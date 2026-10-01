@@ -1694,3 +1694,41 @@ end
         .run_test("test/models/article_guard_test.rb")
         .assert_passes();
 }
+
+/// Not `out = ""`, a literal spinel freezes: `+""` stays an unfrozen copy that the method can append to.
+#[test]
+fn a_mutable_string_literal_stays_mutable() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r##"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def initials
+    out = +""
+    title.split.each { |word| out << word[0] }
+    out
+  end
+
+  def hashtag
+    tag = +"#"
+    tag << title.downcase.delete(" ")
+  end"##,
+        )
+        .write(
+            "test/models/article_mutable_literal_test.rb",
+            r##"require "test_helper"
+
+class ArticleMutableLiteralTest < ActiveSupport::TestCase
+  test "an unfrozen copy of a literal can be appended to" do
+    article = Article.new(title: "Hello World")
+    assert_equal "HW", article.initials
+    assert_equal "#helloworld", article.hashtag
+  end
+end
+"##,
+        )
+        .run_test_frozen("test/models/article_mutable_literal_test.rb")
+        .assert_passes();
+}
