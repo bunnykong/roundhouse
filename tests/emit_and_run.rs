@@ -1563,3 +1563,36 @@ fn a_collection_render_with_a_reserved_word_as_local_runs() {
     );
     run.assert_passes();
 }
+
+/// Not `module ApplicationController`, which cannot load beside the controller's own `class ApplicationController`: a class nested in a controller reopens the controller as a class.
+#[test]
+fn a_class_nested_in_a_controller_loads() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n",
+            "class ApplicationController < ActionController::Base\n  class Failure < StandardError\n    attr_reader :status\n\n    def initialize(status)\n      @status = status\n      super(\"failed with #{status}\")\n    end\n  end\n\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "class ArticlesController < ApplicationController\n",
+            "class ArticlesController < ApplicationController\n  class Missing < StandardError\n  end\n\n",
+        )
+        .write(
+            "test/models/article_nested_class_test.rb",
+            r#"require "test_helper"
+
+class ArticleNestedClassTest < ActiveSupport::TestCase
+  test "a class nested in a controller is the one the source declared" do
+    failure = ApplicationController::Failure.new(404)
+    assert_equal 404, failure.status
+    assert_equal "failed with 404", failure.message
+    assert_kind_of StandardError, ArticlesController::Missing.new
+    assert ArticlesController < ApplicationController
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_nested_class_test.rb")
+        .assert_passes();
+}

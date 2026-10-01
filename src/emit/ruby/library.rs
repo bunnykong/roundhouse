@@ -6401,6 +6401,7 @@ fn owns_a_file(name: &str, app: &App) -> bool {
 
 fn is_app_class(name: &str, app: &App) -> bool {
     app.models.iter().any(|m| m.name.0.as_str() == name)
+        || app.controllers.iter().any(|c| c.name.0.as_str() == name)
         || app
             .library_classes
             .iter()
@@ -6412,6 +6413,9 @@ fn is_app_class(name: &str, app: &App) -> bool {
 fn outer_class_parent(name: &str, app: &App) -> Option<ClassId> {
     if let Some(m) = app.models.iter().find(|m| m.name.0.as_str() == name) {
         return m.parent.clone();
+    }
+    if let Some(c) = app.controllers.iter().find(|c| c.name.0.as_str() == name) {
+        return c.parent.clone();
     }
     app.library_classes
         .iter()
