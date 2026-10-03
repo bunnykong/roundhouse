@@ -242,7 +242,9 @@ class Routing(unittest.TestCase):
                     ci.PARAM_BIND_TESTS if path.startswith("src/") or path == "tests/support/emit_and_run.rs" else ["param_binds"],
                 )
                 self.assertEqual(
-                    self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
+                    self.extras(plan),
+                    set(ci.CORE) | {"framework-tests-spinel"}
+                    | ({"compare-jruby"} if path in ci.JRUBY_BIND_INPUTS else set()),
                 )
         for path in ["runtime/spinel/db.rb", "runtime/spinel/sqlite_adapter.rb"]:
             with self.subTest(path=path):
@@ -282,6 +284,11 @@ class Routing(unittest.TestCase):
                     plan = ci.select(["tests/" + suite + suffix])
                     self.assertEqual(plan["spinel_tests"], [suite])
                     self.assertIn("framework-tests-spinel", plan["jobs"])
+
+    def test_jdbc_bind_inputs_select_the_jruby_contract_job(self):
+        for path in ci.JRUBY_BIND_INPUTS:
+            with self.subTest(path=path):
+                self.assertIn("compare-jruby", ci.select([path])["jobs"])
 
     def test_runtime_owners_choose_asymmetric_focused_binaries(self):
         cases = {
