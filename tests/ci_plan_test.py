@@ -299,7 +299,7 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(
                     ci.select([path])["spinel_tests"],
-                    ["spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru"],
+                    ["spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats"],
                 )
         for path in [
             "README.md",
@@ -337,6 +337,13 @@ class Routing(unittest.TestCase):
         plan = ci.select(["tests/param_binds_text_cleanup.rb"])
         self.assertEqual(plan["spinel_tests"], ["param_binds_cleanup"])
         self.assertIn("framework-tests-spinel", plan["jobs"])
+
+    def test_statement_stats_drivers_select_the_native_harness(self):
+        for path in ["tests/stmt_stats.rs", "tests/stmt_stats.rb"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertEqual(plan["spinel_tests"], ["stmt_stats"])
+                self.assertIn("framework-tests-spinel", plan["jobs"])
 
     def test_jdbc_bind_inputs_select_the_jruby_contract_job(self):
         for path in ci.JRUBY_BIND_INPUTS:
@@ -387,13 +394,13 @@ class Routing(unittest.TestCase):
             "tests/spinel_db_lease.rb": ["spinel_db_lease"],
             "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
             "runtime/spinel/db.rb": [
-                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru"
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats"
             ],
             "runtime/spinel/sqlite_adapter.rb": [
-                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru"
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats"
             ],
             "runtime/spinel/active_support_time_parsing.rb": [
-                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru"
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats"
             ],
             "tests/params_vectors/canon.rb": ["spinel_param_builder"],
             "tests/rails_compat_vectors.rb": ["rails_compat_vectors_spinel"],
@@ -429,6 +436,7 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
+                "stmt_stats",
             ],
         )
 
