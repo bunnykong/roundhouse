@@ -263,11 +263,43 @@ module CrubyCleanupRegressions
     stuck.define_singleton_method(:close, original_close) if original_close
     Db.release_open_statements(owner) if owner
   end
+
+  def self.original_driver_error_case(operation)
+    Db.with_connection do
+      sql = operation == :step ? "SELECT abs(-9223372036854775808)" : "SELECT ? AS bind_error_identity"
+      stmt = Db.prepare(sql)
+      raw = stmt[:stmt]
+      driver_name = operation == :step ? :step : :bind_param
+      driver_call = raw.method(driver_name)
+      original_error = nil
+      raw.define_singleton_method(driver_name) do |*args|
+        driver_call.call(*args)
+      rescue SQLite3::Exception => e
+        original_error = e
+        raise
+      end
+      raw.define_singleton_method(:reset!) { raise "cleanup must not replace the driver error" }
+      error = begin
+        operation == :step ? Db.step?(stmt) : Db.bind_int(stmt, 2, 73)
+        nil
+      rescue StandardError => e
+        e
+      end
+      expected_class = operation == :step ? SQLite3::SQLException : SQLite3::RangeException
+      check("#{operation}: preserve the driver exception class", error.instance_of?(expected_class))
+      check("#{operation}: preserve the driver exception object", error.equal?(original_error))
+      check("#{operation}: cleanup closes the failed statement", raw.closed?)
+      check("#{operation}: cleanup releases ownership", stmt[:stmt].nil?)
+    end
+    puts "runtime: #{operation} preserves the original driver exception passed"
+  end
 end
 
 CrubyCleanupRegressions.replacement_failure_case(false)
 CrubyCleanupRegressions.replacement_failure_case(true)
-puts "runtime: #{CrubyCleanupRegressions.instance_variable_get(:@checks)} replacement assertions passed"
+CrubyCleanupRegressions.original_driver_error_case(:step)
+CrubyCleanupRegressions.original_driver_error_case(:bind)
+puts "runtime: #{CrubyCleanupRegressions.instance_variable_get(:@checks)} replacement and exception assertions passed"
 
 # The unleased boot/script path also owns its unfinished statements at close.
 outer = Db.prepare("SELECT ? AS shutdown_ownership")

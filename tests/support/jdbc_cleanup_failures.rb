@@ -205,6 +205,44 @@ module JdbcCleanupFailures
       Db.release_open_statements(owner) if owner
     end
 
+    def original_driver_error_case(operation)
+      Db.with_connection do
+        actual_driver_error = operation == :step?
+        sql = actual_driver_error ? "SELECT abs(-9223372036854775808)" : "SELECT 1 AS metadata_error_identity"
+        stmt = Db.prepare(sql)
+        ps = stmt.pstmt
+        original_execute = ps.method(:execute_query)
+        original_close = ps.method(:close)
+        sentinel = Java::JavaSql::SQLException.new("injected execute exception")
+        original_error = nil
+        ps.define_singleton_method(:execute_query) do
+          raise sentinel unless actual_driver_error
+          original_execute.call
+        rescue StandardError => e
+          original_error = e
+          raise
+        end
+        ps.define_singleton_method(:close) { raise "cleanup must not replace the driver error" }
+        begin
+          error = begin
+            operation == :column_name ? Db.column_name(stmt, 0) : Db.public_send(operation, stmt)
+            nil
+          rescue StandardError => e
+            e
+          end
+          expected_class = actual_driver_error ? Java::OrgSqlite::SQLiteException : Java::JavaSql::SQLException
+          check("#{operation}: preserve the driver exception class", error.instance_of?(expected_class))
+          check("#{operation}: preserve the driver exception object", error.equal?(original_error))
+          check("#{operation}: evict the failed statement", !Db.current_dbh.stmt_cache.values.include?(ps))
+        ensure
+          ps.define_singleton_method(:close, original_close)
+          Db.finalize(stmt)
+        end
+        check("#{operation}: cleanup releases ownership", Db.current_dbh.open_statements.empty?)
+      end
+      puts "jdbc cleanup: #{operation} preserves the original driver exception passed"
+    end
+
     def idle_cached_shutdown_retry_case
       Db.configure(":memory:", pool_size: 1)
       stmt = Db.prepare("SELECT 1 AS idle_shutdown_retry")
@@ -263,6 +301,9 @@ module JdbcCleanupFailures
       clean_once_case
       replacement_failure_case(false)
       replacement_failure_case(true)
+      original_driver_error_case(:step?)
+      original_driver_error_case(:column_count)
+      original_driver_error_case(:column_name)
       Db.exec("DROP TABLE jdbc_cleanup_rows")
       shutdown_retry_case
       idle_cached_shutdown_retry_case

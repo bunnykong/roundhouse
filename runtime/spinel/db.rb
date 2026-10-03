@@ -644,9 +644,35 @@ class DbConn
     c.real_ptr
   end
 
+  def step_checked(ptr)
+    rc = SQL.sqlite3_step(ptr)
+    return true if rc == SQL::ROW
+    return false if rc == SQL::DONE
+    step_failed(ptr, rc)
+  end
+
+  # Reset failed cursors to release locks and consume SQLite's last step
+  # error, but keep their checkout owned until finalize or lease cleanup.
+  # Releasing here would let an old ensure-finalizer reset a new reader
+  # using the same raw pointer. Only error paths pay for this extra reset.
+  def step_failed(ptr, rc)
+    msg = SQL.sqlite3_errmsg(@dbh)
+    @qc_recording.delete(ptr)
+    SQL.sqlite3_reset(ptr)
+    raise "Db.step failed (" + rc.to_s + "): " + msg
+  end
+
+  def bind_checked(ptr, idx, rc)
+    return nil if rc == SQL::OK
+    msg = SQL.sqlite3_errmsg(@dbh)
+    @qc_recording.delete(ptr)
+    SQL.sqlite3_reset(ptr)
+    raise "Db.bind failed (" + rc.to_s + ") at parameter " + idx.to_s + ": " + msg
+  end
+
   def qc_step?(handle)
     c = qc_cursor(handle)
-    return SQL.sqlite3_step(c.real_ptr) == SQL::ROW if c.promoted
+    return step_checked(c.real_ptr) if c.promoted
     e = c.qc_entry
     if c.row_pos + 1 < e.nrows
       c.advance_row
@@ -656,13 +682,13 @@ class DbConn
     # The first consumer stopped before the end and this one wants more:
     # re-run the real statement and fast-forward past what was replayed.
     ptr = prepare_cached(e.qc_sql)
+    c.promote_to(ptr)
     n = 0
     while n < e.nrows
-      SQL.sqlite3_step(ptr)
+      step_checked(ptr)
       n += 1
     end
-    c.promote_to(ptr)
-    SQL.sqlite3_step(ptr) == SQL::ROW
+    step_checked(ptr)
   end
 
   def qc_finalize(handle)
@@ -1207,8 +1233,9 @@ module Db
     if stmt.is_a?(Integer)
       return current_conn.qc_step?(stmt)
     end
-    has_row = SQL.sqlite3_step(stmt) == SQL::ROW
-    current_conn.qc_record_step(stmt, has_row)
+    conn = current_conn
+    has_row = conn.step_checked(stmt)
+    conn.qc_record_step(stmt, has_row)
     has_row
   end
 
@@ -1419,20 +1446,20 @@ module Db
   # reset + clear_bindings'd at its previous `finalize`, so re-binding
   # here starts clean.
   def self.bind_int(stmt, idx, value)
-    return nil if stmt.is_a?(Integer)
-    SQL.sqlite3_bind_int64(stmt, idx, value)
+    raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
+    current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_int64(stmt, idx, value))
   end
 
   def self.bind_text(stmt, idx, value)
-    return nil if stmt.is_a?(Integer)
-    SQL.sqlite3_bind_text(stmt, idx, value, value.bytesize, -1)
+    raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
+    current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_text(stmt, idx, value, value.bytesize, -1))
   end
 
   # SQLite has no native bool — bind 0/1, matching escape_bool's inline
   # form and the INTEGER affinity `t.boolean` columns get.
   def self.bind_bool(stmt, idx, value)
-    return nil if stmt.is_a?(Integer)
-    SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0)
+    raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
+    current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0))
   end
 
   def self.last_insert_rowid

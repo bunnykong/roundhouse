@@ -411,6 +411,8 @@ module Db
       end
     end
     ok
+  rescue StandardError => e
+    statement_failed(stmt, "step", e)
   end
 
   def self.column_names_of(stmt)
@@ -495,12 +497,16 @@ module Db
     return stmt.replay[:names].length if stmt.replay
     ensure_executed(stmt)
     stmt.rs.get_meta_data.get_column_count
+  rescue StandardError => e
+    statement_failed(stmt, "step", e)
   end
 
   def self.column_name(stmt, i)
     return stmt.replay[:names][i] if stmt.replay
     ensure_executed(stmt)
     stmt.rs.get_meta_data.get_column_name(i + 1)
+  rescue StandardError => e
+    statement_failed(stmt, "step", e)
   end
 
   # Release the per-call handle. A pure replay held no statement. A
@@ -574,6 +580,21 @@ module Db
     stmt.capture = nil
     raise error if error
     nil
+  end
+
+  def self.statement_failed(stmt, _operation, error)
+    stmt.replay = nil
+    # Xerial can close the native statement after an execute error. Evict
+    # the failed checkout instead of leaving a poisoned cache entry.
+    cache = current_dbh.stmt_cache
+    cache.delete(stmt.sql) if cache[stmt.sql].equal?(stmt.pstmt)
+    stmt.cached = false
+    begin
+      release_statement(stmt)
+    rescue StandardError
+      # Failed closes remain owned until lease cleanup quarantines them.
+    end
+    raise error
   end
 
   def self.last_insert_rowid

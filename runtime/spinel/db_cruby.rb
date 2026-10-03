@@ -513,6 +513,19 @@ module Db
       end
     end
     !row.nil?
+  rescue StandardError => e
+    statement_failed(entry, "step", e)
+  end
+
+  def self.statement_failed(entry, _operation, error)
+    entry[:closed] = true
+    entry[:replay] = nil
+    begin
+      release_statement(entry)
+    rescue StandardError
+      # Failed closes remain owned until lease cleanup quarantines them.
+    end
+    raise error
   end
 
   def self.column_int(handle, i)
@@ -633,28 +646,26 @@ module Db
     raise error if error
   end
 
-  # Placeholder binding (roundhouse#12). Bind one `?` param (1-based) on
-  # a prepared stmt before the first `step?`, via the gem's
-  # `Statement#bind_param`. The emitted `_adapter_*` bodies always
-  # re-bind every param before stepping; release clears bindings so an
-  # interrupted reader cannot leave stale values. The
-  # nil guard covers the replay-handle case, which `?` queries never take
-  # (prepare skips replay for parameterized SQL).
+  # The gem checks SQLite return codes. Failed binds must also abandon
+  # captures and release checkouts when rescued within a lease.
+  def self.bind_value(handle, idx, value)
+    raise "statement is not bindable" if handle[:stmt].nil?
+    handle[:stmt].bind_param(idx, value)
+    nil
+  rescue StandardError => e
+    statement_failed(handle, "bind", e)
+  end
+
   def self.bind_int(handle, idx, value)
-    st = handle[:stmt]
-    st.bind_param(idx, value) unless st.nil?
+    bind_value(handle, idx, value)
   end
 
   def self.bind_text(handle, idx, value)
-    st = handle[:stmt]
-    st.bind_param(idx, value) unless st.nil?
+    bind_value(handle, idx, value)
   end
 
-  # SQLite has no native bool — bind 0/1, matching escape_bool's inline
-  # form and the INTEGER affinity `t.boolean` columns get.
   def self.bind_bool(handle, idx, value)
-    st = handle[:stmt]
-    st.bind_param(idx, value ? 1 : 0) unless st.nil?
+    bind_value(handle, idx, value ? 1 : 0)
   end
 
   def self.last_insert_rowid

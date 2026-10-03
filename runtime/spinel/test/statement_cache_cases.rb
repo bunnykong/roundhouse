@@ -195,7 +195,97 @@ class StatementCacheTest
     Db.exec("DROP TABLE cache_replay_rows")
   end
 
+  def read_bound(sql, value, expected)
+    stmt = Db.prepare(sql)
+    Db.bind_int(stmt, 1, value)
+    expect_row("bound scalar", stmt, expected)
+    raise "scalar has extra rows" if Db.step?(stmt)
+    Db.finalize(stmt)
+  end
+
+  def test_uncached_bind_and_step_errors
+    Db.with_connection do
+      Db.query_cache_end
+      failed = false
+      stmt = Db.prepare("SELECT column1 FROM (VALUES (10), (11), (20)) WHERE column1 >= ?")
+      Db.bind_int(stmt, 1, 10)
+      expect_row("real cursor before misuse", stmt, 10)
+      begin
+        Db.bind_int(stmt, 1, 20)
+      rescue StandardError
+        failed = true
+      end
+      raise "real SQLITE_MISUSE was ignored" if !failed
+      stmt = Db.prepare("SELECT column1 FROM (VALUES (10), (11), (20)) WHERE column1 >= ?")
+      Db.bind_int(stmt, 1, 20)
+      expect_row("next owner after real misuse", stmt, 20)
+      Db.finalize(stmt)
+      failed = false
+      stmt = Db.prepare("SELECT abs(-9223372036854775808)")
+      begin
+        Db.step?(stmt)
+      rescue StandardError
+        failed = true
+      end
+      raise "uncached step error became EOF" if !failed
+      read_bound("SELECT ? AS usable_after_error", 31, 31)
+    end
+  end
+
+  def test_finalize_after_bind_error
+    Db.with_connection do
+      sql = "SELECT COALESCE(?, -99) AS bind_error_ownership"
+      old = Db.prepare(sql)
+      current = nil
+      begin
+        failed = false
+        begin
+          Db.bind_int(old, 2, 1)
+        rescue StandardError
+          failed = true
+        end
+        raise "invalid bind was ignored" if !failed
+        current = Db.prepare(sql)
+        Db.bind_int(current, 1, 73)
+      ensure
+        # The caller still owns old after rescuing its driver error.
+        # Its raw pointer must not identify the new checkout as well.
+        Db.finalize(old)
+      end
+      expect_row("finalize after bind error preserves new reader", current, 73)
+      Db.finalize(current)
+    end
+  end
+
+  def test_finalize_after_step_error
+    Db.with_connection do
+      sql = "SELECT CASE WHEN ? = 0 THEN abs(-9223372036854775808) ELSE COALESCE(?, -99) END"
+      old = Db.prepare(sql)
+      current = nil
+      begin
+        Db.bind_int(old, 1, 0)
+        failed = false
+        begin
+          Db.step?(old)
+        rescue StandardError
+          failed = true
+        end
+        raise "integer overflow was ignored" if !failed
+        current = Db.prepare(sql)
+        Db.bind_int(current, 1, 1)
+        Db.bind_int(current, 2, 73)
+      ensure
+        Db.finalize(old)
+      end
+      expect_row("finalize after step error preserves new reader", current, 73)
+      Db.finalize(current)
+    end
+  end
+
   def run
+    test_uncached_bind_and_step_errors
+    test_finalize_after_bind_error
+    test_finalize_after_step_error
     test_nested_identical_sql
     test_nested_bound_sql
     test_checkout_before_step
