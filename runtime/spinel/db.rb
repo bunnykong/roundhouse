@@ -168,28 +168,23 @@ end
 # /about. Only a MIX of routes overflows the cap, so the growth looked
 # like it tracked route variety rather than the cap it actually tracked.
 #
-# The fix is the CRuby shim's (db_cruby.rb): never hand back an uncached
-# stmt — bound the cache by EVICTING, and finalize what's evicted. The
-# one hazard is closing a stmt some open cursor still holds; lobsters'
-# comment tree nests cursors, and an outer one can stay open across many
-# inner queries. CRuby can check directly (it hands out an index into a
-# @rows table and can ask whether an entry still holds a stmt); this shim
-# hands back the raw ptr, so it has no such table to consult.
-#
-# So eviction runs at the REQUEST BOUNDARY instead, where no cursor is
-# open by construction — `with_connection` returns only after the whole
-# request body has run. Within a request the cache is a soft bound; at
-# every boundary it comes back down to CAP and the excess is finalized.
-# Bounded, and it can never close a live stmt.
-# One cache entry: the composed SQL and its prepared stmt ptr. A concrete
+# Cache new SQL until the request boundary, then evict back to CAP.
+# Reentrant prepares of an already checked-out statement are transient;
+# DbConn tracks their ownership too, so finalize really closes them.
+# The lease's ensure releases abandoned cursors before trimming, including
+# when hydration or a bind expression raised before Db.finalize.
+# One owned statement: the composed SQL and its prepared stmt ptr. A concrete
 # user class (not a raw ptr) so an Array of these types concretely the way
 # ConnectionPool's @free does — spinel infers the element type from the
 # first `push`, which lets `length`/`[]` resolve (a poly_array of bare ptrs
 # does not support them).
 class Stmt
-  def initialize(sql, ptr)
+  def initialize(sql, ptr, cached)
     @sql = sql
     @ptr = ptr
+    @cached = cached
+    @in_use = true
+    @closed = false
   end
 
   def sql
@@ -198,6 +193,39 @@ class Stmt
 
   def ptr
     @ptr
+  end
+
+  def in_use
+    @in_use
+  end
+
+  def closed
+    @closed
+  end
+
+  def checkout
+    @in_use = true
+    nil
+  end
+
+  def release
+    rc = SQL::OK
+    if @cached
+      reset_rc = SQL.sqlite3_reset(@ptr)
+      clear_rc = SQL.sqlite3_clear_bindings(@ptr)
+      rc = reset_rc == SQL::OK ? clear_rc : reset_rc
+      # A failed reset/clear cannot leave an idle, reusable cache entry.
+      @cached = false if rc != SQL::OK
+    end
+    if !@cached
+      close_rc = SQL.sqlite3_finalize(@ptr)
+      rc = close_rc if rc == SQL::OK
+      # sqlite3_finalize destroys the statement even when it reports the
+      # preceding execution error. No native resource remains owned.
+      @closed = true
+    end
+    @in_use = false
+    rc
   end
 end
 
@@ -347,6 +375,10 @@ class DbConn
   def initialize(dbh)
     @dbh = dbh
     @entries = []
+    # Every checkout, including busy-hit transients and replay promotions.
+    # Entry flags protect ownership before step and after SQLITE_DONE;
+    # the usually short list avoids hash mutations on the query hot path.
+    @open = []
     # The per-request query cache (see `qc_begin`). Off until a request
     # leases this connection, so scripts and tests that call Db directly
     # see plain round trips unless they ask.
@@ -360,19 +392,25 @@ class DbConn
     @dbh
   end
 
-  # Return a cached prepared stmt for `sql`, preparing+caching on miss.
-  # Linear scan over a ptr-keyed structure spinel would not type; the hit
-  # rate is what matters here, not the lookup's constant.
-  #
-  # EVERY prepared stmt goes into @entries, with no cap check. That is
-  # what makes `Db.finalize`'s reset-don't-close correct for all of them:
-  # a stmt this method hands back is always reachable for reuse, and
-  # always finalizable at `trim!`. Capping HERE is what leaked.
+  # Return an idle cached statement, or a transient on a busy hit. A
+  # paused outer cursor must keep both its position and its bindings.
+  # New SQL is cached without a cap check; trim! bounds it at lease end.
   def prepare_cached(sql)
+    cached = true
     i = 0
     while i < @entries.length
       e = @entries[i]
-      return e.ptr if e.sql == sql
+      if e.sql == sql
+        if !e.in_use
+          # Only a successful release makes a statement idle; its cursor
+          # and bindings are already reset and cleared.
+          e.checkout
+          @open.push(e)
+          return e.ptr
+        end
+        cached = false
+        break
+      end
       i += 1
     end
     # `SQL.stmt_out` is ONE 8-byte out-buffer for the whole process (an
@@ -396,14 +434,63 @@ class DbConn
     if rc != SQL::OK
       raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql
     end
-    @entries.push(Stmt.new(sql, st))
+    entry = Stmt.new(sql, st, cached)
+    @entries.push(entry) if cached
+    @open.push(entry)
     st
   end
 
-  # Bring the cache back to CAP, finalizing what's dropped. Called at the
-  # request boundary (`Db.with_connection`), never mid-request: a stmt an
-  # open cursor still holds must not be closed, and between requests there
-  # are none.
+  # Logical finalize. Unlike a cached statement, a busy-hit transient has
+  # no future owner and must be finalized, not just reset.
+  def release(ptr)
+    # Nested readers normally finish in reverse order, so the common
+    # case is the tail. Arbitrary finalize order is supported too.
+    i = @open.length - 1
+    while i >= 0
+      e = @open[i]
+      if e.ptr == ptr
+        rc = e.release
+        @open.delete_at(i)
+        if rc != SQL::OK
+          discard_closed
+          raise "Db.release failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh)
+        end
+        return nil
+      end
+      i -= 1
+    end
+    nil
+  end
+
+  # The lease boundary owns every remaining checkout. Do not publish
+  # partial query-cache captures from readers that failed to finalize.
+  def release_all
+    rc = SQL::OK
+    i = 0
+    while i < @open.length
+      release_rc = @open[i].release
+      rc = release_rc if rc == SQL::OK
+      i += 1
+    end
+    @open.clear
+    if rc != SQL::OK
+      discard_closed
+      raise "Db.release failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh)
+    end
+    nil
+  end
+
+  def discard_closed
+    i = @entries.length - 1
+    while i >= 0
+      @entries.delete_at(i) if @entries[i].closed
+      i -= 1
+    end
+    nil
+  end
+
+  # Bring the cache back to CAP after lease cleanup. An explicit mid-lease
+  # trim retains live entries even if that leaves the cache above CAP.
   #
   # Keeps the CAP most-recent entries — the tail, since `prepare_cached`
   # appends. With per-value keys (bind gate off) recency is the best
@@ -417,7 +504,7 @@ class DbConn
     drop_before = @entries.length - CAP
     i = 0
     while i < @entries.length
-      if i < drop_before
+      if i < drop_before && !@entries[i].in_use
         SQL.sqlite3_finalize(@entries[i].ptr)
       else
         keep.push(@entries[i])
@@ -488,9 +575,8 @@ class DbConn
     @qc_cursors.length
   end
 
-  # Start recording a real stmt's rows for `sql`. A stmt already being
-  # recorded (the same SQL re-prepared while its first cursor is still
-  # open hands back the same pointer) is left alone.
+  # Start recording a real stmt's rows for `sql`. Nested identical SQL
+  # owns distinct pointers and therefore distinct captures.
   def qc_record(sql, ptr)
     return nil if !@qc_on || sql.include?("?")
     return nil if !@qc_recording[ptr].nil?
@@ -582,8 +668,7 @@ class DbConn
   def qc_finalize(handle)
     c = qc_cursor(handle)
     if c.promoted
-      SQL.sqlite3_reset(c.real_ptr)
-      SQL.sqlite3_clear_bindings(c.real_ptr)
+      release(c.real_ptr)
     end
     nil
   end
@@ -631,11 +716,14 @@ class DbConn
 
   # Real finalize of every cached stmt — pool-shutdown path only.
   def finalize_all
+    release_all
     i = 0
     while i < @entries.length
       SQL.sqlite3_finalize(@entries[i].ptr)
       i += 1
     end
+    @entries.clear
+    nil
   end
 end
 
@@ -983,22 +1071,28 @@ module Db
     Thread.current[:db_conn] = conn
     # Rails wraps every request in the query cache; so does this lease.
     conn.qc_begin
-    finished = false
+    request_error = nil
     begin
       result = yield
-      finished = true
+    rescue Exception => e
+      request_error = e
     ensure
-      conn.qc_end
-      # Every cursor this request opened is closed by now, so trimming the
-      # stmt cache here can't close a live one. This is the only place the
-      # cache is bounded — `prepare_cached` deliberately caps nothing, since
-      # a stmt it refused to cache is a stmt nothing can ever finalize.
-      # After a raise a cursor may still be open, so the trim waits for
-      # the next lease that finishes.
-      conn.trim! if finished
-      Thread.current[:db_conn] = nil
-      pool.release(idx)
+      cleanup_error = nil
+      begin
+        conn.qc_end
+        conn.release_all
+      rescue StandardError => e
+        # Cleanup must not replace the request's own exception. Native
+        # releases still dispose every failed statement before raising.
+        cleanup_error = e
+      ensure
+        conn.trim!
+        Thread.current[:db_conn] = nil
+        pool.release(idx)
+      end
+      raise cleanup_error if !cleanup_error.nil? && request_error.nil?
     end
+    raise request_error if !request_error.nil?
     result
   end
 
@@ -1304,7 +1398,7 @@ module Db
 
   # roundhouse#12 Path A.1: with caching on, "finalize" means rewind the
   # cached stmt (reset cursor + clear any bound params) so the next call
-  # reuses it. Real sqlite3_finalize runs only at pool close.
+  # reuses it. Busy-hit transients are really finalized on release.
   def self.finalize(stmt)
     conn = current_conn
     if stmt.is_a?(Integer)
@@ -1312,8 +1406,7 @@ module Db
       return nil
     end
     conn.qc_install(stmt)
-    SQL.sqlite3_reset(stmt)
-    SQL.sqlite3_clear_bindings(stmt)
+    conn.release(stmt)
     nil
   end
 
