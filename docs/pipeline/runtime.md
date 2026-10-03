@@ -209,6 +209,50 @@ Enabling another target requires its selected driver/profile to implement
 `bind_int`, `bind_text`, `bind_bool`, and their `_opt` variants, with execution
 after binding and value serialization matching the inline writer.
 
+## Spinel statement-cache diagnostic
+
+Set `RH_STMT_STATS=1` before starting an emitted Spinel app to write cumulative
+per-connection summaries to stderr. A different nonempty value names a file to
+append to; unset, empty and `0` disable it. The destination and enabled flag are
+read once at boot. Changing the environment afterwards does not enable or disable
+the diagnostic. Disabled hooks are constant checks: no SQL tracking, counter
+updates, output, per-row work or diagnostic locking. Run diagnostics separately
+from timings.
+
+`Db.close` dumps after finalizing the pool. For an on-demand snapshot, stop request
+workers first and call `Db.dump_stmt_stats("phase")`; labels should contain no
+whitespace. Connection IDs are `shard:index`, local to the configured pool. A
+process that exits without closing its pool must explicitly request a snapshot.
+
+Each `RH_STMT_STATS` line reports:
+
+- `hits`, `misses` (successful native prepares), and `prepare_failures`.
+  Statement-cache hit rate is `hits / (hits + misses)`; replay hits do not reach
+  that cache. `misses` includes transient prepares and `transient_prepares` counts
+  that subset, including busy-hit readers and partial-replay promotions.
+- `entries`, `peak_entries`, and `distinct_sql` (all-time distinct successfully
+  prepared SQL strings on that connection, including transient reads). Tracking
+  distinct SQL is unbounded diagnostic memory, enabled only with this flag.
+  SQL text and bind values are not printed.
+- `trims` (boundaries exceeding CAP), `evictions` (cached statements dropped), and
+  `finalizations` (real SQLite finalizations, including transient release, failed
+  cleanup and pool close). Logical `Db.finalize` resets a cached statement and
+  does not count as a real finalization.
+- `qc_hits`, `qc_misses`, and `qc_bypasses` count request-replay decisions.
+  Bypasses include disabled request replay and SQL containing `?`. Bound reads
+  always execute against SQLite; SQL-only replay cannot distinguish bind values.
+- `executions`: SQLite `SQLITE_STMTSTATUS_RUN`, summed over live and finalized
+  cached and transient statements. It counts first native steps, including replay
+  promotions, rather than rows, prepares, replayed results or `Db.exec` writes.
+  The native counter is read only at snapshots or real finalization, including
+  before failed cleanup destroys a statement.
+
+Counters are cumulative; subtract snapshots to measure a phase. The native cache's
+128-entry cap is soft within a request, with insertion-order trimming at lease
+boundaries after every outstanding cursor is released. Summing per-connection
+`distinct_sql` is not a count of globally unique SQL strings. The diagnostic is
+implemented for compiled Spinel; CRuby and JRuby do not emit these summaries.
+
 ## Emitter ↔ runtime contract
 
 Ruby-family lowered equality reads select SQL from the runtime value: a

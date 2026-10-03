@@ -249,7 +249,7 @@ class Routing(unittest.TestCase):
         for path in ["runtime/spinel/db.rb", "runtime/spinel/sqlite_adapter.rb"]:
             with self.subTest(path=path):
                 self.assertEqual(
-                    ci.select([path])["spinel_tests"], ["spinel_db_lease", *ci.PARAM_BIND_TESTS]
+                    ci.select([path])["spinel_tests"], ["spinel_db_lease", *ci.PARAM_BIND_TESTS, "stmt_stats"]
                 )
         for path in [
             "README.md",
@@ -284,6 +284,13 @@ class Routing(unittest.TestCase):
                     plan = ci.select(["tests/" + suite + suffix])
                     self.assertEqual(plan["spinel_tests"], [suite])
                     self.assertIn("framework-tests-spinel", plan["jobs"])
+
+    def test_statement_stats_drivers_select_the_native_harness(self):
+        for path in ["tests/stmt_stats.rs", "tests/stmt_stats.rb"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertEqual(plan["spinel_tests"], ["stmt_stats"])
+                self.assertIn("framework-tests-spinel", plan["jobs"])
 
     def test_jdbc_bind_inputs_select_the_jruby_contract_job(self):
         for path in ci.JRUBY_BIND_INPUTS:
@@ -360,7 +367,7 @@ class Routing(unittest.TestCase):
             ["runtime/spinel/web_push_crypto.rb", "runtime/spinel/sqlite_adapter.rb"]
         )
         self.assertEqual(
-            plan["spinel_tests"], ["spinel_web_push_crypto", "spinel_db_lease", *ci.PARAM_BIND_TESTS]
+            plan["spinel_tests"], ["spinel_web_push_crypto", "spinel_db_lease", *ci.PARAM_BIND_TESTS, "stmt_stats"]
         )
 
     def test_wasm_changes_have_no_archive_or_spinel_fanout(self):
