@@ -2230,6 +2230,11 @@ jobs:
             Db.close
           end
           RUBY
+      - name: JRuby parameter bind contract
+        run: |
+          jruby -S gem install jdbc-sqlite3 --no-document
+          jruby tests/param_binds_jruby.rb
+          jruby tests/support/jdbc_value_semantics.rb
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}

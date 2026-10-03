@@ -37,6 +37,14 @@ BASE = [
 # not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
 CORE = ["build-spinel", "toolchain-spinel", "compare-spinel"]
+JRUBY_BIND_INPUTS = {
+    "tests/param_binds_jruby.rb",
+    "tests/support/jdbc_value_semantics.rb",
+    "tests/support/jdbc_cleanup_failures.rb",
+    "tests/param_binds_runtime.rb",
+    "tests/param_binds_nil.rb",
+    "runtime/spinel/test/statement_cache_cases.rb",
+}
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
     "framework_tests_spinel",
@@ -233,12 +241,6 @@ def select(paths, *, draft=False, full=False, publish=False, project_scope=None)
         }:
             full = True
             reasons.append(f"{path}: validation/packaging policy")
-        if path in {
-            "tests/support/jdbc_cleanup_failures.rb",
-            "runtime/spinel/test/statement_cache_cases.rb",
-        }:
-            targets.add("jruby")
-            reasons.append(f"{path}: JDBC statement lifecycle")
         match = re.match(r"(?:src/emit/|runtime/)([^/.]+)(?:[/.]|$)", path)
         test = re.match(
             r"tests/(?:framework_tests_)?([a-z]+)_toolchain\.rs$|tests/framework_tests_([a-z]+)\.rs$",
@@ -251,6 +253,9 @@ def select(paths, *, draft=False, full=False, publish=False, project_scope=None)
             if test
             else None
         )
+        if path in JRUBY_BIND_INPUTS:
+            targets.add("jruby")
+            reasons.append(f"{path}: JDBC bind contract")
         native, interpreter_only, owned_tests = native_coverage(path)
         spinel_tests.update(owned_tests)
         if native or owned_tests:
