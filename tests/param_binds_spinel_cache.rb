@@ -14,6 +14,39 @@ def native_statement_count(conn)
   count
 end
 
+# A write can invalidate a live replay's saved prefix. If its replacement
+# query fails while skipping that prefix, ensure-finalize still owns it.
+Db.with_connection do
+  conn = Db.current_conn
+  Db.exec("CREATE TABLE replay_error_rows (id INTEGER PRIMARY KEY, value INTEGER)")
+  Db.exec("INSERT INTO replay_error_rows VALUES (1, 1), (2, 2)")
+  sql = "SELECT abs(value) FROM replay_error_rows ORDER BY id"
+  seed = Db.prepare(sql)
+  raise "missing replay error seed" if !Db.step?(seed)
+  expect_int("replay error seed", 1, Db.column_int(seed, 0))
+  Db.finalize(seed)
+  replay = Db.prepare(sql)
+  raise "missing saved replay prefix" if !replay.is_a?(Integer) || !Db.step?(replay)
+  expect_int("saved replay prefix", 1, Db.column_int(replay, 0))
+  Db.exec("UPDATE replay_error_rows SET value = -9223372036854775808 WHERE id = 1")
+  failed = false
+  begin
+    Db.step?(replay)
+  rescue RuntimeError => error
+    raise error if !error.message.include?("integer overflow")
+    failed = true
+  ensure
+    Db.finalize(replay)
+  end
+  raise "replayed prefix overflow was ignored" if !failed
+  before = native_statement_count(conn)
+  current = Db.prepare(sql)
+  expect_int("failed replay finalizer releases cached ownership", before, native_statement_count(conn))
+  Db.finalize(current)
+  Db.exec("DROP TABLE replay_error_rows")
+end
+puts "runtime: failed replay prefix finalizer releases cached ownership passed"
+
 Db.with_connection do
   conn = Db.current_conn
   outer = Db.prepare("SELECT ? AS transient_ownership")

@@ -354,9 +354,12 @@ puts "runtime: CRuby interrupted reader keeps ownership across a different id"
         include_str!("param_binds_cruby_cache.rb")
     };
     let script = format!(
-        "{prelude}\nDb.configure(\"file:bind_runtime?mode=memory&cache=shared\", pool_size: 4)\n\
+        "{prelude}\nENV[\"DATABASE_POOL_SIZE\"] = \"1\"\n\
+         Db.configure(\"file:cache_cases?mode=memory&cache=shared\", pool_size: 1)\n\
          {cache_cases}\nStatementCacheTest.new.run\n\
-         puts \"runtime: 9 statement cache ownership tests passed\"\n{body}\n{ownership}\nDb.close\n"
+         puts \"runtime: 12 statement cache ownership and error tests passed\"\nDb.close\n\
+         ENV[\"DATABASE_POOL_SIZE\"] = \"4\"\n\
+         Db.configure(\"file:bind_runtime?mode=memory&cache=shared\", pool_size: 4)\n{body}\n{ownership}\nDb.close\n"
     );
     run_script(&dir, &script, native);
     std::fs::remove_dir_all(dir).expect("remove successful runtime probe");

@@ -658,7 +658,7 @@ class Workflow(unittest.TestCase):
         )
         self.assertLess(job.index("ruby-version: 'jruby-10.0'"), job.index(install))
         self.assertLess(step.index(install), step.index(probe))
-        self.assertLess(job.index(probe), job.index("ruby-version: '3.4'"))
+        self.assertLess(job.index(probe), job.index("ruby-version: ${{ env.MRI_RUBY }}"))
 
 
 class MergeTree(unittest.TestCase):
