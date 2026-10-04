@@ -638,7 +638,7 @@ module Db
     if value.nil?
       ps.set_null(idx, Java::JavaSql::Types::VARCHAR)
     else
-      ps.set_string(idx, value)
+      bind_text(handle, idx, value)
     end
   rescue StandardError => error
     statement_failed(handle, "bind", error)
@@ -654,6 +654,33 @@ module Db
     end
   rescue StandardError => error
     statement_failed(handle, "bind", error)
+  end
+
+  # Match this shim's inline writer, including ASCII-only BINARY strings
+  # remaining TEXT. set_bytes keeps NUL and non-ASCII binary data out of
+  # Java String decoding; both JDBC setters copy the Ruby value at bind time.
+  def self.bind_text(stmt, idx, value)
+    pstmt = stmt.pstmt
+    return nil if pstmt.nil?
+    value = value.to_s
+    if value.include?("\0") || (value.encoding == Encoding::BINARY && !value.ascii_only?)
+      pstmt.set_bytes(idx, value.to_java_bytes)
+    else
+      pstmt.set_string(idx, value)
+    end
+  rescue StandardError => error
+    statement_failed(stmt, "bind", error)
+  end
+
+  # SQLite boolean values are integers, with NULL distinct from false/0.
+  def self.bind_bool(stmt, idx, value)
+    pstmt = stmt.pstmt
+    return nil if pstmt.nil?
+    if value.nil?
+      pstmt.set_null(idx, Java::JavaSql::Types::INTEGER)
+    else
+      pstmt.set_int(idx, value ? 1 : 0)
+    end
   end
 
   def self.last_insert_rowid

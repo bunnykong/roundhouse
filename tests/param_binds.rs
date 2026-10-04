@@ -423,13 +423,27 @@ puts "runtime: CRuby interrupted reader keeps ownership across a different id"
     } else {
         include_str!("param_binds_cruby_cache.rb")
     };
+    // Spinel's existing inline writer cannot put NUL in SQL text. Its
+    // bind-byte contract above still covers NUL; the gem/JDBC writers use
+    // BLOB literals, so the gem path also checks writer/reader parity.
+    let nul_writer = if native {
+        ""
+    } else {
+        r#"
+inline_bound_string("NUL UTF-8", "a\0b")
+inline_bound_string("NUL binary", "a\0b".b)
+inline_bound_string("invalid UTF-8 tag", "\xFFa".force_encoding(Encoding::UTF_8))
+inline_bound_string("gem BLOB wrapper", SQLite3::Blob.new("plain-ascii"))
+puts "runtime: NUL inline writes and bound reads agree"
+"#
+    };
     let script = format!(
         "{prelude}\nENV[\"DATABASE_POOL_SIZE\"] = \"1\"\n\
          Db.configure(\"file:cache_cases?mode=memory&cache=shared\", pool_size: 1)\n\
          {cache_cases}\nStatementCacheTest.new.run\n\
          puts \"runtime: 12 statement cache ownership and error tests passed\"\nDb.close\n\
          ENV[\"DATABASE_POOL_SIZE\"] = \"4\"\n\
-         Db.configure(\"file:bind_runtime?mode=memory&cache=shared\", pool_size: 4)\n{body}\n{ownership}\nDb.close\n"
+         Db.configure(\"file:bind_runtime?mode=memory&cache=shared\", pool_size: 4)\n{body}\n{nul_writer}\n{ownership}\nDb.close\n"
     );
     run_script(&dir, &script, native);
     std::fs::remove_dir_all(dir).expect("remove successful runtime probe");
