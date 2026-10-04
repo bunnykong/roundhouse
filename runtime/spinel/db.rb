@@ -1529,6 +1529,8 @@ module Db
 
   def self.bind_text(stmt, idx, value)
     raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
+    # This shim's inline writer uses TEXT regardless of Ruby encoding.
+    # Preserve all bytes at the FFI boundary, including embedded NULs.
     current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_text(stmt, idx, value, value.bytesize, -1))
   end
 
@@ -1536,7 +1538,11 @@ module Db
   # form and the INTEGER affinity `t.boolean` columns get.
   def self.bind_bool(stmt, idx, value)
     raise "Db.bind failed (21): cannot bind a replay cursor" if stmt.is_a?(Integer)
-    current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0))
+    if value.nil?
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_null(stmt, idx))
+    else
+      current_conn.bind_checked(stmt, idx, SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0))
+    end
   end
 
   def self.last_insert_rowid

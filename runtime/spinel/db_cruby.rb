@@ -694,11 +694,24 @@ module Db
   end
 
   def self.bind_text(handle, idx, value)
-    bind_value(handle, idx, value)
+    value = value.to_s
+    # Match escape_string's storage class exactly. The gem otherwise binds
+    # every BINARY string as BLOB and every UTF-8 string (even NUL) as TEXT;
+    # SQLite equality does not equate the same bytes across those classes.
+    if value.include?("\0") || (value.encoding == Encoding::BINARY && !value.ascii_only?)
+      bind_value(handle, idx, value.b)
+    elsif value.encoding == Encoding::BINARY
+      bind_value(handle, idx, value.encode(Encoding::UTF_8))
+    else
+      bind_value(handle, idx, value)
+    end
+  rescue StandardError => error
+    # Encoding checks/conversion can raise before bind_value is entered.
+    statement_failed(handle, "bind", error)
   end
 
   def self.bind_bool(handle, idx, value)
-    bind_value(handle, idx, value ? 1 : 0)
+    bind_value(handle, idx, value.nil? ? nil : (value ? 1 : 0))
   end
 
   def self.last_insert_rowid

@@ -36,7 +36,8 @@ module Db
   # (cruby-gem + spinel-FFI) implements these.
   def self.bind_int: (Integer, Integer, Integer?) -> void
   def self.bind_text: (Integer, Integer, String) -> void
-  def self.bind_bool: (Integer, Integer, bool) -> void
+  # A nullable boolean binds SQL NULL, never the false/0 representation.
+  def self.bind_bool: (Integer, Integer, bool?) -> void
   def self.bind_int_opt: (Integer, Integer, Integer?) -> void
   def self.bind_text_opt: (Integer, Integer, String?) -> void
   def self.bind_bool_opt: (Integer, Integer, bool?) -> void
