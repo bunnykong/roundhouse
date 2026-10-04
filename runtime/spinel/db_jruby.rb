@@ -358,6 +358,28 @@ module Db
     st
   end
 
+  # Explicit uncached reads skip statement reuse, retaining result replay.
+  # finalize closes real transient statements, including replay promotion.
+  def self.prepare_uncached(sql)
+    qcache = Fiber[:rh_qcache]
+    parameterized = sql.include?("?")
+    if !qcache.nil? && !parameterized && (hit = qcache[sql])
+      st = Stmt.new(nil, false)
+      st.sql = sql
+      st.replay = hit
+      return st
+    end
+    record_query(sql)
+    conn = current_dbh
+    pstmt = conn.raw.prepare_statement(sql)
+    st = Stmt.new(pstmt, false)
+    st.open = conn.open_statements
+    st.open[pstmt] = st
+    st.sql = sql
+    st.capture = { rows: [], names: nil, eof: false } if !qcache.nil? && !parameterized
+    st
+  end
+
   # Run the query exactly once, lazily. `sqlite_adapter.rb`'s `select_rows`
   # calls `column_count` before the first `step?`, so either entry point
   # may be first to need a live ResultSet — execute on whichever wins and
@@ -595,6 +617,43 @@ module Db
       # Failed closes remain owned until lease cleanup quarantines them.
     end
     raise error
+  end
+
+  # Optional read predicates occupy one slot whether nil or present.
+  def self.bind_int_opt(handle, idx, value)
+    ps = handle.pstmt
+    raise "statement is not bindable" if ps.nil? || handle.executed
+    if value.nil?
+      ps.set_null(idx, Java::JavaSql::Types::INTEGER)
+    else
+      ps.set_long(idx, value)
+    end
+  rescue StandardError => error
+    statement_failed(handle, "bind", error)
+  end
+
+  def self.bind_text_opt(handle, idx, value)
+    ps = handle.pstmt
+    raise "statement is not bindable" if ps.nil? || handle.executed
+    if value.nil?
+      ps.set_null(idx, Java::JavaSql::Types::VARCHAR)
+    else
+      ps.set_string(idx, value)
+    end
+  rescue StandardError => error
+    statement_failed(handle, "bind", error)
+  end
+
+  def self.bind_bool_opt(handle, idx, value)
+    ps = handle.pstmt
+    raise "statement is not bindable" if ps.nil? || handle.executed
+    if value.nil?
+      ps.set_null(idx, Java::JavaSql::Types::INTEGER)
+    else
+      ps.set_long(idx, value ? 1 : 0)
+    end
+  rescue StandardError => error
+    statement_failed(handle, "bind", error)
   end
 
   def self.last_insert_rowid

@@ -36,6 +36,9 @@ module ActiveRecord
     def self.record_timestamps: () -> bool
     def update_column: (untyped name, untyped value) -> bool
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
+    # Ruby-family key guards also accept nil at public entry points.
+    def self.find: (Integer | String | nil id) -> Base
+    def self.exists?: (Integer | String | nil id) -> bool
     # Ruby-family overrides of base.rb's Array-returning fallbacks.
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
     def self.all: () -> Relation

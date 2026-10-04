@@ -940,7 +940,14 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // 802). This probe does not resolve self-sends or `@orders`
     // indexing; the full-context gate counts 16. What it buys: campfire
     // room pages LIMIT the last 40 in SQL, including `order(a:, b:)`.
-    const CEILING: usize = 1273;
+    // 2026-10-05 1273 -> 1285, +12 MEASURED against main 432dbb80:
+    // connection.rb 210 -> 222; all other files are unchanged. Ruby-only
+    // find/exists? guards add class self-sends and their value/error reads.
+    // This historical probe does not resolve those sends; the sidecar takes
+    // concrete Integer/String/nil keys and returns Base/bool. Nullable keys
+    // must not resolve to real zero or empty-string rows; the Ruby and
+    // native bind gates assert that.
+    const CEILING: usize = 1285;
 
     assert!(
         all_untyped.len() <= CEILING,

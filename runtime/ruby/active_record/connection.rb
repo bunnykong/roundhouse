@@ -122,6 +122,20 @@ module ActiveRecord
   # walked only into the ruby-family trees, and active_record.rb
   # requires it AFTER base.rb so the reopen sees the real class.
   class Base
+    # Ruby accepts nil at these public entry points. Reject it before a
+    # key-typed adapter can coerce it to a real zero/empty-string key.
+    def self.find(id)
+      raise RecordNotFound, "Couldn't find #{name} without an ID" if id.nil?
+      result = _adapter_find_by_id(id)
+      raise RecordNotFound, "Couldn't find #{name} with id=#{id}" if result.nil?
+      result
+    end
+
+    def self.exists?(id)
+      return false if id.nil?
+      _adapter_exists_by_id?(id)
+    end
+
     # Stateless facade — every member delegates straight to `Db`, so a
     # fresh instance per call is cheap and dodges class-ivar state.
     def self.connection

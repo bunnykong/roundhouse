@@ -98,6 +98,8 @@ def native_coverage(path):
         "tests/param_binds_runtime.rb",
         "tests/param_binds_cruby_cache.rb",
         "tests/param_binds_spinel_cache.rb",
+        "tests/param_binds_associations.rb",
+        "tests/param_binds_nil.rb",
         "runtime/spinel/test/statement_cache_cases.rb",
         "tests/support/emit_and_run.rs",
         "src/lower/model_to_library/adapter_emit.rs",
