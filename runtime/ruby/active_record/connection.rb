@@ -158,17 +158,14 @@ module ActiveRecord
     # caller reaches it through `connection.execute`, which lives here
     # too. Put in base.rb it broke `go vet` on every fixture.
     #
-    # SPLIT-and-interleave rather than the `sub`-per-bind loop
-    # `Relation#substitute_binds` uses: `String#sub` is Ruby vocabulary
-    # the Go emitter does not carry either ("sql.Sub undefined"), and
-    # Relation gets away with it only because Go does not stage that
-    # file. `split` every target speaks.
+    # Split-and-interleave uses the portable string vocabulary: every
+    # emitter carries `split`, though this facade is Ruby-family only.
+    # Relation also substitutes each original placeholder just once.
     #
     # The BIND COUNT is authoritative, not the placeholder count: Ruby
     # drops a trailing empty field, so `"… where rowid = ?"` splits to
     # one part, and appending a bind after each part while binds remain
-    # reconstructs it exactly. A `?` with no bind left is dropped, which
-    # is the same shape `substitute_binds` leaves it in.
+    # reconstructs it exactly. A `?` with no bind left is dropped.
     def self.sanitize_sql(statement)
       parts = statement[0].to_s.split("?")
       out = ""

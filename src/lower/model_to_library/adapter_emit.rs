@@ -53,18 +53,19 @@ pub(super) fn push_adapter_methods(
     owner: &ClassId,
     table: &Table,
     schema: &Schema,
+    param_binds: bool,
 ) {
-    methods.push(synth_adapter_find_by_id(owner, table, schema));
+    methods.push(synth_adapter_find_by_id(owner, table, schema, param_binds));
     methods.push(synth_adapter_all(owner, table, schema));
     methods.push(synth_adapter_last(owner, table, schema));
     methods.push(synth_adapter_insert(owner, table, schema));
     methods.push(synth_adapter_update(owner, table, schema));
     methods.push(synth_adapter_delete(owner, table, schema));
     methods.push(synth_adapter_count(owner, table, schema));
-    methods.push(synth_adapter_exists_by_id(owner, table, schema));
+    methods.push(synth_adapter_exists_by_id(owner, table, schema, param_binds));
     methods.push(synth_adapter_truncate(owner, table, schema));
     methods.push(synth_delete_all(owner, table));
-    methods.push(synth_adapter_reload(owner, table));
+    methods.push(synth_adapter_reload(owner, table, param_binds));
     methods.push(synth_columns_sql(owner, table));
     methods.push(synth_hydrate_all(owner));
 }
@@ -77,7 +78,7 @@ pub(super) fn push_adapter_methods(
 // insert / update / delete).
 // ---------------------------------------------------------------------------
 
-fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema, param_binds: bool) -> MethodDef {
     let id = Symbol::from("id");
     let key_ty = key_ty(table);
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
@@ -102,7 +103,7 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
         name: Symbol::from("_adapter_find_by_id"),
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(id.clone())],
-        body: SqliteVisitor.visit(&op, schema, owner),
+        body: SqliteVisitor { param_binds }.visit(&op, schema, owner),
         signature: Some(fn_sig(vec![(id, key_ty)], nilable_owner)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -135,7 +136,7 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
         name: Symbol::from("_adapter_all"),
         receiver: MethodReceiver::Class,
         params: vec![],
-        body: SqliteVisitor.visit(&op, schema, owner),
+        body: SqliteVisitor::default().visit(&op, schema, owner),
         signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(owner_ty) })),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -181,7 +182,7 @@ fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> Method
         name: Symbol::from("_adapter_last"),
         receiver: MethodReceiver::Class,
         params: vec![],
-        body: SqliteVisitor.visit(&op, schema, owner),
+        body: SqliteVisitor::default().visit(&op, schema, owner),
         signature: Some(fn_sig(vec![], nilable_owner)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -235,7 +236,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     });
 
     let (body, ret_ty) = match supplied_key {
-        None => (SqliteVisitor.visit(&op, schema, owner), Ty::Int),
+        None => (SqliteVisitor::default().visit(&op, schema, owner), Ty::Int),
         Some(k) => {
             let key_ivar = || ivar_ref(&k.name);
             let mut exprs = Vec::new();
@@ -280,7 +281,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
                     },
                 ));
             }
-            exprs.push(SqliteVisitor.visit(&op, schema, owner));
+            exprs.push(SqliteVisitor::default().visit(&op, schema, owner));
             exprs.push(key_ivar());
             (Expr::new(Span::synthetic(), ExprNode::Seq { exprs }), ty_of_column(&k.col_type))
         }
@@ -336,7 +337,7 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         name: Symbol::from("_adapter_update"),
         receiver: MethodReceiver::Instance,
         params: vec![],
-        body: SqliteVisitor.visit(&op, schema, owner),
+        body: SqliteVisitor::default().visit(&op, schema, owner),
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -363,7 +364,7 @@ fn synth_adapter_delete(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         name: Symbol::from("_adapter_delete"),
         receiver: MethodReceiver::Instance,
         params: vec![],
-        body: SqliteVisitor.visit(&op, schema, owner),
+        body: SqliteVisitor::default().visit(&op, schema, owner),
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -394,7 +395,7 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
         name: Symbol::from("_adapter_count"),
         receiver: MethodReceiver::Class,
         params: vec![],
-        body: SqliteVisitor.visit(&op, schema, owner),
+        body: SqliteVisitor::default().visit(&op, schema, owner),
         signature: Some(fn_sig(vec![], Ty::Int)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -405,7 +406,7 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
     }
 }
 
-fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema, param_binds: bool) -> MethodDef {
     let id = Symbol::from("id");
     let key_ty = key_ty(table);
 
@@ -428,7 +429,7 @@ fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -
         name: Symbol::from("_adapter_exists_by_id?"),
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(id.clone())],
-        body: SqliteVisitor.visit(&op, schema, owner),
+        body: SqliteVisitor { param_binds }.visit(&op, schema, owner),
         signature: Some(fn_sig(vec![(id, key_ty)], Ty::Bool)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -512,7 +513,7 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
         name: Symbol::from("_adapter_truncate"),
         receiver: MethodReceiver::Class,
         params: vec![],
-        body: SqliteVisitor.visit(&op, schema, owner),
+        body: SqliteVisitor::default().visit(&op, schema, owner),
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -546,7 +547,7 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
 /// reload needs to write into self. Generalizing the visitor with
 /// a "hydrate target = bare ivar / passed-in symbol" option is the
 /// right cleanup once a second use surfaces.
-fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
+fn synth_adapter_reload(owner: &ClassId, table: &Table, param: bool) -> MethodDef {
     use crate::expr::{ExprNode, LValue, Literal};
     use crate::span::Span;
 
@@ -562,12 +563,12 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         .collect::<Vec<_>>()
         .join(", ");
 
-    // Placeholder-bind gate (roundhouse#12). Reload is a `Db.prepare`
+    // The same read-bind policy as the Arel visitor (roundhouse#12). Reload
+    // is a `Db.prepare`
     // read — it hits the prepared-statement cache with a per-id key when
     // inlined, so parameterize its `@id` predicate too, keeping it in
-    // step with the visitor-emitted find/exists paths. Gate off ⇒
+    // step with the visitor-emitted find/exists paths. Binding disabled ⇒
     // inline-escape, byte-identical to before.
-    let param = crate::lower::arel::visitor::param_binds_enabled();
     // The key column and its ivar, bound with the key's type — the same
     // column the visitor-emitted find/exists paths compare.
     let key = key_column_name(table);
