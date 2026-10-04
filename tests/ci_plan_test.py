@@ -236,14 +236,17 @@ class Routing(unittest.TestCase):
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])
-                self.assertEqual(plan["spinel_tests"], ["param_binds"])
+                self.assertEqual(
+                    plan["spinel_tests"],
+                    ci.PARAM_BIND_TESTS if path.startswith("src/") or path == "tests/support/emit_and_run.rs" else ["param_binds"],
+                )
                 self.assertEqual(
                     self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
                 )
         for path in ["runtime/spinel/db.rb", "runtime/spinel/sqlite_adapter.rb"]:
             with self.subTest(path=path):
                 self.assertEqual(
-                    ci.select([path])["spinel_tests"], ["spinel_db_lease", "param_binds"]
+                    ci.select([path])["spinel_tests"], ["spinel_db_lease", *ci.PARAM_BIND_TESTS]
                 )
         for path in [
             "README.md",
@@ -270,6 +273,14 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], suites)
                 self.assertEqual(plan["smoke"], [])
                 self.assertEqual(plan["archives"], [])
+
+    def test_param_bind_suite_drivers_select_their_native_harness(self):
+        for suite in ci.PARAM_BIND_TESTS:
+            for suffix in (".rs", ".rb", "_runtime.rb"):
+                with self.subTest(suite=suite, suffix=suffix):
+                    plan = ci.select(["tests/" + suite + suffix])
+                    self.assertEqual(plan["spinel_tests"], [suite])
+                    self.assertIn("framework-tests-spinel", plan["jobs"])
 
     def test_runtime_owners_choose_asymmetric_focused_binaries(self):
         cases = {
@@ -341,7 +352,7 @@ class Routing(unittest.TestCase):
             ["runtime/spinel/web_push_crypto.rb", "runtime/spinel/sqlite_adapter.rb"]
         )
         self.assertEqual(
-            plan["spinel_tests"], ["spinel_web_push_crypto", "spinel_db_lease", "param_binds"]
+            plan["spinel_tests"], ["spinel_web_push_crypto", "spinel_db_lease", *ci.PARAM_BIND_TESTS]
         )
 
     def test_wasm_changes_have_no_archive_or_spinel_fanout(self):

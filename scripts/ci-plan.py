@@ -33,11 +33,12 @@ BASE = [
     "campfire-compare",
 ]
 CORE = ["build-spinel", "toolchain-spinel", "compare-spinel"]
+PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
     "framework_tests_spinel",
     "spinel_web_push_crypto",
     "spinel_db_lease",
-    "param_binds",
+    *PARAM_BIND_TESTS,
     "spinel_param_builder",
     "rails_compat_vectors_spinel",
 ]
@@ -88,18 +89,21 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    # Gate drivers stay flat beside their Rust harness. Match the most
+    # specific suite first (e.g. param_binds_values before param_binds).
+    if path.startswith("tests/") and path.endswith(".rb"):
+        stem = path[len("tests/"):-len(".rb")]
+        for suite in reversed(PARAM_BIND_TESTS):
+            if stem == suite or stem.startswith(suite + "_"):
+                suites.add(suite)
+                break
+    if path == "runtime/spinel/test/statement_cache_cases.rb":
+        suites.add("param_binds")
     if path in {
-        "tests/param_binds_emit.rb",
-        "tests/param_binds_runtime.rb",
-        "tests/param_binds_cruby_cache.rb",
-        "tests/param_binds_spinel_cache.rb",
-        "tests/param_binds_associations.rb",
-        "tests/param_binds_nil.rb",
-        "runtime/spinel/test/statement_cache_cases.rb",
         "tests/support/emit_and_run.rs",
         "src/lower/model_to_library/adapter_emit.rs",
     } or path.startswith("src/lower/arel/"):
-        suites.add("param_binds")
+        suites.update(PARAM_BIND_TESTS)
     if path.startswith(("runtime/spinel/", "runtime/ruby/")) and not interpreter_only:
         name = path.rsplit("/", 1)[-1]
         owned_tests = set()
@@ -121,7 +125,7 @@ def native_coverage(path):
         if any(
             word in path for word in ("/db", "sqlite", "active_support_time_parsing")
         ):
-            owned_tests.update(("spinel_db_lease", "param_binds"))
+            owned_tests.update(("spinel_db_lease", *PARAM_BIND_TESTS))
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
         if (
