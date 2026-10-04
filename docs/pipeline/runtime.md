@@ -184,6 +184,11 @@ budget use `prepare_uncached`, avoiding exponential growth within a long
 lease. Existing per-connection cache limits still apply across query sites.
 Strict-target lowering retains its existing predicates and lifecycle.
 
+Generated Ruby-family reads use `ensure Db.finalize(stmt)` around binding,
+serialization after prepare, stepping and hydration, including reload and
+preloads. Text preprocessing failures also release the binder's checkout.
+Cleanup therefore completes before a caller rescues within an ongoing lease.
+
 For each target:
 
 - **Emitter assumes** specific function names, signatures, and
