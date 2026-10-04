@@ -60,7 +60,7 @@ pub fn rewrite_arel_in_expr_with_assocs(
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
 ) {
-    rewrite_arel_in_expr_with_ruby_values(expr, schema, registry, assocs, false);
+    rewrite_arel_in_expr_with_ruby_values(expr, schema, registry, assocs, false, SqliteVisitor::default());
 }
 
 /// Ruby-family values preserve SQL NULL without changing strict-target emit.
@@ -70,6 +70,7 @@ pub(crate) fn rewrite_arel_in_expr_with_ruby_values(
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
     ruby_read_values: bool,
+    visitor: SqliteVisitor,
 ) {
     // Names (ivars/locals) the body later refines with relation-chain
     // methods (`@moderations.where(...)` after `@moderations =
@@ -78,7 +79,7 @@ pub(crate) fn rewrite_arel_in_expr_with_ruby_values(
     // runtime Relation path.
     let mut refined = std::collections::HashSet::new();
     collect_relation_refined_names(expr, &mut refined);
-    rewrite_arel_inner(expr, schema, registry, assocs, &refined, ruby_read_values);
+    rewrite_arel_inner(expr, schema, registry, assocs, &refined, ruby_read_values, visitor);
     // Both call sites hand us a METHOD BODY, and a body that is a
     // single statement is not a `Seq` — so the hoist post-pass inside
     // `rewrite_arel_inner`, which walks a Seq's statement list, had no
@@ -191,6 +192,7 @@ fn rewrite_arel_inner(
     assocs: &[crate::lower::model_associations::AssociationEdge],
     refined: &std::collections::HashSet<crate::ident::Symbol>,
     ruby_read_values: bool,
+    visitor: SqliteVisitor,
 ) {
     if let ExprNode::Assign { target, .. } = expr.node.as_ref() {
         let name = match target {
@@ -209,7 +211,7 @@ fn rewrite_arel_inner(
             if ruby_read_values {
                 ruby_values::normalize(&mut op, schema);
             }
-            let mut replacement = SqliteVisitor.visit(&op, schema, &owner);
+            let mut replacement = visitor.visit(&op, schema, &owner);
             // The expansion replaces the recognized chain wholesale;
             // its provenance is the chain call site. Subtrees the
             // builder lifted out of the chain (predicate values, …)
@@ -242,14 +244,14 @@ fn rewrite_arel_inner(
         let ExprNode::Send { recv: Some(recv), args, .. } = &mut *expr.node else {
             unreachable!("matched Send with recv above");
         };
-        rewrite_arel_spine_args(recv, schema, registry, assocs, refined, ruby_read_values);
+        rewrite_arel_spine_args(recv, schema, registry, assocs, refined, ruby_read_values, visitor);
         for a in args {
-            rewrite_arel_inner(a, schema, registry, assocs, refined, ruby_read_values);
+            rewrite_arel_inner(a, schema, registry, assocs, refined, ruby_read_values, visitor);
         }
         return;
     }
     walk_subexprs_mut(expr, &mut |e| {
-        rewrite_arel_inner(e, schema, registry, assocs, refined, ruby_read_values)
+        rewrite_arel_inner(e, schema, registry, assocs, refined, ruby_read_values, visitor)
     });
     // Post-pass: when an Arel rewrite landed a multi-stmt hydrate Seq
     // in a *value* position — directly as an Assign value
@@ -281,16 +283,17 @@ fn rewrite_arel_spine_args(
     assocs: &[crate::lower::model_associations::AssociationEdge],
     refined: &std::collections::HashSet<crate::ident::Symbol>,
     ruby_read_values: bool,
+    visitor: SqliteVisitor,
 ) {
     if let ExprNode::Send { recv, args, block, .. } = &mut *expr.node {
         if let Some(r) = recv {
-            rewrite_arel_spine_args(r, schema, registry, assocs, refined, ruby_read_values);
+            rewrite_arel_spine_args(r, schema, registry, assocs, refined, ruby_read_values, visitor);
         }
         for a in args {
-            rewrite_arel_inner(a, schema, registry, assocs, refined, ruby_read_values);
+            rewrite_arel_inner(a, schema, registry, assocs, refined, ruby_read_values, visitor);
         }
         if let Some(b) = block {
-            rewrite_arel_inner(b, schema, registry, assocs, refined, ruby_read_values);
+            rewrite_arel_inner(b, schema, registry, assocs, refined, ruby_read_values, visitor);
         }
     }
 }

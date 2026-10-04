@@ -10,8 +10,9 @@
 //! Rails DSL.
 //!
 //! This module is pure: input is one `Model` plus the app `Schema`, output
-//! is one `LibraryClass`. No side-effects, no per-target choices. Per-Rails-
-//! idiom lowering is a separate function so each can be tested in
+//! is one `LibraryClass`. No side-effects; target capabilities are supplied
+//! by the caller. Per-Rails-idiom lowering is a separate function so each
+//! can be tested in
 //! isolation (skeleton, schema columns, has_many, belongs_to, validates,
 //! callbacks, …).
 //!
@@ -139,6 +140,7 @@ pub fn lower_models_with_registry(
         &Default::default(),
         &Default::default(),
         Materialization::Emit,
+        false,
     );
     (lcs, classes)
 }
@@ -155,7 +157,7 @@ pub fn lower_models_with_registry_and_params(
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
-    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit)
+    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit, false)
 }
 
 pub fn lower_models_to_library_classes(
@@ -170,6 +172,7 @@ pub fn lower_models_to_library_classes(
         &Default::default(),
         &Default::default(),
         Materialization::Emit,
+        false,
     )
     .0
 }
@@ -180,7 +183,7 @@ pub fn lower_models_to_library_classes_with_params(
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<LibraryClass> {
-    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit).0
+    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit, false).0
 }
 
 /// As above, plus the class methods whose bodies must NOT be arel-folded
@@ -200,7 +203,7 @@ pub fn lower_models_to_library_classes_unfolding(
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
     unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
 ) -> Vec<LibraryClass> {
-    lower_models_inner(models, schema, extra_class_infos, params_specs, unfolded, Materialization::Emit).0
+    lower_models_inner(models, schema, extra_class_infos, params_specs, unfolded, Materialization::Emit, false).0
 }
 
 pub(crate) fn lower_models_inner(
@@ -210,9 +213,10 @@ pub(crate) fn lower_models_inner(
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
     unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
     materialization: Materialization<'_>,
+    param_binds: bool,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     lower_models_inner_with_ruby_values(
-        models, schema, extra_class_infos, params_specs, unfolded, materialization, false,
+        models, schema, extra_class_infos, params_specs, unfolded, materialization, false, param_binds,
     )
 }
 
@@ -224,11 +228,12 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
     materialization: Materialization<'_>,
     ruby_read_values: bool,
+    param_binds: bool,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     for model in models {
-        let methods = build_methods(model, models, schema, params_specs);
+        let methods = build_methods_with_param_binds(model, models, schema, params_specs, param_binds);
         let table = schema.tables.get(&model.table.0);
         // Register actual production definitions, even for unselected
         // models and when source overrides hide framework ownership.
@@ -247,7 +252,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                             if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")),
                     _ => true,
                 });
-                let mut methods = build_methods(&definitions, models, schema, params_specs);
+                let mut methods = build_methods_with_param_binds(&definitions, models, schema, params_specs, param_binds);
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
@@ -358,6 +363,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             if !unfold {
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
+                    crate::lower::arel::SqliteVisitor { param_binds },
                 );
             }
             type_method_body(method, &classes, table, Some(model));
@@ -949,6 +955,16 @@ pub(crate) fn build_methods(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<MethodDef> {
+    build_methods_with_param_binds(model, models, schema, params_specs, false)
+}
+
+fn build_methods_with_param_binds(
+    model: &Model,
+    models: &[Model],
+    schema: &Schema,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
+    param_binds: bool,
+) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
     report_unclaimed_unknowns(model);
@@ -978,7 +994,7 @@ pub(crate) fn build_methods(
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
         // project_level_3_adapter_emit.md.
-        push_adapter_methods(&mut methods, &model.name, table, schema);
+        push_adapter_methods(&mut methods, &model.name, table, schema, param_binds);
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
