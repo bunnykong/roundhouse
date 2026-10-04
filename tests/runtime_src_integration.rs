@@ -1539,7 +1539,15 @@ fn every_runtime_method_body_concretely_typed() {
     // `iso8601_ms`'s `::Time` parameter. What it bought:
     // `has_secure_password`'s password-reset token, which the Rails 8
     // authentication generator's PasswordsController and mailer use.
-    const CEILING: usize = 521;
+    // 2026-10-04 521 -> 522, MEASURED on the rebased tree before and
+    // after substitute_binds (previous base: 520 -> 521). Relation
+    // 240 -> 241; token_for.rb retains its one site above. The Array
+    // check reads an existing untyped
+    // raw argument; no signature became untyped. Escaped scalar/list
+    // values and the result remain String, and Bar A still requires
+    // zero unresolved types. The raw-where gate executes both forms
+    // on CRuby and compiled Spinel.
+    const CEILING: usize = 522;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

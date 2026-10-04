@@ -944,7 +944,15 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // context gate still has zero unresolved types with gradual sites
     // unchanged from main. Nullable keys must not resolve to real zero or
     // empty-string rows; the Ruby and native bind gates assert that.
-    const CEILING: usize = 1221;
+    // 2026-10-04 1221 -> 1229, +8 MEASURED on the rebased tree before
+    // and after substitute_binds: relation.rb 738 -> 746, with the
+    // token_for.rb and connection.rb counts above unchanged. Previously
+    // 1191 -> 1199 on the old base, measured by restoring only substitute_binds:
+    // one-pass scalar/Array substitution adds a type check and local
+    // reads in this partial-context probe. The full-context gate adds
+    // just one gradual read of the existing untyped argument and keeps
+    // zero unresolved types; no signature was weakened.
+    const CEILING: usize = 1229;
 
     assert!(
         all_untyped.len() <= CEILING,

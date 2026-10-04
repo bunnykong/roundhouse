@@ -227,6 +227,7 @@ class Routing(unittest.TestCase):
             "src/lower/model_to_library/adapter_emit.rs",
             "tests/param_binds.rs",
             "tests/param_binds_emit.rb",
+            "tests/param_binds_raw_where.rb",
             "tests/param_binds_runtime.rb",
             "tests/param_binds_cruby_cache.rb",
             "tests/param_binds_spinel_cache.rb",
