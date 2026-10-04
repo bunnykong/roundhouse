@@ -242,6 +242,10 @@ fn emitted(test: &str, target: BuildTarget) {
         !preload.contains("Db.bind_"),
         "preload must not bind:\n{preload}"
     );
+    assert!(
+        preload.contains("Db.prepare(") && !preload.contains("Db.prepare_uncached("),
+        "inline IN preload must retain statement caching:\n{preload}"
+    );
     assert_eq!(
         probe.contains("WHERE id = ? AND parent_id = ?"),
         binds_on,
@@ -469,6 +473,38 @@ fn varying_binds_spinel() {
 #[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
 fn bind_runtime_spinel() {
     runtime(true);
+}
+
+fn raw_where_substitution(target: BuildTarget) {
+    let (dir, errors) = overlay().emit(target);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let native = target == BuildTarget::Spinel;
+    let script = format!(
+        r#"require_relative "boot"
+require_relative "app/models/item"
+SqliteAdapter.configure("file:raw_where_gate?mode=memory&cache=shared")
+ActiveRecord.adapter = SqliteAdapter
+Schema.statements.each {{ |sql| Db.exec(sql) }}
+{}
+{}
+Db.close
+"#,
+        cache_probe(native),
+        include_str!("param_binds_raw_where.rb")
+    );
+    run_script(&dir, &script, native);
+    std::fs::remove_dir_all(dir.parent().unwrap()).expect("remove successful overlay");
+}
+
+#[test]
+fn raw_where_substitution_ruby() {
+    raw_where_substitution(BuildTarget::Ruby);
+}
+
+#[test]
+#[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
+fn raw_where_substitution_spinel() {
+    raw_where_substitution(BuildTarget::Spinel);
 }
 
 fn nullable_associations(test: &str, target: BuildTarget) {

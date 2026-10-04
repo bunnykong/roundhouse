@@ -1612,14 +1612,22 @@ module ActiveRecord
       end
     end
 
-    # Replace `?` placeholders in a raw fragment with escaped args, in
-    # order. A fragment with no `?` returns unchanged. Each `sub` rewrites
-    # the leftmost remaining `?`, so iterating the args consumes them in
-    # order.
+    # Replace placeholders in the original fragment once. Question marks
+    # and backslashes inside escaped values are data, never substitutions.
     def substitute_binds(sql, args)
-      result = sql
-      args.each { |a| result = result.sub("?", ActiveRecord.adapter.escape_value(a)) }
-      result
+      values = args.map do |a|
+        a.is_a?(Array) ? escape_list(a) : ActiveRecord.adapter.escape_value(a)
+      end
+      index = 0
+      sql.gsub("?") do |_placeholder|
+        if index < values.length
+          value = values[index]
+          index += 1
+          value
+        else
+          "?"
+        end
+      end
     end
 
     def escape_list(vals)

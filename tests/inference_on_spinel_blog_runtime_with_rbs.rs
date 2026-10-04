@@ -947,7 +947,14 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // concrete Integer/String/nil keys and returns Base/bool. Nullable keys
     // must not resolve to real zero or empty-string rows; the Ruby and
     // native bind gates assert that.
-    const CEILING: usize = 1285;
+    // 2026-10-05 1285 -> 1293, +8 MEASURED before and after
+    // substitute_binds on the rebased tree: relation.rb 802 -> 810;
+    // all other files are unchanged. One-pass scalar/Array substitution
+    // adds a type check and local reads in this partial-context probe.
+    // The full-context gate adds one gradual read of the existing
+    // untyped argument and keeps zero unresolved types; no signature
+    // was weakened.
+    const CEILING: usize = 1293;
 
     assert!(
         all_untyped.len() <= CEILING,

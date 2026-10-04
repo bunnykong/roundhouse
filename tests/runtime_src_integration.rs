@@ -1546,7 +1546,14 @@ fn every_runtime_method_body_concretely_typed() {
     // @orders / @records / to_a seam every other terminal already
     // pays. What it bought: campfire's ordered.last(PAGE_SIZE) is
     // ORDER BY … DESC LIMIT n, not the whole room history.
-    const CEILING: usize = 537;
+    // 2026-10-05 537 -> 538, +1 MEASURED against main 432dbb80 and
+    // before/after substitute_binds: relation.rb 256 -> 257, all other
+    // files unchanged. The Array check reads an existing untyped raw
+    // argument; no signature became untyped. Escaped scalar/list values
+    // and the result remain String, and Bar A still requires zero
+    // unresolved types. The raw-where gate executes both forms on
+    // CRuby and compiled Spinel.
+    const CEILING: usize = 538;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

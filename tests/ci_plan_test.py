@@ -276,6 +276,7 @@ class Routing(unittest.TestCase):
             "src/lower/model_to_library/adapter_emit.rs",
             "tests/param_binds.rs",
             "tests/param_binds_emit.rb",
+            "tests/param_binds_raw_where.rb",
             "tests/param_binds_runtime.rb",
             "tests/param_binds_cruby_cache.rb",
             "tests/param_binds_spinel_cache.rb",
@@ -331,6 +332,9 @@ class Routing(unittest.TestCase):
                     plan = ci.select(["tests/" + suite + suffix])
                     self.assertEqual(plan["spinel_tests"], [suite])
                     self.assertIn("framework-tests-spinel", plan["jobs"])
+        plan = ci.select(["tests/param_binds_text_cleanup.rb"])
+        self.assertEqual(plan["spinel_tests"], ["param_binds_cleanup"])
+        self.assertIn("framework-tests-spinel", plan["jobs"])
 
     def test_runtime_owners_choose_asymmetric_focused_binaries(self):
         cases = {

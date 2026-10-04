@@ -96,7 +96,9 @@ def native_coverage(path):
         suites.add(focused[1])
     # Gate drivers stay flat beside their Rust harness. Match the most
     # specific suite first (e.g. param_binds_values before param_binds).
-    if path.startswith("tests/") and path.endswith(".rb"):
+    if path == "tests/param_binds_text_cleanup.rb":
+        suites.add("param_binds_cleanup")
+    elif path.startswith("tests/") and path.endswith(".rb"):
         stem = path[len("tests/"):-len(".rb")]
         for suite in reversed(PARAM_BIND_TESTS):
             if stem == suite or stem.startswith(suite + "_"):
