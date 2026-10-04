@@ -3600,7 +3600,8 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 if matches!(id.0.as_str(),
                     "URI::HTTP" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
                     | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
-                    | "Rails::HTML5::SafeListSanitizer" | "JSON")
+                    | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
+                    | "Struct" | "Mutex")
                     // Nokogiri does not supply HTML5 on JRuby. The
                     // other bundled values remain available there.
                     && (target != "jruby" || id.0.as_str() == "Rails::HTML5::SafeListSanitizer")
