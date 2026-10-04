@@ -223,6 +223,15 @@ const CORE: &[&str] = &[
     "escape_int",
 ];
 
+#[test]
+fn ruby_family_db_shims_support_transient_preparation() {
+    for path in ["runtime/spinel/db.rb", "runtime/spinel/db_cruby.rb", "runtime/spinel/db_jruby.rb"] {
+        assert!(defines_with(&read_shim(path), "prepare_uncached", &["def self."], false, false),
+            "{path} must support transient preparation");
+    }
+    assert!(defines_in_rbs(&read_shim("runtime/ruby/db.rbs"), "prepare_uncached"));
+}
+
 /// The nullable-column seam. A column the schema declares nullable
 /// holds NULL until something sets it, and NULL is not the type's
 /// zero: `column_text` collapsing it to "" makes a nullable UNIQUE
@@ -387,4 +396,15 @@ fn the_rbs_contract_declares_the_nullable_seam() {
          declared contract has to keep up or the calls type as untyped.",
         missing.join(", ")
     );
+}
+
+#[test]
+fn ruby_family_shims_declare_optional_binds() {
+    let rbs = read_shim("runtime/ruby/db.rbs");
+    for method in ["bind_int_opt", "bind_text_opt", "bind_bool_opt"] {
+        assert!(defines_in_rbs(&rbs, method), "missing RBS: {method}");
+        for path in ["runtime/spinel/db.rb", "runtime/spinel/db_cruby.rb", "runtime/spinel/db_jruby.rb"] {
+            assert!(defines_with(&read_shim(path), method, &["def self."], false, false), "{path}: {method}");
+        }
+    }
 }

@@ -935,7 +935,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // runtime_src_integration counts ONE site (`Time.now + expires_in`).
     // What it buys: the Rails 8 authentication generator's password
     // reset flow, in Rails' own token format.
-    const CEILING: usize = 1209;
+    // 2026-10-04 1209 -> 1221, +12 MEASURED after rebasing onto
+    // 55487333: connection.rb 210 -> 222; token_for.rb retains its 30
+    // sites above. The previous base measured 1179 -> 1191. Ruby-only
+    // find/exists? guards add class self-sends and their value/error reads. This
+    // historical probe does not resolve those sends; the sidecar takes
+    // concrete Integer/String/nil keys and returns Base/bool. The full
+    // context gate still has zero unresolved types with gradual sites
+    // unchanged from main. Nullable keys must not resolve to real zero or
+    // empty-string rows; the Ruby and native bind gates assert that.
+    const CEILING: usize = 1221;
 
     assert!(
         all_untyped.len() <= CEILING,

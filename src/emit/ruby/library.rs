@@ -5075,6 +5075,29 @@ pub(crate) fn apply_hydration_nil_lowering(lcs: &mut [LibraryClass], app: &App) 
         if let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) {
             for m in &mut lc.methods {
                 widen_fk_zero_guards(&mut m.body, &nullable_fks);
+                // Polymorphic readers dispatch on the type discriminator,
+                // so they have no zero-sentinel guard to widen. Guard their
+                // nullable FK here too, before any key-typed adapter call.
+                if m.name_span.is_synthetic() {
+                    for assoc in model.associations() {
+                        if let crate::dialect::Association::BelongsTo {
+                            name, foreign_key, polymorphic: true, ..
+                        } = assoc {
+                            if m.name == *name && nullable.contains(foreign_key) {
+                                let cond = Expr::new(Span::synthetic(), ExprNode::Send {
+                                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Ivar { name: foreign_key.clone() })),
+                                    method: Symbol::from("nil?"), args: vec![], block: None,
+                                    parenthesized: false,
+                                });
+                                m.body = Expr::new(m.body.span, ExprNode::If {
+                                    cond,
+                                    then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                                    else_branch: m.body.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -5153,10 +5176,8 @@ fn widen_fk_zero_guards(expr: &mut Expr, fks: &BTreeSet<Symbol>) {
             if method.as_str() == "==" && args.len() == 1 =>
         {
             matches!(&*r.node, ExprNode::Ivar { name } if fks.contains(name))
-                && matches!(
-                    &*args[0].node,
-                    ExprNode::Lit { value: Literal::Int { value: 0 } }
-                )
+                && (matches!(&*args[0].node, ExprNode::Lit { value: Literal::Int { value: 0 } })
+                    || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value.is_empty()))
         }
         _ => false,
     };

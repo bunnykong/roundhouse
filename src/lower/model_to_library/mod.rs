@@ -211,6 +211,20 @@ pub(crate) fn lower_models_inner(
     unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
     materialization: Materialization<'_>,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    lower_models_inner_with_ruby_values(
+        models, schema, extra_class_infos, params_specs, unfolded, materialization, false,
+    )
+}
+
+pub(crate) fn lower_models_inner_with_ruby_values(
+    models: &[Model],
+    schema: &Schema,
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
+    unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
+    materialization: Materialization<'_>,
+    ruby_read_values: bool,
+) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     for model in models {
@@ -342,7 +356,9 @@ pub(crate) fn lower_models_inner(
             let unfold = method.receiver == crate::dialect::MethodReceiver::Class
                 && unfolded.contains(&(model.name.clone(), method.name.clone()));
             if !unfold {
-                crate::lower::arel::rewrite_arel_in_expr(&mut method.body, schema, &classes);
+                crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
+                    &mut method.body, schema, &classes, &[], ruby_read_values,
+                );
             }
             type_method_body(method, &classes, table, Some(model));
         }

@@ -230,6 +230,8 @@ class Routing(unittest.TestCase):
             "tests/param_binds_runtime.rb",
             "tests/param_binds_cruby_cache.rb",
             "tests/param_binds_spinel_cache.rb",
+            "tests/param_binds_associations.rb",
+            "tests/param_binds_nil.rb",
             "tests/support/emit_and_run.rs",
         ]:
             with self.subTest(path=path):

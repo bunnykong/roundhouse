@@ -170,6 +170,20 @@ it. Snapshot tests + toolchain tests catch drift.
 
 ## Emitter ↔ runtime contract
 
+Ruby-family lowered equality reads select SQL from the runtime value: a
+non-nil value uses `col = ?` and a bind; nil uses `col IS NULL` without a slot.
+The same branch selects the fragment and reserves its running bind position,
+so later predicates cannot shift out of alignment. Inline emission uses
+`col = <escaped value>` or `col IS NULL`. `IS ?` is deliberately avoided:
+SQLite excludes `IS` from its [partial-index non-null implication rule](https://www.sqlite.org/partialindex.html#queries_using_partial_indexes).
+
+Each nullable predicate contributes two possible fragments. Code size stays
+linear: no query variants are enumerated in the compiler. A bound query with
+up to seven nullable predicates has at most 128 shapes; queries above that
+budget use `prepare_uncached`, avoiding exponential growth within a long
+lease. Existing per-connection cache limits still apply across query sites.
+Strict-target lowering retains its existing predicates and lifecycle.
+
 For each target:
 
 - **Emitter assumes** specific function names, signatures, and

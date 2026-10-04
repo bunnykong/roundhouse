@@ -247,6 +247,8 @@ fn returns_relation(ty: &Ty) -> bool {
 /// positional args.
 #[derive(Default)]
 pub struct LowerControllerOptions<'a> {
+    /// Ruby-family nullable read values; strict-target defaults stay unchanged.
+    pub ruby_read_values: bool,
     /// App `Schema` — enables the Arel SQL-chain lowering pass.
     pub schema: Option<&'a crate::schema::Schema>,
     /// App views — scanned for `*.json.jbuilder` format dispatch and the
@@ -291,6 +293,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     opts: LowerControllerOptions,
 ) -> Vec<LibraryClass> {
     let LowerControllerOptions {
+        ruby_read_values,
         schema,
         views,
         library_classes,
@@ -555,8 +558,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             let refined_across_methods = refined_result_methods.contains(&method.name);
             if let Some(schema) = schema {
                 if !refined_across_methods {
-                    crate::lower::arel::rewrite_arel_in_expr_with_assocs(
-                        &mut method.body, schema, &classes, assocs,
+                    crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
+                        &mut method.body, schema, &classes, assocs, ruby_read_values,
                     );
                     crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
                 }
