@@ -121,7 +121,11 @@ fn user_src_beside(model_src: &str, others: &[(&str, &str)]) -> String {
 
 /// The body of the model's own `password=`, as emitted.
 fn writer_body(src: &str) -> &str {
-    src.split("def password=(")
+    named_writer_body(src, "password")
+}
+
+fn named_writer_body<'a>(src: &'a str, attr: &str) -> &'a str {
+    src.split(&format!("def {attr}=("))
         .nth(1)
         .and_then(|rest| rest.split_once('\n'))
         .and_then(|(_, body)| body.split("\n  end").next())
@@ -149,6 +153,60 @@ fn a_password_writer_that_calls_super_reaches_the_macro_writer() {
                 && src.contains("@password_digest = BCrypt::Password.create(unencrypted_password).to_s"),
             "{call}: the macro's writer under its own name: {src}",
         );
+    }
+}
+
+#[test]
+fn each_secure_password_writer_that_calls_super_reaches_its_macro_writer() {
+    let schema = r#"ActiveRecord::Schema.define(version: 1) do
+  create_table :users do |t|
+    t.string :password_digest
+    t.string :recovery_password_digest
+  end
+end
+"#;
+    for declarations in [
+        "  has_secure_password\n  has_secure_password :recovery_password",
+        "  has_secure_password :recovery_password\n  has_secure_password",
+    ] {
+        let src = user_src_beside(
+            &format!(
+                r#"class User < ApplicationRecord
+{declarations}
+
+  def password=(value)
+    @password_supplied = true
+    super
+  end
+
+  def recovery_password=(token)
+    @recovery_password_supplied = true
+    super(token.strip)
+  end
+end
+"#,
+            ),
+            &[("db/schema.rb", schema)],
+        );
+        for (attr, argument) in [("password", "value"), ("recovery_password", "token.strip")] {
+            let writer = named_writer_body(&src, attr);
+            assert!(writer.contains(&format!("@{attr}_supplied = true")), "{attr}: {writer}");
+            assert!(
+                writer.contains(&format!("_secure_{attr}_writer({argument})")),
+                "{attr}: {writer}",
+            );
+            assert!(!writer.contains("super"), "{attr}: {writer}");
+            assert_eq!(
+                src.matches(&format!("def _secure_{attr}_writer(unencrypted_password)")).count(),
+                1,
+                "one helper per attribute: {src}",
+            );
+            assert!(src.contains(&format!("@{attr} = unencrypted_password")), "{attr}: {src}");
+            assert!(
+                src.contains(&format!("@{attr}_digest = BCrypt::Password.create(unencrypted_password).to_s")),
+                "{attr}: {src}",
+            );
+        }
     }
 }
 

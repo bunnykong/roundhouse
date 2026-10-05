@@ -4352,7 +4352,7 @@ fn a_password_writer_that_calls_super_runs() {
         .edit(
             "db/schema.rb",
             "create_table \"articles\", force: :cascade do |t|",
-            "create_table \"articles\", force: :cascade do |t|\n    t.string \"password_digest\"",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"password_digest\"\n    t.string \"recovery_password_digest\"",
         )
         .edit(
             "db/schema.rb",
@@ -4365,6 +4365,7 @@ fn a_password_writer_that_calls_super_runs() {
             r#"class Article < ApplicationRecord
   has_many :comments, dependent: :destroy
   has_secure_password
+  has_secure_password :recovery_password
 
   def password=(value)
     @password_supplied = true
@@ -4377,6 +4378,20 @@ fn a_password_writer_that_calls_super_runs() {
 
   def seed_plaintext(value)
     @password = value
+    @recovery_password = value
+  end
+
+  def recovery_password=(value)
+    @recovery_password_supplied = true
+    super
+  end
+
+  def recovery_password_supplied?
+    @recovery_password_supplied == true
+  end
+
+  def recovery_plaintext
+    @recovery_password
   end"#,
         )
         .edit(
@@ -4421,6 +4436,20 @@ class ArticlePasswordWriterTest < ActiveSupport::TestCase
     comment.password = nil
     assert comment.password_supplied?
     assert_nil comment.password
+  end
+
+  test "each secure-password attribute reaches its own macro writer" do
+    article = articles(:one)
+    article.seed_plaintext("seeded")
+    article.password = ""
+    assert article.password_supplied?
+    assert_nil article.password
+    assert_equal "seeded", article.recovery_plaintext
+    assert !article.recovery_password_supplied?
+    article.recovery_password = nil
+    assert article.recovery_password_supplied?
+    assert_nil article.recovery_plaintext
+    assert_nil article.password
   end
 end
 "#,

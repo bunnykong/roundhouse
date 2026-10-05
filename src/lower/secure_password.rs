@@ -355,12 +355,9 @@ fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
 ///   parameter name can mean the block's own variable (a block
 ///   parameter, or a `|; local|`, which ingest does not keep).
 pub fn apply_secure_password_super(app: &mut App) {
-    let eligible: Vec<(usize, Symbol)> = app
-        .models
-        .iter()
-        .enumerate()
-        .filter_map(|(i, model)| {
-            let attr = secure_password_attr(&model.body)?;
+    let mut eligible = Vec::new();
+    for (i, model) in app.models.iter().enumerate() {
+        for attr in secure_password_attrs(&model.body) {
             let helper = helper_name(&attr);
             let lineage = lineage(app, model);
             let left_alone = lineage.iter().any(|m| includes_a_module(m))
@@ -371,9 +368,11 @@ pub fn apply_secure_password_super(app: &mut App) {
                 || app.models.iter().any(|m| names_method(m, &helper))
                 || app.library_classes.iter().any(|lc| lc.methods.iter().any(|m| m.name == helper))
                 || app.schema.tables.values().any(|t| t.columns.iter().any(|c| c.name == helper));
-            (!left_alone).then_some((i, attr))
-        })
-        .collect();
+            if !left_alone {
+                eligible.push((i, attr));
+            }
+        }
+    }
     for (i, attr) in eligible {
         let model = &mut app.models[i];
         let writer = Symbol::from(format!("{}=", attr.as_str()));
