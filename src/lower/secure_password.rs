@@ -29,7 +29,7 @@
 //! apps (the blog).
 
 use super::model_to_library::{fn_sig, push_synth_instance_method};
-use crate::dialect::{AccessorKind, MethodDef, Model, ModelBodyItem, Param};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
@@ -105,6 +105,228 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
         AccessorKind::AttributeWriter,
         true,
     );
+    push_reset_token_methods(methods, model, &attr);
+}
+
+/// Rails 8's `has_secure_password` also generates a password-reset
+/// token (`reset_token: true` is its default): `<attr>_reset_token`
+/// mints it and the class-side `find_by_<attr>_reset_token(!)` read it
+/// back, through `generates_token_for :"<attr>_reset", expires_in:
+/// 15.minutes { <attr>_salt&.last(10) }`. The authentication generator's
+/// PasswordsController and mailer are built on the three.
+///
+/// The model name, purpose and expiry are compile-time facts, folded
+/// into the call so the runtime (`runtime/ruby/active_record/
+/// token_for.rb`) needs no reflection. A `reset_token:` option other
+/// than `true` is not reproduced: `false` means Rails defines none of
+/// these, and a custom expiry would need its Duration read here.
+fn push_reset_token_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
+    if !default_reset_token(&model.body) {
+        return;
+    }
+    let digest = Symbol::from(format!("{}_digest", attr.as_str()));
+    let purpose = format!("{}\\n{}_reset\\n{}", model.name.0.as_str(), attr.as_str(), RESET_TOKEN_TTL);
+    let self_ty = Ty::Class { id: model.name.clone(), args: vec![] };
+    let token_for = || sp_expr(ExprNode::Const {
+        path: vec![Symbol::from("ActiveRecord"), Symbol::from("TokenFor")],
+    });
+    let purpose_lit = || sp_expr(ExprNode::Lit { value: Literal::Str { value: purpose.clone() } });
+    let var = |name: &str| sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from(name) });
+    // `[id, digest salt tail]` as JSON, for the record `id`/`digest` name.
+    let data_of = |id: Expr, digest: Expr| send(Some(token_for()), "secure_password_data", vec![id, digest]);
+
+    // def password_reset_token
+    //   ActiveRecord::TokenFor.generate(ActiveRecord::TokenFor
+    //     .secure_password_data(id, @password_digest), "User\npassword_reset\n900", 900)
+    let generate = send(
+        Some(token_for()),
+        "generate",
+        vec![
+            data_of(send(Some(sp_expr(ExprNode::SelfRef)), "id", vec![]), ivar_read(&digest)),
+            purpose_lit(),
+            sp_expr(ExprNode::Lit { value: Literal::Int { value: RESET_TOKEN_TTL } }),
+        ],
+    );
+    push_synth_instance_method(
+        methods,
+        model,
+        Symbol::from(format!("{}_reset_token", attr.as_str())),
+        Vec::new(),
+        generate,
+        Some(fn_sig(vec![], Ty::Str)),
+        AccessorKind::Method,
+        false,
+    );
+
+    // def password_reset_token_expires_in = 900 — Rails answers the
+    // Duration `15.minutes`; seconds are what every reader here takes
+    // (the reset mailer's `distance_of_time_in_words(0, …)`).
+    push_synth_instance_method(
+        methods,
+        model,
+        Symbol::from(format!("{}_reset_token_expires_in", attr.as_str())),
+        Vec::new(),
+        sp_expr(ExprNode::Lit { value: Literal::Int { value: RESET_TOKEN_TTL } }),
+        Some(fn_sig(vec![], Ty::Int)),
+        AccessorKind::Method,
+        false,
+    );
+
+    // Both finders open the same way:
+    //   data = ActiveRecord::TokenFor.verified_data(token, PURPOSE)
+    let token = Symbol::from("token");
+    let assign = |name: &str, value: Expr| sp_expr(ExprNode::Assign {
+        target: LValue::Var { id: VarId(0), name: Symbol::from(name) },
+        value,
+    });
+    let verify = || assign("data", send(Some(token_for()), "verified_data", vec![var("token"), purpose_lit()]));
+    let id_of_data = || send(Some(token_for()), "data_id", vec![var("data")]);
+    // The record still carries the salt the token was minted under.
+    let still_matches = || send(
+        Some(data_of(
+            send(Some(var("record")), "id", vec![]),
+            send(Some(var("record")), digest.as_str(), vec![]),
+        )),
+        "==",
+        vec![var("data")],
+    );
+    let nil = || sp_expr(ExprNode::Lit { value: Literal::Nil });
+    let invalid = || sp_expr(ExprNode::Raise {
+        value: sp_expr(ExprNode::Const {
+            path: vec![
+                Symbol::from("ActiveSupport"),
+                Symbol::from("MessageVerifier"),
+                Symbol::from("InvalidSignature"),
+            ],
+        }),
+    });
+    let if_ = |cond: Expr, then_branch: Expr, else_branch: Expr| {
+        sp_expr(ExprNode::If { cond, then_branch, else_branch })
+    };
+
+    // def self.find_by_password_reset_token(token)
+    //   data = …; record = find_by(id: ActiveRecord::TokenFor.data_id(data))
+    //   if record.nil? then nil elsif <still matches> then record else nil end
+    let find_by = send(
+        None,
+        "find_by",
+        vec![sp_expr(ExprNode::Hash {
+            entries: vec![(sp_expr(ExprNode::Lit { value: Literal::Sym { value: Symbol::from("id") } }), id_of_data())],
+            kwargs: true,
+        })],
+    );
+    let lenient = sp_expr(ExprNode::Seq {
+        exprs: vec![
+            verify(),
+            assign("record", find_by),
+            if_(
+                send(Some(var("record")), "nil?", vec![]),
+                nil(),
+                if_(still_matches(), var("record"), nil()),
+            ),
+        ],
+    });
+    push_synth_class_method(
+        methods,
+        model,
+        Symbol::from(format!("find_by_{}_reset_token", attr.as_str())),
+        vec![Param::positional(token.clone())],
+        lenient,
+        fn_sig(vec![(token.clone(), Ty::Str)], Ty::Union { variants: vec![self_ty.clone(), Ty::Nil] }),
+    );
+
+    // The bang form, Rails' `find_by_token_for!`: a token that does not
+    // verify, or whose salt no longer matches, is InvalidSignature; one
+    // that verifies but names no row is `find`'s RecordNotFound.
+    //   data = …; raise InvalidSignature if data == ""
+    //   record = find(ActiveRecord::TokenFor.data_id(data))
+    //   raise InvalidSignature unless <still matches>
+    //   record
+    let empty = sp_expr(ExprNode::Lit { value: Literal::Str { value: String::new() } });
+    let strict = sp_expr(ExprNode::Seq {
+        exprs: vec![
+            verify(),
+            if_(send(Some(var("data")), "==", vec![empty]), invalid(), nil()),
+            assign("record", send(None, "find", vec![id_of_data()])),
+            if_(still_matches(), nil(), invalid()),
+            var("record"),
+        ],
+    });
+    push_synth_class_method(
+        methods,
+        model,
+        Symbol::from(format!("find_by_{}_reset_token!", attr.as_str())),
+        vec![Param::positional(token.clone())],
+        strict,
+        fn_sig(vec![(token, Ty::Str)], self_ty),
+    );
+}
+
+/// Rails' default reset-token lifetime, `15.minutes`, in seconds — also
+/// the third line of the token's purpose.
+const RESET_TOKEN_TTL: i64 = 900;
+
+/// Whether the declaration takes the default `reset_token: true` —
+/// absent, or written out as `true`.
+fn default_reset_token(body: &[ModelBodyItem]) -> bool {
+    body.iter().all(|item| {
+        let ModelBodyItem::Unknown { expr, .. } = item else { return true };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return true };
+        if method.as_str() != "has_secure_password" {
+            return true;
+        }
+        args.iter().all(|a| {
+            let ExprNode::Hash { entries, .. } = &*a.node else { return true };
+            entries.iter().all(|(k, v)| {
+                !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "reset_token")
+                    || matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: true } })
+            })
+        })
+    })
+}
+
+/// Push a synthesized class method unless the model defines one of
+/// that name (custom methods win) or an earlier synthesizer claimed it.
+fn push_synth_class_method(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    name: Symbol,
+    params: Vec<Param>,
+    body: Expr,
+    signature: Ty,
+) {
+    let defined = model.methods().any(|m| m.receiver == MethodReceiver::Class && m.name == name)
+        || methods.iter().any(|m| m.receiver == MethodReceiver::Class && m.name == name);
+    if defined {
+        return;
+    }
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name,
+        receiver: MethodReceiver::Class,
+        params,
+        body,
+        signature: Some(signature),
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
+fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+    sp_expr(ExprNode::Send {
+        recv,
+        method: Symbol::from(method),
+        args,
+        block: None,
+        parenthesized: true,
+    })
 }
 
 /// Rails names the authenticator after the attribute, except the

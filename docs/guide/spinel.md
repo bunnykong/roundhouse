@@ -44,7 +44,9 @@ calls it the Campfire tier for that reason.
   silently compares two binaries. Note the *dev* package — the
   `libjemalloc2` runtime alone links nothing. On Apple Silicon,
   Homebrew installs it under `/opt/homebrew/lib`, which the linker does
-  not search by default: build with
+  not search by default; `spin` asks `pkg-config` where it is
+  (matz/spinel#7219), so with `pkg-config` installed it links as is. A
+  Spinel older than that, or a host without `pkg-config`, needs
   `LIBRARY_PATH=$(brew --prefix)/lib` (or `export` it), or the link
   fails with `library 'jemalloc' not found`.
 - **Ruby with Bundler** — for the asset step only (`make assets`, below),
@@ -54,7 +56,7 @@ calls it the Campfire tier for that reason.
   `brew install vips`) — only when the app declares image variants
   (`has_one_attached` with `variant`), in which case `spin.toml` lists
   `ruby-vips`.
-- **Node.js 18+** — when the app builds Tailwind (the asset step runs
+- **Node.js 24+** — when the app builds Tailwind (the asset step runs
   `npx @tailwindcss/cli`), and for the browser end-to-end suite.
 
 ## Build and run
@@ -122,12 +124,20 @@ unsupported-construct list — instead of a compiler error. It finds
 `SPIN`, then `PATH`, and prints install steps for whichever is
 missing. The prerequisites above still apply.
 
-The mode is experimental. The asset step and the Apple Silicon
-jemalloc lookup are in [largo/ocran#65](https://github.com/Largo/ocran/pull/65);
-an OCRAN without that change produces a binary whose stylesheets and
-scripts all 404. `tests/ocran_contract.rs` pins the command lines and
-output OCRAN depends on, so a change on this side that would break it
-fails here first.
+The mode is experimental and not yet in a released OCRAN (1.4.6 is
+older); until the next release, run it from a checkout of its `master`:
+
+```sh
+git clone https://github.com/Largo/ocran
+ruby -I ocran/lib ocran/exe/ocran --roundhouse path/to/rails/app
+```
+
+Its asset step came in with
+[largo/ocran#65](https://github.com/Largo/ocran/pull/65); an OCRAN
+without it produces a binary whose stylesheets and scripts all 404.
+`tests/ocran_contract.rs` pins the command lines and output OCRAN
+depends on, so a change on this side that would break it fails here
+first.
 
 ## Deploying
 
@@ -195,7 +205,7 @@ live updates over the socket — from `docker run -p 3000:3000`.
 [rubys.github.io/roundhouse/campfire/docker.tgz](https://rubys.github.io/roundhouse/campfire/docker.tgz)
 is that archive, refreshed by scheduled full validation or an explicitly
 publishing manual run on canonical main. PR archive checks never publish it;
-see [CI coverage](../ci-reuse.md). It is the fastest way to see the door's
+see [CI publication](../ci/README.md#publication-is-separate). It is the fastest way to see the door's
 end state before pointing it at your own app.
 
 ## What to expect

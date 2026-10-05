@@ -211,6 +211,8 @@ impl BuildTarget {
 /// and the regenerate command. For `ships_e2e` targets the `## <name>`
 /// sections are a CI contract — `scripts/smoke` executes their ```sh
 /// blocks verbatim against the published archive.
+/// MRI prerequisites describe the minimum in `.ruby-version`, not a CI
+/// patch pin. Keep the human-facing minimum aligned when that line changes.
 pub fn target_readme(target: BuildTarget) -> String {
     let name = target.as_str();
     let body = match target {
@@ -247,7 +249,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              - libvips (`libvips-dev` to build, `libvips42` to run; `brew install vips`) — \
              only when `spin.toml` lists `ruby-vips`, which it does when the app \
              declares image variants (thumbnails, avatars)\n\
-             - Node.js 18+ — for the End-to-end suite\n\n\
+             - Node.js 24+ — for the End-to-end suite\n\n\
              ## Build\n\
              ```sh\n\
              spin build\n\
@@ -502,7 +504,7 @@ pub fn target_readme(target: BuildTarget) -> String {
         }
         BuildTarget::Typescript => {
             "## Prerequisites\n\
-             - Node.js 18+\n\n\
+             - Node.js 24+\n\n\
              ## Install dependencies\n\
              ```sh\n\
              npm install\n\
@@ -521,7 +523,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              is loaded by a host HTML page — there's no standalone \
              server.\n\n\
              ## Prerequisites\n\
-             - Node.js 18+ (for bundling)\n\n\
+             - Node.js 24+ (for bundling)\n\n\
              ## Install + build\n\
              ```sh\n\
              npm install\n\
@@ -600,7 +602,7 @@ pub fn target_readme(target: BuildTarget) -> String {
         // no target needs it now. (See the flash-wiring punch list memory.)
         format!(
             "## End-to-end\n\
-             Browser smoke tests (Playwright). Needs Node.js 18+ and the \
+             Browser smoke tests (Playwright). Needs Node.js 24+ and the \
              `sqlite3` CLI; run after the Build steps above — the test \
              config boots the server and seeds `db/seed.sql` itself:\n\
              ```sh\n\
@@ -808,6 +810,33 @@ fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String
     Ok(())
 }
 
+/// Keep admitted Data factories outside unverified target emitters.
+fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
+        return Ok(());
+    }
+    fn visit(expr: &crate::expr::Expr, target: &str, found: &mut bool) {
+        if expr.decisions & crate::expr::RESOLVED_DATA_FACTORY != 0 {
+            *found = true;
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "Data.define",
+                "this target has no supported Data factory representation; use Ruby or Spinel",
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target, found));
+    }
+    let mut found = false;
+    crate::lower::for_each_forwarding_body_ref(app, &mut |expr| {
+        visit(expr, target.as_str(), &mut found);
+    });
+    if found {
+        return Err(format!("{}: Data.define is not supported; use Ruby or Spinel", target.as_str()));
+    }
+    Ok(())
+}
+
 /// Arbitrary `&expr` operands need a real forwarding convention, not
 /// a lambda that returns the operand (or a dropped block). Keep the
 /// unsupported native paths out of emit, even in survey mode.
@@ -841,6 +870,42 @@ fn reject_unsupported_forwarded_procs(app: &App, target: BuildTarget) -> Result<
         return Err(format!("{}: arbitrary &expr Proc forwarding is not supported; use Ruby instead", target.as_str()));
     }
     Ok(())
+}
+
+/// Targets whose emitters name, file and dispatch a module-qualified
+/// controller (`Admin::StatsController`) correctly. The others write
+/// the `::` into identifiers and paths (TypeScript, Crystal, C#,
+/// Kotlin, Swift), or derive a module/constructor/dispatch key that
+/// disagrees with the route table's (Rust, Go, Python) — true of an
+/// app's own namespaced controllers as well. Elixir and the Roda
+/// conversion have no run proving one either way.
+fn emits_namespaced_controllers(target: BuildTarget) -> bool {
+    matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
+}
+
+/// The app without `Rails::HealthController`, for a target that cannot
+/// emit a namespaced controller: ingest synthesizes it for the `/up`
+/// route, and emitting it there breaks the build or misroutes it,
+/// which the route alone did not (it left `/up` unserved). Matched by name,
+/// so an app's own `Rails::HealthController` is dropped there too; it
+/// hit the same gap. `None` when there is nothing to drop. The warning
+/// keeps the 404 on the ledger.
+fn without_rails_health_controller(app: &App, target: BuildTarget) -> Option<App> {
+    let health = crate::ingest::routes::RAILS_HEALTH_CONTROLLER;
+    if emits_namespaced_controllers(target) || !app.controllers.iter().any(|c| c.name.0.as_str() == health) {
+        return None;
+    }
+    let mut d = crate::diagnostic::Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
+        Some(crate::ident::Symbol::from(target.as_str())),
+        "namespaced_controller",
+        format!("{health} is not emitted: this target does not emit namespaced controllers yet, so `rails/health#show` is not served"),
+    );
+    d.severity = crate::diagnostic::Severity::Warning;
+    emit::diagnostics::push(d);
+    let mut app = app.clone();
+    app.controllers.retain(|c| c.name.0.as_str() != health);
+    Some(app)
 }
 
 /// A unique index whose `where:` SQLite can't be trusted to run as
@@ -914,7 +979,16 @@ pub fn target_files(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    let without_health;
+    let app = match without_rails_health_controller(app, target) {
+        Some(trimmed) => {
+            without_health = trimmed;
+            &without_health
+        }
+        None => app,
+    };
     reject_unsupported_pattern_matches(app, target)?;
+    reject_unsupported_data_factories(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
@@ -942,6 +1016,17 @@ pub fn target_files(
             crate::emit::diagnostics::report_unsupported(method.name_span, target.as_str(), "parameter declaration", formal.description());
         }
         if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+            let named_keyword_rest = method.params.iter().any(|p| {
+                p.keyword && p.rest && !p.name.as_str().is_empty() && !p.forwarding
+            });
+            let anonymous_or_full = method.params.iter().any(|p| {
+                p.forwarding || (p.keyword && p.rest && p.name.as_str().is_empty())
+            });
+            // Spinel carries keyword parameters. A named `**details` is
+            // that parameter. Nameless `**` and `...` stay refused.
+            if matches!(target, BuildTarget::Spinel) && named_keyword_rest && !anonymous_or_full {
+                continue;
+            }
             let construct = if method.params.iter().any(|p| p.forwarding) {
                 "full argument forwarding"
             } else if method.params.iter().any(|p| p.keyword && p.rest) {
@@ -4012,12 +4097,20 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     // `runtime/spinel/erb_spinel.rb`'s header records, which cost the
     // lobsters AOT lane ten days.
     //
+    // `Zlib`: same three-branch swap, different reason. The CRC-32 port
+    // stays for targets with no zlib; spinel's `packages/zlib` is the
+    // real codec (gzip/deflate), which tep uses to honour
+    // Accept-Encoding the way campfire's Rack::Deflater does on CRuby.
+    // Without the swap, `Zlib.gzip` is a NameError and every HTML page
+    // ships uncompressed. Its .rbs goes too: the port's surface is not
+    // the library's.
+    //
     // HERE rather than in `spin_shape`, because `spin_shape` is not the
     // only tree that ships: `spinel_base_files` is what
     // `tests/spinel_toolchain.rs` compiles, and the bundled-require
     // table's own comment records what it cost to have the two disagree.
     // A lane is evidence only if it runs the same code.
-    files.retain(|(p, _)| p != "sig/runtime/tempfile.rbs");
+    files.retain(|(p, _)| p != "sig/runtime/tempfile.rbs" && p != "sig/runtime/zlib.rbs");
     for (path, content) in files.iter_mut() {
         if path == "runtime/tempfile.rb" {
             *content = "# The bundled tempfile library — see `project::spinel_files`.\n\
@@ -4025,6 +4118,13 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
                         # targets that have no stdlib to bind to, and opens by name\n\
                         # where this one opens O_EXCL.\n\
                         require \"tempfile\"\n"
+                .to_string();
+        }
+        if path == "runtime/zlib.rb" {
+            *content = "# The bundled zlib library — see `project::spinel_files`.\n\
+                        # The port at runtime/ruby/zlib.rb is CRC-32 only; this one is\n\
+                        # packages/zlib (gzip/deflate) so tep can honour Accept-Encoding.\n\
+                        require \"zlib\"\n"
                 .to_string();
         }
     }
@@ -7125,6 +7225,10 @@ mod tests {
         assert!(out.contains("require_relative \"main\""));
         assert!(out.contains("Db.with_connection { Main.run_rack(env) }"));
         assert!(out.contains("run app"));
+        assert!(
+            out.contains("GzipCache"),
+            "campfire's config.ru gzips; the overlay must too"
+        );
         // A config.ru missing the markers errors loudly instead of
         // silently shipping a tree whose require graph dangles.
         assert!(strip_cable_from_config_ru("run app\n").is_err());

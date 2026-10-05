@@ -237,6 +237,9 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
             "UndefinedFilterTarget".into(),
             format!("{}:{}", macro_name.as_str(), target.as_str()),
         ),
+        DiagnosticKind::GraphqlNullableField { field, .. } => {
+            ("GraphqlNullableField".into(), format!(":{}", field.as_str()))
+        }
     }
 }
 

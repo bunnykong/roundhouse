@@ -26,6 +26,7 @@
 mod alba;
 mod body;
 mod class_configuration;
+mod data;
 pub(crate) use body::string_answers;
 pub(crate) use body::ConstResolverTask;
 pub use body::PreparedConstResolver;
@@ -41,6 +42,7 @@ mod effects;
 mod diagnostics;
 pub(crate) mod forwarding;
 mod filter_targets;
+pub mod graphql;
 mod inferred_types;
 pub mod inquiry;
 pub use inferred_types::inferred_types;
@@ -123,6 +125,8 @@ pub struct Analyzer {
     const_resolver: std::sync::Arc<body::ConstResolver>,
     /// Inferred values keyed by Rubydex declaration IDs, not by names.
     typed_constants: IdentityHashMap<DeclarationId, Ty>,
+    /// Literal Data constants on library classes, keyed by source span.
+    data_factories: HashMap<crate::span::Span, Ty>,
 }
 
 impl Analyzer {
@@ -785,6 +789,9 @@ impl Analyzer {
         // ordinary application methods.
         test_module::register(&mut classes, app);
 
+        let const_resolver = app.const_resolver.for_sources(&app.sources);
+        let data_factories = data::register(app, &const_resolver, &mut classes);
+
         Self {
             classes,
             inferred_params: HashMap::new(),
@@ -793,8 +800,9 @@ impl Analyzer {
             host_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
             inquirers: inquiry::inquirer_methods(app),
-            const_resolver: app.const_resolver.for_sources(&app.sources),
+            const_resolver,
             typed_constants: IdentityHashMap::default(),
+            data_factories,
         }
     }
 
@@ -805,6 +813,7 @@ impl Analyzer {
             .with_inquirers(&self.inquirers)
             .with_const_resolver(self.const_resolver.clone())
             .with_typed_constants(&self.typed_constants)
+            .with_data_factories(&self.data_factories)
     }
 
     /// The per-class member registry — schema columns, catalog-sourced
@@ -1285,7 +1294,8 @@ impl Analyzer {
             let typer = BodyTyper::new(&self.classes)
                 .with_inquirers(&self.inquirers)
                 .with_const_resolver(self.const_resolver.clone())
-                .with_typed_constants(&resolved);
+                .with_typed_constants(&resolved)
+                .with_data_factories(&self.data_factories);
             for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
                     self_ty: Some(self_ty.clone()),
@@ -2532,6 +2542,14 @@ impl Analyzer {
             }
             let model_name = model.name.clone();
             for method in model.methods_mut() {
+                // A default is part of the parameter's type. Typed before
+                // seeding so `value = nil` is `Nil` when no call site has
+                // said otherwise, and a later site can union with it.
+                for param in &mut method.params {
+                    if let Some(default) = &mut param.default {
+                        self.body_typer().analyze_expr(default, &class_ctx);
+                    }
+                }
                 let mctx = self.seed_method_params(&class_ctx, &model_name, method);
                 self.body_typer().analyze_expr(&mut method.body, &mctx);
             }
@@ -2705,6 +2723,11 @@ impl Analyzer {
                 constants: Default::default(), annotate_self_dispatch: false, in_view: false,
             };
 
+            for (_, value) in &mut lc.constants {
+                if self.data_factories.contains_key(&value.span) {
+                    self.body_typer().analyze_expr(value, &class_ctx);
+                }
+            }
             let lc_name = lc.name.clone();
             for method in &mut lc.methods {
                 // A default is an expression of the class body too, and
