@@ -42,6 +42,7 @@ mod effects;
 mod diagnostics;
 pub(crate) mod forwarding;
 mod filter_targets;
+pub mod graphql;
 mod inferred_types;
 pub mod inquiry;
 pub use inferred_types::inferred_types;

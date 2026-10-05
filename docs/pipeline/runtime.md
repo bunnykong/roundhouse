@@ -741,11 +741,28 @@ an already-encoded body, `render plain: v.as_json_str, content_type:
 target; `JsonBuilder` is shared runtime, so the ruby lane runs the very
 writer the compiled lane does. Demand-gated and type-gated: only a class
 the analyzer typed at a `render json:` site is given the pair. A value
-with no writer — a Hash literal, a Relation, a class with its own
+with no writer — a collection containing objects or temporal values, a Relation, a class with its own
 `as_json` (whose pairs `as_json_shape` recognizes but whose computed
 values are not yet typed, see that module) — keeps the runtime
 encoder, CRuby-only and loud elsewhere; the suite ledger's
 `render-json-encoder` rule is the tripwire for it.
+
+Inline Hash/Array payloads whose inferred contents are JSON primitives use
+the target's existing `JSON.generate` encoder, including nested primitive
+collections. The shared `JsonBuilder.escape_html_entities` helper then
+escapes `<`, `>` and `&` to their JSON Unicode forms, matching Rails' default
+HTML-entity escaping without re-escaping the encoded document. Unknown values
+and values requiring Rails `as_json` hooks do not take this path. The generic
+`render_json_primitives` regression runs on CRuby and compiled Spinel, checks
+the exact bytes for `<b>&</b>`, and retains a CRuby nested-Time serialization
+control.
+
+Remaining divergences: non-finite Float values (NaN and positive/negative
+Infinity) still raise `JSON::GeneratorError` instead of Rails' `null` because
+this path delegates primitive encoding to `JSON.generate`. The helper applies
+the Rails 8.1+ defaults: HTML-entity escaping enabled, U+2028/U+2029 escaping
+disabled. Per-application changes to those Rails encoder settings are not
+reflected here.
 
 ### Active Storage: rows and bytes are modeled, variants are a seam
 
@@ -2891,8 +2908,16 @@ header. Grouped by cause, largest first:
   which every Rails response carries. Without `X-Frame-Options` any
   site can frame a signed-in campfire page. The one to close first.
 - **The app's own `config.ru` middleware is not applied.** campfire's
-  `config.ru` says `use Rack::Deflater`; no response of ours is gzipped
-  (65) and none varies on `Accept-Encoding` (71).
+  `config.ru` says `use Rack::Deflater`. The CRuby overlay now wraps
+  `Main.run_rack` in `GzipCache` (Static stays outside so `/cable`
+  hijack is never compressed; CSS/JS stay identity; identical HTML is
+  not deflated on every request). spinel tep gzips inline bodies when
+  `Accept-Encoding` includes gzip, from a cache keyed by SHA-256 of
+  the identity body (CRuby keys by the body itself — MRI's string
+  hash is cheaper than SHA-256 here). Gzip runs outside the lock on
+  both lanes.
+  Re-run `scripts/campfire-http-shape` before treating the 65
+  Content-Encoding misses as current.
 - **Rails' `Rack::ETag` / `Rack::ConditionalGet` are absent**: no weak
   ETag on a 200 (52), no `Cache-Control: max-age=0, private,
   must-revalidate`, so a revisit is 200 where Rails answers 304 (10-14).

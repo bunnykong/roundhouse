@@ -41,6 +41,9 @@
 //!  11. `begin … rescue … end`          → the same `begin`; a `rescue`
 //!                                       first drops a pair the body
 //!                                       left half-written
+//!  12. `x = <expr>`                    → kept as written, in place; a
+//!                                       local the template reads
+//!                                       later
 //!
 //! (6)-(9) arrived together with campfire's bot API, which is six
 //! jbuilder templates written in exactly that dialect.
@@ -354,8 +357,8 @@ struct Ctx {
     /// Column-type table for the model that backs `arg_name`. Keyed
     /// by column-name symbol; empty when the arg has no resolvable
     /// model (e.g. layouts, untyped fixtures). Used to route
-    /// datetime columns through `JsonBuilder.encode_datetime` rather
-    /// than the generic `encode_value`.
+    /// temporal columns through their storage text (see
+    /// `temporal_column_json`) rather than the generic `encode_value`.
     arg_columns: std::collections::HashMap<Symbol, crate::schema::ColumnType>,
     /// Names declared by `direct :name do |…| … end`, without the
     /// `_path`/`_url` suffix. A direct helper's block parameter is
@@ -422,6 +425,9 @@ enum JbStmt<'a> {
         body: &'a Expr,
         rescues: &'a [RescueClause],
     },
+    /// `x = <expr>` — a template local. Emitted as written; it adds
+    /// no pair.
+    Local,
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
@@ -476,27 +482,38 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
 
     // Whole-template DSL forms (single stmt covers the entire JSON
     // body) — array! and partial! produce a top-level array or method
-    // call respectively, no `{}` wrap.
-    if classified.len() == 1 {
+    // call respectively, no `{}` wrap. Template locals around that one
+    // statement stay where they are and do not count.
+    let mut dsl = classified
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !matches!(c, JbStmt::Local));
+    if let (Some((index, only)), None) = (dsl.next(), dsl.next()) {
         // Synthesis choke point (whole-template forms): everything
         // emitted for the single DSL statement attributes back to it.
-        let src_span = raw_stmts[0].span;
-        match &classified[0] {
+        let src_span = raw_stmts[index].span;
+        let whole = match only {
             JbStmt::ArrayPartial { collection, partial_path, item_var } => {
-                let mut out = emit_array_partial(collection, partial_path, item_var, ctx);
-                for e in &mut out {
-                    e.inherit_span(src_span);
-                }
-                return out;
+                Some(emit_array_partial(collection, partial_path, item_var, ctx))
             }
             JbStmt::Partial { partial_path, arg } => {
-                let mut out = emit_partial_call(partial_path, arg, ctx);
-                for e in &mut out {
-                    e.inherit_span(src_span);
-                }
-                return out;
+                Some(emit_partial_call(partial_path, arg, ctx))
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some(mut whole) = whole {
+            for e in &mut whole {
+                e.inherit_span(src_span);
+            }
+            let mut out: Vec<Expr> = Vec::new();
+            for (i, src) in raw_stmts.iter().enumerate() {
+                if i == index {
+                    out.append(&mut whole);
+                } else {
+                    out.push(emit_local(src, ctx));
+                }
+            }
+            return out;
         }
     }
 
@@ -585,42 +602,24 @@ fn emit_pairs(
                         &ctx.accumulator,
                         &format!("\"{}\":", attr.as_str()),
                     ));
-                    // Route datetime / date columns through
-                    // `JsonBuilder.encode_datetime` for Rails-canonical
-                    // ISO 8601 output. Other columns (Integer, String,
-                    // …) ride encode_value's type dispatch.
-                    let use_datetime = obj_is_arg
-                        && matches!(
-                            ctx.arg_columns.get(attr),
-                            Some(crate::schema::ColumnType::DateTime)
-                                | Some(crate::schema::ColumnType::Date)
-                                | Some(crate::schema::ColumnType::Time)
-                        );
                     // A temporal column serializes from its `<col>_raw`
                     // storage reader (the stored ISO-8601 text), NOT the
-                    // parsing `<col>` reader: `encode_datetime`'s
-                    // string→string reformat is exact (no float
-                    // sub-second hazards) and skips a native
-                    // parse→format round-trip per row. The native-Time
-                    // reader stays for field access and arithmetic;
-                    // JSON never needs the object.
-                    let reader = if use_datetime {
-                        format!("{}_raw", attr.as_str())
-                    } else {
-                        attr.as_str().to_string()
-                    };
-                    let value = send(
-                        Some((*obj).clone()),
-                        &reader,
-                        Vec::new(),
-                        None,
-                        false,
-                    );
-                    let encoded = if use_datetime {
-                        json_builder_call("encode_datetime", value)
-                    } else {
-                        json_builder_encode(value)
-                    };
+                    // parsing `<col>` reader. Other columns (Integer,
+                    // String, …) ride encode_value's type dispatch.
+                    let encoded = ctx
+                        .arg_columns
+                        .get(attr)
+                        .filter(|_| obj_is_arg)
+                        .and_then(|t| temporal_column_json(obj, attr, t))
+                        .unwrap_or_else(|| {
+                        json_builder_encode(send(
+                            Some((*obj).clone()),
+                            attr.as_str(),
+                            Vec::new(),
+                            None,
+                            false,
+                        ))
+                    });
                     out.push(io_append_call(&ctx.accumulator, encoded));
                     sep = Sep::After;
                 }
@@ -640,13 +639,11 @@ fn emit_pairs(
                 // `encode_value` would otherwise render `Time#to_s`
                 // ("2026-09-12 13:26:25 UTC") where Rails renders
                 // `xmlschema(3)` ("2026-09-12T13:26:25.149Z").
-                let encoded = match temporal_column_read(value, ctx) {
-                    Some((obj, col)) => json_builder_call(
-                        "encode_datetime",
-                        send(Some(obj), &format!("{}_raw", col.as_str()), Vec::new(), None, false),
-                    ),
-                    None => json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx))),
-                };
+                let encoded = temporal_column_read(value, ctx)
+                    .and_then(|(obj, col)| temporal_column_json(&obj, &col, ctx.arg_columns.get(&col)?))
+                    .unwrap_or_else(|| {
+                        json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx)))
+                    });
                 out.push(io_append_call(&ctx.accumulator, encoded));
                 sep = Sep::After;
             }
@@ -707,6 +704,9 @@ fn emit_pairs(
             }
             JbStmt::Guarded { body, rescues } => {
                 sep = emit_guarded(body, rescues, ctx, out, sep);
+            }
+            JbStmt::Local => {
+                out.push(emit_local(src, ctx));
             }
             JbStmt::Unknown => {
                 out.push(io_append_lit(&ctx.accumulator, ""));
@@ -804,6 +804,24 @@ fn emit_guarded(
     after
 }
 
+/// A template local as written, its value given the rewrites a pair's
+/// value gets (`<x>_url` to `RouteHelpers.<x>_path`, `h`): the value is
+/// read by pairs later, and the emitted view has no `_url` helpers.
+fn emit_local(stmt: &Expr, ctx: &Ctx) -> Expr {
+    let ExprNode::Assign { target, value } = &*stmt.node else {
+        return stmt.clone();
+    };
+    let mut out = Expr::new(
+        stmt.span,
+        ExprNode::Assign {
+            target: target.clone(),
+            value: rewrite_h_escape(&rewrite_route_helpers(value, ctx)),
+        },
+    );
+    out.ty = stmt.ty.clone();
+    out
+}
+
 fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
     if let ExprNode::BeginRescue { body, rescues, else_branch: None, ensure: None, .. } = &*stmt.node {
         if !rescues.is_empty() {
@@ -812,6 +830,9 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
     }
     if let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node {
         return JbStmt::Cond { cond, then_branch, else_branch };
+    }
+    if let ExprNode::Assign { target: LValue::Var { .. }, .. } = &*stmt.node {
+        return JbStmt::Local;
     }
     let ExprNode::Send {
         recv: Some(recv),
@@ -1373,6 +1394,37 @@ fn json_builder_call(method: &str, value: Expr) -> Expr {
         },
     );
     send(Some(recv), method, vec![value], None, true)
+}
+
+/// The JSON value of `<obj>.<col>` for a temporal column, from its
+/// `<col>_raw` storage reader.
+///
+/// * datetime / time: `JsonBuilder.encode_datetime(<obj>.<col>_raw)`,
+///   the exact string→string reformat to `xmlschema(3)` (no float
+///   sub-second hazards, no native parse→format round-trip per row).
+/// * date: `JsonBuilder.encode_value(ActiveSupport.format_db_date(
+///   ActiveSupport.parse_db_date(<obj>.<col>_raw)))` — the column's
+///   own seam, as the model's `as_json` writer uses. A date has no
+///   clock, so `encode_datetime` is the wrong primitive for it, and it
+///   quoted the "" an unset nonnullable slot (or an adapter's NULL)
+///   holds where Rails renders `null`.
+///
+/// `None` for any other column type.
+fn temporal_column_json(obj: &Expr, col: &Symbol, ty: &crate::schema::ColumnType) -> Option<Expr> {
+    use crate::schema::ColumnType;
+    let raw = send(Some(obj.clone()), &format!("{}_raw", col.as_str()), Vec::new(), None, false);
+    match ty {
+        ColumnType::DateTime | ColumnType::Time => Some(json_builder_call("encode_datetime", raw)),
+        ColumnType::Date => {
+            let active_support = || {
+                Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })
+            };
+            let date = send(Some(active_support()), "parse_db_date", vec![raw], None, true);
+            let text = send(Some(active_support()), "format_db_date", vec![date], None, true);
+            Some(json_builder_encode(text))
+        }
+        _ => None,
+    }
 }
 
 /// True when `obj` reads as the named local — either a bare `Var`

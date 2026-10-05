@@ -495,7 +495,7 @@ fn draft_transitions_replace_the_previous_pr_run() {
     );
     assert_eq!(
         ci["concurrency"]["cancel-in-progress"].as_str(),
-        Some("${{ github.event_name == 'pull_request' }}")
+        Some("${{ github.event_name == 'pull_request' || github.event_name == 'push' }}")
     );
 }
 

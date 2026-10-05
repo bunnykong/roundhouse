@@ -1539,7 +1539,14 @@ fn every_runtime_method_body_concretely_typed() {
     // `iso8601_ms`'s `::Time` parameter. What it bought:
     // `has_secure_password`'s password-reset token, which the Rails 8
     // authentication generator's PasswordsController and mailer use.
-    const CEILING: usize = 521;
+    //
+    // 521 -> 537, +16 MEASURED: Relation#last_n as a SQL tail
+    // (relation.rb). reverse_order_term / reverse_one_order_term /
+    // loaded_tail / last_n itself. The residual is the same untyped
+    // @orders / @records / to_a seam every other terminal already
+    // pays. What it bought: campfire's ordered.last(PAGE_SIZE) is
+    // ORDER BY … DESC LIMIT n, not the whole room history.
+    const CEILING: usize = 537;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

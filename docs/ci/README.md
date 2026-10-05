@@ -6,12 +6,18 @@ The workflows and their tests own implementation details, not this handbook.
 
 ## What runs
 
-Ready PRs and ordinary main pushes run a compact floor: fixture preparation,
-unit tests, Store analysis, Ruby/Rust/TypeScript comparisons against Rails,
-SharedWorker browser tests, and Campfire conformance/comparison. Three unit
-shards cover all package test targets in bounded batches; ignored integrations
-need selected toolchain lanes. Framework and toolchain suites also run inside
-comparison jobs, not necessarily as standalone checks.
+Ready PRs run a Ruby floor: fixture preparation, unit tests, Store analysis,
+the CRuby comparison against Rails, and Campfire conformance/comparison.
+Three unit shards cover all package test targets in bounded batches; ignored
+integrations need selected toolchain lanes. Framework and toolchain suites
+also run inside comparison jobs, not necessarily as standalone checks.
+
+That floor is the merge claim for ordinary analyzer, lowerer, and runtime
+work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
+Swift, Kotlin, C#, Elixir, Python, JRuby, Rust, TypeScript, WASM, Writebook,
+and Spinel do **not** start on that path unless the diff owns them or a
+maintainer applies `ci:full`. Extra-language failures after merge are a
+main ledger, not a reason to block the next Ruby PR.
 
 Selected lanes start once their inputs are ready, without waiting for unit
 tests to pass. Campfire consumes an independently built same-run debug compiler.
@@ -21,17 +27,24 @@ gate still requires all selected non-advisory checks, including the unit matrix.
 Additional checks are selected from the changed inputs. Target-specific
 changes select owning lanes; shared emit, build, packaging, and CI-policy
 implementation changes can select full coverage. Changes only to CI contract
-tests retain the compact floor rather than expanding to every target.
+tests retain the Ruby floor rather than expanding to every target.
 Analyzer/lowerer changes do not automatically select every target: request
-full coverage when the risk warrants it.
-The planner uses the actual PR merge tree against its base, includes both
-sides of a rename, and expands uncertain diff identity to full coverage.
+full coverage when the risk warrants it. CLI help and other
+`src/bin/roundhouse.rs` edits stay on the Ruby floor.
+The planner diffs the PR merge tree (or the PR head) against its base,
+includes both sides of a rename, and expands only when the trees cannot be
+identified. A newer main than the event's `base.sha` is not unknown input.
 See the run's **plan** job for its selected jobs and reasons.
 
 Drafts default to fixture preparation and unit tests only. `ci:full` overrides
 that floor and runs full validation while the PR is still a draft.
 Documentation-only PRs still receive checks; changes to the rendered user
 guide also select site/browser coverage.
+
+Pushes to canonical `main` run full validation and cancel a superseded SHA
+on the same ref. Extra-target red on that run is follow-up work on main,
+not a merge gate for later Ruby PRs. The four-hour scheduled cycle remains
+the publication and floating-pin catch-up.
 
 ## Request full or fresh validation
 
@@ -48,9 +61,10 @@ guide also select site/browser coverage.
   Leave `publish` unchecked. This executes freshly on the chosen ref; a
   branch-head dispatch is not a substitute for a PR merge-tree check.
 
-Superseded PR runs cancel. Already-started main/full runs finish. Neither
-dependency-cache hits nor restored fixture source are test results; check
-the job summary for any explicitly reused execution evidence.
+Superseded PR runs cancel. Push-to-main full runs also cancel a superseded
+SHA; the scheduled full-ci lock does not. Neither dependency-cache hits nor
+restored fixture source are test results; check the job summary for any
+explicitly reused execution evidence.
 
 ## Read results honestly
 
@@ -71,12 +85,14 @@ broaden comparison masks merely to turn CI green.
 
 ## Publication is separate
 
-PR checks and ordinary main pushes never deploy Pages. Full validation runs
-every four hours on canonical `rubys/roundhouse` main; that scheduled cycle
-also requests publication. Manual publication is opt-in on canonical main.
+PR checks never deploy Pages. Pushes to canonical `main` run full validation
+without publication. The four-hour scheduled cycle on canonical
+`rubys/roundhouse` main is what requests publication. Manual publication is
+opt-in on canonical main.
 
-Pages requires the compact floor, verified same-run assembly, and a live-main
-SHA check before deployment. It does **not** require all extra/advisory lanes
+Pages requires the compact publication floor (Ruby plus any selected
+Rust/TypeScript lanes), verified same-run assembly, and a live-main SHA
+check before deployment. It does **not** require all extra/advisory lanes
 to pass. Failed archives may be useful repro downloads, not validated output.
 The published `ci/archive-results.json` reports archive presence and validation
 separately. Evidence applies to exact bytes: testing a TGZ does not certify its

@@ -42,6 +42,9 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
+    // graphql-ruby object types: their bodies, and each `null: false`
+    // field's resolved value.
+    out.extend(super::graphql::diagnose(app, diagnose_expr));
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual
@@ -221,6 +224,8 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             // Produced by `filter_targets::diagnose` as a returned list,
             // never as an `Expr.diagnostic` annotation.
             DiagnosticKind::UndefinedFilterTarget { .. } => Diagnostic::stub_text(kind),
+            // Produced by `graphql::diagnose` as a returned list.
+            DiagnosticKind::GraphqlNullableField { .. } => Diagnostic::stub_text(kind),
         };
         out.push(Diagnostic {
             span: expr.span,

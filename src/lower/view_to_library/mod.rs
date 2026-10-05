@@ -2508,35 +2508,14 @@ pub(crate) fn action_view_ivar_map(
 /// no-recv/no-arg Send (`action_name`) or a Var (`action_name` already
 /// lowered to a local). Used to surface controller-context helpers
 /// (action_name/controller_name) as view params only when actually used.
-/// True when the view body holds a `url_for` options hash — a Hash
-/// literal whose keys are all Symbols and include both `controller` and
-/// `action` (`{controller: controller_name, action: action_name, page:
-/// @page + 1}`), the shape `lower_url_option_helpers` resolves.
+/// True when the view body holds a `url_for` options hash in a URL
+/// argument (`link_to "Next", {controller: controller_name, action:
+/// action_name, page: @page + 1}`), the shape `lower_url_option_helpers`
+/// resolves. Same collector, so the two cannot disagree.
 pub(crate) fn view_uses_url_options_hash(body: &Expr) -> bool {
-    fn walk(e: &Expr) -> bool {
-        if let ExprNode::Hash { entries, .. } = &*e.node {
-            let keys: Option<Vec<&str>> = entries
-                .iter()
-                .map(|(k, _)| match &*k.node {
-                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
-                    _ => None,
-                })
-                .collect();
-            if let Some(keys) = keys {
-                if keys.contains(&"controller") && keys.contains(&"action") {
-                    return true;
-                }
-            }
-        }
-        let mut found = false;
-        e.node.for_each_child(&mut |c| {
-            if !found && walk(c) {
-                found = true;
-            }
-        });
-        found
-    }
-    walk(body)
+    let mut sets = Vec::new();
+    crate::lower::routes_to_library::collect_url_option_key_sets(body, &mut sets);
+    !sets.is_empty()
 }
 
 pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {

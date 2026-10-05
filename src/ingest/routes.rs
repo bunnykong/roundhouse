@@ -276,6 +276,11 @@ fn ingest_route_stmts<'pr>(
         // zero the whole table. Survey mode records the gap and keeps
         // walking; strict mode still fails loud.
         match ingest_route_call(&call, &method, file, parent, draws) {
+            Ok(Some(spec)) if method == "match" => match expand_match_via(&call, spec, file) {
+                Ok(expanded) => entries.extend(expanded),
+                Err(err) if super::survey::is_active() => super::survey::record(&err),
+                Err(err) => return Err(err),
+            },
             Ok(Some(spec)) => entries.push(spec),
             Ok(None) => {}
             Err(err) if super::survey::is_active() => super::survey::record(&err),
@@ -532,7 +537,10 @@ fn ingest_route_call(
     // for shapes it intentionally drops (today: `to: redirect(...)`
     // helpers — not bench-critical, not modeled in `RouteSpec`).
     if let Some(http) = http_method_from(method) {
-        let via = via_methods(call);
+        // A `match` takes its verbs from `via:` in `expand_match_via`,
+        // once the entry is built; expanding it here too would copy
+        // each of these routes again per verb.
+        let via = if method == "match" { Vec::new() } else { via_methods(call) };
         if via.is_empty() {
             return ingest_explicit_route(call, http, file, parent);
         }
@@ -641,6 +649,102 @@ fn via_methods(call: &ruby_prism::CallNode<'_>) -> Vec<HttpMethod> {
         }
     }
     Vec::new()
+}
+
+/// `match "x", to: "c#a", via: %i[get post]` is one route per verb in
+/// Rails (`GET|POST /x`); the entry ingests once with the `Any`
+/// placeholder and is copied here with each listed verb. Only
+/// `via: :all` keeps `Any`, the verb the runtime router matches
+/// against every request method. A verb the table cannot represent
+/// (`via: :trace`), a `via:` that is not a literal, or no `via:` at all
+/// (which Rails refuses) is unsupported rather than widened to `Any`.
+fn expand_match_via(
+    call: &ruby_prism::CallNode<'_>,
+    spec: RouteSpec,
+    file: &str,
+) -> Result<Vec<RouteSpec>, IngestError> {
+    let unsupported = |message: String| IngestError::Unsupported { file: file.into(), message };
+    let names = match_via_names(call).map_err(unsupported)?;
+    let mut verbs = Vec::with_capacity(names.len());
+    for name in &names {
+        let verb = match name.as_str() {
+            "all" => HttpMethod::Any,
+            other => http_method_from(other)
+                .filter(|m| *m != HttpMethod::Any)
+                .ok_or_else(|| unsupported(format!("unsupported `match` verb: `via: :{other}`")))?,
+        };
+        verbs.push(verb);
+    }
+    if verbs.contains(&HttpMethod::Any) {
+        return Ok(vec![spec]);
+    }
+    Ok(verbs
+        .into_iter()
+        .map(|verb| {
+            let mut entry = spec.clone();
+            if let RouteSpec::Explicit { method, .. } = &mut entry {
+                *method = verb;
+            }
+            entry
+        })
+        .collect())
+}
+
+/// The `via:` value of a call as written: `:get`, `"post"`, or a
+/// literal list of either, lowercased. An error when `via:` is absent,
+/// empty, or anything but symbol/string literals.
+fn match_via_names(call: &ruby_prism::CallNode<'_>) -> Result<Vec<String>, String> {
+    // Ruby keeps the last of duplicate keys, so `via: :get, via: :post`
+    // is `via: :post`.
+    let via = call.arguments().and_then(|args| {
+        args.arguments()
+            .iter()
+            .filter_map(|arg| arg.as_keyword_hash_node())
+            .flat_map(|kh| kh.elements().iter().collect::<Vec<_>>())
+            .filter_map(|el| el.as_assoc_node())
+            .filter(|assoc| symbol_value(&assoc.key()).as_deref() == Some("via"))
+            .map(|assoc| assoc.value())
+            .last()
+    });
+    let Some(via) = via else {
+        return Err("`match` without `via:` (Rails requires the verbs)".into());
+    };
+    let names: Vec<String> = match via.as_array_node() {
+        Some(arr) => arr
+            .elements()
+            .iter()
+            .map(|n| via_name(&n))
+            .collect::<Result<_, _>>()?,
+        None => vec![via_name(&via)?],
+    };
+    if names.is_empty() {
+        return Err("unsupported `match` option: non-literal `via:`".into());
+    }
+    Ok(names)
+}
+
+/// One `via:` element, lowercased. Rails upcases any other spelling of
+/// a verb (`:GET`, `"post"` both work), but only the exact symbol
+/// `:all` means every verb: `"all"` and `:ALL` become a literal `ALL`
+/// request method that no request carries, so those are unsupported
+/// rather than widened to `Any`.
+fn via_name(node: &Node<'_>) -> Result<String, String> {
+    if symbol_value(node).as_deref() == Some("all") {
+        return Ok("all".into());
+    }
+    let name = symbol_or_string_value(node)
+        .ok_or_else(|| "unsupported `match` option: non-literal `via:`".to_string())?;
+    if name.eq_ignore_ascii_case("all") {
+        let spelled = if symbol_value(node).is_some() {
+            format!(":{name}")
+        } else {
+            format!("{name:?}")
+        };
+        return Err(format!(
+            "unsupported `match` verb: `via: {spelled}` (only the symbol `:all` means every verb)"
+        ));
+    }
+    Ok(name.to_lowercase())
 }
 
 fn http_method_from(name: &str) -> Option<HttpMethod> {
@@ -1132,9 +1236,8 @@ fn ingest_explicit_route(
                         action_kwarg =
                             string_value(value).or_else(|| symbol_value(value));
                     }
-                    // `via: :all` (HTTP-method override) and similar
-                    // method-shaping options aren't modeled today; the
-                    // route still resolves to the outer verb. Other
+                    // `via:` picks the verbs of a `match`; read by
+                    // `expand_match_via` once the entry is built. Other
                     // string-value options become routing constraints.
                     "via" => {}
                     // `constraints: { id: /\d+/, tag: /[^,.\/]+/ }` —
@@ -1348,6 +1451,7 @@ fn ingest_resources_route(
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
     let mut param: Option<Symbol> = None;
+    let mut path: Option<String> = None;
     let mut only_none = false;
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
@@ -1414,7 +1518,48 @@ fn ingest_resources_route(
                 // `params[:task_id]`. Dropped, the path bound `:id`
                 // and the lowered action read nil (#84).
                 "param" => param = symbol_or_string_value(&value).map(|s| Symbol::from(s.as_str())),
-                // `path:` and `shallow:` land when a fixture demands them.
+                // `path: "components"` renames the URL SEGMENT and nothing
+                // else (`/components`, still `parts_path` and
+                // `PartsController`). Rails strips the slashes, so
+                // `path: "/components"` is the same segment.
+                "path" => {
+                    let Some(raw) = symbol_or_string_value(&value) else {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `path:` is not a literal string or symbol"
+                            ),
+                        });
+                    };
+                    // A dynamic segment (`"categories/:category_id/parts"`),
+                    // a glob or an optional group adds route params the
+                    // flattener does not carry yet; refuse rather than
+                    // serve a path whose `:category_id` never reaches
+                    // `params`.
+                    if raw.contains([':', '*', '(']) {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `path: {raw:?}` has a dynamic segment"
+                            ),
+                        });
+                    }
+                    // `path: ""` / `path: "/"` mounts the resource at the
+                    // root (`GET /` is `index`, `/:id` is `show`). That
+                    // is not the resource name, so refuse it rather
+                    // than fall back to `/parts`.
+                    let segment = raw.trim_matches('/');
+                    if segment.is_empty() {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "resources :{name_str} `path: {raw:?}` mounts the resource at the root"
+                            ),
+                        });
+                    }
+                    path = Some(segment.to_string());
+                }
+                // `shallow:` lands when a fixture demands it.
                 _ => {}
             }
         }
@@ -1439,6 +1584,7 @@ fn ingest_resources_route(
         as_name,
         controller,
         param,
+        path,
     })
 }
 

@@ -339,6 +339,10 @@ pub enum Association {
         name: Symbol,
         target: ClassId,
         foreign_key: Symbol,
+        /// Written as `foreign_key:` rather than defaulted from the
+        /// owner. A Concern splice rehomes only a defaulted key.
+        #[serde(default, skip_serializing_if = "is_false")]
+        foreign_key_explicit: bool,
         through: Option<Symbol>,
         dependent: Dependent,
         /// `has_many :notifications, as: :notifiable` — this side is
@@ -370,6 +374,9 @@ pub enum Association {
         name: Symbol,
         target: ClassId,
         foreign_key: Symbol,
+        /// See `HasMany::foreign_key_explicit`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        foreign_key_explicit: bool,
         dependent: Dependent,
         /// See `HasMany::as_interface`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -893,6 +900,57 @@ pub enum LibraryClassOrigin {
         owner: Symbol,
         members: Vec<Symbol>,
     },
+}
+
+/// A graphql-ruby object type (a class descending from
+/// `GraphQL::Schema::Object`), as `ingest::graphql_ruby` read it.
+/// Analysis-only: the methods it synthesized onto the library class
+/// (`synthesized`) let inference type each field the way graphql-ruby
+/// resolves it, and leave at the start of lowering, so no emitter
+/// sees them. The class's `field` calls stay in `unknown_calls`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphqlObjectType {
+    pub class: ClassId,
+    /// Fields in declaration order, inherited ones first.
+    pub fields: Vec<GraphqlField>,
+    /// Methods this pass added to the library class, by name.
+    pub synthesized: Vec<Symbol>,
+    /// A `resolver:`/`mutation:` class a field resolves through, not
+    /// an object type: no fields of its own, and only its synthesized
+    /// methods are checked (search_object calls the rest).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resolver: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphqlField {
+    /// The Ruby (underscored) field name, as declared.
+    pub name: Symbol,
+    /// The `field` call.
+    pub span: Span,
+    /// `null: true`, or no `null:` (graphql-ruby's default is nullable).
+    pub nullable: bool,
+    /// The declared return type, when it names an object type this
+    /// pass also read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_type: Option<ClassId>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub list: bool,
+    /// The synthesized method holding the value graphql-ruby would
+    /// resolve, or why there is none.
+    pub resolution: GraphqlResolution,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GraphqlResolution {
+    Value { method: Symbol },
+    /// Resolves through the type's own `method`, whose parameters do
+    /// not take the declared arguments (one no argument fills, or an
+    /// argument with no parameter). graphql-ruby's call would fail;
+    /// the method is neither called nor checked.
+    Arguments { method: Symbol },
+    Skipped { reason: String },
 }
 
 fn is_false(b: &bool) -> bool {
@@ -1494,6 +1552,12 @@ pub enum RouteSpec {
         /// while the lowered action read a param nothing set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         param: Option<Symbol>,
+        /// `resources :parts, path: "components"` — the URL segment,
+        /// in place of the name. The opposite of `as:`: only the path
+        /// moves; the helpers (`parts_path`) and the controller
+        /// (`PartsController`) still come from `name`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with

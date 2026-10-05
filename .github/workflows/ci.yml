@@ -26,9 +26,11 @@ on:
         value: ${{ jobs.compact-required.outputs.passed == 'true' && jobs.assemble-site.outputs.ready == 'true' }}
 
 # Separate from the full-ci caller's lock: workflow_call inherits its context.
+# Push-to-main now runs full coverage; cancel superseded SHAs so merge trains
+# do not stack 50-job matrices. Scheduled/manual full-ci keeps its own lock.
 concurrency:
   group: validation-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 permissions:
   contents: read
@@ -68,6 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # Merge-commit parents are enough to identify the PR tree. Named
+          # bases that are not a parent (stale event SHA, push before) are
+          # fetched by the planner, not by cloning full history.
           fetch-depth: 2
       - name: Select required coverage from the event's actual tree
         id: plan
@@ -958,7 +963,7 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      # Full runs select all five suites; targeted runs select their owners.
+      # Full runs select all native suites; targeted runs select their owners.
       # Continue after a failing suite without losing its failure status.
       - name: Run selected native framework checks
         env:
@@ -2106,8 +2111,9 @@ jobs:
         run: scripts/compare ${{ matrix.target }}
 
   # Same commands, distinct result: extra-target failures must not be confused
-  # with the Rust/TypeScript publication floor. Anchors preserve physical job
-  # names used by the existing strict PR-local execution receipts.
+  # with the compact publication floor (Ruby, plus Rust/TypeScript when those
+  # jobs are selected). Anchors preserve physical job names used by the
+  # existing strict PR-local execution receipts.
   compare-extra:
     needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-extra') }}
@@ -3446,6 +3452,8 @@ jobs:
         run: echo 'ready=true' >> "$GITHUB_OUTPUT"
 
   compact-required:
+    # compare and browser-smoke-typescript stay in needs so a full/main run
+    # can still require them. Unselected PR skips must not fail this gate.
     needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare]
     if: always()
     runs-on: ubuntu-latest

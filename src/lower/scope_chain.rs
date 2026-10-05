@@ -1798,6 +1798,8 @@ pub fn mentions_assoc_class_method(
         .any(|(_, m)| acm.values().any(|per_model| per_model.contains_key(m)))
 }
 
+/// True when a model constant starts a Relation chain or a terminal that
+/// requires a Relation seed; used by both whole-app and per-body gates.
 pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> bool {
     let mut found = false;
     fn walk(e: &Expr, models: &HashSet<ClassId>, found: &mut bool) {
@@ -1814,41 +1816,6 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
             if (is_relation_chain_method(method.as_str())
                 || method.as_str() == "all"
                 || CLASS_ROOT_TERMINALS.contains(&method.as_str()))
-                && const_model(r, models).is_some()
-            {
-                *found = true;
-                return;
-            }
-        }
-        e.node.for_each_child(&mut |c| walk(c, models, found));
-    }
-    walk(expr, models, &mut found);
-    found
-}
-
-/// True when `expr` ends a chain in a terminal that has no home on the
-/// model CLASS (`Push::Subscription.destroy_by(…)`) — the
-/// [`CLASS_ROOT_TERMINALS`] set, on a model constant.
-///
-/// A WHOLE-APP gate, separate from `mentions_model_chain_start`'s
-/// per-body one, because `apply_scope_lowering` returns early for an app
-/// with no scopes, no association-scoped class methods and no
-/// association extensions. That early return is right for everything
-/// else it guards — those all need a registry to be non-empty — and
-/// wrong for these: `destroy_by` on a class reaches nothing whether or
-/// not the app declares a single scope.
-///
-/// Kept to this one set on purpose. Asking the same question about
-/// `where`-family chains would make the early return vacuous for
-/// essentially every app.
-pub fn mentions_class_root_terminal(expr: &Expr, models: &HashSet<ClassId>) -> bool {
-    let mut found = false;
-    fn walk(e: &Expr, models: &HashSet<ClassId>, found: &mut bool) {
-        if *found {
-            return;
-        }
-        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
-            if CLASS_ROOT_TERMINALS.contains(&method.as_str())
                 && const_model(r, models).is_some()
             {
                 *found = true;

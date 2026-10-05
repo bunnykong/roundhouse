@@ -1865,6 +1865,8 @@ fn parse_association(
         }
     }
 
+    let foreign_key_explicit = foreign_key.is_some();
+
     // Rails `foreign_key` demodulizes: `Billing::Invoice` → `invoice_id`.
     let owner_snake = snake_case(crate::naming::demodulize(owner.0.as_str()));
 
@@ -1929,6 +1931,7 @@ fn parse_association(
                     Some(intf) => Symbol::from(format!("{intf}_id")),
                     None => Symbol::from(format!("{owner_snake}_id")),
                 }),
+            foreign_key_explicit,
             through: through.map(|s| Symbol::from(s.as_str())),
             dependent: dependent.unwrap_or_default(),
             as_interface: as_interface.as_deref().map(Symbol::from),
@@ -1945,6 +1948,7 @@ fn parse_association(
                     Some(intf) => Symbol::from(format!("{intf}_id")),
                     None => Symbol::from(format!("{owner_snake}_id")),
                 }),
+            foreign_key_explicit,
             dependent: dependent.unwrap_or_default(),
             as_interface: as_interface.as_deref().map(Symbol::from),
         }),

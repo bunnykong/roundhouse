@@ -1562,6 +1562,20 @@ fn walk_decl_body_with_visibility<'pr>(
                 match kw {
                     "include" => {
                         if let Some(args) = call.arguments() {
+                            // `include Resolvers.for(:product)`: a module
+                            // computed at load time. Dropping it emitted
+                            // the class without its mixin and told every
+                            // reader the class had only its own methods.
+                            // Kept as an unknown call: the Ruby family
+                            // replays it, the rest see a class body they
+                            // cannot model.
+                            if args.arguments().iter().any(|arg| {
+                                constant_path_of(&arg).is_none() && !is_rails_url_helpers_chain(&arg)
+                            }) {
+                                if let Ok(e) = ingest_expr(&stmt, file) {
+                                    unknown_calls.push(e);
+                                }
+                            }
                             for arg in args.arguments().iter() {
                                 if let Some(path) = constant_path_of(&arg) {
                                     // lobsters' `TimeSeries` includes

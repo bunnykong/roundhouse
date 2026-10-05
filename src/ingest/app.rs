@@ -1669,6 +1669,9 @@ end
     if let Err(err) = super::alba::lower_alba_resources(&mut app, &sources) {
         survey::continue_or_fail(err)?;
     }
+    // graphql-ruby object types: analyzer-only field methods, so
+    // inference carries each type's record class down the schema.
+    super::graphql_ruby::lower_graphql_types(&mut app);
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
@@ -1896,9 +1899,11 @@ fn splice_concerns_into_models(app: &mut App) {
 /// `user_id`. The emitted query said `WHERE webhooks.user::bot_id = 5`
 /// and sqlite answered "unrecognized token".
 ///
-/// Only a key that still EQUALS the concern-derived default is moved.
-/// An explicit `foreign_key:` differs from it and is left exactly as
-/// written; if it happens to coincide, the two names are equal anyway.
+/// Only a DEFAULTED key is moved. An explicit `foreign_key:` is left
+/// exactly as written, even when its name matches the concern-derived
+/// default (`foreign_key: :remarkable_id` inside `Remarkable`). With
+/// `as:`, the key belongs to the polymorphic interface, even when its
+/// name matches too (`as: :notifiable` inside `Notifiable`).
 /// `belongs_to` is untouched — its key derives from the TARGET, which
 /// the splice does not change.
 fn rehome_default_fk(
@@ -1914,7 +1919,8 @@ fn rehome_default_fk(
     let model_default =
         crate::ident::Symbol::from(format!("{}_id", crate::naming::snake_case(crate::naming::demodulize(model.0.as_str()))));
     match assoc {
-        Association::HasMany { foreign_key, .. } | Association::HasOne { foreign_key, .. } => {
+        Association::HasMany { foreign_key, foreign_key_explicit: false, as_interface: None, .. }
+        | Association::HasOne { foreign_key, foreign_key_explicit: false, as_interface: None, .. } => {
             if *foreign_key == concern_default {
                 *foreign_key = model_default;
             }

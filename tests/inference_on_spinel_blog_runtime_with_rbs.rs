@@ -935,7 +935,12 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // runtime_src_integration counts ONE site (`Time.now + expires_in`).
     // What it buys: the Rails 8 authentication generator's password
     // reset flow, in Rails' own token format.
-    const CEILING: usize = 1209;
+    // 2026-10-05 1209 -> 1273, +64, MEASURED: Relation#last_n SQL tail
+    // plus reversing comma-separated order terms (relation.rb 738 ->
+    // 802). This probe does not resolve self-sends or `@orders`
+    // indexing; the full-context gate counts 16. What it buys: campfire
+    // room pages LIMIT the last 40 in SQL, including `order(a:, b:)`.
+    const CEILING: usize = 1273;
 
     assert!(
         all_untyped.len() <= CEILING,

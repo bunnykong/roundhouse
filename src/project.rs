@@ -4098,12 +4098,20 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     // `runtime/spinel/erb_spinel.rb`'s header records, which cost the
     // lobsters AOT lane ten days.
     //
+    // `Zlib`: same three-branch swap, different reason. The CRC-32 port
+    // stays for targets with no zlib; spinel's `packages/zlib` is the
+    // real codec (gzip/deflate), which tep uses to honour
+    // Accept-Encoding the way campfire's Rack::Deflater does on CRuby.
+    // Without the swap, `Zlib.gzip` is a NameError and every HTML page
+    // ships uncompressed. Its .rbs goes too: the port's surface is not
+    // the library's.
+    //
     // HERE rather than in `spin_shape`, because `spin_shape` is not the
     // only tree that ships: `spinel_base_files` is what
     // `tests/spinel_toolchain.rs` compiles, and the bundled-require
     // table's own comment records what it cost to have the two disagree.
     // A lane is evidence only if it runs the same code.
-    files.retain(|(p, _)| p != "sig/runtime/tempfile.rbs");
+    files.retain(|(p, _)| p != "sig/runtime/tempfile.rbs" && p != "sig/runtime/zlib.rbs");
     for (path, content) in files.iter_mut() {
         if path == "runtime/tempfile.rb" {
             *content = "# The bundled tempfile library — see `project::spinel_files`.\n\
@@ -4111,6 +4119,13 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
                         # targets that have no stdlib to bind to, and opens by name\n\
                         # where this one opens O_EXCL.\n\
                         require \"tempfile\"\n"
+                .to_string();
+        }
+        if path == "runtime/zlib.rb" {
+            *content = "# The bundled zlib library — see `project::spinel_files`.\n\
+                        # The port at runtime/ruby/zlib.rb is CRC-32 only; this one is\n\
+                        # packages/zlib (gzip/deflate) so tep can honour Accept-Encoding.\n\
+                        require \"zlib\"\n"
                 .to_string();
         }
     }
@@ -7211,6 +7226,10 @@ mod tests {
         assert!(out.contains("require_relative \"main\""));
         assert!(out.contains("Db.with_connection { Main.run_rack(env) }"));
         assert!(out.contains("run app"));
+        assert!(
+            out.contains("GzipCache"),
+            "campfire's config.ru gzips; the overlay must too"
+        );
         // A config.ru missing the markers errors loudly instead of
         // silently shipping a tree whose require graph dangles.
         assert!(strip_cable_from_config_ru("run app\n").is_err());

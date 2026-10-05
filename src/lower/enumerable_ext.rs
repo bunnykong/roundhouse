@@ -200,7 +200,7 @@ fn rewrite(expr: &mut Expr) {
 /// `wrap`, or a wrap on something other than the Array class, stays.
 fn ground_array_wrap(expr: &mut Expr) {
     let span = expr.span;
-    let ExprNode::Send { recv, method, args, block, parenthesized } = &mut *expr.node else {
+    let ExprNode::Send { recv, method, args, block, parenthesized: _ } = &mut *expr.node else {
         return;
     };
     if method.as_str() != "wrap" || block.is_some() || args.len() != 1 {

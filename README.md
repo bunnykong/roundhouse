@@ -60,8 +60,8 @@ oracle: the same URL fetched from Rails and from each target must
 produce the same response — emitted tests, a differential compare
 against live Rails (DOM node for DOM node, JSON value for value), and
 browser end-to-end tests for what a static diff can't reach — and
-the full target matrix runs in scheduled validation, with a compact
-floor and targeted additions on pull requests. →
+the full target matrix runs after merge to `main` and in scheduled
+validation, with a Ruby floor and targeted additions on pull requests. →
 [`--target`](docs/guide/transpile.md) · [targets](docs/guide/targets.md)
 · [what of Rails comes through](docs/guide/rails-coverage.md) ·
 [verifying](docs/guide/verifying.md)
@@ -174,7 +174,7 @@ its predecessors; [`WHY.md`](WHY.md) is why do it at all.
 Issues and pull requests are welcome; a PR does not need a conversation first.
 Include a repro, a regression test, and what you verified. Start with
 [contributor setup](docs/development/README.md) and the
-[invariants](AGENTS.md). CI selects a compact floor plus targeted checks;
+[invariants](AGENTS.md). CI selects a Ruby floor plus targeted checks;
 see [CI for contributors](docs/ci/README.md) to request full/fresh validation
 and interpret advisory results. PR validation never deploys Pages.
 
