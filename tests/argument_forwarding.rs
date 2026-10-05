@@ -521,13 +521,17 @@ fn unpreserved_controller_and_test_entry_declarations_are_rejected() {
 
 #[test]
 fn anonymous_keyword_call_forwarding_is_still_a_separate_gap() {
-    let source = b"class Probe\n def call(__fwd_kwargs, **)\n target(__fwd_kwargs, **)\n end\nend";
-    let error = roundhouse::ingest::ingest_library_class(source, "probe.rb")
-        .expect_err("declaration retention does not implement bare ** call forwarding");
+    // The declaration is retained. The bare `**` call is not a working
+    // forward: the callee's keyword rest is flattened, so this stays a
+    // gap rather than a claim that `target(**)` runs.
+    let source = "class Probe\n def call(__fwd_kwargs, **)\n target(__fwd_kwargs, **)\n end\n def target(**params)\n params\n end\nend";
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby("puts 1");
+    let emitted = std::fs::read_to_string(run.emitted.join("app/models/probe.rb")).unwrap();
     assert!(
-        error
-            .to_string()
-            .contains("anonymous `**` keyword forwarding not yet supported")
+        !emitted.contains("def target(**params)"),
+        "bare ** forwarding is not implemented, so the callee must not claim a keyword rest:\n{emitted}"
     );
 }
 

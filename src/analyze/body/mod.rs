@@ -201,6 +201,7 @@ pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
+    data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
     /// Methods whose value is an ActiveSupport inquirer (see
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
     /// which the runtime-source typer and tests use.
@@ -215,7 +216,7 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, inquirers: None }
+        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None }
     }
 
     /// Share the analyzer's immutable source index across typing passes.
@@ -230,6 +231,11 @@ impl<'a> BodyTyper<'a> {
         values: &'a IdentityHashMap<DeclarationId, Ty>,
     ) -> Self {
         self.typed_constants = Some(values);
+        self
+    }
+
+    pub(super) fn with_data_factories(mut self, factories: &'a HashMap<crate::span::Span, Ty>) -> Self {
+        self.data_factories = Some(factories);
         self
     }
 
@@ -808,6 +814,15 @@ impl<'a> BodyTyper<'a> {
             }
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
+                expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
+                if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
+                    // Only admitted declarations establish a Data class identity.
+                    expr.decisions |= crate::expr::RESOLVED_DATA_FACTORY;
+                    expr.diagnostic = None;
+                    if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
+                    for arg in args.iter_mut() { self.analyze_expr(arg, ctx); }
+                    return ty.clone();
+                }
                 // Bare-name implicit-self Send (no receiver, no args, no
                 // block) resolves to a local binding when one exists. Ruby
                 // parses `x` as `self.x()` when `x` wasn't assigned earlier
@@ -886,7 +901,31 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
-                for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                // `defined?(Foo)` keeps the written path but must not
+                // resolve or autoload it. Absence is a runtime answer.
+                let defined_constant = recv.is_none()
+                    && method.as_str() == "defined?"
+                    && args.len() == 1
+                    && args[0].decisions & crate::expr::DEFINED_CONSTANT != 0;
+                for a in args.iter_mut() {
+                    if defined_constant {
+                        let path = match &*a.node {
+                            ExprNode::Const { path } => path.as_slice(),
+                            _ => &[],
+                        };
+                        let rooted = path.first().is_some_and(|segment| segment.as_str().is_empty());
+                        let id = if rooted {
+                            crate::ident::ClassId(crate::ident::Symbol::from(
+                                format!("::{}", path[1..].iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")).as_str(),
+                            ))
+                        } else {
+                            written_class_id(path)
+                        };
+                        a.ty = Some(Ty::Class { id, args: vec![] });
+                        continue;
+                    }
+                    self.analyze_expr(a, ctx);
+                }
                 if let Some(r) = recv.as_mut() {
                     if promotes_to_param_value(r, recv_ty.as_ref(), method, args, &ctx.local_bindings) {
                         r.ty = Some(send::param_value_ty());
@@ -910,6 +949,17 @@ impl<'a> BodyTyper<'a> {
                 } else {
                     None
                 };
+                if method.as_str() == "new"
+                    && matches!(&recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "Data")
+                    && self.const_resolver.as_ref().is_some_and(|resolver| !resolver.has_source_namespace("Data"))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("Data.new"),
+                        detail: "Data is abstract; construct a class returned by Data.define".into(),
+                    });
+                    return unknown();
+                }
                 // Force `parenthesized: true` when dispatch resolves
                 // to a `Method`-kind on a registered class. The TS
                 // emitter's bare-recv-Send fallback omits parens when
