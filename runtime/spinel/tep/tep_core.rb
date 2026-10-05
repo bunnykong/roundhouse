@@ -1,3 +1,6 @@
+require "digest"
+require "zlib"
+
 module Tep
   # The name the server announces itself by. scaffold/main.rb sets
   # Tep::APP.name to the app's own name (the underscored module that
@@ -172,29 +175,38 @@ module Tep
     true
   end
 
-  # Gzip of an identity body, keyed by the identity bytes. A campfire
-  # room page is the same HTML for every wrk GET that shares a session;
-  # without this, Zlib.gzip runs on every request and is the measured
-  # cliff (1984 → 694 req/s). Cap is a COUNT so a bound does not need
-  # an LRU touch on the read path. The lock is the fragment-cache one:
-  # a green thread can be descheduled inside Hash#[]=.
+  # Gzip of an identity body, keyed by SHA-256 of the identity bytes.
+  # A campfire room page is the same HTML for every wrk GET that shares
+  # a session; without this, Zlib.gzip runs on every request and is the
+  # measured cliff (1984 → 694 req/s). Keying on the raw 420 KB body
+  # hashed and compared that whole string under the lock on every hit;
+  # the digest is 64 hex chars and is computed outside the lock.
+  #
+  # Gzip itself also runs outside the lock. Holding Mutex across
+  # Zlib.gzip serialized every miss onto one green thread — Spinel's
+  # lane has no GVL, so that was the whole CPU. Two threads that miss
+  # the same body both gzip and one write wins.
+  #
+  # Cap is a COUNT so a bound does not need an LRU touch on the read
+  # path. The lock is still required: a green thread can be descheduled
+  # inside Hash#[]=.
   GZIP_CACHE_MAX = 64
   GZIP_LOCK = Mutex.new
   @gzip_bodies = Hash.new("")
 
   def self.gzip_cached(raw)
-    gz = ""
+    key = Digest::SHA256.hexdigest(raw)
+    hit = ""
     GZIP_LOCK.synchronize do
-      hit = @gzip_bodies[raw]
-      if hit.length > 0
-        gz = hit
-      else
-        if @gzip_bodies.size >= GZIP_CACHE_MAX
-          @gzip_bodies = Hash.new("")
-        end
-        gz = Zlib.gzip(raw)
-        @gzip_bodies[raw] = gz
+      hit = @gzip_bodies[key]
+    end
+    return hit if hit.length > 0
+    gz = Zlib.gzip(raw)
+    GZIP_LOCK.synchronize do
+      if @gzip_bodies.size >= GZIP_CACHE_MAX
+        @gzip_bodies = Hash.new("")
       end
+      @gzip_bodies[key] = gz
     end
     gz
   end

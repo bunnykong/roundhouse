@@ -2912,7 +2912,10 @@ header. Grouped by cause, largest first:
   `Main.run_rack` in `GzipCache` (Static stays outside so `/cable`
   hijack is never compressed; CSS/JS stay identity; identical HTML is
   not deflated on every request). spinel tep gzips inline bodies when
-  `Accept-Encoding` includes gzip, from the same identity-body cache.
+  `Accept-Encoding` includes gzip, from a cache keyed by SHA-256 of
+  the identity body (CRuby keys by the body itself — MRI's string
+  hash is cheaper than SHA-256 here). Gzip runs outside the lock on
+  both lanes.
   Re-run `scripts/campfire-http-shape` before treating the 65
   Content-Encoding misses as current.
 - **Rails' `Rack::ETag` / `Rack::ConditionalGet` are absent**: no weak

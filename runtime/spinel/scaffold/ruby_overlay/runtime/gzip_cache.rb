@@ -4,8 +4,16 @@
 #
 # Rack::Deflater compresses every response. A campfire room page is the
 # same ~420 KB HTML for every wrk GET that shares a session, so that is
-# the same deflate over and over. Key by the identity bytes; a hit is
-# the compressed copy. Misses gzip once and store.
+# the same deflate over and over. Key by the identity bytes: MRI's
+# string hash of a 420 KB body is cheaper than SHA-256 of the same
+# bytes (measured: digest-keyed cache dropped /rooms/1 from ~1725 to
+# ~1140 req/s). The Spinel twin keys by digest because its Hash hashes
+# the whole key under the lock and has no GVL.
+#
+# Gzip itself runs outside the lock. Holding Mutex across Zlib.gzip
+# serialized every miss onto one core. Two threads that miss the same
+# body both gzip and one write wins — a duplicate deflate, not a
+# wrong body.
 #
 # HTML only, same skips as tep: 1xx/204/304, HEAD, already-encoded,
 # small, listed binary types. Wraps run_rack only so /cable's hijack
@@ -50,16 +58,17 @@ module GzipCache
   end
 
   def self.compress(raw)
+    hit = nil
+    @mutex.synchronize { hit = @store[raw] }
+    return hit unless hit.nil?
+    gz = Zlib.gzip(raw)
     @mutex.synchronize do
-      hit = @store[raw]
-      return hit unless hit.nil?
       if @store.size >= MAX_ENTRIES
         @store.clear
       end
-      gz = Zlib.gzip(raw)
       @store[raw] = gz
-      gz
     end
+    gz
   end
 
   def self.join_body(body)

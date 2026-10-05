@@ -144,6 +144,16 @@ pub fn apply_kwsplat_expansion(app: &mut App) -> Vec<Diagnostic> {
     diags
 }
 
+/// Re-apply the `**h` → `KeywordSplat` restore after a later pass has
+/// projected splats to positional hashes. `helper_kwargs` calls
+/// `forwarding::apply`, which strips `**` so explicit-keyword expansion
+/// can fire; a callee that IS `**rest` then needs the marker back.
+pub(crate) fn restore_kwrest_in_test_helpers(app: &mut App) {
+    let sigs = collect_signatures(app);
+    apply_to_self_sends(app, &sigs, &mut Vec::new());
+    apply_to_test_modules(app, &mut Vec::new());
+}
+
 /// The receiverless half for models and library classes: `render_code(
 /// size: 2, **opts)` inside the class that defines `render_code`, or
 /// inside a concern it includes. The body typer leaves these sends
@@ -245,17 +255,24 @@ fn rewrite_self_sends(expr: &mut Expr, helpers: &HashMap<Symbol, Vec<Param>>, di
     expr.node
         .for_each_child_mut(&mut |child| rewrite_self_sends(child, helpers, diags));
     let splat = {
-        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
+        let ExprNode::Send { recv, method, args, .. } = &*expr.node else {
             return;
         };
+        if !is_self_send(recv.as_ref()) {
+            return;
+        }
         let Some(params) = helpers.get(method) else { return };
-        let Some(splat) = erased_splat_against(args, params) else { return };
-        splat
+        erased_splat_against(args, params)
     };
-    let ExprNode::Send { args, .. } = &mut *expr.node else {
+    let ExprNode::Send { method, args, .. } = &mut *expr.node else {
         unreachable!("matched a Send above")
     };
-    expand(args, splat, diags);
+    if let Some(splat) = splat {
+        expand(args, splat, diags);
+        return;
+    }
+    let Some(params) = helpers.get(method) else { return };
+    restore_kwrest_splat(args, params);
 }
 
 /// Every instance method an app class declares. Class-side methods are
@@ -304,13 +321,82 @@ fn rewrite(expr: &mut Expr, sigs: &Signatures, diags: &mut Vec<Diagnostic>) {
     expr.node
         .for_each_child_mut(&mut |child| rewrite(child, sigs, diags));
 
-    let Some(splat) = erased_splat(expr, sigs) else {
+    if let Some(splat) = erased_splat(expr, sigs) {
+        let ExprNode::Send { args, .. } = &mut *expr.node else {
+            unreachable!("erased_splat matched a Send")
+        };
+        expand(args, splat, diags);
+        return;
+    }
+    restore_kwrest_on_typed_send(expr, sigs);
+}
+
+fn is_self_send(recv: Option<&Expr>) -> bool {
+    match recv {
+        None => true,
+        Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+    }
+}
+
+fn restore_kwrest_on_typed_send(expr: &mut Expr, sigs: &Signatures) {
+    let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node else {
         return;
     };
-    let ExprNode::Send { args, .. } = &mut *expr.node else {
-        unreachable!("erased_splat matched a Send")
+    let Some(params) = recv.ty.as_ref().and_then(|ty| callee_params(ty, method, sigs)) else {
+        return;
     };
-    expand(args, splat, diags);
+    let params = params.clone();
+    let ExprNode::Send { args, .. } = &mut *expr.node else { return };
+    restore_kwrest_splat(args, &params);
+}
+
+/// `f(**h)` into `def f(**rest)` survived ingest as a positional `h`.
+/// Ruby 3 will not auto-convert that Hash, so the call is
+/// `wrong number of arguments (given 1, expected 0)` — campfire's
+/// `embeds_from(**details)` → `attachments_for(details)` against
+/// `def attachments_for(**details)`. Restore the splat; the ruby
+/// emitter already prints `**h` for `KeywordSplat`.
+fn restore_kwrest_splat(args: &mut Vec<Expr>, params: &[Param]) {
+    if args
+        .iter()
+        .any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::KeywordSplat { .. }))
+        || params.iter().any(|p| p.forwarding)
+    {
+        return;
+    }
+    // `def f(*items, **opts); f(payload)` is a valid positional call:
+    // `*items` absorbs the Hash. The same count as `f(**payload)` into
+    // a bare `**opts`, so a rewrite here would move the argument from
+    // `items` onto `opts`. Leave the call when that distinction is
+    // unavailable.
+    if params.iter().any(|p| p.rest && !p.keyword && !p.from_kwrest) {
+        return;
+    }
+    let positional = params
+        .iter()
+        .filter(|p| !p.keyword && !p.rest && !p.from_kwrest)
+        .count();
+    let Some(last) = params.last() else { return };
+    // Ingest keeps `**rest` as a keyword-rest when the def already has
+    // a rest/required-keyword or the body forwards `**name`. Otherwise
+    // it flattens to a trailing positional marked `from_kwrest`, and
+    // emit prints `name = {}`. Restoring `**h` against that def is
+    // unexpected keywords. Only the kept `**name` slot needs the splat.
+    if !(last.keyword && last.rest) {
+        return;
+    }
+    if args.len() != positional + 1 {
+        return;
+    }
+    let Some(hash) = args.last() else { return };
+    if !is_pure_read(hash) {
+        return;
+    }
+    let hash = args.pop().expect("checked above");
+    args.push(Expr::new(
+        hash.span,
+        ExprNode::KeywordSplat { value: hash },
+    ));
 }
 
 /// Replace the trailing positional bundle in `args` with the keyword

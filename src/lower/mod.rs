@@ -114,6 +114,7 @@ pub mod including;
 pub mod enum_symbols;
 pub mod has_json;
 pub mod object_extend;
+pub mod param_rebind;
 pub mod to_sgid;
 pub mod cable_test_case;
 pub mod view_test_case;
@@ -588,6 +589,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `obj.extend Mod` on an instance -> a raise stub with the report.
     // Consumes a shape no pass produces or reads; no constraints.
     ("object_extend", &[]),
+    // A parameter written after its binder (`user = users(user) unless
+    // user.is_a? User`, `id = id.to_i`) -> a fresh local, so AOT does
+    // not pin the caller's type onto the later write. Reads an Assign
+    // no other pass produces; writes a name no other pass reads.
+    ("param_rebind", &[]),
     // `record.to_sgid(for: LOCATOR_NAME).to_s` -> the runtime's attachable
     // sgid mint, model name baked in. Consumes a shape no pass produces
     // or reads; no constraints.
@@ -937,6 +943,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("attachables_grep");
     diags.extend(object_extend::apply_object_extend_stub(app));
     ran!("object_extend");
+    param_rebind::apply_param_rebind_lowering(app);
+    ran!("param_rebind");
     diags.extend(to_sgid::apply_to_sgid_lowering(app));
     ran!("to_sgid");
     diags.extend(cable_test_case::apply_cable_test_case_lowering(app));

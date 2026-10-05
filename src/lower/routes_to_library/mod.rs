@@ -1085,10 +1085,20 @@ fn build_helper_function(
             // SINGULAR key would have been: `user_ids: [ user.id ]`
             // carries ids, and `param_ty` is name-based, so the
             // singular is what it must be asked about.
-            let value_ty = if let Some(slug) = key.record_slug {
-                if slug { Ty::Str } else { Ty::Int }
-            } else if key.array {
+            // A query value is a String on the wire. `id` / `*_id` stay
+            // Integer because call sites pass `record.id` and the helper
+            // calls `to_s` itself. Every other key — including a RECORD
+            // standing in for `before:` / `after:` — is projected to
+            // `.id.to_s` at the call site (`project_route_helper_ids`),
+            // so typing it Integer is a seed that contradicts the emit:
+            // spinel refuses `before: message.id.to_s` against `Integer?`.
+            // A slug `to_param` is already a String. `record_slug:
+            // Some(false)` used to override to Integer and is what made
+            // campfire's messages_controller_test never link.
+            let value_ty = if key.array {
                 Ty::Array { elem: Box::new(param_ty(singular_key(&key.name), false)) }
+            } else if key.record_slug == Some(true) {
+                Ty::Str
             } else {
                 param_ty(&key.name, false)
             };
