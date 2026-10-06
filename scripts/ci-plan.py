@@ -108,6 +108,7 @@ def native_coverage(path):
         suites.add("db_sqlite_concurrency")
     if path in {
         "tests/param_binds_emit.rb",
+        "tests/param_binds_raw_where.rb",
         "tests/param_binds_runtime.rb",
         "tests/support/emit_and_run.rs",
         "src/lower/model_to_library/adapter_emit.rs",

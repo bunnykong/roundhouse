@@ -601,6 +601,12 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // Soft ratchet under canonical class-ID lookup (Fixes #435), then
     // dependency RBS + cross-stem ivar merge + Relation/Base overlays.
     // Fails only when the residual rises. Not a substitute for Bar B.
+    // 2026-10-06: positional raw WHERE/HAVING substitution, measured
+    // against main c49721be with this current RBS-seeded probe. Paired
+    // totals stay 0 -> 0 (relation.rb 0 -> 0), so the measured delta is
+    // 0 - 0 = 0 and main's committed ceiling stays 0 + 0 = 0. The older
+    // probe on 0ac82f51 measured +4; its ceiling does not carry forward.
+    // Keep the named-bind dispatch/scan and RBS signatures unchanged.
     const CEILING: usize = 0;
 
     assert!(

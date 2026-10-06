@@ -372,3 +372,32 @@ fn varying_binds_spinel() {
 fn bind_runtime_spinel() {
     runtime(true);
 }
+
+fn raw_where_substitution(target: BuildTarget) {
+    let (dir, errors) = overlay().emit(target);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let script = format!(
+        r#"require_relative "boot"
+require_relative "app/models/item"
+SqliteAdapter.configure("file:raw_where_gate?mode=memory&cache=shared")
+ActiveRecord.adapter = SqliteAdapter
+Schema.statements.each {{ |sql| Db.exec(sql) }}
+{}
+Db.close
+"#,
+        include_str!("param_binds_raw_where.rb")
+    );
+    run_script(&dir, &script, target == BuildTarget::Spinel);
+    std::fs::remove_dir_all(dir.parent().unwrap()).expect("remove successful overlay");
+}
+
+#[test]
+fn raw_where_substitution_ruby() {
+    raw_where_substitution(BuildTarget::Ruby);
+}
+
+#[test]
+#[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
+fn raw_where_substitution_spinel() {
+    raw_where_substitution(BuildTarget::Spinel);
+}

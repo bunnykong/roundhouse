@@ -1817,15 +1817,25 @@ module ActiveRecord
       end
     end
 
-    # Replace `?` placeholders in a raw fragment with escaped args, in
-    # order. A fragment with no `?` returns unchanged. Each `sub` rewrites
-    # the leftmost remaining `?`, so iterating the args consumes them in
-    # order.
+    # A single Hash dispatches to the named-bind scan of the original SQL.
+    # For positional binds, split only the original `?` placeholders,
+    # keeping escaped values verbatim. Preserve trailing empty parts so
+    # missing binds leave their `?` intact.
     def substitute_binds(sql, args)
       first = args[0]
       return substitute_named_binds(sql, first) if args.length == 1 && first.is_a?(Hash)
-      result = sql
-      args.each { |a| result = result.sub("?", ActiveRecord.adapter.escape_value(a)) }
+      parts = sql.split("?", -1)
+      result = parts[0].to_s
+      index = 0
+      while index < parts.length - 1
+        if index < args.length
+          result = result + ActiveRecord.adapter.escape_value(args[index])
+        else
+          result = result + "?"
+        end
+        result = result + parts[index + 1].to_s
+        index += 1
+      end
       result
     end
 
