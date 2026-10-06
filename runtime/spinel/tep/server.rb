@@ -125,9 +125,10 @@ module Tep
     # surrounding while loop and prevent the young-gen GC from
     # reclaiming the previous request's allocations.
     def handle_connection(client)
+      input = InputBuffer.new
       keep_going = true
       while keep_going
-        keep_going = handle_one(client)
+        keep_going = handle_one(client, input)
       end
       Sock.sphttp_close(client)
     end
@@ -140,25 +141,26 @@ module Tep
     # client fd is blocking, so each recv parks the worker until bytes
     # arrive — no scheduler. Replaces the C sphttp_read_request +
     # request_buf (sphttp.c retired — matz/spinel#1466). `+` is binary-safe.
-    def read_request_blocking(client)
-      buf = +""
-      while buf.length < 65535
-        chunk = Sock.sp_net_recv_some(client, 4096)
+    def read_request_blocking(client, input = InputBuffer.new)
+      buf = input.take_pending_input
+      return buf if buf.include?("\r\n\r\n")
+      while buf.bytesize < 65535
+        chunk = Sock.sp_net_recv_some(client, 4096).b
         if chunk.length == 0
           return ""
         end
         buf = buf + chunk
-        if buf.length >= 4 && buf.include?("\r\n\r\n")
+        if buf.bytesize >= 4 && buf.include?("\r\n\r\n")
           return buf
         end
       end
       ""
     end
 
-    def handle_one(client)
-      blob = read_request_blocking(client)
+    def handle_one(client, input = InputBuffer.new)
+      blob = read_request_blocking(client, input)
       return false if blob.length == 0
-      req = Parser.parse(blob)
+      req = Parser.parse(blob, input)
       if req == nil
         send_simple(client, 400, "bad request")
         return false
@@ -190,7 +192,7 @@ module Tep
         send_simple(client, 500, "internal server error")
         return false
       end
-      keep_alive = req.keep_alive? && !res.halted_close?
+      keep_alive = req.keep_alive? && !res.halted_close? && !res.streaming
       write_response(client, req, res, keep_alive)
       keep_alive
     end

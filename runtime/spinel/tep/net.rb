@@ -88,7 +88,7 @@ module Sock
   def self.sphttp_drain_body(fd, n)
     out = +""
     while out.bytesize < n
-      chunk = Sock.sp_net_recv_some(fd, n - out.bytesize)
+      chunk = Sock.sp_net_recv_some(fd, n - out.bytesize).b
       if chunk.bytesize == 0
         break   # peer closed mid-body
       end

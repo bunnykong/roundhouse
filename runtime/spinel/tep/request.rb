@@ -246,7 +246,7 @@ module Tep
         if ready == 0
           break   # timeout -- client never finished sending
         end
-        chunk = Sock.sphttp_recv_some(client_fd, cl - @raw_body.bytesize)
+        chunk = Sock.sphttp_recv_some(client_fd, cl - @raw_body.bytesize).b
         if chunk.bytesize == 0
           break   # peer closed mid-body
         end
@@ -271,7 +271,7 @@ module Tep
         if ready.nil?
           break   # timeout -- client never finished sending
         end
-        chunk = Sock.sphttp_recv_some(client_fd, cl - @raw_body.bytesize)
+        chunk = Sock.sphttp_recv_some(client_fd, cl - @raw_body.bytesize).b
         if chunk.bytesize == 0
           break   # peer closed mid-body
         end
