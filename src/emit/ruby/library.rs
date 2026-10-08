@@ -1133,7 +1133,7 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) -> bo
             at,
             crate::ty::Param {
                 name: rel_param.clone(),
-                ty: crate::ty::Ty::Untyped.into(),
+                ty: crate::ty::Ty::gradual().into(),
                 kind: crate::ty::ParamKind::Optional,
             },
         );

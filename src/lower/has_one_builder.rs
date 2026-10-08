@@ -187,7 +187,7 @@ fn rewrite(expr: &mut Expr, table: &Builders, self_owner: Option<&ClassId>) {
 
     let span = expr.span;
     let mut attrs = Expr::new(span, ExprNode::Hash { entries, kwargs: true });
-    attrs.ty = Some(Ty::Untyped);
+    attrs.ty = Some(Ty::gradual());
     *expr = Expr::new(
         span,
         ExprNode::Send {

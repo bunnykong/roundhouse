@@ -69,7 +69,7 @@ pub(super) fn register(
         // A member declaration establishes a reader, not its value type.
         // Data has no generated writers.
         for member in members {
-            info.instance_methods.insert(member, Ty::Untyped);
+            info.instance_methods.insert(member, Ty::unresolved());
         }
         classes.insert(id, info);
         factories.insert(value.span, instance);

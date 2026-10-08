@@ -187,7 +187,7 @@ pub(super) fn register_field_names(class: &str, fields: &[String]) {
     FIELD_TYPES.with(|f| {
         f.borrow_mut().insert(
             class.to_string(),
-            fields.iter().map(|n| (n.clone(), crate::ty::Ty::Untyped)).collect(),
+            fields.iter().map(|n| (n.clone(), crate::ty::Ty::gradual())).collect(),
         );
     });
 }
@@ -1908,7 +1908,7 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
     // registered `Untyped` (the default for unclassified struct fields,
     // e.g. a controller's `params`) must fall through to the body-typer's
     // `ty` (which knows `params: Hash`), not clobber it.
-    let concrete = |t: crate::ty::Ty| (!matches!(t, crate::ty::Ty::Untyped)).then_some(t);
+    let concrete = |t: crate::ty::Ty| (!matches!(t, crate::ty::Ty::Untyped { .. })).then_some(t);
     // (a) a `record.__field__(:f)` self-bridge → the current class's field.
     if let Some(field) = field_bridge_name(e) {
         let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
@@ -1953,7 +1953,7 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
     }
     // Fall back to the node's own ty.
     match e.ty.as_ref() {
-        Some(t) if !matches!(t, crate::ty::Ty::Untyped) => Some(t.clone()),
+        Some(t) if !matches!(t, crate::ty::Ty::Untyped { .. }) => Some(t.clone()),
         _ => None,
     }
 }
@@ -2204,7 +2204,7 @@ mod tests {
         })
     }
     fn arr() -> Ty {
-        Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }
+        Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) }
     }
 
     fn unary(method: &str, recv: Expr) -> Expr {
@@ -2225,7 +2225,7 @@ mod tests {
             block_style: Default::default(),
         });
         Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
-            recv: Some(var_t(recv, Ty::Untyped)),
+            recv: Some(var_t(recv, Ty::gradual())),
             method: Symbol::from(method),
             args: vec![],
             block: Some(lambda),
@@ -2235,15 +2235,15 @@ mod tests {
 
     #[test]
     fn block_calls_map_to_enum() {
-        let each = block_send("items", "each", &["x"], var_t("x", Ty::Untyped));
+        let each = block_send("items", "each", &["x"], var_t("x", Ty::gradual()));
         assert_eq!(emit_expr(&each), "Enum.each(items, fn x ->\n  x\nend)");
         // Renames: collect→map, select→filter, detect→find.
-        let mapped = block_send("items", "collect", &["x"], var_t("x", Ty::Untyped));
+        let mapped = block_send("items", "collect", &["x"], var_t("x", Ty::gradual()));
         assert!(emit_expr(&mapped).starts_with("Enum.map(items, fn x ->"));
-        let filtered = block_send("items", "select", &["x"], var_t("x", Ty::Untyped));
+        let filtered = block_send("items", "select", &["x"], var_t("x", Ty::gradual()));
         assert!(emit_expr(&filtered).starts_with("Enum.filter(items, fn x ->"));
         // Two-param block (`each do |k, v|`) destructures the element tuple.
-        let kv = block_send("h", "each", &["k", "v"], var_t("k", Ty::Untyped));
+        let kv = block_send("h", "each", &["k", "v"], var_t("k", Ty::gradual()));
         assert!(emit_expr(&kv).starts_with("Enum.each(h, fn {k, v} ->"));
     }
 
@@ -2299,9 +2299,9 @@ mod tests {
         // accumulator (it's a `Send`, not an `Assign`) and the `each`
         // lowered to `Enum.reduce`, not a dead `Enum.each` rebind.
         let mut append = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
-            recv: Some(var_t("io", Ty::Untyped)),
+            recv: Some(var_t("io", Ty::gradual())),
             method: Symbol::from("<<"),
-            args: vec![var_t("a", Ty::Untyped)],
+            args: vec![var_t("a", Ty::gradual())],
             block: None,
             parenthesized: false,
         });
@@ -2322,7 +2322,7 @@ mod tests {
         // `io = if cond do [io, "x"] else io end` so the append isn't
         // discarded by the branch scope.
         let mut append = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
-            recv: Some(var_t("io", Ty::Untyped)),
+            recv: Some(var_t("io", Ty::gradual())),
             method: Symbol::from("<<"),
             args: vec![Expr::new(crate::span::Span::synthetic(), ExprNode::Lit {
                 value: Literal::Str { value: "x".to_string() },
@@ -2339,7 +2339,7 @@ mod tests {
             }),
         });
         let body = Expr::new(crate::span::Span::synthetic(), ExprNode::Seq {
-            exprs: vec![if_stmt, var_t("io", Ty::Untyped)],
+            exprs: vec![if_stmt, var_t("io", Ty::gradual())],
         });
         let out = emit_method_body(&body);
         assert!(
@@ -2387,7 +2387,7 @@ mod tests {
         // → reduce where `next` yields the accumulator unchanged.
         let sp = crate::span::Span::synthetic;
         let next_guard = Expr::new(sp(), ExprNode::If {
-            cond: var_t("x", Ty::Untyped),
+            cond: var_t("x", Ty::gradual()),
             then_branch: Expr::new(sp(), ExprNode::Next { value: None }),
             else_branch: Expr::new(sp(), ExprNode::Lit { value: Literal::Nil }),
         });
@@ -2397,7 +2397,7 @@ mod tests {
                 var_t("acc", arr()),
                 "++",
                 Expr::new(sp(), ExprNode::Array {
-                    elements: vec![var_t("x", Ty::Untyped)],
+                    elements: vec![var_t("x", Ty::gradual())],
                     style: Default::default(),
                 }),
             ),
@@ -2433,8 +2433,8 @@ mod tests {
             })
         };
         let inner_if = Expr::new(sp(), ExprNode::If {
-            cond: var_t("x", Ty::Untyped),
-            then_branch: push(var_t("x", Ty::Untyped)),
+            cond: var_t("x", Ty::gradual()),
+            then_branch: push(var_t("x", Ty::gradual())),
             else_branch: push(Expr::new(sp(), ExprNode::Lit { value: Literal::Int { value: 0 } })),
         });
         let out = emit_expr(&block_send("coll", "each", &["x"], inner_if));
@@ -2454,7 +2454,7 @@ mod tests {
         let set = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
             recv: Some(ivar.clone()),
             method: Symbol::from("[]="),
-            args: vec![var_t("k", Ty::Untyped), var_t("v", Ty::Untyped)],
+            args: vec![var_t("k", Ty::gradual()), var_t("v", Ty::gradual())],
             block: None,
             parenthesized: false,
         });
@@ -2467,7 +2467,7 @@ mod tests {
             recv: Some(ivar.clone()),
             method: Symbol::from("fetch"),
             args: vec![
-                var_t("k", Ty::Untyped),
+                var_t("k", Ty::gradual()),
                 Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
             ],
             block: None,
@@ -2485,7 +2485,7 @@ mod tests {
     #[test]
     fn hash_methods_map_to_elixir_map() {
         let hash = || {
-            var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) })
+            var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::gradual()) })
         };
         let no_args = |m: &str| Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
             recv: Some(hash()),
@@ -2757,16 +2757,16 @@ mod tests {
     fn container_query_methods_dispatch_on_type() {
         // Array receiver → Enum.*; Hash receiver → Map.* / map_size.
         let arr = || var_t("xs", arr());
-        let hsh = || var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) });
+        let hsh = || var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::gradual()), value: std::sync::Arc::new(Ty::gradual()) });
         assert_eq!(emit_expr(&call(arr(), "empty?", vec![])), "Enum.empty?(xs)");
         assert_eq!(emit_expr(&call(hsh(), "empty?", vec![])), "map_size(h) == 0");
         assert_eq!(
-            emit_expr(&call(arr(), "include?", vec![var_t("y", Ty::Untyped)])),
+            emit_expr(&call(arr(), "include?", vec![var_t("y", Ty::gradual())])),
             "Enum.member?(xs, y)"
         );
         // Hash include? is key membership.
         assert_eq!(
-            emit_expr(&call(hsh(), "include?", vec![var_t("k", Ty::Untyped)])),
+            emit_expr(&call(hsh(), "include?", vec![var_t("k", Ty::gradual())])),
             "Map.has_key?(h, k)"
         );
         // String receiver → `== ""` (Elixir has no String.empty?).
@@ -2841,14 +2841,14 @@ mod tests {
 
         // Only `status:` given → trailing defaulted params dropped.
         let only_status =
-            vec![var_t("body", Ty::Untyped), kwargs(vec![("status", sym_lit("unprocessable_content"))])];
+            vec![var_t("body", Ty::gradual()), kwargs(vec![("status", sym_lit("unprocessable_content"))])];
         assert_eq!(unpack_kwargs("render", &only_status), vec!["body", ":unprocessable_content"]);
 
         // `status:` + `location:` (skipping content_type) → the skipped
         // optional is filled with its default so `location` lands right.
         let status_and_loc = vec![
-            var_t("body", Ty::Untyped),
-            kwargs(vec![("status", sym_lit("created")), ("location", var_t("loc", Ty::Untyped))]),
+            var_t("body", Ty::gradual()),
+            kwargs(vec![("status", sym_lit("created")), ("location", var_t("loc", Ty::gradual()))]),
         ];
         assert_eq!(
             unpack_kwargs("render", &status_and_loc),
@@ -2922,7 +2922,7 @@ mod tests {
         let call_expr = call(
             const_path("ViewHelpers"),
             "truncate",
-            vec![var_t("body", Ty::Untyped), kwargs],
+            vec![var_t("body", Ty::gradual()), kwargs],
         );
         assert_eq!(
             emit_expr(&call_expr),
@@ -2976,7 +2976,7 @@ mod tests {
 
     #[test]
     fn to_h_is_identity() {
-        assert_eq!(emit_expr(&call(var_t("conditions", Ty::Untyped), "to_h", vec![])), "conditions");
+        assert_eq!(emit_expr(&call(var_t("conditions", Ty::gradual()), "to_h", vec![])), "conditions");
     }
 
     #[test]
@@ -3007,7 +3007,7 @@ mod tests {
         // would be an undefined variable in Elixir).
         assert_eq!(emit_expr(&bare_call("table_name", vec![])), "table_name()");
         assert_eq!(
-            emit_expr(&bare_call("foo", vec![var_t("x", Ty::Untyped)])),
+            emit_expr(&bare_call("foo", vec![var_t("x", Ty::gradual())])),
             "foo(x)"
         );
     }
@@ -3022,7 +3022,7 @@ mod tests {
         let via_self = call(call(self_ref(), "class", vec![]), "schema_columns", vec![]);
         assert_eq!(emit_expr(&via_self), "schema_columns()");
         let via_record =
-            call(call(var_t("record", Ty::Untyped), "class", vec![]), "schema_columns", vec![]);
+            call(call(var_t("record", Ty::gradual()), "class", vec![]), "schema_columns", vec![]);
         assert_eq!(emit_expr(&via_record), "schema_columns()");
         set_threads_record(false);
     }
@@ -3117,8 +3117,8 @@ mod tests {
         // A `+` chain rooted in a string literal with UNTYPED operands
         // (the functionalize passes drop the body-typer's `.ty`) still
         // emits `<>`, not `+` — the SQL-building concat shape.
-        let inner = call(str_lit_e("SELECT "), "+", vec![var_t("col", Ty::Untyped)]);
-        let outer = call(inner, "+", vec![var_t("tail", Ty::Untyped)]);
+        let inner = call(str_lit_e("SELECT "), "+", vec![var_t("col", Ty::gradual())]);
+        let outer = call(inner, "+", vec![var_t("tail", Ty::gradual())]);
         assert_eq!(emit_expr(&outer), "\"SELECT \" <> col <> tail");
         // A genuinely numeric `+` (no string root) stays `+`.
         assert_eq!(emit_expr(&call(var_t("m", Ty::Int), "+", vec![var_t("n", Ty::Int)])), "m + n");

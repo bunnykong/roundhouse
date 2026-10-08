@@ -40,8 +40,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         for (m, ty) in [
             ("persisted?", Ty::Bool),
             ("new_record?", Ty::Bool),
-            ("to_model", Ty::Untyped),
-            ("model_name", Ty::Untyped),
+            ("to_model", Ty::gradual()),
+            ("model_name", Ty::gradual()),
         ] {
             model.instance_methods.insert(Symbol::from(m), ty);
         }

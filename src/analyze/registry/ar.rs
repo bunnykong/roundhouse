@@ -42,8 +42,8 @@ fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
     // result types, and the adapter objects it hands out (the transaction
     // manager, the pool, the current transaction) stay untyped.
     let str = Ty::Str;
-    let untyped_rows = Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }) };
-    let untyped_list = Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
+    let untyped_rows = Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) }) };
+    let untyped_list = Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) };
     let cls = classes.entry(ClassId(Symbol::from("ActiveRecord::Connection"))).or_default();
     for (name, ty) in [
         ("quote_column_name", str.clone()),
@@ -60,20 +60,20 @@ fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("open_transactions", Ty::Int),
         ("select_rows", untyped_rows),
         ("select_values", untyped_list.clone()),
-        ("select_one", Ty::Untyped),
-        ("select_value", Ty::Untyped),
+        ("select_one", Ty::gradual()),
+        ("select_value", Ty::gradual()),
         ("tables", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
         ("columns", untyped_list.clone()),
         ("indexes", untyped_list),
-        ("insert", Ty::Untyped),
+        ("insert", Ty::gradual()),
         ("update", Ty::Int),
         ("delete", Ty::Int),
-        ("transaction", Ty::Untyped),
-        ("current_transaction", Ty::Untyped),
-        ("transaction_manager", Ty::Untyped),
-        ("pool", Ty::Untyped),
-        ("raw_connection", Ty::Untyped),
-        ("database_version", Ty::Untyped),
+        ("transaction", Ty::gradual()),
+        ("current_transaction", Ty::gradual()),
+        ("transaction_manager", Ty::gradual()),
+        ("pool", Ty::gradual()),
+        ("raw_connection", Ty::gradual()),
+        ("database_version", Ty::gradual()),
     ] {
         cls.instance_methods.entry(Symbol::from(name)).or_insert(ty);
     }
@@ -108,7 +108,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             "connection_pool",
             "establish_connection",
         ] {
-            base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Untyped);
+            base.class_methods.entry(Symbol::from(m)).or_insert(Ty::gradual());
         }
         base.class_methods
             .entry(Symbol::from("connection"))
@@ -173,7 +173,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `() -> AdapterInterface`.
     let hash_str_untyped = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::gradual()),
     };
     let row_ty = hash_str_untyped.clone();
     let nilable_row = Ty::Union {
@@ -479,7 +479,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // The file behind the part, as Rack hands it over: the Tempfile
         // (`params[:file].tempfile`) and its path on disk. The Tempfile
         // is not modelled, so it is a gradual boundary.
-        uploaded.instance_methods.insert(Symbol::from("tempfile"), Ty::Untyped);
+        uploaded.instance_methods.insert(Symbol::from("tempfile"), Ty::gradual());
         uploaded.instance_methods.insert(Symbol::from("path"), Ty::Str);
         uploaded.instance_methods.insert(Symbol::from("to_s"), Ty::Str);
         let uploaded_id = ClassId(Symbol::from("ActionDispatch::Http::UploadedFile"));
@@ -724,6 +724,6 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     // comes back.
     content
         .instance_methods
-        .insert(Symbol::from("attachables"), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        .insert(Symbol::from("attachables"), Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) });
     classes.insert(ClassId(Symbol::from("ActionText::Content")), content);
 }

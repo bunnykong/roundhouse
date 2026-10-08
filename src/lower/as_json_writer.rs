@@ -333,7 +333,7 @@ fn self_send(method: &str) -> Expr {
             vec![],
             false,
         ),
-        Ty::Untyped,
+        Ty::gradual(),
     )
 }
 

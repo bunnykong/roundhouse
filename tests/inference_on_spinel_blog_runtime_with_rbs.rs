@@ -472,7 +472,7 @@ fn qualified_runtime_signatures_seed_contexts_and_results() {
     let classes = ingest_runtime_classes();
     let row = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::gradual()),
     };
     let rows = Ty::Array { elem: std::sync::Arc::new(row) };
     for (class, method, name, expected) in [

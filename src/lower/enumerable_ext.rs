@@ -247,7 +247,7 @@ fn empty_array(span: crate::span::Span) -> Expr {
     // A later pass reads assignment types. An untyped `[]` is invisible
     // to it, so a controller ivar assigned both this and a Relation
     // would keep the Relation.
-    empty.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+    empty.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) });
     empty
 }
 
@@ -258,7 +258,7 @@ fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
             span,
             ExprNode::Array { elements: vec![value], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) });
         wrapped
     };
     match arg.ty.as_ref() {
@@ -299,7 +299,7 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
             span,
             ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) });
         wrapped
     };
     let mut cond = Expr::new(
@@ -321,7 +321,7 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
             else_branch: when_present,
         },
     );
-    branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+    branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) });
     Some(Expr::new(
         span,
         ExprNode::Seq { exprs: vec![bound.assign, branch] },
@@ -384,7 +384,7 @@ fn sentence_connectors(arg: &Expr) -> Option<[String; 3]> {
 fn is_relation_or_array_union(ty: Option<&Ty>) -> bool {
     let Some(Ty::Union { variants }) = ty else { return false };
     variants.iter().any(|v| matches!(v, Ty::Array { .. }))
-        && variants.iter().all(|v| matches!(v, Ty::Array { .. } | Ty::Relation { .. } | Ty::Untyped))
+        && variants.iter().all(|v| matches!(v, Ty::Array { .. } | Ty::Relation { .. } | Ty::Untyped { .. }))
 }
 
 /// A block `map`/`collect`/`filter_map`/`flat_map` — an Array whatever
@@ -459,7 +459,7 @@ mod tests {
     /// `Array | untyped`, and the Array half has no `many?` on spinel.
     #[test]
     fn many_on_an_array_or_untyped_union_is_a_size_test() {
-        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped].into() });
+        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::gradual()].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), ">");
         let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
@@ -499,7 +499,7 @@ mod tests {
     /// `Array | untyped` union reads through `to_a`, typed as the Array half.
     #[test]
     fn first_n_on_an_array_or_untyped_union_reads_through_to_a() {
-        let mut e = first_n_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped].into() });
+        let mut e = first_n_on(Ty::Union { variants: vec![array_of_users(), Ty::gradual()].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), "first");
         let ExprNode::Send { recv: Some(to_a), args, .. } = &*e.node else { panic!() };
@@ -582,7 +582,7 @@ mod tests {
             Span::synthetic(),
             ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("members") },
         );
-        members.ty = Some(Ty::Untyped);
+        members.ty = Some(Ty::gradual());
         let block = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil });
         *r = Expr::new(
             Span::synthetic(),
@@ -594,7 +594,7 @@ mod tests {
                 parenthesized: false,
             },
         );
-        r.ty = Some(Ty::Untyped);
+        r.ty = Some(Ty::gradual());
         rewrite(&mut e);
         let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
         assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));

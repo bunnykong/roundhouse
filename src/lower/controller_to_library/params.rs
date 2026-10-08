@@ -1629,7 +1629,7 @@ fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     // The declared type is `initialize`'s parameter type verbatim: this
     // hash is built to be handed straight to it, and a narrower element
     // type would need a widening conversion at every call site.
-    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) };
     let attrs_var = || {
         with_ty(
             Expr::new(
@@ -1776,7 +1776,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
             ),
             arms,
         },
-        Some(Ty::Untyped),
+        Some(Ty::gradual()),
     );
 
     MethodDef {
@@ -1791,7 +1791,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
         // Heterogeneous: the value when provided, nil when not.
         signature: Some(crate::lower::typing::fn_sig(
             vec![(key, Ty::Sym)],
-            Ty::Untyped,
+            Ty::gradual(),
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),

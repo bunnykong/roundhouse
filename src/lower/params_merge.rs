@@ -791,7 +791,7 @@ fn rewrite_method(
 /// decline (`assoc_class_method_scope` residue) because merging into
 /// something that may not be a Hash is a guess.
 fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
-    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) };
     let (mut params, block, ret, effects) = match method.signature.clone() {
         Some(Ty::Fn { params, block, ret, effects }) => (params, block, ret, effects),
         _ => (
@@ -800,12 +800,12 @@ fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::gradual().into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            std::sync::Arc::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::gradual()),
             method.effects.clone(),
         ),
     };
@@ -830,12 +830,12 @@ fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpe
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::gradual().into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            std::sync::Arc::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::gradual()),
             method.effects.clone(),
         ),
     };

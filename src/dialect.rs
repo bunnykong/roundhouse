@@ -1907,7 +1907,7 @@ impl Fixture {
         let class = self.class_id();
         let ret = models.iter().find(|model| model.name == class)
             .map(|model| Ty::Class { id: model.name.clone(), args: vec![].into() })
-            .unwrap_or(Ty::Untyped);
+            .unwrap_or(Ty::gradual());
         Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("name"),

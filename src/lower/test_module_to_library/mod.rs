@@ -183,7 +183,7 @@ pub fn lower_test_modules_with_inner(
         // `type_method_body` can seed ConstScope and Value qualify keeps
         // the bare name rather than re-expanding to the helper module.
         for (name, _) in &test_modules[idx].constants {
-            info.constants.entry(name.clone()).or_insert(Ty::Untyped);
+            info.constants.entry(name.clone()).or_insert(Ty::gradual());
         }
         // Inherit Minitest::Test assertion methods so `self.assert(...)`
         // dispatch resolves through the registry.
@@ -275,7 +275,7 @@ pub fn lower_test_modules_with_inner(
             }
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
             let Some(body_ty) = method.body.ty.clone() else { continue };
-            if matches!(body_ty, Ty::Untyped | Ty::Nil) {
+            if matches!(body_ty, Ty::Untyped { .. } | Ty::Nil) {
                 continue;
             }
             if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
@@ -498,7 +498,7 @@ fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassIn
                 .map(|ty| adopt_param_names(ty, &method.params));
             let adopted = inherited.is_some();
             method.signature = inherited
-                .or_else(|| Some(signature_from_params(&method.params, classes, Ty::Untyped)));
+                .or_else(|| Some(signature_from_params(&method.params, classes, Ty::gradual())));
             crate::lower::typing::type_method_body(method, classes, &empty_ivars);
             !adopted
         })
@@ -552,7 +552,7 @@ fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassIn
             *ret = std::sync::Arc::new(if method.name.as_str() == "initialize" {
                 Ty::Nil
             } else {
-                method.body.ty.clone().unwrap_or(Ty::Untyped)
+                method.body.ty.clone().unwrap_or(Ty::gradual())
             });
         }
     }
@@ -578,7 +578,7 @@ fn signature_from_params(
             // type when it has one.
             let ty = match &p.default {
                 Some(d) if !p.rest => ty_of_expr(d, classes),
-                _ => Ty::Untyped,
+                _ => Ty::gradual(),
             };
             TyParam { name: p.name.clone(), ty: ty.into(), kind: p.ty_kind() }
         })
@@ -598,7 +598,7 @@ fn ty_of_expr(e: &Expr, classes: &HashMap<ClassId, ClassInfo>) -> Ty {
     let ctx = crate::analyze::Ctx::default();
     let mut clone = e.clone();
     typer.analyze_expr(&mut clone, &ctx);
-    clone.ty.unwrap_or(Ty::Untyped)
+    clone.ty.unwrap_or(Ty::gradual())
 }
 
 /// Harvest `self.x = v` setter calls from a method body as ivar
@@ -701,7 +701,7 @@ fn build_library_class(
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::gradual().into(),
                     kind: p.ty_kind(),
                 })
                 .collect();
@@ -828,65 +828,65 @@ fn sanitize_test_name(name: &str) -> String {
 type SigBuilder = fn() -> Ty;
 const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     // Core Minitest assertions.
-    ("assert", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_equal", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_not", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_not_equal", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_nil", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_not_nil", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_includes", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_match", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_no_match", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("assert_raises", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
+    ("assert", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("assert_equal", || fn_sig_two(Ty::gradual(), Ty::gradual(), Ty::Nil)),
+    ("assert_not", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("assert_not_equal", || fn_sig_two(Ty::gradual(), Ty::gradual(), Ty::Nil)),
+    ("assert_nil", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("assert_not_nil", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("assert_includes", || fn_sig_two(Ty::gradual(), Ty::gradual(), Ty::Nil)),
+    ("assert_match", || fn_sig_two(Ty::gradual(), Ty::gradual(), Ty::Nil)),
+    ("assert_no_match", || fn_sig_two(Ty::gradual(), Ty::gradual(), Ty::Nil)),
+    ("assert_raises", || fn_sig_one(Ty::gradual(), Ty::gradual())),
     // Test::Unit's spelling of the same assertion, which Rails aliases.
-    ("assert_raise", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
+    ("assert_raise", || fn_sig_one(Ty::gradual(), Ty::gradual())),
     // Minitest's throw/catch assertion — answers the thrown value.
-    ("assert_throws", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
-    ("assert_difference", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
+    ("assert_throws", || fn_sig_one(Ty::gradual(), Ty::gradual())),
+    ("assert_difference", || fn_sig_one(Ty::gradual(), Ty::gradual())),
     // ActionCable::Channel::TestCase / Connection::TestCase — the
     // harness in runtime/spinel/test/test_helper.rb. `subscribe` is
     // rewritten to `subscribe_to` by `lower::cable_test_case`;
     // `subscription`/`connection` are the objects it built.
-    ("stub_connection", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("stub_connection", || fn_sig_one(Ty::gradual(), Ty::Nil)),
     ("subscribe_to", || crate::lower::typing::fn_sig(
-        vec![(Symbol::from("channel"), Ty::Str), (Symbol::from("keys"), Ty::Untyped), (Symbol::from("values"), Ty::Untyped)],
+        vec![(Symbol::from("channel"), Ty::Str), (Symbol::from("keys"), Ty::gradual()), (Symbol::from("values"), Ty::gradual())],
         Ty::Nil,
     )),
-    ("subscription", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("subscription", || crate::lower::typing::fn_sig(vec![], Ty::gradual())),
     ("unsubscribe", || crate::lower::typing::fn_sig(vec![], Ty::Nil)),
-    ("assert_has_stream", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("assert_has_stream", || fn_sig_one(Ty::gradual(), Ty::Nil)),
     ("connect", || crate::lower::typing::fn_sig(vec![], Ty::Nil)),
-    ("connection", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("connection", || crate::lower::typing::fn_sig(vec![], Ty::gradual())),
     ("assert_reject_connection", || crate::lower::typing::fn_sig(vec![], Ty::Nil)),
-    ("assert_no_difference", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
-    ("refute", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("refute_equal", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
-    ("refute_nil", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("assert_no_difference", || fn_sig_one(Ty::gradual(), Ty::gradual())),
+    ("refute", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("refute_equal", || fn_sig_two(Ty::gradual(), Ty::gradual(), Ty::Nil)),
+    ("refute_nil", || fn_sig_one(Ty::gradual(), Ty::Nil)),
     ("skip", || fn_sig_one(Ty::Str, Ty::Nil)),
     ("flunk", || fn_sig_one(Ty::Str, Ty::Nil)),
     // ActionDispatch::IntegrationTest HTTP verbs — each takes a URL
     // (and possibly opts) and dispatches through the test rack stack.
     // Return Nil; sets `response`/`@response` ivars for downstream
     // assertions.
-    ("get", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("post", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("put", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("patch", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("delete", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("head", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("get", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("post", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("put", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("patch", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("delete", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("head", || fn_sig_one(Ty::gradual(), Ty::Nil)),
     // A second browser (`ActionDispatch::Integration::Session`), for a
     // test that asks a question as another client; the verbs above
     // are then sent to it.
-    ("open_session", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("open_session", || crate::lower::typing::fn_sig(vec![], Ty::gradual())),
     // Response assertions.
-    ("assert_response", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_redirected_to", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_select", || fn_sig_one(Ty::Untyped, Ty::Nil)),
-    ("assert_template", || fn_sig_one(Ty::Untyped, Ty::Nil)),
+    ("assert_response", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("assert_redirected_to", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("assert_select", || fn_sig_one(Ty::gradual(), Ty::Nil)),
+    ("assert_template", || fn_sig_one(Ty::gradual(), Ty::Nil)),
     // Response accessors.
-    ("response", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
-    ("request", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
-    ("session", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("response", || crate::lower::typing::fn_sig(vec![], Ty::gradual())),
+    ("request", || crate::lower::typing::fn_sig(vec![], Ty::gradual())),
+    ("session", || crate::lower::typing::fn_sig(vec![], Ty::gradual())),
     // NOT Untyped, unlike its neighbours: `cookies[k]` is the receiver
     // of campfire's `assert cookies[:session_token].present?`, which
     // `sign_in` runs on the way into roughly twenty controller test
@@ -897,7 +897,7 @@ const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     // for an instance of String`, 82 of the spinel suite lane's 288
     // tests, inside the helper that gates every authenticated request.
     ("cookies", || crate::lower::typing::fn_sig(vec![], cookie_jar_ty())),
-    ("flash", || crate::lower::typing::fn_sig(vec![], Ty::Untyped)),
+    ("flash", || crate::lower::typing::fn_sig(vec![], Ty::gradual())),
 ];
 
 fn fn_sig_one(p: Ty, ret: Ty) -> Ty {
@@ -945,8 +945,8 @@ fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     use crate::lower::typing::fn_sig;
     let str_hash_arg = || Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     let str_hash = str_hash_arg();
-    let key = || (Symbol::from("key"), Ty::Untyped);
-    let value = || (Symbol::from("value"), Ty::Untyped);
+    let key = || (Symbol::from("key"), Ty::gradual());
+    let value = || (Symbol::from("value"), Ty::gradual());
 
     let mut jar = ClassInfo::default();
     for (name, sig) in [
@@ -973,7 +973,7 @@ fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
         // `Session.find_signed(cookies.signed[:session_token])` is
         // written against.
         ("[]", fn_sig(vec![key()], Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })),
-        ("[]=", fn_sig(vec![key(), value()], Ty::Untyped)),
+        ("[]=", fn_sig(vec![key(), value()], Ty::gradual())),
         ("delete", fn_sig(vec![key()], Ty::Str)),
         ("permanent", fn_sig(vec![], signed_cookie_jar_ty())),
     ] {
@@ -999,7 +999,7 @@ fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     builder.class_methods.insert(
         build.clone(),
         fn_sig(
-            vec![(Symbol::from("request"), Ty::Untyped), (Symbol::from("cookies"), str_hash_arg())],
+            vec![(Symbol::from("request"), Ty::gradual()), (Symbol::from("cookies"), str_hash_arg())],
             cookie_jar_ty(),
         ),
     );

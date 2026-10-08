@@ -402,7 +402,7 @@ fn needs_hash_widening(param_ty: &Ty, arg: &Expr) -> bool {
     let Ty::Hash { value: pv, .. } = param_ty else {
         return false;
     };
-    if !matches!(pv.as_ref(), Ty::Untyped) {
+    if !matches!(pv.as_ref(), Ty::Untyped { .. }) {
         return false;
     }
     // Skip args already wrapped in Cast — idempotency.
@@ -413,7 +413,7 @@ fn needs_hash_widening(param_ty: &Ty, arg: &Expr) -> bool {
         return true;
     }
     if let Some(Ty::Hash { value: av, .. }) = arg.ty.as_ref() {
-        if !matches!(av.as_ref(), Ty::Untyped) {
+        if !matches!(av.as_ref(), Ty::Untyped { .. }) {
             return true;
         }
     }
@@ -437,7 +437,7 @@ fn needs_some_wrap(param_ty: &Ty, arg: &Expr) -> bool {
     let Some(inner) = peel_option(param_ty) else {
         return false;
     };
-    if matches!(inner, Ty::Untyped) {
+    if matches!(inner, Ty::Untyped { .. }) {
         return false;
     }
     // Owned-producing branch.
@@ -537,7 +537,7 @@ fn needs_primitive_to_value(param_ty: &Ty, arg: &Expr) -> bool {
     // recognition in `coerce.rs` Family 3 — kept name-keyed at the
     // IR level rather than promoted to a Ty variant since `ParamValue`
     // is a target-rendering decision, not an IR shape).
-    let param_renders_as_value = matches!(param_ty, Ty::Untyped)
+    let param_renders_as_value = matches!(param_ty, Ty::Untyped { .. })
         || matches!(
             param_ty,
             Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
@@ -570,7 +570,7 @@ fn needs_hash_literal_to_value(param_ty: &Ty, arg: &Expr) -> bool {
     if !matches!(&*arg.node, ExprNode::Hash { .. }) {
         return false;
     }
-    matches!(param_ty, Ty::Untyped | Ty::Record { .. })
+    matches!(param_ty, Ty::Untyped { .. } | Ty::Record { .. })
         || matches!(
             param_ty,
             Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
@@ -590,7 +590,7 @@ fn peel_nil(ty: &Ty) -> &Ty {
 /// ty_contains_untyped` because the lowerer is target-neutral.
 fn ty_contains_untyped(ty: &Ty) -> bool {
     match ty {
-        Ty::Untyped => true,
+        Ty::Untyped { .. } => true,
         Ty::Union { variants } => variants.iter().any(ty_contains_untyped),
         _ => false,
     }

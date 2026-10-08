@@ -435,11 +435,11 @@ impl<'a> BodyTyper<'a> {
         match pattern {
             MatchPattern::Value { .. } | MatchPattern::Nil => Vec::new(),
             MatchPattern::Bind { name } => {
-                vec![(name.clone(), subject_ty.cloned().unwrap_or(Ty::Untyped))]
+                vec![(name.clone(), subject_ty.cloned().unwrap_or(Ty::unresolved()))]
             }
             MatchPattern::Capture { pattern, name } => {
                 let mut out = self.match_pattern_bindings(pattern, subject_ty);
-                out.push((name.clone(), subject_ty.cloned().unwrap_or(Ty::Untyped)));
+                out.push((name.clone(), subject_ty.cloned().unwrap_or(Ty::unresolved())));
                 out
             }
             // Ruby permits `_`-prefixed bindings in alternatives. A
@@ -453,7 +453,7 @@ impl<'a> BodyTyper<'a> {
                     out.extend(self.match_pattern_bindings(p, None));
                 }
                 if let Some(Some(name)) = rest {
-                    out.push((name.clone(), Ty::Untyped));
+                    out.push((name.clone(), Ty::unresolved()));
                 }
                 out
             }
@@ -463,10 +463,10 @@ impl<'a> BodyTyper<'a> {
                     out.extend(self.match_pattern_bindings(p, None));
                 }
                 if let Some(name) = pre_rest {
-                    out.push((name.clone(), Ty::Untyped));
+                    out.push((name.clone(), Ty::unresolved()));
                 }
                 if let Some(name) = post_rest {
-                    out.push((name.clone(), Ty::Untyped));
+                    out.push((name.clone(), Ty::unresolved()));
                 }
                 out
             }
@@ -485,7 +485,7 @@ impl<'a> BodyTyper<'a> {
                 for (key, sub) in pairs {
                     match sub {
                         Some(p) => out.extend(self.match_pattern_bindings(p, value_ty.as_ref())),
-                        None => out.push((key.clone(), value_ty.clone().unwrap_or(Ty::Untyped))),
+                        None => out.push((key.clone(), value_ty.clone().unwrap_or(Ty::unresolved()))),
                     }
                 }
                 if let Some(HashRest::Collect { name }) = rest {
@@ -494,7 +494,7 @@ impl<'a> BodyTyper<'a> {
                     // need not be symbols, even though pattern keys are.
                     let rest_ty = match subject_ty {
                         Some(ty @ Ty::Hash { .. }) if constant.is_none() => ty.clone(),
-                        _ => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
+                        _ => Ty::Hash { key: std::sync::Arc::new(Ty::unresolved()), value: std::sync::Arc::new(Ty::unresolved()) },
                     };
                     out.push((name.clone(), rest_ty));
                 }
@@ -793,7 +793,7 @@ impl<'a> BodyTyper<'a> {
                 // in spirit to RBS's `untyped` declaration. Distinct
                 // from `Var` (analyzer gap) so the gradual diagnostic
                 // shape is right.
-                Ty::Untyped
+                Ty::unresolved()
             }
 
             ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
@@ -818,7 +818,7 @@ impl<'a> BodyTyper<'a> {
                                     });
                                 }
                                 _ => {
-                                    rescued = Some(Ty::Untyped);
+                                    rescued = Some(Ty::unresolved());
                                     break;
                                 }
                             }
@@ -1409,7 +1409,7 @@ impl<'a> BodyTyper<'a> {
                     if let Some(t) = args[0]
                         .ty
                         .clone()
-                        .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))
+                        .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped { .. }))
                     {
                         return t;
                     }
@@ -1479,7 +1479,7 @@ impl<'a> BodyTyper<'a> {
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
                     && (matches!(dispatched, Ty::Var { .. })
-                        || (matches!(dispatched, Ty::Untyped)
+                        || (matches!(dispatched, Ty::Untyped { .. })
                             && !self.app_defines(ctx.self_ty.as_ref(), method)))
                 {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
@@ -1489,7 +1489,7 @@ impl<'a> BodyTyper<'a> {
                 // receiver's own table did not. App analyzer only.
                 // `class_object_receiver` was resolved above for block binding
                 // so it matches the same class/instance table preference.
-                if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
+                if matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. }) && self.inquirers.is_some()
                     && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let class_object = class_object_receiver;
@@ -1514,7 +1514,7 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
-                if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
+                if matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. }) && self.inquirers.is_some()
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let gap = match recv_ty.as_ref() {
                         Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "ActiveModel::Errors" | "ActiveModel::Error") => Some(id.0.as_str()),
@@ -2159,7 +2159,7 @@ impl<'a> BodyTyper<'a> {
                 // so type as Untyped: the call site signed for an opaque block
                 // return, and propagating Untyped lets downstream dispatch
                 // resolve cleanly instead of bottoming out at Var.
-                if ctx.in_view { Ty::Str } else { Ty::Untyped }
+                if ctx.in_view { Ty::Str } else { Ty::unresolved() }
             }
 
             ExprNode::Raise { value } => {
@@ -2189,7 +2189,7 @@ impl<'a> BodyTyper<'a> {
                 Ty::Bottom
             }
 
-            ExprNode::ForwardArgs | ExprNode::ForwardKeywords => Ty::Untyped,
+            ExprNode::ForwardArgs | ExprNode::ForwardKeywords => Ty::unresolved(),
 
             ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
                 // Splat propagates the inner expression's type
@@ -2233,7 +2233,7 @@ impl<'a> BodyTyper<'a> {
                 // no element-type signal.
                 let elem = begin_ty
                     .or(end_ty)
-                    .unwrap_or(Ty::Untyped);
+                    .unwrap_or(Ty::unresolved());
                 Ty::Class {
                     id: ClassId(Symbol::from("Range")),
                     args: vec![elem].into(),
@@ -2402,7 +2402,7 @@ fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
             .map(|elems| elems.into_iter().reduce(union_of).unwrap_or(Ty::Bottom)),
         // Any other class may answer `to_ary`/`to_a` (a Struct, a Set,
         // anything Enumerable), which `Array()` then unpacks.
-        Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. } | Ty::Record { .. } | Ty::Class { .. } => None,
+        Ty::Var { .. } | Ty::Untyped { .. } | Ty::Hash { .. } | Ty::Record { .. } | Ty::Class { .. } => None,
         scalar => Some(scalar.clone()),
     }
 }
@@ -2459,7 +2459,7 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         // target gets the element model, same as `Array<of>`.
         Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
-        Some(Ty::Untyped) => Some(Ty::Untyped),
+        Some(Ty::Untyped { .. }) => Some(Ty::unresolved()),
         _ => None,
     }
 }
@@ -2833,7 +2833,7 @@ mod tests {
     fn kernel_array_does_not_capture_inherited_or_included_app_methods() {
         let owner = ClassId(Symbol::from("Owner"));
         let child = ClassId(Symbol::from("Child"));
-        for (included, ret) in [(false, Ty::Str), (true, Ty::Str), (false, Ty::Untyped)] {
+        for (included, ret) in [(false, Ty::Str), (true, Ty::Str), (false, Ty::unresolved())] {
             let mut classes = empty_classes();
             let mut info = ClassInfo::default();
             info.instance_methods.insert(Symbol::from("Array"), ret.clone());
@@ -3400,7 +3400,7 @@ mod tests {
             "opts",
             Ty::Hash {
                 key: std::sync::Arc::new(Ty::Str),
-                value: std::sync::Arc::new(Ty::Untyped),
+                value: std::sync::Arc::new(Ty::unresolved()),
             },
         );
         typer.analyze_expr(&mut seq, &ctx);
@@ -3820,7 +3820,7 @@ mod tests {
             Ty::Str,
             Ty::Time,
             Ty::Nil,
-            Ty::Untyped,
+            Ty::unresolved(),
             Ty::Bottom,
             Ty::Var { var: TyVar(7) },
             class("Story"),
@@ -4085,13 +4085,13 @@ mod tests {
 
         let classes = empty_classes();
         let typer = BodyTyper::new(&classes);
-        let ctx = ctx_with_local("r", Ty::Untyped);
+        let ctx = ctx_with_local("r", Ty::unresolved());
         typer.analyze_expr(&mut expr, &ctx);
 
         let ExprNode::CaseMatch { arms, .. } = &*expr.node else {
             panic!("expected CaseMatch, got {:?}", expr.node);
         };
-        assert_eq!(arms[0].body.ty, Some(Ty::Untyped));
+        assert_eq!(arms[0].body.ty, Some(Ty::unresolved()));
     }
 }
 
@@ -4195,7 +4195,7 @@ fn expect_hash_arg_ty(recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::E
     let (key, value) = match recv_ty {
         Some(Ty::Hash { key, value }) => (key.clone(), value.clone()),
         Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionController::Parameters" => {
-            (std::sync::Arc::new(Ty::Str), std::sync::Arc::new(Ty::Untyped))
+            (std::sync::Arc::new(Ty::Str), std::sync::Arc::new(Ty::unresolved()))
         }
         _ => return None,
     };
@@ -4237,8 +4237,8 @@ fn promotes_to_param_value(
     };
     // Not only the source's `params`: after the controller lowering it reads `@params`, a `Hash[String, untyped]`.
     let untyped = match recv_ty {
-        Some(Ty::Untyped) => true,
-        Some(Ty::Union { variants }) => variants.iter().all(|v| matches!(v, Ty::Untyped | Ty::Nil)),
+        Some(Ty::Untyped { .. }) => true,
+        Some(Ty::Union { variants }) => variants.iter().all(|v| matches!(v, Ty::Untyped { .. } | Ty::Nil)),
         _ => false,
     };
     // The fork models the full parameter-value union before this

@@ -18,7 +18,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `Rails.env` is the one we can type concretely as Str.
     let mut rails_cls = ClassInfo::default();
     for m in ["application", "logger", "cache", "configuration", "root"] {
-        rails_cls.class_methods.insert(Symbol::from(m), Ty::Untyped);
+        rails_cls.class_methods.insert(Symbol::from(m), Ty::gradual());
     }
     // `Rails.env` is an ActiveSupport::StringInquirer (a String
     // that also answers `development?`/`production?`/… as Bool),
@@ -46,10 +46,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let mut locator = ClassInfo::default();
         locator
             .class_methods
-            .insert(Symbol::from("locate"), Ty::Untyped);
+            .insert(Symbol::from("locate"), Ty::gradual());
         locator
             .class_methods
-            .insert(Symbol::from("locate_signed"), Ty::Untyped);
+            .insert(Symbol::from("locate_signed"), Ty::gradual());
         classes.insert(ClassId(Symbol::from("GlobalID::Locator")), locator);
     }
 
@@ -110,9 +110,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     classes.insert(ClassId(Symbol::from("Date")), ClassInfo::default());
     for name in ["DateTime"] {
         let mut cls = ClassInfo::default();
-        cls.class_methods.insert(Symbol::from("current"), Ty::Untyped);
-        cls.class_methods.insert(Symbol::from("today"), Ty::Untyped);
-        cls.class_methods.insert(Symbol::from("now"), Ty::Untyped);
+        cls.class_methods.insert(Symbol::from("current"), Ty::gradual());
+        cls.class_methods.insert(Symbol::from("today"), Ty::gradual());
+        cls.class_methods.insert(Symbol::from("now"), Ty::gradual());
         // The parse family has a concrete answer where `current` /
         // `today` / `now` above do not yet: `Ty::Time` is roundhouse's
         // timestamp type. Upgrading the three older
@@ -138,7 +138,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "SecureRandom", &[
         ("hex", Ty::Str), ("base64", Ty::Str), ("urlsafe_base64", Ty::Str),
         ("base58", Ty::Str), ("uuid", Ty::Str), ("alphanumeric", Ty::Str),
-        ("random_bytes", Ty::Str), ("random_number", Ty::Untyped),
+        ("random_bytes", Ty::Str), ("random_number", Ty::gradual()),
     ], &[]);
     // `Random` carries the same `Random::Formatter` surface as
     // SecureRandom since Ruby 3.3 (`Random.uuid` is campfire's test
@@ -148,10 +148,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("uuid", Ty::Str), ("hex", Ty::Str), ("base64", Ty::Str),
         ("urlsafe_base64", Ty::Str), ("alphanumeric", Ty::Str),
         ("bytes", Ty::Str), ("random_bytes", Ty::Str),
-        ("rand", Ty::Untyped), ("random_number", Ty::Untyped),
+        ("rand", Ty::gradual()), ("random_number", Ty::gradual()),
         ("new_seed", Ty::Int), ("seed", Ty::Int),
     ], &[
-        ("rand", Ty::Untyped), ("bytes", Ty::Str), ("seed", Ty::Int),
+        ("rand", Ty::gradual()), ("bytes", Ty::Str), ("seed", Ty::Int),
     ]);
     // `Turbo::StreamsChannel` — turbo-rails' CLASS-side broadcast API,
     // the one an app reaches for when the payload is not a record's
@@ -202,7 +202,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "File", &[
         ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int),
         ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("file?", Ty::Bool),
-        ("directory?", Ty::Bool), ("open", Ty::Untyped),
+        ("directory?", Ty::Bool), ("open", Ty::gradual()),
         ("unlink", Ty::Int), ("delete", Ty::Int), ("rename", Ty::Int),
         ("join", Ty::Str), ("basename", Ty::Str), ("dirname", Ty::Str),
         ("extname", Ty::Str), ("expand_path", Ty::Str), ("size", Ty::Int),
@@ -218,8 +218,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // ruby-family emit keeps the call. Return types stay gradual: the
     // document shape is whatever the file held.
     register_stdlib_class(classes, "YAML", &[
-        ("load", Ty::Untyped), ("load_file", Ty::Untyped),
-        ("safe_load", Ty::Untyped), ("safe_load_file", Ty::Untyped),
+        ("load", Ty::gradual()), ("load_file", Ty::gradual()),
+        ("safe_load", Ty::gradual()), ("safe_load_file", Ty::gradual()),
         ("dump", Ty::Str),
     ], &[]);
     // Framework modules an app `include`s that emit already handles
@@ -444,8 +444,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // hands them — campfire assigns an ActiveSupport::Duration — so
         // asserting Int there would be a narrower answer than the truth.
         ("use_ssl=", Ty::Bool),
-        ("open_timeout=", Ty::Untyped),
-        ("read_timeout=", Ty::Untyped),
+        ("open_timeout=", Ty::gradual()),
+        ("read_timeout=", Ty::gradual()),
         ("use_ssl?", Ty::Bool), ("started?", Ty::Bool),
         ("address", Ty::Str), ("port", Ty::Int),
         ("finish", Ty::Nil),
@@ -480,9 +480,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("detailed_message", Ty::Str),
         ("inspect", Ty::Str),
         ("backtrace", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
-        ("backtrace_locations", Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }),
-        ("set_backtrace", Ty::Untyped),
-        ("exception", Ty::Untyped),
+        ("backtrace_locations", Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) }),
+        ("set_backtrace", Ty::gradual()),
+        ("exception", Ty::gradual()),
         (
             "cause",
             Ty::Union {
@@ -518,7 +518,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActiveRecord::RecordNotUnique", None),
         ("ActiveRecord::ValueTooLong", None),
         // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
-        ("ActiveRecord::RecordInvalid", Some(("record", Ty::Untyped))),
+        ("ActiveRecord::RecordInvalid", Some(("record", Ty::gradual()))),
         // Names overlap `project::RUBY_FAMILY_RUNTIME_CONSTANTS` (emit
         // ledger). Keep extras here — inference needs the readers.
         ("ActionController::ParameterMissing", Some(("param", Ty::Str))),
@@ -544,8 +544,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("new", thread.clone()),
         ("pass", Ty::Nil),
     ], &[
-        ("[]", Ty::Untyped),
-        ("[]=", Ty::Untyped),
+        ("[]", Ty::gradual()),
+        ("[]=", Ty::gradual()),
         ("kill", thread.clone()),
         ("join", thread.clone()),
     ]);
@@ -600,9 +600,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `URI.parse` returns a URI object we don't model; `Untyped` lets
     // chained `.scheme` / `.host` flow gradually instead of erroring.
     register_stdlib_class(classes, "URI", &[
-        ("parse", Ty::Untyped), ("join", Ty::Untyped),
+        ("parse", Ty::gradual()), ("join", Ty::gradual()),
         ("escape", Ty::Str), ("unescape", Ty::Str),
-        ("encode_www_form", Ty::Str), ("decode_www_form", Ty::Untyped),
+        ("encode_www_form", Ty::Str), ("decode_www_form", Ty::gradual()),
     ], &[]);
     // A class test such as `URI.parse(url).is_a?(URI::HTTP)` names the
     // real bundled class, without claiming any extra instance methods.
@@ -667,7 +667,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(
         classes,
         "Array",
-        &[("wrap", Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) })],
+        &[("wrap", Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) })],
         &[],
     );
     // CRuby supplies Sets here, the Spinel port supplies Arrays. Both
@@ -683,7 +683,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // accessors are `Untyped` (Set isn't parameterized here).
     let set_self = Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![].into() };
     // Enumerable's filters and sorts answer an Array, not a Set.
-    let untyped_array = Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
+    let untyped_array = Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) };
     register_stdlib_class(classes, "Set", &[("[]", set_self.clone())], &[
         ("<<", set_self.clone()), ("add", set_self.clone()),
         ("delete", set_self.clone()), ("merge", set_self.clone()),
@@ -694,9 +694,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("union", set_self.clone()), ("intersection", set_self.clone()),
         ("difference", set_self.clone()),
         ("dup", set_self.clone()), ("to_set", set_self.clone()),
-        ("add?", Ty::Untyped),
+        ("add?", Ty::gradual()),
         ("delete?", Ty::Union { variants: vec![set_self.clone(), Ty::Nil].into() }),
-        ("each", Ty::Untyped),
+        ("each", Ty::gradual()),
         ("map", untyped_array.clone()), ("flat_map", untyped_array.clone()),
         ("filter_map", untyped_array.clone()),
         ("select", untyped_array.clone()), ("filter", untyped_array.clone()),
@@ -704,14 +704,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("sort", untyped_array.clone()), ("sort_by", untyped_array.clone()),
         ("partition", Ty::Array { elem: std::sync::Arc::new(untyped_array.clone()) }),
         ("to_a", untyped_array.clone()),
-        ("find", Ty::Untyped), ("detect", Ty::Untyped),
-        ("first", Ty::Untyped),
-        ("max", Ty::Untyped), ("min", Ty::Untyped),
-        ("max_by", Ty::Untyped), ("min_by", Ty::Untyped),
-        ("sum", Ty::Untyped), ("inject", Ty::Untyped), ("reduce", Ty::Untyped),
-        ("each_with_object", Ty::Untyped),
+        ("find", Ty::gradual()), ("detect", Ty::gradual()),
+        ("first", Ty::gradual()),
+        ("max", Ty::gradual()), ("min", Ty::gradual()),
+        ("max_by", Ty::gradual()), ("min_by", Ty::gradual()),
+        ("sum", Ty::gradual()), ("inject", Ty::gradual()), ("reduce", Ty::gradual()),
+        ("each_with_object", Ty::gradual()),
         ("group_by", Ty::Hash {
-            key: std::sync::Arc::new(Ty::Untyped),
+            key: std::sync::Arc::new(Ty::gradual()),
             value: std::sync::Arc::new(untyped_array.clone()),
         }),
         ("include?", Ty::Bool), ("member?", Ty::Bool), ("empty?", Ty::Bool),

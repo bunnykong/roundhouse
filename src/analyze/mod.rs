@@ -290,10 +290,10 @@ impl Analyzer {
             // / `connection_pool` similarly. Block-yielding ones
             // return whatever the block returned, which we don't
             // statically track — Untyped is the gradual escape.
-            cls.class_methods.insert(Symbol::from("transaction"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("transaction"), Ty::unresolved());
             cls.class_methods.insert(Symbol::from("connection"), registry::ar::connection_ty());
-            cls.class_methods.insert(Symbol::from("connection_pool"), Ty::Untyped);
-            cls.class_methods.insert(Symbol::from("establish_connection"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("connection_pool"), Ty::unresolved());
+            cls.class_methods.insert(Symbol::from("establish_connection"), Ty::unresolved());
             cls.class_methods.insert(Symbol::from("table_name"), Ty::Str);
             // `Model.human_attribute_name(:col)` — the ActiveModel
             // translation entry point every form label and table header
@@ -315,13 +315,13 @@ impl Analyzer {
             );
             cls.class_methods.insert(Symbol::from("attribute_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
-            cls.class_methods.insert(Symbol::from("columns_hash"), Ty::Untyped);
+            cls.class_methods.insert(Symbol::from("columns_hash"), Ty::unresolved());
             // The rest of the schema-reflection surface every model has:
             // `columns` is the list of `ActiveRecord::ConnectionAdapters::Column`
             // objects (not modelled, so their elements stay untyped), the
             // `sanitize_sql*` family builds a SQL fragment string, and
             // `base_class` is the STI root, a class.
-            cls.class_methods.insert(Symbol::from("columns"), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+            cls.class_methods.insert(Symbol::from("columns"), Ty::Array { elem: std::sync::Arc::new(Ty::unresolved()) });
             for sanitizer in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_for_conditions", "sanitize_sql_like"] {
                 cls.class_methods.insert(Symbol::from(sanitizer), Ty::Str);
             }
@@ -339,7 +339,7 @@ impl Analyzer {
             // `ActiveModel::Name`, the `Type::Value`s and the enum table are
             // objects the registry does not model.
             for opaque in ["model_name", "attribute_types", "type_for_attribute", "defined_enums", "reset_column_information"] {
-                cls.class_methods.insert(Symbol::from(opaque), Ty::Untyped);
+                cls.class_methods.insert(Symbol::from(opaque), Ty::unresolved());
             }
             // The rest of the class-side query surface — everything
             // from here to the `ids` seed below reads or writes the
@@ -403,7 +403,7 @@ impl Analyzer {
                 for proj in ["pluck", "pick"] {
                     cls.class_methods
                         .entry(Symbol::from(proj))
-                        .or_insert_with(|| Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+                        .or_insert_with(|| Ty::Array { elem: std::sync::Arc::new(Ty::unresolved()) });
                 }
                 cls.class_methods
                     .entry(Symbol::from("ids"))
@@ -665,8 +665,8 @@ impl Analyzer {
             // chains off the reader resolve.
             for name in crate::lower::model_to_library::markers::declared_attr_names(model) {
                 let writer = Symbol::from(format!("{}=", name.as_str()));
-                cls.instance_methods.entry(name).or_insert(Ty::Untyped);
-                cls.instance_methods.entry(writer).or_insert(Ty::Untyped);
+                cls.instance_methods.entry(name).or_insert(Ty::unresolved());
+                cls.instance_methods.entry(writer).or_insert(Ty::unresolved());
             }
             // `attachable_sgid` — the signed GlobalID an
             // `ActionText::Attachable` model mints. Registered for every
@@ -708,15 +708,15 @@ impl Analyzer {
                 ("marked_for_destruction?", Ty::Bool),
                 ("mark_for_destruction", Ty::Bool),
                 ("record_timestamps=", Ty::Bool),
-                ("attributes=", Ty::Untyped),
-                ("assign_attributes", Ty::Untyped),
+                ("attributes=", Ty::unresolved()),
+                ("assign_attributes", Ty::unresolved()),
                 ("update_column", Ty::Bool),
                 ("update_columns", Ty::Bool),
-                ("saved_changes", Ty::Untyped),
+                ("saved_changes", Ty::unresolved()),
                 ("saved_changes?", Ty::Bool),
-                ("changes", Ty::Untyped),
-                ("previous_changes", Ty::Untyped),
-                ("changed_attributes", Ty::Untyped),
+                ("changes", Ty::unresolved()),
+                ("previous_changes", Ty::unresolved()),
+                ("changed_attributes", Ty::unresolved()),
                 ("changed", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
                 // Turbo::Broadcastable, which turbo-rails mixes into
                 // `ActiveRecord::Base` — so every model answers these,
@@ -759,7 +759,7 @@ impl Analyzer {
                     for m in extension {
                         cls.assoc_extensions
                             .entry((name.clone(), m.name.clone()))
-                            .or_insert(Ty::Untyped);
+                            .or_insert(Ty::unresolved());
                     }
                     // Flat `<name>_loaded?` — same Bool `model_to_library`
                     // synthesizes for emit. Registered here so `check`
@@ -1624,7 +1624,7 @@ impl Analyzer {
                 if i + 1 == arity {
                     local_bindings.insert(
                         p.clone(),
-                        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
+                        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::unresolved()) },
                     );
                     continue;
                 }
@@ -1709,7 +1709,7 @@ impl Analyzer {
                     .filter(|t| !matches!(t, Ty::Fn { .. }))
                     .cloned()
                     .or_else(|| effective_return_ty(&method.body))
-                    .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped));
+                    .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped { .. }));
 
                 if !has_params && ret.is_none() {
                     continue;
@@ -1738,10 +1738,10 @@ impl Analyzer {
                         // to `*STDERR streams`, a declaration about
                         // every vararg made from one of them.
                         let ty = if p.rest {
-                            Ty::Untyped
+                            Ty::unresolved()
                         } else {
                             param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p)
-                                .unwrap_or(Ty::Untyped)
+                                .unwrap_or(Ty::unresolved())
                                 .subst_self(&owner_ty)
                         };
                         // Kind must survive verbatim: the untyped
@@ -1755,7 +1755,7 @@ impl Analyzer {
                 method.signature = Some(Ty::Fn {
                     params: params.into(),
                     block: None,
-                    ret: std::sync::Arc::new(ret.unwrap_or(Ty::Untyped).subst_self(&owner_ty)),
+                    ret: std::sync::Arc::new(ret.unwrap_or(Ty::unresolved()).subst_self(&owner_ty)),
                     effects: method.effects.clone(),
                 });
             }
@@ -2110,7 +2110,7 @@ impl Analyzer {
             // so a direct `@edit_user_id` read resolves (don't clobber
             // a schema column of the same name).
             for name in collect_attr_accessor_names(&model.body) {
-                class_ivars.entry(name).or_insert(Ty::Untyped);
+                class_ivars.entry(name).or_insert(Ty::unresolved());
             }
 
             // Phase 0: type the model's `Unknown` body items so the
@@ -4069,7 +4069,7 @@ impl Analyzer {
                 .filter(|p| matches!(p.kind, crate::ty::ParamKind::Required | crate::ty::ParamKind::Optional))
                 .nth(n)
         })?;
-        (!matches!(*found.ty, Ty::Var { .. } | Ty::Untyped)).then(|| (*found.ty).clone())
+        (!matches!(*found.ty, Ty::Var { .. } | Ty::Untyped { .. })).then(|| (*found.ty).clone())
     }
 
     /// Whether a signature says this parameter is `untyped`, in as many
@@ -4104,7 +4104,7 @@ impl Analyzer {
                     .filter(|p| matches!(p.kind, crate::ty::ParamKind::Required | crate::ty::ParamKind::Optional))
                     .nth(n)
             })
-            .is_some_and(|p| matches!(*p.ty, Ty::Untyped))
+            .is_some_and(|p| matches!(*p.ty, Ty::Untyped { .. }))
     }
 
     /// `dsl_macro_host`: model and library-class concern hosts may declare
@@ -4148,7 +4148,7 @@ impl Analyzer {
             let positional = is_positional.then_some(positional_seen);
             positional_seen += usize::from(is_positional);
             if self.declared_untyped_param(class_id, &method.name, positional, &param.name) {
-                ctx.local_bindings.insert(param.name.clone(), Ty::Untyped);
+                ctx.local_bindings.insert(param.name.clone(), Ty::unresolved());
                 continue;
             }
             let from_sites = observed.and_then(|v| v.get(i)).cloned();
@@ -4200,7 +4200,7 @@ impl Analyzer {
         let mut ctx = base.clone();
         for (i, name) in params.fields.keys().enumerate() {
             if self.declared_untyped_param(class_id, action_name, Some(i), name) {
-                ctx.local_bindings.insert(name.clone(), Ty::Untyped);
+                ctx.local_bindings.insert(name.clone(), Ty::unresolved());
                 continue;
             }
             let observed = [own, from_origin]
@@ -5050,7 +5050,7 @@ impl Analyzer {
             }
             _ => {
                 if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })) {
-                    table.insert(method.clone(), Ty::Untyped);
+                    table.insert(method.clone(), Ty::unresolved());
                 }
             }
         }
@@ -5777,7 +5777,7 @@ impl Analyzer {
                             // the typed sites' information. Scoped to
                             // the helper channel; explicit-receiver and
                             // own-class channels keep their semantics.
-                            if via_helper_index && matches!(t, Ty::Untyped) {
+                            if via_helper_index && matches!(t, Ty::Untyped { .. }) {
                                 Ty::Var { var: crate::ident::TyVar(0) }
                             } else {
                                 t
@@ -5801,7 +5801,7 @@ impl Analyzer {
                                             .ty
                                             .clone()
                                             .unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
-                                        let t = if via_helper_index && matches!(t, Ty::Untyped) {
+                                        let t = if via_helper_index && matches!(t, Ty::Untyped { .. }) {
                                             Ty::Var { var: crate::ident::TyVar(0) }
                                         } else {
                                             t
@@ -6311,8 +6311,8 @@ pub(crate) fn instantiate_return_kind(
         },
         ReturnKind::RelationOfSelf => Ty::Relation { of: self_id.clone() },
         ReturnKind::ArrayOfInt => Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
-        ReturnKind::ArrayOfUntyped => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
-        ReturnKind::Untyped => Ty::Untyped,
+        ReturnKind::ArrayOfUntyped => Ty::Array { elem: std::sync::Arc::new(Ty::unresolved()) },
+        ReturnKind::Untyped => Ty::unresolved(),
     }
 }
 
@@ -6879,10 +6879,10 @@ fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     if matches!(observed, Ty::Var { .. }) {
         return stored;
     }
-    if matches!(stored, Ty::Untyped) {
+    if matches!(stored, Ty::Untyped { .. }) {
         return observed;
     }
-    if matches!(observed, Ty::Untyped) {
+    if matches!(observed, Ty::Untyped { .. }) {
         return stored;
     }
     // T + Nil → Union<T, Nil>; same for the symmetric case. Skip
@@ -7199,7 +7199,7 @@ fn captured_block_ty() -> Ty {
     Ty::Fn {
         params: vec![].into(),
         block: None,
-        ret: std::sync::Arc::new(Ty::Untyped),
+        ret: std::sync::Arc::new(Ty::unresolved()),
         effects: crate::effect::EffectSet::default(),
     }
 }
@@ -7369,7 +7369,7 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
         // `Bottom`: harvesting that made every call on the result (`set_class.new`)
         // a dispatch failure on an unreachable type.
         if !saw_return && is_abstract_body(body) {
-            return Some(Ty::Untyped);
+            return Some(Ty::unresolved());
         }
         // Nothing usable collected — preserve prior behavior so the
         // `Var`/`Bottom`/`None` fallbacks downstream are unchanged.
@@ -8070,7 +8070,7 @@ fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<S
             methods.entry(Symbol::from(name)).or_insert(record.clone());
         }
         methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
-        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::Untyped);
+        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::unresolved());
     }
 }
 
@@ -8092,7 +8092,7 @@ fn register_plain_text_attr(
             methods.entry(Symbol::from(name)).or_insert(record.clone());
         }
         methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
-        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::Untyped);
+        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::unresolved());
     }
 }
 
@@ -8112,11 +8112,11 @@ fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol,
         for arg in args {
             let Some(name) = symbol_arg(arg) else { continue };
             if reader {
-                methods.entry(name.clone()).or_insert(Ty::Untyped);
+                methods.entry(name.clone()).or_insert(Ty::unresolved());
             }
             if writer {
                 let setter = Symbol::from(format!("{}=", name.as_str()));
-                methods.entry(setter).or_insert(Ty::Untyped);
+                methods.entry(setter).or_insert(Ty::unresolved());
             }
         }
     }
@@ -8141,7 +8141,7 @@ fn register_ar_attributes(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, 
             .get(1)
             .and_then(symbol_arg)
             .and_then(|t| typed_store_ty(t.as_str()))
-            .unwrap_or(Ty::Untyped);
+            .unwrap_or(Ty::unresolved());
         methods.entry(name.clone()).or_insert(ty.clone());
         let setter = Symbol::from(format!("{}=", name.as_str()));
         methods.entry(setter).or_insert(ty.clone());
@@ -8171,7 +8171,7 @@ fn register_ar_attributes(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, 
 /// overriding it.
 fn register_has_json(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
     for decl in crate::lower::has_json::has_json_decls(body) {
-        methods.insert(decl.column.clone(), Ty::Untyped);
+        methods.insert(decl.column.clone(), Ty::unresolved());
         for a in &decl.attrs {
             let flat = crate::lower::has_json::flat_name(&decl.column, &a.name);
             let ty = a.scalar.ty();
@@ -8203,8 +8203,8 @@ fn register_serialized_columns(body: &[ModelBodyItem], methods: &mut HashMap<Sym
             continue;
         }
         for name in args.iter().map_while(symbol_arg) {
-            methods.insert(name.clone(), Ty::Untyped);
-            methods.insert(Symbol::from(format!("{}=", name.as_str())), Ty::Untyped);
+            methods.insert(name.clone(), Ty::unresolved());
+            methods.insert(Symbol::from(format!("{}=", name.as_str())), Ty::unresolved());
         }
     }
 }
@@ -8232,7 +8232,7 @@ fn register_typed_store_decls(expr: &Expr, methods: &mut HashMap<Symbol, Ty>) {
             // `Untyped` even as an array — the element is unknown, so the
             // gradual escape covers every call (`push`/`reject!`/`each`/…)
             // without depending on the Array method registry.
-            let ty = if typed_store_is_array(args) && !matches!(elem_ty, Ty::Untyped) {
+            let ty = if typed_store_is_array(args) && !matches!(elem_ty, Ty::Untyped { .. }) {
                 Ty::Array { elem: std::sync::Arc::new(elem_ty.clone()) }
             } else {
                 elem_ty
@@ -8259,7 +8259,7 @@ pub(crate) fn typed_store_ty(type_method: &str) -> Option<Ty> {
         "boolean" => Ty::Bool,
         "integer" | "big_integer" => Ty::Int,
         "float" | "decimal" => Ty::Float,
-        "any" => Ty::Untyped,
+        "any" => Ty::unresolved(),
         "datetime" | "time" | "date" => Ty::Time,
         _ => return None,
     })
@@ -8383,8 +8383,8 @@ mod typed_store_tests {
 
         // `any` stays the gradual escape even with `array: true` — element
         // is unknown, so Untyped (not Array<Untyped>) keeps every call live.
-        assert_eq!(methods.get(&Symbol::from("keybase_signatures")), Some(&Ty::Untyped));
-        assert_eq!(methods.get(&Symbol::from("keybase_signatures=")), Some(&Ty::Untyped));
+        assert_eq!(methods.get(&Symbol::from("keybase_signatures")), Some(&Ty::unresolved()));
+        assert_eq!(methods.get(&Symbol::from("keybase_signatures=")), Some(&Ty::unresolved()));
         assert_eq!(methods.get(&Symbol::from("keybase_signatures?")), Some(&Ty::Bool));
         // a typed `array: true` column wraps the element type.
         assert_eq!(
@@ -8404,13 +8404,13 @@ mod typed_store_tests {
 
         // Unresolved (None or Var) → register existence as a gradual escape.
         Analyzer::register_method_return(&mut t, &Symbol::from("current_vote"), None);
-        assert_eq!(t.get(&Symbol::from("current_vote")), Some(&Ty::Untyped));
+        assert_eq!(t.get(&Symbol::from("current_vote")), Some(&Ty::unresolved()));
         Analyzer::register_method_return(
             &mut t,
             &Symbol::from("enabled"),
             Some(&Ty::Var { var: TyVar(0) }),
         );
-        assert_eq!(t.get(&Symbol::from("enabled")), Some(&Ty::Untyped));
+        assert_eq!(t.get(&Symbol::from("enabled")), Some(&Ty::unresolved()));
 
         // The fallback must never clobber a real type from another pass…
         Analyzer::register_method_return(&mut t, &Symbol::from("to_html"), None);
@@ -8704,7 +8704,7 @@ mod keyword_splat_tests {
                 Ty::Bool,
             ]
         );
-        let unsplatted = Analyzer::bind_keyword_group(&shape, &[Ty::Untyped], &keys, None)
+        let unsplatted = Analyzer::bind_keyword_group(&shape, &[Ty::unresolved()], &keys, None)
             .expect("placed");
         assert_eq!(unsplatted[0], Ty::Sym, "without a splat the literal stands alone");
     }

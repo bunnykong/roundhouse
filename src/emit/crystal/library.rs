@@ -333,7 +333,7 @@ fn render_class(lc: &LibraryClass) -> String {
                             collect_ivar_assignments(&other.body, &mut probe);
                         }
                         match probe.get(&target[1..]) {
-                            Some(t) if !matches!(t, crate::ty::Ty::Untyped) => {
+                            Some(t) if !matches!(t, crate::ty::Ty::Untyped { .. }) => {
                                 super::ty::crystal_ty(t)
                             }
                             _ => "String".to_string(),
@@ -531,7 +531,7 @@ fn render_class(lc: &LibraryClass) -> String {
             // Skip when the value type collapses to the default
             // `String` (Untyped/Var fall back there); the
             // unconditional rewrite would be a no-op.
-            if !matches!(&**value, crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. }) {
+            if !matches!(&**value, crate::ty::Ty::Untyped { .. } | crate::ty::Ty::Var { .. }) {
                 ivar_hash_types.insert(
                     name.clone(),
                     (super::ty::crystal_ty(key), super::ty::crystal_ty(value)),
@@ -843,7 +843,7 @@ fn collect_ivar_assignments(
     use crate::expr::LValue;
     match &*e.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let ty = value.ty.clone().unwrap_or(crate::ty::Ty::Untyped);
+            let ty = value.ty.clone().unwrap_or(crate::ty::Ty::gradual());
             out.insert(name.as_str().to_string(), ty);
             collect_ivar_assignments(value, out);
         }
@@ -1001,7 +1001,7 @@ fn collect_ivar_assignments(
 /// the empty-literal `Untyped` to the actual union of stored types.
 fn union_widen(existing: &crate::ty::Ty, incoming: &crate::ty::Ty) -> crate::ty::Ty {
     use crate::ty::Ty;
-    if matches!(existing, Ty::Untyped) {
+    if matches!(existing, Ty::Untyped { .. }) {
         return incoming.clone();
     }
     if existing == incoming {

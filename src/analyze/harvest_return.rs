@@ -20,14 +20,14 @@ use crate::ty::Ty;
 use super::body;
 
 fn gradual_nil() -> Ty {
-    body::union_of(Ty::Nil, Ty::Untyped)
+    body::union_of(Ty::Nil, Ty::unresolved())
 }
 
 /// True when stripping top-level unknown arms leaves a usable core
 /// (anything other than bare [`Ty::Untyped`]).
 fn has_informative_core(ty: &Ty) -> bool {
     match ty {
-        Ty::Untyped | Ty::Var { .. } => false,
+        Ty::Untyped { .. } | Ty::Var { .. } => false,
         // Nested unions (a sorbet signature keeps their shape) count only
         // if some arm somewhere is known.
         Ty::Union { variants } => variants.iter().any(has_informative_core),
@@ -70,14 +70,14 @@ fn untie_memo(ty: &Ty, prior: &Ty, memo: &mut std::collections::HashMap<usize, T
     }
     let mut go = |t: &Ty| {
         if t == prior {
-            return Ty::Untyped;
+            return Ty::unresolved();
         }
         if let (Ty::Union { variants: pv }, Ty::Union { variants: tv }) = (prior, t)
             && pv.iter().all(|v| tv.contains(v))
         {
             let mut rest: Vec<Ty> = tv.iter().filter(|v| !pv.contains(v)).map(|v| untie_memo(v, prior, memo)).collect();
-            if !rest.contains(&Ty::Untyped) {
-                rest.push(Ty::Untyped);
+            if !rest.contains(&Ty::unresolved()) {
+                rest.push(Ty::unresolved());
             }
             return Ty::Union { variants: rest.into() };
         }
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn configuration_versus_configuration_or_untyped_stabilizes_to_configuration() {
         let concrete = cfg();
-        let noisy = body::union_of(cfg(), Ty::Untyped);
+        let noisy = body::union_of(cfg(), Ty::unresolved());
         let stable = stabilize_untyped_return_oscillation(&concrete, &noisy)
             .expect("same concrete core");
         assert_eq!(stable, concrete);
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn nil_versus_nil_or_untyped_keeps_gradual_nil() {
         let nil = Ty::Nil;
-        let gradual = body::union_of(Ty::Nil, Ty::Untyped);
+        let gradual = body::union_of(Ty::Nil, Ty::unresolved());
         let stable =
             stabilize_untyped_return_oscillation(&nil, &gradual).expect("nil-only cores match");
         assert_eq!(stable, gradual);
@@ -219,10 +219,10 @@ mod tests {
     #[test]
     fn a_nested_union_of_unknown_arms_is_not_informative() {
         let unknown = Ty::Union {
-            variants: vec![Ty::Union { variants: vec![Ty::Untyped, Ty::Var { var: TyVar(0) }].into() }, Ty::Untyped].into(),
+            variants: vec![Ty::Union { variants: vec![Ty::unresolved(), Ty::Var { var: TyVar(0) }].into() }, Ty::unresolved()].into(),
         };
         assert!(!has_informative_core(&unknown));
-        let known = Ty::Union { variants: vec![Ty::Union { variants: vec![Ty::Str, Ty::Untyped].into() }, Ty::Untyped].into() };
+        let known = Ty::Union { variants: vec![Ty::Union { variants: vec![Ty::Str, Ty::unresolved()].into() }, Ty::unresolved()].into() };
         assert!(has_informative_core(&known));
     }
 
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn var_nil_versus_untyped_nil_keeps_gradual_nil() {
         let a = body::union_of(Ty::Var { var: TyVar(0) }, Ty::Nil);
-        let b = body::union_of(Ty::Untyped, Ty::Nil);
+        let b = body::union_of(Ty::unresolved(), Ty::Nil);
         let stable = stabilize_untyped_return_oscillation(&a, &b).expect("same nil core");
         assert_eq!(stable, gradual_nil());
     }
@@ -259,7 +259,7 @@ mod tests {
         let method = Symbol::from("config");
         let mut table = HashMap::new();
         insert_inferred_return(&mut table, &method, cfg());
-        insert_inferred_return(&mut table, &method, body::union_of(cfg(), Ty::Untyped));
+        insert_inferred_return(&mut table, &method, body::union_of(cfg(), Ty::unresolved()));
         assert_eq!(table.get(&method), Some(&cfg()));
     }
 
@@ -267,7 +267,7 @@ mod tests {
     fn insert_preserves_first_write_of_gradual_union() {
         let method = Symbol::from("build");
         let mut table = HashMap::new();
-        let gradual = body::union_of(Ty::Str, Ty::Untyped);
+        let gradual = body::union_of(Ty::Str, Ty::unresolved());
         insert_inferred_return(&mut table, &method, gradual.clone());
         assert_eq!(table.get(&method), Some(&gradual));
     }
@@ -276,7 +276,7 @@ mod tests {
     fn insert_gradual_first_write_then_same_core_concrete_narrows() {
         let method = Symbol::from("config");
         let mut table = HashMap::new();
-        insert_inferred_return(&mut table, &method, body::union_of(cfg(), Ty::Untyped));
+        insert_inferred_return(&mut table, &method, body::union_of(cfg(), Ty::unresolved()));
         insert_inferred_return(&mut table, &method, cfg());
         assert_eq!(table.get(&method), Some(&cfg()));
     }
@@ -295,7 +295,7 @@ mod tests {
         let method = Symbol::from("config");
         let mut table = HashMap::new();
         insert_inferred_return(&mut table, &method, cfg());
-        insert_inferred_return(&mut table, &method, Ty::Untyped);
+        insert_inferred_return(&mut table, &method, Ty::unresolved());
         assert_eq!(table.get(&method), Some(&cfg()));
     }
 
@@ -311,7 +311,7 @@ mod tests {
         insert_inferred_return(
             &mut table,
             &method,
-            Ty::Union { variants: vec![Ty::Untyped, Ty::Untyped].into() },
+            Ty::Union { variants: vec![Ty::unresolved(), Ty::unresolved()].into() },
         );
         assert_eq!(table.get(&method), Some(&concrete));
     }
@@ -342,7 +342,7 @@ mod tests {
     fn insert_recursive_return_that_nests_its_previous_round_keeps_the_previous() {
         let method = Symbol::from("sanitize");
         let mut table = HashMap::new();
-        let first = union(vec![Ty::Str, arr(Ty::Untyped)]);
+        let first = union(vec![Ty::Str, arr(Ty::unresolved())]);
         insert_inferred_return(&mut table, &method, first.clone());
         insert_inferred_return(&mut table, &method, union(vec![Ty::Str, arr(first.clone())]));
         assert_eq!(table.get(&method), Some(&first));
@@ -352,13 +352,13 @@ mod tests {
     fn insert_recursive_return_flattened_into_a_union_is_cut() {
         let method = Symbol::from("sanitize");
         let mut table = HashMap::new();
-        let first = union(vec![Ty::Str, sym_hash(Ty::Untyped)]);
+        let first = union(vec![Ty::Str, sym_hash(Ty::unresolved())]);
         insert_inferred_return(&mut table, &method, first.clone());
-        let nested = union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(Ty::Untyped), Ty::Int]))]);
+        let nested = union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(Ty::unresolved()), Ty::Int]))]);
         insert_inferred_return(&mut table, &method, nested);
-        let cut = union(vec![Ty::Str, sym_hash(union(vec![Ty::Int, Ty::Untyped]))]);
+        let cut = union(vec![Ty::Str, sym_hash(union(vec![Ty::Int, Ty::unresolved()]))]);
         assert_eq!(table.get(&method), Some(&cut));
-        insert_inferred_return(&mut table, &method, union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(union(vec![Ty::Int, Ty::Untyped])), Ty::Int]))]));
+        insert_inferred_return(&mut table, &method, union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(union(vec![Ty::Int, Ty::unresolved()])), Ty::Int]))]));
         assert_eq!(table.get(&method), Some(&cut));
     }
 
@@ -370,7 +370,7 @@ mod tests {
             row: crate::ty::Row { fields: [(Symbol::from("nested"), field)].into_iter().collect(), rest: None },
         };
         let mut table = HashMap::new();
-        let first = record(Ty::Untyped);
+        let first = record(Ty::unresolved());
         insert_inferred_return(&mut table, &method, first.clone());
         insert_inferred_return(&mut table, &method, record(first.clone()));
         assert_eq!(table.get(&method), Some(&first));

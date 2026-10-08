@@ -128,7 +128,15 @@ pub enum Ty {
     /// elevate any reachable `Untyped` to an emit-time error via the
     /// diagnostic pipeline — the gradual escape only survives
     /// emission for targets that explicitly accept it.
-    Untyped,
+    ///
+    /// `why` records which of three meanings a producer gave it
+    /// ([`Provenance`]). It is carried for reporting only: two
+    /// `Untyped` values compare, order and hash equal whatever their
+    /// provenance, and it is not serialized.
+    Untyped {
+        #[serde(skip)]
+        why: Provenance,
+    },
 
     /// The bottom type — values of this type don't exist at runtime
     /// because the expression diverges (`raise`, `return`, `next`,
@@ -145,6 +153,57 @@ pub enum Ty {
     /// the union filter is the analog of Crystal's `Type.merge`
     /// dropping NoReturn variants during type joining.
     Bottom,
+}
+
+/// Why a type is `untyped`. One value used to carry three meanings, and
+/// every rule that meets it has to keep or drop it, which is right for one
+/// meaning and wrong for another. The producers now say which they mean.
+///
+/// The tag is carried, not consulted: no rule reads it yet, and it never
+/// changes how a type compares, orders, hashes or serializes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Provenance {
+    /// Not computed yet: an inference gap that a later round may fill. It
+    /// carries no evidence about the value.
+    Pending,
+    /// The author opted out: RBS `untyped`, Sorbet `T.untyped`, or a
+    /// declared or modeled signature (the catalog, the framework runtime)
+    /// that says any value is accepted.
+    #[default]
+    Gradual,
+    /// Nothing answers it: an unsupported construct, an unknown or external
+    /// surface, or a position the analysis cut or widened.
+    Unresolved,
+}
+
+impl Ty {
+    /// `untyped`, as a producer that means `why`.
+    pub const fn untyped(why: Provenance) -> Ty {
+        Ty::Untyped { why }
+    }
+
+    /// `untyped` the author or a declaration chose.
+    pub const fn gradual() -> Ty {
+        Ty::Untyped { why: Provenance::Gradual }
+    }
+
+    /// `untyped` because nothing answers the position.
+    pub const fn unresolved() -> Ty {
+        Ty::Untyped { why: Provenance::Unresolved }
+    }
+
+    /// `untyped` standing in for a value not computed yet.
+    pub const fn pending_untyped() -> Ty {
+        Ty::Untyped { why: Provenance::Pending }
+    }
+
+    /// The provenance of an `untyped`, `None` for any other type.
+    pub fn provenance(&self) -> Option<Provenance> {
+        match self {
+            Ty::Untyped { why } => Some(*why),
+            _ => None,
+        }
+    }
 }
 
 impl Ty {
@@ -288,7 +347,7 @@ impl Ty {
     /// declaration the last word rather than a hint.
     pub fn mentions_unknown(&self) -> bool {
         match self {
-            Ty::Var { .. } | Ty::Untyped => true,
+            Ty::Var { .. } | Ty::Untyped { .. } => true,
             Ty::Class { args, .. } => args.iter().any(Ty::mentions_unknown),
             Ty::Array { elem } => elem.mentions_unknown(),
             Ty::Hash { key, value } => key.mentions_unknown() || value.mentions_unknown(),
@@ -315,7 +374,7 @@ impl Ty {
     /// are *known* types, so sites that also treat those as noise use
     /// their own `matches!` and must not be folded into this predicate.
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Ty::Var { .. } | Ty::Untyped)
+        matches!(self, Ty::Var { .. } | Ty::Untyped { .. })
     }
 
     /// The element type of a collection-shaped type: `Array[T]` → `T`,
@@ -466,12 +525,12 @@ impl Ty {
             Ty::Union { variants } => {
                 let kept: Vec<Ty> = variants.into_iter().filter(|v| !v.is_unknown()).collect();
                 match kept.len() {
-                    0 => Ty::Untyped,
+                    0 => Ty::gradual(),
                     1 => kept.into_iter().next().unwrap(),
                     _ => Ty::Union { variants: kept.into() },
                 }
             }
-            Ty::Var { .. } => Ty::Untyped,
+            Ty::Var { .. } => Ty::pending_untyped(),
             other => other,
         }
     }
@@ -517,7 +576,7 @@ fn ty_tag(ty: &Ty) -> u8 {
         Ty::Class { .. } => 14,
         Ty::Fn { .. } => 15,
         Ty::Var { .. } => 16,
-        Ty::Untyped => 17,
+        Ty::Untyped { .. } => 17,
         Ty::Bottom => 18,
         Ty::Nil => 19,
     }
@@ -706,5 +765,43 @@ impl PartialEq for Ty {
 impl std::hash::Hash for Ty {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
         crate::ty_hash::hash(self, h);
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    use std::hash::{Hash, Hasher};
+
+    fn hash(t: &Ty) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    }
+
+    /// The tag is carried, not consulted: every kind of `untyped` compares,
+    /// orders, hashes and serializes as `untyped` did.
+    #[test]
+    fn provenance_never_changes_how_untyped_behaves() {
+        let kinds = [Ty::pending_untyped(), Ty::gradual(), Ty::unresolved()];
+        for a in &kinds {
+            for b in &kinds {
+                assert_eq!(a, b);
+                assert_eq!(hash(a), hash(b));
+                assert_eq!(cmp_ty(a, b), std::cmp::Ordering::Equal);
+                assert_eq!(serde_json::to_string(a).unwrap(), serde_json::to_string(b).unwrap());
+            }
+        }
+        assert_eq!(serde_json::to_string(&Ty::unresolved()).unwrap(), r#"{"kind":"untyped"}"#);
+        let back: Ty = serde_json::from_str(r#"{"kind":"untyped"}"#).unwrap();
+        assert_eq!(back.provenance(), Some(Provenance::Gradual));
+        let u = Ty::Union { variants: vec![Ty::Int, Ty::unresolved()].into() };
+        assert_eq!(u, Ty::Union { variants: vec![Ty::Int, Ty::gradual()].into() });
+    }
+
+    #[test]
+    fn a_pending_var_strips_to_pending_untyped() {
+        assert_eq!(Ty::Var { var: TyVar(0) }.strip_unknown().provenance(), Some(Provenance::Pending));
+        assert_eq!(Ty::Int.provenance(), None);
     }
 }

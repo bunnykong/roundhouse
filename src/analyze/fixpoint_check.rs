@@ -299,31 +299,48 @@ impl StateFp {
     }
 }
 
-/// Typed expressions, and those whose type holds `untyped`.
+/// Typed expressions, and those whose type holds `untyped`, in all and by
+/// provenance (an expression can hold more than one kind).
 #[derive(Default)]
 struct Census {
     typed: u64,
     missing: u64,
     bare_untyped: u64,
     untyped_anywhere: u64,
+    /// Pending, gradual, unresolved.
+    by_kind: [u64; 3],
 }
 
-fn holds_untyped(t: &Ty) -> bool {
+/// The provenances of the `untyped` positions in `t`, as bits.
+fn untyped_kinds(t: &Ty) -> u8 {
+    let mut bits = 0u8;
+    let mut each = |c: &Ty| bits |= untyped_kinds(c);
     match t {
-        Ty::Untyped => true,
-        Ty::Array { elem } => holds_untyped(elem),
-        Ty::Hash { key, value } => holds_untyped(key) || holds_untyped(value),
-        Ty::Tuple { elems } => elems.iter().any(holds_untyped),
-        Ty::Union { variants } => variants.iter().any(holds_untyped),
-        Ty::Record { row } => row.fields.values().any(holds_untyped),
-        Ty::Class { args, .. } => args.iter().any(holds_untyped),
-        Ty::Fn { params, block, ret, .. } => {
-            params.iter().any(|p| holds_untyped(&p.ty))
-                || block.as_deref().is_some_and(holds_untyped)
-                || holds_untyped(ret)
+        Ty::Untyped { why } => return 1 << (*why as u8),
+        Ty::Array { elem } => each(elem),
+        Ty::Hash { key, value } => {
+            each(key);
+            each(value);
         }
-        _ => false,
+        Ty::Tuple { elems } => elems.iter().for_each(each),
+        Ty::Union { variants } => variants.iter().for_each(each),
+        Ty::Record { row } => row.fields.values().for_each(each),
+        Ty::Class { args, .. } => args.iter().for_each(each),
+        Ty::Fn { params, block, ret, .. } => {
+            params.iter().for_each(|p| each(&p.ty));
+            if let Some(b) = block.as_deref() {
+                each(b);
+            }
+            each(ret);
+        }
+        _ => {}
     }
+    bits
+}
+
+#[cfg(test)]
+fn holds_untyped(t: &Ty) -> bool {
+    untyped_kinds(t) != 0
 }
 
 impl Census {
@@ -331,8 +348,12 @@ impl Census {
         match &e.ty {
             Some(t) => {
                 self.typed += 1;
-                self.bare_untyped += u64::from(matches!(t, Ty::Untyped));
-                self.untyped_anywhere += u64::from(holds_untyped(t));
+                self.bare_untyped += u64::from(matches!(t, Ty::Untyped { .. }));
+                let kinds = untyped_kinds(t);
+                self.untyped_anywhere += u64::from(kinds != 0);
+                for (i, n) in self.by_kind.iter_mut().enumerate() {
+                    *n += u64::from(kinds & (1 << i) != 0);
+                }
             }
             None => self.missing += 1,
         }
@@ -540,6 +561,11 @@ impl Analyzer {
                 "missing": census.missing,
                 "bare_untyped": census.bare_untyped,
                 "untyped_anywhere": census.untyped_anywhere,
+                "untyped_by_provenance": {
+                    "pending": census.by_kind[0],
+                    "gradual": census.by_kind[1],
+                    "unresolved": census.by_kind[2],
+                },
             });
             line["bound"] = serde_json::json!({
                 "calls": BOUND_CALLS.load(Ordering::Relaxed),
@@ -581,7 +607,7 @@ mod tests {
     fn untyped_is_found_at_any_depth() {
         let deep = Ty::Hash {
             key: Arc::new(Ty::Str),
-            value: Arc::new(Ty::Array { elem: Arc::new(union(vec![Ty::Int, Ty::Untyped])) }),
+            value: Arc::new(Ty::Array { elem: Arc::new(union(vec![Ty::Int, Ty::unresolved()])) }),
         };
         assert!(holds_untyped(&deep));
         assert!(!holds_untyped(&Ty::Array { elem: Arc::new(Ty::Int) }));

@@ -841,7 +841,7 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
     // override, so the base body never runs. Synthesize the type's default
     // (`0` for `Long`, `null` for nullable returns) to keep it a no-op.
     let body = if returns_value && is_empty_body(&m.body) {
-        let ret = ret_ty.clone().unwrap_or(Ty::Untyped);
+        let ret = ret_ty.clone().unwrap_or(Ty::gradual());
         format!("return {}", default_for(&ret))
     } else {
         emit_body(&m.body, returns_value)
@@ -1127,7 +1127,7 @@ fn object_property_decl(name: &str, ty: &Ty) -> String {
 /// `lateinit` is legal only for non-null, non-primitive types.
 fn can_lateinit(ty: &Ty) -> bool {
     match ty {
-        Ty::Int | Ty::Float | Ty::Bool | Ty::Nil | Ty::Untyped | Ty::Var { .. } => false,
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Nil | Ty::Untyped { .. } | Ty::Var { .. } => false,
         Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => false,
         _ => true,
     }
@@ -1201,7 +1201,7 @@ fn infer_body_ivar_types(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
 /// value of `@x = …`, when it's concrete (not `Untyped`/`Var`). Never
 /// overwrites a stronger signal already present.
 fn collect_ivar_node_types(e: &Expr, out: &mut BTreeMap<String, Ty>) {
-    let useful = |ty: &Ty| !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil);
+    let useful = |ty: &Ty| !matches!(ty, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Nil);
     match &*e.node {
         ExprNode::Ivar { name } => {
             if let Some(ty) = e.ty.as_ref().filter(|t| useful(t)) {

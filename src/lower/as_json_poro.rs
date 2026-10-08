@@ -519,7 +519,7 @@ fn as_json_method(owner: &ClassId, readers: &[Symbol]) -> MethodDef {
                     // what the emitted RBS says of them.
                     let mut read =
                         Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() });
-                    read.ty = Some(crate::ty::Ty::Untyped);
+                    read.ty = Some(crate::ty::Ty::gradual());
                     read
                 },
             )

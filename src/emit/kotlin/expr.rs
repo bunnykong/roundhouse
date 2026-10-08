@@ -1096,13 +1096,13 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
         // fail Kotlin invariance against String-keyed helper params.
         if let Some(crate::ty::Ty::Hash { key, value }) = e.ty.as_ref() {
             let k = match key.as_ref() {
-                crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. } | crate::ty::Ty::Sym => {
+                crate::ty::Ty::Untyped { .. } | crate::ty::Ty::Var { .. } | crate::ty::Ty::Sym => {
                     "String".to_string()
                 }
                 _ => kotlin_ty(key),
             };
             let v = match value.as_ref() {
-                crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. } => "Any?".to_string(),
+                crate::ty::Ty::Untyped { .. } | crate::ty::Ty::Var { .. } => "Any?".to_string(),
                 _ => kotlin_ty(value),
             };
             return format!("mutableMapOf<{k}, {v}>()");
@@ -1154,7 +1154,7 @@ fn emit_hash_precise(entries: &[(Expr, Expr)], e: &Expr) -> String {
 /// `Bottom` name no storable value.
 fn is_concrete_elem(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
-    !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil | Ty::Bottom | Ty::Union { .. })
+    !matches!(ty, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Nil | Ty::Bottom | Ty::Union { .. })
 }
 
 /// Emit a non-empty hash literal with no explicit type arguments, so the
@@ -1430,7 +1430,7 @@ fn coerce_nullable_finder(
             let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
             matches!(non_nil.as_slice(), [Ty::Class { .. }])
         }
-        None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => {
+        None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => {
             let ExprNode::Const { path } = &*r.node else { return rendered };
             let cls = type_name(
                 &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
@@ -2049,8 +2049,8 @@ fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
 fn nilable_prop_conversion(base: &str, value: &Expr) -> Option<String> {
     use crate::ty::Ty;
     let rhs_untyped = match value.ty.as_ref() {
-        None | Some(Ty::Untyped) => true,
-        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped)),
+        None | Some(Ty::Untyped { .. }) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped { .. })),
         _ => false,
     };
     if !rhs_untyped {

@@ -764,7 +764,7 @@ fn map_holds_json_value(recv_ty: Option<&crate::ty::Ty>) -> bool {
     matches!(
         recv_ty,
         Some(Ty::Hash { value, .. })
-            if matches!(value.as_ref(), Ty::Untyped)
+            if matches!(value.as_ref(), Ty::Untyped { .. })
                 || matches!(value.as_ref(), Ty::Union { .. })
     )
 }

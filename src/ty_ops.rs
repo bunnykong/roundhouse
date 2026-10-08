@@ -89,7 +89,7 @@ pub(crate) fn equal(a: &Ty, b: &Ty) -> bool {
         | (Ty::Time, _)
         | (Ty::Nil, _)
         | (Ty::SelfInstance, _)
-        | (Ty::Untyped, _)
+        | (Ty::Untyped { .. }, _)
         | (Ty::Bottom, _) => return true,
         (Ty::Var { var: x }, Ty::Var { var: y }) => return x == y,
         (Ty::Relation { of: x }, Ty::Relation { of: y }) => return x == y,
@@ -109,7 +109,7 @@ pub(crate) fn equal(a: &Ty, b: &Ty) -> bool {
         | (Ty::Time, Ty::Time)
         | (Ty::Nil, Ty::Nil)
         | (Ty::SelfInstance, Ty::SelfInstance)
-        | (Ty::Untyped, Ty::Untyped)
+        | (Ty::Untyped { .. }, Ty::Untyped { .. })
         | (Ty::Bottom, Ty::Bottom) => true,
         (Ty::Relation { of: x }, Ty::Relation { of: y }) => x == y,
         (Ty::Array { elem: x }, Ty::Array { elem: y }) => x == y,

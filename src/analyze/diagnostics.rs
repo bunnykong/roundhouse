@@ -308,7 +308,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // A `Seq` has its tail's type; the tail reports itself. ForwardArgs is
     // an argument-packet marker, not a value escaping the type system.
     if value_used
-        && matches!(expr.ty.as_ref(), Some(Ty::Untyped))
+        && matches!(expr.ty.as_ref(), Some(Ty::Untyped { .. }))
         && !matches!(
             &*expr.node,
             ExprNode::Seq { .. } | ExprNode::ForwardArgs | ExprNode::ForwardKeywords

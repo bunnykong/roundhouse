@@ -142,7 +142,7 @@ fn refine_signature_block(m: &mut crate::dialect::MethodDef, block_ty: Ty) {
                 .iter()
                 .map(|p| Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::unresolved().into(),
                     kind: ParamKind::Required,
                 })
                 .chain(std::iter::once(block_param))
@@ -150,7 +150,7 @@ fn refine_signature_block(m: &mut crate::dialect::MethodDef, block_ty: Ty) {
             m.signature = Some(Ty::Fn {
                 params: placeholder_params.into(),
                 block: Some(std::sync::Arc::new(block_ty)),
-                ret: std::sync::Arc::new(Ty::Untyped),
+                ret: std::sync::Arc::new(Ty::unresolved()),
                 effects: crate::effect::EffectSet::default(),
             });
         }
@@ -183,7 +183,7 @@ mod tests {
                 },
                 Param {
                     name: Symbol::new("v"),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::unresolved().into(),
                     kind: ParamKind::Required,
                 },
             ].into(),
@@ -331,13 +331,13 @@ mod tests {
                         kind: ParamKind::Required,
                     }].into(),
                     block: None,
-                    ret: std::sync::Arc::new(Ty::Untyped),
+                    ret: std::sync::Arc::new(Ty::unresolved()),
                     effects: EffectSet::pure(),
                 }.into(),
                 kind: ParamKind::Block,
             }].into(),
             block: None,
-            ret: std::sync::Arc::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::unresolved()),
             effects: EffectSet::pure(),
         };
         fwd.signature = Some(pre_sig.clone());

@@ -154,7 +154,7 @@ fn body_ty(body: &Expr) -> Option<crate::ty::Ty> {
         ExprNode::Seq { exprs } => exprs.last()?,
         _ => body,
     };
-    last.ty.clone().filter(|t| !matches!(t, crate::ty::Ty::Var { .. } | crate::ty::Ty::Untyped))
+    last.ty.clone().filter(|t| !matches!(t, crate::ty::Ty::Var { .. } | crate::ty::Ty::Untyped { .. }))
 }
 
 /// `Rails.application.credentials.pushover` → `Rails.application
@@ -200,7 +200,7 @@ fn rewrite_credentials_node(expr: &mut Expr) {
             parenthesized: true,
         },
     );
-    index.ty = Some(crate::ty::Ty::Untyped);
+    index.ty = Some(crate::ty::Ty::gradual());
     *expr = index;
 }
 
@@ -473,7 +473,7 @@ fn peel_config_chain(expr: &Expr) -> Option<(Expr, Vec<String>)> {
                 // hop out — and an unstamped node here reads on the
                 // ledger as `no known method application on Class(Rails)`
                 // against a class that plainly has one.
-                app.ty = Some(crate::ty::Ty::Untyped);
+                app.ty = Some(crate::ty::Ty::gradual());
                 return Some((app, segments));
             }
             _ => {

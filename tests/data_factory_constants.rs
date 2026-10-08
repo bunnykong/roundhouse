@@ -51,7 +51,7 @@ fn literal_data_declarations_register_exact_members_without_writers() {
         for member in members {
             assert_eq!(
                 class.instance_methods.get(&Symbol::from(member)),
-                Some(&Ty::Untyped)
+                Some(&Ty::gradual())
             );
             assert!(
                 !class

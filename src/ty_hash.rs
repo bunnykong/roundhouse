@@ -67,7 +67,7 @@ fn fingerprint(ty: &Ty) -> u64 {
         Ty::Class { .. } => 15,
         Ty::Fn { .. } => 16,
         Ty::Var { .. } => 17,
-        Ty::Untyped => 18,
+        Ty::Untyped { .. } => 18,
         Ty::Bottom => 19,
     };
     tag.hash(&mut h);

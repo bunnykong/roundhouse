@@ -922,7 +922,7 @@ fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
                     "Any?".to_string()
                 }
             }
-            Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Var { .. }) | None => {
+            Some(crate::ty::Ty::Untyped { .. }) | Some(crate::ty::Ty::Var { .. }) | None => {
                 "Any?".to_string()
             }
             Some(t) => swift_ty(t),
@@ -1552,7 +1552,7 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
 /// second-guess it.
 fn is_concrete_elem(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
-    !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil | Ty::Bottom)
+    !matches!(ty, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Nil | Ty::Bottom)
 }
 
 fn emit_array(elements: &[Expr], e: &Expr) -> String {

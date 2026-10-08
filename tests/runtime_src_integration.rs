@@ -145,7 +145,7 @@ fn count_gradual(e: &Expr) -> usize {
 }
 
 fn count_gradual_recurse(e: &Expr, total: &mut usize) {
-    if matches!(&e.ty, Some(Ty::Untyped)) {
+    if matches!(&e.ty, Some(Ty::Untyped { .. })) {
         *total += 1;
     }
     use ExprNode as N;
@@ -836,8 +836,8 @@ fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
         ExprNode::Hash { entries: vec![], kwargs: false },
     );
     arg.ty = Some(Ty::Hash {
-        key: std::sync::Arc::new(Ty::Untyped),
-        value: std::sync::Arc::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::gradual()),
+        value: std::sync::Arc::new(Ty::gradual()),
     });
     let emitted = roundhouse::emit::kotlin::emit_expr_for_runtime(&arg);
     assert_eq!(
