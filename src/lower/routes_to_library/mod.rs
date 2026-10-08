@@ -207,7 +207,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // single helper (`articles` for both index/create — same URL).
     // First-occurrence wins; the as_name + path are identical so the
     // function body is the same.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: crate::hashes::HashSet<String> = crate::hashes::HashSet::default();
     let mut funcs: Vec<LibraryFunction> = Vec::new();
     // Helper name -> (every segment name it can take, how many
     // positionals the GENERATED helper requires). The query survey
@@ -222,7 +222,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // Taking the last one's segments instead made `period` look like a
     // query param and emitted `mod_notes_path(period = nil, period:
     // nil)` — a duplicate parameter name.
-    let mut helper_shape: std::collections::HashMap<String, (Vec<String>, usize)> =
+    let mut helper_shape: crate::hashes::HashMap<String, (Vec<String>, usize)> =
         Default::default();
     for r in flat.iter().filter(|r| r.named) {
         // Both spellings: `_url` is the same helper with the host in
@@ -251,7 +251,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // generated without them (`unknown keyword: :bot_key`). Registering
     // the variant under its own name collects them against the variant,
     // where they belong.
-    let declared: std::collections::HashSet<String> =
+    let declared: crate::hashes::HashSet<String> =
         flat.iter().filter(|r| r.named).map(|r| format!("{}_path", r.as_name)).collect();
     let variants = format_variant_demand(app, &declared);
     for (name, (as_name, _)) in &variants {
@@ -491,7 +491,7 @@ fn build_url_options_function(
     extras: &[String],
     flat: &[FlatRoute],
 ) -> LibraryFunction {
-    let no_slugs = std::collections::HashSet::new();
+    let no_slugs = crate::hashes::HashSet::default();
     let key_expr = Expr::new(
         Span::synthetic(),
         ExprNode::StringInterp {
@@ -556,7 +556,7 @@ fn build_url_options_function(
             })
             .collect();
         supers.sort_by_key(|r| std::cmp::Reverse(r.path_params.len()));
-        let mut seen_paths: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut seen_paths: crate::hashes::HashSet<&str> = crate::hashes::HashSet::default();
         for r in supers {
             if !seen_paths.insert(r.path.as_str()) {
                 continue;
@@ -607,7 +607,7 @@ fn build_url_options_function(
                 Expr::new(Span::synthetic(), ExprNode::Seq { exprs: binds }),
             ));
         }
-        let family: std::collections::HashSet<&String> =
+        let family: crate::hashes::HashSet<&String> =
             routes.iter().flat_map(|r| r.path_params.iter()).collect();
         let drop = routes
             .iter()
@@ -750,7 +750,7 @@ fn build_helper_function(
     // Segments a call site fills with a String — see
     // `string_segment_demand`. Overrides the name-based `id`-is-Integer
     // default for exactly those.
-    string_segments: Option<&std::collections::HashSet<String>>,
+    string_segments: Option<&crate::hashes::HashSet<String>>,
     // `Some("json")` builds the MONOMORPHIZED variant a call site's
     // `format: :json` asks for — see `format_variant_demand`. The
     // extension is a literal here, so it costs the base helper nothing.
@@ -777,7 +777,7 @@ fn build_helper_function(
         }
         slug_id
     };
-    let slug_params: std::collections::HashSet<String> = route
+    let slug_params: crate::hashes::HashSet<String> = route
         .path_params
         .iter()
         .filter(|p| param_is_slug(p.as_str()))
@@ -1122,7 +1122,7 @@ fn build_helper_function(
     // spinel#3977 was about. `optional_names` is the set the `def`
     // actually defaulted, defaults-from-`scope` and trailing
     // nil-optionals alike.
-    let optional_names: std::collections::HashSet<Symbol> = params
+    let optional_names: crate::hashes::HashSet<Symbol> = params
         .iter()
         .filter(|p| p.default.is_some())
         .map(|p| p.name.clone())
@@ -1260,14 +1260,14 @@ pub(crate) struct QueryKey {
 /// demoted, and a helper nobody calls keeps the name-based default.
 fn string_segment_demand(
     app: &App,
-    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    type Demand = std::collections::HashMap<String, std::collections::HashSet<String>>;
+    helpers: &crate::hashes::HashMap<String, (Vec<String>, usize)>,
+) -> crate::hashes::HashMap<String, crate::hashes::HashSet<String>> {
+    type Demand = crate::hashes::HashMap<String, crate::hashes::HashSet<String>>;
     let mut out: Demand = Default::default();
     let mut collect = |e: &Expr| {
         fn walk(
             e: &Expr,
-            helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+            helpers: &crate::hashes::HashMap<String, (Vec<String>, usize)>,
             out: &mut Demand,
         ) {
             if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
@@ -1331,8 +1331,8 @@ fn string_segment_demand(
 /// and never a segment.
 fn route_for_string_segments(
     e: &Expr,
-    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-    out: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+    helpers: &crate::hashes::HashMap<String, (Vec<String>, usize)>,
+    out: &mut crate::hashes::HashMap<String, crate::hashes::HashSet<String>>,
 ) {
     if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
         if method.as_str() == "route_for" && !args.is_empty() {
@@ -1360,11 +1360,11 @@ fn route_for_string_segments(
 
 fn query_param_demand(
     app: &App,
-    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-) -> std::collections::HashMap<String, Vec<QueryKey>> {
-    type Demand = std::collections::HashMap<String, std::collections::BTreeMap<String, bool>>;
-    type Records = std::collections::HashMap<(String, String), bool>;
-    let models: std::collections::HashMap<String, bool> = app
+    helpers: &crate::hashes::HashMap<String, (Vec<String>, usize)>,
+) -> crate::hashes::HashMap<String, Vec<QueryKey>> {
+    type Demand = crate::hashes::HashMap<String, std::collections::BTreeMap<String, bool>>;
+    type Records = crate::hashes::HashMap<(String, String), bool>;
+    let models: crate::hashes::HashMap<String, bool> = app
         .models
         .iter()
         .map(|m| {
@@ -1381,9 +1381,9 @@ fn query_param_demand(
     let mut collect = |e: &Expr| {
         fn walk(
             e: &Expr,
-            helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+            helpers: &crate::hashes::HashMap<String, (Vec<String>, usize)>,
             out: &mut Demand,
-            models: &std::collections::HashMap<String, bool>,
+            models: &crate::hashes::HashMap<String, bool>,
             records: &mut Records,
         ) {
             if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
@@ -1469,7 +1469,7 @@ fn query_param_demand(
 /// convention the call-site pass also reads (`@user`, `@showing_user`:
 /// the name, or its `_<model>` suffix, is a model's). Answers whether
 /// that model overrides `to_param`.
-fn record_model_slug(v: &Expr, models: &std::collections::HashMap<String, bool>) -> Option<bool> {
+fn record_model_slug(v: &Expr, models: &crate::hashes::HashMap<String, bool>) -> Option<bool> {
     if let Some(crate::ty::Ty::Class { id, .. }) = v.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
         if let Some(slug) = models.get(id.0.as_str()) {
             return Some(*slug);
@@ -1502,7 +1502,7 @@ fn record_model_slug(v: &Expr, models: &std::collections::HashMap<String, bool>)
 /// costs nothing to the callers that never mention a format.
 fn format_variant_demand(
     app: &App,
-    declared: &std::collections::HashSet<String>,
+    declared: &crate::hashes::HashSet<String>,
 ) -> std::collections::BTreeMap<String, (String, String)> {
     let mut out: std::collections::BTreeMap<String, (String, String)> = Default::default();
     // `<as_name>` for every named route, longest first: `story_path` and
@@ -1518,7 +1518,7 @@ fn format_variant_demand(
         fn walk(
             e: &Expr,
             names: &[String],
-            declared: &std::collections::HashSet<String>,
+            declared: &crate::hashes::HashSet<String>,
             out: &mut std::collections::BTreeMap<String, (String, String)>,
         ) {
             if let ExprNode::Send { recv: None, method, .. } = &*e.node {
@@ -1790,7 +1790,7 @@ fn param_ty(name: &str, slug_id: bool) -> Ty {
 fn build_path_expr(
     path: &str,
     path_params: &[String],
-    slug_params: &std::collections::HashSet<String>,
+    slug_params: &crate::hashes::HashSet<String>,
 ) -> Expr {
     if path_params.is_empty() {
         return lit_str(path.to_string());
@@ -1846,9 +1846,9 @@ fn build_optional_path_expr(
     path: &str,
     seg_params: &[String],
     required: usize,
-    slug_params: &std::collections::HashSet<String>,
+    slug_params: &crate::hashes::HashSet<String>,
 ) -> Expr {
-    let optional: std::collections::HashSet<&str> =
+    let optional: crate::hashes::HashSet<&str> =
         seg_params[required..].iter().map(|s| s.as_str()).collect();
     let mut base_parts: Vec<InterpPart> = Vec::new();
     // (param-name, its conditionally-appended segment parts)
@@ -2020,7 +2020,7 @@ fn app_merges_into_url_options(app: &App) -> bool {
 
 fn expr_splats_into_a_route_helper(
     e: &Expr,
-    shapes: &std::collections::HashMap<String, Vec<bool>>,
+    shapes: &crate::hashes::HashMap<String, Vec<bool>>,
 ) -> bool {
     if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
         if crate::lower::controller_to_library::rewrites::route_helper_query_splat_index(

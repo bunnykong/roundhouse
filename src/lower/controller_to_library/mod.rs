@@ -65,8 +65,8 @@ use self::util::{ivars_in_scope, method_name_for_action, views_module_name};
 fn json_actions_for(
     controller: &Controller,
     views: &[crate::dialect::View],
-) -> std::collections::HashSet<Symbol> {
-    let mut out: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+) -> crate::hashes::HashSet<Symbol> {
+    let mut out: crate::hashes::HashSet<Symbol> = crate::hashes::HashSet::default();
     let module = match views_module_name(controller) {
         Some(m) => m,
         None => return out,
@@ -111,10 +111,10 @@ fn json_actions_for(
 /// raw `pwa/service_worker.js`. Without the arm the action had no
 /// template for html and answered an empty 204, which the browser
 /// refuses to register — so no push subscription could ever start.
-type TextFormatActions = std::collections::HashMap<Symbol, Vec<&'static str>>;
+type TextFormatActions = crate::hashes::HashMap<Symbol, Vec<&'static str>>;
 
 fn text_format_actions_for(controller: &Controller, views: &[crate::dialect::View]) -> TextFormatActions {
-    let mut out = TextFormatActions::new();
+    let mut out = TextFormatActions::default();
     let module = match views_module_name(controller) {
         Some(m) => m,
         None => return out,
@@ -143,12 +143,12 @@ fn text_format_actions_for(controller: &Controller, views: &[crate::dialect::Vie
 
 /// `(view-module, action-stem) -> ViewArgs` for the render rewrite.
 /// Built once from the app's views; see `action_view_ivar_map`.
-type PartialMap = std::collections::HashMap<
+type PartialMap = crate::hashes::HashMap<
     (String, String),
     crate::lower::view_to_library::PartialCallContract,
 >;
 type ViewIvarMap =
-    std::collections::HashMap<(String, String), crate::lower::view_to_library::ViewArgs>;
+    crate::hashes::HashMap<(String, String), crate::lower::view_to_library::ViewArgs>;
 
 /// Bulk entry point: lower every controller against a shared class
 /// registry so cross-controller / model / view dispatch types
@@ -255,21 +255,21 @@ pub struct LowerControllerOptions<'a> {
     /// implicit-render/dispatch to routed actions; `None` is legacy
     /// "every public method is an action."
     pub routed_by_controller:
-        Option<&'a std::collections::HashMap<ClassId, std::collections::HashSet<Symbol>>>,
+        Option<&'a crate::hashes::HashMap<ClassId, crate::hashes::HashSet<Symbol>>>,
     /// Whether to synthesize the full format-dispatch breadth.
     pub format_breadth: FormatBreadth,
     /// Per route helper, which positional segments are id-shaped —
     /// `crate::lower::routes::helper_id_segments`. Empty (the default)
     /// means the record→`.id` projection stays purely shape-directed,
     /// which is what it was before the table existed.
-    pub route_id_segments: Option<&'a std::collections::HashMap<String, Vec<bool>>>,
+    pub route_id_segments: Option<&'a crate::hashes::HashMap<String, Vec<bool>>>,
     /// The analyzer's converged call-site param table
     /// (`App::inferred_method_params`) — types private-helper params
     /// in the built signatures. `None` (the default) pins them
     /// `untyped`, which is what every param was before the channel
     /// existed.
     pub inferred_params:
-        Option<&'a std::collections::HashMap<(ClassId, Symbol), Vec<crate::ty::Ty>>>,
+        Option<&'a crate::hashes::HashMap<(ClassId, Symbol), Vec<crate::ty::Ty>>>,
     /// The app's models — read for `has_one_attached` declarations, so
     /// a permitted field that is one (`:avatar`) is typed as an
     /// uploaded file on the synthesized params class
@@ -297,7 +297,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     } = opts;
     // `None` (every wrapper's default) means the projection stays
     // purely shape-directed — what it was before this table existed.
-    let empty_segments = std::collections::HashMap::new();
+    let empty_segments = crate::hashes::HashMap::default();
     let route_id_segments = route_id_segments.unwrap_or(&empty_segments);
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
@@ -332,8 +332,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
     });
 
-    let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
-        std::collections::HashMap::new();
+    let mut classes: crate::hashes::HashMap<ClassId, crate::analyze::ClassInfo> =
+        crate::hashes::HashMap::default();
     // Register synthesized Params classes so dispatch on
     // `<Resource>Params.from_raw(@params)` and the typed factory
     // accessors resolves through the body-typer.
@@ -438,8 +438,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // `@article = Article.find(@params[:id].to_i)` at the top of
     // an action, the body-typer's Seq walk picks it up and
     // propagates the type to downstream reads. No naming guess.
-    let mut framework_ivars: std::collections::HashMap<Symbol, Ty> =
-        std::collections::HashMap::new();
+    let mut framework_ivars: crate::hashes::HashMap<Symbol, Ty> =
+        crate::hashes::HashMap::default();
     framework_ivars.insert(
         Symbol::from("params"),
         Ty::Hash {
@@ -476,7 +476,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // `scope` declarations plus the class methods whose body tail is a
     // query chain. Read off the analyzer's registry rather than
     // restated, so "what refines a relation" has one answer.
-    let relation_scope_names: std::collections::HashSet<Symbol> = classes
+    let relation_scope_names: crate::hashes::HashSet<Symbol> = classes
         .values()
         .flat_map(|ci| ci.class_methods.iter())
         .filter(|(_, ty)| crate::lower::arel::returns_relation(ty))
@@ -492,7 +492,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         // rewritten: which of its own methods does it call and then
         // chain a relation method onto. See
         // `arel::relation_refined_method_names` for what that licenses.
-        let mut refined_result_methods: std::collections::HashSet<Symbol> =
+        let mut refined_result_methods: crate::hashes::HashSet<Symbol> =
             Default::default();
         for m in &methods {
             crate::lower::arel::relation_refined_method_names(
@@ -563,8 +563,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // check fails.
     let mut params_lcs = params_lcs;
     for params_lc in &mut params_lcs {
-        let mut params_ivars: std::collections::HashMap<Symbol, Ty> =
-            std::collections::HashMap::new();
+        let mut params_ivars: crate::hashes::HashMap<Symbol, Ty> =
+            crate::hashes::HashMap::default();
         if let Some(crate::dialect::LibraryClassOrigin::ResourceParams { fields, .. }) =
             &params_lc.origin
         {
@@ -593,19 +593,19 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
     let specs = self::params::collect_specs(std::slice::from_ref(controller));
     // No view list in this single-controller path → empty map; the render
     // rewrite falls back to in-scope ivars (legacy behavior for tests).
-    let view_ivars: ViewIvarMap = std::collections::HashMap::new();
-    let partials: PartialMap = std::collections::HashMap::new();
+    let view_ivars: ViewIvarMap = crate::hashes::HashMap::default();
+    let partials: PartialMap = crate::hashes::HashMap::default();
     let mut methods = build_methods(
         controller,
         std::slice::from_ref(controller),
         &specs,
-        &std::collections::HashSet::new(),
-        &TextFormatActions::new(),
+        &crate::hashes::HashSet::default(),
+        &TextFormatActions::default(),
         None,
         &view_ivars,
         &partials,
         FormatBreadth::NARROW,
-        &std::collections::HashMap::new(),
+        &crate::hashes::HashMap::default(),
         None,
     );
     methods.extend(collect_attr_accessor_methods(controller));
@@ -997,9 +997,9 @@ fn build_methods(
     controller: &Controller,
     all_controllers: &[Controller],
     params_specs: &ParamsSpecs,
-    json_actions: &std::collections::HashSet<Symbol>,
+    json_actions: &crate::hashes::HashSet<Symbol>,
     text_format_actions: &TextFormatActions,
-    routed: Option<&std::collections::HashSet<Symbol>>,
+    routed: Option<&crate::hashes::HashSet<Symbol>>,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
     // respond_to BREADTH — format.rss branches + inline `render json:`
@@ -1009,8 +1009,8 @@ fn build_methods(
     // routed-aware too) cannot resolve. Everyone else keeps the narrow
     // html(+simple-json) flatten, emit unchanged.
     format_breadth: FormatBreadth,
-    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
-    inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
+    route_id_segments: &crate::hashes::HashMap<String, Vec<bool>>,
+    inferred_params: Option<&crate::hashes::HashMap<(ClassId, Symbol), Vec<Ty>>>,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = controller.class_methods().cloned().collect();
 
@@ -1050,12 +1050,12 @@ fn build_methods(
         let chain = ancestor_chain(controller, all_controllers);
         // Settled = this controller's own helper declares a permit list,
         // so no ancestor can speak for it.
-        let settled: std::collections::HashSet<Symbol> = privs
+        let settled: crate::hashes::HashSet<Symbol> = privs
             .iter()
             .filter(|a| self::params::first_permit_in(&a.body).is_some())
             .map(|a| a.name.clone())
             .collect();
-        let mut seen: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+        let mut seen: crate::hashes::HashSet<Symbol> = crate::hashes::HashSet::default();
         let mut out = privs.clone();
         for c in chain.iter().rev() {
             let (pubs, ancestor_privs) = split_public_private_actions(c);
@@ -1123,7 +1123,7 @@ fn build_methods(
     // that are also called from action bodies (e.g., `_params`
     // helpers — actually those don't appear in before_filters, but
     // be defensive) stay.
-    let filter_target_names: std::collections::HashSet<&Symbol> =
+    let filter_target_names: crate::hashes::HashSet<&Symbol> =
         before_filters.iter().map(|f| &f.target).collect();
     // A subclassed controller keeps its filter targets: descendants
     // inherit the before_action and their preambles call the target
@@ -1149,7 +1149,7 @@ fn build_methods(
     // ancestor wins, and anything this controller defines itself (public
     // OR private — a private override is still the method Ruby finds)
     // is not inherited.
-    let own_names: std::collections::HashSet<Symbol> =
+    let own_names: crate::hashes::HashSet<Symbol> =
         controller.actions().map(|a| a.name.clone()).collect();
     // The ROUTES decide, not visibility. "Public" in this IR means
     // "declared above the `private` marker", and lobsters'
@@ -1166,7 +1166,7 @@ fn build_methods(
     // `when :authenticate_user` in 25 files.
     let mut inherited: Vec<Symbol> = Vec::new();
     if let Some(routed) = routed {
-        let mut seen: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+        let mut seen: crate::hashes::HashSet<Symbol> = crate::hashes::HashSet::default();
         for ancestor in ancestor_chain(controller, all_controllers).iter().rev() {
             let (ancestor_pubs, _) = split_public_private_actions(ancestor);
             for a in ancestor_pubs {
@@ -1212,8 +1212,8 @@ fn build_methods(
     // dispatcher is spliced in at index 0 afterwards so the emitted
     // method order is unchanged.
     let dispatcher_at = methods.len();
-    let mut deferred_tails: std::collections::HashMap<Symbol, Expr> =
-        std::collections::HashMap::new();
+    let mut deferred_tails: crate::hashes::HashMap<Symbol, Expr> =
+        crate::hashes::HashMap::default();
     for a in &publics_inlined {
         methods.push(action_to_method(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ true,
@@ -1247,14 +1247,14 @@ fn build_methods(
     // The empty set for both non-public loops below: `is_public: false`
     // already suppresses the implicit render, so there is never one to
     // defer.
-    let no_deferred: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+    let no_deferred: crate::hashes::HashSet<Symbol> = crate::hashes::HashSet::default();
     for a in &privs_kept {
         methods.push(action_to_method(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
             params_specs, json_actions,
             text_format_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, inferred_params,
-            &no_deferred, &mut std::collections::HashMap::new(),
+            &no_deferred, &mut crate::hashes::HashMap::default(),
         ));
     }
     // Public methods no route reaches are helpers/filters, not actions:
@@ -1267,7 +1267,7 @@ fn build_methods(
             params_specs, json_actions,
             text_format_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, inferred_params,
-            &no_deferred, &mut std::collections::HashMap::new(),
+            &no_deferred, &mut crate::hashes::HashMap::default(),
         ));
     }
 
@@ -1724,7 +1724,7 @@ fn build_filter_preamble(
     // lands in the preamble at its registered position. Walking only
     // `anc.filters()` here dropped every ancestor block: campfire's
     // `Current.request = request` never ran in any emitted controller.
-    let own_priv_targets: std::collections::HashSet<&Symbol> =
+    let own_priv_targets: crate::hashes::HashSet<&Symbol> =
         own_privs.iter().map(|a| &a.name).collect();
     // `prepend_before_action` filters, collected separately and hoisted
     // to the front of the WHOLE chain at the end — Rails registers each
@@ -1848,8 +1848,8 @@ fn default_forgery_protection() -> Filter {
 fn route_helper_shadows(
     controller: &Controller,
     all: &[Controller],
-) -> std::collections::HashSet<Symbol> {
-    let mut out: std::collections::HashSet<Symbol> = ancestor_chain(controller, all)
+) -> crate::hashes::HashSet<Symbol> {
+    let mut out: crate::hashes::HashSet<Symbol> = ancestor_chain(controller, all)
         .into_iter()
         .chain(std::iter::once(controller))
         .flat_map(|c| c.body.iter())
@@ -2023,8 +2023,8 @@ fn inherited_params_spec<'a>(
 fn actions_reached_by_super(
     controller: &Controller,
     all: &[Controller],
-) -> std::collections::HashSet<Symbol> {
-    let mut out = std::collections::HashSet::new();
+) -> crate::hashes::HashSet<Symbol> {
+    let mut out = crate::hashes::HashSet::default();
     let defines = |name: &Symbol| controller.actions().any(|a| &a.name == name);
     for sub in all {
         if sub.name == controller.name {
@@ -2482,16 +2482,16 @@ fn action_to_method(
     params_privs: &[Action],
     is_public: bool,
     params_specs: &ParamsSpecs,
-    json_actions: &std::collections::HashSet<Symbol>,
+    json_actions: &crate::hashes::HashSet<Symbol>,
     text_format_actions: &TextFormatActions,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
     format_breadth: FormatBreadth,
-    shadows: &std::collections::HashSet<Symbol>,
-    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
-    inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
-    deferred_renders: &std::collections::HashSet<Symbol>,
-    deferred_out: &mut std::collections::HashMap<Symbol, Expr>,
+    shadows: &crate::hashes::HashSet<Symbol>,
+    route_id_segments: &crate::hashes::HashMap<String, Vec<bool>>,
+    inferred_params: Option<&crate::hashes::HashMap<(ClassId, Symbol), Vec<Ty>>>,
+    deferred_renders: &crate::hashes::HashSet<Symbol>,
+    deferred_out: &mut crate::hashes::HashMap<Symbol, Expr>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals first, then optional positionals with their
@@ -2795,8 +2795,8 @@ fn lower_action_body(
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
     format_breadth: FormatBreadth,
-    shadows: &std::collections::HashSet<Symbol>,
-    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    shadows: &crate::hashes::HashSet<Symbol>,
+    route_id_segments: &crate::hashes::HashMap<String, Vec<bool>>,
     defer_implicit_render: bool,
     can_respond_via_helper: bool,
     inherited_params_spec: Option<&ParamsSpec>,

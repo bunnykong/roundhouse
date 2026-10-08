@@ -450,7 +450,7 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
     // LoadError at boot on the ruby lane and a build abort on spinel.
     // Skipping it keeps Rails' laziness: the route still dispatches,
     // and it fails where Rails fails it.
-    let defined: std::collections::HashSet<&str> =
+    let defined: crate::hashes::HashSet<&str> =
         app.controllers.iter().map(|c| c.name.0.as_str()).collect();
     for r in &flat {
         let class_name = r.controller.0.as_str();
@@ -566,10 +566,10 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
     // action (gets implicit render + process_action dispatch) only if a
     // route reaches it. Lets base-controller helper/filter methods keep
     // their return value instead of being clobbered by a synthesized render.
-    let mut routed: std::collections::HashMap<
+    let mut routed: crate::hashes::HashMap<
         crate::ident::ClassId,
-        std::collections::HashSet<crate::ident::Symbol>,
-    > = std::collections::HashMap::new();
+        crate::hashes::HashSet<crate::ident::Symbol>,
+    > = crate::hashes::HashMap::default();
     for r in crate::lower::flatten_routes(app) {
         routed.entry(r.controller).or_default().insert(r.action);
     }
@@ -942,7 +942,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // `DELETE FROM` rather than a synthesized `_adapter_truncate`:
     // there is no model to synthesize it onto, and a virtual table has
     // no AUTOINCREMENT sequence to reset.
-    let modelled: std::collections::HashSet<&str> =
+    let modelled: crate::hashes::HashSet<&str> =
         app.models.iter().map(|m| m.table.0.as_str()).collect();
     for (name, _table) in &app.schema.tables {
         if !modelled.contains(name.as_str()) {
@@ -1102,10 +1102,10 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         // silently replace the first. A namespaced class whose stem
         // is taken spells its `::` as `__` instead — decided from the
         // whole set, so the outcome does not depend on emit order.
-        let stem_counts: std::collections::HashMap<String, usize> = test_lowered
+        let stem_counts: crate::hashes::HashMap<String, usize> = test_lowered
             .iter()
             .map(|l| test_file_stem(l.test_class.name.0.as_str()))
-            .fold(std::collections::HashMap::new(), |mut m, s| {
+            .fold(crate::hashes::HashMap::default(), |mut m, s| {
                 *m.entry(s).or_insert(0) += 1;
                 m
             });

@@ -10,7 +10,7 @@
 
 pub mod inline_assertions;
 
-use std::collections::HashMap;
+use crate::hashes::HashMap;
 
 use crate::analyze::ClassInfo;
 use crate::dialect::{
@@ -51,7 +51,7 @@ pub fn lower_test_modules_to_library_classes(
     fixtures: &[Fixture],
     models: &[Model],
     extras: Vec<(ClassId, ClassInfo)>,
-    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    route_id_segments: &crate::hashes::HashMap<String, Vec<bool>>,
 ) -> Vec<LibraryClass> {
     lower_test_modules_with_inner(test_modules, fixtures, models, extras, route_id_segments)
         .into_iter()
@@ -71,9 +71,9 @@ pub fn lower_test_modules_with_inner(
     // Which route-helper segments are id-shaped, so a record argument
     // projects to `.id` only where an id is what the segment holds —
     // `crate::lower::routes::helper_id_segments`.
-    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    route_id_segments: &crate::hashes::HashMap<String, Vec<bool>>,
 ) -> Vec<LoweredTestModule> {
-    let mut classes: HashMap<ClassId, ClassInfo> = HashMap::new();
+    let mut classes: HashMap<ClassId, ClassInfo> = HashMap::default();
     for (id, info) in extras {
         classes.insert(id, info);
     }
@@ -218,7 +218,7 @@ pub fn lower_test_modules_with_inner(
         classes.insert(lc.name.clone(), info);
     }
 
-    let empty_ivars: HashMap<Symbol, Ty> = HashMap::new();
+    let empty_ivars: HashMap<Symbol, Ty> = HashMap::default();
 
     // Type inner-class methods first — they may reference each other
     // and need their bodies typed for downstream emit. `type_inner_class`
@@ -252,7 +252,7 @@ pub fn lower_test_modules_with_inner(
     // return, and BEFORE the test bodies are typed against the
     // registry. A body the typer cannot name keeps the nil default
     // rather than gaining `untyped`; a test method is never a helper.
-    let synthesized_per_module: Vec<std::collections::HashSet<Symbol>> = test_modules
+    let synthesized_per_module: Vec<crate::hashes::HashSet<Symbol>> = test_modules
         .iter()
         .map(|tm| {
             tm.helpers
@@ -316,7 +316,7 @@ pub fn lower_test_modules_with_inner(
             // covers both rewritten nodes and ivar reads. Without the
             // ivar seed, `@messages = ….to_a` binds nothing and
             // `@messages.third` is a read off an untyped ivar.
-            let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+            let mut ivars: HashMap<Symbol, Ty> = HashMap::default();
             crate::analyze::extract_ivar_assignments(&method.body, &mut ivars);
             ivars.retain(|_, ty| !ty.is_unknown());
             // Has-many `.create` / `.build` rewrite needs the parent
@@ -441,7 +441,7 @@ fn adopt_param_names(ty: Ty, params: &[crate::dialect::Param]) -> Ty {
 }
 
 fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassInfo>) {
-    let empty_ivars: HashMap<Symbol, Ty> = HashMap::new();
+    let empty_ivars: HashMap<Symbol, Ty> = HashMap::default();
 
     // An override has to keep the shape it overrides. `def
     // process_action(action_name)` in a `< ActionController::Base`
@@ -510,7 +510,7 @@ fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassIn
     // is — and with an unannotated param it only widens the ivar to
     // `untyped`. The attribute's real type comes from `initialize` and
     // direct assignments, which the non-writer methods carry.
-    let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+    let mut ivars: HashMap<Symbol, Ty> = HashMap::default();
     for method in &inner.methods {
         if method.name.as_str().ends_with('=') {
             continue;
@@ -637,14 +637,14 @@ fn collect_self_setter_ivars(body: &Expr, out: &mut HashMap<Symbol, Ty>) {
 /// emit, prefer the bulk entry which threads a shared registry.
 pub fn lower_test_module_to_library_class(
     tm: &TestModule,
-    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    route_id_segments: &crate::hashes::HashMap<String, Vec<bool>>,
 ) -> LibraryClass {
     build_library_class(tm, route_id_segments)
 }
 
 fn build_library_class(
     tm: &TestModule,
-    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    route_id_segments: &crate::hashes::HashMap<String, Vec<bool>>,
 ) -> LibraryClass {
     // Inline setup body at the start of every test method. The
     // body-typer's Seq walk picks up `@article = articles(:one)` and
@@ -654,7 +654,7 @@ fn build_library_class(
     // A test class's own `*_path` / `*_url` helpers shadow the route
     // helpers of the same name — same rule the controller lowering
     // applies to its ancestry.
-    let helper_shadows: std::collections::HashSet<Symbol> = tm
+    let helper_shadows: crate::hashes::HashSet<Symbol> = tm
         .helpers
         .iter()
         .map(|h| h.name.clone())
@@ -739,8 +739,8 @@ fn test_to_method_def(
     owner: &ClassId,
     t: &Test,
     setup: Option<&Expr>,
-    shadows: &std::collections::HashSet<Symbol>,
-    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    shadows: &crate::hashes::HashSet<Symbol>,
+    route_id_segments: &crate::hashes::HashMap<String, Vec<bool>>,
 ) -> MethodDef {
     let snake = sanitize_test_name(&t.name);
     let method_name = Symbol::from(format!("test_{snake}"));

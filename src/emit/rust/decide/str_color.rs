@@ -20,7 +20,7 @@
 //! from `analyze/str_color` in Stage 2 of #22 to concentrate
 //! rust-local decisions under the decide module.
 
-use std::collections::HashMap;
+use crate::hashes::HashMap;
 
 use crate::dialect::{LibraryClass, LibraryFunction, MethodDef};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
@@ -309,8 +309,8 @@ pub fn color_method(method: &mut MethodDef, registry: &CallableRegistry) -> usiz
     let mut ctx = WalkCtx {
         registry,
         return_color,
-        owned_str_locals: std::collections::HashSet::new(),
-        owned_init_vars: std::collections::HashSet::new(),
+        owned_str_locals: crate::hashes::HashSet::default(),
+        owned_init_vars: crate::hashes::HashSet::default(),
     };
     let expect = return_color.map_or(ParentExpect::None, ParentExpect::Color);
     walk(&mut method.body, expect, &mut ctx)
@@ -332,7 +332,7 @@ struct WalkCtx<'a> {
     /// borrow coercion — and Rust rejects the call (no String→&str
     /// auto-coercion at arg position). The set scopes per-Seq via
     /// snapshot-restore so nested blocks don't leak bindings outward.
-    owned_str_locals: std::collections::HashSet<Symbol>,
+    owned_str_locals: crate::hashes::HashSet<Symbol>,
     /// Multi-assign coordination: Vars assigned more than once where
     /// at least one assignment produces `Owned`. Rust infers the
     /// binding's type from the FIRST assignment, so an init like
@@ -342,7 +342,7 @@ struct WalkCtx<'a> {
     /// `expect` to Owned for any assignment whose target Var is in
     /// the set — including the first-init, so the init's literal/
     /// borrow gets `.to_string()`'d up front.
-    owned_init_vars: std::collections::HashSet<Symbol>,
+    owned_init_vars: crate::hashes::HashSet<Symbol>,
 }
 
 /// What the parent of the current expression expects from a string
@@ -422,7 +422,7 @@ fn walk(e: &mut Expr, expect: ParentExpect, ctx: &mut WalkCtx<'_>) -> usize {
 /// control-flow node still surfaces.
 fn collect_owned_var_assignments(
     e: &Expr,
-    out: &mut std::collections::HashSet<Symbol>,
+    out: &mut crate::hashes::HashSet<Symbol>,
 ) {
     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
         if is_str_ty(value.ty.as_ref())
@@ -904,7 +904,7 @@ fn is_known_str_send(e: &Expr) -> bool {
 fn unify_branches_expect(
     then_branch: &Expr,
     else_branch: &Expr,
-    owned_str_locals: &std::collections::HashSet<Symbol>,
+    owned_str_locals: &crate::hashes::HashSet<Symbol>,
 ) -> ParentExpect {
     match (
         branch_tail_color(then_branch, owned_str_locals),
@@ -925,7 +925,7 @@ fn unify_branches_expect(
 /// inspects the immediate tail expression of a Seq, not deeper.
 fn branch_tail_color(
     e: &Expr,
-    owned_str_locals: &std::collections::HashSet<Symbol>,
+    owned_str_locals: &crate::hashes::HashSet<Symbol>,
 ) -> Option<StrColor> {
     let tail = tail_expr(e);
     match tail.node.as_ref() {

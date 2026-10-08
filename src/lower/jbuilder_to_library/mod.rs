@@ -101,8 +101,8 @@ pub fn lower_jbuilder_to_library_classes(
     // Merge: caller extras + framework runtime stubs + the jbuilder LCs
     // themselves (so `Views::Articles.article_json` resolves when
     // referenced from `Views::Articles.index_json`).
-    let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
-        std::collections::HashMap::new();
+    let mut classes: crate::hashes::HashMap<ClassId, crate::analyze::ClassInfo> =
+        crate::hashes::HashMap::default();
     for (id, info) in extras {
         classes.insert(id, info);
     }
@@ -149,8 +149,8 @@ pub fn lower_jbuilder_to_library_classes(
         }
     }
 
-    let empty_ivars: std::collections::HashMap<Symbol, crate::ty::Ty> =
-        std::collections::HashMap::new();
+    let empty_ivars: crate::hashes::HashMap<Symbol, crate::ty::Ty> =
+        crate::hashes::HashMap::default();
     for lc in &mut lcs {
         for method in &mut lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
@@ -232,7 +232,7 @@ fn build_library_class(
     });
     let mut rewritten = rewrite_ivars_to_locals(&view.body);
     if let Some(ivars) = partial_key.as_ref().and_then(|k| partials.ivars.get(k)) {
-        let renames: std::collections::HashMap<Symbol, Symbol> = ivars
+        let renames: crate::hashes::HashMap<Symbol, Symbol> = ivars
             .iter()
             .filter(|(iv, p)| crate::naming::safe_local(iv.as_str()) != p.as_str())
             .cloned()
@@ -255,7 +255,7 @@ fn build_library_class(
     // and the model is the one the name gives, as the param type).
     let params: Vec<&str> = method.params.iter().map(|p| p.name.as_str()).collect();
     let (arg_name, arg_columns) = if arg_name.is_empty() {
-        (arg_name, std::collections::HashMap::new())
+        (arg_name, crate::hashes::HashMap::default())
     } else if !is_partial || params.contains(&arg_name.as_str()) {
         let columns = columns_for_arg(&arg_name, dir, is_partial, stem, app);
         (arg_name, columns)
@@ -484,8 +484,8 @@ fn jbuilder_method_parts(
 }
 
 fn type_method_body_solo(method: &mut MethodDef) {
-    let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
-        std::collections::HashMap::new();
+    let mut classes: crate::hashes::HashMap<ClassId, crate::analyze::ClassInfo> =
+        crate::hashes::HashMap::default();
     insert_framework_stubs(&mut classes);
     let typer = crate::analyze::BodyTyper::new(&classes);
     let mut ctx = crate::analyze::Ctx::default();
@@ -524,7 +524,7 @@ struct Ctx {
     /// model (e.g. layouts, untyped fixtures). Used to route
     /// temporal columns through their storage text (see
     /// `temporal_column_json`) rather than the generic `encode_value`.
-    arg_columns: std::collections::HashMap<Symbol, crate::schema::ColumnType>,
+    arg_columns: crate::hashes::HashMap<Symbol, crate::schema::ColumnType>,
     /// Names declared by `direct :name do |…| … end`, without the
     /// `_path`/`_url` suffix. A direct helper's block parameter is
     /// whatever the CALLER hands it — campfire's `direct
@@ -532,14 +532,14 @@ struct Ctx {
     /// and `user.updated_at`, so it wants the RECORD — where a resource
     /// member helper wants the `:id` segment. `rewrite_path_arg_local`
     /// asks this before appending `.id`.
-    direct_helpers: std::collections::HashSet<String>,
+    direct_helpers: crate::hashes::HashSet<String>,
     /// Every model class the app declares. A route-helper argument
     /// whose last reader NAMES one is a record standing where an id
     /// belongs, and the app's own model list is the evidence — the
     /// alternative is the type, and the ruby emit lowers each jbuilder
     /// template SOLO, with only framework stubs registered, so
     /// `boost.message.room` has no type to ask.
-    models: std::collections::HashSet<String>,
+    models: crate::hashes::HashSet<String>,
     /// Counter for the method's synthesized collection locals
     /// (`__col0`, `__col1`, …), shared by every clone of the template's
     /// `Ctx` so two collection blocks never bind the same name.
@@ -1620,7 +1620,7 @@ fn record_partial_path(
     arg: &Expr,
     as_name: Option<&Symbol>,
     resource_dir: &str,
-    models: &std::collections::HashSet<String>,
+    models: &crate::hashes::HashSet<String>,
 ) -> Option<(String, Symbol)> {
     let name = local_name(arg)?;
     let model = crate::naming::camelize(name.as_str());
@@ -1722,10 +1722,10 @@ fn partial_call(partial_path: &str, locals: Vec<(Symbol, Expr)>, ctx: &Ctx) -> E
 /// passes it on under the caller's own parameter for `@note`.
 #[derive(Default)]
 pub(crate) struct PartialParams {
-    params: std::collections::HashMap<(String, String), Vec<Symbol>>,
+    params: crate::hashes::HashMap<(String, String), Vec<Symbol>>,
     /// Each partial's ivar parameters: the ivar, then its parameter.
-    ivars: std::collections::HashMap<(String, String), Vec<(Symbol, Symbol)>>,
-    closures: std::collections::HashMap<Symbol, Vec<Symbol>>,
+    ivars: crate::hashes::HashMap<(String, String), Vec<(Symbol, Symbol)>>,
+    closures: crate::hashes::HashMap<Symbol, Vec<Symbol>>,
 }
 
 impl PartialParams {
@@ -1745,8 +1745,8 @@ fn partial_params(app: &App) -> PartialParams {
     let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
     let edges = render_edges(&views, &known_models);
     let closures = ivar_closures(&views, &edges);
-    let mut bound: std::collections::HashMap<(String, String), Vec<Symbol>> =
-        std::collections::HashMap::new();
+    let mut bound: crate::hashes::HashMap<(String, String), Vec<Symbol>> =
+        crate::hashes::HashMap::default();
     for (_, sites) in &edges {
         for (key, _, names) in sites {
             let entry = bound.entry(key.clone()).or_default();
@@ -1780,7 +1780,7 @@ fn partial_params(app: &App) -> PartialParams {
             }
         }
         let locals = names.len();
-        let mut used = std::collections::HashSet::new();
+        let mut used = crate::hashes::HashSet::default();
         collect_local_names(&v.body, &mut used);
         used.extend(names.iter().cloned());
         let mut ivars = Vec::new();
@@ -1815,9 +1815,9 @@ fn partial_params(app: &App) -> PartialParams {
 type RenderSites = Vec<((String, String), Option<Symbol>, Vec<Symbol>)>;
 
 fn render_edges(views: &[&View], known_models: &[String]) -> Vec<(Symbol, RenderSites)> {
-    let models: std::collections::HashSet<String> = known_models.iter().cloned().collect();
-    let mut partial_views: std::collections::HashMap<(String, String), Symbol> =
-        std::collections::HashMap::new();
+    let models: crate::hashes::HashSet<String> = known_models.iter().cloned().collect();
+    let mut partial_views: crate::hashes::HashMap<(String, String), Symbol> =
+        crate::hashes::HashMap::default();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
         if let Some(stem) = base.strip_prefix('_') {
@@ -1849,8 +1849,8 @@ fn render_edges(views: &[&View], known_models: &[String]) -> Vec<(Symbol, Render
 fn ivar_closures(
     views: &[&View],
     edges: &[(Symbol, RenderSites)],
-) -> std::collections::HashMap<Symbol, Vec<Symbol>> {
-    use std::collections::{HashMap, HashSet};
+) -> crate::hashes::HashMap<Symbol, Vec<Symbol>> {
+    use crate::hashes::{HashMap, HashSet};
     fn visit(
         name: &Symbol,
         bodies: &HashMap<Symbol, &Expr>,
@@ -1884,9 +1884,9 @@ fn ivar_closures(
         .iter()
         .map(|(name, sites)| (name.clone(), sites.iter().filter_map(|(_, t, _)| t.clone()).collect()))
         .collect();
-    let mut done = HashMap::new();
+    let mut done = HashMap::default();
     for v in views {
-        visit(&v.name, &bodies, &children, &mut done, &mut HashSet::new());
+        visit(&v.name, &bodies, &children, &mut done, &mut HashSet::default());
     }
     done
 }
@@ -1910,7 +1910,7 @@ pub(crate) fn jbuilder_render_edges(app: &App) -> Vec<(Symbol, Vec<Symbol>)> {
 pub(crate) fn jbuilder_ivar_closures(
     views: &[View],
     models: &[crate::dialect::Model],
-) -> std::collections::HashMap<Symbol, Vec<Symbol>> {
+) -> crate::hashes::HashMap<Symbol, Vec<Symbol>> {
     let known_models: Vec<String> = models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let views: Vec<&View> = views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
     let edges = render_edges(&views, &known_models);
@@ -1920,7 +1920,7 @@ pub(crate) fn jbuilder_ivar_closures(
 /// Every name a template binds or reads as a local — variables, block
 /// parameters, and the receiverless reads a partial's locals are — so a
 /// generated parameter name takes none of them.
-fn collect_local_names(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
+fn collect_local_names(e: &Expr, out: &mut crate::hashes::HashSet<Symbol>) {
     match &*e.node {
         ExprNode::Var { name, .. }
         | ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
@@ -1945,7 +1945,7 @@ fn collect_local_names(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
 fn collect_partial_sites(
     e: &Expr,
     dir: &str,
-    models: &std::collections::HashSet<String>,
+    models: &crate::hashes::HashSet<String>,
     out: &mut Vec<((String, String), Vec<Symbol>)>,
 ) {
     if let ExprNode::Send { recv: Some(recv), block: None, .. } = &*e.node {
@@ -2336,9 +2336,9 @@ fn columns_for_arg(
     is_partial: bool,
     stem: &str,
     app: &App,
-) -> std::collections::HashMap<Symbol, crate::schema::ColumnType> {
-    let mut out: std::collections::HashMap<Symbol, crate::schema::ColumnType> =
-        std::collections::HashMap::new();
+) -> crate::hashes::HashMap<Symbol, crate::schema::ColumnType> {
+    let mut out: crate::hashes::HashMap<Symbol, crate::schema::ColumnType> =
+        crate::hashes::HashMap::default();
     // Index views' arg is the plural collection (`articles`), not a
     // single record. Per-row column lookups don't apply — the
     // extract! inside the partial handles those instead.
@@ -2360,9 +2360,9 @@ fn columns_for_arg(
 fn columns_for_model(
     model_class: &str,
     app: &App,
-) -> std::collections::HashMap<Symbol, crate::schema::ColumnType> {
-    let mut out: std::collections::HashMap<Symbol, crate::schema::ColumnType> =
-        std::collections::HashMap::new();
+) -> crate::hashes::HashMap<Symbol, crate::schema::ColumnType> {
+    let mut out: crate::hashes::HashMap<Symbol, crate::schema::ColumnType> =
+        crate::hashes::HashMap::default();
     let Some(model) = app.models.iter().find(|m| m.name.0.as_str() == model_class) else {
         return out;
     };
@@ -2437,7 +2437,7 @@ fn seq(exprs: Vec<Expr>) -> Expr {
 
 /// `@x` → `@<renames[x]>`, reads and writes, before the rewrite to
 /// locals: a partial's ivar parameter whose name a local takes.
-fn rename_ivars(e: &mut Expr, renames: &std::collections::HashMap<Symbol, Symbol>) {
+fn rename_ivars(e: &mut Expr, renames: &crate::hashes::HashMap<Symbol, Symbol>) {
     match &mut *e.node {
         ExprNode::Ivar { name } | ExprNode::Assign { target: LValue::Ivar { name }, .. } => {
             if let Some(to) = renames.get(name) {

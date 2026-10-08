@@ -65,20 +65,20 @@ pub fn apply_inquiry_lowering(app: &mut App) {
 /// `crate::analyze::inquiry`, shared with the body typer so the
 /// analyze-only drivers (`check`, LSP, MCP) answer the predicate the
 /// same way this pass folds it.
-fn inquirer_methods(app: &App) -> std::collections::HashSet<Symbol> {
+fn inquirer_methods(app: &App) -> crate::hashes::HashSet<Symbol> {
     crate::analyze::inquiry::inquirer_methods(app)
 }
 
 struct Facts {
-    inquirers: std::collections::HashSet<Symbol>,
-    app_string_methods: std::collections::HashSet<Symbol>,
+    inquirers: crate::hashes::HashSet<Symbol>,
+    app_string_methods: crate::hashes::HashSet<Symbol>,
 }
 
 /// The methods the app defines by reopening `String`, its included
 /// modules' among them.
-fn app_string_methods(app: &App) -> std::collections::HashSet<Symbol> {
-    let mut out = std::collections::HashSet::new();
-    let mut seen = std::collections::HashSet::new();
+fn app_string_methods(app: &App) -> crate::hashes::HashSet<Symbol> {
+    let mut out = crate::hashes::HashSet::default();
+    let mut seen = crate::hashes::HashSet::default();
     let mut stack = vec![crate::ident::ClassId(Symbol::from("String"))];
     while let Some(id) = stack.pop() {
         if !seen.insert(id.clone()) {

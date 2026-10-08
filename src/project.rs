@@ -861,14 +861,14 @@ pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<()
 /// A conflict the rule cannot decide fails the emit, rather than leaving
 /// it to readdir.
 fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), String> {
-    use std::collections::HashMap;
+    use crate::hashes::HashMap;
     struct Decl {
         file: usize,
         line: usize,
         sig: String,
     }
     // (qualified class, method) -> its declarations, from every runtime .rbs.
-    let mut decls: HashMap<(String, String), Vec<Decl>> = HashMap::new();
+    let mut decls: HashMap<(String, String), Vec<Decl>> = HashMap::default();
     for (fi, (path, text)) in files.iter().enumerate() {
         if !path.ends_with(".rbs") || !(path.starts_with("runtime/") || path.starts_with("sig/runtime/")) {
             continue;
@@ -913,7 +913,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         let reopen = rest != primary;
         (spinel as u8) * 2 + reopen as u8
     };
-    let mut drop: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut drop: HashMap<usize, Vec<usize>> = HashMap::default();
     let mut undecided = Vec::new();
     for ((class, method), ds) in &decls {
         let first = &ds[0].sig;
@@ -1544,7 +1544,7 @@ pub fn target_files(
             if declarations.iter().all(|lc| !lc.has_source_ivar_initializers()) {
                 continue;
             }
-            let mut methods = std::collections::HashSet::new();
+            let mut methods = crate::hashes::HashSet::default();
             for m in declarations.iter().flat_map(|lc| &lc.methods) {
                 if !methods.insert((m.receiver == crate::dialect::MethodReceiver::Class, &m.name)) {
                     return Err(format!(
@@ -1592,7 +1592,7 @@ pub fn target_files(
         target,
         BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby
     ) {
-        let mut synth_shakeable: std::collections::HashSet<String> = app
+        let mut synth_shakeable: crate::hashes::HashSet<String> = app
             .models
             .iter()
             .flat_map(|m| app.schema.tables.get(&m.table.0).into_iter()
@@ -3882,7 +3882,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     const HARDCODED: &str = "  def self.instantiate_controller(sym)\n    case sym\n    when :articles then ArticlesController.new\n    when :comments then CommentsController.new\n    else ActiveStorage::Routes.instantiate_controller(sym)\n    end\n  end";
 
     let flat = crate::lower::flatten_routes(app);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::hashes::HashSet::default();
     let current_classes = &app.current_attribute_classes;
     let mut arms = String::new();
     // Same rule as the routes.rb require header: a route may name a
@@ -3890,7 +3890,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     // under `scope module: "rooms"`). Rails resolves lazily and fails
     // only on request; an eager `require_relative` for a missing file
     // takes the whole process down at boot.
-    let defined: std::collections::HashSet<&str> =
+    let defined: crate::hashes::HashSet<&str> =
         app.controllers.iter().map(|c| c.name.0.as_str()).collect();
     for r in &flat {
         let class = r.controller.0.as_str();
@@ -6668,7 +6668,7 @@ fn apply_image_processor_wiring(files: &mut [(String, String)]) -> Result<bool, 
 }
 
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
-    use std::collections::HashSet;
+    use crate::hashes::HashSet;
 
     // 1. sig/ tree → file-adjacent sidecars.
     let mut files: Vec<(String, String)> = files
@@ -6811,7 +6811,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
 
     // Relocations can only collide by construction error — fail loudly.
     {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         for (p, _) in &files {
             if !seen.insert(p.as_str()) {
                 return Err(format!("spin_shape: path collision after reshaping: {p}"));
@@ -7274,7 +7274,7 @@ fn test_class_and_count(content: &str, path: &str) -> Result<(String, usize), St
 fn unresolvable_require(
     content: &str,
     path: &str,
-    rb_paths: &std::collections::HashSet<String>,
+    rb_paths: &crate::hashes::HashSet<String>,
 ) -> Option<String> {
     let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
     content.lines().find_map(|line| {
@@ -7291,7 +7291,7 @@ fn rewrite_requires_for_move(
     content: &str,
     old_dir: &str,
     new_dir: &str,
-    rb_paths: &std::collections::HashSet<String>,
+    rb_paths: &crate::hashes::HashSet<String>,
 ) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.lines() {
@@ -8230,7 +8230,7 @@ mod tests {
 
     #[test]
     fn move_rewrites_bare_and_relative_requires() {
-        let rb_paths: std::collections::HashSet<String> = [
+        let rb_paths: crate::hashes::HashSet<String> = [
             "app/models/article.rb",
             "test/fixtures/articles.rb",
             "test/test_helper.rb",

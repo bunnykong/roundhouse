@@ -26,7 +26,7 @@ pub use ir::{
 };
 pub use visitor::{ArelVisitor, SqliteVisitor};
 
-use std::collections::HashMap;
+use crate::hashes::HashMap;
 
 use crate::analyze::ClassInfo;
 use crate::expr::{Expr, ExprNode, InterpPart};
@@ -64,7 +64,7 @@ pub fn rewrite_arel_in_expr_with_assocs(
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
 ) -> bool {
-    let no_scopes = std::collections::HashSet::new();
+    let no_scopes = crate::hashes::HashSet::default();
     rewrite_arel_in_expr_with_ruby_values(expr, schema, registry, assocs, false, &no_scopes)
 }
 
@@ -79,7 +79,7 @@ pub(crate) fn rewrite_arel_in_expr_with_ruby_values(
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
     ruby_read_values: bool,
-    scopes: &std::collections::HashSet<crate::ident::Symbol>,
+    scopes: &crate::hashes::HashSet<crate::ident::Symbol>,
 ) -> bool {
     // Names (ivars/locals) the body later refines with relation-chain
     // methods (`@moderations.where(...)` after `@moderations =
@@ -262,7 +262,7 @@ fn chain_root_class<'e>(
 /// actually uses (#558).
 fn requires_relation_receiver_or_scope(
     method: &crate::ident::Symbol,
-    scopes: &std::collections::HashSet<crate::ident::Symbol>,
+    scopes: &crate::hashes::HashSet<crate::ident::Symbol>,
 ) -> bool {
     requires_relation_receiver(method.as_str()) || scopes.contains(method)
 }
@@ -291,8 +291,8 @@ fn requires_relation_receiver_or_scope(
 /// campfire's caller is `users_scope.active`, and `active` is a scope.
 pub fn relation_refined_method_names(
     body: &Expr,
-    scopes: &std::collections::HashSet<crate::ident::Symbol>,
-    out: &mut std::collections::HashSet<crate::ident::Symbol>,
+    scopes: &crate::hashes::HashSet<crate::ident::Symbol>,
+    out: &mut crate::hashes::HashSet<crate::ident::Symbol>,
 ) {
     if let ExprNode::Send { recv: Some(r), method, .. } = body.node.as_ref() {
         if requires_relation_receiver_or_scope(method, scopes) {
@@ -323,7 +323,7 @@ fn self_call_name(e: &Expr) -> Option<crate::ident::Symbol> {
 
 fn collect_relation_refined_names(
     expr: &Expr,
-    scopes: &std::collections::HashSet<crate::ident::Symbol>,
+    scopes: &crate::hashes::HashSet<crate::ident::Symbol>,
     out: &mut RefinedNames,
 ) {
     if let ExprNode::Send { recv: Some(r), method, args, block, .. } = expr.node.as_ref() {
@@ -355,7 +355,7 @@ fn collect_relation_refined_names(
 /// reading.
 #[derive(Default)]
 struct RefinedNames {
-    always: std::collections::HashSet<Symbol>,
+    always: crate::hashes::HashSet<Symbol>,
     by_scope: HashMap<Symbol, Vec<Symbol>>,
 }
 
@@ -403,7 +403,7 @@ fn rewrite_arel_inner(
     assocs: &[crate::lower::model_associations::AssociationEdge],
     refined: &RefinedNames,
     ruby_read_values: bool,
-    scopes: &std::collections::HashSet<crate::ident::Symbol>,
+    scopes: &crate::hashes::HashSet<crate::ident::Symbol>,
 ) -> bool {
     if let ExprNode::Assign { target, value } = expr.node.as_ref() {
         let name = match target {
@@ -499,7 +499,7 @@ fn rewrite_arel_spine_args(
     assocs: &[crate::lower::model_associations::AssociationEdge],
     refined: &RefinedNames,
     ruby_read_values: bool,
-    scopes: &std::collections::HashSet<crate::ident::Symbol>,
+    scopes: &crate::hashes::HashSet<crate::ident::Symbol>,
 ) -> bool {
     let mut changed = false;
     if let ExprNode::Send { recv, args, block, .. } = &mut *expr.node {

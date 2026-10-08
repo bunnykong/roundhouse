@@ -30,7 +30,7 @@
 //! single-column `Column`/`ForeignKey` IR — are ledgered the same way
 //! rather than silently narrowed to one column.
 
-use std::collections::HashSet;
+use crate::hashes::HashSet;
 
 use crate::schema::{
     Column, ColumnType, ForeignKey, GeneratedColumn, GeneratedColumnStorage, Index,
@@ -45,7 +45,7 @@ pub fn ingest_structure_sql(source: &[u8], file: &str) -> IngestResult<Schema> {
     super::sources::register(file, &text);
 
     let mut schema = Schema::default();
-    let mut enum_types: HashSet<String> = HashSet::new();
+    let mut enum_types: HashSet<String> = HashSet::default();
     // Columns, table-level constraints, and whole statements the walk
     // could not model. Never silent — see the module header.
     let mut gaps: Vec<IngestError> = Vec::new();
@@ -53,7 +53,7 @@ pub fn ingest_structure_sql(source: &[u8], file: &str) -> IngestResult<Schema> {
     // per distinct statement head, not per occurrence (a 200k-line dump
     // can repeat the same unmodeled ALTER INDEX shape thousands of
     // times).
-    let mut seen_heads: HashSet<String> = HashSet::new();
+    let mut seen_heads: HashSet<String> = HashSet::default();
 
     for raw in top_level_split(&text, b';') {
         let stmt = strip_leading_comment_banner(&raw);
@@ -1555,7 +1555,7 @@ CREATE INDEX widgets_payload_idx ON widgets USING public.gin (payload);"#;
 
     #[test]
     fn resolve_column_type_maps_the_core_postgres_types() {
-        let enums = HashSet::new();
+        let enums = HashSet::default();
         assert!(matches!(
             resolve_column_type("character varying(255)", &enums),
             Some(ColumnType::String { limit: Some(255) })
@@ -1574,7 +1574,7 @@ CREATE INDEX widgets_payload_idx ON widgets USING public.gin (payload);"#;
 
     #[test]
     fn resolve_column_type_maps_a_registered_enum_to_string() {
-        let mut enums = HashSet::new();
+        let mut enums = HashSet::default();
         enums.insert("widget_status".to_string());
         assert!(matches!(
             resolve_column_type("public.widget_status", &enums),

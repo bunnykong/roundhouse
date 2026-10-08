@@ -149,7 +149,7 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
 /// replaced by bare `Untyped`/`Var`. First writes are stored as-is,
 /// including gradual unions.
 pub(super) fn insert_inferred_return(
-    table: &mut std::collections::HashMap<Symbol, Ty>,
+    table: &mut crate::hashes::HashMap<Symbol, Ty>,
     method: &Symbol,
     ty: Ty,
 ) {
@@ -171,7 +171,7 @@ pub(super) fn insert_inferred_return(
 mod tests {
     use super::*;
     use crate::ident::{ClassId, TyVar};
-    use std::collections::HashMap;
+    use crate::hashes::HashMap;
 
     fn cfg() -> Ty {
         Ty::Class {
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn insert_preserves_rbs_fn() {
         let method = Symbol::from("config");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         let fn_ty = Ty::Fn {
             params: vec![],
             ret: Box::new(Ty::Str),
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn insert_stabilizes_configuration_versus_noisy() {
         let method = Symbol::from("config");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         insert_inferred_return(&mut table, &method, cfg());
         insert_inferred_return(&mut table, &method, body::union_of(cfg(), Ty::Untyped));
         assert_eq!(table.get(&method), Some(&cfg()));
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn insert_preserves_first_write_of_gradual_union() {
         let method = Symbol::from("build");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         let gradual = body::union_of(Ty::Str, Ty::Untyped);
         insert_inferred_return(&mut table, &method, gradual.clone());
         assert_eq!(table.get(&method), Some(&gradual));
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn insert_gradual_first_write_then_same_core_concrete_narrows() {
         let method = Symbol::from("config");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         insert_inferred_return(&mut table, &method, body::union_of(cfg(), Ty::Untyped));
         insert_inferred_return(&mut table, &method, cfg());
         assert_eq!(table.get(&method), Some(&cfg()));
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn insert_distinct_cores_last_write_wins() {
         let method = Symbol::from("value");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         insert_inferred_return(&mut table, &method, Ty::Str);
         insert_inferred_return(&mut table, &method, Ty::Int);
         assert_eq!(table.get(&method), Some(&Ty::Int));
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn insert_keeps_known_return_against_bare_untyped() {
         let method = Symbol::from("config");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         insert_inferred_return(&mut table, &method, cfg());
         insert_inferred_return(&mut table, &method, Ty::Untyped);
         assert_eq!(table.get(&method), Some(&cfg()));
@@ -291,7 +291,7 @@ mod tests {
         // class_attribute readers thrash on that shape across rounds.
         let method = Symbol::from("_preload_definitions");
         let concrete = arr(Ty::Str);
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         insert_inferred_return(&mut table, &method, concrete.clone());
         insert_inferred_return(
             &mut table,
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn insert_gradual_nil_is_sticky_against_bare_nil() {
         let method = Symbol::from("uri");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         insert_inferred_return(&mut table, &method, gradual_nil());
         insert_inferred_return(&mut table, &method, Ty::Nil);
         assert_eq!(table.get(&method), Some(&gradual_nil()));
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn insert_recursive_return_that_nests_its_previous_round_keeps_the_previous() {
         let method = Symbol::from("sanitize");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         let first = union(vec![Ty::Str, arr(Ty::Untyped)]);
         insert_inferred_return(&mut table, &method, first.clone());
         insert_inferred_return(&mut table, &method, union(vec![Ty::Str, arr(first.clone())]));
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn insert_recursive_return_flattened_into_a_union_is_cut() {
         let method = Symbol::from("sanitize");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         let first = union(vec![Ty::Str, sym_hash(Ty::Untyped)]);
         insert_inferred_return(&mut table, &method, first.clone());
         let nested = union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(Ty::Untyped), Ty::Int]))]);
@@ -354,7 +354,7 @@ mod tests {
         let record = |field: Ty| Ty::Record {
             row: crate::ty::Row { fields: [(Symbol::from("nested"), field)].into_iter().collect(), rest: None },
         };
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         let first = record(Ty::Untyped);
         insert_inferred_return(&mut table, &method, first.clone());
         insert_inferred_return(&mut table, &method, record(first.clone()));
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn insert_scalar_previous_return_is_not_a_recursion_witness() {
         let method = Symbol::from("names");
-        let mut table = HashMap::new();
+        let mut table = HashMap::default();
         insert_inferred_return(&mut table, &method, Ty::Str);
         let widened = union(vec![Ty::Str, arr(Ty::Str)]);
         insert_inferred_return(&mut table, &method, widened.clone());

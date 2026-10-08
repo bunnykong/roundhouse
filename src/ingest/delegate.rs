@@ -215,15 +215,15 @@ fn take_delegate_decls(lc: &mut LibraryClass) -> Vec<Delegation> {
 /// Bare names this class calls WITH arguments, anywhere in its own
 /// method bodies. A delegated name in this set needs the argument
 /// forwarding this pass declines to synthesize.
-fn names_called_with_arguments(lc: &LibraryClass) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
+fn names_called_with_arguments(lc: &LibraryClass) -> crate::hashes::HashSet<String> {
+    let mut out = crate::hashes::HashSet::default();
     for m in &lc.methods {
         collect_calls_with_args(&m.body, &mut out);
     }
     out
 }
 
-fn collect_calls_with_args(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+fn collect_calls_with_args(expr: &Expr, out: &mut crate::hashes::HashSet<String>) {
     expr.node.for_each_child(&mut |c| collect_calls_with_args(c, out));
     let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else { return };
     if !args.is_empty() || block.is_some() {

@@ -625,7 +625,7 @@ fn mounts_in_split_route_files_keep_the_split_file_span() {
     let table = roundhouse::ingest::routes::ingest_routes_with_draws(
         b"Rails.application.routes.draw do\n  draw :admin\nend\n",
         "config/routes.rb",
-        &std::collections::HashMap::from([("admin".to_string(), (
+        &roundhouse::hashes::HashMap::from_iter([("admin".to_string(), (
             b"mount Catalog::Engine, at: '/catalog'\nget '/ok', to: 'posts#index'\n".to_vec(),
             "config/routes/admin.rb".to_string(),
         ))]),
@@ -642,7 +642,7 @@ fn top_level_draw_preserves_runtime_cable_mount_context() {
     let table = roundhouse::ingest::routes::ingest_routes_with_draws(
         b"Rails.application.routes.draw do\n  draw :cable\nend\n",
         "config/routes.rb",
-        &std::collections::HashMap::from([("cable".to_string(), (
+        &roundhouse::hashes::HashMap::from_iter([("cable".to_string(), (
             b"mount ActionCable.server => '/cable'\n".to_vec(),
             "config/routes/cable.rb".to_string(),
         ))]),
@@ -653,7 +653,7 @@ fn top_level_draw_preserves_runtime_cable_mount_context() {
 /// Transparent draw/concern expansion inherits its invocation's mount scope.
 #[test]
 fn cable_mounts_inherit_draw_and_concern_scope() {
-    let draws = std::collections::HashMap::from([("cable".to_string(), (
+    let draws = roundhouse::hashes::HashMap::from_iter([("cable".to_string(), (
         b"mount ActionCable.server => '/cable'\n".to_vec(),
         "config/routes/cable.rb".to_string(),
     ))]);
@@ -699,7 +699,7 @@ fn loaded_route_draw_resets_and_restores_mount_scope() {
         let source = format!("Rails.application.routes.draw do\n namespace :admin do\n  {include}\n  mount ActionCable.server => '/cable'\n end\n mount ActionCable.server => '/cable'\nend\n");
         let table = roundhouse::ingest::routes::ingest_routes_with_draws(
             source.as_bytes(), "config/routes.rb",
-            &std::collections::HashMap::from([("cable".to_string(), (
+            &roundhouse::hashes::HashMap::from_iter([("cable".to_string(), (
                 loaded.to_vec(), "config/routes/cable.rb".to_string(),
             ))]),
         ).unwrap();

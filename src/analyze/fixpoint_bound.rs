@@ -253,7 +253,7 @@ mod tests {
             crate::span::Span::synthetic(),
             crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name: Symbol::from("h") }, value },
         );
-        let mut ivars = std::collections::HashMap::new();
+        let mut ivars = rustc_hash::FxHashMap::default();
         super::super::extract_ivar_assignments(&write, &mut ivars);
         assert_eq!(measure(&ivars[&Symbol::from("h")]).0, MAX_DEPTH);
 

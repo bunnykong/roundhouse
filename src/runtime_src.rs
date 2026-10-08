@@ -49,16 +49,16 @@ fn ingest_expr(node: &Node<'_>, file: &str) -> Result<Expr, crate::ingest::Inges
 /// body-typer's `ExprNode::Const` arm so dispatch on a constant
 /// (`STATUS_CODES.fetch(...)`) lands in the right primitive method
 /// table.
-pub fn parse_module_constants(source: &str) -> Result<std::collections::HashMap<Symbol, Ty>, String> {
+pub fn parse_module_constants(source: &str) -> Result<crate::hashes::HashMap<Symbol, Ty>, String> {
     Ok(parse_module_constant_tables(source, false).0)
 }
 
-type ConstantTypes = std::collections::HashMap<Symbol, Ty>;
-type OwnedConstantTypes = std::collections::HashMap<ClassId, ConstantTypes>;
+type ConstantTypes = crate::hashes::HashMap<Symbol, Ty>;
+type OwnedConstantTypes = crate::hashes::HashMap<ClassId, ConstantTypes>;
 
 pub(crate) fn parse_module_constant_tables(source: &str, with_owners: bool) -> (ConstantTypes, OwnedConstantTypes) {
-    let mut global = ConstantTypes::new();
-    let mut by_owner = OwnedConstantTypes::new();
+    let mut global = ConstantTypes::default();
+    let mut by_owner = OwnedConstantTypes::default();
     let result = parse(source.as_bytes());
     if result.errors().count() == 0 {
         walk_constants(&result.node(), "", &mut global, &mut by_owner, with_owners);
@@ -392,7 +392,7 @@ pub fn parse_methods_with_rbs(
     parse_methods_with_rbs_in_ctx(
         ruby_src,
         rbs_src,
-        &std::collections::HashMap::new(),
+        &crate::hashes::HashMap::default(),
     )
 }
 
@@ -433,7 +433,7 @@ pub fn parse_library_with_rbs(
     // annotation; the flat parser does. Use the flat result purely as
     // an abstract-name filter so per-class orphan checks skip
     // contract-only methods (e.g. base.rb's `[]` / `[]=`).
-    let abstract_method_names: std::collections::HashSet<Symbol> =
+    let abstract_method_names: crate::hashes::HashSet<Symbol> =
         crate::rbs::parse_signatures(rbs_src)
             .map(|s| s.abstract_methods)
             .unwrap_or_default();
@@ -443,7 +443,7 @@ pub fn parse_library_with_rbs(
     // `ActiveRecord::Base`), so the lookup is direct. The prior
     // last-segment normalization was a workaround for the bare-name
     // collision between RBS and ingest; both sides have caught up.
-    let sigs_by_full_path: std::collections::HashMap<String, std::collections::HashMap<Symbol, Ty>> =
+    let sigs_by_full_path: crate::hashes::HashMap<String, crate::hashes::HashMap<Symbol, Ty>> =
         sigs_by_class
             .into_iter()
             .map(|(cid, m)| (cid.0.as_str().to_string(), m))
@@ -456,7 +456,7 @@ pub fn parse_library_with_rbs(
     let ruby_text = String::from_utf8_lossy(ruby_src);
     let (literal_constants, owned_constants) = parse_module_constant_tables(&ruby_text, true);
     let constants = crate::analyze::ConstScope::global(literal_constants);
-    let class_constants: std::collections::HashMap<_, _> = owned_constants
+    let class_constants: crate::hashes::HashMap<_, _> = owned_constants
         .into_iter()
         .map(|(owner, own)| (owner, constants.with_own(own)))
         .collect();
@@ -539,10 +539,10 @@ pub fn parse_library_with_rbs(
     // body-typer dispatches `Send { recv: SelfRef, method: m }` against
     // self_ty's class entry, so without this registry self-method
     // calls resolve to `Ty::Untyped`.
-    let mut class_registry: std::collections::HashMap<
+    let mut class_registry: crate::hashes::HashMap<
         crate::ident::ClassId,
         crate::analyze::ClassInfo,
-    > = std::collections::HashMap::new();
+    > = crate::hashes::HashMap::default();
     // Use the shared `class_info_from_library_class` helper so kinds
     // (and the ivar-shadows-method reclassification — `def errors` paired
     // with `@errors = []` reads as a field, so its dispatch should not
@@ -580,7 +580,7 @@ pub fn parse_library_with_rbs(
     for lc in &mut library_classes {
         let scope_constants = class_constants.get(&lc.name).unwrap_or(&constants);
         let build_ctx = |m: &MethodDef,
-                         ivars: &std::collections::HashMap<Symbol, Ty>|
+                         ivars: &crate::hashes::HashMap<Symbol, Ty>|
          -> crate::analyze::Ctx {
             let mut ctx = crate::analyze::Ctx::default();
             if let Some(Ty::Fn { params, .. }) = &m.signature {
@@ -604,15 +604,15 @@ pub fn parse_library_with_rbs(
             ctx
         };
 
-        let empty_ivars: std::collections::HashMap<Symbol, Ty> =
-            std::collections::HashMap::new();
+        let empty_ivars: crate::hashes::HashMap<Symbol, Ty> =
+            crate::hashes::HashMap::default();
         for m in &mut lc.methods {
             let ctx = build_ctx(m, &empty_ivars);
             typer.analyze_expr(&mut m.body, &ctx);
         }
 
-        let mut flow_ivars: std::collections::HashMap<Symbol, Ty> =
-            std::collections::HashMap::new();
+        let mut flow_ivars: crate::hashes::HashMap<Symbol, Ty> =
+            crate::hashes::HashMap::default();
         for m in &lc.methods {
             crate::analyze::extract_ivar_assignments(&m.body, &mut flow_ivars);
         }
@@ -643,7 +643,7 @@ pub fn parse_library_with_rbs(
             }
         }
         if !flow_ivars.is_empty() {
-            let reseeded: std::collections::HashMap<Symbol, Ty> = flow_ivars
+            let reseeded: crate::hashes::HashMap<Symbol, Ty> = flow_ivars
                 .into_iter()
                 .map(|(name, ty)| (name, Ty::Union { variants: vec![ty, Ty::Nil] }))
                 .collect();
@@ -667,7 +667,7 @@ pub fn parse_library_with_rbs(
 /// truncate`) `runtime/ruby/active_record/base.rb` dispatches through
 /// `ActiveRecord.adapter`.
 fn seed_well_known_classes(
-    classes: &mut std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    classes: &mut crate::hashes::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
 ) {
     use crate::analyze::ClassInfo;
     use crate::ident::{ClassId, Symbol};
@@ -743,10 +743,10 @@ fn seed_well_known_classes(
 /// classes, also fill non-block local signatures with `or_insert`.
 /// Never mutates `classes`.
 fn typing_classes_with_local_block_contracts(
-    classes: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    classes: &crate::hashes::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
     methods: &[MethodDef],
-) -> std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo> {
-    let declares_block: std::collections::HashSet<&Symbol> = methods
+) -> crate::hashes::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo> {
+    let declares_block: crate::hashes::HashSet<&Symbol> = methods
         .iter()
         .filter(|m| matches!(m.signature, Some(Ty::Fn { block: Some(_), .. })))
         .filter_map(|m| m.enclosing_class.as_ref())
@@ -784,7 +784,7 @@ fn typing_classes_with_local_block_contracts(
 pub fn parse_methods_with_rbs_in_ctx(
     ruby_src: &str,
     rbs_src: &str,
-    classes: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    classes: &crate::hashes::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
 ) -> Result<Vec<MethodDef>, String> {
     let mut methods = parse_methods(ruby_src)?;
 
@@ -798,8 +798,8 @@ pub fn parse_methods_with_rbs_in_ctx(
     // class) we fall back to a name-keyed map built from
     // parse_signatures.
     let app_sigs = crate::rbs::parse_app_signatures(rbs_src)?;
-    let mut sig_by_class: std::collections::HashMap<String, std::collections::HashMap<Symbol, Ty>> =
-        std::collections::HashMap::new();
+    let mut sig_by_class: crate::hashes::HashMap<String, crate::hashes::HashMap<Symbol, Ty>> =
+        crate::hashes::HashMap::default();
     for (cid, sigs) in app_sigs {
         let raw = cid.0.as_str();
         let last = raw.rsplit("::").next().unwrap_or(raw).to_string();
@@ -810,9 +810,9 @@ pub fn parse_methods_with_rbs_in_ctx(
     }
 
     let flat_sigs = parse_signatures(rbs_src)?;
-    let abstract_methods: std::collections::HashSet<Symbol> =
+    let abstract_methods: crate::hashes::HashSet<Symbol> =
         flat_sigs.abstract_methods.iter().cloned().collect();
-    let mut flat_sig_map: std::collections::HashMap<Symbol, Ty> =
+    let mut flat_sig_map: crate::hashes::HashMap<Symbol, Ty> =
         flat_sigs.methods.into_iter().collect();
 
     // Names that satisfied a top-level (no enclosing class) Ruby def
@@ -820,8 +820,8 @@ pub fn parse_methods_with_rbs_in_ctx(
     // per-class orphan check — emit_method drops module wrappers, so
     // a round-trip test re-parses with `enclosing_class = None` but
     // the RBS sigs still live inside a `module M`.
-    let mut flat_matched_names: std::collections::HashSet<Symbol> =
-        std::collections::HashSet::new();
+    let mut flat_matched_names: crate::hashes::HashSet<Symbol> =
+        crate::hashes::HashSet::default();
 
     for m in &mut methods {
         let ty = if let Some(enclosing) = &m.enclosing_class {
@@ -927,7 +927,7 @@ pub fn parse_methods_with_rbs_in_ctx(
     let constants = crate::analyze::ConstScope::global(parse_module_constants(ruby_src).unwrap_or_default());
 
     let build_ctx = |m: &MethodDef,
-                     ivars: &std::collections::HashMap<Symbol, Ty>|
+                     ivars: &crate::hashes::HashMap<Symbol, Ty>|
      -> crate::analyze::Ctx {
         let mut ctx = crate::analyze::Ctx::default();
         ctx.class_side = m.receiver == MethodReceiver::Class;
@@ -947,21 +947,21 @@ pub fn parse_methods_with_rbs_in_ctx(
         ctx
     };
 
-    let empty_ivars: std::collections::HashMap<Symbol, Ty> =
-        std::collections::HashMap::new();
+    let empty_ivars: crate::hashes::HashMap<Symbol, Ty> =
+        crate::hashes::HashMap::default();
     for m in &mut methods {
         let ctx = build_ctx(m, &empty_ivars);
         typer.analyze_expr(&mut m.body, &ctx);
     }
 
-    let mut flow_ivars: std::collections::HashMap<Symbol, Ty> =
-        std::collections::HashMap::new();
+    let mut flow_ivars: crate::hashes::HashMap<Symbol, Ty> =
+        crate::hashes::HashMap::default();
     for m in &methods {
         crate::analyze::extract_ivar_assignments(&m.body, &mut flow_ivars);
     }
 
     if !flow_ivars.is_empty() {
-        let reseeded: std::collections::HashMap<Symbol, Ty> = flow_ivars
+        let reseeded: crate::hashes::HashMap<Symbol, Ty> = flow_ivars
             .into_iter()
             .map(|(name, ty)| (name, Ty::Union { variants: vec![ty, Ty::Nil] }))
             .collect();
