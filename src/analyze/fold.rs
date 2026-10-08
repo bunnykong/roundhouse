@@ -243,7 +243,9 @@ pub(crate) fn param_ref(class: &ClassId, method: &Symbol, index: usize, value: T
     if !active() || !is_rec_method(class, method) {
         return value;
     }
-    let slot = intern(SlotKey::Param { class: class.clone(), method: method.clone(), index });
+    let key = SlotKey::Param { class: class.clone(), method: method.clone(), index };
+    super::structure::fold_write(&key, "parameter-seed");
+    let slot = intern(key);
     // A slot's own top-level reference contributes nothing (X = X | A is A).
     let value = strip_self(value, slot);
     ST.with(|s| {
@@ -316,6 +318,7 @@ fn fingerprint(t: &Ty) -> u64 {
 /// `RH_FOLD_JOIN` they also join across passes; without it, the first
 /// write in a new pass replaces the last pass's value.
 fn accumulate(key: SlotKey, value: Ty) -> Ty {
+    if super::fixpoint_check::stats_on() { super::structure::fold_write(&key, "site-transfer"); }
     let slot = intern(key);
     let value = strip_self(value, slot);
     let print = fingerprint(&value);
@@ -1022,4 +1025,18 @@ mod tests {
         comps.sort();
         assert_eq!(comps, vec![vec![0, 1], vec![2], vec![3]]);
     }
+}
+
+/// Canonical structure records; inferred values and allocation ids are absent.
+pub(super) fn structure_parts() -> (Vec<SlotKey>, Vec<String>, Vec<String>) {
+    ST.with(|s| {
+        let s = s.borrow();
+        let refs = s.rec_methods.iter().map(|(c, m)| format!("{}#{m}", c.0)).collect();
+        let mut routing = Vec::new();
+        for ((c, m), module) in &s.aliases { routing.push(format!("alias:{}#{m}->{}#{m}", c.0, module.0)); }
+        for ((c, m), targets) in &s.edges {
+            for (t, n) in targets { routing.push(format!("edge:{}#{m}->{}#{n}", c.0, t.0)); }
+        }
+        (s.keys.clone(), refs, routing)
+    })
 }

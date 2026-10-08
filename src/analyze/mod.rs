@@ -51,6 +51,7 @@ mod fixpoint_bound;
 mod fixpoint_check;
 mod det;
 mod detfp;
+mod structure;
 mod fixpoint_rounds;
 mod handoff;
 pub(crate) mod fold;
@@ -1114,6 +1115,10 @@ impl Analyzer {
         handoff::reset();
         fold::reset();
         slots::reset();
+        structure::reset(|| (Self::defined_methods(app), Self::param_shapes(app)));
+        if fixpoint_check::stats_on() {
+            self.fixpoint_checks.structure_start = Some(self.structure_snapshot(app).summary());
+        }
         // An unresolvable include is a load-time error, not an open method
         // surface. Keep it in the class-body ledger even when no method is called.
         for class in &mut app.library_classes {
@@ -1553,6 +1558,9 @@ impl Analyzer {
         self.type_rails_application_body(app);
         // `RH_FOLD`: expand every reference before anything downstream of
         // analysis sees a type.
+        if fixpoint_check::stats_on() {
+            self.fixpoint_checks.structure_end = Some(self.structure_snapshot(app).summary());
+        }
         if detfp::on() {
             let fp = self.c1_state_fp(app);
             eprintln!("rh-det-pre: {}", fp.det_line());
@@ -6305,6 +6313,13 @@ impl Analyzer {
                     let record_initialize = method.as_str() == "new"
                         && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
                     for class_id in recv_classes {
+                        if fixpoint_check::stats_on() {
+                            let dest = structure::owner(|defined| self.inherited_param_owner(defined, class_id.clone(), method));
+                            let placed = structure::placed_arity(|shapes| Self::place_keyword_args(
+                                shapes.get(&(dest.clone(), method.clone())), arg_tys.clone(), kw_tys.clone()).len());
+                            structure::param_site(&dest, method, placed, &expr.span, self_class);
+                            if record_initialize { structure::param_site(&class_id, &Symbol::from("initialize"), placed, &expr.span, self_class); }
+                        }
                         if record_initialize {
                             out.push((
                                 class_id.clone(),
