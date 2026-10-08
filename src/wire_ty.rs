@@ -1,26 +1,29 @@
 //! Wire equality: structural equality that also requires record fields in
 //! the same order, since a record serializes in insertion order. Interning
-//! and the join memo use it, so a reused node serializes exactly as the
-//! one it replaces.
+//! and the join memo use the same walk. Storage equality additionally
+//! preserves untyped provenance when the interner chooses a payload.
 use crate::ident::Symbol;
 use crate::ty::{Param, Ty};
 use indexmap::IndexMap;
 use std::collections::HashMap;
-type Memo = HashMap<(usize, usize), bool>;
-
-pub(crate) fn types(a: &[Ty], b: &[Ty]) -> bool {
-    let mut memo = Memo::new();
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| go(x, y, &mut memo))
+#[derive(Default)]
+struct Memo {
+    pairs: HashMap<(usize, usize), bool>,
+    provenance: bool,
 }
-pub(crate) fn params(a: &[Param], b: &[Param]) -> bool {
-    let mut memo = Memo::new();
+
+pub(crate) fn storage_types(a: &[Ty], b: &[Ty]) -> bool {
+    slice(a, b, &mut Memo { provenance: true, ..Memo::default() })
+}
+pub(crate) fn storage_params(a: &[Param], b: &[Param]) -> bool {
+    let mut memo = Memo { provenance: true, ..Memo::default() };
     a.len() == b.len()
         && a.iter()
             .zip(b)
             .all(|(x, y)| x.name == y.name && x.kind == y.kind && go(&x.ty, &y.ty, &mut memo))
 }
-pub(crate) fn fields(a: &IndexMap<Symbol, Ty>, b: &IndexMap<Symbol, Ty>) -> bool {
-    fields_memo(a, b, &mut Memo::new())
+pub(crate) fn storage_fields(a: &IndexMap<Symbol, Ty>, b: &IndexMap<Symbol, Ty>) -> bool {
+    fields_memo(a, b, &mut Memo { provenance: true, ..Memo::default() })
 }
 fn fields_memo(a: &IndexMap<Symbol, Ty>, b: &IndexMap<Symbol, Ty>, memo: &mut Memo) -> bool {
     a.len() == b.len()
@@ -36,14 +39,15 @@ fn go(a: &Ty, b: &Ty, memo: &mut Memo) -> bool {
         return true;
     }
     let key = (a as *const Ty as usize, b as *const Ty as usize);
-    if let Some(value) = memo.get(&key) {
+    if let Some(value) = memo.pairs.get(&key) {
         return *value;
     }
     if a != b {
-        memo.insert(key, false);
+        memo.pairs.insert(key, false);
         return false;
     }
     let result = match (a, b) {
+        (Ty::Untyped { why: x }, Ty::Untyped { why: y }) => !memo.provenance || x == y,
         (Ty::Array { elem: x }, Ty::Array { elem: y }) => go(x, y, memo),
         (Ty::Hash { key: kx, value: vx }, Ty::Hash { key: ky, value: vy }) => {
             go(kx, ky, memo) && go(vx, vy, memo)
@@ -77,10 +81,10 @@ fn go(a: &Ty, b: &Ty, memo: &mut Memo) -> bool {
         }
         _ => true,
     };
-    memo.insert(key, result);
+    memo.pairs.insert(key, result);
     result
 }
 
 pub(crate) fn equal(a: &Ty, b: &Ty) -> bool {
-    go(a, b, &mut Memo::new())
+    go(a, b, &mut Memo::default())
 }
