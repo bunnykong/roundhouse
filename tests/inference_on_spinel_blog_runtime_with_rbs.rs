@@ -432,7 +432,7 @@ fn build_method_ctx(
 ) -> Ctx {
     let mut ctx = Ctx::default();
     ctx.self_ty = Some(Ty::Class { id: class_id.clone(), args: vec![] });
-    ctx.ivar_bindings = ivars.clone();
+    ctx.ivar_bindings = ivars.clone().into();
     if let Some(class_sigs) = sigs.get(class_id) {
         if let Some(Ty::Fn { params, .. }) = class_sigs.get(&method.name) {
             for (param, p) in method.params.iter().zip(params.iter()) {

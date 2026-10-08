@@ -1604,8 +1604,8 @@ impl Analyzer {
             }
             let ctx = Ctx {
                 self_ty: None,
-                ivar_bindings: HashMap::new(),
-                local_bindings,
+                ivar_bindings: Default::default(),
+                local_bindings: local_bindings.into(),
                 class_objects: Default::default(),
                 constants: Default::default(),
                 annotate_self_dispatch: false,
@@ -1822,8 +1822,8 @@ impl Analyzer {
             for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
                     self_ty: Some(self_ty.clone()),
-                    ivar_bindings: HashMap::new(),
-                    local_bindings: HashMap::new(),
+                    ivar_bindings: Default::default(),
+                    local_bindings: Default::default(),
                     class_objects: Default::default(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
@@ -2092,8 +2092,8 @@ impl Analyzer {
             // (`days` on `Class { NEW_USER_DAYS }`).
             let const_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
-                ivar_bindings: class_ivars.clone(),
-                local_bindings: HashMap::new(),
+                ivar_bindings: class_ivars.clone().into(),
+                local_bindings: Default::default(),
                 class_objects: Default::default(),
                 constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -2108,8 +2108,8 @@ impl Analyzer {
 
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
-                ivar_bindings: class_ivars.clone(),
-                local_bindings: HashMap::new(),
+                ivar_bindings: class_ivars.clone().into(),
+                local_bindings: Default::default(),
                 class_objects: Default::default(),
                 constants: class_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -2168,8 +2168,8 @@ impl Analyzer {
                 }
                 let reseeded_ctx = Ctx {
                     self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
-                    ivar_bindings: reseeded,
-                    local_bindings: HashMap::new(),
+                    ivar_bindings: reseeded.into(),
+                    local_bindings: Default::default(),
                     class_objects: Default::default(),
                     constants: class_constants.clone(),
                     annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -2216,8 +2216,8 @@ impl Analyzer {
             };
             let const_ctx = Ctx {
                 self_ty: Some(self_ty.clone()),
-                ivar_bindings: HashMap::new(),
-                local_bindings: HashMap::new(),
+                ivar_bindings: Default::default(),
+                local_bindings: Default::default(),
                 class_objects: Default::default(),
                 constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -2236,8 +2236,8 @@ impl Analyzer {
 
             let ctx = Ctx {
                 self_ty: Some(self_ty.clone()),
-                ivar_bindings: HashMap::new(),
-                local_bindings: HashMap::new(),
+                ivar_bindings: Default::default(),
+                local_bindings: Default::default(),
                 class_objects: Default::default(),
                 constants: class_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -2786,8 +2786,8 @@ impl Analyzer {
                         }
                         let base_ctx = Ctx {
                             self_ty: Some(meta.self_ty.clone()),
-                            ivar_bindings: seed,
-                            local_bindings: HashMap::new(),
+                            ivar_bindings: seed.into(),
+                            local_bindings: Default::default(),
                             class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
                             annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
@@ -3293,8 +3293,8 @@ impl Analyzer {
                     }
                     let base_ctx = Ctx {
                         self_ty: Some(self_ty.clone()),
-                        ivar_bindings: seed,
-                        local_bindings: HashMap::new(),
+                        ivar_bindings: seed.into(),
+                        local_bindings: Default::default(),
                         class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
@@ -3474,8 +3474,8 @@ impl Analyzer {
             };
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: self_id, args: vec![] }),
-                ivar_bindings: HashMap::new(),
-                local_bindings: HashMap::new(),
+                ivar_bindings: Default::default(),
+                local_bindings: Default::default(),
                 class_objects: Default::default(),
                 constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
             };
@@ -3618,8 +3618,8 @@ impl Analyzer {
                 }
                 let reseeded_ctx = Ctx {
                     self_ty: class_ctx.self_ty.clone(),
-                    ivar_bindings: reseeded,
-                    local_bindings: HashMap::new(),
+                    ivar_bindings: reseeded.into(),
+                    local_bindings: Default::default(),
                     class_objects: Default::default(),
                     constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false, instance_body: false,
                 };
@@ -3680,7 +3680,7 @@ impl Analyzer {
                 args: vec![],
             });
             view_ctx.constants = global_constants.clone();
-            view_ctx.ivar_bindings = ivars;
+            view_ctx.ivar_bindings = ivars.into();
             if let Some(row) = mailer_params_by_view.get(name) {
                 view_ctx.local_bindings.insert(Symbol::from("params"), row.clone());
             }
@@ -3920,7 +3920,7 @@ impl Analyzer {
             });
             view_ctx.constants = global_constants.clone();
             if let Some(locals) = partial_locals_by_name.get(&view.name) {
-                view_ctx.local_bindings = locals.clone();
+                view_ctx.local_bindings = locals.clone().into();
             }
             // Partials the FRAMEWORK renders, so no site in the app seeds
             // them: `action_text:install` copies `active_storage/blobs/
@@ -3956,7 +3956,7 @@ impl Analyzer {
                     .or_insert(Ty::Class { id: binding.class.clone(), args: vec![] });
             }
             if let Some(ivars) = partial_ivars_by_name.get(&view.name) {
-                view_ctx.ivar_bindings = ivars.clone();
+                view_ctx.ivar_bindings = ivars.clone().into();
             }
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
         }

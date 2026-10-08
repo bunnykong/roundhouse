@@ -91,6 +91,52 @@ impl ConstScope {
     }
 }
 
+/// A binding map shared by a [`Ctx`] and the contexts cloned from it.
+/// The typer clones `Ctx` for every block, branch, `let` and method it
+/// enters, and most clones write to one map or none: cloning shares the
+/// maps, and a map is copied on its first write while shared
+/// (`Arc::make_mut`). Reads and writes go through `Deref`/`DerefMut`,
+/// so call sites read as before; lookups and iteration are unchanged.
+#[derive(Default)]
+pub struct Shared<T: Clone>(std::sync::Arc<T>);
+
+impl<T: Clone> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        Shared(std::sync::Arc::clone(&self.0))
+    }
+}
+
+impl<T: Clone> std::ops::Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for Shared<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<T: Clone> From<T> for Shared<T> {
+    fn from(value: T) -> Self {
+        Shared(std::sync::Arc::new(value))
+    }
+}
+
+impl<A, T: Clone + FromIterator<A>> FromIterator<A> for Shared<T> {
+    fn from_iter<I: IntoIterator<Item = A>>(iter: I) -> Self {
+        Shared::from(iter.into_iter().collect::<T>())
+    }
+}
+
+impl<T: Clone + std::fmt::Debug> std::fmt::Debug for Shared<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Recursion context — what `self` is, what locals/ivars are in scope.
 /// Immutable during descent; clone to enter a new scope (Let body,
 /// block body, Seq walk with new ivar/local bindings).
@@ -100,14 +146,14 @@ pub struct Ctx {
     /// Ivar bindings observed as a `Seq` walks its statements in order.
     /// `@post = Post.find(...)` in stmt 1 lets `@post.destroy` in stmt 2
     /// dispatch correctly.
-    pub ivar_bindings: HashMap<Symbol, Ty>,
+    pub ivar_bindings: Shared<HashMap<Symbol, Ty>>,
     /// Local-variable bindings in the current scope: let-bound names,
     /// assignments accumulated through a `Seq`, and block parameters
     /// seeded from a receiver-aware dispatch.
-    pub local_bindings: HashMap<Symbol, Ty>,
+    pub local_bindings: Shared<HashMap<Symbol, Ty>>,
     /// Locals whose assigned value is proven to be a class/module object.
     /// Nominal instance types alone do not establish this identity.
-    pub class_objects: std::collections::HashSet<Symbol>,
+    pub class_objects: Shared<std::collections::HashSet<Symbol>>,
     /// Module/class-level typed constants such as
     /// `STATUS_CODES = { ok: 200, ... }.freeze`. Rubydex IDs resolve
     /// source-backed reads; this scope types generated expressions.
@@ -2781,6 +2827,26 @@ pub(super) fn union_many(tys: Vec<Ty>) -> Ty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloned_context_bindings_remain_independent_after_writes() {
+        let name = Symbol::from("value");
+        let mut outer = Ctx::default();
+        outer.local_bindings.insert(name.clone(), Ty::Int);
+        outer.ivar_bindings.insert(name.clone(), Ty::Int);
+        outer.class_objects.insert(name.clone());
+        let mut branch = outer.clone();
+        branch.local_bindings.insert(name.clone(), Ty::Str);
+        branch.ivar_bindings.remove(&name);
+        branch.class_objects.remove(&name);
+        assert_eq!(outer.local_bindings.get(&name), Some(&Ty::Int));
+        assert_eq!(outer.ivar_bindings.get(&name), Some(&Ty::Int));
+        assert!(outer.class_objects.contains(&name));
+        outer.local_bindings.clear();
+        assert_eq!(branch.local_bindings.get(&name), Some(&Ty::Str));
+        assert!(branch.ivar_bindings.is_empty());
+        assert!(branch.class_objects.is_empty());
+    }
     use super::narrowing::{apply_narrowing, extract_narrowing};
     use crate::expr::ExprNode;
     use crate::ident::VarId;

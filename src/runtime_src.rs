@@ -592,7 +592,7 @@ pub fn parse_library_with_rbs(
                 id: lc.name.clone(),
                 args: vec![],
             });
-            ctx.ivar_bindings = ivars.clone();
+            ctx.ivar_bindings = ivars.clone().into();
             ctx.constants = scope_constants.clone();
             // Opt in to typer's self-dispatch annotation: bare Sends
             // that resolve through this class's methods get
@@ -942,7 +942,7 @@ pub fn parse_methods_with_rbs_in_ctx(
                 args: vec![],
             });
         }
-        ctx.ivar_bindings = ivars.clone();
+        ctx.ivar_bindings = ivars.clone().into();
         ctx.constants = constants.clone();
         ctx
     };
