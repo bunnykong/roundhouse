@@ -2915,11 +2915,27 @@ fn block_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
         return vec![];
     };
     let Some(pn) = bpn.parameters() else { return vec![] };
-    pn.requireds()
+    let mut names: Vec<Symbol> = pn
+        .requireds()
         .iter()
         .filter_map(|req| req.as_required_parameter_node())
         .map(|rp| Symbol::from(constant_id_str(&rp.name())))
-        .collect()
+        .collect();
+    // Under the fixpoint (`RH_FOLD`), `|k, |` (an implicit rest) and `|k, *|`
+    // (an anonymous one) destructure a yielded Array like `|k, v|`: name the
+    // rest so the block binds `k` to the first element, not the whole Array.
+    let unnamed_rest = pn.rest().is_some_and(|r| {
+        r.as_implicit_rest_node().is_some() || r.as_rest_parameter_node().is_some_and(|rp| rp.name().is_none())
+    });
+    if crate::analyze::fold::on()
+        && unnamed_rest
+        && names.len() == 1
+        && pn.requireds().iter().count() == 1
+        && pn.posts().iter().next().is_none()
+    {
+        names.push(Symbol::from("__rest"));
+    }
+    names
 }
 
 /// The block's REST parameter (`|*args|`), without its sigil.
