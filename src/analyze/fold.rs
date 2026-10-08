@@ -65,6 +65,20 @@ static TAIL: LazyLock<bool> = LazyLock::new(|| flag("RH_FOLD_TAIL"));
 /// `untyped`.
 const EXPAND_NODES: usize = 256;
 
+/// The published S2c already walks maps by key. This opt-in completes the
+/// canonical expansion by ordering direct reference arms by slot key too.
+static CANON_EXPAND: LazyLock<bool> = LazyLock::new(|| flag("RH_CANON_EXPAND"));
+
+fn reference_arm_order(variants: &[Ty]) -> Vec<usize> {
+    let mut order: Vec<(u8, String, usize)> = variants.iter().enumerate().map(|(i, v)| match v {
+        Ty::Rec { slot } => (1, format!("{:?}", key_of(*slot)), i),
+        _ => (0, String::new(), i),
+    }).collect();
+    order.sort();
+    order.into_iter().map(|(_, _, i)| i).collect()
+}
+
+
 /// A syntax site: the span of the expression at which a reference was
 /// unfolded or narrowed.
 pub(crate) type SiteId = (u32, u32, u32);
@@ -913,6 +927,11 @@ impl<'a> Expander<'a> {
                 r
             }
             Ty::Union { variants } => {
+                if *CANON_EXPAND && variants.iter().filter(|v| matches!(v, Ty::Rec { .. })).count() > 1 {
+                    let order = reference_arm_order(variants);
+                    let vs: Vec<Ty> = order.iter().map(|i| self.go(&variants[*i], budget)).collect();
+                    return super::body::union_many(vs);
+                }
                 let vs: Vec<Ty> = variants.iter().map(|v| self.go(v, budget)).collect();
                 super::body::union_many(vs)
             }
@@ -1010,6 +1029,26 @@ mod tests {
         assert_eq!(strip_self(Ty::Rec { slot: 3 }, 3).provenance(), Some(crate::ty::Provenance::Pending));
         assert_eq!(strip_self(union(vec![Ty::Rec { slot: 3 }, Ty::Int]), 3), Ty::Int);
         assert_eq!(strip_self(Ty::Rec { slot: 4 }, 3), Ty::Rec { slot: 4 });
+    }
+
+    #[test]
+    fn reference_arm_order_uses_keys_across_opposite_allocations() {
+        let key = |name: &str| SlotKey::Ret { class: ClassId(Symbol::from("Order")), method: Symbol::from(name), class_side: false };
+        ST.with(|s| *s.borrow_mut() = State::default());
+        let z = intern(key("z")); let a = intern(key("a"));
+        let first = vec![Ty::Rec { slot:z }, Ty::Int, Ty::Rec { slot:a }];
+        let keys1: Vec<_> = reference_arm_order(&first).iter().map(|i| match &first[*i] {
+            Ty::Rec { slot } => format!("{:?}", key_of(*slot)), _ => "value".into(),
+        }).collect();
+        ST.with(|s| *s.borrow_mut() = State::default());
+        let a = intern(key("a")); let z = intern(key("z"));
+        let second = vec![Ty::Rec { slot:a }, Ty::Rec { slot:z }, Ty::Int];
+        let keys2: Vec<_> = reference_arm_order(&second).iter().map(|i| match &second[*i] {
+            Ty::Rec { slot } => format!("{:?}", key_of(*slot)), _ => "value".into(),
+        }).collect();
+        assert_eq!(keys1, keys2);
+        assert_eq!(keys1[0], "value");
+        ST.with(|s| *s.borrow_mut() = State::default());
     }
 
     #[test]
