@@ -1,7 +1,6 @@
-//! Wire equality: structural equality that also requires record fields in
-//! the same order, since a record serializes in insertion order. Interning
-//! and the join memo use the same walk. Storage equality additionally
-//! preserves untyped provenance when the interner chooses a payload.
+//! Storage equality: structural equality including untyped provenance
+//! and record insertion order. Interning and the join memo use the same
+//! memoized walk; semantic equality remains provenance-insensitive.
 use crate::ident::Symbol;
 use crate::ty::{Param, Ty};
 use indexmap::IndexMap;
@@ -85,6 +84,7 @@ fn go(a: &Ty, b: &Ty, memo: &mut Memo) -> bool {
     result
 }
 
+#[cfg(test)]
 pub(crate) fn equal(a: &Ty, b: &Ty) -> bool {
     go(a, b, &mut Memo::default())
 }
