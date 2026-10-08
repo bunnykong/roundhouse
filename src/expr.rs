@@ -27,6 +27,10 @@ pub const CLASS_OBJECT_VALUE: u64 = 1 << 5;
 pub const RESOLVED_OPERATOR_RECEIVER: u64 = 1 << 6;
 /// The cast's type was declared by source, rather than synthesized by lowering.
 pub const SOURCE_TYPE_ASCRIPTION: u64 = 1 << 7;
+/// A setter with a pending/gradual RHS still has a dispatch verdict separate
+/// from its Ruby expression value (which is always that RHS).
+pub const SETTER_DISPATCH_CHECKED: u64 = 1 << 8;
+pub const SETTER_DISPATCH_FAILED: u64 = 1 << 9;
 /// A generated constant may borrow a source span for diagnostics/layout;
 /// that position is not a written Ruby constant reference to index.
 pub const GENERATED_CONST_REF: u64 = 1 << 4;

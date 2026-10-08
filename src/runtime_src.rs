@@ -576,8 +576,20 @@ pub fn parse_library_with_rbs(
     // files. Their constant values use owner-first lookup with the
     // legacy bare-name fallback; other class reads keep exact paths without a
     // partial Rubydex graph that would misreport them as missing.
-    let typer = crate::analyze::BodyTyper::new(&class_registry);
     for lc in &mut library_classes {
+        let mut literal_declarations = std::collections::HashMap::new();
+        if let Some(info) = class_registry.get(&lc.name) {
+            for (name, sig) in &info.instance_methods {
+                if let Ty::Fn { params, ret, .. } = sig {
+                    if params.is_empty() { literal_declarations.insert(name.clone(), (**ret).clone()); }
+                }
+            }
+        }
+        if let Some(declared) = rbs_ivars_by_class.get(&lc.name) {
+            literal_declarations.extend(declared.iter().map(|(name, ty)| (name.clone(), ty.clone())));
+        }
+        let typer = crate::analyze::BodyTyper::new(&class_registry)
+            .with_literal_declarations(&literal_declarations);
         let scope_constants = class_constants.get(&lc.name).unwrap_or(&constants);
         let build_ctx = |m: &MethodDef,
                          ivars: &std::collections::HashMap<Symbol, Ty>|

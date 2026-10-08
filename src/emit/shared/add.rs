@@ -108,7 +108,8 @@ pub fn classify_add(lhs: &Expr, rhs: &Expr) -> AddCase {
             // emitter consumes `ArrayConcat { .. }` ignoring it, and
             // the expression's true (union-element) result type is
             // computed by the body typer, not here.
-            match (lhs_ty.collection_elem(), rhs_ty.collection_elem()) {
+            let elem = crate::analyze::shape::collection_elem;
+            match (elem(lhs_ty), elem(rhs_ty)) {
                 (Some(elem), Some(_)) => AddCase::ArrayConcat { elem },
                 _ => AddCase::Incompatible,
             }
@@ -199,6 +200,26 @@ mod tests {
             panic!("expected ArrayConcat");
         };
         assert_eq!(elem, Ty::Int);
+    }
+
+    #[test]
+    fn syntax_return_tuples_concatenate_as_arrays() {
+        // Discourse's staff_filters returns a homogeneous literal array.
+        // RH_SHAPE preserves its positions; '+' must keep its Array meaning.
+        let tuple = var_with("tuple", Ty::Tuple { elems: vec![Ty::Sym, Ty::Sym].into() });
+        let array = var_with("array", Ty::Array { elem: std::sync::Arc::new(Ty::Sym) });
+        let shape = std::env::var("RH_SHAPE").is_ok_and(|v| v == "1");
+        for (lhs, rhs) in [(&tuple, &array), (&array, &tuple), (&tuple, &tuple)] {
+            if shape {
+                let AddCase::ArrayConcat { elem } = classify_add(lhs, rhs) else {
+                    panic!("tuple concatenation must retain Array behavior");
+                };
+                assert_eq!(elem, Ty::Sym);
+            } else {
+                assert!(matches!(classify_add(lhs, rhs), AddCase::Incompatible));
+            }
+        }
+        assert!(matches!(classify_add(&tuple, &int_lit(1)), AddCase::Incompatible));
     }
 
     #[test]

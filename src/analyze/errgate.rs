@@ -126,7 +126,7 @@ fn visit(e: &Expr, app: &App, typer: &BodyTyper<'_>, body: usize, ordinal: &mut 
             &e.diagnostic,
             Some(DiagnosticKind::SendDispatchFailed { .. })
         ) || (r.ty.as_ref().is_some_and(|t| !matches!(t, Ty::Var { .. }))
-            && e.ty.as_ref().is_none_or(|t| matches!(t, Ty::Var { .. })));
+            && super::diagnostics::send_result_is_unknown(e));
         let mut row = recv(r.ty.as_ref(), |arm| {
             typer.errgate_answer(arm, method, block_ret, args)
         });

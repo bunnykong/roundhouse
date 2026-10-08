@@ -50,6 +50,7 @@ mod harvest_return;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod det;
+pub(crate) mod shape;
 mod detfp;
 mod structure;
 pub(crate) mod errgate;
@@ -1197,6 +1198,7 @@ impl Analyzer {
             .map(|c| (c.name.clone(), c.parent.clone()))
             .collect();
 
+        shape::capture_literals(app);
         if sccq::sched_sccq() {
             self.sccq_init(app);
             // The state before any typing: the initial pass harvests each
@@ -9088,6 +9090,22 @@ pub(crate) fn return_leaves(body: &Expr) -> Vec<&Expr> {
     }
     fn returns<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
         match &*e.node {
+            ExprNode::Send { recv, args, block, method, .. } if shape::on() => {
+                if let Some(r) = recv { returns(r, out); }
+                for a in args { returns(a, out); }
+                if !matches!(method.as_str(), "lambda" | "define_method") {
+                    if let Some(b) = block {
+                        if let ExprNode::Lambda { body, .. } = &*b.node { returns(body, out); }
+                    }
+                }
+            }
+            ExprNode::Apply { fun, args, block } if shape::on() => {
+                returns(fun, out);
+                for a in args { returns(a, out); }
+                if let Some(b) = block {
+                    if let ExprNode::Lambda { body, .. } = &*b.node { returns(body, out); }
+                }
+            }
             // A block's `return`/`next` is not the method's.
             ExprNode::Lambda { .. } => {}
             ExprNode::Return { value } => {
@@ -9126,7 +9144,7 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
             return None;
         }
         let tys: Vec<Ty> = elements.iter().map(|e| e.ty.clone()).collect::<Option<_>>()?;
-        if tys.iter().any(|t| matches!(t, Ty::Var { .. })) {
+        if !shape::on() && tys.iter().any(|t| matches!(t, Ty::Var { .. })) {
             return None;
         }
         positions = Some(match positions {
@@ -9139,10 +9157,34 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
     }
     let elems = positions?;
     let first = &elems[0];
-    if elems.iter().all(|t| t == first) {
+    if !shape::on() && elems.iter().all(|t| t == first) {
         return None;
     }
     Some(Ty::Tuple { elems: elems.into() })
+}
+
+#[cfg(test)]
+mod shape_tuple_tests {
+    use super::*;
+
+    fn literal(tys: Vec<Ty>) -> Expr {
+        let elements = tys.into_iter().map(|t| {
+            let mut e = Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil });
+            e.ty = Some(t);
+            e
+        }).collect();
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Array { elements, style: Default::default() })
+    }
+
+    #[test]
+    fn shape_tuple_shape_is_independent_of_pending_and_uniform_elements() {
+        for types in [vec![body::unknown(), Ty::Int], vec![Ty::Int, Ty::Int]] {
+            let expected = shape::on().then(|| Ty::Tuple { elems: types.clone().into() });
+            assert_eq!(tuple_return_ty(&literal(types)), expected);
+        }
+        let mixed = vec![Ty::Int, Ty::Str];
+        assert_eq!(tuple_return_ty(&literal(mixed.clone())), Some(Ty::Tuple { elems: mixed.into() }));
+    }
 }
 
 #[cfg(test)]
