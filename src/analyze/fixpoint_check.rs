@@ -250,7 +250,7 @@ fn ir_rows(e: &Expr, out: &mut Vec<IrRow>) {
 }
 
 /// The carried state, as one hash per entry.
-pub(super) struct StateFp {
+pub(crate) struct StateFp {
     parts: BTreeMap<&'static str, BTreeMap<String, u64>>,
     /// Sorted, so two fingerprints compare as multisets.
     ir: Vec<IrRow>,
@@ -294,11 +294,39 @@ impl StateFp {
         out
     }
 
-    fn digests(&self) -> BTreeMap<&'static str, String> {
+    pub(crate) fn digests(&self) -> BTreeMap<&'static str, String> {
         let mut out: BTreeMap<&'static str, String> =
             self.parts.iter().map(|(name, part)| (*name, format!("{:016x}", hash_of(part)))).collect();
         out.insert("ir", format!("{:016x}", hash_of(&self.ir)));
         out
+    }
+
+    /// The first differing carried-state slot, followed by the first IR
+    /// site if the keyed tables agree. Use the same inventory as S0.
+    pub(crate) fn first_difference(&self, other: &Self) -> Option<serde_json::Value> {
+        let empty = BTreeMap::new();
+        let parts: BTreeSet<_> = self.parts.keys().chain(other.parts.keys()).copied().collect();
+        for part in parts {
+            let a = self.parts.get(part).unwrap_or(&empty);
+            let b = other.parts.get(part).unwrap_or(&empty);
+            let keys: BTreeSet<_> = a.keys().chain(b.keys()).collect();
+            for key in keys {
+                if a.get(key) != b.get(key) {
+                    return Some(serde_json::json!({"part": part, "slot": key,
+                        "warm": a.get(key).map(|v| format!("{v:016x}")),
+                        "cold": b.get(key).map(|v| format!("{v:016x}"))}));
+                }
+            }
+        }
+        for index in 0..self.ir.len().max(other.ir.len()) {
+            if self.ir.get(index) != other.ir.get(index) {
+                let site = self.ir.get(index).or_else(|| other.ir.get(index)).unwrap();
+                return Some(serde_json::json!({"part": "ir", "index": index,
+                    "slot": format!("{}:{}:{}", site.0, site.1, site.2),
+                    "warm": self.ir.get(index), "cold": other.ir.get(index)}));
+            }
+        }
+        None
     }
 
     fn sizes(&self) -> BTreeMap<&'static str, u64> {
@@ -381,7 +409,7 @@ fn loop_end(end: LoopEnd) -> serde_json::Value {
 
 impl Analyzer {
     /// The carried state (see the module docs), one hash per entry.
-    pub(super) fn state_fp(&self, app: &App) -> StateFp {
+    pub(crate) fn state_fp(&self, app: &App) -> StateFp {
         let mut parts: BTreeMap<&'static str, BTreeMap<String, u64>> = BTreeMap::new();
         let mut put = |part: &'static str, key: String, hash: u64| {
             parts.entry(part).or_default().insert(key, hash);

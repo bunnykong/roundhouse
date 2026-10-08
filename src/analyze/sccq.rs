@@ -168,6 +168,24 @@ fn rec_end() -> Reads {
     reads
 }
 
+// A warm evaluation isolates its actual scheduler reads from cache guards.
+// The caller's prefix is put back when the evaluation scope ends.
+pub(crate) fn warm_rec_take() -> Option<Reads> {
+    RECORDING.load(Relaxed).then(|| REC.with(|r| std::mem::take(&mut *r.borrow_mut())))
+}
+
+pub(crate) fn warm_rec_snapshot() -> Option<Reads> {
+    RECORDING.load(Relaxed).then(|| {
+        let mut reads = REC.with(|r| r.borrow().clone());
+        reads.normalize();
+        reads
+    })
+}
+
+pub(crate) fn warm_rec_restore(before: Reads) {
+    REC.with(|r| r.borrow_mut().absorb(before));
+}
+
 // ─────────────────────────── syntax ───────────────────────────
 
 /// Names dispatch reads under that the syntax does not spell.
@@ -397,6 +415,7 @@ const DIRTY_FULL: u8 = 2;
 
 pub(super) struct Unit {
     pub family: Family,
+    pub class_side: bool,
     pub ci: usize,
     pub mi: usize,
     pub entry: usize,
@@ -1115,12 +1134,13 @@ impl Analyzer {
         };
         let sole_includer = app.sole_includer_of_modules();
         let new_unit = |eng: &mut Engine, family: Family, ci: usize, mi: usize, entry: usize,
-                        class: &ClassId, name: &Symbol, _class_side: bool, body: &Expr,
+                        class: &ClassId, name: &Symbol, class_side: bool, body: &Expr,
                         extra: &[&Expr], own_key: Option<ParamKey>| -> u32 {
             let (ivars, ivar_write) = scan_ivars(body);
             let id = eng.units.len() as u32;
             eng.units.push(Unit {
                 family,
+                class_side,
                 ci,
                 mi,
                 entry,
@@ -1280,6 +1300,7 @@ impl Analyzer {
             }
         }
         eng.unit_ord = vec![u32::MAX; eng.units.len()];
+        super::warm::register(app, &eng.units);
         self.sccq = Some(Box::new(eng));
         // Main's tests loop re-harvests every body, typed or not; the worklist keeps
         // that (the harvest is not idempotent: `decide_harvested_return`).
@@ -1331,6 +1352,7 @@ impl Analyzer {
 
     /// Start recording a fine typing inside a class pass.
     pub(super) fn sccq_rec_begin(&self, unit: Option<u32>) {
+        super::warm::begin_unit(unit);
         if unit.is_some() && self.sccq.is_some() {
             rec_begin();
         }
@@ -1338,6 +1360,7 @@ impl Analyzer {
 
     /// Stop recording; `pass_a` replaces the unit's reads, otherwise they merge.
     pub(super) fn sccq_rec_end(&mut self, unit: Option<u32>, pass_a: bool, body: Option<&Expr>) {
+        super::warm::end_unit();
         let Some(u) = unit else { return };
         let Some(eng) = self.sccq.as_mut() else { return };
         let reads = rec_end();
@@ -2015,6 +2038,8 @@ impl Analyzer {
     // ── one unit ──
 
     fn sccq_eval(&mut self, eng: &mut Engine, app: &mut App, u: u32, level: u8) {
+        super::warm::begin_unit(Some(u));
+        let _warm_unit = super::warm::UnitScope;
         let cap = unit_cap();
         {
             let unit = &mut eng.units[u as usize];
@@ -2337,6 +2362,7 @@ impl Analyzer {
             eng.stats.restamps += 1;
             eng.mark(u, DIRTY_FULL);
         }
+        super::warm::end_unit();
     }
 
     /// Seed units whose read slots moved between `prev` and now.
@@ -2896,7 +2922,7 @@ fn literal_stamps(body: &Expr) -> u64 {
     h.finish()
 }
 
-fn unit_body(app: &App, family: Family, ci: usize, mi: usize) -> &Expr {
+pub(super) fn unit_body(app: &App, family: Family, ci: usize, mi: usize) -> &Expr {
     match family {
         Family::Lib => &app.library_classes[ci].methods[mi].body,
         Family::ModelMethod => &app.models[ci].methods().nth(mi).expect("model method").body,

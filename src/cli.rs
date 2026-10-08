@@ -95,6 +95,9 @@ Serve the MCP tools over stdio for the Rails app at APP
 /// deduplicated punch list is printed at the end. Useful for
 /// scope-estimation passes on unfamiliar apps.
 pub fn check(args: &[String], default_app: &str) -> ExitCode {
+    let warm_check_start = (std::env::var("RH_WARM_TIMINGS").as_deref() == Ok("1")
+        && std::env::var_os("RH_WARM").is_some()).then(std::time::Instant::now);
+    let mut warm_shadow_seconds = 0.0;
     let mut continue_on_error = std::env::var("ROUNDHOUSE_INGEST_SURVEY")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
@@ -187,7 +190,52 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    crate::timings::phase("analyze", || Analyzer::new(&app).analyze(&mut app));
+    let warming = match crate::analyze::warm::start(&app) {
+        Ok(active) => active,
+        Err(error) => {
+            eprintln!("roundhouse-check: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut cold_app = warming.then(|| app.clone());
+    let timing = warming && std::env::var("RH_WARM_TIMINGS").as_deref() == Ok("1");
+    let warm_start = timing.then(std::time::Instant::now);
+    let mut analyzer = Analyzer::new(&app);
+    crate::timings::phase("analyze", || analyzer.analyze(&mut app));
+    let warm_seconds = warm_start.map(|t| t.elapsed().as_secs_f64());
+    if let Some(pending) = crate::analyze::warm::stop() {
+        let shadow_start = timing.then(std::time::Instant::now);
+        let warm = analyzer.state_fp(&app);
+        let cold_start = timing.then(std::time::Instant::now);
+        let cold_app = cold_app.as_mut().unwrap();
+        let mut cold_analyzer = Analyzer::new(cold_app);
+        cold_analyzer.analyze(cold_app);
+        let cold_seconds = cold_start.map(|t| t.elapsed().as_secs_f64());
+        let cold = cold_analyzer.state_fp(cold_app);
+        let first = warm.first_difference(&cold);
+        warm_shadow_seconds = shadow_start.map_or(0.0, |t| t.elapsed().as_secs_f64());
+        let mut report = serde_json::json!({"shadow": if first.is_none() { "pass" } else { "fail" },
+            "warm_digest": warm.digests(), "cold_digest": cold.digests(),
+            "first_difference": first, "evaluations": pending.stats});
+        if timing {
+            report["warm_analyze_seconds"] = serde_json::json!(warm_seconds);
+            report["cold_analyze_seconds"] = serde_json::json!(cold_seconds);
+            report["shadow_seconds"] = serde_json::json!(warm_shadow_seconds);
+        }
+        eprintln!("rh-warm: {report}");
+        if first.is_some() {
+            eprintln!("roundhouse-check: warm shadow differs from cold; cache not published");
+            return ExitCode::from(3);
+        }
+        let save_start = timing.then(std::time::Instant::now);
+        if let Err(error) = pending.save() {
+            eprintln!("roundhouse-check: {error}");
+            return ExitCode::from(2);
+        }
+        if let Some(t) = save_start {
+            eprintln!("rh-warm-save: {{\"seconds\":{}}}", t.elapsed().as_secs_f64());
+        }
+    }
     let mut diags = crate::timings::phase("diagnose", || diagnose(&app));
     // Survey mode: diagnostics that trace back to a recorded ingest gap
     // are the tool's coverage problem, not the app's — downgrade them to
@@ -264,6 +312,13 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
         notes,
         survey_errors.len(),
     );
+
+    if let Some(start) = warm_check_start {
+        let total = start.elapsed().as_secs_f64();
+        eprintln!("rh-warm-wall: {}", serde_json::json!({"total_seconds": total,
+            "shadow_seconds": warm_shadow_seconds,
+            "check_excluding_shadow_seconds": total - warm_shadow_seconds}));
+    }
 
     // Survey errors are informational; they don't gate exit code.
     // Strict-mode ingest errors are caught above. Parse (syntax) errors

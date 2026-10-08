@@ -82,7 +82,7 @@ pub(crate) fn pseudo_site(tag: &str) -> SiteId {
     (u32::MAX, h.finish() as u32, 0)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum SlotKey {
     Ret { class: ClassId, method: Symbol, class_side: bool },
     Param { class: ClassId, method: Symbol, index: usize },
@@ -95,7 +95,7 @@ pub(crate) enum SlotKey {
     At { site: SiteId, step: Step },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Step {
     Elem,
     Key,
@@ -285,20 +285,23 @@ pub(crate) fn value_of(slot: u32, classes: &HashMap<ClassId, ClassInfo>) -> Opti
     // A typing that reads a slot's value depends on it: the worklist
     // re-types the reader when the value moves.
     super::sccq::rec_fold_slot(slot);
-    match key_of(slot)? {
+    let key = key_of(slot)?;
+    let value = match &key {
         SlotKey::Ret { class, method, class_side } => {
-            let cls = classes.get(&class)?;
-            let table = if class_side { &cls.class_methods } else { &cls.instance_methods };
-            let t = table.get(&method)?;
-            Some(match t {
-                Ty::Fn { ret, .. } => (**ret).clone(),
-                other => other.clone(),
+            classes.get(class).and_then(|cls| {
+                let table = if *class_side { &cls.class_methods } else { &cls.instance_methods };
+                table.get(method).map(|t| match t {
+                    Ty::Fn { ret, .. } => (**ret).clone(),
+                    other => other.clone(),
+                })
             })
         }
         SlotKey::Param { .. } | SlotKey::Narrow { .. } | SlotKey::At { .. } => {
             ST.with(|s| s.borrow().values.get(&slot).cloned())
         }
-    }
+    };
+    super::warm::fold_read(&key, value.as_ref());
+    value
 }
 
 /// A structural fingerprint of `t`, blind to provenance as equality is.
@@ -314,7 +317,10 @@ fn fingerprint(t: &Ty) -> u64 {
 /// `RH_FOLD_JOIN` they also join across passes; without it, the first
 /// write in a new pass replaces the last pass's value.
 fn accumulate(key: SlotKey, value: Ty) -> Ty {
+    let recording = super::warm::ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+    let recorded_key = recording.then(|| key.clone());
     let slot = intern(key);
+    let before = recording.then(|| ST.with(|s| s.borrow().values.get(&slot).cloned())).flatten();
     let value = strip_self(value, slot);
     let print = fingerprint(&value);
     ST.with(|s| {
@@ -347,7 +353,50 @@ fn accumulate(key: SlotKey, value: Ty) -> Ty {
         }
         s.values.insert(slot, joined);
     });
+    if recording {
+        let after = ST.with(|s| s.borrow().values.get(&slot).cloned());
+        if let Some(after) = after { super::warm::fold_write(recorded_key.as_ref().unwrap(), before.as_ref(), &after); }
+    }
     Ty::Rec { slot }
+}
+
+pub(crate) fn warm_intern(key: SlotKey) -> u32 { intern(key) }
+
+pub(crate) fn warm_value(key: &SlotKey, classes: &HashMap<ClassId, ClassInfo>) -> Option<Ty> {
+    match key {
+        SlotKey::Ret { class, method, class_side } => {
+            let cls = classes.get(class)?;
+            let t = if *class_side { cls.class_methods.get(method)? } else { cls.instance_methods.get(method)? };
+            Some(match t { Ty::Fn { ret, .. } => (**ret).clone(), t => t.clone() })
+        },
+        _ => ST.with(|s| {
+            let s = s.borrow();
+            s.ids.get(key).and_then(|id| s.values.get(id)).cloned()
+        }),
+    }
+}
+
+pub(crate) fn warm_write(key: SlotKey, value: Ty) {
+    let slot = intern(key);
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.values.get(&slot) != Some(&value) { note_moved(slot, s.values.get(&slot)); }
+        let epoch = s.epoch;
+        s.site_epoch.insert(slot, epoch);
+        s.joined.remove(&slot);
+        s.values.insert(slot, value);
+    });
+}
+
+pub(crate) fn warm_structure() -> serde_json::Value {
+    ST.with(|s| {
+        let s = s.borrow();
+        let mut methods: Vec<_> = s.rec_methods.iter().map(|(c, m)| (c.0.as_str(), m.as_str())).collect();
+        methods.sort_unstable();
+        let mut aliases: Vec<_> = s.aliases.iter().map(|((c, m), a)| (c.0.as_str(), m.as_str(), a.0.as_str())).collect();
+        aliases.sort_unstable();
+        serde_json::json!({"active": s.active, "methods": methods, "aliases": aliases})
+    })
 }
 
 /// Whether the state a loop's signature check cannot see is unchanged
