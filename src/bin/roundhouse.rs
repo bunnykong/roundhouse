@@ -29,6 +29,10 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[cfg(all(feature = "native-mimalloc", not(target_arch = "wasm32")))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use roundhouse::analyze::{diagnose, Severity};
 use roundhouse::ingest::ingest_app;
 use roundhouse::project::{self, BuildTarget};

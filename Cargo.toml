@@ -10,6 +10,11 @@ homepage = "https://rubys.github.io/roundhouse/"
 repository = "https://github.com/rubys/roundhouse"
 publish = false
 
+[features]
+# Opt in for the native release CLI; the browser and library consumers keep
+# their existing allocator.
+native-mimalloc = ["dep:mimalloc"]
+
 # Not on crates.io (publish = false), but its binary is released:
 # cargo-dist needs the opt-in to see the package.
 [package.metadata.dist]
@@ -41,6 +46,7 @@ libc = "0.2"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false, optional = true }
 # The user guide (docs/guide/*.md) rendered into the Pages site by
 # `roundhouse --site`. Host-only like the rest of the site build.
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

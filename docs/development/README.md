@@ -31,6 +31,12 @@ Selected ignored integrations need their own SDKs and dependencies; see the
 harness you intend to run. `doctor` reports installed tools, not complete
 test readiness. Fixture generation uses Rails and can change with its release.
 
+The native CLI can opt into mimalloc with
+`cargo build --release --locked --bin roundhouse --features native-mimalloc`.
+The feature is off by default and selects an allocator only in that executable.
+Library consumers keep their allocator, and `wasm32` excludes the dependency
+and allocator even when the feature is enabled.
+
 ## Local loop
 
 1. Read the [compiler ownership map](compiler-changes.md) for the affected path.
