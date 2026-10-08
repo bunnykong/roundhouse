@@ -2859,6 +2859,9 @@ fn collect_var_assignments_into(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 }
 
 pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
+    if crate::ty_arena::on() {
+        return crate::ty_arena::memo_union(a, b, union_of_raw);
+    }
     // The join memo pays for one large DAG-shaped join. The fold's joins are
     // many small independent ones, where it only costs hashing and copies.
     if crate::analyze::fold::on() {
@@ -2990,6 +2993,39 @@ mod tests {
     use crate::expr::ExprNode;
     use crate::ident::VarId;
     use crate::span::Span;
+
+    #[test]
+    fn arena_union_matches_native_wire_output_in_both_operand_orders() {
+        fn record(reverse: bool, value: Ty) -> Ty {
+            let mut fields = vec![(Symbol::from("a"), value), (Symbol::from("b"), Ty::Str)];
+            if reverse { fields.reverse(); }
+            Ty::Record { row: Row { fields: fields.into_iter().collect(), rest: None } }
+        }
+        let mut values = vec![Ty::Bottom, Ty::Int, Ty::Str, Ty::pending_untyped(), Ty::gradual(),
+            Ty::Rec { slot: 1 }, Ty::Rec { slot: 2 }, record(false, Ty::Int), record(true, Ty::Int)];
+        values.push(Ty::Union { variants: vec![record(false, Ty::Int), Ty::Int].into() });
+        values.push(Ty::Union { variants: vec![record(true, Ty::Int), Ty::Str].into() });
+        let bases = values.clone();
+        for a in &bases {
+            values.push(Ty::Array { elem: std::sync::Arc::new(a.clone()) });
+            values.push(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(a.clone()) });
+        }
+        crate::ty_arena::reset();
+        let mut check = crate::ty_arena::Arena::default();
+        for a in &values {
+            for b in &values {
+                let native = union_of_raw(a.clone(), b.clone());
+                for _ in 0..2 {
+                    let memo = crate::ty_arena::memo_union(a.clone(), b.clone(), union_of_raw);
+                    assert_eq!(serde_json::to_vec(&native).unwrap(), serde_json::to_vec(&memo).unwrap());
+                    let expected = check.intern(&native);
+                    let actual = check.intern(&memo);
+                    assert_eq!(expected, actual, "wire order and provenance");
+                }
+            }
+        }
+        crate::ty_arena::reset();
+    }
 
     fn synth(node: ExprNode) -> Expr {
         Expr::new(Span::synthetic(), node)
