@@ -74,6 +74,7 @@ pub mod version;
 pub mod schema;
 pub mod span;
 pub mod ty;
+mod ty_arena;
 pub mod vfs;
 
 pub use adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter, SqliteAsyncAdapter};

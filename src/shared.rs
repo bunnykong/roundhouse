@@ -224,6 +224,11 @@ where
     }
 }
 impl<T> Shared<T> {
+    /// Stable for this immutable payload; every mutable borrow assigns a new id.
+    pub(crate) fn identity(&self) -> u64 {
+        self.0.id
+    }
+
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
