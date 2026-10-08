@@ -99,4 +99,6 @@ debug = false
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
+# Optimize shipped binaries without slowing ordinary release builds.
 lto = "thin"
+codegen-units = 1
