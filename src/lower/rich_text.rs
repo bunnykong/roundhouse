@@ -230,7 +230,7 @@ pub(crate) fn push_rich_text_methods(methods: &mut Vec<MethodDef>, model: &Model
 /// asks for plain text.
 fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     let body_col = Symbol::from("body");
-    let content_ty = Ty::Class { id: content_class(), args: vec![] };
+    let content_ty = Ty::Class { id: content_class(), args: vec![].into() };
 
     // def body; ActionText::Content.new(@body); end
     replace_or_push(
@@ -395,8 +395,8 @@ fn push_owner_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol
     let builder = Symbol::from(format!("build_rich_text_{}", attr.as_str()));
     let cache = Symbol::from(format!("__rich_text_{}", attr.as_str()));
     let loaded = Symbol::from(format!("__rich_text_{}_loaded", attr.as_str()));
-    let record_ty = Ty::Class { id: record_class(), args: vec![] };
-    let maybe_record = Ty::Union { variants: vec![record_ty.clone(), Ty::Nil] };
+    let record_ty = Ty::Class { id: record_class(), args: vec![].into() };
+    let maybe_record = Ty::Union { variants: vec![record_ty.clone(), Ty::Nil].into() };
     let push = super::model_to_library::push_synth_instance_method;
 
     // The association reader, with Rails' load-once semantics. The

@@ -93,3 +93,12 @@ pub use ide::{Position, Reference, TypeAt};
 pub use schema::{Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table};
 pub use span::{FileId, Span};
 pub use ty::{Param, ParamKind, Row, Ty};
+
+pub mod shared;
+
+pub(crate) mod ty_ops;
+
+pub(crate) mod wire_ty;
+
+pub(crate) mod ty_hash;
+pub(crate) mod join_memo;

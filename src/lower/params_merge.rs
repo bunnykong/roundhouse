@@ -791,7 +791,7 @@ fn rewrite_method(
 /// decline (`assoc_class_method_scope` residue) because merging into
 /// something that may not be a Hash is a guess.
 fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
-    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
     let (mut params, block, ret, effects) = match method.signature.clone() {
         Some(Ty::Fn { params, block, ret, effects }) => (params, block, ret, effects),
         _ => (
@@ -800,18 +800,18 @@ fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            Box::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::Untyped),
             method.effects.clone(),
         ),
     };
     for i in indices {
         if let Some(p) = params.get_mut(*i) {
-            p.ty = hash_ty.clone();
+            p.ty = hash_ty.clone().into();
         }
     }
     method.signature = Some(Ty::Fn { params, block, ret, effects });
@@ -830,18 +830,18 @@ fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpe
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            Box::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::Untyped),
             method.effects.clone(),
         ),
     };
     for (i, _name, spec) in bound {
         if let Some(p) = params.get_mut(*i) {
-            p.ty = Ty::Class { id: spec.class_id.clone(), args: vec![] };
+            p.ty = Ty::Class { id: spec.class_id.clone(), args: vec![].into() }.into();
         }
     }
     method.signature = Some(Ty::Fn { params, block, ret, effects });

@@ -12,13 +12,15 @@
 //! absorbed by unions so a raising branch doesn't widen the type.
 
 use indexmap::IndexMap;
+use crate::shared::Shared;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::effect::EffectSet;
 use crate::ident::{ClassId, Symbol, TyVar};
 
 /// The types that inhabit Roundhouse values.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Ty {
     Int,
@@ -73,11 +75,11 @@ pub enum Ty {
     /// association reads).
     Relation { of: ClassId },
 
-    Array { elem: Box<Ty> },
-    Hash { key: Box<Ty>, value: Box<Ty> },
-    Tuple { elems: Vec<Ty> },
+    Array { elem: Arc<Ty> },
+    Hash { key: Arc<Ty>, value: Arc<Ty> },
+    Tuple { elems: Shared<Vec<Ty>> },
     Record { row: Row },
-    Union { variants: Vec<Ty> },
+    Union { variants: Shared<Vec<Ty>> },
 
     /// An instance of the class that RECEIVED the call — RBS
     /// `instance` (and `self` on an instance-side member), sorbet
@@ -99,12 +101,12 @@ pub enum Ty {
     /// silent fallback would hide it.
     SelfInstance,
 
-    Class { id: ClassId, args: Vec<Ty> },
+    Class { id: ClassId, args: Shared<Vec<Ty>> },
 
     Fn {
-        params: Vec<Param>,
-        block: Option<Box<Ty>>,
-        ret: Box<Ty>,
+        params: Shared<Vec<Param>>,
+        block: Option<Arc<Ty>>,
+        ret: Arc<Ty>,
         effects: EffectSet,
     },
 
@@ -159,50 +161,65 @@ impl Ty {
     /// `Array[instance]`, `instance?` and a signature's params are all
     /// substituted, not just a bare return.
     pub fn subst_self(&self, with: &Ty) -> Ty {
-        match self {
+        self.subst_self_memo(with, &mut std::collections::HashMap::new())
+    }
+
+    /// [`Self::subst_self`], visiting each shared node once: `memo` is
+    /// keyed by node address, which is stable while `self` is borrowed.
+    fn subst_self_memo(&self, with: &Ty, memo: &mut std::collections::HashMap<usize, Ty>) -> Ty {
+        let key = self as *const Ty as usize;
+        if let Some(result) = memo.get(&key) {
+            return result.clone();
+        }
+        let result = match self {
             Ty::SelfInstance => with.clone(),
-            Ty::Array { elem } => Ty::Array { elem: Box::new(elem.subst_self(with)) },
+            Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(elem.subst_self_memo(with, memo)) },
             Ty::Hash { key, value } => Ty::Hash {
-                key: Box::new(key.subst_self(with)),
-                value: Box::new(value.subst_self(with)),
+                key: std::sync::Arc::new(key.subst_self_memo(with, memo)),
+                value: std::sync::Arc::new(value.subst_self_memo(with, memo)),
             },
             Ty::Tuple { elems } => {
-                Ty::Tuple { elems: elems.iter().map(|t| t.subst_self(with)).collect() }
+                Ty::Tuple { elems: elems.iter().map(|t| t.subst_self_memo(with, memo)).collect() }
             }
             Ty::Record { row } => Ty::Record {
                 row: Row {
                     fields: row
                         .fields
                         .iter()
-                        .map(|(name, ty)| (name.clone(), ty.subst_self(with)))
+                        .map(|(name, ty)| (name.clone(), ty.subst_self_memo(with, memo)))
                         .collect(),
                     rest: row.rest.clone(),
                 },
             },
             Ty::Union { variants } => {
-                Ty::Union { variants: variants.iter().map(|t| t.subst_self(with)).collect() }
+                Ty::Union { variants: variants.iter().map(|t| t.subst_self_memo(with, memo)).collect() }
             }
             Ty::Class { id, args } => Ty::Class {
                 id: id.clone(),
-                args: args.iter().map(|t| t.subst_self(with)).collect(),
+                args: args.iter().map(|t| t.subst_self_memo(with, memo)).collect(),
             },
             Ty::Fn { params, block, ret, effects } => Ty::Fn {
                 params: params
                     .iter()
                     .map(|p| Param {
                         name: p.name.clone(),
-                        ty: p.ty.subst_self(with),
+                        ty: p.ty.subst_self_memo(with, memo).into(),
                         kind: p.kind.clone(),
                     })
                     .collect(),
-                block: block.as_ref().map(|b| Box::new(b.subst_self(with))),
-                ret: Box::new(ret.subst_self(with)),
+                block: block.as_ref().map(|b| std::sync::Arc::new(b.subst_self_memo(with, memo))),
+                ret: std::sync::Arc::new(ret.subst_self_memo(with, memo)),
                 effects: effects.clone(),
             },
             // Leaves, and `Relation { of }` whose `of` is a ClassId
             // rather than a Ty.
             other => other.clone(),
-        }
+        };
+        // An unchanged node keeps its identity, so sharing survives the
+        // substitution.
+        let result = if result == *self { self.clone() } else { result };
+        memo.insert(key, result.clone());
+        result
     }
 
     /// Every `Class { from }` / `Relation { of: from }` rewritten to `to`, recursing like [`Self::subst_self`].
@@ -214,17 +231,17 @@ impl Ty {
                 args: args.iter().map(go).collect(),
             },
             Ty::Relation { of } if of == from => Ty::Relation { of: to.clone() },
-            Ty::Array { elem } => Ty::Array { elem: Box::new(go(elem)) },
-            Ty::Hash { key, value } => Ty::Hash { key: Box::new(go(key)), value: Box::new(go(value)) },
+            Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(go(elem)) },
+            Ty::Hash { key, value } => Ty::Hash { key: std::sync::Arc::new(go(key)), value: std::sync::Arc::new(go(value)) },
             Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(go).collect() },
             Ty::Union { variants } => Ty::Union { variants: variants.iter().map(go).collect() },
             Ty::Fn { params, block, ret, effects } => Ty::Fn {
                 params: params
                     .iter()
-                    .map(|p| Param { name: p.name.clone(), ty: go(&p.ty), kind: p.kind.clone() })
+                    .map(|p| Param { name: p.name.clone(), ty: go(&p.ty).into(), kind: p.kind.clone() })
                     .collect(),
-                block: block.as_ref().map(|b| Box::new(go(b))),
-                ret: Box::new(go(ret)),
+                block: block.as_ref().map(|b| std::sync::Arc::new(go(b))),
+                ret: std::sync::Arc::new(go(ret)),
                 effects: effects.clone(),
             },
             other => other.clone(),
@@ -240,10 +257,10 @@ impl Ty {
                 id: f(id),
                 args: args.iter().map(|t| t.map_class_ids(f)).collect(),
             },
-            Ty::Array { elem } => Ty::Array { elem: Box::new(elem.map_class_ids(f)) },
+            Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(elem.map_class_ids(f)) },
             Ty::Hash { key, value } => Ty::Hash {
-                key: Box::new(key.map_class_ids(f)),
-                value: Box::new(value.map_class_ids(f)),
+                key: std::sync::Arc::new(key.map_class_ids(f)),
+                value: std::sync::Arc::new(value.map_class_ids(f)),
             },
             Ty::Tuple { elems } => {
                 Ty::Tuple { elems: elems.iter().map(|t| t.map_class_ids(f)).collect() }
@@ -254,10 +271,10 @@ impl Ty {
             Ty::Fn { params, block, ret, effects } => Ty::Fn {
                 params: params
                     .iter()
-                    .map(|p| Param { name: p.name.clone(), ty: p.ty.map_class_ids(f), kind: p.kind.clone() })
+                    .map(|p| Param { name: p.name.clone(), ty: p.ty.map_class_ids(f).into(), kind: p.kind.clone() })
                     .collect(),
-                block: block.as_ref().map(|b| Box::new(b.map_class_ids(f))),
-                ret: Box::new(ret.map_class_ids(f)),
+                block: block.as_ref().map(|b| std::sync::Arc::new(b.map_class_ids(f))),
+                ret: std::sync::Arc::new(ret.map_class_ids(f)),
                 effects: effects.clone(),
             },
             other => other.clone(),
@@ -321,7 +338,7 @@ impl Ty {
     pub fn collection_elem(&self) -> Option<Ty> {
         match self {
             Ty::Array { elem } => Some((**elem).clone()),
-            Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![] }),
+            Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
             Ty::Union { variants } => {
                 let mut non_nil = variants.iter().filter(|v| !matches!(v, Ty::Nil));
                 let first = non_nil.next()?;
@@ -424,7 +441,7 @@ impl Ty {
         match kept.len() {
             0 => Ty::Nil,
             1 => kept.into_iter().next().unwrap(),
-            _ => Ty::Union { variants: kept },
+            _ => Ty::Union { variants: kept.into() },
         }
     }
 
@@ -451,7 +468,7 @@ impl Ty {
                 match kept.len() {
                     0 => Ty::Untyped,
                     1 => kept.into_iter().next().unwrap(),
-                    _ => Ty::Union { variants: kept },
+                    _ => Ty::Union { variants: kept.into() },
                 }
             }
             Ty::Var { .. } => Ty::Untyped,
@@ -507,6 +524,10 @@ fn ty_tag(ty: &Ty) -> u8 {
 }
 
 fn cmp_ty(a: &Ty, b: &Ty) -> std::cmp::Ordering {
+    crate::ty_ops::compare(a, b, || cmp_ty_raw(a, b))
+}
+
+fn cmp_ty_raw(a: &Ty, b: &Ty) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     ty_tag(a).cmp(&ty_tag(b)).then_with(|| match (a, b) {
         (Ty::Relation { of: x }, Ty::Relation { of: y }) => x.cmp(y),
@@ -596,26 +617,26 @@ fn param_kind_tag(kind: &ParamKind) -> u8 {
 
 /// A row-polymorphic record shape.
 /// `fields` are known; `rest` is the open-extension variable if this is a partial view.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
-    pub fields: IndexMap<Symbol, Ty>,
+    pub fields: Shared<IndexMap<Symbol, Ty>>,
     pub rest: Option<TyVar>,
 }
 
 impl Row {
     pub fn closed() -> Self {
-        Row { fields: IndexMap::new(), rest: None }
+        Row { fields: IndexMap::new().into(), rest: None }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Param {
     pub name: Symbol,
-    pub ty: Ty,
+    pub ty: std::sync::Arc<Ty>,
     pub kind: ParamKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ParamKind {
     Required,
@@ -624,4 +645,66 @@ pub enum ParamKind {
     Keyword { required: bool },
     KeywordRest,
     Block,
+}
+
+// IndexMap Eq ignores insertion order; preserve that in Row's Hash.
+impl std::hash::Hash for Row {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.rest.hash(state);
+        self.fields.len().hash(state);
+        let mut fields: Vec<_> = self.fields.iter().collect();
+        fields.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, ty) in fields { name.hash(state); ty.hash(state); }
+    }
+}
+
+#[cfg(test)]
+mod shared_identity_tests {
+    use super::*;
+    use std::hash::{Hash, Hasher};
+    fn fingerprint(t: &Ty) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        t.hash(&mut h); h.finish()
+    }
+    #[test]
+    fn equal_record_orders_have_equal_hashes_without_reordering_serialization() {
+        let a = Ty::Record { row: Row { fields: [(Symbol::from("a"), Ty::Int),
+            (Symbol::from("b"), Ty::Str)].into_iter().collect(), rest: None } };
+        let b = Ty::Record { row: Row { fields: [(Symbol::from("b"), Ty::Str),
+            (Symbol::from("a"), Ty::Int)].into_iter().collect(), rest: None } };
+        assert_eq!(a, b); assert_eq!(fingerprint(&a), fingerprint(&b));
+        // Preserve existing IndexMap wire order; hashing never mutates Row.
+        assert_ne!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
+    }
+    #[test]
+    fn extracting_shared_children_preserves_other_owners_and_wire_type() {
+        let child = Arc::new(Ty::Tuple { elems: vec![Ty::Str, Ty::Int].into() });
+        let array = Ty::Array { elem: child.clone() };
+        let Ty::Array { elem } = array else { unreachable!() };
+        assert_eq!(Arc::unwrap_or_clone(elem), *child);
+        let restored: Ty = serde_json::from_str(&serde_json::to_string(&Ty::Array {
+            elem: child.clone() }).unwrap()).unwrap();
+        assert_eq!(restored, Ty::Array { elem: child });
+    }
+}
+
+impl From<std::sync::Arc<Ty>> for Ty {
+    fn from(value: std::sync::Arc<Ty>) -> Self {
+        std::sync::Arc::unwrap_or_clone(value)
+    }
+}
+
+/// Structural equality that compares each pair of shared nodes once
+/// (`ty_ops::equal`).
+impl PartialEq for Ty {
+    fn eq(&self, other: &Self) -> bool {
+        crate::ty_ops::equal(self, other)
+    }
+}
+
+/// Structural hash that hashes each shared node once (`ty_hash`).
+impl std::hash::Hash for Ty {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        crate::ty_hash::hash(self, h);
+    }
 }

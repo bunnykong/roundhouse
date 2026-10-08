@@ -2186,7 +2186,7 @@ fn js_class_member(
                     m.params.len(),
                 ));
             }
-            let tys = non_block.iter().map(|p| p.ty.clone()).collect();
+            let tys = non_block.iter().map(|p| (*p.ty).clone()).collect();
             let optionals = non_block
                 .iter()
                 .map(|p| {
@@ -2445,7 +2445,7 @@ pub(super) fn js_library_function(
                         func.params.len(),
                     ));
                 }
-                let tys = non_block.iter().map(|p| p.ty.clone()).collect();
+                let tys = non_block.iter().map(|p| (*p.ty).clone()).collect();
                 let optionals = non_block
                     .iter()
                     .map(|p| {

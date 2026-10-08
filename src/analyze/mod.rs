@@ -201,9 +201,9 @@ impl Analyzer {
             app.models.iter().map(|m| (&m.name, m.parent.as_ref())).collect();
 
         for model in &app.models {
-            let self_ty = Ty::Class { id: model.name.clone(), args: vec![] };
+            let self_ty = Ty::Class { id: model.name.clone(), args: vec![].into() };
             let array_of_self =
-                Ty::Array { elem: Box::new(self_ty.clone()) };
+                Ty::Array { elem: std::sync::Arc::new(self_ty.clone()) };
             let relation_of_self = Ty::Relation { of: model.name.clone() };
             // Is this class actually an ActiveRecord model?
             //
@@ -307,28 +307,28 @@ impl Analyzer {
             // scopes that drop into Arel stay typed end-to-end.
             cls.class_methods.insert(
                 Symbol::from("arel_table"),
-                Ty::Class { id: ClassId(Symbol::from("Arel::Table")), args: vec![] },
+                Ty::Class { id: ClassId(Symbol::from("Arel::Table")), args: vec![].into() },
             );
             cls.class_methods.insert(
                 Symbol::from("arel"),
-                Ty::Class { id: ClassId(Symbol::from("Arel::SelectManager")), args: vec![] },
+                Ty::Class { id: ClassId(Symbol::from("Arel::SelectManager")), args: vec![].into() },
             );
-            cls.class_methods.insert(Symbol::from("attribute_names"), Ty::Array { elem: Box::new(Ty::Str) });
-            cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: Box::new(Ty::Str) });
+            cls.class_methods.insert(Symbol::from("attribute_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+            cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("columns_hash"), Ty::Untyped);
             // The rest of the schema-reflection surface every model has:
             // `columns` is the list of `ActiveRecord::ConnectionAdapters::Column`
             // objects (not modelled, so their elements stay untyped), the
             // `sanitize_sql*` family builds a SQL fragment string, and
             // `base_class` is the STI root, a class.
-            cls.class_methods.insert(Symbol::from("columns"), Ty::Array { elem: Box::new(Ty::Untyped) });
+            cls.class_methods.insert(Symbol::from("columns"), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
             for sanitizer in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_for_conditions", "sanitize_sql_like"] {
                 cls.class_methods.insert(Symbol::from(sanitizer), Ty::Str);
             }
-            cls.class_methods.insert(Symbol::from("base_class"), Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![] });
-            let class_ty = Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![] };
+            cls.class_methods.insert(Symbol::from("base_class"), Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![].into() });
+            let class_ty = Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![].into() };
             for family in ["descendants", "subclasses"] {
-                cls.class_methods.insert(Symbol::from(family), Ty::Array { elem: Box::new(class_ty.clone()) });
+                cls.class_methods.insert(Symbol::from(family), Ty::Array { elem: std::sync::Arc::new(class_ty.clone()) });
             }
             for text in ["quoted_table_name", "inheritance_column", "sti_name"] {
                 cls.class_methods.insert(Symbol::from(text), Ty::Str);
@@ -403,11 +403,11 @@ impl Analyzer {
                 for proj in ["pluck", "pick"] {
                     cls.class_methods
                         .entry(Symbol::from(proj))
-                        .or_insert_with(|| Ty::Array { elem: Box::new(Ty::Untyped) });
+                        .or_insert_with(|| Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
                 }
                 cls.class_methods
                     .entry(Symbol::from("ids"))
-                    .or_insert_with(|| Ty::Array { elem: Box::new(key_ty.clone()) });
+                    .or_insert_with(|| Ty::Array { elem: std::sync::Arc::new(key_ty.clone()) });
             } // end `if is_ar_model` — class-side query surface
 
             // Rails' `id` reads the primary-key attribute whatever the
@@ -435,7 +435,7 @@ impl Analyzer {
                 let n = name.as_str();
                 // Not the stored value: an enum's reader answers its label, or nil for a value no label names.
                 let reader_ty = if crate::dialect::enum_reads_label(model, name) {
-                    Ty::Union { variants: vec![Ty::Str, Ty::Nil] }
+                    Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }
                 } else {
                     ty.clone()
                 };
@@ -603,13 +603,13 @@ impl Analyzer {
             for (_span, attr) in crate::lower::attached::attached_attrs(model) {
                 cls.instance_methods.entry(attr).or_insert(Ty::Class {
                     id: ClassId(Symbol::from("ActiveStorage::Attached")),
-                    args: vec![],
+                    args: vec![].into(),
                 });
             }
             for (_span, attr) in crate::lower::attached::many_attached_attrs(model) {
                 cls.instance_methods.entry(attr).or_insert(Ty::Class {
                     id: ClassId(Symbol::from("ActiveStorage::AttachedMany")),
-                    args: vec![],
+                    args: vec![].into(),
                 });
             }
             // `ActiveStorage::Attachment` helpers synthesized by
@@ -620,14 +620,14 @@ impl Analyzer {
             if crate::lower::attachment_model::is_attachment_model(model) {
                 let blob = Ty::Class {
                     id: ClassId(Symbol::from("ActiveStorage::Blob")),
-                    args: vec![],
+                    args: vec![].into(),
                 };
                 let filename = Ty::Class {
                     id: ClassId(Symbol::from("ActiveStorage::Filename")),
-                    args: vec![],
+                    args: vec![].into(),
                 };
                 let nilable = |ty: Ty| Ty::Union {
-                    variants: vec![ty, Ty::Nil],
+                    variants: vec![ty, Ty::Nil].into(),
                 };
                 cls.instance_methods
                     .entry(Symbol::from("blob"))
@@ -717,7 +717,7 @@ impl Analyzer {
                 ("changes", Ty::Untyped),
                 ("previous_changes", Ty::Untyped),
                 ("changed_attributes", Ty::Untyped),
-                ("changed", Ty::Array { elem: Box::new(Ty::Str) }),
+                ("changed", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
                 // Turbo::Broadcastable, which turbo-rails mixes into
                 // `ActiveRecord::Base` — so every model answers these,
                 // and `lower::model_to_library::broadcasts` rewrites
@@ -1533,7 +1533,7 @@ impl Analyzer {
     fn type_rails_application_body(&mut self, app: &mut App) {
         let Some(lc) = &mut app.rails_application else { return };
         let ctx = Ctx {
-            self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![] }),
+            self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![].into() }),
             ..Ctx::default()
         };
         let typer = self.body_typer();
@@ -1624,7 +1624,7 @@ impl Analyzer {
                 if i + 1 == arity {
                     local_bindings.insert(
                         p.clone(),
-                        Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+                        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
                     );
                     continue;
                 }
@@ -1721,7 +1721,7 @@ impl Analyzer {
                 // refuses a bare SelfInstance — pin it to the owner the
                 // method is stamped on (same concrete shape
                 // `concern_class_methods` requires).
-                let owner_ty = Ty::Class { id: owner.clone(), args: Vec::new() };
+                let owner_ty = Ty::Class { id: owner.clone(), args: Vec::new().into() };
 
                 let params: Vec<crate::ty::Param> = method
                     .params
@@ -1749,13 +1749,13 @@ impl Analyzer {
                         // `*streams` rendered positionally makes the
                         // sig disagree with the def. `Param::ty_kind` is
                         // the one copy of that rule.
-                        crate::ty::Param { name: p.name.clone(), ty, kind: p.ty_kind() }
+                        crate::ty::Param { name: p.name.clone(), ty: ty.into(), kind: p.ty_kind() }
                     })
                     .collect();
                 method.signature = Some(Ty::Fn {
-                    params,
+                    params: params.into(),
                     block: None,
-                    ret: Box::new(ret.unwrap_or(Ty::Untyped).subst_self(&owner_ty)),
+                    ret: std::sync::Arc::new(ret.unwrap_or(Ty::Untyped).subst_self(&owner_ty)),
                     effects: method.effects.clone(),
                 });
             }
@@ -1792,14 +1792,14 @@ impl Analyzer {
         for model in &app.models {
             for item in &model.body {
                 if let ModelBodyItem::Unknown { expr, .. } = item {
-                    push_const(Ty::Class { id: model.name.clone(), args: vec![] }, expr);
+                    push_const(Ty::Class { id: model.name.clone(), args: vec![].into() }, expr);
                 }
             }
         }
         for controller in &app.controllers {
             for item in &controller.body {
                 if let ControllerBodyItem::Unknown { expr, .. } = item {
-                    push_const(Ty::Class { id: controller.name.clone(), args: vec![] }, expr);
+                    push_const(Ty::Class { id: controller.name.clone(), args: vec![].into() }, expr);
                 }
             }
         }
@@ -1816,7 +1816,7 @@ impl Analyzer {
         // emit's type errors, one missing loop.
         for lc in &app.library_classes {
             for (name, value) in &lc.constants {
-                let self_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+                let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
                 entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), true));
             }
         }
@@ -1828,7 +1828,7 @@ impl Analyzer {
                 .chain(module.inner_classes.iter().map(|inner| (&inner.name, &inner.constants)))
             {
                 for (name, value) in constants {
-                    let self_ty = Ty::Class { id: owner.clone(), args: vec![] };
+                    let self_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
                     entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), false));
                 }
             }
@@ -1894,7 +1894,7 @@ impl Analyzer {
         for constant in app.generated_helper_methods.keys() {
             resolved.insert(
                 rubydex::model::ids::declaration_id_from_lookup_name(constant.0.as_str()),
-                Ty::Class { id: constant.clone(), args: vec![] },
+                Ty::Class { id: constant.clone(), args: vec![].into() },
             );
         }
         (map, resolved)
@@ -1976,7 +1976,7 @@ impl Analyzer {
                 continue;
             }
             let ctx = Ctx {
-                self_ty: Some(Ty::Class { id: class.name.clone(), args: vec![] }),
+                self_ty: Some(Ty::Class { id: class.name.clone(), args: vec![].into() }),
                 constants: global_constants.clone(),
                 class_side: true,
                 ..Ctx::default()
@@ -2090,8 +2090,8 @@ impl Analyzer {
             class_ivars.insert(
                 Symbol::from("attributes"),
                 Ty::Hash {
-                    key: Box::new(Ty::Sym),
-                    value: Box::new(Ty::Var { var: crate::ident::TyVar(0) }),
+                    key: std::sync::Arc::new(Ty::Sym),
+                    value: std::sync::Arc::new(Ty::Var { var: crate::ident::TyVar(0) }),
                 },
             );
             for (name, ty) in &model.attributes.fields {
@@ -2123,7 +2123,7 @@ impl Analyzer {
             // (`Int > Class { MIN_KARMA }`) and `send_dispatch_failed`
             // (`days` on `Class { NEW_USER_DAYS }`).
             let const_ctx = Ctx {
-                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
@@ -2139,7 +2139,7 @@ impl Analyzer {
             let class_constants = global_constants.with_own(extract_const_assignments(&model.body));
 
             let class_ctx = Ctx {
-                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
@@ -2199,7 +2199,7 @@ impl Analyzer {
                     reseeded.insert(name, union_ty);
                 }
                 let reseeded_ctx = Ctx {
-                    self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                    self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
@@ -2244,7 +2244,7 @@ impl Analyzer {
             // which hid same-controller helpers from dispatch.
             let self_ty = Ty::Class {
                 id: controller.name.clone(),
-                args: vec![],
+                args: vec![].into(),
             };
             let const_ctx = Ctx {
                 self_ty: Some(self_ty.clone()),
@@ -3297,7 +3297,7 @@ impl Analyzer {
                 }
                 let own_env = controller_ivar_env.get(&controller.name).cloned()
                     .unwrap_or_default();
-                let self_ty = Ty::Class { id: controller.name.clone(), args: vec![] };
+                let self_ty = Ty::Class { id: controller.name.clone(), args: vec![].into() };
                 let ctrl_name = controller.name.clone();
                 // The same constants Phase B typed this controller's
                 // bodies with. Passing an empty map here would make the
@@ -3505,7 +3505,7 @@ impl Analyzer {
                 lc.name.clone()
             };
             let class_ctx = Ctx {
-                self_ty: Some(Ty::Class { id: self_id, args: vec![] }),
+                self_ty: Some(Ty::Class { id: self_id, args: vec![].into() }),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
@@ -3709,7 +3709,7 @@ impl Analyzer {
             view_ctx.in_view = true; // `yield` here renders to a String
             view_ctx.self_ty = Some(Ty::Class {
                 id: ClassId(Symbol::from("ActionView::Base")),
-                args: vec![],
+                args: vec![].into(),
             });
             view_ctx.constants = global_constants.clone();
             view_ctx.ivar_bindings = ivars;
@@ -3942,7 +3942,7 @@ impl Analyzer {
             // implicit-self helper calls (`form_with`, …) dispatch there.
             view_ctx.self_ty = Some(Ty::Class {
                 id: ClassId(Symbol::from("ActionView::Base")),
-                args: vec![],
+                args: vec![].into(),
             });
             view_ctx.constants = global_constants.clone();
             if let Some(locals) = partial_locals_by_name.get(&view.name) {
@@ -3960,7 +3960,7 @@ impl Analyzer {
             if view.name.as_str() == "active_storage/blobs/_blob" {
                 view_ctx.local_bindings.entry(Symbol::from("blob")).or_insert(Ty::Class {
                     id: ClassId(Symbol::from("ActionText::Attachment")),
-                    args: vec![],
+                    args: vec![].into(),
                 });
             }
             // The same framework render site for the app's OWN
@@ -3979,7 +3979,7 @@ impl Analyzer {
                 view_ctx
                     .local_bindings
                     .entry(Symbol::from(binding.local.as_str()))
-                    .or_insert(Ty::Class { id: binding.class.clone(), args: vec![] });
+                    .or_insert(Ty::Class { id: binding.class.clone(), args: vec![].into() });
             }
             if let Some(ivars) = partial_ivars_by_name.get(&view.name) {
                 view_ctx.ivar_bindings = ivars.clone();
@@ -4069,7 +4069,7 @@ impl Analyzer {
                 .filter(|p| matches!(p.kind, crate::ty::ParamKind::Required | crate::ty::ParamKind::Optional))
                 .nth(n)
         })?;
-        (!matches!(found.ty, Ty::Var { .. } | Ty::Untyped)).then(|| found.ty.clone())
+        (!matches!(*found.ty, Ty::Var { .. } | Ty::Untyped)).then(|| (*found.ty).clone())
     }
 
     /// Whether a signature says this parameter is `untyped`, in as many
@@ -4104,7 +4104,7 @@ impl Analyzer {
                     .filter(|p| matches!(p.kind, crate::ty::ParamKind::Required | crate::ty::ParamKind::Optional))
                     .nth(n)
             })
-            .is_some_and(|p| matches!(p.ty, Ty::Untyped))
+            .is_some_and(|p| matches!(*p.ty, Ty::Untyped))
     }
 
     /// `dsl_macro_host`: model and library-class concern hosts may declare
@@ -4988,7 +4988,7 @@ impl Analyzer {
             }
             let singleton = Ty::Class {
                 id: ClassId(Symbol::from("Class")),
-                args: vec![Ty::Class { id: id.clone(), args: vec![] }],
+                args: vec![Ty::Class { id: id.clone(), args: vec![].into() }].into(),
             };
             if !classes.contains(&singleton) {
                 classes.push(singleton);
@@ -4996,7 +4996,7 @@ impl Analyzer {
         }
         Some(match classes.len() {
             1 => classes.pop().unwrap(),
-            _ => Ty::Union { variants: classes },
+            _ => Ty::Union { variants: classes.into() },
         })
     }
 
@@ -5021,7 +5021,7 @@ impl Analyzer {
                     // informative block type.
                     let recv_ty = match recv {
                         Some(r) => r.ty.clone(),
-                        None => Some(Ty::Class { id: owner.clone(), args: vec![] }),
+                        None => Some(Ty::Class { id: owner.clone(), args: vec![].into() }),
                     };
                     // `Rails.cache` by its spelling too: app analysis
                     // does not type it (the runtime's RBS is not in the
@@ -6135,7 +6135,7 @@ pub(crate) fn scope_return_seed(
     if let Some(kind) = body_tail_terminal_kind(body, model_id, scope_names) {
         return instantiate_return_kind(kind, model_id);
     }
-    Ty::Array { elem: Box::new(Ty::Class { id: model_id.clone(), args: vec![] }) }
+    Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: model_id.clone(), args: vec![].into() }) }
 }
 
 /// Did [`scope_return_seed`] actually classify this body, or fall back?
@@ -6291,27 +6291,27 @@ pub(crate) fn instantiate_return_kind(
     self_id: &ClassId,
 ) -> Ty {
     use crate::catalog::ReturnKind;
-    let self_ty = || Ty::Class { id: self_id.clone(), args: vec![] };
+    let self_ty = || Ty::Class { id: self_id.clone(), args: vec![].into() };
     match kind {
         ReturnKind::SelfType => self_ty(),
-        ReturnKind::ArrayOfSelf => Ty::Array { elem: Box::new(self_ty()) },
-        ReturnKind::SelfOrNil => Ty::Union { variants: vec![self_ty(), Ty::Nil] },
+        ReturnKind::ArrayOfSelf => Ty::Array { elem: std::sync::Arc::new(self_ty()) },
+        ReturnKind::SelfOrNil => Ty::Union { variants: vec![self_ty(), Ty::Nil].into() },
         ReturnKind::Int => Ty::Int,
-        ReturnKind::IntOrNil => Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
+        ReturnKind::IntOrNil => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         ReturnKind::Bool => Ty::Bool,
         ReturnKind::HashSymStr => Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(Ty::Str),
+            key: std::sync::Arc::new(Ty::Sym),
+            value: std::sync::Arc::new(Ty::Str),
         },
-        ReturnKind::ArrayOfSym => Ty::Array { elem: Box::new(Ty::Sym) },
+        ReturnKind::ArrayOfSym => Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
         ReturnKind::Str => Ty::Str,
         ReturnKind::ClassRef(path) => Ty::Class {
             id: ClassId(Symbol::from(path)),
-            args: vec![],
+            args: vec![].into(),
         },
         ReturnKind::RelationOfSelf => Ty::Relation { of: self_id.clone() },
-        ReturnKind::ArrayOfInt => Ty::Array { elem: Box::new(Ty::Int) },
-        ReturnKind::ArrayOfUntyped => Ty::Array { elem: Box::new(Ty::Untyped) },
+        ReturnKind::ArrayOfInt => Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
+        ReturnKind::ArrayOfUntyped => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
         ReturnKind::Untyped => Ty::Untyped,
     }
 }
@@ -7027,22 +7027,22 @@ fn association_member_ty(assoc: &crate::dialect::Association) -> (Symbol, Ty) {
         {
             let mut variants: Vec<Ty> = polymorphic_targets
                 .iter()
-                .map(|t| Ty::Class { id: t.clone(), args: vec![] })
+                .map(|t| Ty::Class { id: t.clone(), args: vec![].into() })
                 .collect();
             variants.push(Ty::Nil);
-            (name.clone(), Ty::Union { variants })
+            (name.clone(), Ty::Union { variants: variants.into() })
         }
         Association::BelongsTo { name, target, .. }
         | Association::HasOne { name, target, .. } => (
             name.clone(),
             Ty::Union {
-                variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
+                variants: vec![Ty::Class { id: target.clone(), args: vec![].into() }, Ty::Nil].into(),
             },
         ),
         Association::HasMany { name, target, .. }
         | Association::HasAndBelongsToMany { name, target, .. } => (
             name.clone(),
-            Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: target.clone(), args: vec![].into() }) },
         ),
     }
 }
@@ -7063,7 +7063,7 @@ fn association_builder_members(assoc: &crate::dialect::Association) -> Vec<(Symb
         | Association::HasOne { name, target, .. } => (name, target),
         _ => return Vec::new(),
     };
-    let record = Ty::Class { id: target.clone(), args: vec![] };
+    let record = Ty::Class { id: target.clone(), args: vec![].into() };
     let n = name.as_str();
     vec![
         (Symbol::from(format!("build_{n}")), record.clone()),
@@ -7071,7 +7071,7 @@ fn association_builder_members(assoc: &crate::dialect::Association) -> Vec<(Symb
         (Symbol::from(format!("create_{n}!")), record.clone()),
         (
             Symbol::from(format!("reload_{n}")),
-            Ty::Union { variants: vec![record, Ty::Nil] },
+            Ty::Union { variants: vec![record, Ty::Nil].into() },
         ),
     ]
 }
@@ -7197,9 +7197,9 @@ struct ParamShape {
 /// &action)`) is a read of a bound local rather than of nothing.
 fn captured_block_ty() -> Ty {
     Ty::Fn {
-        params: vec![],
+        params: vec![].into(),
         block: None,
-        ret: Box::new(Ty::Untyped),
+        ret: std::sync::Arc::new(Ty::Untyped),
         effects: crate::effect::EffectSet::default(),
     }
 }
@@ -7479,7 +7479,7 @@ fn bind_framework_assigned_ivars(body: &Expr, ivars: &mut HashMap<Symbol, Ty>) {
             if method.as_str() == "set_page_and_extract_portion_from" {
                 out.entry(Symbol::from("page")).or_insert_with(|| Ty::Class {
                     id: ClassId(Symbol::from("ActionController::Page")),
-                    args: vec![],
+                    args: vec![].into(),
                 });
             }
         }
@@ -7796,7 +7796,7 @@ fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, incoming:
         // the Crystal collector's "fresh entry" branch.
         out.insert(
             name.clone(),
-            Ty::Hash { key: Box::new(Ty::Str), value: Box::new(incoming.clone()) },
+            Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(incoming.clone()) },
         );
         return;
     };
@@ -7804,15 +7804,15 @@ fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, incoming:
         return;
     };
     let key = if matches!(**key, Ty::Var { .. }) {
-        Box::new(Ty::Str)
+        std::sync::Arc::new(Ty::Str)
     } else {
         key.clone()
     };
     let value = if matches!(**value, Ty::Var { .. }) {
-        Box::new(incoming.clone())
+        std::sync::Arc::new(incoming.clone())
     } else {
         // The general widening is exactly the canonical type join.
-        Box::new(crate::analyze::body::union_of((**value).clone(), incoming.clone()))
+        std::sync::Arc::new(crate::analyze::body::union_of((**value).clone(), incoming.clone()))
     };
     out.insert(name.clone(), Ty::Hash { key, value });
 }
@@ -7999,7 +7999,7 @@ fn register_has_secure_password(
             .or_insert(Ty::Str);
         class_methods
             .entry(Symbol::from(format!("find_by_{attr}_reset_token")))
-            .or_insert(Ty::Union { variants: vec![self_ty.clone(), Ty::Nil] });
+            .or_insert(Ty::Union { variants: vec![self_ty.clone(), Ty::Nil].into() });
         class_methods
             .entry(Symbol::from(format!("find_by_{attr}_reset_token!")))
             .or_insert(self_ty.clone());
@@ -8027,7 +8027,7 @@ fn register_generates_token_for(
     methods.entry(Symbol::from("generate_token_for")).or_insert(Ty::Str);
     class_methods
         .entry(Symbol::from("find_by_token_for"))
-        .or_insert(Ty::Union { variants: vec![self_ty.clone(), Ty::Nil] });
+        .or_insert(Ty::Union { variants: vec![self_ty.clone(), Ty::Nil].into() });
     class_methods.entry(Symbol::from("find_by_token_for!")).or_insert(self_ty.clone());
 }
 
@@ -8047,7 +8047,7 @@ fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<S
     // Content (`serialize :body, coder: ActionText::Content`) and it
     // delegates the Content surface — `push_record_methods`' list.
     if rich_text::is_record_model(model) {
-        let content = Ty::Class { id: rich_text::content_class(), args: vec![] };
+        let content = Ty::Class { id: rich_text::content_class(), args: vec![].into() };
         methods.insert(Symbol::from("body"), content);
         methods.entry(Symbol::from("body=")).or_insert(Ty::Str);
         for (name, ret) in [
@@ -8063,7 +8063,7 @@ fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<S
         }
         return;
     }
-    let record = Ty::Class { id: rich_text::record_class(), args: vec![] };
+    let record = Ty::Class { id: rich_text::record_class(), args: vec![].into() };
     for (_, attr) in rich_text::rich_text_attrs(model) {
         let a = attr.as_str();
         for name in [format!("rich_text_{a}"), format!("build_rich_text_{a}"), a.to_string()] {
@@ -8085,7 +8085,7 @@ fn register_plain_text_attr(
     if plain_text_attr::is_record_model(model) || !plain_text_attr::record_table_present(schema) {
         return;
     }
-    let record = Ty::Class { id: plain_text_attr::record_class(), args: vec![] };
+    let record = Ty::Class { id: plain_text_attr::record_class(), args: vec![].into() };
     for (_, attr) in plain_text_attr::plain_text_attrs(model) {
         let a = attr.as_str();
         for name in [format!("markdown_{a}"), format!("build_markdown_{a}"), a.to_string()] {
@@ -8233,7 +8233,7 @@ fn register_typed_store_decls(expr: &Expr, methods: &mut HashMap<Symbol, Ty>) {
             // gradual escape covers every call (`push`/`reject!`/`each`/…)
             // without depending on the Array method registry.
             let ty = if typed_store_is_array(args) && !matches!(elem_ty, Ty::Untyped) {
-                Ty::Array { elem: Box::new(elem_ty.clone()) }
+                Ty::Array { elem: std::sync::Arc::new(elem_ty.clone()) }
             } else {
                 elem_ty
             };
@@ -8389,7 +8389,7 @@ mod typed_store_tests {
         // a typed `array: true` column wraps the element type.
         assert_eq!(
             methods.get(&Symbol::from("tags")),
-            Some(&Ty::Array { elem: Box::new(Ty::Str) })
+            Some(&Ty::Array { elem: std::sync::Arc::new(Ty::Str) })
         );
     }
 
@@ -8427,9 +8427,9 @@ mod rbs_ingestion_tests {
 
     fn fn_ty_returning(ret: Ty) -> Ty {
         Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(ret),
+            ret: std::sync::Arc::new(ret),
             effects: EffectSet::default(),
         }
     }
@@ -8668,7 +8668,7 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
     if elems.iter().all(|t| t == first) {
         return None;
     }
-    Some(Ty::Tuple { elems })
+    Some(Ty::Tuple { elems: elems.into() })
 }
 
 #[cfg(test)]
@@ -8689,10 +8689,10 @@ mod keyword_splat_tests {
             ],
             keywords_by_kind: true,
         };
-        let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
         let keys = vec![
             (Symbol::from("kind"), Ty::Sym),
-            (Symbol::from("keys"), Ty::Array { elem: Box::new(Ty::Str) }),
+            (Symbol::from("keys"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
         ];
         let placed = Analyzer::bind_keyword_group(&shape, &[hash], &keys, Some(&Ty::Bool))
             .expect("placed");
@@ -8700,7 +8700,7 @@ mod keyword_splat_tests {
             placed,
             vec![
                 union_of(Ty::Sym, Ty::Bool),
-                union_of(Ty::Array { elem: Box::new(Ty::Str) }, Ty::Bool),
+                union_of(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Bool),
                 Ty::Bool,
             ]
         );

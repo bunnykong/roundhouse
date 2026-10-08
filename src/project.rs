@@ -7572,7 +7572,7 @@ mod tests {
             let mut constant = Expr::new(span, ExprNode::Const {
                 path: vec![Symbol::new("Net"), Symbol::new("HTTPOK")],
             });
-            constant.ty = Some(Ty::Class { id: ClassId(Symbol::new("Net::HTTPOK")), args: vec![] });
+            constant.ty = Some(Ty::Class { id: ClassId(Symbol::new("Net::HTTPOK")), args: vec![].into() });
             match root {
                 0 | 1 => app.fixtures.push(Fixture {
                     name: Symbol::new("probes"), path: Symbol::new("probes"), model_class: None,
