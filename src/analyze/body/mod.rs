@@ -2676,12 +2676,18 @@ fn propagate_expected_to_empty_container(value: &mut Expr, expected: &Ty) {
 /// Anything else yields `None` (no usable signal — leave the target
 /// unbound rather than guess).
 pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty> {
+    // Under the fixpoint (`RH_FOLD`): an Array of unknown length may be
+    // shorter than the targets, so every position past the first may be
+    // `nil` (`key, value = "b".split("=")` leaves `value` nil), and a
+    // position past a tuple's end is `nil`.
+    let strict = crate::analyze::fold::on();
+    let short = |t: Ty| if strict && index > 0 { union_of(t, Ty::Nil) } else { t };
     match rhs {
-        Some(Ty::Array { elem }) => Some((**elem).clone()),
+        Some(Ty::Array { elem }) => Some(short((**elem).clone())),
         // Destructuring a relation materializes it — each scalar
         // target gets the element model, same as `Array<of>`.
-        Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
-        Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
+        Some(Ty::Relation { of }) => Some(short(Ty::Class { id: of.clone(), args: vec![].into() })),
+        Some(Ty::Tuple { elems }) => elems.get(index).cloned().or_else(|| strict.then_some(Ty::Nil)),
         Some(Ty::Untyped { .. }) => Some(Ty::unresolved()),
         // A reference nobody unfolded reads as `untyped`.
         Some(Ty::Rec { .. }) => Some(Ty::unresolved()),

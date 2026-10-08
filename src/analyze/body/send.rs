@@ -33,7 +33,7 @@ fn splat_yield(t: &Ty, n: usize) -> Option<Vec<Ty>> {
     for arm in arms {
         let row: Vec<Ty> = match arm {
             Ty::Var { .. } => return None,
-            Ty::Untyped => vec![Ty::Untyped; n],
+            Ty::Untyped { why } => vec![Ty::untyped(*why); n],
             Ty::Tuple { elems } => (0..n).map(|i| elems.get(i).cloned().unwrap_or(Ty::Nil)).collect(),
             // An Array of unknown length may be shorter than the block:
             // every position past the first may be `nil`.
@@ -294,6 +294,35 @@ impl<'a> BodyTyper<'a> {
                 new_ctx.local_bindings.insert(name.clone(), Ty::unresolved());
             }
             return new_ctx;
+        }
+        // Under the fixpoint (`RH_FOLD`): `merge`'s conflict block yields the
+        // key, the receiver's value and the merged-in value.
+        if crate::analyze::fold::on() && matches!(method.as_str(), "merge" | "merge!" | "update") {
+            if let Some(Ty::Hash { key, value }) = recv_ty {
+                let mut k = (**key).clone();
+                let mut incoming: Option<Ty> = None;
+                let mut add = |t: Ty| incoming = Some(match incoming.take() { None => t, Some(x) => union_of(x, t) });
+                for a in args {
+                    match a.ty.as_ref() {
+                        Some(Ty::Hash { key: k2, value: v2 }) => {
+                            k = union_of(k, (**k2).clone());
+                            add((**v2).clone());
+                        }
+                        Some(Ty::Record { row }) => {
+                            k = union_of(k, Ty::Sym);
+                            for (_, t) in row.fields.iter() {
+                                add(t.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let tys = [k, (**value).clone(), incoming.unwrap_or_else(Ty::unresolved)];
+                for (name, ty) in params.iter().zip(tys.iter()) {
+                    new_ctx.local_bindings.insert(name.clone(), ty.clone());
+                }
+                return new_ctx;
+            }
         }
         let Some(mut param_tys) = self.block_params_for(recv_ty, method, class_object_receiver) else {
             return new_ctx;
@@ -2776,6 +2805,12 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "max" | "min" | "max_by" | "min_by" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil].into(),
         },
+        // Under the fixpoint (`RH_FOLD`): without a block, `each_with_index` is an enumerator of
+        // `[element, index]` pairs, so `arr.each_with_index.map { |x, i| }`
+        // binds `i` to the index (it took the element).
+        "each_with_index" if crate::analyze::fold::on() && block_ret.is_none() => Ty::Array {
+            elem: std::sync::Arc::new(Ty::Tuple { elems: vec![elem.clone(), Ty::Int].into() }),
+        },
         // In-place / index-yielding transforms return the array itself.
         "each_with_index" | "keep_if" | "delete_if" | "select!" | "reject!" | "sort!"
         | "uniq!" | "compact!" | "reverse!" | "sort_by!" | "insert" => Ty::Array { elem: std::sync::Arc::new(elem.clone()) },
@@ -2875,6 +2910,44 @@ pub(super) fn record_method(
     }
 }
 
+/// `Hash#merge`'s result type. Each argument that is a Hash (or a
+/// symbol-keyed record, or `untyped`) adds its keys and values; an argument
+/// still pending adds nothing yet. A conflict block's return joins the
+/// values.
+fn hash_merge(key: &Ty, value: &Ty, block_ret: Option<&Ty>, args: &[Expr]) -> Ty {
+    let (mut k, mut v) = (key.clone(), value.clone());
+    for a in args {
+        let arms: Vec<&Ty> = match a.ty.as_ref() {
+            Some(Ty::Union { variants }) => variants.iter().collect(),
+            Some(t) => vec![t],
+            None => vec![],
+        };
+        for arm in arms {
+            match arm {
+                Ty::Hash { key: k2, value: v2 } => {
+                    k = union_of(k, (**k2).clone());
+                    v = union_of(v, (**v2).clone());
+                }
+                Ty::Record { row } => {
+                    k = union_of(k, Ty::Sym);
+                    for (_, t) in row.fields.iter() {
+                        v = union_of(v, t.clone());
+                    }
+                }
+                gradual @ Ty::Untyped { .. } => {
+                    k = union_of(k, gradual.clone());
+                    v = union_of(v, gradual.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(r) = block_ret {
+        v = union_of(v, r.clone());
+    }
+    Ty::Hash { key: std::sync::Arc::new(k), value: std::sync::Arc::new(v) }
+}
+
 pub(super) fn hash_method(
     method: &Symbol,
     key: &Ty,
@@ -2941,12 +3014,29 @@ pub(super) fn hash_method(
             Some(default) if !default.is_open() => union_of(value.clone(), default),
             _ => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         },
+        // Under the fixpoint (`RH_FOLD`): the merged hashes' keys and values
+        // join the receiver's (`h.merge("meta" => { "v" => 1 })` holds that
+        // Hash), and a conflict block's return joins the values.
+        "merge" | "merge!" | "update" | "reverse_merge" | "reverse_merge!" | "with_defaults" | "with_defaults!"
+            if crate::analyze::fold::on() => hash_merge(key, value, block_ret, args),
         "merge" => Ty::Hash {
             key: std::sync::Arc::new(key.clone()),
             value: std::sync::Arc::new(value.clone()),
         },
-        // `Hash#to_h` is identity (returns self when called without a
-        // block; with a block, transforms entries — same shape).
+        // Under the fixpoint (`RH_FOLD`): with a block, `Hash#to_h` builds its entries from the block's
+        // `[key, value]` returns, as `Array#to_h` does.
+        "to_h" if crate::analyze::fold::on() && block_ret.is_some() => match block_ret {
+            Some(Ty::Tuple { elems }) if elems.len() == 2 => Ty::Hash {
+                key: std::sync::Arc::new(elems[0].clone()),
+                value: std::sync::Arc::new(elems[1].clone()),
+            },
+            Some(Ty::Array { elem: inner }) => Ty::Hash {
+                key: std::sync::Arc::new((**inner).clone()),
+                value: std::sync::Arc::new((**inner).clone()),
+            },
+            _ => Ty::Hash { key: std::sync::Arc::new(unknown()), value: std::sync::Arc::new(unknown()) },
+        },
+        // `Hash#to_h` without a block is identity.
         // Common in controller bodies: `params.expect(...).to_h` to
         // strip the strong-params wrapper.
         "to_h" => Ty::Hash {
@@ -3013,6 +3103,11 @@ pub(super) fn hash_method(
         },
         // `min_by`/`max_by`/`find`/`detect` yield (k, v) and return a
         // single `[key, value]` pair, or nil on an empty hash.
+        // Under the fixpoint (`RH_FOLD`): with a count, `min_by(n)`/`max_by(n)`
+        // answer an Array of pairs.
+        "min_by" | "max_by" if crate::analyze::fold::on() && args.len() == 1 => Ty::Array {
+            elem: std::sync::Arc::new(Ty::Tuple { elems: vec![key.clone(), value.clone()].into() }),
+        },
         "min_by" | "max_by" | "find" | "detect" => Ty::Union {
             variants: vec![
                 Ty::Tuple { elems: vec![key.clone(), value.clone()].into() },

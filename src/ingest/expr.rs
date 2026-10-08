@@ -1012,6 +1012,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
             };
             let body = desugar_post_params(&mut rest_param, block_post_params(l.parameters()), body);
+            let body = desugar_destructured_params(l.parameters(), body);
             // `->(x) { body }` literals always use brace form (Prism's
             // opening_loc is `{`); `->(x) do body end` exists but isn't
             // idiomatic and doesn't appear in any fixture yet.
@@ -2781,6 +2782,7 @@ fn ingest_call_block(
                     None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
                 };
                 let body = desugar_post_params(&mut rest_param, block_post_params(lam.parameters()), body);
+                let body = desugar_destructured_params(lam.parameters(), body);
                 let block_style = block_style_from_opening(lam.opening_loc().as_slice());
                 return Ok(Some(Expr::new(
                     Span::synthetic(),
@@ -2848,6 +2850,7 @@ fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> Ing
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
     let body = desugar_post_params(&mut rest_param, block_post_params(b.parameters()), body);
+    let body = desugar_destructured_params(b.parameters(), body);
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
         Span::synthetic(),
@@ -2915,27 +2918,98 @@ fn block_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
         return vec![];
     };
     let Some(pn) = bpn.parameters() else { return vec![] };
+    if !crate::analyze::fold::on() {
+        return pn
+            .requireds()
+            .iter()
+            .filter_map(|req| req.as_required_parameter_node())
+            .map(|rp| Symbol::from(constant_id_str(&rp.name())))
+            .collect();
+    }
+    // Under the fixpoint (`RH_FOLD`), a destructured parameter (`|(k, v), i|`)
+    // keeps its position under a synthetic name, `__bp<position>`, that
+    // `desugar_destructured_params` destructures at the top of the body.
+    // Dropping it made every later parameter bind one position early: `i`
+    // took the pair. A shape the desugar can't bind keeps its position too.
     let mut names: Vec<Symbol> = pn
         .requireds()
         .iter()
-        .filter_map(|req| req.as_required_parameter_node())
-        .map(|rp| Symbol::from(constant_id_str(&rp.name())))
+        .enumerate()
+        .filter_map(|(i, req)| match req.as_required_parameter_node() {
+            Some(rp) => Some(Symbol::from(constant_id_str(&rp.name()))),
+            None => req.as_multi_target_node().map(|_| Symbol::from(format!("__bp{i}"))),
+        })
         .collect();
-    // Under the fixpoint (`RH_FOLD`), `|k, |` (an implicit rest) and `|k, *|`
-    // (an anonymous one) destructure a yielded Array like `|k, v|`: name the
-    // rest so the block binds `k` to the first element, not the whole Array.
+    // `|k, |` (an implicit rest) and `|k, *|` (an anonymous one) destructure
+    // a yielded Array like `|k, v|`: name the rest so the block binds `k` to
+    // the first element, not the whole Array.
     let unnamed_rest = pn.rest().is_some_and(|r| {
         r.as_implicit_rest_node().is_some() || r.as_rest_parameter_node().is_some_and(|rp| rp.name().is_none())
     });
-    if crate::analyze::fold::on()
-        && unnamed_rest
-        && names.len() == 1
-        && pn.requireds().iter().count() == 1
-        && pn.posts().iter().next().is_none()
-    {
+    if unnamed_rest && names.len() == 1 && pn.posts().iter().next().is_none() {
         names.push(Symbol::from("__rest"));
     }
     names
+}
+
+/// `a, b = <tmp>` for a destructured parameter, then the same for each
+/// nested pattern through its own temporary (`<tmp>_<j>`), so
+/// `|((a, b), c), i|` binds all four. A rest or a post-rest inside a
+/// pattern leaves that pattern's names unbound.
+fn destructure_into(mt: &ruby_prism::MultiTargetNode<'_>, tmp: &str, out: &mut Vec<Expr>) {
+    if mt.rest().is_some() || !mt.rights().is_empty() {
+        return;
+    }
+    let mut targets = Vec::new();
+    let mut nested = Vec::new();
+    for (j, l) in mt.lefts().iter().enumerate() {
+        if let Some(rp) = l.as_required_parameter_node() {
+            let name = Symbol::from(constant_id_str(&rp.name()));
+            targets.push(crate::expr::LValue::Var { id: crate::ident::VarId(0), name });
+        } else if let Some(inner) = l.as_multi_target_node() {
+            let t = format!("{tmp}_{j}");
+            targets.push(crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from(t.as_str()) });
+            nested.push((inner, t));
+        } else {
+            return;
+        }
+    }
+    let value = Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(tmp) });
+    out.push(Expr::new(Span::synthetic(), ExprNode::MultiAssign { targets, value }));
+    for (inner, t) in nested {
+        destructure_into(&inner, &t, out);
+    }
+}
+
+/// Open a block body with `a, b = __bp<i>` for each destructured parameter
+/// `block_param_names` named: Ruby's own semantics for `|(a, b)|` (a
+/// non-Array binds `a` and leaves `b` nil).
+fn desugar_destructured_params(params_node: Option<Node<'_>>, body: Expr) -> Expr {
+    if !crate::analyze::fold::on() {
+        return body;
+    }
+    let Some(pn) = params_node.and_then(|n| n.as_block_parameters_node()).and_then(|b| b.parameters()) else {
+        return body;
+    };
+    let mut exprs: Vec<Expr> = pn
+        .requireds()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, req)| req.as_multi_target_node().map(|mt| (i, mt)))
+        .flat_map(|(i, mt)| {
+            let mut out = Vec::new();
+            destructure_into(&mt, &format!("__bp{i}"), &mut out);
+            out
+        })
+        .collect();
+    if exprs.is_empty() {
+        return body;
+    }
+    match *body.node {
+        ExprNode::Seq { exprs: inner } => exprs.extend(inner),
+        other => exprs.push(Expr::new(body.span, other)),
+    }
+    Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
 }
 
 /// The block's REST parameter (`|*args|`), without its sigil.
