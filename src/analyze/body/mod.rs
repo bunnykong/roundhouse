@@ -2663,6 +2663,10 @@ fn collect_var_assignments_into(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 }
 
 pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
+    crate::join_memo::join(a, b, union_of_raw)
+}
+
+fn union_of_raw(a: Ty, b: Ty) -> Ty {
     // Bottom is the divergent-expression type — the branch carrying
     // it doesn't contribute a value, so it drops out of joins.
     // Mirrors Crystal's `Type.merge` filter on `NoReturnType`.

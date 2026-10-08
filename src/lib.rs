@@ -95,3 +95,10 @@ pub use span::{FileId, Span};
 pub use ty::{Param, ParamKind, Row, Ty};
 
 pub mod shared;
+
+pub(crate) mod ty_ops;
+
+pub(crate) mod wire_ty;
+
+pub(crate) mod ty_hash;
+pub(crate) mod join_memo;

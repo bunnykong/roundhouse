@@ -58,22 +58,32 @@ fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
 /// union holding all of `prior`'s variants counts: `prior` flattens into a
 /// union it joins, so it is never there as one term.
 fn untie(ty: &Ty, prior: &Ty) -> Ty {
-    let go = |t: &Ty| {
+    untie_memo(ty, prior, &mut std::collections::HashMap::new())
+}
+
+/// [`untie`], visiting each shared node once: `memo` is keyed by node
+/// address, which is stable while `ty` is borrowed.
+fn untie_memo(ty: &Ty, prior: &Ty, memo: &mut std::collections::HashMap<usize, Ty>) -> Ty {
+    let key = ty as *const Ty as usize;
+    if let Some(value) = memo.get(&key) {
+        return value.clone();
+    }
+    let mut go = |t: &Ty| {
         if t == prior {
             return Ty::Untyped;
         }
         if let (Ty::Union { variants: pv }, Ty::Union { variants: tv }) = (prior, t)
             && pv.iter().all(|v| tv.contains(v))
         {
-            let mut rest: Vec<Ty> = tv.iter().filter(|v| !pv.contains(v)).map(|v| untie(v, prior)).collect();
+            let mut rest: Vec<Ty> = tv.iter().filter(|v| !pv.contains(v)).map(|v| untie_memo(v, prior, memo)).collect();
             if !rest.contains(&Ty::Untyped) {
                 rest.push(Ty::Untyped);
             }
             return Ty::Union { variants: rest.into() };
         }
-        untie(t, prior)
+        untie_memo(t, prior, memo)
     };
-    match ty {
+    let result = match ty {
         Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(go(elem)) },
         Ty::Hash { key, value } => Ty::Hash { key: std::sync::Arc::new(go(key)), value: std::sync::Arc::new(go(value)) },
         Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(go).collect() },
@@ -86,7 +96,11 @@ fn untie(ty: &Ty, prior: &Ty) -> Ty {
         },
         Ty::Class { id, args } => Ty::Class { id: id.clone(), args: args.iter().map(go).collect() },
         other => other.clone(),
-    }
+    };
+    // An unchanged node keeps its identity, so sharing survives the rewrite.
+    let result = if result == *ty { ty.clone() } else { result };
+    memo.insert(key, result.clone());
+    result
 }
 
 /// A return that nests the previous round's return is a recursive method
