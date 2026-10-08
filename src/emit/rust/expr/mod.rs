@@ -1331,7 +1331,7 @@ pub(super) fn arg_hash_var_local_ty(arg: &Expr) -> Option<(crate::ty::Ty, crate:
         _ => return None,
     };
     match local_var_ty(&name)? {
-        crate::ty::Ty::Hash { key, value } => Some((*key, *value)),
+        crate::ty::Ty::Hash { key, value } => Some((std::sync::Arc::unwrap_or_clone(key), std::sync::Arc::unwrap_or_clone(value))),
         _ => None,
     }
 }
@@ -1349,7 +1349,7 @@ pub(super) fn recv_var_back_propagated_hash_kv(recv: &Expr) -> Option<(crate::ty
         return None;
     }
     match local_var_ty(&name)? {
-        crate::ty::Ty::Hash { key, value } => Some((*key, *value)),
+        crate::ty::Ty::Hash { key, value } => Some((std::sync::Arc::unwrap_or_clone(key), std::sync::Arc::unwrap_or_clone(value))),
         _ => None,
     }
 }
