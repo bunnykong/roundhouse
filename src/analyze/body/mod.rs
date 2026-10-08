@@ -401,6 +401,21 @@ impl<'a> BodyTyper<'a> {
         Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None }
     }
 
+    /// Catalog answers for the final-IR error census; never retypes a body.
+    pub(crate) fn errgate_answer(&self, recv: &Ty, method: &Symbol, block: Option<&Ty>, args: &[Expr]) -> bool {
+        !matches!(self.dispatch(Some(recv), method, block, args), Ty::Var { .. })
+    }
+
+    pub(crate) fn errgate_compatible(&self, op: &Symbol, left: &Expr, right: &Expr, a: &Ty, b: &Ty) -> bool {
+        let mut left = left.clone(); left.ty = Some(a.clone());
+        let mut right = right.clone(); right.ty = Some(b.clone());
+        let mut e = Expr::new(left.span, ExprNode::Send {
+            recv: Some(left), method: op.clone(), args: vec![right], block: None, parenthesized: true,
+        });
+        diagnostic::detect_diagnostic(&mut e);
+        !matches!(e.diagnostic, Some(crate::diagnostic::DiagnosticKind::IncompatibleBinop { .. }))
+    }
+
     /// Share the analyzer's immutable source index across typing passes.
     pub(crate) fn with_const_resolver(mut self, resolver: std::sync::Arc<ConstResolver>) -> Self {
         self.const_resolver = Some(resolver);
@@ -1620,6 +1635,18 @@ impl<'a> BodyTyper<'a> {
                     .and_then(|t| literal_extremum_ty(recv.as_ref(), t, method, args))
                 {
                     return t;
+                }
+                if super::errgate::on() {
+                    let mut slots = std::collections::BTreeSet::new();
+                    let side = recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }))
+                        || (recv.is_none() && ctx.class_side);
+                    if let Some(Ty::Class { id, .. }) = recv_ty.as_ref() {
+                        if let Some(ci) = self.classes().raw().get(id) {
+                            let table = if side { &ci.class_methods } else { &ci.instance_methods };
+                            if table.contains_key(method) { slots.insert(super::errgate::ret_slot(id, method, side)); }
+                        }
+                    }
+                    super::errgate::origin(&expr_span, slots);
                 }
                 let dispatched = self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args);
                 if let Some(receiver) = recv.as_mut() {

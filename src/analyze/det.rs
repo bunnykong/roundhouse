@@ -83,6 +83,12 @@ pub(crate) fn descent_on() -> bool {
 
 /// A write of `new` over `old` at `site` (`old` is `None` for a first write).
 pub(crate) fn note(site: &'static str, old: Option<&Ty>, new: &Ty) {
+    if matches!(
+        site,
+        "harvest.first" | "harvest.stabilize" | "harvest.untie_result" | "harvest.lastwrite"
+    ) {
+        super::errgate::note_drop(old, new);
+    }
     if !*DESCENT {
         return;
     }

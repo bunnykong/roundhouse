@@ -1924,6 +1924,13 @@ impl Analyzer {
     /// re-applications still changed the entry.
     fn sccq_harvest_unit(&mut self, eng: &Engine, app: &App, u: u32) -> u64 {
         let unit = &eng.units[u as usize];
+        let side = match unit.family {
+            Family::Lib => app.library_classes[unit.ci].methods.get(unit.mi).is_some_and(|m| m.receiver == crate::dialect::MethodReceiver::Class),
+            Family::ModelMethod => app.models[unit.ci].methods().nth(unit.mi).is_some_and(|m| m.receiver == crate::dialect::MethodReceiver::Class),
+            Family::CtrlClassMethod => true,
+            _ => false,
+        };
+        let _writer = super::errgate::writer(&unit.class, &unit.name, side);
         let mut reapplied = 0u64;
         // A unit that reads its own return re-types between harvests (its
         // self-loop re-queues it), as main's next round would; one that does

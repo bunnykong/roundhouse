@@ -52,6 +52,7 @@ mod fixpoint_check;
 mod det;
 mod detfp;
 mod structure;
+pub(crate) mod errgate;
 mod fixpoint_rounds;
 mod handoff;
 pub(crate) mod fold;
@@ -1112,6 +1113,7 @@ impl Analyzer {
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
         det::reset();
+        errgate::reset();
         handoff::reset();
         fold::reset();
         slots::reset();
@@ -1577,6 +1579,7 @@ impl Analyzer {
             fp.dump();
         }
         det::report();
+        self.report_errgate(app);
     }
 
     /// With the add-only rules or the fold, what is still pending when
@@ -4756,7 +4759,8 @@ impl Analyzer {
         method: &crate::dialect::MethodDef,
     ) {
         {
-            let ret = self.method_return_ty(class_id, method);
+            let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
+        let ret = self.method_return_ty(class_id, method);
             let target = match method.receiver {
                 crate::dialect::MethodReceiver::Instance => {
                     &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -4819,6 +4823,7 @@ impl Analyzer {
 
     /// One library method's harvest (see [`Self::harvest_method_returns`]).
     fn harvest_lib_method(&mut self, class_id: &ClassId, method: &crate::dialect::MethodDef) {
+        let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
         let ret = self.method_return_ty(class_id, method);
         let target = match method.receiver {
             crate::dialect::MethodReceiver::Instance => {
@@ -4887,11 +4892,13 @@ impl Analyzer {
             // call to it resolves to the inferred return or to Untyped
             // rather than "no known method".
             for method in controller.class_methods() {
+                let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
                 let ret = self.method_return_ty(class_id, method);
                 let target = &mut self.classes.entry(class_id.clone()).or_default().class_methods;
                 Self::register_method_return(target, &method.name, ret.as_ref());
             }
             for action in controller.actions() {
+                let _writer = errgate::writer(class_id, &action.name, false);
                 let Some(body_ty) =
                     tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
                 else {
