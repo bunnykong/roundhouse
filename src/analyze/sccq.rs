@@ -707,7 +707,8 @@ impl Engine {
         if unit.dirty == 0 {
             self.seq += 1;
             unit.seq = self.seq;
-            self.heap.push(Reverse((unit.pos, unit.seq, u)));
+            let pos = super::det::shuffle_key(u, self.stats.drain_evals.len() as u64, unit.pos);
+            self.heap.push(Reverse((pos, unit.seq, u)));
             self.pending += 1;
             self.stats.marks += 1;
         }
@@ -822,7 +823,9 @@ impl Engine {
                 e.resize(arity, var0());
             }
             for (slot, observed) in e.iter_mut().zip(args.iter()) {
-                *slot = super::fixpoint_bound::bound(super::unify_param_ty(slot.clone(), observed.clone()));
+                let next = super::fixpoint_bound::bound(super::unify_param_ty(slot.clone(), observed.clone()));
+                super::det::note("params.unify.sccq", Some(&*slot), &next);
+                *slot = next;
             }
         }
         entry
@@ -840,7 +843,9 @@ impl Engine {
                         e.resize(tys.len(), var0());
                     }
                     for (slot, observed) in e.iter_mut().zip(tys.iter()) {
-                        *slot = super::fixpoint_bound::bound(super::unify_param_ty(slot.clone(), observed.clone()));
+                        let next = super::fixpoint_bound::bound(super::unify_param_ty(slot.clone(), observed.clone()));
+                super::det::note("params.unify.sccq", Some(&*slot), &next);
+                *slot = next;
                     }
                 }
             }
@@ -853,7 +858,9 @@ impl Engine {
                     e.resize(arity, var0());
                 }
                 for (slot, observed) in e.iter_mut().zip(args.iter()) {
-                    *slot = super::fixpoint_bound::bound(super::unify_param_ty(slot.clone(), observed.clone()));
+                    let next = super::fixpoint_bound::bound(super::unify_param_ty(slot.clone(), observed.clone()));
+                super::det::note("params.unify.sccq", Some(&*slot), &next);
+                *slot = next;
                 }
             }
         }
@@ -1967,6 +1974,9 @@ impl Analyzer {
             if self.slot_hash(&unit.class, &unit.name) == before {
                 break;
             }
+            if round + 1 == limit {
+                super::det::note_cap(if self_reading { "harvest_reapply_limit_self" } else { "harvest_reapply_limit" });
+            }
             if round > 0 {
                 reapplied += 1;
             }
@@ -2554,7 +2564,7 @@ impl Analyzer {
         eng.heap.clear();
         for u in pending {
             let unit = &eng.units[u as usize];
-            let pos = unit.pos;
+            let pos = super::det::shuffle_key(u as u32, eng.stats.drain_evals.len() as u64, unit.pos);
             eng.heap.push(Reverse((pos, unit.seq, u)));
         }
         if eng.stats.graph_first.is_none() {

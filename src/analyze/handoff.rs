@@ -92,6 +92,7 @@ pub(crate) fn join_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
                     let key = (class.clone(), method.clone(), class_side);
                     if let Some(old) = s.prev_rets.get(&key) {
                         let joined = bound(join_slot(old.clone(), cur.clone()));
+                        super::det::note("fold.join_rets", s.prev_rets.get(&key), &joined);
                         if &joined != cur {
                             *cur = joined;
                         }
@@ -122,7 +123,8 @@ fn join_reference_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
                         Some(old) => join_slot(old.clone(), cur.clone()),
                         None => cur.clone(),
                     };
-                    if &joined != cur {
+                    super::det::note("fold.join_ret_one", s.prev_rets.get(&key), &joined);
+            if &joined != cur {
                         *cur = joined.clone();
                     }
                     s.prev_rets.insert(key, joined);
@@ -150,7 +152,9 @@ pub(crate) fn join_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
                 row.resize(prev.len(), Ty::Var { var: TyVar(0) });
             }
             for (slot, old) in row.iter_mut().zip(prev) {
-                *slot = bound(join_slot(old, slot.clone()));
+                let next = bound(join_slot(old.clone(), slot.clone()));
+                super::det::note("fold.join_params", Some(&old), &next);
+                *slot = next;
             }
         }
         params.retain(|_, row| !row.is_empty());
@@ -173,7 +177,9 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
                     row.resize(prev.len(), Ty::Var { var: TyVar(0) });
                 }
                 for (slot, old) in row.iter_mut().zip(prev) {
-                    *slot = join_slot(old, slot.clone());
+                    let next = join_slot(old.clone(), slot.clone());
+                    super::det::note("fold.join_param_row", Some(&old), &next);
+                    *slot = next;
                 }
             }
             if row.is_empty() {
@@ -205,6 +211,7 @@ pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &Cl
                 Some(old) => join_slot(old.clone(), cur.clone()),
                 None => cur.clone(),
             };
+            super::det::note("fold.join_ret_one", s.prev_rets.get(&key), &joined);
             if &joined != cur {
                 table.insert(method.clone(), joined.clone());
             }
@@ -227,7 +234,9 @@ pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool
                 row.resize(prev.len(), Ty::Var { var: TyVar(0) });
             }
             for (slot, old) in row.iter_mut().zip(prev) {
-                *slot = join_slot(old, slot.clone());
+                let next = join_slot(old.clone(), slot.clone());
+                super::det::note("fold.join_param_row", Some(&old), &next);
+                *slot = next;
             }
         }
         if row.is_empty() {

@@ -165,6 +165,7 @@ fn intern(key: SlotKey) -> u32 {
             return *id;
         }
         let id = s.keys.len() as u32;
+        super::det::note_slot_key(id, &key);
         s.keys.push(key.clone());
         s.ids.insert(key, id);
         id
@@ -258,6 +259,7 @@ pub(crate) fn param_ref(class: &ClassId, method: &Symbol, index: usize, value: T
             note_moved(slot, s.values.get(&slot));
         }
         s.joined.remove(&slot);
+        super::det::note("fold.param_seed", s.values.get(&slot), &value);
         s.values.insert(slot, value);
     });
     Ty::Rec { slot }
@@ -345,6 +347,7 @@ fn accumulate(key: SlotKey, value: Ty) -> Ty {
         if s.values.get(&slot) != Some(&joined) {
             note_moved(slot, s.values.get(&slot));
         }
+        super::det::note("fold.site_slot", s.values.get(&slot), &joined);
         s.values.insert(slot, joined);
     });
     Ty::Rec { slot }

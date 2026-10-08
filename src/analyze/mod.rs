@@ -49,6 +49,8 @@ pub mod graphql;
 mod harvest_return;
 mod fixpoint_bound;
 mod fixpoint_check;
+mod det;
+mod detfp;
 mod fixpoint_rounds;
 mod handoff;
 pub(crate) mod fold;
@@ -1108,6 +1110,7 @@ impl Analyzer {
     /// the refined registry. Iterates to a fixed point (capped; see
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
+        det::reset();
         handoff::reset();
         fold::reset();
         slots::reset();
@@ -1550,12 +1553,22 @@ impl Analyzer {
         self.type_rails_application_body(app);
         // `RH_FOLD`: expand every reference before anything downstream of
         // analysis sees a type.
+        if detfp::on() {
+            let fp = self.c1_state_fp(app);
+            eprintln!("rh-det-pre: {}", fp.det_line());
+        }
         self.fold_finish(app);
 
         self.settle_pending(app);
 
         self.stamp_inferred_method_signatures(app);
         self.report_fixpoint_checks(app);
+        if detfp::on() {
+            let fp = self.c1_state_fp(app);
+            eprintln!("rh-det: {}", fp.det_line());
+            fp.dump();
+        }
+        det::report();
     }
 
     /// With the add-only rules or the fold, what is still pending when
@@ -4684,6 +4697,8 @@ impl Analyzer {
     /// dispatch resolves to via `unwrap_fn_ret`). Skip methods whose
     /// body is `Ty::Var` (no information gained).
     fn harvest_returns_to_registry(&mut self, app: &App, harvest_tests: bool) {
+        det::next_round();
+        let before = det::registry_snapshot(&self.classes);
         self.harvest_method_returns(app, harvest_tests);
         // `RH_FOLD_JOIN`: returns join with the value they held after the
         // previous harvest, after the registry copies too.
@@ -4705,8 +4720,13 @@ impl Analyzer {
                 .filter_map(|cid| self.classes.get(cid))
                 .find_map(|c| c.instance_methods.get(name).cloned());
             if let Some(ty) = ty {
-                self.classes.entry(view_ctx.clone()).or_default().instance_methods.insert(name.clone(), ty);
+                let table = &mut self.classes.entry(view_ctx.clone()).or_default().instance_methods;
+                det::note_named("copy.view_ctx", name.as_str(), table.get(name), &ty);
+                table.insert(name.clone(), ty);
             }
+        }
+        if let Some(before) = before {
+            det::note_registry("round.registry", &before, &self.classes);
         }
     }
 
@@ -5126,6 +5146,7 @@ impl Analyzer {
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
                         continue; // own/catalog entry wins
                     }
+                    det::note_named("copy.concern_inst", name.as_str(), cls.instance_methods.get(name), ty);
                     cls.instance_methods.insert(name.clone(), ty.clone());
                     folded.0.insert(name.clone());
                     // `RH_FOLD`: the copy reads the module's slot.
@@ -5135,6 +5156,7 @@ impl Analyzer {
                     if cls.class_methods.contains_key(name) && !folded.1.contains(name) {
                         continue;
                     }
+                    det::note_named("copy.concern_class", name.as_str(), cls.class_methods.get(name), ty);
                     cls.class_methods.insert(name.clone(), ty.clone());
                     folded.1.insert(name.clone());
                     fold::note_alias(&id, name, &m);
@@ -5229,6 +5251,7 @@ impl Analyzer {
                 cls.instance_methods.remove(name);
             }
             for (name, ty) in agreed {
+                det::note_named("copy.host_lend", name.as_str(), cls.instance_methods.get(&name), &ty);
                 cls.instance_methods.insert(name.clone(), ty);
                 lent.insert(name);
             }
@@ -5415,6 +5438,7 @@ impl Analyzer {
     /// than string fingerprints, so unification is direct: same type →
     /// keep; nil + T → T?; otherwise → union widen.
     fn unify_params_from_call_sites(&mut self, app: &App, scope: UnifyScope) {
+        let before = det::descent_on().then(|| self.inferred_params.clone());
         // Rebuilt from scratch every fixpoint round. The table is pure
         // derived state — a function of the types the last typing pass
         // wrote onto the call-site argument expressions — and carrying
@@ -5536,6 +5560,11 @@ impl Analyzer {
         // `RH_FOLD_JOIN`: rows join with last round's (with `RH_FOLD`, the
         // reference-mode rows).
         handoff::join_params(&mut self.inferred_params);
+        if let Some(before) = before {
+            for (key, row) in &self.inferred_params {
+                det::note_row("round.params", before.get(key).map(Vec::as_slice), row);
+            }
+        }
     }
 
     /// `RH_FOLD`: call-graph edges from one method body's call sites, keyed
@@ -5639,7 +5668,9 @@ impl Analyzer {
                 entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
             }
             for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
-                *slot = fixpoint_bound::bound(unify_param_ty(slot.clone(), observed));
+                let next = fixpoint_bound::bound(unify_param_ty(slot.clone(), observed));
+                det::note("params.unify", Some(&*slot), &next);
+                *slot = next;
             }
         }
     }
@@ -5853,7 +5884,9 @@ impl Analyzer {
                 entry.resize(tys.len(), Ty::Var { var: crate::ident::TyVar(0) });
             }
             for (slot, observed) in entry.iter_mut().zip(tys.into_iter()) {
-                *slot = fixpoint_bound::bound(unify_param_ty(slot.clone(), observed));
+                let next = fixpoint_bound::bound(unify_param_ty(slot.clone(), observed));
+                det::note("params.unify", Some(&*slot), &next);
+                *slot = next;
             }
         }
     }

@@ -122,7 +122,7 @@ fn untie_recursive_return(existing: &Ty, new: &Ty) -> Option<Ty> {
 
 enum HarvestWrite {
     Keep,
-    Set(Ty),
+    Set(&'static str, Ty),
 }
 
 /// Single merge decision for an existing harvested return vs a new body type.
@@ -135,16 +135,18 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     }
     if let Some(untied) = untie_recursive_return(existing, &new) {
         super::fixpoint_check::note_untie_cut();
+        super::det::note_cap("harvest_untie_cut");
+        super::det::note("harvest.untie", Some(existing), &untied);
         if existing == &untied {
             return HarvestWrite::Keep;
         }
-        return HarvestWrite::Set(untied);
+        return HarvestWrite::Set("harvest.untie_result", untied);
     }
     if let Some(stable) = stabilize_untyped_return_oscillation(existing, &new) {
         if existing == &stable {
             return HarvestWrite::Keep;
         }
-        return HarvestWrite::Set(stable);
+        return HarvestWrite::Set("harvest.stabilize", stable);
     }
     // Bare `Untyped`/`Var`, and unions of only those, must not wipe a
     // concrete return. `Union[Untyped, Untyped]` is not `is_unknown()`
@@ -153,7 +155,7 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
         return HarvestWrite::Keep;
     }
     // Distinct cores: last-write wins (residual thrash; not this PR's fix).
-    HarvestWrite::Set(new)
+    HarvestWrite::Set("harvest.lastwrite", new)
 }
 
 /// Conservative insertion into the harvested-return table.
@@ -171,11 +173,13 @@ pub(super) fn insert_inferred_return(
     let ty = super::fixpoint_bound::bound(ty);
     match table.get(method) {
         None => {
+            super::det::note_named("harvest.first", method.as_str(), None, &ty);
             table.insert(method.clone(), ty);
         }
         Some(existing) => match decide_harvested_return(existing, ty) {
             HarvestWrite::Keep => {}
-            HarvestWrite::Set(next) => {
+            HarvestWrite::Set(rule, next) => {
+                super::det::note_named(rule, method.as_str(), Some(existing), &next);
                 table.insert(method.clone(), next);
             }
         },
