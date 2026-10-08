@@ -392,6 +392,7 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
         diagnostic: expr.diagnostic.clone(),
         hint: expr.hint,
         decisions: expr.decisions,
+        inference_id: expr.inference_id,
     }
 }
 
@@ -627,5 +628,6 @@ fn wrap_in_cast(arg: &Expr, target_ty: &Ty) -> Expr {
         diagnostic: None,
         hint: None,
         decisions: 0,
+        inference_id: 0,
     }
 }

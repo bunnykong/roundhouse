@@ -107,6 +107,19 @@ pub(crate) enum SlotKey {
     /// The position `step` below every reference unfolded at `site`; its
     /// value is the union of those children.
     At { site: SiteId, step: Step },
+    /// A concern copy retains both its source definition and the self context
+    /// on which the copy is read. Never alias these values by module alone.
+    CopyRet { owner: ClassId, includer: ClassId, method: Symbol, class_side: bool },
+    CopyParam { owner: ClassId, includer: ClassId, method: Symbol, class_side: bool, index: usize },
+    Site { context: super::equations::Context, site: SiteId, role: SiteRole },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SiteRole {
+    Position(Step),
+    Narrow(String),
+    ClosureResult,
+    ClosureParam(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -126,6 +139,7 @@ struct State {
     /// References are produced only while active: set once the first
     /// recursive component is known, cleared by the final expansion.
     active: bool,
+    structure_frozen: bool,
     keys: Vec<SlotKey>,
     ids: HashMap<SlotKey, u32>,
     /// Methods in reference mode. Only grows.
@@ -144,6 +158,8 @@ struct State {
     /// reference to the module's slot; read by value, the concern re-embeds
     /// its own previous return every round.
     aliases: HashMap<MethodKey, ClassId>,
+    static_aliases: HashMap<(ClassId, Symbol, bool), ClassId>,
+    late_aliases: HashSet<(ClassId, Symbol, bool)>,
     /// The side table's fingerprint at the last convergence test.
     side_fp: Option<u64>,
     /// Final expansion: back edges cut to `untyped`, tail edges resolved,
@@ -213,29 +229,55 @@ pub(crate) fn is_rec_method(class: &ClassId, method: &Symbol) -> bool {
         let s = s.borrow();
         let key = (class.clone(), method.clone());
         s.rec_methods.contains(&key)
+            || (super::equations::on() && [false,true].iter().any(|side| {
+                s.static_aliases.get(&(class.clone(),method.clone(),*side))
+                    .is_some_and(|src| s.rec_methods.contains(&(src.clone(),method.clone())))
+            }))
             || s.aliases.get(&key).is_some_and(|src| s.rec_methods.contains(&(src.clone(), method.clone())))
     })
 }
 
 /// `fold_concern_surfaces` copied `module#method` onto `class`.
-pub(crate) fn note_alias(class: &ClassId, method: &Symbol, module: &ClassId) {
+pub(crate) fn note_alias(class: &ClassId, method: &Symbol, module: &ClassId, class_side: bool) {
     if !*ON {
         return;
     }
     ST.with(|s| {
-        s.borrow_mut().aliases.insert((class.clone(), method.clone()), module.clone());
+        let mut s = s.borrow_mut();
+        if super::equations::on() {
+            let key = (class.clone(),method.clone(),class_side);
+            if s.structure_frozen {
+                if s.static_aliases.get(&key) != Some(module) { s.late_aliases.insert(key); }
+            } else {
+                s.static_aliases.insert(key,module.clone());
+            }
+        } else {
+            s.aliases.insert((class.clone(), method.clone()), module.clone());
+        }
     });
 }
 
 /// The module a registry copy on `class` came from, if any.
 pub(crate) fn alias_of(class: &ClassId, method: &Symbol) -> Option<ClassId> {
+    if super::equations::on() { return alias_of_side(class,method,false); }
     ST.with(|s| s.borrow().aliases.get(&(class.clone(), method.clone())).cloned())
+}
+
+fn alias_of_side(class: &ClassId, method: &Symbol, side: bool) -> Option<ClassId> {
+    ST.with(|s| s.borrow().static_aliases.get(&(class.clone(),method.clone(),side)).cloned())
 }
 
 /// A read of a return slot, when it is in reference mode.
 pub(crate) fn ret_ref(class: &ClassId, method: &Symbol, class_side: bool) -> Option<Ty> {
     if !active() || !is_rec_method(class, method) {
         return None;
+    }
+    if super::equations::on() {
+        let key = match alias_of_side(class, method, class_side) {
+            Some(owner) => SlotKey::CopyRet { owner, includer: class.clone(), method: method.clone(), class_side },
+            None => SlotKey::Ret { class: class.clone(), method: method.clone(), class_side },
+        };
+        return Some(Ty::Rec { slot: intern(key) });
     }
     // A registry copy reads the defining module's slot.
     let class = ST.with(|s| {
@@ -253,11 +295,14 @@ pub(crate) fn ret_ref(class: &ClassId, method: &Symbol, class_side: bool) -> Opt
 
 /// A read of a parameter slot, when it is in reference mode. `value` is
 /// what the body would otherwise have been seeded with.
-pub(crate) fn param_ref(class: &ClassId, method: &Symbol, index: usize, value: Ty) -> Ty {
+pub(crate) fn param_ref(class: &ClassId, method: &Symbol, class_side: bool, index: usize, value: Ty) -> Ty {
     if !active() || !is_rec_method(class, method) {
         return value;
     }
-    let key = SlotKey::Param { class: class.clone(), method: method.clone(), index };
+    let key = if super::equations::on() {
+        let owner = alias_of_side(class, method, class_side).unwrap_or_else(|| class.clone());
+        SlotKey::CopyParam { owner, includer: class.clone(), method: method.clone(), class_side, index }
+    } else { SlotKey::Param { class: class.clone(), method: method.clone(), index } };
     super::structure::fold_write(&key, "parameter-seed");
     let slot = intern(key);
     // A slot's own top-level reference contributes nothing (X = X | A is A).
@@ -304,17 +349,24 @@ pub(crate) fn value_of(slot: u32, classes: &HashMap<ClassId, ClassInfo>) -> Opti
     // re-types the reader when the value moves.
     super::sccq::rec_fold_slot(slot);
     match key_of(slot)? {
-        SlotKey::Ret { class, method, class_side } => {
-            let cls = classes.get(&class)?;
-            let table = if class_side { &cls.class_methods } else { &cls.instance_methods };
-            let t = table.get(&method)?;
-            Some(match t {
-                Ty::Fn { ret, .. } => (**ret).clone(),
-                other => other.clone(),
-            })
+        SlotKey::Ret { class, method, class_side }
+        | SlotKey::CopyRet { includer: class, method, class_side, .. } => {
+            let value = classes.get(&class).and_then(|cls| {
+                let table = if class_side { &cls.class_methods } else { &cls.instance_methods };
+                table.get(&method).map(|t| match t {
+                    // A function inferred after the declaration snapshot is
+                    // the returned closure itself, not a method signature.
+                    Ty::Fn { ret, .. } if !super::equations::on()
+                        || !super::equations::return_reference(&class, &method, class_side) => (**ret).clone(),
+                    other => other.clone(),
+                })
+            });
+            value.or_else(|| super::equations::on().then(super::body::unknown))
         }
-        SlotKey::Param { .. } | SlotKey::Narrow { .. } | SlotKey::At { .. } => {
+        SlotKey::Param { .. } | SlotKey::Narrow { .. } | SlotKey::At { .. }
+        | SlotKey::Site { .. } | SlotKey::CopyParam { .. } => {
             ST.with(|s| s.borrow().values.get(&slot).cloned())
+                .or_else(|| super::equations::on().then(super::body::unknown))
         }
     }
 }
@@ -510,7 +562,8 @@ fn shallow(arm: Ty, site: SiteId) -> Ty {
         ) || matches!(t, Ty::Class { args, .. } if args.is_empty())
     }
     let pos = |child: Ty, step: Step| -> Ty {
-        if keep(&child) { child } else { accumulate(SlotKey::At { site, step }, child) }
+        if keep(&child) && !super::equations::on() { child }
+        else { accumulate(site_key(site, SiteRole::Position(step)), child) }
     };
     use std::sync::Arc;
     match arm {
@@ -577,8 +630,47 @@ pub(crate) fn receiver_classes(t: &Ty, classes: &HashMap<ClassId, ClassInfo>) ->
 
 /// A reference narrowed at `site` through `filter`: a reference to that
 /// site's narrowed slot, whose value accumulates `value`.
+fn site_key(site: SiteId, role: SiteRole) -> SlotKey {
+    if super::equations::on() {
+        SlotKey::Site { context: super::equations::context(), site, role }
+    } else {
+        match role {
+            SiteRole::Position(step) => SlotKey::At { site, step },
+            SiteRole::Narrow(filter) => SlotKey::Narrow { site, filter },
+            _ => unreachable!("closure slots require RH_STRUCT"),
+        }
+    }
+}
+
 pub(crate) fn narrowed_ref(site: SiteId, filter: String, value: Ty) -> Ty {
-    accumulate(SlotKey::Narrow { site, filter }, value)
+    accumulate(site_key(site, SiteRole::Narrow(filter)), value)
+}
+
+pub(crate) fn closure_result(site: SiteId, value: Ty) -> Ty {
+    if super::equations::on() && active() {
+        accumulate(site_key(site, SiteRole::ClosureResult), value)
+    } else { value }
+}
+
+pub(crate) fn closure_param(site: SiteId, index: usize, value: Ty) -> Ty {
+    if super::equations::on() && active() {
+        accumulate(site_key(site, SiteRole::ClosureParam(index as u32)), value)
+    } else { value }
+}
+
+pub(crate) fn return_slot_ids(class: &ClassId, method: &Symbol, class_side: bool) -> Vec<u32> {
+    let mut ids = Vec::new();
+    if let Some(id) = slot_id(&SlotKey::Ret { class: class.clone(), method: method.clone(), class_side }) {
+        ids.push(id);
+    }
+    if super::equations::on() {
+        if let Some(owner) = alias_of_side(class, method, class_side) {
+            if let Some(id) = slot_id(&SlotKey::CopyRet { owner, includer: class.clone(), method: method.clone(), class_side }) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
 }
 
 fn has_top_rec(t: &Ty) -> bool {
@@ -629,6 +721,7 @@ pub(crate) fn head(t: &Ty, at: SiteId, classes: &HashMap<ClassId, ClassInfo>) ->
     let mut out: Vec<Ty> = Vec::new();
     push_head(t, at, classes, &mut out);
     Some(match out.len() {
+        0 if super::equations::on() => super::body::unknown(),
         0 => Ty::pending_untyped(),
         _ => super::body::union_many(out),
     })
@@ -639,35 +732,41 @@ fn push_head(t: &Ty, at: SiteId, classes: &HashMap<ClassId, ClassInfo>, out: &mu
         Ty::Rec { slot } => {
             let arms = resolve(*slot, classes, &mut HashSet::new());
             if arms.is_empty() {
-                out.push(Ty::pending_untyped());
+                out.push(if super::equations::on() { super::body::unknown() } else { Ty::pending_untyped() });
             }
             for arm in arms {
                 out.push(shallow(arm, at));
             }
         }
         Ty::Union { variants } => variants.iter().for_each(|v| push_head(v, at, classes, out)),
-        other => out.push(other.clone()),
+        other => out.push(if super::equations::on() && active() { shallow(other.clone(), at) } else { other.clone() }),
     }
 }
 
 // ---------------------------------------------------------------- call graph
 
 pub(crate) fn begin_calls() {
-    if *ON {
+    if *ON && !super::equations::on() {
         ST.with(|s| s.borrow_mut().edges.clear());
     }
 }
 
 pub(crate) fn record_call(caller: &ClassId, method: &Symbol, callee: MethodKey) {
     ST.with(|s| {
-        s.borrow_mut().edges.entry((caller.clone(), method.clone())).or_default().insert(callee);
+        let mut s = s.borrow_mut();
+        if s.structure_frozen { return; }
+        s.edges.entry((caller.clone(), method.clone())).or_default().insert(callee);
     });
+}
+
+pub(crate) fn freeze_structure() {
+    ST.with(|s| { let mut s = s.borrow_mut(); s.structure_frozen = true; s.active = true; });
 }
 
 /// Close a unify pass: every method in a non-trivial SCC of the call graph
 /// enters reference mode.
 pub(crate) fn end_calls() {
-    if !*ON {
+    if !*ON || super::equations::on() {
         return;
     }
     let sccs = ST.with(|s| tarjan(&s.borrow().edges));
@@ -992,13 +1091,19 @@ pub(crate) fn deactivate() {
 pub(crate) fn stats() -> serde_json::Value {
     ST.with(|s| {
         let s = s.borrow();
-        let mut kinds = [0u64; 4];
+        let mut kinds = [0u64; 6];
         for k in &s.keys {
             kinds[match k {
                 SlotKey::Ret { .. } => 0,
                 SlotKey::Param { .. } => 1,
                 SlotKey::Narrow { .. } => 2,
                 SlotKey::At { .. } => 3,
+                SlotKey::CopyRet { .. } => 0,
+                SlotKey::CopyParam { .. } => 1,
+                SlotKey::Site { role: SiteRole::Position(_), .. } => 3,
+                SlotKey::Site { role: SiteRole::Narrow(_), .. } => 2,
+                SlotKey::Site { role: SiteRole::ClosureResult, .. } => 4,
+                SlotKey::Site { role: SiteRole::ClosureParam(_), .. } => 5,
             }] += 1;
         }
         let nodes: u64 = s.values.values().map(|t| {
@@ -1008,10 +1113,12 @@ pub(crate) fn stats() -> serde_json::Value {
         }).sum();
         serde_json::json!({
             "methods_in_reference_mode": s.rec_methods.len(),
-            "slots": {"ret": kinds[0], "param": kinds[1], "narrow": kinds[2], "position": kinds[3]},
+            "slots": {"ret": kinds[0], "param": kinds[1], "narrow": kinds[2], "position": kinds[3],
+                      "closure_result": kinds[4], "closure_param": kinds[5]},
             "side_table_nodes": nodes,
             "expansion": {"back_edges": s.expansion[0], "tail_edges": s.expansion[1], "budget_cuts": s.expansion[2]},
             "accumulations_skipped": s.skipped,
+            "late_alias_sites": s.late_aliases.len(),
         })
     })
 }
@@ -1019,6 +1126,93 @@ pub(crate) fn stats() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structure_return_slots_preserve_inferred_closures() {
+        if !super::super::equations::on() { return; }
+        reset(); super::super::equations::reset();
+        let class = ClassId(Symbol::from("Factory"));
+        let declared = Symbol::from("declared");
+        let inferred = Symbol::from("inferred");
+        let closure = Ty::Fn {
+            params: vec![].into(), ret: std::sync::Arc::new(Ty::Str),
+            block: None, effects: crate::effect::EffectSet::default(),
+        };
+        let mut info = ClassInfo::default();
+        info.instance_methods.insert(declared.clone(), closure.clone());
+        let mut classes = HashMap::from([(class.clone(), info)]);
+        super::super::equations::capture_contracts(&classes);
+        classes.get_mut(&class).unwrap().instance_methods.insert(inferred.clone(), closure.clone());
+        let a = intern(SlotKey::Ret { class:class.clone(), method:declared, class_side:false });
+        let b = intern(SlotKey::Ret { class:class.clone(), method:inferred.clone(), class_side:false });
+        let c = intern(SlotKey::CopyRet { owner:ClassId(Symbol::from("Concern")),
+            includer:class, method:inferred, class_side:false });
+        assert_eq!(value_of(a, &classes), Some(Ty::Str));
+        assert_eq!(value_of(b, &classes), Some(closure.clone()));
+        assert_eq!(value_of(c, &classes), Some(closure));
+        reset(); super::super::equations::reset();
+    }
+
+    #[test]
+    fn structure_missing_slots_read_pending_and_keep_their_identity() {
+        if !super::super::equations::on() { return; }
+        reset();
+        let key = SlotKey::Site {
+            context: Default::default(), site:(1,2,3), role:SiteRole::ClosureResult,
+        };
+        let slot = intern(key.clone());
+        assert_eq!(value_of(slot,&HashMap::new()),Some(super::super::body::unknown()));
+        assert_eq!(intern(key.clone()),slot);
+        assert_eq!(key_of(slot),Some(key));
+        reset();
+    }
+
+    #[test]
+    fn structure_scalar_children_have_position_slots_and_closures_have_results() {
+        if !super::super::equations::on() { return; }
+        reset(); freeze_structure();
+        let site=(1,2,3);
+        let opened=shallow(Ty::Array { elem:std::sync::Arc::new(Ty::Int) },site);
+        let Ty::Array { elem } = opened else { unreachable!() };
+        let Ty::Rec { slot } = *elem else { panic!("scalar child must keep a position identity") };
+        assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Int));
+        let result=closure_result(site,Ty::Str);
+        assert_ne!(result,Ty::Rec { slot });
+        let Ty::Rec { slot:result }=result else { unreachable!() };
+        assert!(matches!(key_of(result),Some(SlotKey::Site { role:SiteRole::ClosureResult,.. })));
+        assert_eq!(value_of(result,&HashMap::new()),Some(Ty::Str));
+        // `head` promises an actual unfold. Returning Some for an inline
+        // scalar would make dispatch's retry recurse without progress.
+        assert_eq!(head(&Ty::Int,site,&HashMap::new()),None);
+        reset();
+    }
+
+    #[test]
+    fn structure_copy_parameters_distinguish_owner_host_and_side() {
+        if !super::super::equations::on() { return; }
+        reset();
+        let host=ClassId(Symbol::from("Host"));
+        let first=ClassId(Symbol::from("First"));
+        let second=ClassId(Symbol::from("Second"));
+        let method=Symbol::from("same_name");
+        note_alias(&host,&method,&first,false);
+        note_alias(&host,&method,&second,true);
+        add_rec_methods(vec![(first.clone(),method.clone()),(second.clone(),method.clone())]);
+        freeze_structure();
+        let a=param_ref(&host,&method,false,0,Ty::Int);
+        let b=param_ref(&host,&method,true,0,Ty::Str);
+        assert_ne!(a,b);
+        let Ty::Rec { slot:a }=a else { unreachable!() };
+        let Ty::Rec { slot:b }=b else { unreachable!() };
+        assert_eq!(key_of(a),Some(SlotKey::CopyParam { owner:first.clone(),includer:host.clone(),
+            method:method.clone(),class_side:false,index:0 }));
+        assert_eq!(value_of(a,&HashMap::new()),Some(Ty::Int));
+        assert_eq!(value_of(b,&HashMap::new()),Some(Ty::Str));
+        note_alias(&host,&method,&second,false);
+        assert_eq!(alias_of_side(&host,&method,false),Some(first));
+        assert_eq!(stats()["late_alias_sites"],1);
+        reset();
+    }
 
     fn union(v: Vec<Ty>) -> Ty {
         Ty::Union { variants: v.into() }
@@ -1073,6 +1267,9 @@ pub(super) fn structure_parts() -> (Vec<SlotKey>, Vec<String>, Vec<String>) {
         let refs = s.rec_methods.iter().map(|(c, m)| format!("{}#{m}", c.0)).collect();
         let mut routing = Vec::new();
         for ((c, m), module) in &s.aliases { routing.push(format!("alias:{}#{m}->{}#{m}", c.0, module.0)); }
+        for ((c,m,side),module) in &s.static_aliases {
+            routing.push(format!("alias:{}:{side}#{m}->{}:{side}#{m}",c.0,module.0));
+        }
         for ((c, m), targets) in &s.edges {
             for (t, n) in targets { routing.push(format!("edge:{}#{m}->{}#{n}", c.0, t.0)); }
         }

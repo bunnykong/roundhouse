@@ -384,6 +384,7 @@ where
         diagnostic: expr.diagnostic.clone(),
         hint: expr.hint,
         decisions: expr.decisions,
+        inference_id: expr.inference_id,
     }
 }
 

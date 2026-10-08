@@ -95,6 +95,21 @@ impl Structure {
             value.hash(&mut h);
             format!("{:016x}", h.finish())
         }
+        // Aggregate partitions explain an S failure without exposing any
+        // source name. Keep the original whole-system digests as the gate.
+        let mut slots: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        let mut writers: BTreeMap<&str, BTreeMap<&str, &BTreeSet<String>>> = BTreeMap::new();
+        for slot in &self.slots {
+            slots.entry(slot_kind(slot)).or_default().insert(slot);
+        }
+        for (slot, sources) in &self.writers {
+            writers.entry(slot_kind(slot)).or_default().insert(slot, sources);
+        }
+        let slot_kinds: BTreeMap<_, _> = slots.into_iter().map(|(kind, keys)|
+            (kind, serde_json::json!({"n":keys.len(), "digest":hash(&keys)}))).collect();
+        let writer_kinds: BTreeMap<_, _> = writers.into_iter().map(|(kind, keys)|
+            (kind, serde_json::json!({"n":keys.values().map(|v| v.len()).sum::<usize>(),
+                "slots":keys.len(), "digest":hash(&keys)}))).collect();
         serde_json::json!({
             "digest": hash((&self.slots, &self.writers, &self.refs, &self.routing)),
             "universe": {"digest":hash(&self.slots), "n":self.slots.len()},
@@ -102,7 +117,27 @@ impl Structure {
                         "n":self.writers.values().map(BTreeSet::len).sum::<usize>()},
             "reference_mode": {"digest":hash(&self.refs), "n":self.refs.len()},
             "routing": {"digest":hash(&self.routing), "n":self.routing.len()},
+            "slot_kinds": slot_kinds,
+            "writer_kinds": writer_kinds,
         })
+    }
+}
+
+fn slot_kind(key: &str) -> &'static str {
+    if key.starts_with("fold:") {
+        if key.starts_with("fold:Ret ") || key.starts_with("fold:CopyRet ") { return "fold_return"; }
+        if key.starts_with("fold:Param ") || key.starts_with("fold:CopyParam ") { return "fold_param"; }
+        if key.starts_with("fold:Narrow ") || key.contains("role: Narrow(") { return "fold_narrow"; }
+        if key.starts_with("fold:At ") || key.contains("role: Position(") { return "fold_position"; }
+        if key.contains("role: ClosureResult") { return "fold_closure_result"; }
+        if key.contains("role: ClosureParam(") { return "fold_closure_param"; }
+        return "fold_other";
+    }
+    match key.split(':').next().unwrap_or("") {
+        "ret" => "returns", "constant" => "constants", "attribute" => "attributes",
+        "param" => "params", "typed-constant" => "typed_constants", "controller" => "controllers",
+        "ir" => "ir", "ivar" => "ivars", "closure-result" => "closure_results",
+        "closure-param" => "closure_params", _ => "other",
     }
 }
 
