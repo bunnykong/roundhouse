@@ -69,6 +69,7 @@ fn fingerprint(ty: &Ty) -> u64 {
         Ty::Var { .. } => 17,
         Ty::Untyped { .. } => 18,
         Ty::Bottom => 19,
+        Ty::Rec { .. } => 20,
     };
     tag.hash(&mut h);
     match ty {
@@ -97,6 +98,7 @@ fn fingerprint(ty: &Ty) -> u64 {
             effects.hash(&mut h);
         }
         Ty::Var { var } => var.hash(&mut h),
+        Ty::Rec { slot } => slot.hash(&mut h),
         _ => {}
     }
     let fp = h.finish();

@@ -613,6 +613,104 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
+    /// `apply_narrowing`, except that (`RH_FOLD`) a binding holding a slot
+    /// reference is unfolded first and narrowed by constructor head, and a
+    /// binding that was exactly a reference becomes a reference to the
+    /// site's narrowed slot.
+    fn narrow(&self, ctx: &Ctx, pred: &narrowing::NarrowPred, then_branch: bool, site: &crate::span::Span) -> Ctx {
+        let at = crate::analyze::fold::site_of(site);
+        let unfolded = match self.fold_narrow(ctx, pred, at) {
+            std::borrow::Cow::Borrowed(c) => return narrowing::apply_narrowing(c, pred, then_branch),
+            std::borrow::Cow::Owned(c) => c,
+        };
+        let mut out = narrowing::with_head_match(|| narrowing::apply_narrowing(&unfolded, pred, then_branch));
+        let mut keys = Vec::new();
+        narrowing::pred_keys(pred, &mut keys);
+        for key in keys {
+            let (name, ivar) = match &key {
+                narrowing::VarKey::Local(n) => (n, false),
+                narrowing::VarKey::Ivar(n) => (n, true),
+                narrowing::VarKey::Reader(..) => continue,
+            };
+            let before = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) };
+            let Some(Ty::Rec { slot }) = before else { continue };
+            let opened = if ivar { unfolded.ivar_bindings.get(name) } else { unfolded.local_bindings.get(name) }.cloned();
+            let bindings = if ivar { &mut out.ivar_bindings } else { &mut out.local_bindings };
+            let Some(after) = bindings.get(name).cloned() else { continue };
+            if matches!(after, Ty::Rec { .. }) {
+                continue;
+            }
+            if opened.as_ref() == Some(&after) {
+                // Nothing narrowed: keep the reference itself.
+                bindings.insert(name.clone(), Ty::Rec { slot: *slot });
+                continue;
+            }
+            let filter = format!("{}_{}", narrowing::pred_desc(pred, name, then_branch), name.as_str());
+            bindings.insert(name.clone(), crate::analyze::fold::narrowed_ref(at, filter, after));
+        }
+        out
+    }
+
+    /// `RH_FOLD`: the context narrowing starts from, with every binding the
+    /// predicate names unfolded one level when it holds a slot reference.
+    fn fold_narrow<'c>(
+        &self,
+        ctx: &'c Ctx,
+        pred: &narrowing::NarrowPred,
+        at: crate::analyze::fold::SiteId,
+    ) -> std::borrow::Cow<'c, Ctx> {
+        if !crate::analyze::fold::on() {
+            return std::borrow::Cow::Borrowed(ctx);
+        }
+        let mut keys = Vec::new();
+        narrowing::pred_keys(pred, &mut keys);
+        let mut out: Option<Ctx> = None;
+        for key in keys {
+            let (name, ivar) = match &key {
+                narrowing::VarKey::Local(n) => (n, false),
+                narrowing::VarKey::Ivar(n) => (n, true),
+                narrowing::VarKey::Reader(..) => continue,
+            };
+            let current = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) };
+            let Some(t) = current else { continue };
+            if let Some(u) = crate::analyze::fold::head(t, at, self.classes()) {
+                let c = out.get_or_insert_with(|| ctx.clone());
+                if ivar {
+                    c.ivar_bindings.insert(name.clone(), u);
+                } else {
+                    c.local_bindings.insert(name.clone(), u);
+                }
+            }
+        }
+        match out {
+            Some(c) => std::borrow::Cow::Owned(c),
+            None => std::borrow::Cow::Borrowed(ctx),
+        }
+    }
+
+    /// `RH_FOLD`: a `case` scrutinee that is a local or ivar bound to a
+    /// slot reference, with the binding unfolded one level, and the slot
+    /// when the binding was exactly a reference.
+    fn fold_case_binding(&self, scrutinee: &Expr, ctx: &Ctx) -> Option<(Symbol, bool, Ty, Option<u32>)> {
+        if !crate::analyze::fold::on() {
+            return None;
+        }
+        let (name, ivar) = match &*scrutinee.node {
+            ExprNode::Var { name, .. } => (name, false),
+            ExprNode::Ivar { name } => (name, true),
+            ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => (method, false),
+            _ => return None,
+        };
+        let bound = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) }?;
+        let at = crate::analyze::fold::site_of(&scrutinee.span);
+        let unfolded = crate::analyze::fold::head(bound, at, self.classes())?;
+        let base = match bound {
+            Ty::Rec { slot } => Some(*slot),
+            _ => None,
+        };
+        Some((name.clone(), ivar, unfolded, base))
+    }
+
     fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let expr_span = expr.span;
         match &mut *expr.node {
@@ -977,14 +1075,20 @@ impl<'a> BodyTyper<'a> {
                 let pred = narrowing::extract_narrowing_with(left, &|n| self.self_attribute_ty(n, ctx));
                 let right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
-                        narrowing::apply_narrowing(&seeded, p, true)
+                        self.narrow(&seeded, p, true, &left.span)
                     }
                     (Some(p), crate::expr::BoolOpKind::Or) => {
-                        narrowing::apply_narrowing(&seeded, p, false)
+                        self.narrow(&seeded, p, false, &left.span)
                     }
                     _ => seeded,
                 };
                 let rt = self.analyze_expr(right, &right_ctx);
+                // `RH_FOLD`: the left arm's truthiness reads its structure,
+                // so a reference there is unfolded (a narrowing site); a
+                // left that wins whole keeps the reference itself.
+                let lt_ref = lt.clone();
+                let lt = crate::analyze::fold::head(&lt, crate::analyze::fold::site_of(&left.span), self.classes())
+                    .unwrap_or(lt);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
                 // of the two operand types. For `||`, Nil never wins
@@ -1014,7 +1118,7 @@ impl<'a> BodyTyper<'a> {
                     //     from a union), and the union then re-added the
                     //     nil the operator had just ruled out.
                     if never_falsy(&lt) {
-                        return lt;
+                        return lt_ref;
                     }
                     if matches!(lt, Ty::Nil) {
                         return rt;
@@ -1218,6 +1322,16 @@ impl<'a> BodyTyper<'a> {
                         Some(t.subst_self(self_ty))
                     }
                     (other, _) => other,
+                };
+                // `RH_FOLD`: unfold a receiver reference one level before
+                // anything reads its structure (block parameters,
+                // projections, dispatch).
+                let recv_ty = match recv_ty {
+                    Some(t) if crate::analyze::fold::on() => {
+                        let at = crate::analyze::fold::site_of(&expr_span);
+                        Some(crate::analyze::fold::head(&t, at, self.classes()).unwrap_or(t))
+                    }
+                    other => other,
                 };
                 // `Parameters` is a Hash-shaped bag: what its own class does
                 // not answer (`fetch`, `each`, `map`, `count`, ...) is the
@@ -1573,12 +1687,12 @@ impl<'a> BodyTyper<'a> {
                 }
                 self.propagate_match_bindings(cond, &mut base, true);
                 let then_ctx = match &pred {
-                    Some(p) => narrowing::apply_narrowing(&base, p, true),
+                    Some(p) => self.narrow(&base, p, true, &cond.span),
                     None => base.clone(),
                 };
                 let t = self.analyze_expr(then_branch, &then_ctx);
                 let else_ctx = match &pred {
-                    Some(p) => narrowing::apply_narrowing(&base, p, false),
+                    Some(p) => self.narrow(&base, p, false, &cond.span),
                     None => base,
                 };
                 let e = self.analyze_expr(else_branch, &else_ctx);
@@ -1587,10 +1701,57 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Case { scrutinee, arms } => {
                 self.analyze_expr(scrutinee, ctx);
+                // `RH_FOLD`: `case x when Hash …` narrows `x` by constructor
+                // head when `x` holds a slot reference (main does not narrow
+                // `case`; unchanged without one).
+                let mut fold_case = self.fold_case_binding(scrutinee, ctx);
+                let mut removed: Vec<String> = Vec::new();
                 let mut branch_tys = Vec::new();
                 for arm in arms.iter_mut() {
-                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, ctx); }
-                    branch_tys.push(self.analyze_expr(&mut arm.body, ctx));
+                    let arm_ctx = match fold_case.as_mut() {
+                        Some((name, ivar, remaining, base)) => {
+                            let (bound, filter) = match narrowing::when_class_ty(&arm.pattern) {
+                                Some(t) => {
+                                    let (this, rest) = narrowing::head_split(remaining, &t);
+                                    *remaining = rest;
+                                    let head = narrowing::head_name(&t);
+                                    let filter = format!(
+                                        "when_{head}{}",
+                                        removed.iter().map(|r| format!("_not_{r}")).collect::<String>()
+                                    );
+                                    removed.push(head);
+                                    (this, filter)
+                                }
+                                None => (
+                                    remaining.clone(),
+                                    format!(
+                                        "case_else{}",
+                                        removed.iter().map(|r| format!("_not_{r}")).collect::<String>()
+                                    ),
+                                ),
+                            };
+                            // A scrutinee that was exactly a reference is
+                            // bound to a reference to the narrowed slot.
+                            let bound = match base {
+                                Some(_) => crate::analyze::fold::narrowed_ref(
+                                    crate::analyze::fold::site_of(&expr_span),
+                                    format!("{filter}_{}", name.as_str()),
+                                    bound,
+                                ),
+                                None => bound,
+                            };
+                            let mut c = ctx.clone();
+                            if *ivar {
+                                c.ivar_bindings.insert(name.clone(), bound);
+                            } else {
+                                c.local_bindings.insert(name.clone(), bound);
+                            }
+                            std::borrow::Cow::Owned(c)
+                        }
+                        None => std::borrow::Cow::Borrowed(ctx),
+                    };
+                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, &arm_ctx); }
+                    branch_tys.push(self.analyze_expr(&mut arm.body, &arm_ctx));
                 }
                 union_many(branch_tys)
             }
@@ -1849,6 +2010,13 @@ impl<'a> BodyTyper<'a> {
                     // targets with no usable RHS signal are left as-is.
                     if let ExprNode::MultiAssign { targets, value } = &*e.node {
                         let rhs = value.ty.clone();
+                        // `RH_FOLD`: destructuring reads a reference's structure.
+                        let rhs = match &rhs {
+                            Some(t) => crate::analyze::fold::head(t, crate::analyze::fold::site_of(&e.span), self.classes())
+                                .map(Some)
+                                .unwrap_or(rhs),
+                            None => rhs,
+                        };
                         for (i, target) in targets.iter().enumerate() {
                             let Some(ty) = multiassign_target_ty(&rhs, i) else {
                                 continue;
@@ -2082,7 +2250,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         if then_diverges && else_empty {
                             if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
-                                local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
+                                local_ctx = self.narrow(&local_ctx, &pred, false, &cond.span);
                             }
                         }
                         // The mirror image is `unless`, which the ingest
@@ -2097,7 +2265,7 @@ impl<'a> BodyTyper<'a> {
                         let else_diverges = matches!(else_branch.ty.as_ref(), Some(Ty::Bottom));
                         if else_diverges && then_empty {
                             if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
-                                local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, true);
+                                local_ctx = self.narrow(&local_ctx, &pred, true, &cond.span);
                             }
                         }
                     }
@@ -2116,7 +2284,17 @@ impl<'a> BodyTyper<'a> {
                 // empty container literals already infer from their
                 // contents.
                 if let LValue::Ivar { name } = target {
-                    if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
+                    if crate::analyze::slots::ivar_cut(ctx.self_ty.as_ref(), name) {
+                        // `RH_FOLD_SLOTS`: an ivar on a slot-graph cycle
+                        // takes no pre-stamp from its own seed, and keeps no
+                        // stale stamp from an earlier round either: that
+                        // stamp is state carried between rounds.
+                        if matches!(&*value.node, ExprNode::Array { elements, .. } if elements.is_empty())
+                            || matches!(&*value.node, ExprNode::Hash { entries, .. } if entries.is_empty())
+                        {
+                            value.ty = None;
+                        }
+                    } else if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
                         propagate_expected_to_empty_container(value, &expected);
                     }
                 }
@@ -2460,6 +2638,8 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
         Some(Ty::Untyped { .. }) => Some(Ty::unresolved()),
+        // A reference nobody unfolded reads as `untyped`.
+        Some(Ty::Rec { .. }) => Some(Ty::unresolved()),
         _ => None,
     }
 }
@@ -2634,6 +2814,11 @@ fn collect_var_assignments_into(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 }
 
 pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
+    // The join memo pays for one large DAG-shaped join. The fold's joins are
+    // many small independent ones, where it only costs hashing and copies.
+    if crate::analyze::fold::on() {
+        return union_of_raw(a, b);
+    }
     crate::join_memo::join(a, b, union_of_raw)
 }
 

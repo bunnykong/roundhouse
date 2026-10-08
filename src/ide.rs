@@ -1130,7 +1130,7 @@ pub fn render_ty(ty: &Ty) -> String {
         // An unresolved inference variable reads as "untyped" to a
         // consumer — same bucket the diagnostics walker treats as unknown.
         Ty::Var { .. } => "untyped".to_string(),
-        Ty::Untyped { .. } => "untyped".to_string(),
+        Ty::Untyped { .. } | Ty::Rec { .. } => "untyped".to_string(),
         Ty::Bottom => "bot".to_string(),
     }
 }

@@ -340,7 +340,7 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
             format!("^({p}) -> {}", rbs(ret))
         }
         Ty::Var { .. } => "untyped".into(),
-        Ty::Untyped { .. } => "untyped".into(),
+        Ty::Untyped { .. } | Ty::Rec { .. } => "untyped".into(),
         Ty::Bottom => "bot".into(),
     }
 }

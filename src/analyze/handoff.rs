@@ -13,7 +13,10 @@
 //!   each unification its parameter row, so a round can drop what the round
 //!   before it knew. With `RH_FOLD_JOIN=1` they accumulate: a return joins
 //!   with the value it held after the previous harvest, a row with last
-//!   round's row, each re-bounded by #584.
+//!   round's row, each re-bounded by #584. With `RH_FOLD=1` only the
+//!   reference-mode returns and rows accumulate, and they are not
+//!   re-bounded: references keep them finite, and that is the
+//!   configuration the fixpoint lab measured.
 //!
 //! The join is a semilattice join on the whole domain, so its result does
 //! not depend on the order typings write in: two pending values (no
@@ -42,6 +45,11 @@ pub(crate) static ALLARMS: LazyLock<bool> = LazyLock::new(|| flag("RH_BRK_ALLARM
 /// Accumulating handoffs.
 static JOIN: LazyLock<bool> = LazyLock::new(|| flag("RH_FOLD_JOIN"));
 
+/// Whether `RH_FOLD_JOIN` is set.
+pub(crate) fn join_on() -> bool {
+    *JOIN
+}
+
 type MethodKey = (ClassId, Symbol);
 
 #[derive(Default)]
@@ -69,6 +77,9 @@ pub(crate) fn join_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
     if !*JOIN {
         return;
     }
+    if super::fold::on() {
+        return join_reference_rets(classes);
+    }
     ST.with(|s| {
         let mut s = s.borrow_mut();
         for (class, cls) in classes.iter_mut() {
@@ -92,10 +103,42 @@ pub(crate) fn join_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
     });
 }
 
+/// With the fold: only reference-mode returns join, unbounded.
+fn join_reference_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
+    if !super::fold::active() {
+        return;
+    }
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        for (class, cls) in classes.iter_mut() {
+            for class_side in [false, true] {
+                let table = if class_side { &mut cls.class_methods } else { &mut cls.instance_methods };
+                for (method, cur) in table.iter_mut() {
+                    if matches!(cur, Ty::Fn { .. }) || !super::fold::in_reference_mode(class, method) {
+                        continue;
+                    }
+                    let key = (class.clone(), method.clone(), class_side);
+                    let joined = match s.prev_rets.get(&key) {
+                        Some(old) => join_slot(old.clone(), cur.clone()),
+                        None => cur.clone(),
+                    };
+                    if &joined != cur {
+                        *cur = joined.clone();
+                    }
+                    s.prev_rets.insert(key, joined);
+                }
+            }
+        }
+    });
+}
+
 /// Join every parameter row with the row it had last round.
 pub(crate) fn join_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
     if !*JOIN {
         return;
+    }
+    if super::fold::on() {
+        return join_reference_params(params);
     }
     ST.with(|s| {
         let mut s = s.borrow_mut();
@@ -112,6 +155,33 @@ pub(crate) fn join_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
         }
         params.retain(|_, row| !row.is_empty());
         s.prev_params.clone_from(params);
+    });
+}
+
+/// With the fold: only reference-mode rows join, unbounded.
+fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
+    if !super::fold::active() {
+        return;
+    }
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        for key in super::fold::reference_mode_methods() {
+            let prev = s.prev_params.get(&key).cloned();
+            let row = params.entry(key.clone()).or_default();
+            if let Some(prev) = prev {
+                if row.len() < prev.len() {
+                    row.resize(prev.len(), Ty::Var { var: TyVar(0) });
+                }
+                for (slot, old) in row.iter_mut().zip(prev) {
+                    *slot = join_slot(old, slot.clone());
+                }
+            }
+            if row.is_empty() {
+                params.remove(&key);
+            } else {
+                s.prev_params.insert(key, row.clone());
+            }
+        }
     });
 }
 

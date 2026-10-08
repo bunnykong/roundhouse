@@ -51,6 +51,8 @@ mod fixpoint_bound;
 mod fixpoint_check;
 mod fixpoint_rounds;
 mod handoff;
+pub(crate) mod fold;
+mod slots;
 pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
 mod dirty_retype;
 mod typing_mode;
@@ -1084,6 +1086,8 @@ impl Analyzer {
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
         handoff::reset();
+        fold::reset();
+        slots::reset();
         // An unresolvable include is a load-time error, not an open method
         // surface. Keep it in the class-body ledger even when no method is called.
         for class in &mut app.library_classes {
@@ -1201,8 +1205,11 @@ impl Analyzer {
             // verdicts (`DirtyHints`); both must be quiet before the
             // loop stops, or a newly block-valued method leaves its
             // callers on the registered return instead of the block.
+            // With `RH_FOLD`, so must the state the registry cannot see.
+            let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
             if self.inference_matches(&prev_hints.sig)
                 && self.block_value_matches(&prev_hints)
+                && side_stable
             {
                 rounds.production = LoopEnd::Settled(round);
                 break;
@@ -1217,7 +1224,13 @@ impl Analyzer {
             // so the later rounds retype the whole app for a handful of
             // returns. `dirty_classes_for_retype` is that handful plus
             // everything that reads it.
-            let dirty = self.dirty_classes_for_retype(app, &prev_hints);
+            // A moved side-table value can change any body that reads the
+            // reference, which the dirty frontier cannot see.
+            let dirty = if fold::side_full_retype(side_stable) {
+                None
+            } else {
+                self.dirty_classes_for_retype(app, &prev_hints)
+            };
             prev_hints = self.capture_dirty_hints();
             crate::timings::phase(format_args!("round {round}: typing passes"), || {
                 self.run_typing_passes(
@@ -1305,8 +1318,10 @@ impl Analyzer {
                     }
                 },
             );
+            let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
             if self.inference_matches(&prev_hints.sig)
                 && self.block_value_matches(&prev_hints)
+                && side_stable
             {
                 rounds.views_and_tests = LoopEnd::Settled(round);
                 break;
@@ -1355,13 +1370,19 @@ impl Analyzer {
                     snapshot.clone_from(&self.inferred_params);
                 }
                 self.overlay_test_params(app);
+                let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
                 if self.inference_matches(&absorb_hints.sig)
                     && self.block_value_matches(&absorb_hints)
+                    && side_stable
                 {
                     rounds.absorb = LoopEnd::Settled(round);
                     break;
                 }
-                absorb_dirty = self.dirty_classes_for_retype(app, &absorb_hints);
+                absorb_dirty = if fold::side_full_retype(side_stable) {
+                    None
+                } else {
+                    self.dirty_classes_for_retype(app, &absorb_hints)
+                };
                 absorb_hints = self.capture_dirty_hints();
             }
         } else {
@@ -1484,6 +1505,9 @@ impl Analyzer {
         // needs the registry it produces.
         self.type_direct_helper_bodies(app);
         self.type_rails_application_body(app);
+        // `RH_FOLD`: expand every reference before anything downstream of
+        // analysis sees a type.
+        self.fold_finish(app);
 
         self.settle_pending(app);
 
@@ -1491,12 +1515,13 @@ impl Analyzer {
         self.report_fixpoint_checks(app);
     }
 
-    /// With the add-only rules, what is still pending when analysis ends
-    /// goes through the entry-point policy (`handoff::settle_pending`): it
-    /// settles as gradual `untyped`, never as "never returns". Each type
-    /// settles on its own, so the walk's order does not matter.
+    /// With the add-only rules or the fold, what is still pending when
+    /// analysis ends goes through the entry-point policy
+    /// (`handoff::settle_pending`): it settles as gradual `untyped`, never
+    /// as "never returns". Each type settles on its own, so the walk's
+    /// order does not matter.
     fn settle_pending(&mut self, app: &mut App) {
-        if !handoff::settle_on() {
+        if !(handoff::settle_on() || fold::on()) {
             return;
         }
         fn settle(t: &mut Ty) {
@@ -1525,6 +1550,79 @@ impl Analyzer {
             .flat_map(|filter| filter.assigns.values_mut())
             .for_each(settle);
         crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e));
+    }
+
+    /// `RH_FOLD`: expand every reference in the registry, the parameter
+    /// rows, the tables published on the App and the IR, then stop
+    /// producing references.
+    fn fold_finish(&mut self, app: &mut App) {
+        if !fold::on() {
+            return;
+        }
+        // One expander serves every expansion, and its memo and its set of
+        // cyclic slots carry from one to the next, so what a slot expands to
+        // can depend on which reader came first. Every map is walked in key
+        // order, not hash order, so the expanded types are a function of
+        // the fixpoint alone and the same on every run.
+        fn sorted_keys<K: Ord + Clone, V>(map: &HashMap<K, V>) -> Vec<K> {
+            let mut keys: Vec<K> = map.keys().cloned().collect();
+            keys.sort();
+            keys
+        }
+        fn expand_in(t: &mut Ty, ex: &mut fold::Expander) {
+            if fold::contains_rec(t) {
+                *t = ex.expand(t);
+            }
+        }
+        let snapshot = self.classes.clone();
+        let mut ex = fold::Expander::new(&snapshot);
+        for class in sorted_keys(&self.classes) {
+            let Some(cls) = self.classes.get_mut(&class) else { continue };
+            for table in [&mut cls.instance_methods, &mut cls.class_methods] {
+                for method in sorted_keys(table) {
+                    if let Some(t) = table.get_mut(&method) {
+                        expand_in(t, &mut ex);
+                    }
+                }
+            }
+        }
+        for rows in [&mut self.inferred_params, &mut app.inferred_method_params] {
+            for key in sorted_keys(rows) {
+                for t in rows.get_mut(&key).into_iter().flatten() {
+                    expand_in(t, &mut ex);
+                }
+            }
+        }
+        for map in [&mut app.view_ivar_types, &mut app.partial_local_types] {
+            for outer in sorted_keys(map) {
+                let Some(inner) = map.get_mut(&outer) else { continue };
+                for name in sorted_keys(inner) {
+                    if let Some(t) = inner.get_mut(&name) {
+                        expand_in(t, &mut ex);
+                    }
+                }
+            }
+        }
+        for controller in sorted_keys(&app.controller_resolutions) {
+            let Some(res) = app.controller_resolutions.get_mut(&controller) else { continue };
+            for filter in res.filter_chain.iter_mut() {
+                for name in sorted_keys(&filter.assigns) {
+                    if let Some(t) = filter.assigns.get_mut(&name) {
+                        expand_in(t, &mut ex);
+                    }
+                }
+            }
+        }
+        fn rewrite(e: &mut Expr, ex: &mut fold::Expander) {
+            if let Some(t) = &e.ty {
+                if fold::contains_rec(t) {
+                    e.ty = Some(ex.expand(t));
+                }
+            }
+            e.node.for_each_child_mut(&mut |c| rewrite(c, ex));
+        }
+        crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e, &mut ex));
+        fold::deactivate();
     }
 
     /// Type the bodies of `direct :name do |…| … end` helpers, with the
@@ -1961,6 +2059,7 @@ impl Analyzer {
         // a Ruby source reference. Built in either mode: a views pass
         // stamps templates against the same constant scope the
         // production bodies were typed with.
+        fold::new_epoch();
         let (fallback, resolved_values) = crate::timings::phase("typing: constants", || {
             self.build_constant_registry(app)
         });
@@ -4193,11 +4292,13 @@ impl Analyzer {
             }
             let from_sites = observed.and_then(|v| v.get(i)).cloned();
             let seeded = param_ty_with_default(from_sites, param);
-            let ty = prefer_declared(
-                self.declared_param_ty(class_id, &method.name, positional, &param.name),
-                seeded,
-            );
+            let declared = self.declared_param_ty(class_id, &method.name, positional, &param.name);
+            let is_declared = declared.is_some();
+            let ty = prefer_declared(declared, seeded);
             if let Some(ty) = ty {
+                // `RH_FOLD`: a parameter of a recursive component is read
+                // by reference.
+                let ty = if is_declared { ty } else { fold::param_ref(class_id, &method.name, i, ty) };
                 ctx.local_bindings.insert(param.name.clone(), ty);
             }
         }
@@ -4249,11 +4350,13 @@ impl Analyzer {
                 .filter_map(|v| v.get(i).cloned())
                 .filter(|t| !matches!(t, Ty::Var { .. }))
                 .reduce(unify_param_ty);
-            let ty = prefer_declared(
-                self.declared_param_ty(class_id, action_name, Some(i), name),
-                observed,
-            );
+            let declared = self.declared_param_ty(class_id, action_name, Some(i), name);
+            let is_declared = declared.is_some();
+            let ty = prefer_declared(declared, observed);
             if let Some(ty) = ty {
+                // `RH_FOLD`: a parameter of a recursive component is read
+                // by reference.
+                let ty = if is_declared { ty } else { fold::param_ref(class_id, action_name, i, ty) };
                 ctx.local_bindings.insert(name.clone(), ty);
             }
         }
@@ -4834,6 +4937,8 @@ impl Analyzer {
                     }
                     cls.instance_methods.insert(name.clone(), ty.clone());
                     folded.0.insert(name.clone());
+                    // `RH_FOLD`: the copy reads the module's slot.
+                    fold::note_alias(&id, name, &m);
                 }
                 for (name, ty) in class_side {
                     if cls.class_methods.contains_key(name) && !folded.1.contains(name) {
@@ -4841,6 +4946,7 @@ impl Analyzer {
                     }
                     cls.class_methods.insert(name.clone(), ty.clone());
                     folded.1.insert(name.clone());
+                    fold::note_alias(&id, name, &m);
                 }
             }
         }
@@ -5147,11 +5253,13 @@ impl Analyzer {
         // already knows the class it is walking, so the edges are the
         // slice of sites it appended. See `record_callers`.
         self.callers_by_target.clear();
+        fold::begin_calls();
         for model in &app.models {
             for method in model.methods() {
                 let from = sites.len();
                 self.collect_send_sites(&method.body, Some(&model.name), helpers, &mut sites);
                 self.record_callers(&model.name, &sites[from..]);
+                self.fold_record_calls(&model.name, &method.name, &sites[from..], &defined);
             }
             for scope_item in model.scopes() {
                 let from = sites.len();
@@ -5164,6 +5272,7 @@ impl Analyzer {
                 let from = sites.len();
                 self.collect_send_sites(&method.body, Some(&lc.name), helpers, &mut sites);
                 self.record_callers(&lc.name, &sites[from..]);
+                self.fold_record_calls(&lc.name, &method.name, &sites[from..], &defined);
             }
         }
         for controller in &app.controllers {
@@ -5171,11 +5280,13 @@ impl Analyzer {
                 let from = sites.len();
                 self.collect_send_sites(&action.body, Some(&controller.name), helpers, &mut sites);
                 self.record_callers(&controller.name, &sites[from..]);
+                self.fold_record_calls(&controller.name, &action.name, &sites[from..], &defined);
             }
             for method in controller.class_methods() {
                 let from = sites.len();
                 self.collect_send_sites(&method.body, Some(&controller.name), helpers, &mut sites);
                 self.record_callers(&controller.name, &sites[from..]);
+                self.fold_record_calls(&controller.name, &method.name, &sites[from..], &defined);
             }
             // A class-body macro call (`preload_site_configs %w[a], only:
             // :show`) is the call site that types the class method.
@@ -5202,8 +5313,33 @@ impl Analyzer {
         // Fold before adding test-owned observations: a same-named test
         // helper must not feed an included production concern either.
         self.fold_concern_param_sites(app);
-        // `RH_FOLD_JOIN`: rows join with last round's.
+        // `RH_FOLD`: close the call graph (and with `RH_FOLD_SLOTS` the
+        // slot-read graph); their non-trivial SCCs enter reference mode.
+        self.fold_slot_graph(app, &defined);
+        fold::end_calls();
+        // `RH_FOLD_JOIN`: rows join with last round's (with `RH_FOLD`, the
+        // reference-mode rows).
         handoff::join_params(&mut self.inferred_params);
+    }
+
+    /// `RH_FOLD`: call-graph edges from one method body's call sites, keyed
+    /// by the `def` each reaches.
+    fn fold_record_calls(
+        &self,
+        caller: &ClassId,
+        method: &Symbol,
+        sites: &[(ClassId, Symbol, Vec<Ty>, SiteKeywords)],
+        defined: &BTreeSet<(ClassId, Symbol)>,
+    ) {
+        if !fold::on() {
+            return;
+        }
+        for (class_id, callee, _, _) in sites {
+            let owner = self.inherited_param_owner(defined, class_id.clone(), callee);
+            if defined.contains(&(owner.clone(), callee.clone())) {
+                fold::record_call(caller, method, (owner, callee.clone()));
+            }
+        }
     }
 
     /// Replay production+view param observations, then overlay typed
@@ -5777,10 +5913,14 @@ impl Analyzer {
                 // so Class-only receivers would leave callers of
                 // `records.first.foo` off the frontier.
                 let mut recv_classes: Vec<ClassId> = match recv {
+                    // `RH_FOLD`: through references, each slot once.
                     Some(r) => r
                         .ty
                         .as_ref()
-                        .map(class_ids_for_call_receiver)
+                        .map(|t| {
+                            fold::receiver_classes(t, &self.classes)
+                                .unwrap_or_else(|| class_ids_for_call_receiver(t))
+                        })
                         .unwrap_or_default(),
                     None => self_class
                         .cloned()

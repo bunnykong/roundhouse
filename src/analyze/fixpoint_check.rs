@@ -41,6 +41,7 @@
 //! | `controller_cache` | `controller_action_meta_cache`: the concern and action bindings, and the typed concern bodies, that a controller outside the dirty frontier reuses |
 //! | `view_seeds` | `view_seeds`: the controller→view channel that a views pass reads |
 //! | `copies` | `concern_folded` and `host_folded`: which registry entries are copies a fold may overwrite |
+//! | `side_table` | with `RH_FOLD`, the fold's parameter, position and narrowing slots |
 //! | `ir` | every emit-bound expression's type, decisions and diagnostic annotation ([`crate::lower::for_each_emit_body_ref`]). Parameter defaults and empty literals are typed in place and read back by the next typing, so their stamps are here too |
 //!
 //! Not compared, and why:
@@ -177,6 +178,9 @@ pub(super) fn type_hash(t: &Ty) -> u64 {
             }
         }
         Ty::Relation { of } => of.0.as_str().hash(&mut h),
+        // A fold reference hashes by its slot's key, which names the slot
+        // the same way in every run.
+        Ty::Rec { slot } => format!("{:?}", super::fold::key_of(*slot)).hash(&mut h),
         Ty::Fn { params, block, ret, effects } => {
             for p in params.iter() {
                 p.name.as_str().hash(&mut h);
@@ -469,6 +473,11 @@ impl Analyzer {
         for (id, names) in &self.host_folded {
             put("copies", format!("host {}", id.0.as_str()), names_hash(names));
         }
+        if super::fold::on() {
+            for (key, hash) in super::fold::side_table_hashes(&mut |t| type_hash(t)) {
+                put("side_table", key, hash);
+            }
+        }
         let mut ir = Vec::new();
         crate::lower::for_each_emit_body_ref(app, &mut |e| ir_rows(e, &mut ir));
         ir.sort_unstable();
@@ -572,6 +581,9 @@ impl Analyzer {
                 "cuts": BOUND_CUTS.load(Ordering::Relaxed),
             });
             line["harvest_untie_cut"] = serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed));
+            if super::fold::on() {
+                line["fold"] = super::fold::stats();
+            }
         }
         eprintln!("rh-fixpoint: {line}");
     }

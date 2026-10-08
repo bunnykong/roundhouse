@@ -87,6 +87,7 @@ impl Analyzer {
     /// full views/tests pass typed them; helper-chain rounds must not
     /// walk every template.
     pub(super) fn type_tests_only(&mut self, app: &mut App) {
+        super::fold::new_epoch();
         let (fallback, resolved_values) = self.build_constant_registry(app);
         self.typed_constants = resolved_values;
         let global_constants = ConstScope::global(fallback);

@@ -153,6 +153,13 @@ pub enum Ty {
     /// the union filter is the analog of Crystal's `Type.merge`
     /// dropping NoReturn variants during type joining.
     Bottom,
+
+    /// A reference to an inference slot of a recursive component: a
+    /// method's return, a parameter, or a position or narrowing below them
+    /// (`analyze::fold`). Built only with `RH_FOLD=1`, and analysis-only:
+    /// the analyzer expands every reference before it returns, so emitters
+    /// never meet one, and read one as `Untyped` if they do.
+    Rec { slot: u32 },
 }
 
 /// Why a type is `untyped`. One value used to carry three meanings, and
@@ -579,6 +586,7 @@ fn ty_tag(ty: &Ty) -> u8 {
         Ty::Untyped { .. } => 17,
         Ty::Bottom => 18,
         Ty::Nil => 19,
+        Ty::Rec { .. } => 20,
     }
 }
 
@@ -613,6 +621,7 @@ fn cmp_ty_raw(a: &Ty, b: &Ty) -> std::cmp::Ordering {
             .then_with(|| cmp_ty(rx, ry))
             .then_with(|| ex.effects.cmp(&ey.effects)),
         (Ty::Var { var: x }, Ty::Var { var: y }) => x.cmp(y),
+        (Ty::Rec { slot: x }, Ty::Rec { slot: y }) => x.cmp(y),
         _ => Ordering::Equal,
     })
 }

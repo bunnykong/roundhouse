@@ -87,7 +87,7 @@ pub fn rust_ty(ty: &Ty) -> String {
         // recursive normalize_value semantics. Crystal commits to
         // String fallback; TS to `any`. Rust gets the structured-but-
         // dynamic option.
-        Ty::Untyped { .. } => "serde_json::Value".to_string(),
+        Ty::Untyped { .. } | Ty::Rec { .. } => "serde_json::Value".to_string(),
         Ty::Bottom => "!".to_string(),
     }
 }

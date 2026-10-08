@@ -92,6 +92,7 @@ pub(crate) fn equal(a: &Ty, b: &Ty) -> bool {
         | (Ty::Untyped { .. }, _)
         | (Ty::Bottom, _) => return true,
         (Ty::Var { var: x }, Ty::Var { var: y }) => return x == y,
+        (Ty::Rec { slot: x }, Ty::Rec { slot: y }) => return x == y,
         (Ty::Relation { of: x }, Ty::Relation { of: y }) => return x == y,
         _ => {}
     }
@@ -133,6 +134,7 @@ pub(crate) fn equal(a: &Ty, b: &Ty) -> bool {
             },
         ) => px == py && bx == by && rx == ry && ex == ey,
         (Ty::Var { var: x }, Ty::Var { var: y }) => x == y,
+        (Ty::Rec { slot: x }, Ty::Rec { slot: y }) => x == y,
         _ => false,
     };
     MEMO.with(|m| {

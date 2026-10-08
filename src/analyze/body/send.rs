@@ -15,7 +15,7 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
-use super::{BodyTyper, Ctx, union_many, union_of, unknown};
+use super::{BodyTyper, ClassInfo, Ctx, union_many, union_of, unknown};
 
 impl<'a> BodyTyper<'a> {
     /// `record[:column]` / `read_attribute(:column)` (and their writer
@@ -800,6 +800,16 @@ impl<'a> BodyTyper<'a> {
         block_ret: Option<&Ty>,
         args: &[crate::expr::Expr],
     ) -> Ty {
+        // `RH_FOLD`: a receiver that is (or carries) a slot reference is
+        // unfolded one level here.
+        if crate::analyze::fold::on() {
+            if let Some(r) = recv_ty {
+                let at = crate::analyze::fold::pseudo_site(method.as_str());
+                if let Some(unfolded) = crate::analyze::fold::head(r, at, self.classes()) {
+                    return self.dispatch(Some(&unfolded), method, block_ret, args);
+                }
+            }
+        }
         // `Parameters` is a Hash-shaped bag: what its own class does not
         // answer (`fetch`, `each`, `map`, `count`, ...) is the Hash
         // reading over Symbol -> param value. Done here,
@@ -1355,9 +1365,15 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if let Some(ty) = cls.class_methods.get(method) {
+                        if let Some(r) = self.fold_ret_ref(id, cid, cls, method, ty, true) {
+                            return r;
+                        }
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {
+                        if let Some(r) = self.fold_ret_ref(id, cid, cls, method, ty, false) {
+                            return r;
+                        }
                         return unwrap_fn_ret(&subst(ty));
                     }
                     // Mixed-in modules (`include IntervalHelper`)
@@ -1998,6 +2014,38 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    /// `RH_FOLD`: the reference a read of `cid#method` yields when that
+    /// return slot is in reference mode. `None` (read the tree as main
+    /// does) unless the method is in a recursive component, its entry is
+    /// not a declared signature, and the receiver substitution main applies
+    /// would be the identity.
+    fn fold_ret_ref(
+        &self,
+        receiver: &ClassId,
+        cid: &ClassId,
+        cls: &ClassInfo,
+        method: &Symbol,
+        ty: &Ty,
+        class_side: bool,
+    ) -> Option<Ty> {
+        if !crate::analyze::fold::active()
+            || matches!(ty, Ty::Fn { .. })
+            || !crate::analyze::fold::is_rec_method(cid, method)
+        {
+            return None;
+        }
+        let receiver_is_model = self.classes().get(receiver).is_some_and(|c| c.table.is_some());
+        if cid != receiver && cls.table.is_some() && receiver_is_model {
+            return None;
+        }
+        let mut mentions_self = false;
+        crate::analyze::fold::visit(ty, &mut |t| mentions_self |= matches!(t, Ty::SelfInstance));
+        if mentions_self {
+            return None;
+        }
+        crate::analyze::fold::ret_ref(cid, method, class_side)
+    }
+
     /// A method the app adds by reopening `String`, or by including a
     /// module into it. Class methods do not answer `"text".foo`.
     fn lookup_string_instance(&self, method: &Symbol) -> Option<Ty> {
@@ -2025,9 +2073,15 @@ impl<'a> BodyTyper<'a> {
             }
             let Some(m) = self.classes().get(&id) else { continue };
             if let Some(ty) = m.instance_methods.get(method) {
+                if let Some(r) = self.fold_ret_ref(&id, &id, m, method, ty, false) {
+                    return Some(r);
+                }
                 return Some(unwrap_fn_ret(ty));
             }
             if let Some(ty) = m.class_methods.get(method) {
+                if let Some(r) = self.fold_ret_ref(&id, &id, m, method, ty, true) {
+                    return Some(r);
+                }
                 return Some(unwrap_fn_ret(ty));
             }
             stack.extend(m.includes.iter().cloned());
@@ -2056,7 +2110,13 @@ impl<'a> BodyTyper<'a> {
                 continue;
             }
             let Some(cls) = self.classes().get(&cid) else { continue };
-            for ty in cls.instance_methods.values() {
+            for (name, ty) in cls.instance_methods.iter() {
+                // `RH_FOLD`: a dynamic send reads a reference-mode return
+                // by reference, as a named one does.
+                if let Some(r) = self.fold_ret_ref(id, &cid, cls, name, ty, false) {
+                    rets.push(r);
+                    continue;
+                }
                 // `-> self` on an ancestor answers the receiver, not
                 // the ancestor — substitute before the return is read.
                 let r = unwrap_fn_ret(&ty.subst_self(recv_ty));
