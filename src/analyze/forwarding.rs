@@ -74,7 +74,11 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
             walk(app, &contracts, owner, method, default, &mut out);
         }
     }
-    for (span, policy) in keyword_calls_with_index(app, &contracts) {
+    let mut keyword_calls: Vec<_> = keyword_calls_with_index(app, &contracts)
+        .into_iter()
+        .collect();
+    keyword_calls.sort_unstable_by_key(|(span, _)| (span.file.0, span.start, span.end));
+    for (span, policy) in keyword_calls {
         if matches!(policy, KeywordPolicy::Refuse | KeywordPolicy::RefuseOrdinarySuper) {
             out.push(keyword_refusal(span, policy));
         }

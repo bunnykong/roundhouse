@@ -1454,7 +1454,11 @@ pub fn target_files(
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
-        for (span, policy) in crate::analyze::forwarding::keyword_calls(app) {
+        let mut keyword_calls: Vec<_> = crate::analyze::forwarding::keyword_calls(app)
+            .into_iter()
+            .collect();
+        keyword_calls.sort_unstable_by_key(|(span, _)| (span.file.0, span.start, span.end));
+        for (span, policy) in keyword_calls {
             if policy != crate::analyze::forwarding::KeywordPolicy::Legacy {
                 let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
                     ("keyword splat in ordinary super",
