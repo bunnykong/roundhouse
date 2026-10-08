@@ -438,6 +438,13 @@ pub(crate) fn new_epoch() {
 /// visited set for the whole top-level call, not a path set: re-expanding a
 /// slot once per simple path is exponential on rings of references.
 pub(crate) fn resolve(slot: u32, classes: &HashMap<ClassId, ClassInfo>, seen: &mut HashSet<u32>) -> Vec<Ty> {
+    if crate::ty_arena::on() {
+        return crate::ty_arena::with_arena(|arena| resolve_ids(slot, classes, seen, arena));
+    }
+    resolve_raw(slot, classes, seen)
+}
+
+fn resolve_raw(slot: u32, classes: &HashMap<ClassId, ClassInfo>, seen: &mut HashSet<u32>) -> Vec<Ty> {
     let mut out = Vec::new();
     if !seen.insert(slot) {
         return out;
@@ -453,7 +460,7 @@ fn flatten_into(t: &Ty, classes: &HashMap<ClassId, ClassInfo>, seen: &mut HashSe
         Ty::Bottom => {}
         Ty::Union { variants } => variants.iter().for_each(|v| flatten_into(v, classes, seen, out)),
         Ty::Rec { slot } => {
-            for a in resolve(*slot, classes, seen) {
+            for a in resolve_raw(*slot, classes, seen) {
                 if !out.contains(&a) {
                     out.push(a);
                 }
@@ -465,6 +472,54 @@ fn flatten_into(t: &Ty, classes: &HashMap<ClassId, ClassInfo>, seen: &mut HashSe
             }
         }
     }
+}
+
+/// Keep one ordered output for the whole reference walk. Native equality is
+/// an equivalence relation, so suppressing duplicates here chooses the same
+/// first representative as deduplicating every intermediate vector. References
+/// still visit slots in the same order, through the same recorded read path.
+fn resolve_ids(
+    slot: u32,
+    classes: &HashMap<ClassId, ClassInfo>,
+    seen: &mut HashSet<u32>,
+    arena: &mut crate::ty_arena::Arena,
+) -> Vec<Ty> {
+    fn walk(
+        value: &Ty,
+        classes: &HashMap<ClassId, ClassInfo>,
+        seen: &mut HashSet<u32>,
+        arena: &mut crate::ty_arena::Arena,
+        unique: &mut HashSet<u32>,
+        out: &mut Vec<Ty>,
+    ) {
+        match value {
+            Ty::Bottom => {}
+            Ty::Union { variants } => {
+                for arm in variants.iter() {
+                    walk(arm, classes, seen, arena, unique, out);
+                }
+            }
+            Ty::Rec { slot } => {
+                if seen.insert(*slot) {
+                    if let Some(value) = value_of(*slot, classes) {
+                        walk(&value, classes, seen, arena, unique, out);
+                    }
+                }
+            }
+            other => {
+                if unique.insert(arena.semantic(other)) {
+                    out.push(other.clone());
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if seen.insert(slot) {
+        if let Some(value) = value_of(slot, classes) {
+            walk(&value, classes, seen, arena, &mut HashSet::new(), &mut out);
+        }
+    }
+    out
 }
 
 /// `arm` with every child that is not a scalar leaf replaced by a
@@ -994,6 +1049,49 @@ pub(crate) fn stats() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arena_resolution_preserves_cycles_seen_slots_and_first_wire_representative() {
+        fn record(reverse: bool, value: Ty) -> Ty {
+            let mut fields = vec![(Symbol::from("a"), value), (Symbol::from("b"), Ty::Str)];
+            if reverse { fields.reverse(); }
+            Ty::Record { row: crate::ty::Row { fields: fields.into_iter().collect(), rest: None } }
+        }
+        let mut seed = 17u64;
+        for graph in 0..32 {
+            ST.with(|state| {
+                let mut state = state.borrow_mut();
+                *state = State::default();
+                for slot in 0..12 {
+                    state.keys.push(SlotKey::At { site: (slot, 0, 0), step: Step::Elem });
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    if slot == 11 { continue; } // A read with no value must stay absent.
+                    state.values.insert(slot, union(vec![
+                        Ty::Rec { slot: (seed >> 32) as u32 % 12 },
+                        record((graph + slot) % 2 == 0, Ty::Int),
+                        record((graph + slot) % 2 != 0, Ty::Int),
+                        Ty::Rec { slot: seed as u32 % 12 },
+                        Ty::pending_untyped(), Ty::gradual(), Ty::Bottom,
+                        Ty::Array { elem: std::sync::Arc::new(record(slot % 2 == 0, Ty::Bool)) },
+                    ]));
+                }
+            });
+            for root in 0..12 {
+                let mut raw_seen = HashSet::from([(root + graph) % 13]);
+                let mut id_seen = raw_seen.clone();
+                let classes = HashMap::new();
+                let expected = resolve_raw(root, &classes, &mut raw_seen);
+                let mut arena = crate::ty_arena::Arena::default();
+                let actual = resolve_ids(root, &classes, &mut id_seen, &mut arena);
+                assert_eq!(raw_seen, id_seen);
+                assert_eq!(serde_json::to_vec(&expected).unwrap(), serde_json::to_vec(&actual).unwrap());
+                let exact_expected: Vec<_> = expected.iter().map(|t| arena.intern(t)).collect();
+                let exact_actual: Vec<_> = actual.iter().map(|t| arena.intern(t)).collect();
+                assert_eq!(exact_expected, exact_actual, "wire order and provenance");
+            }
+        }
+        ST.with(|state| *state.borrow_mut() = State::default());
+    }
 
     fn union(v: Vec<Ty>) -> Ty {
         Ty::Union { variants: v.into() }
