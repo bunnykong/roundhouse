@@ -511,6 +511,32 @@ impl<'a> BodyTyper<'a> {
             // give up because the union confused dispatch. Skip Nil/Var
             // variants; they don't carry block-shape information.
             Ty::Union { variants } => {
+                // `RH_BRK_ALLARMS`: each block parameter is the join over
+                // every arm that answers the method, a missing position
+                // `nil`. The first-arm rule below is not monotone.
+                if *crate::analyze::handoff::ALLARMS {
+                    let mut joined: Option<Vec<Ty>> = None;
+                    for v in variants {
+                        if matches!(v, Ty::Nil | Ty::Var { .. }) {
+                            continue;
+                        }
+                        let Some(p) = self.block_params_for(Some(v), method, class_object_receiver) else {
+                            continue;
+                        };
+                        joined = Some(match joined.take() {
+                            None => p,
+                            Some(mut acc) => {
+                                let n = acc.len().max(p.len());
+                                acc.resize(n, Ty::Nil);
+                                for (i, t) in p.into_iter().enumerate() {
+                                    acc[i] = union_of(acc[i].clone(), t);
+                                }
+                                acc
+                            }
+                        });
+                    }
+                    return joined;
+                }
                 for v in variants {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;

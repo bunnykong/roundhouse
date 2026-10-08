@@ -50,6 +50,7 @@ mod harvest_return;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod fixpoint_rounds;
+mod handoff;
 pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
 mod dirty_retype;
 mod typing_mode;
@@ -1082,6 +1083,7 @@ impl Analyzer {
     /// the refined registry. Iterates to a fixed point (capped; see
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
+        handoff::reset();
         // An unresolvable include is a load-time error, not an open method
         // surface. Keep it in the class-body ledger even when no method is called.
         for class in &mut app.library_classes {
@@ -1483,8 +1485,46 @@ impl Analyzer {
         self.type_direct_helper_bodies(app);
         self.type_rails_application_body(app);
 
+        self.settle_pending(app);
+
         self.stamp_inferred_method_signatures(app);
         self.report_fixpoint_checks(app);
+    }
+
+    /// With the add-only rules, what is still pending when analysis ends
+    /// goes through the entry-point policy (`handoff::settle_pending`): it
+    /// settles as gradual `untyped`, never as "never returns". Each type
+    /// settles on its own, so the walk's order does not matter.
+    fn settle_pending(&mut self, app: &mut App) {
+        if !handoff::settle_on() {
+            return;
+        }
+        fn settle(t: &mut Ty) {
+            if let Some(settled) = handoff::settle_pending(t, &mut HashMap::new()) {
+                *t = settled;
+            }
+        }
+        fn rewrite(e: &mut Expr) {
+            if let Some(t) = &mut e.ty {
+                settle(t);
+            }
+            e.node.for_each_child_mut(&mut |c| rewrite(c));
+        }
+        for cls in self.classes.values_mut() {
+            cls.instance_methods.values_mut().chain(cls.class_methods.values_mut()).for_each(settle);
+        }
+        self.inferred_params.values_mut().chain(app.inferred_method_params.values_mut()).flatten().for_each(settle);
+        app.view_ivar_types
+            .values_mut()
+            .chain(app.partial_local_types.values_mut())
+            .flat_map(|names| names.values_mut())
+            .for_each(settle);
+        app.controller_resolutions
+            .values_mut()
+            .flat_map(|res| res.filter_chain.iter_mut())
+            .flat_map(|filter| filter.assigns.values_mut())
+            .for_each(settle);
+        crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e));
     }
 
     /// Type the bodies of `direct :name do |…| … end` helpers, with the
@@ -4383,6 +4423,9 @@ impl Analyzer {
     /// body is `Ty::Var` (no information gained).
     fn harvest_returns_to_registry(&mut self, app: &App, harvest_tests: bool) {
         self.harvest_method_returns(app, harvest_tests);
+        // `RH_FOLD_JOIN`: returns join with the value they held after the
+        // previous harvest, after the registry copies too.
+        handoff::join_rets(&mut self.classes);
         // Rails' `helper_method :name` makes a controller (or concern)
         // method callable from templates. The names were ingested from
         // both spellings (`App::view_visible_controller_methods`); the
@@ -4542,6 +4585,9 @@ impl Analyzer {
         }
 
         self.harvest_block_value_methods(app);
+        // …and before the registry copies, so a copy carries the joined
+        // value rather than the raw harvest.
+        handoff::join_rets(&mut self.classes);
         self.fold_concern_surfaces(app);
         self.fold_host_surfaces(app);
         self.fold_extended_modules(app);
@@ -5156,6 +5202,8 @@ impl Analyzer {
         // Fold before adding test-owned observations: a same-named test
         // helper must not feed an included production concern either.
         self.fold_concern_param_sites(app);
+        // `RH_FOLD_JOIN`: rows join with last round's.
+        handoff::join_params(&mut self.inferred_params);
     }
 
     /// Replay production+view param observations, then overlay typed
