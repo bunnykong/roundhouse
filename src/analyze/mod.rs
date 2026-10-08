@@ -48,6 +48,7 @@ mod filter_targets;
 pub mod graphql;
 mod harvest_return;
 mod fixpoint_bound;
+mod fixpoint_check;
 mod fixpoint_rounds;
 pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
 mod dirty_retype;
@@ -161,6 +162,8 @@ pub struct Analyzer {
         HashMap<ClassId, (HashMap<Symbol, HashMap<Symbol, Ty>>, HashMap<Symbol, Expr>)>,
     /// How the last [`Self::analyze`]'s fixpoint loops ended.
     fixpoint_rounds: FixpointRounds,
+    /// What the opt-in fixpoint canaries saw (`fixpoint_check`).
+    fixpoint_checks: fixpoint_check::Checks,
 }
 
 use dirty_retype::{DirtyHints, InferenceSig, dirty_classes_for_retype};
@@ -1029,6 +1032,7 @@ impl Analyzer {
             callers_by_target: HashMap::new(),
             controller_action_meta_cache: HashMap::new(),
             fixpoint_rounds: FixpointRounds::default(),
+            fixpoint_checks: fixpoint_check::Checks::default(),
         }
     }
 
@@ -1225,6 +1229,17 @@ impl Analyzer {
                 )
             });
         }
+        let round_inputs = fixpoint_check::RoundInputs {
+            dynamic_render_ivars: &dynamic_render_ivars,
+            existing_view_names: &existing_view_names,
+            module_methods: &module_methods,
+            module_includes: &module_includes,
+            parent_link_by_name: &parent_link_by_name,
+        };
+        if fixpoint_check::verify_on() {
+            self.verify_round(app, &round_inputs, fixpoint_check::Loop::Production, None);
+            prev_hints = self.capture_dirty_hints();
+        }
 
         // Intermediate rounds skip views/tests: production does not
         // read test helper returns, and unifying from still-untyped view
@@ -1295,6 +1310,14 @@ impl Analyzer {
                 break;
             }
             prev_hints = self.capture_dirty_hints();
+        }
+        if fixpoint_check::verify_on() {
+            self.verify_round(
+                app,
+                &round_inputs,
+                fixpoint_check::Loop::ViewsAndTests,
+                production_view_params.as_mut(),
+            );
         }
         if !self.inference_matches(&production_sig) {
             rounds.absorb = LoopEnd::RanToCap;
@@ -1372,6 +1395,14 @@ impl Analyzer {
                     TypingMode::Production { dirty: None },
                 )
             });
+        }
+        if fixpoint_check::verify_on() {
+            self.verify_round(
+                app,
+                &round_inputs,
+                fixpoint_check::Loop::Absorb,
+                production_view_params.as_mut(),
+            );
         }
         self.fixpoint_rounds = rounds;
         // Wave 12 types views once against production-only helper
@@ -1453,6 +1484,7 @@ impl Analyzer {
         self.type_rails_application_body(app);
 
         self.stamp_inferred_method_signatures(app);
+        self.report_fixpoint_checks(app);
     }
 
     /// Type the bodies of `direct :name do |…| … end` helpers, with the
