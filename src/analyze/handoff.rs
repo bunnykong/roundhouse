@@ -185,6 +185,62 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
     });
 }
 
+/// [`join_rets`] for one reference-mode method (both sides), after the
+/// worklist harvested it.
+pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &ClassId, method: &Symbol) {
+    if !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(class, method) {
+        return;
+    }
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(cls) = classes.get_mut(class) else { return };
+        for class_side in [false, true] {
+            let table = if class_side { &mut cls.class_methods } else { &mut cls.instance_methods };
+            let Some(cur) = table.get(method) else { continue };
+            if matches!(cur, Ty::Fn { .. }) {
+                continue;
+            }
+            let key = (class.clone(), method.clone(), class_side);
+            let joined = match s.prev_rets.get(&key) {
+                Some(old) => join_slot(old.clone(), cur.clone()),
+                None => cur.clone(),
+            };
+            if &joined != cur {
+                table.insert(method.clone(), joined.clone());
+            }
+            s.prev_rets.insert(key, joined);
+        }
+    });
+}
+
+/// [`join_params`] for one row the worklist recomputed: a reference-mode
+/// method's row joins with its previous row (`commit` records it).
+pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool) -> Option<Vec<Ty>> {
+    if !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(&key.0, &key.1) {
+        return raw;
+    }
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        let mut row = raw.unwrap_or_default();
+        if let Some(prev) = s.prev_params.get(key).cloned() {
+            if row.len() < prev.len() {
+                row.resize(prev.len(), Ty::Var { var: TyVar(0) });
+            }
+            for (slot, old) in row.iter_mut().zip(prev) {
+                *slot = join_slot(old, slot.clone());
+            }
+        }
+        if row.is_empty() {
+            None
+        } else {
+            if commit {
+                s.prev_params.insert(key.clone(), row.clone());
+            }
+            Some(row)
+        }
+    })
+}
+
 /// Join of two values of one slot when one is pending: the pending side
 /// (`Var`/`untyped` arms only) yields to the other's informative core, as
 /// the harvest's own rule does (#521); two informative values join after

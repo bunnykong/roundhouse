@@ -805,7 +805,7 @@ impl<'a> BodyTyper<'a> {
         if crate::analyze::fold::on() {
             if let Some(r) = recv_ty {
                 let at = crate::analyze::fold::pseudo_site(method.as_str());
-                if let Some(unfolded) = crate::analyze::fold::head(r, at, self.classes()) {
+                if let Some(unfolded) = crate::analyze::fold::head(r, at, self.classes().raw()) {
                     return self.dispatch(Some(&unfolded), method, block_ret, args);
                 }
             }
@@ -2110,6 +2110,8 @@ impl<'a> BodyTyper<'a> {
                 continue;
             }
             let Some(cls) = self.classes().get(&cid) else { continue };
+            // Every method of the class is read: a class-wide dependency.
+            crate::analyze::sccq::rec_wild(cls.sccq_idx);
             for (name, ty) in cls.instance_methods.iter() {
                 // `RH_FOLD`: a dynamic send reads a reference-mode return
                 // by reference, as a named one does.

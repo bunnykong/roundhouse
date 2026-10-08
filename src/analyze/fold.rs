@@ -254,6 +254,9 @@ pub(crate) fn param_ref(class: &ClassId, method: &Symbol, index: usize, value: T
             Some(old) if super::handoff::join_on() => super::handoff::join_slot(old.clone(), value),
             _ => value,
         };
+        if s.values.get(&slot) != Some(&value) {
+            note_moved(slot, s.values.get(&slot));
+        }
         s.joined.remove(&slot);
         s.values.insert(slot, value);
     });
@@ -279,6 +282,9 @@ fn strip_self(t: Ty, slot: u32) -> Ty {
 /// The current value of a slot: the registry entry for a return, the side
 /// table for the others.
 pub(crate) fn value_of(slot: u32, classes: &HashMap<ClassId, ClassInfo>) -> Option<Ty> {
+    // A typing that reads a slot's value depends on it: the worklist
+    // re-types the reader when the value moves.
+    super::sccq::rec_fold_slot(slot);
     match key_of(slot)? {
         SlotKey::Ret { class, method, class_side } => {
             let cls = classes.get(&class)?;
@@ -336,6 +342,9 @@ fn accumulate(key: SlotKey, value: Ty) -> Ty {
             Some(old) if !fresh => super::handoff::join(old.clone(), value),
             _ => value,
         };
+        if s.values.get(&slot) != Some(&joined) {
+            note_moved(slot, s.values.get(&slot));
+        }
         s.values.insert(slot, joined);
     });
     Ty::Rec { slot }
@@ -384,6 +393,11 @@ pub(crate) fn bindings_fp(bindings: &HashMap<(ClassId, Symbol), HashMap<Symbol, 
 /// Retype every class this round: the side table moved.
 pub(crate) fn side_full_retype(side_stable: bool) -> bool {
     active() && !side_stable
+}
+
+/// The side table's fingerprint, without recording it.
+pub(crate) fn side_fp_peek() -> u64 {
+    side_fp()
 }
 
 fn side_fp() -> u64 {
@@ -657,10 +671,11 @@ pub(crate) fn add_rec_methods(methods: Vec<MethodKey>) {
     }
     ST.with(|s| {
         let mut s = s.borrow_mut();
-        let before = s.rec_methods.len();
-        s.rec_methods.extend(methods);
-        if s.rec_methods.len() > before {
-            s.active = true;
+        for m in methods {
+            if s.rec_methods.insert(m.clone()) {
+                s.active = true;
+                note_new_rec(m);
+            }
         }
     });
 }
@@ -736,6 +751,75 @@ pub(crate) fn scc(succ: &[Vec<usize>]) -> Vec<Vec<usize>> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------- worklist
+
+thread_local! {
+    /// Side-table slots whose value changed since the worklist last asked,
+    /// with their value before the first change (collected only while
+    /// `TRACK` is on: the worklist is running).
+    static MOVED: RefCell<HashMap<u32, Option<Ty>>> = RefCell::new(HashMap::new());
+    /// Methods that entered reference mode since the worklist last asked.
+    static NEW_REC: RefCell<Vec<MethodKey>> = const { RefCell::new(Vec::new()) };
+    static TRACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The worklist asks for moved slots and new reference-mode methods from
+/// now on (or no longer).
+pub(crate) fn track_moves(on: bool) {
+    TRACK.with(|t| t.set(on));
+}
+
+/// A write changed `slot`; `old` is its value before this write. Only net
+/// changes count: a slot written back and forth within one evaluation is
+/// not a move.
+fn note_moved(slot: u32, old: Option<&Ty>) {
+    if TRACK.with(|t| t.get()) {
+        MOVED.with(|m| {
+            m.borrow_mut().entry(slot).or_insert_with(|| old.cloned());
+        });
+    }
+}
+
+fn note_new_rec(m: MethodKey) {
+    if TRACK.with(|t| t.get()) {
+        NEW_REC.with(|n| n.borrow_mut().push(m));
+    }
+}
+
+/// Side-table slots whose value differs from before their first write since
+/// the last call, in slot order.
+pub(crate) fn take_moved() -> Vec<u32> {
+    let firsts = MOVED.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let mut v: Vec<u32> = ST.with(|s| {
+        let s = s.borrow();
+        firsts.into_iter().filter(|(slot, before)| s.values.get(slot) != before.as_ref()).map(|(k, _)| k).collect()
+    });
+    v.sort_unstable();
+    v
+}
+
+/// Methods that entered reference mode since the last call.
+pub(crate) fn take_new_rec() -> Vec<MethodKey> {
+    NEW_REC.with(|n| std::mem::take(&mut *n.borrow_mut()))
+}
+
+/// The id of an already interned slot (no interning).
+pub(crate) fn slot_id(key: &SlotKey) -> Option<u32> {
+    ST.with(|s| s.borrow().ids.get(key).copied())
+}
+
+/// Includers whose registry copy of `module#method` reads the module's slot.
+pub(crate) fn alias_includers(module: &ClassId, method: &Symbol) -> Vec<ClassId> {
+    ST.with(|s| {
+        s.borrow()
+            .aliases
+            .iter()
+            .filter(|((_, m), src)| m == method && src == &module)
+            .map(|((c, _), _)| c.clone())
+            .collect()
+    })
 }
 
 // ---------------------------------------------------------------- expansion

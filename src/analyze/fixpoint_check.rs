@@ -15,9 +15,10 @@
 //! - `RH_FIXPOINT_DIGEST=1`: a 64-bit digest of each part of the final
 //!   carried state, to compare two runs on the same input.
 //! - `RH_FIXPOINT_STATS=1`: the loop ends; the expressions whose type holds
-//!   `untyped` at any depth; how often #584's bound cut a carried type; and
-//!   how often the harvest cut a return that nests its previous round's
-//!   (#528's `harvest_untie_cut`).
+//!   `untyped` at any depth; how often #584's bound cut a carried type; how
+//!   often the harvest cut a return that nests its previous round's (#528's
+//!   `harvest_untie_cut`); and, when they run, the fold's and the worklist's
+//!   counters.
 //!
 //! Each prints one `rh-fixpoint:` JSON line on stderr at the end of
 //! `analyze`. It holds counts and hashes only: no names, spans or types.
@@ -84,6 +85,11 @@ static STATS: LazyLock<bool> = LazyLock::new(|| flag("RH_FIXPOINT_STATS"));
 /// Whether `RH_FIXPOINT_VERIFY` is set.
 pub(super) fn verify_on() -> bool {
     *VERIFY
+}
+
+/// Whether `RH_FIXPOINT_STATS` is set.
+pub(super) fn stats_on() -> bool {
+    *STATS
 }
 
 static BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -583,6 +589,9 @@ impl Analyzer {
             line["harvest_untie_cut"] = serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed));
             if super::fold::on() {
                 line["fold"] = super::fold::stats();
+            }
+            if let Some(worklist) = self.sccq_stats() {
+                line["worklist"] = worklist;
             }
         }
         eprintln!("rh-fixpoint: {line}");

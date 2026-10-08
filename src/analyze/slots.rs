@@ -89,6 +89,8 @@ struct State {
     methods: HashSet<(ClassId, Symbol)>,
     /// Ivars in a non-trivial SCC (cumulative).
     scc_ivars: HashSet<(ClassId, Symbol)>,
+    /// Ivars that joined a cycle since the worklist last asked.
+    new_scc_ivars: Vec<(ClassId, Symbol)>,
     /// Unify passes seen, and consecutive rebuilds that added no method.
     calls: u64,
     quiet_rebuilds: u32,
@@ -99,6 +101,12 @@ pub(crate) fn reset() {
     if on() {
         ST.with(|s| *s.borrow_mut() = State::default());
     }
+}
+
+/// Ivars that joined a slot-graph cycle since the last call: their writers
+/// take the stamp cut from now on (the worklist re-types them).
+pub(crate) fn take_new_scc_ivars() -> Vec<(ClassId, Symbol)> {
+    ST.with(|s| std::mem::take(&mut s.borrow_mut().new_scc_ivars))
 }
 
 /// An ivar of `self_ty`'s class on a cycle of the slot graph: an empty
@@ -902,7 +910,9 @@ impl Analyzer {
                 }
                 for v in comp {
                     if let GNode::Ivar(c, n) = &nodes[v] {
-                        s.scc_ivars.insert((c.clone(), n.clone()));
+                        if s.scc_ivars.insert((c.clone(), n.clone())) {
+                            s.new_scc_ivars.push((c.clone(), n.clone()));
+                        }
                     }
                     if let Some(m) = nodes[v].method() {
                         if s.methods.insert(m.clone()) {

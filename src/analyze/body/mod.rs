@@ -68,17 +68,26 @@ impl ConstScope {
     }
 
     pub fn get(&self, name: &Symbol) -> Option<&Ty> {
+        super::sccq::rec_const_name(name);
         self.own.get(name).or_else(|| self.global.get(name))
     }
 
     /// Only the constants this scope's class declares itself.
     pub fn get_own(&self, name: &Symbol) -> Option<&Ty> {
+        super::sccq::rec_const_name(name);
         self.own.get(name)
     }
 
     /// Only the app-wide, by-bare-name registry.
     pub fn get_global(&self, name: &Symbol) -> Option<&Ty> {
+        super::sccq::rec_const_name(name);
         self.global.get(name)
+    }
+
+    /// A copy of the app-wide registry (the worklist diffs it between
+    /// passes).
+    pub(crate) fn global_entries(&self) -> HashMap<Symbol, Ty> {
+        (*self.global).clone()
     }
 }
 
@@ -147,6 +156,9 @@ pub struct Ctx {
 /// Rails schema + conventions; the body-typer reads it.
 #[derive(Default, Clone)]
 pub struct ClassInfo {
+    /// `RH_SCHED=sccq`: this class's index in the worklist's read sets (0 =
+    /// not indexed). Never read by inference.
+    pub sccq_idx: u32,
     /// Kind of the indexed source declaration; never inferred from its name.
     pub is_module: bool,
     /// Constant values declared by external gem RBI/RBS files.
@@ -324,11 +336,45 @@ pub struct BodyTyper<'a> {
     inquirers: Option<&'a std::collections::HashSet<Symbol>>,
 }
 
+/// The dispatch table as the typer reads it. With `RH_SCHED=sccq` a fetched
+/// class is recorded in the read set of the unit being typed (one relaxed
+/// load when nothing records).
+#[derive(Clone, Copy)]
+pub(super) struct Classes<'a>(&'a HashMap<ClassId, ClassInfo>);
+
+impl<'a> Classes<'a> {
+    #[inline]
+    pub(super) fn get(&self, id: &ClassId) -> Option<&'a ClassInfo> {
+        let found = self.0.get(id);
+        if let Some(info) = found {
+            super::sccq::rec_class(info.sccq_idx);
+        }
+        found
+    }
+
+    #[inline]
+    pub(super) fn contains_key(&self, id: &ClassId) -> bool {
+        self.0.contains_key(id)
+    }
+
+    #[inline]
+    pub(super) fn values(&self) -> std::collections::hash_map::Values<'a, ClassId, ClassInfo> {
+        self.0.values()
+    }
+
+    /// The table without recording: the fold's unfold sites record the
+    /// slots they read instead (`fold::value_of`).
+    #[inline]
+    pub(crate) fn raw(&self) -> &'a HashMap<ClassId, ClassInfo> {
+        self.0
+    }
+}
+
 impl<'a> BodyTyper<'a> {
     /// Submodule accessor for the dispatch table. `classes` itself
     /// stays private to this module; `send.rs` reaches it here.
-    pub(super) fn classes(&self) -> &'a HashMap<ClassId, ClassInfo> {
-        self.classes
+    pub(super) fn classes(&self) -> Classes<'a> {
+        Classes(self.classes)
     }
 
     /// Whether `self`'s class, its includes or its ancestors register
@@ -341,7 +387,7 @@ impl<'a> BodyTyper<'a> {
             if !seen.insert(cid) {
                 continue;
             }
-            let Some(cls) = self.classes.get(cid) else { continue };
+            let Some(cls) = self.classes().get(cid) else { continue };
             if cls.instance_methods.contains_key(method) || cls.class_methods.contains_key(method) {
                 return true;
             }
@@ -544,7 +590,7 @@ impl<'a> BodyTyper<'a> {
         // Bounded: a parent link that cycles must not hang the typer.
         for _ in 0..16 {
             let Some(cur) = cursor else { break };
-            let Some(info) = self.classes.get(&cur) else { break };
+            let Some(info) = self.classes().get(&cur) else { break };
             if let Some(ty) = info.attributes.fields.get(name) {
                 return Some(ty.clone());
             }
@@ -590,7 +636,7 @@ impl<'a> BodyTyper<'a> {
 
     fn is_module_callback(&self, recv_ty: Option<&Ty>, method: &Symbol) -> bool {
         matches!(method.as_str(), "included" | "prepended" | "append_features" | "prepend_features")
-            && matches!(recv_ty, Some(Ty::Class { id, .. }) if self.classes.get(id).is_some_and(|c| c.is_module && c.class_methods.contains_key(method)))
+            && matches!(recv_ty, Some(Ty::Class { id, .. }) if self.classes().get(id).is_some_and(|c| c.is_module && c.class_methods.contains_key(method)))
     }
 
     fn owns_operator(&self, ty: Option<&Ty>, method: &Symbol, class_object: bool) -> bool {
@@ -601,7 +647,7 @@ impl<'a> BodyTyper<'a> {
                 let mut current = Some(id);
                 for _ in 0..32 {
                     let Some(id) = current else { break };
-                    let Some(class) = self.classes.get(id) else { break };
+                    let Some(class) = self.classes().get(id) else { break };
                     let own = if class_object { &class.class_methods } else { &class.instance_methods };
                     if own.contains_key(method) { return true; }
                     if !class_object && class.includes.iter().any(|m| self.lookup_in_module(m, method).is_some()) { return true; }
@@ -673,7 +719,7 @@ impl<'a> BodyTyper<'a> {
             };
             let current = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) };
             let Some(t) = current else { continue };
-            if let Some(u) = crate::analyze::fold::head(t, at, self.classes()) {
+            if let Some(u) = crate::analyze::fold::head(t, at, self.classes().raw()) {
                 let c = out.get_or_insert_with(|| ctx.clone());
                 if ivar {
                     c.ivar_bindings.insert(name.clone(), u);
@@ -703,7 +749,7 @@ impl<'a> BodyTyper<'a> {
         };
         let bound = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) }?;
         let at = crate::analyze::fold::site_of(&scrutinee.span);
-        let unfolded = crate::analyze::fold::head(bound, at, self.classes())?;
+        let unfolded = crate::analyze::fold::head(bound, at, self.classes().raw())?;
         let base = match bound {
             Ty::Rec { slot } => Some(*slot),
             _ => None,
@@ -804,6 +850,7 @@ impl<'a> BodyTyper<'a> {
                         if !keep_bare_splice {
                             qualify_resolved_path(path, name);
                         }
+                        super::sccq::rec_const_id(declaration);
                         self.typed_constants
                             .and_then(|values| values.get(declaration))
                             .cloned()
@@ -831,11 +878,9 @@ impl<'a> BodyTyper<'a> {
                                 .or_else(|| ctx.constants.get_global(name).cloned())
                         } else {
                             let name = written_class_id(path);
-                            self.typed_constants
-                                .and_then(|values| {
-                                    values.get(&declaration_id_from_lookup_name(name.0.as_str()))
-                                })
-                                .cloned()
+                            let id = declaration_id_from_lookup_name(name.0.as_str());
+                            super::sccq::rec_const_id(&id);
+                            self.typed_constants.and_then(|values| values.get(&id)).cloned()
                         };
                         // Otherwise retain the written class path, but
                         // never guess another class by its suffix.
@@ -1087,7 +1132,7 @@ impl<'a> BodyTyper<'a> {
                 // so a reference there is unfolded (a narrowing site); a
                 // left that wins whole keeps the reference itself.
                 let lt_ref = lt.clone();
-                let lt = crate::analyze::fold::head(&lt, crate::analyze::fold::site_of(&left.span), self.classes())
+                let lt = crate::analyze::fold::head(&lt, crate::analyze::fold::site_of(&left.span), self.classes().raw())
                     .unwrap_or(lt);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
@@ -1329,7 +1374,7 @@ impl<'a> BodyTyper<'a> {
                 let recv_ty = match recv_ty {
                     Some(t) if crate::analyze::fold::on() => {
                         let at = crate::analyze::fold::site_of(&expr_span);
-                        Some(crate::analyze::fold::head(&t, at, self.classes()).unwrap_or(t))
+                        Some(crate::analyze::fold::head(&t, at, self.classes().raw()).unwrap_or(t))
                     }
                     other => other,
                 };
@@ -2012,7 +2057,7 @@ impl<'a> BodyTyper<'a> {
                         let rhs = value.ty.clone();
                         // `RH_FOLD`: destructuring reads a reference's structure.
                         let rhs = match &rhs {
-                            Some(t) => crate::analyze::fold::head(t, crate::analyze::fold::site_of(&e.span), self.classes())
+                            Some(t) => crate::analyze::fold::head(t, crate::analyze::fold::site_of(&e.span), self.classes().raw())
                                 .map(Some)
                                 .unwrap_or(rhs),
                             None => rhs,
