@@ -17,6 +17,43 @@ use crate::ty::Ty;
 
 use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 
+/// What a block of `n` (two or more) parameters binds when ONE value of
+/// type `t` is yielded. Ruby destructures ("auto-splats") an Array: a tuple
+/// by position (`nil` past its end), an Array of unknown length to its
+/// element at the first position and `element | nil` past it. Any
+/// other value binds the first parameter and `nil` the rest. A union binds
+/// per arm and joins by position. `None` while `t` is pending (`Var`): the
+/// caller keeps the unsplat binding.
+fn splat_yield(t: &Ty, n: usize) -> Option<Vec<Ty>> {
+    let arms: Vec<&Ty> = match t {
+        Ty::Union { variants } => variants.iter().collect(),
+        _ => vec![t],
+    };
+    let mut out: Option<Vec<Ty>> = None;
+    for arm in arms {
+        let row: Vec<Ty> = match arm {
+            Ty::Var { .. } => return None,
+            Ty::Untyped => vec![Ty::Untyped; n],
+            Ty::Tuple { elems } => (0..n).map(|i| elems.get(i).cloned().unwrap_or(Ty::Nil)).collect(),
+            // An Array of unknown length may be shorter than the block:
+            // every position past the first may be `nil`.
+            Ty::Array { elem } => (0..n)
+                .map(|i| if i == 0 { (**elem).clone() } else { union_of((**elem).clone(), Ty::Nil) })
+                .collect(),
+            Ty::Relation { of } => {
+                let rec = Ty::Class { id: of.clone(), args: vec![].into() };
+                (0..n).map(|i| if i == 0 { rec.clone() } else { union_of(rec.clone(), Ty::Nil) }).collect()
+            }
+            other => std::iter::once(other.clone()).chain(std::iter::repeat_n(Ty::Nil, n - 1)).collect(),
+        };
+        out = Some(match out {
+            None => row,
+            Some(acc) => acc.into_iter().zip(row).map(|(a, b)| union_of(a, b)).collect(),
+        });
+    }
+    out
+}
+
 impl<'a> BodyTyper<'a> {
     /// `record[:column]` / `read_attribute(:column)` (and their writer
     /// twins) are schema-indexed APIs.  The generic ActiveRecord catalog
@@ -217,7 +254,7 @@ impl<'a> BodyTyper<'a> {
         block: &Expr,
     ) -> Ctx {
         let mut new_ctx = outer.clone();
-        let ExprNode::Lambda { params, .. } = &*block.node else {
+        let ExprNode::Lambda { params, rest_param, .. } = &*block.node else {
             return new_ctx;
         };
         for name in params { new_ctx.class_objects.remove(name); }
@@ -258,9 +295,22 @@ impl<'a> BodyTyper<'a> {
             }
             return new_ctx;
         }
-        let Some(param_tys) = self.block_params_for(recv_ty, method, class_object_receiver) else {
+        let Some(mut param_tys) = self.block_params_for(recv_ty, method, class_object_receiver) else {
             return new_ctx;
         };
+        // A block of two or more parameters destructures ONE yielded Array,
+        // as Ruby does: `value.sort.to_h { |k, v| ... }` over `Array[[K, V]]`
+        // binds `k: K, v: V`. Zipped unsplat, `k` took the whole pair and
+        // `v` stayed unbound, and every flow out of `v` was lost.
+        // This unflagged control restores the flow that re-opens the
+        // merged-back family (#518) on main.
+        // A rest parameter destructures too (`|k, *rest|`, and the implicit
+        // rest of `|k, |`, which ingest names).
+        if (params.len() >= 2 || (params.len() == 1 && rest_param.is_some())) && param_tys.len() == 1 {
+            if let Some(splat) = splat_yield(&param_tys[0], params.len()) {
+                param_tys = splat;
+            }
+        }
         for (name, ty) in params.iter().zip(param_tys.iter()) {
             new_ctx.local_bindings.insert(name.clone(), ty.clone());
         }
@@ -384,17 +434,23 @@ impl<'a> BodyTyper<'a> {
                 };
                 self.block_params_for(Some(&as_array), method, class_object_receiver)
             }
+            // CRuby's own pair iterators yield the key and the value as two
+            // values (`|x|` gets the key); `each` and every Enumerable
+            // iterator yield ONE `[key, value]` pair (`|x|` gets the pair,
+            // and `|k, v|` destructures it by the splat in `block_ctx_for`).
             Ty::Hash { key, value } => match method.as_str() {
-                "each" | "each_pair" | "map" | "collect"
-                | "flat_map" | "collect_concat"
-                | "select" | "filter" | "reject"
-                | "any?" | "all?" | "none?" => {
-                    Some(vec![(**key).clone(), (**value).clone()])
-                }
+                "select" | "filter" | "reject" | "select!" | "filter!" | "reject!" | "keep_if"
+                | "delete_if" | "to_h" => Some(vec![(**key).clone(), (**value).clone()]),
                 // `transform_values { |v| ... }` — block receives just the value.
-                "transform_values" => Some(vec![(**value).clone()]),
+                "transform_values" | "transform_values!" | "each_value" => Some(vec![(**value).clone()]),
                 // `transform_keys { |k| ... }` — block receives just the key.
-                "transform_keys" => Some(vec![(**key).clone()]),
+                "transform_keys" | "transform_keys!" | "each_key" => Some(vec![(**key).clone()]),
+                "each" | "each_pair" | "map" | "collect" | "flat_map" | "collect_concat"
+                | "any?" | "all?" | "none?" | "one?" | "count" | "find" | "detect" | "find_index"
+                | "find_all" | "sort_by" | "min_by" | "max_by" | "sum" | "group_by" | "partition"
+                | "filter_map" | "uniq" | "each_entry" | "index_by" | "index_with" => {
+                    Some(vec![Ty::Tuple { elems: vec![(**key).clone(), (**value).clone()].into() }])
+                }
                 _ => None,
             },
             Ty::Class { id, .. } if id.0.as_str() == "CSV" && method.as_str() == "generate" => {
