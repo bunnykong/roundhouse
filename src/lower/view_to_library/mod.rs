@@ -1365,6 +1365,14 @@ pub(crate) fn insert_framework_stubs(
             Ty::Str,
         ),
     );
+    // `url_for_path(path)` — the URL a jbuilder `<x>_url` answers
+    // (runtime/ruby/action_view/view_helpers.rb). Typed here so the
+    // jbuilder pair that encodes it sees a String, not an unknown the
+    // rust emitter would pass to `encode_value` as a `Value`.
+    vh.class_methods.insert(
+        Symbol::from("url_for_path"),
+        fn_sig(vec![(Symbol::from("path"), Ty::Str)], Ty::Str),
+    );
     let nil_helpers = ["content_for_set", "content_for", "set_flash", "flash"];
     for name in nil_helpers {
         vh.class_methods.insert(
