@@ -11,6 +11,8 @@
 //! adapter_emit to build Arel + call this visitor instead of
 //! synthesizing inline).
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::dialect::AccessorKind;
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, BlockStyle, Expr, ExprNode, Literal, LValue};
@@ -36,8 +38,19 @@ struct Bind {
     parameterized: bool,
 }
 
-fn bind_local(kind: &str, i: usize) -> Symbol {
-    Symbol::from(format!("__rh_{}_{}", kind, i))
+/// One shaped-read site gets one id so `__rh_value_0` from two reads in
+/// the same method cannot collide under Spinel's pinned local types.
+fn next_read_id() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn bind_local(kind: &str, i: usize, read_id: usize) -> Symbol {
+    Symbol::from(format!("__rh_{}_{}_{}", kind, i, read_id))
+}
+
+fn bind_index_local(read_id: usize) -> Symbol {
+    Symbol::from(format!("__rh_bind_index_{}", read_id))
 }
 
 fn has_shaped_predicates(binds: &[Bind]) -> bool {
@@ -49,11 +62,11 @@ fn has_shaped_predicates(binds: &[Bind]) -> bool {
 /// the cache, including Spinel's cache which only trims at lease boundaries.
 const MAX_CACHED_NULLABLE_PREDICATES: usize = 7;
 
-fn emit_prepare(stmt: &Symbol, sql: Expr, binds: &[Bind]) -> Vec<Expr> {
+fn emit_prepare(stmt: &Symbol, sql: Expr, binds: &[Bind], read_id: usize) -> Vec<Expr> {
     let db = ClassId(Symbol::from(DB_MOD));
     let mut out = Vec::new();
     let shaped = has_shaped_predicates(binds);
-    let index = Symbol::from("__rh_bind_index");
+    let index = bind_index_local(read_id);
     if shaped && binds.iter().any(|b| b.parameterized) {
         out.push(assign_var(&index, lit_int(0)));
     }
@@ -63,14 +76,14 @@ fn emit_prepare(stmt: &Symbol, sql: Expr, binds: &[Bind]) -> Vec<Expr> {
         // consumes this position, never re-evaluating a nullable RHS.
         let reserve = || vec![
             assign_var(&index, send_to(var_ref(&index), "+", vec![lit_int(1)], false)),
-            assign_var(&bind_local("position", i), var_ref(&index)),
+            assign_var(&bind_local("position", i, read_id), var_ref(&index)),
         ];
         if let Some(column) = &b.nullable_column {
-            let value = bind_local("value", i);
-            let fragment = bind_local("predicate", i);
+            let value = bind_local("value", i, read_id);
+            let fragment = bind_local("predicate", i, read_id);
             out.push(assign_var(&value, b.expr.clone()));
             if b.parameterized {
-                out.push(assign_var(&bind_local("position", i), lit_int(0)));
+                out.push(assign_var(&bind_local("position", i, read_id), lit_int(0)));
             }
             let non_nil_sql = if b.parameterized {
                 lit_str(format!("{} = ?", column))
@@ -86,7 +99,7 @@ fn emit_prepare(stmt: &Symbol, sql: Expr, binds: &[Bind]) -> Vec<Expr> {
                 else_branch: seq(non_nil),
             }));
         } else {
-            out.push(assign_var(&bind_local("value", i), b.expr.clone()));
+            out.push(assign_var(&bind_local("value", i, read_id), b.expr.clone()));
             out.extend(reserve());
         }
     }
@@ -102,7 +115,7 @@ fn emit_prepare(stmt: &Symbol, sql: Expr, binds: &[Bind]) -> Vec<Expr> {
 
 /// Fixed-shape queries keep literal positions. Shaped queries consume the
 /// positions reserved during SQL construction, skipping nil predicates.
-fn emit_bind_calls(stmt: &Symbol, binds: &[Bind]) -> Vec<Expr> {
+fn emit_bind_calls(stmt: &Symbol, binds: &[Bind], read_id: usize) -> Vec<Expr> {
     let db = ClassId(Symbol::from(DB_MOD));
     let shaped = has_shaped_predicates(binds);
     binds.iter().enumerate().filter(|(_, b)| b.parameterized).map(|(i, b)| {
@@ -115,8 +128,16 @@ fn emit_bind_calls(stmt: &Symbol, binds: &[Bind]) -> Vec<Expr> {
             ValueType::BoolOpt => "bind_bool_opt",
             ValueType::FloatOpt => unreachable!("unserialized float in bind path"),
         };
-        let position = if shaped { var_ref(&bind_local("position", i)) } else { lit_int((i + 1) as i64) };
-        let value = if shaped { var_ref(&bind_local("value", i)) } else { b.expr.clone() };
+        let position = if shaped {
+            var_ref(&bind_local("position", i, read_id))
+        } else {
+            lit_int((i + 1) as i64)
+        };
+        let value = if shaped {
+            var_ref(&bind_local("value", i, read_id))
+        } else {
+            b.expr.clone()
+        };
         let call = db_call(&db, method, vec![var_ref(stmt), position.clone(), value]);
         if b.nullable_column.is_some() {
             Expr::new(Span::synthetic(), ExprNode::If {
@@ -145,6 +166,46 @@ pub struct SqliteVisitor {
     /// The selected target's Db shim supports typed positional binds.
     /// Only runtime read predicates are bound; literals and writes stay inline.
     pub param_binds: bool,
+}
+
+impl SqliteVisitor {
+    /// Execute an insert that returns selected columns from that same
+    /// statement. Generated-column persistence uses this to hydrate the
+    /// database-owned values without a second, post-commit SELECT.
+    pub(crate) fn visit_insert_returning(
+        &self,
+        ins: &Insert,
+        schema: &Schema,
+        returning_key: &Symbol,
+        key_is_integer: bool,
+        returning_columns: &[Symbol],
+    ) -> Expr {
+        let key_ident = crate::naming::sql_ident(returning_key.as_str());
+        // Spinel snapshots SQLite integer cells through sqlite3_column_int
+        // (32-bit). Return integer keys as text so the shared result capture
+        // does not truncate them before the adapter parses them back.
+        let key_projection = if key_is_integer {
+            format!("CAST({key_ident} AS TEXT)")
+        } else {
+            key_ident
+        };
+        let mut projection = vec![key_projection];
+        projection.extend(
+            returning_columns
+                .iter()
+                .map(|column| crate::naming::sql_ident(column.as_str())),
+        );
+        let projection = projection.join(", ");
+        let sql = concat_chain(vec![
+            insert_sql(ins, schema),
+            lit_str(format!(" RETURNING {projection}")),
+        ]);
+        db_call(
+            &ClassId(Symbol::from(DB_MOD)),
+            "exec_returning",
+            vec![sql],
+        )
+    }
 }
 
 impl ArelVisitor for SqliteVisitor {
@@ -208,10 +269,11 @@ fn emit_single_hydrate(sel: &Select, table: &Table, owner: &ClassId, param: bool
     let stmt = Symbol::from("stmt");
     let result = Symbol::from("result");
     let db = ClassId(Symbol::from(DB_MOD));
+    let read_id = next_read_id();
 
     let mut binds = Vec::new();
-    let sql = compose_sql_select(sel, table, param, &mut binds);
-    let prepare = emit_prepare(&stmt, sql, &binds);
+    let sql = compose_sql_select(sel, table, param, &mut binds, read_id);
+    let prepare = emit_prepare(&stmt, sql, &binds, read_id);
     let result_init = assign_var(&result, nil_lit());
 
     // if Db.step?(stmt) ; result = <Owner>.from_stmt(stmt) ; end
@@ -232,7 +294,7 @@ fn emit_single_hydrate(sel: &Select, table: &Table, owner: &ClassId, param: bool
     let finalize = db_call(&db, "finalize", vec![var_ref(&stmt)]);
     // stmt = prepare ; [bind …] ; result = nil ; if step? {…} ; finalize ; result
     let mut stmts = prepare;
-    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.extend(emit_bind_calls(&stmt, &binds, read_id));
     stmts.push(result_init);
     stmts.push(if_expr);
     stmts.push(finalize);
@@ -252,10 +314,11 @@ fn emit_multi_hydrate(
     let stmt = Symbol::from("stmt");
     let results = Symbol::from("results");
     let db = ClassId(Symbol::from(DB_MOD));
+    let read_id = next_read_id();
 
     let mut binds = Vec::new();
-    let sql = compose_sql_select(sel, table, param, &mut binds);
-    let prepare = emit_prepare(&stmt, sql, &binds);
+    let sql = compose_sql_select(sel, table, param, &mut binds, read_id);
+    let prepare = emit_prepare(&stmt, sql, &binds, read_id);
     // Empty Array literal carries an explicit `Array<Owner>` type
     // annotation so strict-target emit (Crystal `[] of Owner`)
     // matches the subsequent `results << instance` push semantics.
@@ -310,7 +373,7 @@ fn emit_multi_hydrate(
     // keep the inline `IN (…)` list (variable arity — not parameterized
     // here; see the note in `push_preload_stmts`).
     let mut stmts = prepare;
-    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.extend(emit_bind_calls(&stmt, &binds, read_id));
     stmts.push(results_init);
     stmts.push(while_loop);
     stmts.push(finalize);
@@ -615,10 +678,11 @@ fn emit_pluck(sel: &Select, table: &Table, col: &super::ir::ColRef, param: bool)
         });
     let read_method = crate::lower::model_to_library::schema::column_read_method_for(column);
     let elem_ty = crate::lower::model_to_library::ty_of_column_slot(column);
+    let read_id = next_read_id();
 
     let mut binds = Vec::new();
-    let sql = compose_sql_select(sel, table, param, &mut binds);
-    let prepare = emit_prepare(&stmt, sql, &binds);
+    let sql = compose_sql_select(sel, table, param, &mut binds, read_id);
+    let prepare = emit_prepare(&stmt, sql, &binds, read_id);
 
     // The element type is carried explicitly for the same reason the
     // hydrate loop carries `Array<Owner>`: an untyped `[]` types as
@@ -652,7 +716,7 @@ fn emit_pluck(sel: &Select, table: &Table, col: &super::ir::ColRef, param: bool)
     );
 
     let mut stmts = prepare;
-    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.extend(emit_bind_calls(&stmt, &binds, read_id));
     stmts.push(results_init);
     stmts.push(while_loop);
     stmts.push(db_call(&db, "finalize", vec![var_ref(&stmt)]));
@@ -713,10 +777,11 @@ fn emit_group_count(
         key: Box::new(key_ty),
         value: Box::new(crate::ty::Ty::Int),
     };
+    let read_id = next_read_id();
 
     let mut binds = Vec::new();
-    let sql = compose_sql_select(sel, table, param, &mut binds);
-    let prepare = emit_prepare(&stmt, sql, &binds);
+    let sql = compose_sql_select(sel, table, param, &mut binds, read_id);
+    let prepare = emit_prepare(&stmt, sql, &binds, read_id);
 
     let results_init = assign_var(
         &results,
@@ -755,7 +820,7 @@ fn emit_group_count(
     );
 
     let mut stmts = prepare;
-    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.extend(emit_bind_calls(&stmt, &binds, read_id));
     stmts.push(results_init);
     stmts.push(while_loop);
     stmts.push(db_call(&db, "finalize", vec![var_ref(&stmt)]));
@@ -768,15 +833,16 @@ fn emit_count(sel: &Select, table: &Table, param: bool) -> Expr {
     let stmt = Symbol::from("stmt");
     let result = Symbol::from("result");
     let db = ClassId(Symbol::from(DB_MOD));
+    let read_id = next_read_id();
 
     let mut segments: Vec<Expr> = vec![lit_str(format!(
         "SELECT COUNT(*) FROM {}",
         crate::naming::sql_ident(table.name.as_str())
     ))];
     let mut binds = Vec::new();
-    push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, &mut binds);
+    push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, &mut binds, read_id);
 
-    let prepare = emit_prepare(&stmt, concat_chain(segments), &binds);
+    let prepare = emit_prepare(&stmt, concat_chain(segments), &binds, read_id);
     let step = db_call(&db, "step?", vec![var_ref(&stmt)]);
     let read = db_call(&db, "column_int", vec![var_ref(&stmt), lit_int(0)]);
     let result_assign = assign_var(&result, read);
@@ -784,7 +850,7 @@ fn emit_count(sel: &Select, table: &Table, param: bool) -> Expr {
 
     // stmt = prepare ; [bind …] ; step? ; result = column_int ; finalize ; result
     let mut stmts = prepare;
-    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.extend(emit_bind_calls(&stmt, &binds, read_id));
     stmts.push(step);
     stmts.push(result_assign);
     stmts.push(finalize);
@@ -797,22 +863,23 @@ fn emit_exists(sel: &Select, table: &Table, param: bool) -> Expr {
     let stmt = Symbol::from("stmt");
     let result = Symbol::from("result");
     let db = ClassId(Symbol::from(DB_MOD));
+    let read_id = next_read_id();
 
     let mut segments: Vec<Expr> =
         vec![lit_str(format!("SELECT 1 FROM {}", crate::naming::sql_ident(table.name.as_str())))];
     let mut binds = Vec::new();
-    push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, &mut binds);
+    push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, &mut binds, read_id);
     if let Some(super::ir::LimitSpec(n)) = sel.limit {
         segments.push(lit_str(format!(" LIMIT {}", n)));
     }
 
-    let prepare = emit_prepare(&stmt, concat_chain(segments), &binds);
+    let prepare = emit_prepare(&stmt, concat_chain(segments), &binds, read_id);
     let result_assign = assign_var(&result, db_call(&db, "step?", vec![var_ref(&stmt)]));
     let finalize = db_call(&db, "finalize", vec![var_ref(&stmt)]);
 
     // stmt = prepare ; [bind …] ; result = step? ; finalize ; result
     let mut stmts = prepare;
-    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.extend(emit_bind_calls(&stmt, &binds, read_id));
     stmts.push(result_assign);
     stmts.push(finalize);
     stmts.push(var_ref(&result));
@@ -824,35 +891,49 @@ fn emit_exists(sel: &Select, table: &Table, param: bool) -> Expr {
 // ---------------------------------------------------------------------------
 
 fn visit_insert(ins: &Insert, schema: &Schema) -> Expr {
-    let _ = lookup_table(schema, &ins.table.0); // validates table exists; not consumed beyond that
     let db = ClassId(Symbol::from(DB_MOD));
-
-    let cols_csv = ins
-        .assignments
-        .iter()
-        .map(|a| crate::naming::sql_ident(a.column.as_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let mut segments: Vec<Expr> = vec![lit_str(format!(
-        "INSERT INTO {} ({}) VALUES (",
-        crate::naming::sql_ident(ins.table.0.as_str()),
-        cols_csv
-    ))];
-    for (idx, a) in ins.assignments.iter().enumerate() {
-        if idx > 0 {
-            segments.push(lit_str(", ".to_string()));
-        }
-        segments.push(escape_value(&db, &a.value));
-    }
-    segments.push(lit_str(")".to_string()));
-
-    let exec_call = db_call(&db, "exec", vec![concat_chain(segments)]);
+    let sql = insert_sql(ins, schema);
+    let exec_call = db_call(&db, "exec", vec![sql]);
     if !ins.returns_rowid {
         return exec_call;
     }
     let last_id = db_call(&db, "last_insert_rowid", vec![]);
     seq(vec![exec_call, last_id])
+}
+
+/// Compose the INSERT statement before the visitor chooses `exec` or
+/// `exec_returning`. Keeping value escaping here ensures both paths retain
+/// the same inline, schema-ordered write semantics.
+fn insert_sql(ins: &Insert, schema: &Schema) -> Expr {
+    let _ = lookup_table(schema, &ins.table.0); // validates table exists; not consumed beyond that
+    let db = ClassId(Symbol::from(DB_MOD));
+    let sql = if ins.assignments.is_empty() {
+        lit_str(format!(
+            "INSERT INTO {} DEFAULT VALUES",
+            crate::naming::sql_ident(ins.table.0.as_str())
+        ))
+    } else {
+        let cols_csv = ins
+            .assignments
+            .iter()
+            .map(|a| crate::naming::sql_ident(a.column.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut segments = vec![lit_str(format!(
+            "INSERT INTO {} ({}) VALUES (",
+            crate::naming::sql_ident(ins.table.0.as_str()),
+            cols_csv
+        ))];
+        for (idx, a) in ins.assignments.iter().enumerate() {
+            if idx > 0 {
+                segments.push(lit_str(", ".to_string()));
+            }
+            segments.push(escape_value(&db, &a.value));
+        }
+        segments.push(lit_str(")".to_string()));
+        concat_chain(segments)
+    };
+    sql
 }
 
 fn visit_update(upd: &Update, schema: &Schema) -> Expr {
@@ -872,7 +953,7 @@ fn visit_update(upd: &Update, schema: &Schema) -> Expr {
     // Writes go through `Db.exec` (`sqlite3_exec`), which never touches
     // the prepared-statement cache — so the WHERE stays inline-escaped
     // regardless of the placeholder-bind gate.
-    push_where_segments(&mut segments, upd.conditions.as_ref(), table, false, &mut Vec::new());
+    push_where_segments(&mut segments, upd.conditions.as_ref(), table, false, &mut Vec::new(), next_read_id());
     db_call(&db, "exec", vec![concat_chain(segments)])
 }
 
@@ -882,7 +963,7 @@ fn visit_delete(del: &Delete, schema: &Schema) -> Expr {
 
     let mut segments: Vec<Expr> = vec![lit_str(format!("DELETE FROM {}", crate::naming::sql_ident(del.table.0.as_str())))];
     // Exec path — inline WHERE (see visit_update note); not cached.
-    push_where_segments(&mut segments, del.conditions.as_ref(), table, false, &mut Vec::new());
+    push_where_segments(&mut segments, del.conditions.as_ref(), table, false, &mut Vec::new(), next_read_id());
     let delete_call = db_call(&db, "exec", vec![concat_chain(segments)]);
 
     // Truncate (Delete with no WHERE) — also reset the
@@ -919,7 +1000,13 @@ fn visit_delete(del: &Delete, schema: &Schema) -> Expr {
 
 /// Build the SELECT prefix `"SELECT <cols> FROM <table>[...]"` plus
 /// any WHERE / LIMIT segments, returning the concat chain.
-fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<Bind>) -> Expr {
+fn compose_sql_select(
+    sel: &Select,
+    table: &Table,
+    param: bool,
+    binds: &mut Vec<Bind>,
+    read_id: usize,
+) -> Expr {
     let cols_csv = match &sel.columns {
         ColumnSpec::All => select_cols_csv(table),
         ColumnSpec::Named(refs) => refs
@@ -939,7 +1026,7 @@ fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<
         cols_csv,
         crate::naming::sql_ident(table.name.as_str())
     ))];
-    push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, binds);
+    push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, binds, read_id);
     // GROUP BY sits between WHERE and ORDER BY. Read off the
     // projection rather than a `Select` field: the grouped column is
     // the projection here (see `ColumnSpec::GroupCount`), so one place
@@ -990,12 +1077,13 @@ fn push_where_segments(
     _table: &Table,
     param: bool,
     binds: &mut Vec<Bind>,
+    read_id: usize,
 ) {
     let Some(pred) = preds else {
         return;
     };
     segments.push(lit_str(" WHERE ".to_string()));
-    push_predicate_segments(segments, pred, param, binds);
+    push_predicate_segments(segments, pred, param, binds, read_id);
 }
 
 fn push_predicate_segments(
@@ -1003,6 +1091,7 @@ fn push_predicate_segments(
     pred: &Predicate,
     param: bool,
     binds: &mut Vec<Bind>,
+    read_id: usize,
 ) {
     match pred {
         // SQL equality never matches NULL (`col = NULL` is three-valued
@@ -1012,7 +1101,7 @@ fn push_predicate_segments(
             segments.push(lit_str(format!("{} IS NULL", crate::naming::sql_ident(col.column.as_str()))));
         }
         Predicate::NullableEq(col, Value::Runtime { expr, ty }) => {
-            segments.push(var_ref(&bind_local("predicate", binds.len())));
+            segments.push(var_ref(&bind_local("predicate", binds.len(), read_id)));
             binds.push(Bind {
                 expr: expr.clone(), ty: *ty,
                 nullable_column: Some(crate::naming::sql_ident(col.column.as_str())),
@@ -1025,15 +1114,15 @@ fn push_predicate_segments(
             push_value_segment(segments, val, param, binds);
         }
         Predicate::And(l, r) => {
-            push_predicate_segments(segments, l, param, binds);
+            push_predicate_segments(segments, l, param, binds, read_id);
             segments.push(lit_str(" AND ".to_string()));
-            push_predicate_segments(segments, r, param, binds);
+            push_predicate_segments(segments, r, param, binds, read_id);
         }
         Predicate::Or(l, r) => {
             segments.push(lit_str("(".to_string()));
-            push_predicate_segments(segments, l, param, binds);
+            push_predicate_segments(segments, l, param, binds, read_id);
             segments.push(lit_str(" OR ".to_string()));
-            push_predicate_segments(segments, r, param, binds);
+            push_predicate_segments(segments, r, param, binds, read_id);
             segments.push(lit_str(")".to_string()));
         }
     }
@@ -1286,6 +1375,7 @@ mod tests {
     use indexmap::IndexMap;
 
     // Two-column "articles" table: id (Int), title (Str).
+    /// Creates the articles schema and model identifier used by Arel visitor tests.
     fn fixture_schema() -> (Schema, ClassId) {
         let mut tables = IndexMap::new();
         tables.insert(
@@ -1299,6 +1389,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: true,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                     Column {
                         name: Symbol::from("title"),
@@ -1306,6 +1399,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: false,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                 ],
                 indexes: vec![],
@@ -1491,6 +1587,35 @@ mod tests {
         // exec ; last_insert_rowid
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 2);
+    }
+
+    #[test]
+    fn insert_without_assignments_uses_default_values() {
+        let (schema, owner) = fixture_schema();
+        for returns_rowid in [false, true] {
+            let op = ArelOp::Insert(Insert {
+                table: TableRef(Symbol::from("articles")),
+                assignments: vec![],
+                returns_rowid,
+            });
+            let body = SqliteVisitor::default().visit(&op, &schema, &owner);
+            let exec = if returns_rowid {
+                let ExprNode::Seq { exprs } = body.node.as_ref() else {
+                    panic!("insert must return the last row id");
+                };
+                assert_eq!(exprs.len(), 2);
+                &exprs[0]
+            } else {
+                &body
+            };
+            let ExprNode::Send { method, args, .. } = exec.node.as_ref() else {
+                panic!("insert must execute SQL");
+            };
+            assert_eq!(method.as_str(), "exec");
+            assert!(matches!(args[0].node.as_ref(),
+                ExprNode::Lit { value: Literal::Str { value } }
+                    if value == "INSERT INTO articles DEFAULT VALUES"));
+        }
     }
 
     #[test]

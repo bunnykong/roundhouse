@@ -1,3 +1,67 @@
+# Snapshot cleanup errors must not bypass reader cleanup or replace the
+# request's exception. The failed COMMIT still gets a ROLLBACK.
+[false, true].each do |request_failed|
+  conn = transient = original_execute = nil
+  snapshot_error = RuntimeError.new("injected snapshot COMMIT failure")
+  request_error = RuntimeError.new("request failed inside snapshot")
+  begin
+    Db.with_connection do
+      conn = Db.current_dbh
+      original_execute = conn.method(:execute)
+      conn.define_singleton_method(:execute) do |sql, *args|
+        raise snapshot_error if sql == "COMMIT"
+        original_execute.call(sql, *args)
+      end
+      Db.read_snapshot_begin
+      outer = Db.prepare("SELECT 1 AS snapshot_cleanup_ownership")
+      inner = Db.prepare("SELECT 1 AS snapshot_cleanup_ownership")
+      transient = inner[:stmt]
+      Db.step?(outer)
+      Db.step?(inner)
+      raise request_error if request_failed
+    end
+    raise "snapshot cleanup failure was swallowed"
+  rescue RuntimeError => e
+    expected = request_failed ? request_error : snapshot_error
+    raise "snapshot cleanup replaced the exception" unless e.equal?(expected)
+  ensure
+    conn.define_singleton_method(:execute, original_execute) if original_execute
+  end
+  raise "snapshot cleanup retained readers" unless Db.open_statements(conn).empty?
+  raise "snapshot cleanup retained its sibling" unless transient.closed?
+  raise "snapshot cleanup retained its transaction" if conn.transaction_active?
+  raise "snapshot cleanup retained its lease" if Db.in_lease?
+  raise "snapshot cleanup lost its usable connection" unless Db.instance_variable_get(:@pool).free.include?(conn)
+end
+puts "runtime: snapshot failure drains readers and preserves exception identity passed"
+
+# A failed rollback releases the permit, drains readers and quarantines
+# the connection while its transaction is still active.
+conn = original_execute = nil
+request_error = RuntimeError.new("request failed before rollback")
+begin
+  Db.with_connection do
+    conn = Db.current_dbh
+    original_execute = conn.method(:execute)
+    conn.define_singleton_method(:execute) do |sql, *args|
+      raise "injected ROLLBACK failure" if sql == "ROLLBACK"
+      original_execute.call(sql, *args)
+    end
+    Db.exec("BEGIN")
+    Db.prepare("SELECT 1 AS rollback_cleanup_ownership")
+    raise request_error
+  end
+rescue RuntimeError => e
+  raise "rollback cleanup replaced the request exception" unless e.equal?(request_error)
+ensure
+  conn.define_singleton_method(:execute, original_execute) if original_execute
+end
+raise "rollback cleanup retained readers" unless Db.open_statements(conn).empty?
+raise "rollback cleanup retained the permit" if Db.permit_owned?
+raise "rollback failure returned its connection" if Db.instance_variable_get(:@pool).free.include?(conn)
+raise "rollback failure lost quarantine" unless Db.instance_variable_get(:@quarantined).include?(conn)
+puts "runtime: rollback failure drains readers and quarantines the connection passed"
+
 # Gem-level lifecycle observations complement the cross-runtime row checks.
 Db.with_connection do
   outer = Db.prepare("SELECT ? AS transient_ownership")
@@ -348,3 +412,40 @@ raise "idle cached shutdown retry leaked the statement" unless idle_cached.close
 raise "idle cached shutdown retry retained quarantine" unless Db.instance_variable_get(:@quarantined).empty?
 raise "idle cached shutdown retry retained the pool" unless Db.instance_variable_get(:@pool).nil?
 puts "runtime: idle cached shutdown close failure and retry passed (8 assertions)"
+
+# A checked-out statement's release error must not stop cached statement or
+# connection disposal, including later connections with their own errors.
+Db.configure(":memory:", pool_size: 3)
+closing_conns = Db.instance_variable_get(:@pool).free.dup
+closing_statements = []
+first_shutdown_error = RuntimeError.new("first shutdown release failure")
+closing_conns.each_with_index do |conn, index|
+  Fiber[:db_handle] = conn
+  idle = Db.prepare("SELECT 37 AS shutdown_idle")
+  closing_statements.push(idle[:stmt])
+  Db.finalize(idle)
+  held = Db.prepare("SELECT 41 AS shutdown_held")
+  transient = Db.prepare("SELECT 41 AS shutdown_held")
+  closing_statements.push(held[:stmt], transient[:stmt])
+  raise "missing shutdown readers" unless Db.step?(held) && Db.step?(transient)
+  if index < 2
+    error = index == 0 ? first_shutdown_error : RuntimeError.new("later shutdown release failure")
+    held[:stmt].define_singleton_method(:reset!) { raise error }
+  end
+end
+Fiber[:db_handle] = nil
+shutdown_error = begin
+  Db.close
+  nil
+rescue RuntimeError => e
+  e
+end
+raise "shutdown leaked a cached or transient statement" unless closing_statements.all?(&:closed?)
+raise "shutdown skipped a connection" unless closing_conns.all?(&:closed?)
+raise "shutdown retained checkouts" unless closing_conns.all? { |conn| Db.open_statements(conn).empty? }
+raise "shutdown retained its pool" unless Db.instance_variable_get(:@pool).nil?
+raise "shutdown retained its owner" unless Db.instance_variable_get(:@owner_pid).nil?
+raise "shutdown retained quarantine" unless Db.instance_variable_get(:@quarantined).empty?
+raise "shutdown replaced its first release error" unless shutdown_error.equal?(first_shutdown_error)
+Db.close
+puts "runtime: gem shutdown drains all connections and preserves the first release error passed"

@@ -41,11 +41,14 @@ fn length_rule_fans_out_into_min_and_max_checks() {
     let model = Model {
         name: ClassId(Symbol::from("Widget")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("widgets")),
         primary_key: None,
         attributes: Row::closed(),
         enums: Default::default(),
         enum_defaults: Default::default(),
+        class_attr_defaults: Default::default(),
+        lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
         span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {
@@ -73,11 +76,14 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
     let model = Model {
         name: ClassId(Symbol::from("Widget")),
         parent: None,
+        parent_span: Default::default(),
         table: TableRef(Symbol::from("widgets")),
         primary_key: None,
         attributes: Row::closed(),
         enums: Default::default(),
         enum_defaults: Default::default(),
+        class_attr_defaults: Default::default(),
+        lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
         span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {

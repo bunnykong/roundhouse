@@ -13,7 +13,7 @@ use crate::span::Span;
 use crate::ty::Ty;
 
 use super::params::{ParamsSpec, ParamsSpecs};
-use super::util::map_expr;
+use super::util::{map_expr, map_expr_mut};
 
 // ---------------------------------------------------------------------------
 // Render-template-as-Views-call rewrite. Spinel doesn't have Rails'
@@ -599,7 +599,7 @@ pub(super) fn rewrite_render_to_views(
                         value: Expr::new(
                             e.span,
                             ExprNode::Send {
-                                recv: Some(const_path(
+                                recv: Some(typed_exception_const(
                                     &["ActionView", "MissingTemplate"],
                                     e.span,
                                 )),
@@ -2308,9 +2308,15 @@ pub fn rewrite_route_helpers(
 ) -> Expr {
     let expr = &strip_url_helpers_receiver(expr);
     map_expr(expr, &|e| match &*e.node {
+        // `controller_path` is ActionController::Base's underscored
+        // namespace path (`"admin/users"`), never a route helper — the
+        // `_path` suffix alone would otherwise steal bare calls into
+        // `RouteHelpers.controller_path` and leave the synthesized
+        // Base override unreachable.
         ExprNode::Send { recv: None, method, args, block, parenthesized }
             if (method.as_str().ends_with("_path")
                 || method.as_str().ends_with("_url"))
+                && method.as_str() != "controller_path"
                 && !shadowed.contains(method) =>
         {
             // `RouteHelpers` only emits `_path` helpers — Rails'
@@ -2525,33 +2531,41 @@ fn params_option_value(arg: &Expr) -> Option<&Expr> {
 /// that types to a class is a record standing where its id belongs.
 /// Idempotent — a projected argument types `Integer`, not a class.
 pub fn project_route_helper_ids(expr: &Expr) -> Expr {
-    map_expr(expr, &|e| {
-        let ExprNode::Send { recv: Some(r), method, args, block, parenthesized } = &*e.node else {
-            return None;
-        };
-        if !matches!(&*r.node, ExprNode::Const { path }
-            if path.len() == 1 && path[0].as_str() == "RouteHelpers")
-        {
-            return None;
-        }
-        if !(method.as_str().ends_with("_path") || method.as_str().ends_with("_url")) {
-            return None;
-        }
-        if !args.iter().any(arg_carries_a_model) && !args.iter().any(query_carries_an_int) {
-            return None;
-        }
-        let projected: Vec<Expr> = args.iter().map(project_arg).collect();
-        Some(Expr::new(
-            e.span,
-            ExprNode::Send {
-                recv: Some(r.clone()),
-                method: method.clone(),
-                args: projected,
-                block: block.clone(),
-                parenthesized: *parenthesized,
-            },
-        ))
-    })
+    map_expr(expr, &project_route_helper_ids_node)
+}
+
+/// In-place twin. Returns whether any argument was projected so the
+/// test lowerer can skip a follow-up typing pass.
+pub fn project_route_helper_ids_in_place(expr: &mut Expr) -> bool {
+    map_expr_mut(expr, &project_route_helper_ids_node)
+}
+
+fn project_route_helper_ids_node(e: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(r), method, args, block, parenthesized } = &*e.node else {
+        return None;
+    };
+    if !matches!(&*r.node, ExprNode::Const { path }
+        if path.len() == 1 && path[0].as_str() == "RouteHelpers")
+    {
+        return None;
+    }
+    if !(method.as_str().ends_with("_path") || method.as_str().ends_with("_url")) {
+        return None;
+    }
+    if !args.iter().any(arg_carries_a_model) && !args.iter().any(query_carries_an_int) {
+        return None;
+    }
+    let projected: Vec<Expr> = args.iter().map(project_arg).collect();
+    Some(Expr::new(
+        e.span,
+        ExprNode::Send {
+            recv: Some(r.clone()),
+            method: method.clone(),
+            args: projected,
+            block: block.clone(),
+            parenthesized: *parenthesized,
+        },
+    ))
 }
 
 /// A route-helper argument with every model instance in it projected
@@ -2689,6 +2703,19 @@ pub(crate) fn const_path(segments: &[&str], span: Span) -> Expr {
             path: segments.iter().map(|s| Symbol::from(*s)).collect(),
         },
     )
+}
+
+/// Like `const_path`, but stamps `Ty::Class` so the emit-time
+/// ruby-family availability gate sees lowers-added raises
+/// (`MissingTemplate` from a missing `render`).
+pub(crate) fn typed_exception_const(segments: &[&str], span: Span) -> Expr {
+    let name = segments.join("::");
+    let mut expr = const_path(segments, span);
+    expr.ty = Some(crate::ty::Ty::Class {
+        id: crate::ident::ClassId(Symbol::from(name)),
+        args: vec![],
+    });
+    expr
 }
 
 /// True when `e` is a bare `params` send: no receiver, no args, no
@@ -2858,7 +2885,7 @@ fn params_require_permit(resource: Symbol, fields: Vec<Symbol>, span: Span) -> E
             style: ArrayStyle::Brackets,
         },
     );
-    Expr::new(
+    let mut permit = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(require_call),
@@ -2867,7 +2894,11 @@ fn params_require_permit(resource: Symbol, fields: Vec<Symbol>, span: Span) -> E
             block: None,
             parenthesized: true,
         },
-    )
+    );
+    // Remember the source form: `expect` and `require.permit` refuse a
+    // malformed request differently (see `FROM_PARAMS_EXPECT`).
+    permit.decisions |= crate::expr::FROM_PARAMS_EXPECT;
+    permit
 }
 
 fn nil_expr(span: Span) -> Expr {

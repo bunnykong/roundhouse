@@ -358,11 +358,11 @@ end
 
 #[test]
 fn routes_recover_per_entry_under_survey() {
-    // One unknown DSL entry (`devise_for`) must not zero the table:
-    // survey mode records the gap and keeps the sibling routes;
-    // strict mode still fails loud so fixtures force recognizers.
+    // One unknown DSL entry must not zero the table: survey mode
+    // records the gap and keeps the sibling routes; strict mode still
+    // fails loud so fixtures force recognizers.
     let source = br#"Rails.application.routes.draw do
-  devise_for :users
+  use_doorkeeper
   get "/posts", to: "posts#index"
 end
 "#;
@@ -380,39 +380,392 @@ end
     let table = result.expect("survey ingest recovers");
     assert_eq!(table.entries.len(), 1, "the good route survives");
     assert!(
-        gaps.iter().any(|g| format!("{g:?}").contains("devise_for")),
-        "the devise_for gap is recorded, not silently dropped: {gaps:?}"
+        gaps.iter().any(|g| format!("{g:?}").contains("use_doorkeeper")),
+        "the unknown-DSL gap is recorded, not silently dropped: {gaps:?}"
     );
 }
 
+/// Strict ingest rejects authentication guards; survey mode reports and omits
+/// guarded routes while retaining public siblings.
 #[test]
-fn routes_mount_drops_as_recognized_gap() {
-    // `mount SomeEngine` is external code, never part of the
-    // transpiled app: strict ingest drops the route (the modeled
-    // truth, like `to: redirect(...)`), survey runs get a ledger
-    // line so the drop stays visible.
+fn devise_authentication_route_guards_are_unsupported_and_survey_keeps_public_routes() {
+    for (wrapper, route) in [
+        (
+            "authenticate",
+            "authenticate :user do\n    get \"/account\", to: \"widgets#index\"\n  end",
+        ),
+        (
+            "authenticated",
+            "authenticated :user, ->(user) { user.admin? } do\n    get \"/admin/reports\", to: \"widgets#index\"\n  end",
+        ),
+        (
+            "unauthenticated",
+            "unauthenticated :user do\n    get \"/join\", to: \"widgets#index\"\n  end",
+        ),
+    ] {
+        let source = format!(
+            "Rails.application.routes.draw do\n  {route}\n  get \"/health\", to: \"widgets#index\"\nend\n"
+        );
+        let (strict, _) = roundhouse::ingest::prism::scope(|| {
+            roundhouse::ingest::ingest_routes(source.as_bytes(), "config/routes.rb")
+        });
+        let err = strict.expect_err("route authentication must fail strict ingest");
+        assert!(err.to_string().contains("config/routes.rb"), "{err}");
+        let expected_diagnostic = format!("unsupported routes DSL: `{wrapper}`");
+        assert!(
+            err.to_string().contains(expected_diagnostic.as_str()),
+            "strict ingest did not identify `{wrapper}`: {err}"
+        );
+    }
+
     let source = br#"Rails.application.routes.draw do
-  mount Sidekiq::Web, at: "sidekiq"
-  get "/posts", to: "posts#index"
+  authenticate :user do
+    get "/account", to: "widgets#index"
+  end
+  authenticated :user, ->(user) { user.admin? } do
+    get "/admin/reports", to: "widgets#index"
+  end
+  unauthenticated :user do
+    get "/join", to: "widgets#index"
+  end
+  get "/health", to: "widgets#index"
 end
 "#;
-
-    let (strict, _) = roundhouse::ingest::prism::scope(|| {
-        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
-    });
-    let table = strict.expect("strict ingest tolerates mount");
-    assert_eq!(table.entries.len(), 1, "mount drops, the sibling route survives");
-
     roundhouse::ingest::survey::activate();
     let (result, _) = roundhouse::ingest::prism::scope(|| {
         roundhouse::ingest::ingest_routes(source, "config/routes.rb")
     });
     let gaps = roundhouse::ingest::survey::drain();
-    result.expect("survey ingest succeeds");
+    let table = result.expect("survey ingest recovers");
+    for wrapper in ["authenticate", "authenticated", "unauthenticated"] {
+        let expected_diagnostic = format!("unsupported routes DSL: `{wrapper}`");
+        assert!(
+            gaps.iter().any(|gap| format!("{gap:?}").contains(expected_diagnostic.as_str())),
+            "the refusal for `{wrapper}` must be surveyed: {gaps:?}"
+        );
+    }
+
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    assert_eq!(flat.len(), 1, "guarded routes must not reach dispatch: {flat:?}");
+    assert_eq!(flat[0].path, "/health", "the public sibling must survive: {flat:?}");
+}
+
+/// `devise_scope` is path-transparent and does not impose an authentication
+/// guard.
+#[test]
+fn devise_scope_passthrough_nested_routes() {
+    let source = br#"Rails.application.routes.draw do
+  devise_scope :user do
+    get "session/otp", to: "sessions#otp"
+  end
+end
+"#;
+    roundhouse::ingest::survey::activate();
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let gaps = roundhouse::ingest::survey::drain();
+    let table = result.expect("ingest");
+    assert!(gaps.is_empty(), "devise_scope is still a path-transparent wrapper: {gaps:?}");
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
     assert!(
-        gaps.iter().any(|g| format!("{g:?}").contains("mount")),
-        "the mount drop is ledgered, not silent: {gaps:?}"
+        flat.iter().any(|r| r.path == "/session/otp" && r.controller.0.as_str() == "SessionsController"),
+        "devise_scope nested route: {flat:?}"
     );
+}
+
+#[test]
+fn namespaced_root_as_applies_name_prefix() {
+    let source = br#"Rails.application.routes.draw do
+  namespace :admin do
+    root to: "dashboard#show", as: :home
+  end
+end
+"#;
+    let table = roundhouse::ingest::ingest_routes(source, "config/routes.rb").expect("ingest");
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    assert!(
+        flat.iter().any(|r| r.path == "/admin" && r.as_name == "admin_home"),
+        "namespace as: prefix on root: {flat:?}"
+    );
+    assert!(
+        !flat.iter().any(|r| r.as_name == "home"),
+        "bare home helper must not win over admin_home: {flat:?}"
+    );
+}
+
+#[test]
+fn devise_for_expands_session_and_registration_helpers() {
+    let source = br#"Rails.application.routes.draw do
+  devise_for :users,
+    controllers: {
+      registrations: "users/registrations",
+      sessions: "users/sessions"
+    }
+end
+"#;
+    roundhouse::ingest::survey::activate();
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let gaps = roundhouse::ingest::survey::drain();
+    let table = result.expect("ingest");
+    assert!(
+        gaps.iter().all(|g| !format!("{g:?}").contains("devise_for")),
+        "devise_for must not survey: {gaps:?}"
+    );
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let by_name: std::collections::HashMap<_, _> =
+        flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+    let session = by_name.get("new_user_session").expect("new_user_session");
+    assert_eq!(session.path, "/users/sign_in");
+    assert_eq!(session.controller.0.as_str(), "Users::SessionsController");
+    let reg = by_name.get("new_user_registration").expect("new_user_registration");
+    assert_eq!(reg.path, "/users/sign_up");
+    assert_eq!(reg.controller.0.as_str(), "Users::RegistrationsController");
+    assert!(by_name.contains_key("destroy_user_session"));
+    assert!(by_name.contains_key("edit_user_password"));
+    assert!(by_name.contains_key("user_confirmation"));
+}
+
+#[test]
+fn devise_for_accepts_string_controller_keys() {
+    // Devise accepts string keys in `controllers:`; skipping them would
+    // silently fall back to Devise::*Controller.
+    let source = br#"Rails.application.routes.draw do
+  devise_for :users,
+    controllers: {
+      "sessions" => "users/sessions",
+      registrations: "users/registrations"
+    }
+end
+"#;
+    roundhouse::ingest::survey::activate();
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let gaps = roundhouse::ingest::survey::drain();
+    let table = result.expect("ingest");
+    assert!(
+        gaps.iter().all(|g| !format!("{g:?}").contains("devise_for")),
+        "string-keyed controllers must not survey: {gaps:?}"
+    );
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let by_name: std::collections::HashMap<_, _> =
+        flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+    let session = by_name.get("new_user_session").expect("new_user_session");
+    assert_eq!(session.controller.0.as_str(), "Users::SessionsController");
+    let reg = by_name.get("new_user_registration").expect("new_user_registration");
+    assert_eq!(reg.controller.0.as_str(), "Users::RegistrationsController");
+}
+
+#[test]
+fn devise_for_rejects_unmodeled_controller_mappings() {
+    // OmniAuth (and any mapping outside the static four) must fail loud —
+    // accepting the key then emitting no routes would hide the gap.
+    let source = br#"Rails.application.routes.draw do
+  devise_for :users, controllers: { omniauth_callbacks: "users/omniauth_callbacks" }
+end
+"#;
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let err = result.expect_err("unmodeled controllers: key must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("omniauth_callbacks") || msg.contains("unsupported devise_for controllers"),
+        "expected unmodeled mapping error, got: {msg}"
+    );
+}
+
+#[test]
+fn devise_for_defaults_controllers_under_devise_module() {
+    // Bare `devise_for :users` must resolve to Devise::*Controller, not
+    // top-level SessionsController (Devise::Mapping#default_controllers).
+    let source = br#"Rails.application.routes.draw do
+  devise_for :users
+end
+"#;
+    roundhouse::ingest::survey::activate();
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let gaps = roundhouse::ingest::survey::drain();
+    let table = result.expect("ingest");
+    assert!(
+        gaps.iter().all(|g| !format!("{g:?}").contains("devise_for")),
+        "bare devise_for must not survey: {gaps:?}"
+    );
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let by_name: std::collections::HashMap<_, _> =
+        flat.iter().map(|r| (r.as_name.as_str(), r)).collect();
+    let session = by_name.get("new_user_session").expect("new_user_session");
+    assert_eq!(session.path, "/users/sign_in");
+    assert_eq!(session.controller.0.as_str(), "Devise::SessionsController");
+    let reg = by_name.get("new_user_registration").expect("new_user_registration");
+    assert_eq!(reg.controller.0.as_str(), "Devise::RegistrationsController");
+    let password = by_name.get("new_user_password").expect("new_user_password");
+    assert_eq!(password.controller.0.as_str(), "Devise::PasswordsController");
+    let confirmation = by_name.get("user_confirmation").expect("user_confirmation");
+    assert_eq!(
+        confirmation.controller.0.as_str(),
+        "Devise::ConfirmationsController"
+    );
+}
+
+/// A route omission is an error on the recovered table, not a fatal parse.
+#[test]
+fn routes_mount_diagnostic_preserves_siblings_in_every_mode() {
+    let source = br#"Rails.application.routes.draw do
+  mount Sidekiq::Web, at: "sidekiq"
+  get "/posts", to: "posts#index"
+end
+"#;
+    let strict = roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+        .expect("mount diagnostics do not abort ingest");
+    assert_eq!(strict.entries.len(), 1);
+    assert_eq!(strict.diagnostics.len(), 1);
+    let diagnostic = &strict.diagnostics[0];
+    assert_eq!(diagnostic.severity, roundhouse::diagnostic::Severity::Error);
+    assert!(!diagnostic.span.is_synthetic());
+    assert_eq!(&source[diagnostic.span.start as usize..diagnostic.span.end as usize],
+        br#"mount Sidekiq::Web, at: "sidekiq""#);
+
+    roundhouse::ingest::survey::activate();
+    let result = roundhouse::ingest::ingest_routes(source, "config/routes.rb");
+    let gaps = roundhouse::ingest::survey::drain();
+    let surveyed = result.expect("survey ingest succeeds");
+    assert_eq!(surveyed.entries, strict.entries);
+    assert_eq!(surveyed.diagnostics, strict.diagnostics);
+    assert_eq!(gaps.len(), 1, "one survey ledger entry: {gaps:?}");
+}
+
+/// Draw files retain their own source attribution and share mount recovery.
+#[test]
+fn mounts_in_split_route_files_keep_the_split_file_span() {
+    let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+        b"Rails.application.routes.draw do\n  draw :admin\nend\n",
+        "config/routes.rb",
+        &std::collections::HashMap::from([("admin".to_string(), (
+            b"mount Catalog::Engine, at: '/catalog'\nget '/ok', to: 'posts#index'\n".to_vec(),
+            "config/routes/admin.rb".to_string(),
+        ))]),
+    ).unwrap();
+    assert_eq!(table.entries.len(), 1);
+    assert_eq!(table.diagnostics.len(), 1);
+    assert_eq!(table.diagnostics[0].span.file,
+        roundhouse::ingest::sources::file_id("config/routes/admin.rb"));
+}
+
+/// A top-level draw is transparent to the fixed runtime cable mount.
+#[test]
+fn top_level_draw_preserves_runtime_cable_mount_context() {
+    let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+        b"Rails.application.routes.draw do\n  draw :cable\nend\n",
+        "config/routes.rb",
+        &std::collections::HashMap::from([("cable".to_string(), (
+            b"mount ActionCable.server => '/cable'\n".to_vec(),
+            "config/routes/cable.rb".to_string(),
+        ))]),
+    ).unwrap();
+    assert!(table.diagnostics.is_empty(), "{table:?}");
+}
+
+/// Transparent draw/concern expansion inherits its invocation's mount scope.
+#[test]
+fn cable_mounts_inherit_draw_and_concern_scope() {
+    let draws = std::collections::HashMap::from([("cable".to_string(), (
+        b"mount ActionCable.server => '/cable'\n".to_vec(),
+        "config/routes/cable.rb".to_string(),
+    ))]);
+    for (body, expected) in [
+        ("draw :cable", 0),
+        ("namespace :admin do\n draw :cable\nend", 1),
+        ("concern :live do\n mount ActionCable.server => '/cable'\nend\nconcerns :live", 0),
+        ("concern :live do\n mount ActionCable.server => '/cable'\nend\nnamespace :admin do\n concerns :live\nend", 1),
+        ("concern :live do\n mount ActionCable.server => '/cable'\nend\nresources :widgets, concerns: :live", 1),
+        ("constraints id: /[0-9]+/ do\n mount ActionCable.server => '/cable'\nend", 1),
+        ("devise_scope :user do\n mount ActionCable.server => '/cable'\nend", 1),
+        ("if Rails.env.development?\n mount ActionCable.server => '/cable'\nend", 1),
+    ] {
+        let source = format!("Rails.application.routes.draw do\n{body}\nend\n");
+        let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+            source.as_bytes(), "config/routes.rb", &draws,
+        ).unwrap();
+        assert_eq!(table.diagnostics.len(), expected, "{body}: {table:?}");
+        for diagnostic in &table.diagnostics {
+            let span = diagnostic.span;
+            let origin = if span.file == roundhouse::ingest::sources::file_id("config/routes/cable.rb") {
+                draws["cable"].0.as_slice()
+            } else {
+                source.as_bytes()
+            };
+            assert_eq!(&origin[span.start as usize..span.end as usize],
+                b"mount ActionCable.server => '/cable'", "{body}: located mount");
+        }
+    }
+
+    // These guards are rejected before the fixed runtime cable mount is
+    // visited. Treating them as transparent would discard their guard.
+    for wrapper in ["authenticate :user", "authenticated :user", "unauthenticated :user"] {
+        let source = format!(
+            "Rails.application.routes.draw do\n  {wrapper} do\n    mount ActionCable.server => '/cable'\n  end\nend\n"
+        );
+        let err = roundhouse::ingest::routes::ingest_routes_with_draws(
+            source.as_bytes(),
+            "config/routes.rb",
+            &draws,
+        )
+        .expect_err("auth guard must fail closed before a nested mount");
+        let method = wrapper.split_whitespace().next().unwrap();
+        let expected_diagnostic = format!("unsupported routes DSL: `{method}`");
+        assert!(
+            err.to_string().contains(expected_diagnostic.as_str()),
+            "{wrapper}: {err}"
+        );
+    }
+}
+
+/// A loaded file's own draw opens a fresh mapper, then restores the caller's
+/// scope. Draw inclusion instead keeps the caller's mapper.
+#[test]
+fn loaded_route_draw_resets_and_restores_mount_scope() {
+    let loaded = b"Rails.application.routes.draw do\n mount ActionCable.server => '/cable'\n mount Catalog::Engine, at: '/catalog'\n get '/ok', to: 'posts#index'\nend\n";
+    for include in [
+        "load Rails.root.join('config/routes/cable.rb')",
+        "instance_eval(File.read(Rails.root.join('config/routes/cable.rb')))",
+    ] {
+        let source = format!("Rails.application.routes.draw do\n namespace :admin do\n  {include}\n  mount ActionCable.server => '/cable'\n end\n mount ActionCable.server => '/cable'\nend\n");
+        let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+            source.as_bytes(), "config/routes.rb",
+            &std::collections::HashMap::from([("cable".to_string(), (
+                loaded.to_vec(), "config/routes/cable.rb".to_string(),
+            ))]),
+        ).unwrap();
+        assert_eq!(table.diagnostics.len(), 2, "{include}: {table:?}");
+        assert_eq!(table.diagnostics[0].span.file,
+            roundhouse::ingest::sources::file_id("config/routes/cable.rb"));
+        let span = table.diagnostics[0].span;
+        assert_eq!(&loaded[span.start as usize..span.end as usize],
+            b"mount Catalog::Engine, at: '/catalog'");
+        assert_eq!(table.diagnostics[1].span.file,
+            roundhouse::ingest::sources::file_id("config/routes.rb"));
+        assert!(table.entries.iter().any(|r| matches!(r,
+            roundhouse::RouteSpec::Explicit { path, .. } if path == "/ok")),
+            "the loaded sibling stays at top scope: {table:?}");
+    }
 }
 
 #[test]
@@ -931,7 +1284,7 @@ fn classifies_models_vs_library_classes() {
 /// Survey-mode ingest must recover from an unsupported construct (rather
 /// than aborting the whole app) and must record skipped view templates.
 /// This is the behavior the LSP/MCP rely on to stay usable on real apps,
-/// and the surfacing that keeps unsupported (Slim/`.text.erb`/`.ruby`)
+/// and the surfacing that keeps unsupported (RABL/`.text.erb`/`.ruby`)
 /// views from vanishing silently.
 #[test]
 fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
@@ -948,8 +1301,8 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
         ),
         // A HAML view: now ingested through the shared view pipeline.
         ("app/views/widgets/show.html.haml", "%h1= @widget.name\n"),
-        // A Slim view: still an unsupported engine the analyzer skips.
-        ("app/views/widgets/show.html.slim", "h1 = @widget.name\n"),
+        // A RABL view: still an unsupported engine the analyzer skips.
+        ("app/views/widgets/index.html.rabl", "object @widget\n"),
     ];
     let tree = || -> HashMap<PathBuf, Vec<u8>> {
         files
@@ -987,8 +1340,8 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
     assert!(
         messages
             .iter()
-            .any(|m| m.contains("view template not ingested: slim")),
-        "skipped Slim view should be recorded as a gap, got: {messages:?}"
+            .any(|m| m.contains("view template not ingested: rabl")),
+        "skipped RABL view should be recorded as a gap, got: {messages:?}"
     );
     assert!(
         !messages.is_empty(),
@@ -1180,13 +1533,13 @@ fn survey_mode_keeps_the_class_when_one_body_item_is_unsupported() {
 }
 
 #[test]
-fn cattr_classvar_bodies_normalize_to_class_ivars() {
+fn cattr_and_verbatim_classvar_reads_share_storage() {
+    use roundhouse::expr::LValue;
     use roundhouse::ingest::ingest_library_classes;
     use roundhouse::{Expr, ExprNode};
 
-    // The extras/keybase.rb shape: cattr_accessor storage and verbatim
-    // `@@X` reads must agree (class-level ivar), and the `@@X = nil`
-    // body initializer drops as semantically exact.
+    // extras/keybase.rb shape: cattr_accessor and verbatim `@@X` share
+    // Rails class-variable storage; the `@@X = nil` seed is kept.
     let src = br#"class Keybase
   cattr_accessor :DOMAIN
 
@@ -1200,49 +1553,50 @@ end
     let classes = ingest_library_classes(src, "extras/keybase.rb").expect("ingest");
     let kb = &classes[0];
 
-    fn has_classvar(e: &Expr) -> bool {
+    fn has_classvar(e: &Expr, cvar: &str) -> bool {
         let mut found = false;
-        fn walk(e: &Expr, found: &mut bool) {
+        fn walk(e: &Expr, cvar: &str, found: &mut bool) {
             if let ExprNode::Var { name, .. } = &*e.node {
-                if name.as_str().starts_with("@@") {
+                if name.as_str() == cvar {
                     *found = true;
                 }
             }
-            e.node.for_each_child(&mut |c| walk(c, found));
+            e.node.for_each_child(&mut |c| walk(c, cvar, found));
         }
-        walk(e, &mut found);
-        found
-    }
-    fn reads_ivar(e: &Expr, ivar: &str) -> bool {
-        let mut found = false;
-        fn walk(e: &Expr, ivar: &str, found: &mut bool) {
-            if let ExprNode::Ivar { name } = &*e.node {
-                if name.as_str() == ivar {
-                    *found = true;
-                }
-            }
-            e.node.for_each_child(&mut |c| walk(c, ivar, found));
-        }
-        walk(e, ivar, &mut found);
+        walk(e, cvar, &mut found);
         found
     }
 
+    assert!(
+        kb.class_ivar_initializers.iter().any(|expr| {
+            matches!(
+                &*expr.node,
+                ExprNode::Assign {
+                    target: LValue::Var { name, .. },
+                    ..
+                } if name.as_str() == "@@DOMAIN"
+            )
+        }),
+        "@@DOMAIN = nil seed must survive"
+    );
     let enabled = kb
         .methods
         .iter()
         .find(|m| m.name.as_str() == "enabled?")
         .expect("enabled? ingested");
     assert!(
-        !has_classvar(&enabled.body) && reads_ivar(&enabled.body, "DOMAIN"),
-        "class-method @@DOMAIN read should normalize to the @DOMAIN class ivar"
+        has_classvar(&enabled.body, "@@DOMAIN"),
+        "class-method @@DOMAIN read must keep shared class-variable storage"
     );
-    // The cattr_accessor reader uses the same storage.
     let reader = kb
         .methods
         .iter()
         .find(|m| m.name.as_str() == "DOMAIN")
         .expect("cattr reader synthesized");
-    assert!(reads_ivar(&reader.body, "DOMAIN"), "accessor reads @DOMAIN");
+    assert!(
+        has_classvar(&reader.body, "@@DOMAIN"),
+        "accessor reads @@DOMAIN"
+    );
 }
 
 #[test]
@@ -1558,6 +1912,367 @@ fn block_arg_ivar_and_call_result_preserve_the_forwarded_expression() {
 }
 
 #[test]
+fn defined_extended_targets_ingest_and_round_trip() {
+    // Gap #18.2: retain Tim Tischler's constant, call and super controls.
+    use roundhouse::emit::ruby::emit_expr;
+
+    for source in ["defined?(Widget)", "defined?(Widget::Kind)", "defined?(widget.kind)", "defined?(super)"] {
+        let parse = |source: &str| {
+            let result = ruby_prism::parse(source.as_bytes());
+            let program = result.node();
+            let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+            roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+        };
+        let expr = parse(source);
+        let ExprNode::Defined { operand } = &*expr.node else {
+            panic!("expected native defined? syntax: {expr:?}");
+        };
+        match source {
+            "defined?(Widget)" => assert!(matches!(&*operand.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["Widget"])),
+            "defined?(Widget::Kind)" => assert!(matches!(&*operand.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["Widget", "Kind"])),
+            "defined?(widget.kind)" => assert!(matches!(&*operand.node, ExprNode::Send { recv: Some(_), method, .. } if method.as_str() == "kind")),
+            _ => assert!(matches!(&*operand.node, ExprNode::Super { args: None })),
+        }
+        let emitted = emit_expr(&expr);
+        assert_eq!(emit_expr(&parse(&emitted)), emitted);
+        let mut children = 0;
+        expr.node.for_each_child(&mut |_| children += 1);
+        assert_eq!(children, 0, "a syntax query must not expose value children");
+    }
+}
+
+#[test]
+fn class_variable_compound_assignment_in_method_body_ingests_and_round_trips() {
+    use roundhouse::emit::ruby::emit_expr;
+    use roundhouse::expr::{LValue, OpAssignOp};
+
+    for source in ["@@count ||= 0", "@@count = 1"] {
+        let parse = |source: &str| {
+            let result = ruby_prism::parse(source.as_bytes());
+            let program = result.node();
+            let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+            roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+        };
+        let expr = parse(source);
+        if source.contains("||=") {
+            assert!(matches!(&*expr.node, ExprNode::OpAssign { target: LValue::Var { name, .. }, op: OpAssignOp::OrOr, .. } if name.as_str() == "@@count"));
+        } else {
+            assert!(matches!(&*expr.node, ExprNode::Assign { target: LValue::Var { name, .. }, .. } if name.as_str() == "@@count"));
+        }
+        assert_eq!(emit_expr(&expr), source);
+        assert_eq!(emit_expr(&parse(source)), source);
+    }
+}
+
+#[test]
+fn specific_ledger_messages_replace_the_generic_catch_all() {
+    use roundhouse::ingest::IngestError;
+
+    for (source, expected) in [
+        ("`ls`", "shell command (backticks) is not modeled"),
+        ("%x{ls}", "shell command (backticks) is not modeled"),
+        ("$stdout = out", "global variable write"),
+        ("class Foo; end", "class/module defined inside a method or block (runtime class definition)"),
+        ("module Foo; end", "class/module defined inside a method or block (runtime class definition)"),
+        ("1 + ", "unparsed fragment (Prism recovery node)"),
+    ] {
+        let result = ruby_prism::parse(source.as_bytes());
+        let program = result.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let Err(IngestError::Unsupported { message, .. }) = roundhouse::ingest::ingest_expr(&stmt, "<snippet>") else {
+            panic!("expected unsupported: {source}");
+        };
+        assert_eq!(message, expected);
+    }
+}
+
+#[test]
+fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
+    use roundhouse::emit::ruby::emit_expr;
+
+    let parse = |source: &str| {
+        let result = ruby_prism::parse(source.as_bytes());
+        let program = result.node();
+        roundhouse::ingest::ingest_expr(&program.as_program_node().unwrap().statements().as_node(), "<snippet>").unwrap()
+    };
+    let expr = parse("a, *b, c = [1, 2, 3, 4]");
+    let emitted = emit_expr(&expr);
+    assert!(emitted.contains("a = "), "{emitted}");
+    assert!(emitted.contains(".drop(1).take("), "{emitted}");
+    assert!(emitted.contains("[-1]"), "{emitted}");
+    assert_eq!(expr, parse(&emitted), "round-trip IR, not only emitted text, must be stable");
+    assert_eq!(emit_expr(&parse(&emitted)), emitted);
+}
+
+#[test]
+fn multi_write_temporary_does_not_capture_a_user_target() {
+    let source = "a, *__mw_0, c = [11, 22, 33]";
+    let result = ruby_prism::parse(source.as_bytes());
+    let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+    let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap();
+    let ExprNode::Seq { exprs } = &*expr.node else { panic!("expected desugared assignment") };
+    let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*exprs[0].node else {
+        panic!("expected temporary binding");
+    };
+    assert_ne!(name.as_str(), "__mw_0");
+}
+
+#[test]
+fn simple_defined_operands_keep_ruby_descriptors() {
+    for (source, expected) in [
+        ("defined?(self)", "self"), ("defined?(nil)", "nil"),
+        ("defined?(true)", "true"), ("defined?(false)", "false"),
+        ("defined?(17)", "expression"),
+    ] {
+        let result = ruby_prism::parse(source.as_bytes());
+        let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap();
+        assert!(matches!(&*expr.node, ExprNode::Lit { value: Literal::Str { value } } if value == expected), "{source}: {expr:?}");
+    }
+}
+
+#[test]
+fn post_rest_effectful_targets_remain_explicitly_unsupported() {
+    for source in [
+        "a, *, mark(log)[0] = [rhs(log)]",
+        "mark(log)[0], *b, c = [rhs(log)]",
+        "a, *mark(log)[0], c = [rhs(log)]",
+        "a, *, target.value = [rhs(log)]",
+    ] {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "legal Ruby control: {source}");
+        let program = result.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err("LHS order must not change silently");
+        assert!(err.to_string().contains("preserved LHS evaluation order"), "{err}");
+    }
+}
+
+#[test]
+fn class_method_classvar_writes_keep_shared_inheritance_storage() {
+    use roundhouse::expr::ExprNode;
+    for method in ["def self.bump", "class << self; def bump"] {
+        for write in ["@@count ||= 11", "@@count = 14", "@@count &&= 17", "@@count += 3", "@@count -= 1"] {
+            let extra_end = if method.starts_with("class") { "end" } else { "" };
+            let source = format!("class Parent; {method}; {write}; @@count; end; {extra_end}; end\nclass Child < Parent; end");
+            let classes = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+                .expect("shared @@ storage must ingest on class methods");
+            let bump = classes[0]
+                .methods
+                .iter()
+                .find(|m| m.name.as_str() == "bump")
+                .expect("bump");
+            let mut saw = false;
+            bump.body.node.for_each_child(&mut |c| {
+                if matches!(&*c.node, ExprNode::Var { name, .. } if name.as_str() == "@@count") {
+                    saw = true;
+                }
+            });
+            // OpAssign / Assign targets are LValues, not child Exprs — also
+            // accept bodies whose emitted text would read @@count.
+            let text = format!("{:?}", bump.body.node);
+            assert!(
+                saw || text.contains("@@count"),
+                "expected @@count in bump body: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn post_rest_nonliteral_rhs_remains_unsupported_without_coercion() {
+    for rhs in ["11", "nil", "Coercible.new", "values", "[11, 22].dup"] {
+        let source = format!("a, *b, c = {rhs}");
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "legal Ruby control: {source}");
+        let program = result.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>")
+            .expect_err("collection methods do not implement Ruby coercion");
+        assert!(err.to_string().contains("to_ary coercion"), "{err}");
+    }
+}
+
+#[test]
+fn richer_defined_call_shapes_remain_explicitly_unsupported() {
+    for source in ["defined?(self.call(11))", "defined?(self.call {})", "defined?(self&.call)"] {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0);
+        let program = result.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err("unverified query shape");
+        assert!(err.to_string().contains("defined? calls"), "{err}");
+    }
+}
+
+#[test]
+fn mattr_and_native_classvar_writes_share_storage() {
+    // Rails mattr/cattr is @@; a hand-written @@ write is the same slot.
+    for declaration in ["cattr_accessor", "mattr_accessor"] {
+        let source = format!(
+            "class Probe; {declaration} :count; def bump; @@count = 11; end; def self.current; @@count; end; end"
+        );
+        let classes = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+            .expect("shared @@ storage must ingest");
+        assert!(
+            classes[0].class_ivar_initializers.iter().any(|expr| {
+                matches!(
+                    &*expr.node,
+                    ExprNode::Assign {
+                        target: LValue::Var { name, .. },
+                        ..
+                    } if name.as_str() == "@@count"
+                ) || matches!(
+                    &*expr.node,
+                    ExprNode::If { else_branch, .. } if matches!(
+                        &*else_branch.node,
+                        ExprNode::Assign {
+                            target: LValue::Var { name, .. },
+                            ..
+                        } if name.as_str() == "@@count"
+                    )
+                )
+            }),
+            "mattr seeds @@count = nil: {:?}",
+            classes[0].class_ivar_initializers
+        );
+    }
+}
+
+#[test]
+fn cattr_defaults_cannot_be_silently_dropped_with_native_initializers() {
+    for declaration in ["cattr_reader", "cattr_writer", "cattr_accessor", "mattr_reader", "mattr_writer", "mattr_accessor"] {
+        for default in ["default: 41", "default: nil", ""] {
+            let call = if default.is_empty() {
+                format!("{declaration}(:count) {{ 41 }}")
+            } else {
+                format!("{declaration} :count, {default}")
+            };
+            for body in [format!("@@count = nil; {call}"), format!("{call}; @@count = nil")] {
+                let source = format!("class Probe; {body}; def self.current; @@count; end; end");
+                let err = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+                    .expect_err("an explicit default must not share a body with a native @@ seed");
+                assert!(err.to_string().contains("cattr/mattr defaults require source-order initialization"), "{err}");
+            }
+            // Standalone parseable defaults seed @@attr = <value>.
+            let source = format!("class Probe; {call}; end");
+            let classes = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+                .expect("standalone class-attribute default must seed");
+            let seed_value = classes[0].class_ivar_initializers.iter().find_map(|expr| {
+                match &*expr.node {
+                    ExprNode::Assign {
+                        target: LValue::Var { name, .. },
+                        value,
+                    } if name.as_str() == "@@count" => Some(value),
+                    // Nil defaults are conditional (`unless class_variable_defined?`).
+                    ExprNode::If { else_branch, .. } => match &*else_branch.node {
+                        ExprNode::Assign {
+                            target: LValue::Var { name, .. },
+                            value,
+                        } if name.as_str() == "@@count" => Some(value),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            });
+            assert!(
+                seed_value.is_some(),
+                "missing @@count seed for {call}: {:?}",
+                classes[0].class_ivar_initializers
+            );
+            let value = seed_value.unwrap();
+            let expected_nil = default == "default: nil";
+            assert_eq!(
+                matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }),
+                expected_nil,
+                "{call}: {:?}",
+                value.node
+            );
+            if default == "default: 41" || default.is_empty() {
+                assert!(
+                    matches!(&*value.node, ExprNode::Lit { value: Literal::Int { value: 41 } }),
+                    "{call}: {:?}",
+                    value.node
+                );
+            }
+        }
+        for default in ["**{default: 41}", "**options", "instance_reader: false, default: 41"] {
+            let call = format!("{declaration} :count, {default}");
+            let source = format!("class Probe; {call}; end");
+            let classes = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+                .expect("unmodeled defaults leave the class standing");
+            assert!(
+                classes[0].class_ivar_initializers.iter().all(|expr| {
+                    !matches!(
+                        &*expr.node,
+                        ExprNode::Assign {
+                            target: LValue::Var { name, .. },
+                            ..
+                        } if name.as_str() == "@@count"
+                    )
+                }),
+                "unmodeled default must not nil-seed @@count: {:?}",
+                classes[0].class_ivar_initializers
+            );
+            assert!(
+                !classes[0].methods.iter().any(|m| m.name.as_str() == "count"),
+                "unmodeled default must not synthesize accessors"
+            );
+            assert!(
+                !classes[0].unknown_calls.is_empty(),
+                "unmodeled mattr/cattr must remain an unknown call"
+            );
+        }
+        let source = format!("class Probe; @@count = nil; {declaration} :count; end");
+        let classes = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb").unwrap();
+        assert_eq!(
+            classes[0].class_ivar_initializers.len(),
+            1,
+            "source @@nil seed is kept for shared mattr storage"
+        );
+        assert!(matches!(
+            &*classes[0].class_ivar_initializers[0].node,
+            ExprNode::Assign {
+                target: LValue::Var { name, .. },
+                ..
+            } if name.as_str() == "@@count"
+        ));
+    }
+}
+
+#[test]
+fn native_classvar_initialization_uses_owned_initializer_ir() {
+    let classes = roundhouse::ingest::ingest_library_classes(
+        b"class Probe; @@count = nil; def self.current; @@count; end; end", "probe.rb",
+    ).unwrap();
+    assert!(classes[0].unknown_calls.is_empty());
+    assert!(matches!(&*classes[0].class_ivar_initializers[0].node,
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } if name.as_str() == "@@count"));
+    for declaration in ["arbitrary_dsl", "INITIAL = @@count", "include Other"] {
+        let source = format!("class Probe; @@count = nil; {declaration}; end");
+        let err = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb")
+            .expect_err("separate class-body buckets cannot preserve interleaving");
+        assert!(err.to_string().contains("requires source ordering"), "{err}");
+    }
+}
+
+#[test]
+fn native_initializers_keep_order_across_singleton_body_merges() {
+    let classes = roundhouse::ingest::ingest_library_classes(
+        b"class Probe; @@before=nil; class << self; @@middle=nil; end; @@after=nil; end",
+        "recursive_initializer.rb",
+    ).unwrap();
+    let names: Vec<_> = classes[0].class_ivar_initializers.iter().map(|expr| {
+        assert!(!expr.span.is_synthetic());
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. } => name.as_str(),
+            other => panic!("unexpected initializer: {other:?}"),
+        }
+    }).collect();
+    assert_eq!(names, ["@@before", "@@middle", "@@after"]);
+}
+
+#[test]
 fn case_in_pattern_matching() {
     use roundhouse::expr::{HashRest, MatchGuardKind, MatchPattern};
 
@@ -1703,4 +2418,175 @@ fn case_in_pattern_matching() {
     // `value => pattern` — MatchRequired, binds or raises.
     let e = parse_one(b"y => Integer");
     assert!(matches!(&*e.node, ExprNode::MatchRequired { .. }));
+}
+
+#[test]
+fn nested_class_methods_cannot_relocate_native_initializers() {
+    use roundhouse::ingest::ingest_library_classes;
+    let err = ingest_library_classes(
+        b"module Probe; module ClassMethods; @@flag = nil; def flag; @@flag; end; end; end",
+        "probe.rb",
+    ).expect_err("ClassMethods owns @@flag, not the enclosing Probe");
+    assert!(err.to_string().contains("class-variable initialization in module ClassMethods is not modeled"), "{err}");
+
+    // A cattr in the same body shares @@ storage; the nil seed relocates
+    // onto Probe with the ClassMethods methods.
+    let classes = ingest_library_classes(
+        b"module Probe; module ClassMethods; @@flag = nil; cattr_accessor :flag; def read; @@flag; end; end; end",
+        "probe.rb",
+    ).unwrap();
+    let probe = classes.iter().find(|class| class.name.0.as_str() == "Probe").unwrap();
+    assert!(
+        probe.class_ivar_initializers.iter().any(|expr| {
+            matches!(
+                &*expr.node,
+                roundhouse::expr::ExprNode::Assign {
+                    target: roundhouse::expr::LValue::Var { name, .. },
+                    ..
+                } if name.as_str() == "@@flag"
+            )
+        }),
+        "@@flag seed must fold onto Probe: {:?}",
+        probe.class_ivar_initializers
+    );
+    assert!(probe.methods.iter().any(|method| method.name.as_str() == "read"));
+
+    // An initializer actually owned by Probe must not be rejected.
+    let classes = ingest_library_classes(
+        b"module Probe; @@flag = nil; module ClassMethods; def flag; @@flag; end; end; end",
+        "probe.rb",
+    ).unwrap();
+    let probe = classes.iter().find(|class| class.name.0.as_str() == "Probe").unwrap();
+    assert_eq!(probe.class_ivar_initializers.len(), 1);
+
+    // Plain ClassMethods cattr (no source @@) still relocates a nil seed.
+    let classes = ingest_library_classes(
+        b"module Probe; module ClassMethods; cattr_accessor :flag; end; end",
+        "probe.rb",
+    ).unwrap();
+    let probe = classes.iter().find(|class| class.name.0.as_str() == "Probe").unwrap();
+    assert!(
+        probe.class_ivar_initializers.iter().any(|expr| {
+            matches!(
+                &*expr.node,
+                roundhouse::expr::ExprNode::Assign {
+                    target: roundhouse::expr::LValue::Var { name, .. },
+                    ..
+                } if name.as_str() == "@@flag"
+            ) || matches!(
+                &*expr.node,
+                roundhouse::expr::ExprNode::If { else_branch, .. } if matches!(
+                    &*else_branch.node,
+                    roundhouse::expr::ExprNode::Assign {
+                        target: roundhouse::expr::LValue::Var { name, .. },
+                        ..
+                    } if name.as_str() == "@@flag"
+                )
+            )
+        }),
+        "ClassMethods cattr must seed @@flag on Probe: {:?}",
+        probe.class_ivar_initializers
+    );
+    assert!(probe.methods.iter().any(|m| m.name.as_str() == "flag"));
+}
+
+#[test]
+fn direct_class_and_module_compound_ivar_writes_are_initializers() {
+    use roundhouse::expr::OpAssignOp;
+    use roundhouse::ingest::ingest_library_classes;
+
+    for kind in ["class", "module"] {
+        let source = format!("{kind} Probe\n  @cache ||= 7\n  @cache &&= 8\n  @cache += 1\n  \
+            class << self\n    @singleton_cache ||= 9\n  end\n  def self.cache; @cache; end\nend\n");
+        let classes = ingest_library_classes(source.as_bytes(), "probe.rb").unwrap();
+        let probe = classes.iter().find(|class| class.name.0.as_str() == "Probe").unwrap();
+        assert!(probe.unknown_calls.is_empty(), "compound writes belong to the initializer list");
+        assert_eq!(probe.class_ivar_initializers.len(), 3, "{kind} body loses a compound write");
+        for (initializer, expected_op) in probe.class_ivar_initializers.iter()
+            .zip([OpAssignOp::OrOr, OpAssignOp::AndAnd, OpAssignOp::Add])
+        {
+            assert!(matches!(&*initializer.node,
+                ExprNode::OpAssign { target: LValue::Ivar { name }, op, .. }
+                    if name.as_str() == "cache" && *op == expected_op));
+            assert_eq!(&source[initializer.span.start as usize..initializer.span.end as usize],
+                match expected_op {
+                    OpAssignOp::OrOr => "@cache ||= 7",
+                    OpAssignOp::AndAnd => "@cache &&= 8",
+                    OpAssignOp::Add => "@cache += 1",
+                    _ => unreachable!(),
+                });
+        }
+    }
+}
+
+/// Parameters after a rest (`->(*, payload)`, `|*rest, a, b|`) used to
+/// vanish: Lambda IR has no slot for them, so `->(*, payload) {
+/// payload[:sql] }` emitted as `-> { payload[:sql] }`, a body reading a
+/// name nothing bound, and the expression IR diverged across a round
+/// trip. They are now popped off the rest, last first, which is Ruby's
+/// own rule, and the emitted form reaches a fixed point.
+#[test]
+fn parameters_after_a_rest_are_popped_off_it() {
+    use roundhouse::emit::ruby::emit_expr;
+    let cases: &[(&[u8], &[&str])] = &[
+        (b"cb = ->(*, payload) { payload[:sql] }", &["->(*__rest)", "payload = __rest.pop"]),
+        (b"cb = ->(*rest, a, b) { [rest, a, b] }", &["->(*rest)", "b = rest.pop", "a = rest.pop"]),
+        (b"cb = ->(*args) { args }", &["->(*args)"]),
+        (b"xs.each { |*, last| p last }", &["|*__rest|", "last = __rest.pop"]),
+    ];
+    for (source, wants) in cases {
+        let first = emit_expr(&ingest_snippet(source));
+        for want in *wants {
+            assert!(first.contains(want), "{}: expected `{want}` in:\n{first}", String::from_utf8_lossy(source));
+        }
+        let second = emit_expr(&ingest_snippet(first.as_bytes()));
+        assert_eq!(first, second, "{} is not a fixed point", String::from_utf8_lossy(source));
+    }
+}
+
+/// `wrap_parameters` in a form the ParamsWrapper lowering reads (`false`,
+/// `format:`, a name, a model, `include:`/`exclude:`) is consumed without a
+/// survey line; a form it cannot read (a method call as the argument)
+/// stays ledgered, and the lowering leaves that controller unwrapped.
+#[test]
+fn recognized_wrap_parameters_forms_are_consumed_others_stay_in_the_survey() {
+    use roundhouse::ingest::{ingest_app_from_tree, survey, IngestError};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let files: &[(&str, &str)] = &[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::API\n  wrap_parameters false\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  wrap_parameters format: [:json], include: [:name]\nend\n",
+        ),
+        (
+            "app/controllers/gadgets_controller.rb",
+            "class GadgetsController < ApplicationController\n  wrap_parameters wrapper_options\nend\n",
+        ),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+        .collect();
+
+    survey::activate();
+    let result = ingest_app_from_tree(tree);
+    let gaps = survey::drain();
+    result.expect("survey-mode ingest succeeds");
+
+    let wrap_gaps: Vec<(String, String)> = gaps
+        .iter()
+        .filter_map(|g| match g {
+            IngestError::Unsupported { file, message } if message.contains("`wrap_parameters`") => {
+                Some((file.clone(), message.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(wrap_gaps.len(), 1, "only the unreadable form is a gap: {wrap_gaps:?}");
+    assert!(wrap_gaps[0].0.to_lowercase().contains("gadgets"), "{wrap_gaps:?}");
 }

@@ -259,6 +259,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                 // AN ARGUMENT, NOT A BLOCK: `ActiveJob.enqueue` names its
                 // parameter `^() -> nil` so the runtime file types
                 // fully, and RBS has no syntax for naming a block.
+                let held_block = block.clone();
                 let mut enqueue = Expr::new(
                     span,
                     ExprNode::Send {
@@ -314,12 +315,42 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     },
                 );
                 cond.ty = Some(Ty::Bool);
+                // Under `enqueue_only` the work is HELD rather than
+                // dropped, so a blockless `perform_enqueued_jobs` can run
+                // it later, as Rails' `:test` adapter can
+                // (basecamp/once-campfire#296's tests post first and
+                // perform after). Same Proc the drain takes.
+                let mut hold = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(active_job(span)),
+                        method: Symbol::from("hold"),
+                        args: vec![
+                            {
+                                let mut lit = Expr::new(
+                                    span,
+                                    ExprNode::Lit {
+                                        value: crate::expr::Literal::Str {
+                                            value: lc.name.0.as_str().to_string(),
+                                        },
+                                    },
+                                );
+                                lit.ty = Some(Ty::Str);
+                                lit
+                            },
+                            held_block,
+                        ],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                hold.ty = Some(Ty::Nil);
                 let mut guarded = Expr::new(
                     span,
                     ExprNode::If {
                         cond,
                         then_branch: queued_or_inline,
-                        else_branch: nil_arm.clone(),
+                        else_branch: hold,
                     },
                 );
                 guarded.ty = Some(Ty::Nil);

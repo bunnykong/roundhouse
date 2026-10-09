@@ -223,7 +223,8 @@ module Rails
       k = key.to_s
       return nil unless @entries.key?(k)
       due = @expires_at[k]
-      return @entries[k] if due == 0 || due > Time.now.to_i
+      return @entries[k] if due == 0
+      return @entries[k] if due > Time.now.to_i
       forget(k)
       nil
     end
@@ -481,13 +482,30 @@ module Rails
       []
     end
 
+    # `config.active_storage.video_preview_arguments` — ffmpeg argv
+    # after `-i`. Default is the select/keyframe/scene filter the
+    # poster reopen has always drawn with; campfire's initializer
+    # adds `gte(t,5)` and ingest overrides this one method.
+    # `ActiveStorage.video_preview_vf_filter` peels `-vf` from here.
+    def active_storage_video_preview_arguments
+      "-vf 'select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1' -frames:v 1 -f image2"
+    end
+
+    # `config.active_storage.previewers` — default video previewer.
+    # A VideoPreviewer → replacement Const map is synthesized onto
+    # the Application reopen at ingest (where the app Const resolves).
+    def active_storage_previewers
+      [ActiveStorage::Previewer::VideoPreviewer]
+    end
+
     # `Vips.block_untrusted(true)` / `Vips.block("<op>", true)` in an
     # initializer: libvips' loader policy, which an app that stores
     # user uploads sets before any image is decoded. Lifted at ingest
     # onto the reopen, the same way as the trim above; applied by the
     # image processor (runtime/spinel/facades/active_storage_processor
-    # _vips.rb) when it loads. Nothing blocked when the app says
-    # nothing, which is libvips' own default.
+    # _vips.rb) when it loads, which also wraps find_load so a blocked
+    # loader is not selected on libvips 8.14. Nothing blocked when the
+    # app says nothing, which is libvips' own default.
     def vips_block_untrusted
       false
     end
@@ -496,11 +514,11 @@ module Rails
       []
     end
 
-    # `config.default_per_page = N` inside `Kaminari.configure` in an
-    # initializer: the page size `Relation#page` applies. Lifted at
-    # ingest onto the reopen like the settings above; Kaminari's own
-    # default when the app configures none.
-    def kaminari_default_per_page
+    # Default page size for `Relation#page`. Ingest lifts a literal
+    # `config.default_per_page = N` from a `Kaminari.configure` block
+    # (one input spelling) onto this reopen; 25 when the app configures
+    # none.
+    def default_per_page
       25
     end
   end
@@ -544,5 +562,19 @@ module GlobalID
   # once base64 has been applied.
   def self.uri(model_name, id)
     "gid://" + Rails.application.global_id_app + "/" + model_name + "/" + id.to_s
+  end
+
+  # Mint a signed GlobalID for `(model_name, id)` under `purpose` —
+  # the write half of `GlobalID::Locator.locate_signed`. Same
+  # `signed_global_ids` envelope ActionText attachables use; purpose
+  # is coerced with `to_s` so Symbol and String mints verify alike.
+  def self.signed(model_name, id, purpose)
+    ActionController::MessageVerifier.gid_envelope(
+      Rails.application.secret_key_base,
+      "signed_global_ids",
+      ActionController::MessageVerifier.json_string(uri(model_name, id)),
+      purpose.to_s,
+      ""
+    )
   end
 end

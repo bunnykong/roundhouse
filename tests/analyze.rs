@@ -124,22 +124,20 @@ fn params_resolves_via_implicit_self_in_action_body() {
     assert_eq!(method.as_str(), "[]");
     let params_recv = recv.as_ref().expect("bracket has a receiver");
 
-    // `params` (implicit self Send) — now resolved via ctx.self_ty to Hash<Sym, Str>.
+    // `params` (implicit self Send) — now resolved via ctx.self_ty to ActionController::Parameters.
     match params_recv.ty.as_ref().expect("params ty populated") {
-        Ty::Hash { key, value } => {
-            assert!(matches!(**key, Ty::Sym));
-            assert!(matches!(**value, Ty::Str));
-        }
-        other => panic!("expected Hash<Sym, Str>, got {other:?}"),
+        Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "ActionController::Parameters"),
+        other => panic!("expected ActionController::Parameters, got {other:?}"),
     }
 
-    // `params[:id]` resolves to Union<Str, Nil>.
+    // `params[:id]` resolves to the element union: a String among
+    // Array / Parameters arms, or nil.
     match bracket_send.ty.as_ref().expect("bracket ty populated") {
         Ty::Union { variants } => {
             assert!(variants.iter().any(|v| matches!(v, Ty::Str)));
             assert!(variants.iter().any(|v| matches!(v, Ty::Nil)));
         }
-        other => panic!("expected Union<Str, Nil>, got {other:?}"),
+        other => panic!("expected the params element union, got {other:?}"),
     }
 }
 
@@ -439,6 +437,7 @@ fn actions_without_db_calls_stay_pure() {
         app.controllers.push(roundhouse::dialect::Controller {
             name: ClassId(Symbol::from("NoopController")),
             parent: None,
+            parent_span: Default::default(),
             body: vec![roundhouse::ControllerBodyItem::Action {
                 action: action.clone(),
                 leading_comments: vec![],
@@ -570,7 +569,15 @@ fn action_aggregate_equals_subtree_fold() {
             | ExprNode::Retry
             | ExprNode::Redo
             | ExprNode::ForwardArgs
+            | ExprNode::ForwardKeywords
+            | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
+            ExprNode::ForwardKeywordsWithPairs { entries } => {
+                for (key, value) in entries {
+                    fold(key, acc);
+                    fold(value, acc);
+                }
+            }
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
                     fold(k, acc);
@@ -761,6 +768,7 @@ fn analyze_action_body(body: roundhouse::expr::Expr) -> roundhouse::expr::Expr {
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("TestController")),
         parent: None,
+        parent_span: Default::default(),
         body: vec![ControllerBodyItem::Action {
             action,
             leading_comments: vec![],
@@ -1049,6 +1057,12 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
             if let Some(v) = value { collect_ivar_reads(v, out); }
         }
         ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => collect_ivar_reads(value, out),
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_ivar_reads(key, out);
+                collect_ivar_reads(value, out);
+            }
+        }
         ExprNode::MultiAssign { value, .. } => collect_ivar_reads(value, out),
         ExprNode::While { cond, body, .. } => {
             collect_ivar_reads(cond, out);
@@ -1065,6 +1079,8 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
     }
 }
@@ -1252,6 +1268,12 @@ fn collect_bare_name_sends(
             if let Some(v) = value { collect_bare_name_sends(v, out); }
         }
         ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => collect_bare_name_sends(value, out),
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_bare_name_sends(key, out);
+                collect_bare_name_sends(value, out);
+            }
+        }
         ExprNode::MultiAssign { value, .. } => collect_bare_name_sends(value, out),
         ExprNode::While { cond, body, .. } => {
             collect_bare_name_sends(cond, out);
@@ -1269,6 +1291,8 @@ fn collect_bare_name_sends(
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
     }
 }
@@ -1583,8 +1607,8 @@ fn index_ivar_ty(app: &roundhouse::App, name: &str) -> Ty {
 ///
 /// lobsters' `Search` is the shape: a PORO with `attr_accessor :page`,
 /// living in `app/models`. Because an instance receiver resolves
-/// `class_methods` before `instance_methods`, seeding kaminari's
-/// class-side `page` builder onto it made `@search.page` — an Integer
+/// `class_methods` before `instance_methods`, seeding the class-side
+/// `page` builder onto it made `@search.page` — an Integer
 /// the object assigns itself in `initialize` — resolve to a relation
 /// over `Search`. That mistyping was invisible while chain starts were
 /// `Array`-shaped and became a hard `relation_type` emit error the day
@@ -1643,7 +1667,7 @@ end
         index_ivar_ty(&app, "search"),
     );
 
-    // The attr_accessor answers, NOT kaminari's class-side `page`.
+    // The attr_accessor answers, NOT the class-side `page` builder.
     let page = index_ivar_ty(&app, "page");
     assert!(
         !matches!(page, Ty::Relation { .. } | Ty::Array { .. }),
@@ -2709,6 +2733,169 @@ end
 }
 
 #[test]
+fn activesupport_calendar_methods_type_on_a_date() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"things\" do |t|\n    t.date \"due_on\"\n  end\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def window
+    d = due_on
+    [Date.current.year, Date.yesterday.month, d.beginning_of_month.day, d.end_of_month.day,
+     d.next_month.month, d.yesterday.day, d.in_time_zone("UTC").hour, (d + 2).day,
+     d.all_month.begin.month, 1.in_time_zone("UTC").year]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in [
+        "current",
+        "yesterday",
+        "beginning_of_month",
+        "end_of_month",
+        "next_month",
+        "in_time_zone",
+        "+",
+        "all_month",
+        "begin",
+    ] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "`{m}` should type on Date / Integer calendar; failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
+fn date_minus_untyped_stays_gradual() {
+    // `Date - Untyped` might be Date−Date (Rational) or Date−Integer
+    // (Date). Returning Date would green-light Date-only follow-ups.
+    // `Integer#ago` is typed Untyped (Time-ish), a stable Untyped operand.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"things\" do |t|\n    t.date \"due_on\"\n  end\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def shift
+    due_on - 1.ago
+  end
+end
+"#,
+        ),
+    ]);
+    let thing = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Thing")
+        .expect("Thing");
+    let shift = thing
+        .methods()
+        .find(|m| m.name.as_str() == "shift")
+        .expect("shift");
+    match shift.body.ty.as_ref() {
+        Some(Ty::Untyped) => {}
+        other => panic!("Date − Untyped must stay Untyped, got {other:?}"),
+    }
+}
+
+#[test]
+fn date_plus_untyped_stays_gradual() {
+    // Same gradual rule as minus: Spinel Date has no `+`, and lowering
+    // only grounds Integer/Var shifts. Typing `Date` here would claim
+    // support the emit does not have for Untyped operands.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"things\" do |t|\n    t.date \"due_on\"\n  end\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def shift
+    due_on + 1.ago
+  end
+end
+"#,
+        ),
+    ]);
+    let thing = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Thing")
+        .expect("Thing");
+    let shift = thing
+        .methods()
+        .find(|m| m.name.as_str() == "shift")
+        .expect("shift");
+    match shift.body.ty.as_ref() {
+        Some(Ty::Untyped) => {}
+        other => panic!("Date + Untyped must stay Untyped, got {other:?}"),
+    }
+}
+
+#[test]
+fn date_shift_untyped_stays_gradual() {
+    // `>>` / `<<` are native on Spinel Date, but an Untyped operand is
+    // not known to be an Integer month count — same gradual bar as `+`.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"things\" do |t|\n    t.date \"due_on\"\n  end\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def shift_right
+    due_on >> 1.ago
+  end
+
+  def shift_left
+    due_on << 1.ago
+  end
+end
+"#,
+        ),
+    ]);
+    let thing = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Thing")
+        .expect("Thing");
+    for name in ["shift_right", "shift_left"] {
+        let m = thing.methods().find(|m| m.name.as_str() == name).expect(name);
+        match m.body.ty.as_ref() {
+            Some(Ty::Untyped) => {}
+            other => panic!("Date {name} with Untyped must stay Untyped, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn use_zone_answers_its_block_value() {
     let app = app_from_files(&[
         (
@@ -3707,6 +3894,64 @@ end
 }
 
 #[test]
+fn subclass_filter_reads_parent_target_effects() {
+    // `before_action :load_room` declared on the subclass, method body
+    // on the parent. Lookup by included_via/defined_in both names the
+    // subclass, which never stamped the method.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            r#"class ApplicationController < ActionController::Base
+  private
+
+  def load_room
+    @room = Room.find(1)
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/rooms_controller.rb",
+            r#"class RoomsController < ApplicationController
+  before_action :load_room
+
+  def show
+  end
+end
+"#,
+        ),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("app/views/rooms/show.html.erb", "<p><%= @room %></p>\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+    ]);
+
+    let res = app
+        .controller_resolutions
+        .get(&ClassId(Symbol::from("RoomsController")))
+        .expect("RoomsController resolution");
+    let load = res
+        .filter_chain
+        .iter()
+        .find(|rf| rf.filter.target.as_str() == "load_room")
+        .expect("load_room filter");
+    assert_eq!(load.defined_in.0.as_str(), "RoomsController");
+    assert_eq!(load.included_via.0.as_str(), "RoomsController");
+    assert!(
+        load.effects.effects.iter().any(|e| matches!(e, Effect::DbRead { .. })),
+        "parent load_room DbRead must reach the subclass filter hop; got {:?}",
+        load.effects
+    );
+}
+
+#[test]
 fn controller_resolutions_layout_inheritance_and_skip_entries() {
     let app = app_from_files(&[
         (
@@ -4163,6 +4408,93 @@ fn errors_of(app: &roundhouse::App) -> Vec<String> {
 fn store_shapes_type_without_errors() {
     let app = store_fixture();
     assert_eq!(errors_of(&app), Vec::<String>::new());
+}
+
+/// A uuid-keyed model's tokens are not modeled: Rails writes the key into
+/// the payload as a JSON string, which the token runtime does not read
+/// back. So `find_by_token_for` stays an error there rather than typing
+/// a method nothing defines; the Integer-keyed store model still types.
+#[test]
+fn a_string_keyed_models_token_finder_stays_unsupported() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/invites_controller.rb",
+            "class InvitesController < ApplicationController\n  def show\n    @invite = Invite.find_by_token_for(:accept, params[:token])\n    @subscriber = Subscriber.find_by_token_for(:unsubscribe, params[:token])\n  end\nend\n",
+        ),
+        ("app/models/invite.rb", "class Invite < ApplicationRecord\n  generates_token_for :accept\nend\n"),
+        ("app/models/subscriber.rb", "class Subscriber < ApplicationRecord\n  generates_token_for :unsubscribe\nend\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "invites", id: :uuid, force: :cascade do |t|
+    t.string "email"
+  end
+  create_table "subscribers", force: :cascade do |t|
+    t.string "email"
+  end
+end
+"#,
+        ),
+    ]);
+    let errors = errors_of(&app);
+    assert_eq!(errors.len(), 1, "only the uuid model's finder errors; got {errors:?}");
+    assert!(errors[0].contains("find_by_token_for") && errors[0].contains("Invite"), "got {errors:?}");
+}
+
+/// A model's token methods are all or nothing, since they dispatch on a
+/// purpose passed at runtime. Rails keeps the LAST declaration of a
+/// purpose, so one redeclared in a form the lowering cannot expand
+/// (`expires_at:`) declines the model rather than letting the earlier
+/// form stand in. So does a quoted Symbol purpose, which the synthesized
+/// source cannot spell, even beside a purpose that could be expanded.
+/// A model whose redeclaration CAN be expanded still types.
+#[test]
+fn a_token_purpose_the_lowering_cannot_expand_declines_the_model() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/links_controller.rb",
+            "class LinksController < ApplicationController\n  def show\n    @a = Redeclared.find_by_token_for(:share, params[:token])\n    @b = Quoted.find_by_token_for(:plain, params[:token])\n    @c = Superseded.find_by_token_for(:share, params[:token])\n  end\nend\n",
+        ),
+        (
+            "app/models/redeclared.rb",
+            "class Redeclared < ApplicationRecord\n  generates_token_for :share\n  generates_token_for :share, expires_at: Time.now\nend\n",
+        ),
+        (
+            "app/models/quoted.rb",
+            "class Quoted < ApplicationRecord\n  generates_token_for :plain\n  generates_token_for :\"share-link\"\nend\n",
+        ),
+        (
+            "app/models/superseded.rb",
+            "class Superseded < ApplicationRecord\n  generates_token_for :share, expires_at: Time.now\n  generates_token_for :share\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "redeclareds", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "quoteds", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "supersededs", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+    ]);
+    let errors = errors_of(&app);
+    assert_eq!(errors.len(), 2, "the two declined models' finders error; got {errors:?}");
+    assert!(errors.iter().any(|e| e.contains("Redeclared")), "got {errors:?}");
+    assert!(errors.iter().any(|e| e.contains("Quoted")), "got {errors:?}");
 }
 
 /// `ProductMailer.with(product:, subscriber:)` makes `params[:subscriber]`
@@ -4623,4 +4955,306 @@ fn method_ref_block_arg_types_map_result_by_referenced_method_return_ty() {
         "[1, 2, 3].map(&method(:double)) should type as Array[Integer], got {:?}",
         doubled_list.body.ty,
     );
+}
+
+// ── Controller→view ivar channel: instance_variable_set + view→layout ──
+
+fn widget_schema() -> &'static str {
+    r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "widgets", force: :cascade do |t|
+    t.string "title"
+  end
+end
+"#
+}
+
+#[test]
+fn literal_instance_variable_set_seeds_the_view() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  def show
+    instance_variable_set(:@widget, Widget.find(params[:id]))
+  end
+end
+"#,
+        ),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+        ("app/views/widgets/show.html.erb", "<p><%= @widget.title %></p>\n"),
+        ("db/schema.rb", widget_schema()),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        !unresolved.iter().any(|n| n == "widget"),
+        "@widget from instance_variable_set(:@widget, …) should seed the view; unresolved = {unresolved:?}"
+    );
+}
+
+#[test]
+fn controller_name_instance_variable_set_seeds_the_view() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  def show
+    instance_variable_set("@#{controller_name.singularize}", Widget.find(params[:id]))
+  end
+end
+"#,
+        ),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+        ("app/views/widgets/show.html.erb", "<p><%= @widget.title %></p>\n"),
+        ("db/schema.rb", widget_schema()),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        !unresolved.iter().any(|n| n == "widget"),
+        "@widget from instance_variable_set(\"@#{{controller_name.singularize}}\", …) should seed the view; unresolved = {unresolved:?}"
+    );
+}
+
+#[test]
+fn concern_class_name_instance_variable_set_seeds_subclass_views() {
+    // The SetBookLeaf shape: a concern writes
+    // `instance_variable_set "@#{instance_name}", record` where
+    // `instance_name` is the includer's demodulized class. Each
+    // includer must seed its own conventional ivar, not a shared
+    // Writebook-named special case.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/concerns/record_scoped.rb",
+            r#"module RecordScoped
+  extend ActiveSupport::Concern
+
+  included do
+    before_action :set_record, only: %i[ show edit ]
+  end
+
+  private
+    def set_record
+      instance_variable_set "@#{instance_name}", Widget.find(params[:id])
+    end
+
+    def instance_name
+      controller_record_name.underscore
+    end
+
+    def controller_record_name
+      self.class.to_s.remove("Controller").demodulize.singularize
+    end
+end
+"#,
+        ),
+        (
+            "app/controllers/leaf_records_controller.rb",
+            r#"class LeafRecordsController < ApplicationController
+  include RecordScoped
+
+  def show
+  end
+
+  def edit
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < LeafRecordsController\nend\n",
+        ),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+        ("app/views/widgets/edit.html.erb", "<p><%= @widget.title %></p>\n"),
+        ("app/views/widgets/show.html.erb", "<p><%= @widget.title %></p>\n"),
+        ("db/schema.rb", widget_schema()),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        !unresolved.iter().any(|n| n == "widget"),
+        "@widget from a concern instance_variable_set folded per includer should seed widgets/edit; unresolved = {unresolved:?}"
+    );
+}
+
+#[test]
+fn view_assigned_ivar_seeds_the_layout() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  def show
+    @widget = Widget.find(params[:id])
+  end
+end
+"#,
+        ),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+        (
+            "app/views/widgets/show.html.erb",
+            "<% @section_class = \"wide\" %>\n<p><%= @widget.title %></p>\n",
+        ),
+        (
+            "app/views/layouts/application.html.erb",
+            "<main class=\"<%= @section_class %>\"><%= yield %></main>\n",
+        ),
+        ("db/schema.rb", widget_schema()),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        !unresolved.iter().any(|n| n == "section_class"),
+        "@section_class assigned in the template should be visible in the layout; unresolved = {unresolved:?}"
+    );
+}
+
+#[test]
+fn dynamic_instance_variable_set_stays_unresolved() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  def show
+    instance_variable_set(params[:ivar], Widget.find(params[:id]))
+  end
+end
+"#,
+        ),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+        ("app/views/widgets/show.html.erb", "<p><%= @widget.title %></p>\n"),
+        ("db/schema.rb", widget_schema()),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        unresolved.iter().any(|n| n == "widget"),
+        "a runtime instance_variable_set name must stay fail-closed; unresolved = {unresolved:?}"
+    );
+}
+
+#[test]
+fn namespaced_class_underscore_instance_variable_set_stays_unresolved() {
+    // `Admin::WidgetsController`.to_s.underscore → `admin/widgets_controller`
+    // at runtime; flattening `/` to `_` would seed the wrong ivar.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/admin/widgets_controller.rb",
+            r#"class Admin::WidgetsController < ApplicationController
+  def show
+    instance_variable_set("@#{self.class.to_s.underscore}", Widget.find(params[:id]))
+  end
+end
+"#,
+        ),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+        (
+            "app/views/admin/widgets/show.html.erb",
+            "<p><%= @admin_widgets_controller.title %></p>\n",
+        ),
+        ("db/schema.rb", widget_schema()),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        unresolved.iter().any(|n| n == "admin_widgets_controller"),
+        "namespaced underscore must not flatten `/` into a false ivar; unresolved = {unresolved:?}"
+    );
+}
+
+#[test]
+fn irregular_singularize_instance_variable_set_stays_unresolved() {
+    // App irregular `leaf`/`leaves`: naming → `leaf`, runtime chop → `leave`.
+    // Folding the naming answer would clear a diagnostic the emit cannot honor.
+    let app = app_from_files(&[
+        (
+            "config/initializers/inflections.rb",
+            "ActiveSupport::Inflector.inflections(:en) do |inflect|\n  inflect.irregular \"leaf\", \"leaves\"\nend\n",
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/leaves_controller.rb",
+            r#"class LeavesController < ApplicationController
+  def show
+    instance_variable_set("@#{controller_name.singularize}", Leaf.find(params[:id]))
+  end
+end
+"#,
+        ),
+        ("app/models/leaf.rb", "class Leaf < ApplicationRecord\nend\n"),
+        ("app/views/leaves/show.html.erb", "<p><%= @leaf.title %></p>\n"),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :leaves do |t|\n    t.string :title\n  end\nend\n",
+        ),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        unresolved.iter().any(|n| n == "leaf"),
+        "irregular singularize must stay fail-closed until runtime matches naming; unresolved = {unresolved:?}"
+    );
+}
+
+#[test]
+fn array_to_h_without_a_block_reads_each_element_as_a_pair() {
+    // `pairs.to_h` keyed the Hash by the whole [key, value] pair, so an ivar
+    // rewritten as `@counts = @counts.sort_by { … }.to_h` nested the pair one
+    // level deeper every fixpoint round and the analysis never finished.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/report.rb",
+            r#"class Report < ApplicationRecord
+  def counts
+    @counts = {}
+    ["a", "b", "a"].each do |name|
+      @counts[name] = 0 if @counts[name].nil?
+      @counts[name] += 1
+    end
+    @counts = @counts.sort_by { |k, v| [-v, k] }.to_h
+    @counts.probe_counts
+  end
+
+  def literal_pairs
+    [["a", 1], ["b", 2]].to_h.probe_literal_pairs
+  end
+end
+"#,
+        ),
+    ]);
+    let receiver = |probe: &str| {
+        diagnose(&app)
+            .into_iter()
+            .find(|d| d.message.contains(probe))
+            .map(|d| d.message.split(" on ").last().unwrap_or("").to_string())
+            .unwrap_or_else(|| panic!("no `{probe}` diagnostic"))
+    };
+    // The empty literal's key stays `untyped`; what matters is that no pair nests in.
+    let counts = receiver("probe_counts");
+    assert!(counts.starts_with("Hash[String") && counts.matches('[').count() == 1, "{counts}");
+    assert_eq!(receiver("probe_literal_pairs"), "Hash[Integer | String, Integer | String]");
 }

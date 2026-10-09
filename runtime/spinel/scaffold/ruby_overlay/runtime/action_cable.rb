@@ -89,7 +89,13 @@ module ActionCable
     #
     # LOG FIRST, then dispatch — the order `Broadcasts.record` uses, so a
     # transport that raises cannot lose the record of the attempt.
-    def broadcast(stream, payload)
+    #
+    # `coder: nil` — Rails' "the payload is already encoded": campfire
+    # encodes the unread notice once and hands every member the same
+    # text (basecamp/once-campfire#292). This side carries the Hash, so
+    # the text is read back into one and travels the same path.
+    def broadcast(stream, payload, coder: :json)
+      payload = JSON.parse(payload) if coder.nil?
       Broadcasts.log_append({ action: :message, stream: stream, payload: payload })
       Broadcasts::TRANSPORTS[0].broadcast(stream, payload)
       nil
@@ -218,7 +224,7 @@ module ActionCable
 
     def broadcasts(stream)
       Broadcasts.log.select { |entry| entry[:stream] == stream }.map do |entry|
-        JSON.generate(payload_of(entry))
+        JsonBuilder.escape_html_entities(JSON.generate(payload_of(entry)))
       end
     end
 
@@ -347,6 +353,13 @@ module ActionCable
       end
 
       attr_reader :connection, :identifier, :params, :streams
+
+      # Rails 8.2's channel tests read the stream names off the
+      # subscription (`subscription.stream_names`); `streams` beside it
+      # became private there. Here they are the same list.
+      def stream_names
+        @streams
+      end
 
       # `identifier` is the identifier JSON STRING exactly as the client
       # sent it, because every frame back to that client has to echo it

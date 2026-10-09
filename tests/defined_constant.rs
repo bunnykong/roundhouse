@@ -3,7 +3,7 @@
 //! A missing constant is not an ingest failure.
 
 use roundhouse::analyze::Analyzer;
-use roundhouse::expr::{ExprNode, DEFINED_CONSTANT};
+use roundhouse::expr::ExprNode;
 use roundhouse::ingest::ingest_library_classes;
 use roundhouse::ty::Ty;
 use roundhouse::App;
@@ -24,6 +24,9 @@ fn method_body(source: &str) -> roundhouse::Expr {
 
 fn defined_operand(body: &roundhouse::Expr) -> &roundhouse::Expr {
     fn find<'a>(expr: &'a roundhouse::Expr) -> Option<&'a roundhouse::Expr> {
+        if let ExprNode::Defined { operand } = &*expr.node {
+            return Some(operand);
+        }
         if let ExprNode::Send { recv: None, method, args, .. } = &*expr.node {
             if method.as_str() == "defined?" && args.len() == 1 {
                 return Some(&args[0]);
@@ -54,7 +57,7 @@ fn constant_guards_keep_the_written_path_and_are_not_resolved() {
         let source = format!("class File\n  NOFOLLOW = 0\nend\nclass Probe\n  def check\n    {guard}\n  end\nend\n");
         let body = method_body(&source);
         let operand = defined_operand(&body);
-        assert_ne!(operand.decisions & DEFINED_CONSTANT, 0, "{guard}");
+        assert!(matches!(&*body.node, ExprNode::Defined { .. }), "{guard}");
         let ExprNode::Const { path: written } = &*operand.node else {
             panic!("{guard} did not retain a constant path: {operand:?}");
         };
@@ -68,15 +71,9 @@ fn constant_guards_keep_the_written_path_and_are_not_resolved() {
             }
             other => panic!("{guard} must type as the existing defined? result Str?, got {other:?}"),
         }
-        assert!(
-            matches!(&operand.ty, Some(Ty::Class { id, .. }) if {
-                let expected = if rooted { format!("::{}", path[1..].join("::")) } else { path.join("::") };
-                id.0.as_str() == expected
-            }),
-            "{guard} operand was resolved or dropped: {:?}",
-            operand.ty
-        );
+        assert_eq!(operand.ty, None, "{guard}: syntax operands must not be evaluated");
         assert_eq!(operand.decisions & roundhouse::expr::RESOLVED_CLASS_REF, 0, "{guard}");
+        assert_eq!(roundhouse::emit::ruby::emit_expr(&body), guard, "{guard}");
     }
 }
 
@@ -86,7 +83,6 @@ fn existing_bareword_and_ivar_guards_still_ingest() {
         let source = format!("class Probe\n  def check\n    {guard}\n  end\nend\n");
         let body = method_body(&source);
         let operand = defined_operand(&body);
-        assert_eq!(operand.decisions & DEFINED_CONSTANT, 0, "{guard}");
         assert!(
             matches!(&*operand.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }),
             "{guard}: {operand:?}"
@@ -95,11 +91,36 @@ fn existing_bareword_and_ivar_guards_still_ingest() {
 }
 
 #[test]
-fn method_and_index_defined_stay_unsupported() {
-    for guard in ["defined?(obj.method)", "defined?(foo[0])"] {
+fn argument_free_method_queries_keep_native_syntax() {
+    let body = method_body("class Probe; def check; defined?(obj.method); end; end");
+    assert!(matches!(&*body.node, ExprNode::Defined { .. }));
+    assert_eq!(roundhouse::emit::ruby::emit_expr(&body), "defined?(obj.method)");
+    assert_eq!(defined_operand(&body).ty, None);
+}
+
+#[test]
+fn argument_and_index_queries_stay_unsupported() {
+    for guard in ["defined?(obj.method(11))", "defined?(foo[0])"] {
         let source = format!("class Probe\n  def check\n    {guard}\n  end\nend\n");
         let err = ingest_library_classes(source.as_bytes(), "guard.rb").expect_err(guard);
         let message = err.to_string();
-        assert!(message.contains("`defined?` only supports bareword, ivar, and constant"), "{guard}: {message}");
+        assert!(message.contains("defined? calls with arguments"), "{guard}: {message}");
     }
+}
+
+#[test]
+fn source_guards_and_generated_references_keep_distinct_intent() {
+    use roundhouse::expr::{GENERATED_CONST_REF, RESOLVED_DATA_FACTORY};
+    use roundhouse::span::{FileId, Span};
+    let body = method_body("class Probe; def check; defined?(MissingConstant); end; end");
+    let operand = defined_operand(&body);
+    assert_eq!(operand.decisions & (GENERATED_CONST_REF | RESOLVED_DATA_FACTORY), 0);
+
+    let mut generated = roundhouse::Expr::new(Span::synthetic(), ExprNode::Const {
+        path: vec!["Probe".into()],
+    });
+    generated.inherit_span(Span { file: FileId(1), start: 1, end: 6 });
+    let restored: roundhouse::Expr = serde_json::from_str(&serde_json::to_string(&generated).unwrap()).unwrap();
+    assert_ne!(restored.decisions & GENERATED_CONST_REF, 0);
+    assert_eq!(restored.decisions & RESOLVED_DATA_FACTORY, 0);
 }

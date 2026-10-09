@@ -97,10 +97,10 @@ end
     println!("cleanup tree: {} binds={}", dir.display(), std::env::var("ROUNDHOUSE_PARAM_BINDS").unwrap());
     if native {
         success(Command::new(std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into()))
-            .args(["cleanup_gate.rb", "-o", "cleanup_gate"]).current_dir(&dir));
-        success(Command::new(dir.join("cleanup_gate")).current_dir(&dir));
+            .args(["cleanup_gate.rb", "-o", "cleanup_gate"]).current_dir(&*dir));
+        success(Command::new(dir.join("cleanup_gate")).current_dir(&*dir));
     } else {
-        success(emit_and_run::ruby().arg("cleanup_gate.rb").current_dir(&dir));
+        success(emit_and_run::ruby().arg("cleanup_gate.rb").current_dir(&*dir));
     }
 }
 

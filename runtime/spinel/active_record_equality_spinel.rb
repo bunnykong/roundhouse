@@ -25,5 +25,16 @@ module ActiveRecord
       return true if equal?(other)
       other.instance_of?(self.class) && persisted? && other.id == id
     end
+
+    # A Set or Hash key compares with `eql?` and `hash`, which Rails
+    # defines to match `==`: campfire compares a direct room's members
+    # as sets (`room.users.to_set`), loaded twice, never the same objects.
+    def eql?(other)
+      self == other
+    end
+
+    def hash
+      id.nil? ? object_id : "#{self.class.name}##{id}".hash
+    end
   end
 end

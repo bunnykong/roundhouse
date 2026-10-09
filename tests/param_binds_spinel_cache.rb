@@ -14,6 +14,25 @@ def native_statement_count(conn)
   count
 end
 
+# Snapshot BEGIN/COMMIT are internal cache users too. They must release
+# each checkout immediately, rather than accumulating busy-hit siblings.
+Db.with_connection do
+  conn = Db.current_conn
+  raise "snapshot BEGIN failed" if !conn.run_cached("BEGIN")
+  raise "snapshot COMMIT failed" if !conn.run_cached("COMMIT")
+  before = native_statement_count(conn)
+  i = 0
+  while i < 12
+    raise "snapshot BEGIN reuse failed" if !conn.run_cached("BEGIN")
+    raise "snapshot COMMIT reuse failed" if !conn.run_cached("COMMIT")
+    i += 1
+  end
+  expect_int("snapshot commands release their checkouts", before, native_statement_count(conn))
+  raise "internal cached error was ignored" if conn.run_cached("SELECT abs(-9223372036854775808)")
+  expect_int("failed internal command releases ownership", before, native_statement_count(conn))
+end
+puts "runtime: native snapshot statement ownership passed"
+
 # A write can invalidate a live replay's saved prefix. If its replacement
 # query fails while skipping that prefix, ensure-finalize still owns it.
 Db.with_connection do
@@ -133,3 +152,82 @@ Db.with_connection do
   expect_int("shutdown finalizes cached and transient statements", 0, native_statement_count(conn))
 end
 puts "runtime: native transient release, trimming and shutdown passed"
+
+# Shutdown must finish across every connection and shard before reporting a
+# release error. Real SQLite step errors leave reset failing at shutdown.
+module SQL
+  ffi_func :sqlite3_memory_used, [], :long
+end
+
+class DbConn
+  def shutdown_cache_size
+    @entries.length
+  end
+
+  def shutdown_open_size
+    @open.length
+  end
+end
+
+module Db
+  def self.shutdown_pools
+    @pools
+  end
+end
+
+Db.close
+before_shutdown = SQL.sqlite3_memory_used
+ENV["DATABASE_POOL_SIZE"] = "12"
+shutdown_path = "file:shutdown_release_failure?mode=memory&cache=shared"
+Db.configure(shutdown_path, pool_size: 12)
+Db.exec("CREATE TABLE shutdown_rows (id INTEGER PRIMARY KEY)")
+Db.exec("INSERT INTO shutdown_rows VALUES (1)")
+pools = Db.shutdown_pools
+expect_int("shutdown uses multiple shards", 3, pools.length)
+connections = []
+p = 0
+while p < pools.length
+  i = 0
+  while i < 4
+    conn = pools[p].conn(i)
+    connections.push(conn)
+    idle = conn.prepare_cached("SELECT 37 AS shutdown_idle")
+    conn.release(idle)
+    held = conn.prepare_cached("SELECT 41 AS shutdown_held")
+    transient = conn.prepare_cached("SELECT 41 AS shutdown_held")
+    expect_int("shutdown cached reader", SQL::ROW, SQL.sqlite3_step(held))
+    expect_int("shutdown transient reader", SQL::ROW, SQL.sqlite3_step(transient))
+    if p == 0 && i == 0
+      bad = conn.prepare_cached("SELECT abs(-9223372036854775808)")
+      expect_int("shutdown first release failure", 1, SQL.sqlite3_step(bad))
+    elsif i == 0 || (p == 0 && i == 1)
+      bad = conn.prepare_cached("INSERT INTO shutdown_rows VALUES (1)")
+      expect_int("shutdown later release failure", 19, SQL.sqlite3_step(bad))
+    end
+    i += 1
+  end
+  p += 1
+end
+shutdown_error = nil
+begin
+  Db.close
+rescue RuntimeError => e
+  shutdown_error = e
+end
+connections.each do |conn|
+  expect_int("shutdown clears every cache", 0, conn.shutdown_cache_size)
+  expect_int("shutdown drains every checkout", 0, conn.shutdown_open_size)
+end
+# This accounts for actual native statements and handles, without reading
+# freed pointers. A leaked connection also keeps the shared memory DB alive.
+expect_int("shutdown frees every SQLite resource", before_shutdown, SQL.sqlite3_memory_used)
+raise "shutdown retained pools" if !Db.shutdown_pools.nil?
+raise "shutdown lost the first release error" if shutdown_error.nil? || !shutdown_error.message.start_with?("Db.release failed (1):")
+Db.close
+ENV["DATABASE_POOL_SIZE"] = "1"
+Db.configure(shutdown_path, pool_size: 1)
+probe = Db.prepare("SELECT COUNT(*) FROM sqlite_master WHERE name = 'shutdown_rows'")
+raise "shutdown database probe failed" if !Db.step?(probe)
+expect_int("shutdown closes every shared-memory connection", 0, Db.column_int(probe, 0))
+Db.finalize(probe)
+puts "runtime: native shutdown drains all shards and preserves the first release error passed"

@@ -128,6 +128,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             let (name, channel) = view_stream_from(streamables, ctx)?;
             Some(view_helpers_call("turbo_stream_from", vec![name, channel]))
         }
+        RenderAttrs { attrs } => Some(view_helpers_call("render_attrs", vec![(*attrs).clone()])),
         DomId { record, prefix } => {
             let mut args = vec![(*record).clone()];
             if let Some(p) = prefix {
@@ -450,8 +451,7 @@ fn view_stream_name(streamables: &[Expr], ctx: &ViewCtx) -> Option<Expr> {
                     return None;
                 }
                 parts.push(Streamable::Record {
-                    singular: name,
-                    id: send(Some(arg.clone()), "id", vec![], None, false),
+                    record: arg.clone(),
                 });
             }
         }

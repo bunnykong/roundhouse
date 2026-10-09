@@ -180,6 +180,52 @@ module ActiveJob
     ran
   end
 
+  # ---- Held by the `:test` adapter ------------------------------------
+  #
+  # Rails' `:test` adapter keeps what was enqueued, and a test can run it
+  # afterwards with a blockless `perform_enqueued_jobs`: campfire's
+  # "the unread fanout skips a member who has opened the room since"
+  # (basecamp/once-campfire#296) posts, changes the member's state, and
+  # only then performs the job. So `perform_later` under `enqueue_only`
+  # holds its work, the same zero-argument Proc a drain would take, with
+  # the job's name beside it for `only:`.
+  HELD_NAMES = []
+  HELD = []
+
+  def self.hold(job_name, work)
+    HELD_NAMES << job_name
+    HELD << work
+    nil
+  end
+
+  # Run the held jobs `only` names (all of them when it is empty), in
+  # the order they were enqueued, and answer how many ran. A job one of
+  # them enqueues is held behind it and runs in the same pass. Jobs
+  # `only` leaves out stay held.
+  def self.perform_held(only)
+    ran = 0
+    i = 0
+    while i < HELD.length
+      if only.empty? || only.include?(HELD_NAMES[i])
+        work = HELD[i]
+        HELD.delete_at(i)
+        HELD_NAMES.delete_at(i)
+        work.call
+        ran = ran + 1
+      else
+        i = i + 1
+      end
+    end
+    ran
+  end
+
+  # Rails' test adapter starts every test with nothing enqueued.
+  def self.clear_held
+    HELD.clear
+    HELD_NAMES.clear
+    nil
+  end
+
   class Base
     # `queue_as :default` — queue routing has no meaning inline.
     def self.queue_as(name = nil)

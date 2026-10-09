@@ -212,7 +212,7 @@ module Tep
           return false
         end
 
-        req.consume_body_via_io(io, client)
+        return false unless req.consume_body_via_io(io, client)
 
         res = Response.new
         begin
@@ -299,12 +299,7 @@ module Tep
           end
           reason = Tep.reason(res.status)
           head = req.http_version + " " + res.status.to_s + " " + reason + "\r\n"
-          res.headers.each do |k, v|
-            head << k + ": " + v + "\r\n"
-          end
-          res.set_cookies.each do |line|
-            head << "Set-Cookie: " + line + "\r\n"
-          end
+          head << Tep.header_lines(res)
           head << "Connection: close\r\n\r\n"
           Sock.sphttp_write_str(client, head)
           out = Tep::Stream.new(client)
@@ -320,12 +315,7 @@ module Tep
         Tep.maybe_gzip!(req, res)
         reason = Tep.reason(res.status)
         head = req.http_version + " " + res.status.to_s + " " + reason + "\r\n"
-        res.headers.each do |k, v|
-          head << k + ": " + v + "\r\n"
-        end
-        res.set_cookies.each do |line|
-          head << "Set-Cookie: " + line + "\r\n"
-        end
+        head << Tep.header_lines(res)
         if keep_alive
           head << "Connection: keep-alive\r\n"
         else
@@ -351,10 +341,12 @@ module Tep
         0
       end
 
+      # bytesize, as write_response: a multibyte `msg` would otherwise
+      # announce fewer bytes than are written.
       def self.send_simple(client, status, msg)
         reason = Tep.reason(status)
         head = "HTTP/1.0 " + status.to_s + " " + reason + "\r\n" +
-               "Content-Length: " + msg.length.to_s + "\r\n" +
+               "Content-Length: " + msg.bytesize.to_s + "\r\n" +
                "Connection: close\r\n\r\n" + msg
         Sock.sphttp_write_str(client, head)
         0

@@ -41,6 +41,7 @@
 # target compiles against.
 
 require "sqlite3"
+require "fileutils"
 
 module Db
   @pool    = nil
@@ -51,6 +52,22 @@ module Db
   @pool_size = 0
   @mutex   = nil
   @cv      = nil
+  # THE WRITE PERMIT: one writer at a time per process, handed out here
+  # instead of by SQLite's busy handler. See `acquire_permit`.
+  @permit_lock  = Mutex.new
+  @permit_cv    = ConditionVariable.new
+  @permit_owner = nil
+  WRITE_PERMIT_TIMEOUT = 5.0
+  @write_permit_timeout = WRITE_PERMIT_TIMEOUT
+  # Background WAL checkpointing: asked for by the server boot
+  # (`checkpoint_in_background!`), started per process on the first
+  # lease. See `start_checkpointer`.
+  @checkpoint_wanted = false
+  @checkpointer_pid  = nil
+  # The process-shared flock File while this process holds it. Retained
+  # so `adopt_after_fork` can close the child's inherited copy without
+  # LOCK_UN (parent keeps the lock). Cleared on release.
+  @checkpoint_lock_file = nil
   # Failed resources stay reachable, but never re-enter the free list.
   @quarantined = []
   @missing_connections = 0
@@ -81,6 +98,22 @@ module Db
     @cv        = ConditionVariable.new
     @quarantined = []
     @missing_connections = 0
+    # Puma `before_worker_boot` re-configure sets @owner_pid to the child
+    # and therefore skips `adopt_after_fork`. Drop any inherited
+    # checkpoint-lock FD without LOCK_UN (same rule as adopt) and forget
+    # the parent's checkpointer pid so the child's first lease starts a
+    # fresh loop. Normal master boot never holds the flock; this closes
+    # the gap if it ever did.
+    inherited = @checkpoint_lock_file
+    if inherited && !inherited.closed?
+      begin
+        inherited.close
+      rescue StandardError
+      end
+    end
+    @checkpoint_lock_file = nil
+    @checkpointer_pid = nil
+    @checkpoint_warn_at = nil
     @pool      = open_pool
     @owner_pid = Process.pid
   end
@@ -109,11 +142,29 @@ module Db
     # compile-time accident is not agreement, so each states it.
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
+    # Page cache + mmap — same measured knobs as runtime/spinel/db.rb
+    # (roundhouse#17 CRuby half). SQLite's default cache is 2 MB; a
+    # long-lived serving process re-reads the working set from the OS
+    # on every visit. Spinel measured ~400 pread64s per /top visit at
+    # the default vs a large cache; tip CRuby still opened at
+    # cache_size=-2000 / mmap_size=0. Negative cache_size is a KiB
+    # budget (-65536 = 64 MiB); mmap_size maps the file so hits skip
+    # the read() copy. Harmless on :memory: (pages are already heap).
+    db.execute("PRAGMA cache_size=-65536")
+    db.execute("PRAGMA mmap_size=268435456")
     # The gem's default is 0: a second writer fails at once with
     # SQLITE_BUSY. Rails' database.yml says `timeout: 5000`, and so do
     # the binary's PRAGMAS — the harness's file database (see
     # test/test_helper.rb) relies on writers waiting.
-    db.busy_timeout = 5000
+    #
+    # The GVL-RELEASING handler, as Rails 8's adapter uses, not
+    # `busy_timeout`: SQLite's own handler sleeps in C holding the GVL,
+    # so a waiting writer stalls every other thread in the process —
+    # including the one holding the lock it waits for. Writers inside
+    # one process queue on the write permit (`exec`) and never reach
+    # this; it is for a writer in ANOTHER process (a clustered Puma
+    # sibling, a console, a migration).
+    db.busy_handler_timeout = 5000
     # The app's SQL functions (`create_function` / `create_aggregate`
     # in an initializer), per connection as Rails' adapter registers
     # them. Defined only when the app has some (runtime/sql_functions.rb
@@ -148,6 +199,21 @@ module Db
       # Re-checked under the lock: every worker thread in a fresh child
       # reaches this together on the first request.
       if @owner_pid != Process.pid
+        # Drop the inherited checkpoint-lock FD without LOCK_UN. The
+        # parent may still hold the flock via its own descriptor; if we
+        # unlocked here we would release the parent's hold. Closing the
+        # child copy lets a surviving worker acquire after the parent
+        # exits (Puma preload / clustered fork after checkpointer start).
+        inherited = @checkpoint_lock_file
+        if inherited && !inherited.closed?
+          begin
+            inherited.close
+          rescue StandardError
+          end
+        end
+        @checkpoint_lock_file = nil
+        @checkpointer_pid = nil
+        @checkpoint_warn_at = nil
         # The parent's handles are simply dropped. They are already
         # discarded by the gem's fork safety, and closing a descriptor
         # this process shares with its parent is not ours to do.
@@ -207,6 +273,7 @@ module Db
     Fiber[:db_handle] = h
     request_failed = false
     begin
+      prepare_for_checkpointer(h) if @checkpoint_wanted
       yield
     rescue Exception
       request_failed = true
@@ -215,13 +282,26 @@ module Db
       cleanup_error = nil
       open = h.instance_variable_get(:@rh_open)
       begin
-        release_open_statements(h) unless open.nil? || open.empty?
+        if h.instance_variable_get(:@rh_snapshot_depth).to_i > 0
+          h.instance_variable_set(:@rh_snapshot_depth, 1)
+          read_snapshot_end
+        end
       rescue StandardError => e
         cleanup_error = e
+      end
+      begin
+        release_abandoned_write(h)
+      rescue StandardError => e
+        cleanup_error ||= e
+      end
+      begin
+        release_open_statements(h) unless open.nil? || open.empty?
+      rescue StandardError => e
+        cleanup_error ||= e
       ensure
         Fiber[:db_handle] = nil
         begin
-          if open.nil? || open.empty?
+          if (open.nil? || open.empty?) && !h.transaction_active?
             @mutex.synchronize do
               @pool.checkin(h)
               @cv.signal
@@ -308,15 +388,404 @@ module Db
 
   def self.exec(sql)
     record_query(sql)
+    write(sql) { |conn, s| run_exec(conn, s) }
+  end
+
+  # A write that returns rows (`INSERT … RETURNING`, roundhouse#91). It
+  # runs under exec's discipline (query cache cleared, snapshot ended,
+  # write permit), reads every row before the permit goes back, and
+  # answers a replay handle over them: step/column_*/finalize as for a
+  # read. `changes` is the write's row count.
+  def self.exec_returning(sql)
+    v = loaded_sqlite_version
+    if !returning_supported?(v)
+      raise "Db.exec_returning: RETURNING needs SQLite 3.35 or newer; this process loads " + v.to_s
+    end
+    record_query(sql)
+    rows = nil
+    names = nil
+    write(sql) do |conn, s|
+      stmt = conn.prepare(s)
+      begin
+        names = stmt.columns
+        rows = stmt.execute.to_a
+      rescue StandardError => e
+        raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
+        raise
+      ensure
+        stmt.close
+      end
+    end
+    hit = { rows: rows, names: names, eof: true, sql: sql }
+    { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: sql }
+  end
+
+  # Test-only hook, matching the Spinel SQLite shim's (db.rb) accessor of
+  # the same name: always 0 here, since an exec_returning handle is a
+  # plain Ruby Hash — there is no persistent array of outstanding
+  # captures to leak.
+  def self.qc_cursor_count
+    0
+  end
+
+  # RETURNING arrived in SQLite 3.35.0 (3035000). An older library gets
+  # a clear error rather than a syntax error, as #91 agreed.
+  def self.returning_supported?(version_number)
+    version_number >= 3035000
+  end
+
+  # The library the gem loaded (not the one it was compiled against), as
+  # 3035000 for 3.35.0.
+  def self.loaded_sqlite_version
+    text = defined?(SQLite3::SQLITE_LOADED_VERSION) ? SQLite3::SQLITE_LOADED_VERSION : SQLite3::SQLITE_VERSION
+    major, minor, patch = text.split(".").map(&:to_i)
+    major * 1_000_000 + minor.to_i * 1000 + patch.to_i
+  end
+
+  # exec's write path; the block runs the statement on the connection.
+  def self.write(sql)
     # Any exec is (per the Db contract) DDL or a write — Rails
     # invalidates the whole query cache on write; so do we.
     qcache = Fiber[:rh_qcache]
     qcache.clear unless qcache.nil?
+    conn = current_dbh
+    # A write can't run inside the request's read snapshot: if another
+    # connection committed since the snapshot began, SQLite refuses the
+    # upgrade at once with SQLITE_BUSY (no busy handler is consulted).
+    # End the snapshot first; the next read opens a fresh one that sees
+    # this write.
+    end_snapshot(conn)
+    if permit_owned?
+      # Inside this fiber's own transaction: the permit is already held.
+      begin
+        yield(conn, sql)
+      ensure
+        release_permit if sql == "ROLLBACK" || (sql == "COMMIT" && !conn.transaction_active?)
+      end
+    elsif conn.transaction_active?
+      # Inside a transaction that began WITHOUT the permit (its wait
+      # timed out — see `acquire_permit`): SQLite's lock is already
+      # held, so there is nothing to queue for.
+      yield(conn, sql)
+    elsif sql == "BEGIN"
+      # IMMEDIATE, as Rails 8's SQLite adapter begins: the write lock is
+      # taken at BEGIN, not at the first write, so a transaction never
+      # fails part way through upgrading a stale read.
+      got = acquire_permit
+      begin
+        yield(conn, "BEGIN IMMEDIATE")
+      rescue Exception
+        release_permit if got
+        raise
+      end
+    else
+      got = acquire_permit
+      begin
+        yield(conn, sql)
+      ensure
+        release_permit if got
+      end
+    end
+  end
+
+  def self.run_exec(conn, sql)
+    conn.execute(sql)
+  rescue StandardError => e
+    raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
+    raise
+  end
+
+  # ── The write permit ──
+  #
+  # SQLite allows one writer at a time. Left to itself, a second writer
+  # gets SQLITE_BUSY and the busy handler retries on a timer, so writers
+  # race: whoever retries at the right moment wins, and an unlucky one
+  # loses again and again (the post-message tail). `exec` instead takes
+  # the permit — for one statement in autocommit, or from BEGIN to
+  # COMMIT/ROLLBACK — so writers in this process queue and go in turn.
+  # The SQL still runs on the caller's own pooled connection; only the
+  # permission is shared. A writer in another process still meets
+  # SQLite's lock, and waits in `busy_handler_timeout`.
+  #
+  # The owner is a FIBER: BEGIN and COMMIT run on the same fiber, and a
+  # different request on the same thread (Falcon) is a different fiber.
+  #
+  # THE WAIT IS BOUNDED. A transaction that starts a thread which writes
+  # and then joins it would otherwise wait on itself forever. Before the
+  # permit existed that case waited out SQLite's busy timeout and raised
+  # SQLITE_BUSY; a hang is worse than that error. So after
+  # `@write_permit_timeout` seconds a writer stops queueing and goes
+  # straight to SQLite, which is exactly the old behaviour: it waits in
+  # the busy handler and, if the lock never frees, raises BUSY.
+  # Tests shorten the bound to exercise the timeout path quickly.
+  def self.write_permit_timeout=(seconds)
+    @write_permit_timeout = seconds
+  end
+
+  def self.acquire_permit
+    fiber = Fiber.current
+    @permit_lock.synchronize do
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @write_permit_timeout
+      # A dead owner (a killed thread) never releases; a Mutex would
+      # have been freed with it, so this permit treats it as free too.
+      until @permit_owner.nil? || !@permit_owner.alive?
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        return false if remaining <= 0
+        @permit_cv.wait(@permit_lock, remaining)
+      end
+      @permit_owner = fiber
+    end
+    true
+  end
+
+  def self.release_permit
+    @permit_lock.synchronize do
+      @permit_owner = nil
+      @permit_cv.signal
+    end
+  end
+
+  # Read without the lock: only the owning fiber ever sets the owner to
+  # itself or clears it, so the answer for the CURRENT fiber is exact.
+  def self.permit_owned?
+    @permit_owner.equal?(Fiber.current)
+  end
+
+  def self.release_abandoned_write(conn)
+    owned = permit_owned?
+    return unless owned || conn.transaction_active?
     begin
-      current_dbh.execute(sql)
-    rescue StandardError => e
-      raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
-      raise
+      conn.execute("ROLLBACK") if conn.transaction_active?
+    ensure
+      release_permit if owned
+    end
+  end
+
+  # ── The request read snapshot ──
+  #
+  # Outside a transaction every SELECT is its own transaction, and each
+  # one sets up a WAL snapshot (shared lock on the WAL index, header
+  # check). Inside an open transaction the same point query skips that:
+  # measured 0.93 -> 0.36 us through this gem on an M-series Mac, and
+  # the once-campfire Ruby port measured 4.5 -> 0.2 us on Linux. It also
+  # gives the request one consistent view of the database, which
+  # autocommit does not.
+  #
+  # The dispatcher brackets a GET/HEAD with `read_snapshot_begin` /
+  # `read_snapshot_end`. Nothing happens until the first `prepare`
+  # opens a deferred BEGIN; the first `exec` (any write) ends it, and the
+  # read after that opens a new one. The app is never asked to promise
+  # its GET handlers don't write. A request in a transaction of its own
+  # is left alone: `prepare` opens a snapshot only when the connection
+  # is in autocommit.
+  #
+  # States: nil (off), :wanted (on, not open), :open (BEGIN issued by
+  # us). Brackets nest — a test that dispatches from inside a lease, a
+  # job drained inside a request — and only the outermost end closes
+  # the snapshot.
+  #
+  # The state lives ON THE CONNECTION, not in fiber storage. A snapshot
+  # is a property of one SQLite connection, and a connection is leased
+  # to one holder at a time. Fiber storage is copied into every Thread
+  # created inside the request, so a thread spawned during a GET would
+  # inherit `:open` and COMMIT a transaction its own connection never
+  # began.
+  def self.read_snapshot_begin
+    conn  = current_dbh
+    depth = conn.instance_variable_get(:@rh_snapshot_depth).to_i
+    conn.instance_variable_set(:@rh_snapshot, :wanted) if depth == 0
+    conn.instance_variable_set(:@rh_snapshot_depth, depth + 1)
+  end
+
+  def self.read_snapshot_end
+    conn  = current_dbh
+    depth = conn.instance_variable_get(:@rh_snapshot_depth).to_i - 1
+    conn.instance_variable_set(:@rh_snapshot_depth, depth)
+    return if depth > 0
+    state = conn.instance_variable_get(:@rh_snapshot)
+    conn.instance_variable_set(:@rh_snapshot, nil)
+    conn.execute("COMMIT") if state == :open
+  end
+
+  def self.begin_snapshot(conn)
+    return unless conn.instance_variable_get(:@rh_snapshot) == :wanted
+    return if conn.transaction_active?
+    conn.execute("BEGIN")
+    conn.instance_variable_set(:@rh_snapshot, :open)
+  end
+
+  def self.end_snapshot(conn)
+    return unless conn.instance_variable_get(:@rh_snapshot) == :open
+    conn.execute("COMMIT")
+    conn.instance_variable_set(:@rh_snapshot, :wanted)
+  end
+
+  # ── Checkpoints off the request path ──
+  #
+  # In WAL mode a write appends to the -wal file, and a checkpoint copies
+  # it back into the database. SQLite's default runs one inside whichever
+  # COMMIT pushes the log past 1,000 pages: that request pays for the
+  # copy and an fsync (10-20 ms in the once-campfire port's measurements,
+  # on about every 30th post — the p99). Under steady writes the log can
+  # also never empty, because a checkpoint can only copy frames no reader
+  # still needs.
+  #
+  # The server boot calls `checkpoint_in_background!`. Each serving
+  # process then turns automatic checkpoints off on its pooled
+  # connections and runs one thread with its own connection: PASSIVE
+  # (copy what it can, wait on nobody) every CHECKPOINT_INTERVAL, and
+  # RESTART once the log passes CHECKPOINT_RESTART_FRAMES, which makes
+  # the next writer start the log from the beginning so the file stops
+  # growing. RESTART holds the write permit, so in-process writers queue
+  # behind it rather than meeting SQLITE_BUSY.
+  #
+  # Started from the first lease, not from boot, because a clustered
+  # Puma boots the app in a master that forks and never serves: a thread
+  # does not survive `fork`, and the master has no writes to checkpoint.
+  # Tests, scripts and the console never ask, and keep SQLite's default.
+  CHECKPOINT_INTERVAL = 0.25
+  CHECKPOINT_RESTART_FRAMES = 8192 # ~32 MB of 4 KB pages
+  # Cap failure noise: the loop keeps its 250 ms cadence (no Campfire-style
+  # backoff that slows copying), but a stuck disk / permission / corruption
+  # path must not stay completely silent either. One warn per interval.
+  CHECKPOINT_WARN_INTERVAL = 30.0
+
+  def self.checkpoint_in_background!
+    @checkpoint_wanted = true
+  end
+
+  # Rate-limited visibility for checkpoint_loop failures. Resets the
+  # suppress window only by time, not by success — a later success simply
+  # stops calling this. Private: the loop is the only production caller;
+  # tests reach it via `send`.
+  def self.warn_checkpoint_failure(error)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    last = @checkpoint_warn_at
+    return if last && (now - last) < CHECKPOINT_WARN_INTERVAL
+    @checkpoint_warn_at = now
+    begin
+      warn "[db] WAL checkpoint failed: #{error.class}: #{error.message}"
+    rescue StandardError
+      # A failing warning sink must not kill the checkpointer thread —
+      # wal_autocheckpoint is already 0 on serving connections.
+      nil
+    end
+  end
+  private_class_method :warn_checkpoint_failure
+
+  def self.prepare_for_checkpointer(conn)
+    start_checkpointer if @checkpointer_pid != Process.pid
+    return if @checkpointer_pid != Process.pid
+    return if conn.instance_variable_get(:@rh_manual_checkpoint)
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.instance_variable_set(:@rh_manual_checkpoint, true)
+  end
+
+  def self.start_checkpointer
+    @mutex.synchronize do
+      return if @checkpointer_pid == Process.pid
+      # Only a database file has a WAL to checkpoint.
+      path = @path
+      return if path.nil? || path == ":memory:" || path.start_with?("file:")
+      @checkpointer_pid = Process.pid
+      Thread.new { checkpoint_loop(path) }
+    end
+  end
+
+  # One checkpointer across WEB_CONCURRENCY / Resque siblings (the bit
+  # Campfire once-campfire#319 adds on top of the same PASSIVE loop).
+  # Without a flock every forked worker runs its own 250ms PASSIVE and
+  # they contend on the WAL; with it, losers skip the tick. Lock file
+  # sits next to the database so each file-backed DB has its own.
+  def self.checkpoint_lock_path(path)
+    File.join(File.dirname(path), ".#{File.basename(path)}.wal_checkpoint.lock")
+  end
+
+  # File on acquire, `:busy` when another process holds the flock, `nil`
+  # when the lock file cannot be used (mkdir/open/flock error). Callers
+  # skip only on `:busy`; `nil` still checkpoints so a broken lock path
+  # cannot disable WAL copy after `wal_autocheckpoint=0`.
+  def self.try_checkpoint_lock(lock_path)
+    file = nil
+    FileUtils.mkdir_p(File.dirname(lock_path))
+    file = File.open(lock_path, File::RDWR | File::CREAT, 0644)
+    if file.flock(File::LOCK_EX | File::LOCK_NB)
+      @checkpoint_lock_file = file
+      return file
+    end
+    file.close
+    :busy
+  rescue StandardError
+    begin
+      file.close if file && !file.closed?
+    rescue StandardError
+    end
+    nil
+  end
+
+  def self.release_checkpoint_lock(file)
+    return if file.nil? || !file.is_a?(File)
+    begin
+      file.flock(File::LOCK_UN)
+    ensure
+      file.close
+      @checkpoint_lock_file = nil if @checkpoint_lock_file.equal?(file)
+    end
+  rescue StandardError
+  end
+
+  def self.checkpoint_loop(path)
+    lock_path = checkpoint_lock_path(path)
+    # Open can fail (permissions, missing file mid-deploy). Do not let
+    # the thread die after prepare_for_checkpointer already set
+    # wal_autocheckpoint=0 — warn and retry on the same cadence.
+    conn = nil
+    until conn
+      begin
+        conn = SQLite3::Database.new(path)
+        conn.busy_handler_timeout = 100
+      rescue StandardError => error
+        warn_checkpoint_failure(error)
+        sleep CHECKPOINT_INTERVAL
+      end
+    end
+    loop do
+      # Hold the flock for the whole inner loop (Campfire #319), not
+      # per tick: releasing every 250ms lets a sibling overlap a
+      # PASSIVE with ours. Losers sleep and retry; a dead winner
+      # drops the flock so another worker takes over.
+      lock = try_checkpoint_lock(lock_path)
+      if lock == :busy
+        sleep CHECKPOINT_INTERVAL
+        next
+      end
+      held_error = nil
+      begin
+        loop do
+          sleep CHECKPOINT_INTERVAL
+          row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)")[0]
+          log_frames = row.nil? ? 0 : row[1].to_i
+          if log_frames >= CHECKPOINT_RESTART_FRAMES
+            if acquire_permit
+              begin
+                conn.execute("PRAGMA wal_checkpoint(RESTART)")
+              ensure
+                release_permit
+              end
+            end
+          end
+        end
+      rescue StandardError => error
+        held_error = error
+      ensure
+        # Release before warn so a blocked $stderr cannot extend the
+        # exclusive flock and delay sibling takeover.
+        release_checkpoint_lock(lock)
+      end
+      # Retry on the next outer pass (same 250 ms cadence). Warn at
+      # most once per CHECKPOINT_WARN_INTERVAL so a persistent failure
+      # is visible without a multi-contender log storm.
+      warn_checkpoint_failure(held_error) if held_error
     end
   end
 
@@ -415,6 +884,7 @@ module Db
     end
     record_query(sql)
     conn  = current_dbh
+    begin_snapshot(conn)
     cache = conn.instance_variable_get(:@rh_stmt_cache)
     if cache.nil?
       cache = {}
@@ -481,6 +951,7 @@ module Db
     end
     record_query(sql)
     conn = current_dbh
+    begin_snapshot(conn)
     stmt = conn.prepare(sql)
     statement_handle(open_statements(conn), stmt, sql, false, !qcache.nil? && !parameterized)
   end

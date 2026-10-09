@@ -14,6 +14,7 @@ module ActiveStorage
 
   class Blob
     def self.from_attachable: (untyped value) -> ActiveStorage::Blob?
+    def self.from_io_hash: (untyped value) -> ActiveStorage::Blob?
   end
 
   class ImageAnalyzer
@@ -53,6 +54,7 @@ module ActiveStorage
   end
 
   class DiskController < ActionController::Base
+    @headers: ActionController::HeaderStore
     def process_action: (Symbol action_name) -> nil
     def show: () -> nil
   end

@@ -18,6 +18,11 @@ module ActiveJob
   def self.enqueue: (^() -> nil work) -> nil
   def self.pending_count: () -> Integer
   def self.drain: () -> Integer
+  HELD_NAMES: Array[String]
+  HELD: Array[^() -> nil]
+  def self.hold: (String job_name, ^() -> nil work) -> nil
+  def self.perform_held: (Array[String] only) -> Integer
+  def self.clear_held: () -> nil
 
   class Base
     def self.queue_as: (?Symbol? name) -> nil

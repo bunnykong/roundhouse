@@ -387,6 +387,68 @@ fn forwarding_declaration_and_call_round_trip_as_a_contract() {
 }
 
 #[test]
+fn mixed_anonymous_keyword_pairs_round_trip_as_an_ordered_group() {
+    use roundhouse::diagnostic::DiagnosticKind;
+    use roundhouse::expr::ExprNode;
+
+    let source = "class Probe\n  def relay(path, **)\n    target(kind: :get, path: path, **)\n  end\n  def target(kind:, path:, **)\n    [kind, path]\n  end\nend\n";
+    let group_names = |app: &roundhouse::App| {
+        let class = app
+            .library_classes
+            .iter()
+            .find(|c| c.name.0.as_str() == "Probe")
+            .expect("Probe class");
+        let relay = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == "relay")
+            .expect("relay method");
+        let ExprNode::Send { args, .. } = &*relay.body.node else {
+            panic!("expected forwarded call, got {:?}", relay.body.node);
+        };
+        assert_eq!(args.len(), 1, "the keyword group is one call argument");
+        let ExprNode::ForwardKeywordsWithPairs { entries } = &*args[0].node else {
+            panic!("expected ordered anonymous keyword group, got {:?}", args[0].node);
+        };
+        entries
+            .iter()
+            .map(|(key, _)| match &*key.node {
+                ExprNode::Lit { value: roundhouse::expr::Literal::Sym { value } } => value.as_str().to_string(),
+                other => panic!("expected static symbol key, got {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let emit = |app: &roundhouse::App| {
+        let class = app
+            .library_classes
+            .iter()
+            .find(|c| c.name.0.as_str() == "Probe")
+            .expect("Probe class");
+        format!(
+            "class Probe\n{}end\n",
+            class.methods.iter().map(roundhouse::emit::ruby::emit_method).collect::<String>()
+        )
+    };
+    let app = analyzed(source);
+    assert_eq!(group_names(&app), vec![String::from("kind"), String::from("path")]);
+    let errors = diagnose(&app);
+    assert!(
+        !errors.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "full argument forwarding"
+        )),
+        "anonymous keyword forwarding must not be diagnosed as full `...` forwarding: {errors:?}"
+    );
+    let first = emit(&app);
+    let again = analyzed(&first);
+    assert_eq!(group_names(&again), group_names(&app), "re-ingest must preserve the explicit pair group and its order");
+    let second = emit(&again);
+    assert_eq!(first, second, "mixed anonymous keyword forwarding must reach a Ruby IR fixed point");
+    assert!(first.contains("target(kind: :get, path: path, **)"), "{first}");
+}
+
+#[test]
 fn flattened_and_unknown_contracts_remain_errors_through_lowering() {
     for source in [
         "class Probe\n def call(...)\n target(...)\n end\n def target(a, b, factor: 2)\n (a-b)*factor\n end\nend",
@@ -504,35 +566,33 @@ fn declaration_only_forwarders_are_gated_on_unverified_targets() {
 
 #[test]
 fn unpreserved_controller_and_test_entry_declarations_are_rejected() {
-    let controller = roundhouse::ingest::ingest_controller(
-        b"class ProbeController < ApplicationController\n def call(...)\n 11\n end\nend",
-        "probe_controller.rb",
-    )
-    .expect_err("controller forwarding is outside this slice");
-    assert!(controller.to_string().contains("forwarding declaration"));
-    for name in ["setup", "test_forwarding"] {
-        let source =
-            format!("class ProbeTest < ActiveSupport::TestCase\n def {name}(...)\n 11\n end\nend");
-        let err = roundhouse::ingest::ingest_test_file(source.as_bytes(), "probe_test.rb")
-            .expect_err("test entrypoint forwarding is outside this slice");
-        assert!(err.to_string().contains("forwarding declaration"));
+    for formal in ["...", "**"] {
+        let source = format!("class ProbeController < ApplicationController\n def call({formal})\n 11\n end\nend");
+        let controller = roundhouse::ingest::ingest_controller(source.as_bytes(), "probe_controller.rb")
+            .expect_err("controller forwarding is outside this slice");
+        assert!(controller.to_string().contains("forwarding declaration"));
+        for name in ["setup", "test_forwarding"] {
+            let source = format!("class ProbeTest < ActiveSupport::TestCase\n def {name}({formal})\n 11\n end\nend");
+            let err = roundhouse::ingest::ingest_test_file(source.as_bytes(), "probe_test.rb")
+                .expect_err("test entrypoint forwarding is outside this slice");
+            assert!(err.to_string().contains("forwarding declaration"));
+        }
     }
 }
 
 #[test]
-fn anonymous_keyword_call_forwarding_is_still_a_separate_gap() {
-    // The declaration is retained. The bare `**` call is not a working
-    // forward: the callee's keyword rest is flattened, so this stays a
-    // gap rather than a claim that `target(**)` runs.
-    let source = "class Probe\n def call(__fwd_kwargs, **)\n target(__fwd_kwargs, **)\n end\n def target(**params)\n params\n end\nend";
-    let run = emit_and_run::real_blog()
-        .write("app/lib/probe.rb", source)
-        .run_ruby("puts 1");
-    let emitted = std::fs::read_to_string(run.emitted.join("app/models/probe.rb")).unwrap();
-    assert!(
-        !emitted.contains("def target(**params)"),
-        "bare ** forwarding is not implemented, so the callee must not claim a keyword rest:\n{emitted}"
-    );
+fn anonymous_keyword_forwarding_refuses_unverified_keyword_abis() {
+    for source in [
+        "class Probe; def call(__fwd_kwargs, **); missing(__fwd_kwargs, **); end; end",
+        "class Probe; def target(**options); options; end; def call(**); target(**); end; end",
+        "class Probe; def target; 7; end; def call(**); target(**); end; end",
+    ] {
+        let mut app = analyzed(source);
+        let lower = roundhouse::session::analyze_and_lower(&mut app);
+        let errors: Vec<_> = diagnose(&app).into_iter().chain(lower)
+            .filter(|d| d.severity == Severity::Error).collect();
+        assert!(errors.iter().any(|d| d.message.contains("keyword forwarding")), "{source}: {errors:?}");
+    }
 }
 
 #[test]
@@ -995,4 +1055,50 @@ fn runtime_full_declarations_refuse_both_entry_paths_and_project_legacy_keywords
     let emitted = roundhouse::emit::ruby::emit_method(&method);
     assert!(emitted.contains("target(kw)"), "{emitted}");
     assert!(!emitted.contains("**kw"), "{emitted}");
+}
+
+#[test]
+fn extend_module_super_forwarding_is_not_residual() {
+    // Campfire WebPush::Connections::Stages: module extended onto Net::HTTP,
+    // `super(...)` lands outside app source. Must not residual tip check.
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let files: [(&str, &str); 3] = [
+        (
+            "app/models/pool.rb",
+            r#"class Pool
+  module Stages
+    def begin_transport(...)
+      super
+    end
+    def connect(...)
+      super(...)
+    end
+  end
+end
+"#,
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let diags = roundhouse::analyze::diagnose(&app);
+    let forwards = diags
+        .iter()
+        .filter(|d| d.to_string().contains("full argument forwarding"))
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        forwards.is_empty(),
+        "extend-module super(...) must not residual: {forwards:?}"
+    );
 }

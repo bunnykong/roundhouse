@@ -21,4 +21,8 @@ pub mod regex_literal;
 pub mod ops;
 pub mod schema_sql;
 pub mod seed_sql;
+pub mod set_op;
+pub mod string_bytes;
 pub mod sub;
+
+pub mod utf8_chr;

@@ -42,9 +42,11 @@ pub fn camelize(snake: &str) -> String {
     // `api_keys` → `APIKeys`, `html_parser` → `HTMLParser`.
     let acronyms = APP_INFLECTIONS.with(|a| a.borrow().acronym.clone());
     let mut out = String::with_capacity(snake.len());
-    for seg in snake.split('_') {
+    // `-` separates too: a view directory such as `product-item` has no
+    // valid constant spelling otherwise (`Product-item`).
+    for seg in snake.split(['_', '-']) {
         if seg.is_empty() {
-            continue; // leading or doubled `_`
+            continue; // leading or doubled separator
         }
         if let Some(acr) = acronyms.iter().find(|a| a.eq_ignore_ascii_case(seg)) {
             out.push_str(acr);

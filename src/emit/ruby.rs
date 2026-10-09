@@ -26,6 +26,7 @@ mod library;
 mod rbs;
 pub mod shake;
 mod shared;
+pub mod source_markers;
 
 /// Render a `Ty` to its RBS string form (`String`, `Array[Comment]`,
 /// `Article`, `Integer?`). Re-exported for non-emit consumers — e.g. the
@@ -72,7 +73,24 @@ pub fn emit_method(m: &MethodDef) -> String {
         format!("({})", ps.join(", "))
     };
     let mut out = String::new();
+    // The body's first statement: a Seq writes markers only between
+    // its statements, so the first is named here.
+    let first = match &*m.body.node {
+        crate::expr::ExprNode::Seq { exprs } => exprs.first().unwrap_or(&m.body),
+        _ => &m.body,
+    };
+    let body_marker = source_markers::marker_for(&first.span);
+    // A marker ABOVE the def, so the def line never reports the previous
+    // method's held position: Spinel names a --debug backtrace frame by
+    // its def line (spinel#7658). A synthesized method has no name span;
+    // its body's first statement stands in.
+    if let Some(mk) = source_markers::marker_for(&m.name_span).or_else(|| body_marker.clone()) {
+        writeln!(out, "{mk}").unwrap();
+    }
     writeln!(out, "def {prefix}{}{}", m.name, params).unwrap();
+    if let Some(mk) = body_marker {
+        writeln!(out, "{mk}").unwrap();
+    }
     let body_text = emit_expr(&m.body);
     fn emit_default(default: &crate::expr::Expr) -> String {
         let src = expr::emit_expr(default);
@@ -217,6 +235,7 @@ fn materialize_models_with_param_binds(
         &params_specs,
         &assoc_scopes,
         materialization,
+        crate::lower::model_to_library::FinderInputs::Request,
         true,
         param_binds,
     ).0;
@@ -330,6 +349,11 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // that same cache and would have nothing to prepend itself to if it
     // ran first.
     library::apply_belongs_to_memoization(&mut lcs, app);
+    // Every association reader waits on its record's pending preload
+    // (`lower::deferred_preload`): a Relation's includes run when a record
+    // first reads an association, not when the rows arrive. After the two
+    // passes above, which put the `@<name>_loaded` guard it looks for.
+    crate::lower::deferred_preload::apply(&mut lcs, app);
     // A has_many cache is made on first read rather than at construction,
     // and the constructor's `attrs = {}` default is one shared frozen Hash
     // (`lower::lazy_model_state`) — nine Arrays and a Hash per hydrated
@@ -553,7 +577,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_
     // + class_info_from_library_class) because the former returns
     // ClassInfo with `table` set — the Arel pass needs `info.table`
     // to map a Const recv to a TableRef when recognizing chains.
-    let (_, model_registry) = crate::lower::lower_models_with_registry(
+    let (_, model_registry) = crate::lower::model_to_library::lower_models_with_request_finders(
         &app.models,
         &app.schema,
         Vec::new(),
@@ -591,6 +615,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_
             route_id_segments: Some(&route_ids),
             inferred_params: Some(&app.inferred_method_params),
             models: &app.models,
+            wrap_parameters_by_default: app.wrap_parameters_by_default,
         },
     )
 }
@@ -658,17 +683,17 @@ fn emit_lowered_controllers_from_lcs(
 /// file put them). No-op when the class line isn't found.
 fn prepend_sibling_classes(
     content: &mut String,
-    siblings: &[(crate::ident::Symbol, crate::ident::Symbol)],
+    siblings: &[crate::dialect::SiblingClass],
     class_name: &str,
 ) {
     let marker = format!("class {class_name}");
     let Some(pos) = content.find(&marker) else { return };
     let mut decls = String::new();
-    for (name, parent) in siblings {
+    for sibling in siblings {
         decls.push_str(&format!(
             "class {} < {}; end\n",
-            name.as_str(),
-            parent.as_str()
+            sibling.name.as_str(),
+            sibling.parent.as_str()
         ));
     }
     decls.push('\n');
@@ -1012,7 +1037,7 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
         // counted twice, which is worse than not knowing.
         let (model_registry, _dup_diags) = crate::emit::diagnostics::scope(|| {
             let (_, reg) =
-                crate::lower::lower_models_with_registry(&app.models, &app.schema, Vec::new());
+                crate::lower::model_to_library::lower_models_with_request_finders(&app.models, &app.schema, Vec::new());
             reg
         });
         let fixture_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> = fixture_lcs

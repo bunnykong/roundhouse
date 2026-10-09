@@ -30,10 +30,14 @@ module ActionDispatch
   class Request
     attr_reader :env
     attr_accessor :params
+    # The body's params alone - see the twin in
+    # runtime/ruby/action_dispatch/request.rb.
+    attr_accessor :request_parameters
 
     def initialize(env, params = {})
       @env = env
       @params = params
+      @request_parameters = {}
       @session_options = {}
     end
 

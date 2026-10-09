@@ -595,8 +595,13 @@ fn walk_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => false,
         ExprNode::Hash { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| walk_expr(k, pred) || walk_expr(v, pred)),
+        ExprNode::ForwardKeywordsWithPairs { entries } => entries
             .iter()
             .any(|(k, v)| walk_expr(k, pred) || walk_expr(v, pred)),
         ExprNode::Array { elements, .. } => elements.iter().any(|e| walk_expr(e, pred)),
@@ -743,6 +748,7 @@ mod tests {
             name: ClassId(Symbol::from(name)),
             is_module: false,
             parent: None,
+            parent_span: Default::default(),
             includes: Vec::new(),
             methods,
             nullable_columns: Vec::new(),

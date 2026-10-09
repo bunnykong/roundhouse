@@ -45,6 +45,7 @@ pub type CompileFn = fn(&str) -> (String, Vec<TemplateSegment>);
 pub enum ViewEngine {
     Erb,
     Haml,
+    Slim,
     /// `.builder` — Ruby `xml.*` markup (`crate::builder`).
     Builder,
     /// Rails' `Raw` handler: the file's bytes, verbatim. It is the
@@ -62,6 +63,7 @@ impl ViewEngine {
         match ext {
             "erb" => Some(ViewEngine::Erb),
             "haml" => Some(ViewEngine::Haml),
+            "slim" => Some(ViewEngine::Slim),
             "builder" => Some(ViewEngine::Builder),
             "raw" => Some(ViewEngine::Raw),
             _ => None,
@@ -73,6 +75,7 @@ impl ViewEngine {
         match self {
             ViewEngine::Erb => erb::compile_erb_mapped,
             ViewEngine::Haml => haml::compile_haml_mapped,
+            ViewEngine::Slim => crate::slim::compile_slim_mapped,
             ViewEngine::Builder => crate::builder::compile_builder_mapped,
             ViewEngine::Raw => erb::compile_raw_mapped,
         }
@@ -122,6 +125,19 @@ pub fn ingest_template(
     let (compiled, map) = compile(source);
     let mut body = ingest_ruby_program(&compiled, file)?;
     erb::translate_spans(&mut body, &map);
+    // `__LINE__` was parsed at a compiled-Ruby offset, whereas the
+    // registry holds the template. Resolve it only after span translation;
+    // ordinary integer literals keep their source value.
+    fn template_lines(expr: &mut crate::expr::Expr, source: &str) {
+        if let crate::expr::ExprNode::Lit { value: crate::expr::Literal::Int { value } } = &mut *expr.node
+            && source.get(expr.span.start as usize..expr.span.end as usize) == Some("__LINE__")
+        {
+            *value = source.as_bytes()[..expr.span.start as usize].iter()
+                .filter(|&&b| b == b'\n').count() as i64 + 1;
+        }
+        expr.node.for_each_child_mut(&mut |child| template_lines(child, source));
+    }
+    template_lines(&mut body, source);
 
     Ok(View {
         name: Symbol::from(name),

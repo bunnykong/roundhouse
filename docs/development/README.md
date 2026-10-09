@@ -19,8 +19,9 @@ The default suite loads Ruby gems as well as Rust code. Prepare them and
 the generated fixtures:
 
 ```sh
-gem install rails rails-html-sanitizer sqlite3 bcrypt minitest rake --no-document
+gem install rails rails-html-sanitizer sqlite3 bcrypt rack minitest rake --no-document
 gem install activerecord -v '~> 8.1.0' --no-document
+(cd runtime/spinel/scaffold && bundle install)   # framework_tests_ruby runs through this bundle
 bin/rh fixture
 (cd fixtures && ../scripts/create-store store)
 bin/rh doctor

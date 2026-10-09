@@ -59,6 +59,10 @@ end
   scope :newest, -> { ordered.last }
   scope :search, ->(q) { where("body like ?", q) }
   scope :shared, -> { where(room_id: 1) }
+
+  def self.paged?
+    count > PAGE_SIZE
+  end
 end
 "#,
         ),
@@ -77,6 +81,7 @@ end
   def show
     @room = Room.find(params[:id])
     @head = @room.messages.ordered.first(3)
+    @paged = @room.messages.paged?
     @words = summary.split.first(4).join(" ")
     @tail = summary.split.last(2).join(" ")
     @found = anything.search("hi").last(100)
@@ -127,6 +132,14 @@ fn counted_terminal_on_a_threaded_relation_is_renamed() {
         message.contains("Message.ordered(__rel).first_n(PAGE_SIZE)"),
         "first(n) on a relation becomes first_n:\n{message}"
     );
+    assert!(
+        message.contains("__rel.more_than?(PAGE_SIZE)"),
+        "count > PAGE_SIZE becomes more_than?:\n{message}"
+    );
+    assert!(
+        !message.contains("__rel.count >"),
+        "the COUNT comparison must not remain:\n{message}"
+    );
 }
 
 /// The bare forms answer one record and keep their names — only the
@@ -157,6 +170,106 @@ fn counted_terminal_on_a_seeded_association_is_renamed() {
     assert!(
         show.contains("Message.ordered(ActiveRecord::Relation.new(Message).where(room_id: @room.id).preloaded(@room.messages_target, @room.messages_loaded?)).first_n(3)"),
         "@room.messages.ordered.first(3) seeds and renames:\n{show}"
+    );
+}
+
+/// campfire `Page.load(relation, :last, size)` after the selector is
+/// grounded: `relation.skip_preloading!.last(size)`. The parameter is
+/// untyped, but `skip_preloading!` is Relation-only — rename anyway.
+#[test]
+fn counted_terminal_through_skip_preloading_on_untyped_param_is_renamed() {
+    let app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.load_page(relation, direction, size)
+    case direction
+    when :first
+      relation.skip_preloading!.first(size)
+    when :last
+      relation.skip_preloading!.last(size)
+    end
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  def index
+    Widget.load_page(Widget.order(:name), :last, 2)
+    render plain: "ok"
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    // Full analyze+lower — emit_lowered_models alone only rewrites
+    // scope bodies via apply_scope_lowering; class-method counted
+    // terminals need relation_counted_terminal on the App first.
+    let mut app = app;
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    let widget = emitted(&ruby::emit_lowered_models(&app), "app/models/widget.rb");
+    assert!(
+        widget.contains("last_n(size)") && widget.contains("first_n(size)"),
+        "skip_preloading!.last/first(size) must rename:\n{widget}"
+    );
+    assert!(
+        !widget.contains(".last(size)") && !widget.contains(".first(size)"),
+        "counted forms must not remain:\n{widget}"
+    );
+}
+
+/// Without a Relation-typed seed *or* a `skip_preloading!` hop, do not
+/// rename. No call site here, so the parameter stays untyped — the hop
+/// is what unlocked campfire; bare `.last(size)` must not freeload.
+#[test]
+fn counted_terminal_on_bare_untyped_param_is_left_alone() {
+    let app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.take_last(relation, size)
+    relation.last(size)
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    let mut app = app;
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    let widget = emitted(&ruby::emit_lowered_models(&app), "app/models/widget.rb");
+    assert!(
+        widget.contains("relation.last(size)"),
+        "bare untyped param must keep .last(size):\n{widget}"
+    );
+    assert!(
+        !widget.contains("last_n"),
+        "must not rename without skip_preloading!:\n{widget}"
     );
 }
 

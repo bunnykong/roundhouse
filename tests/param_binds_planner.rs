@@ -108,7 +108,7 @@ end
         }
     }
     std::fs::write(dir.join("planner_gate.rb"), include_str!("param_binds_planner.rb")).unwrap();
-    let output = emit_and_run::ruby().arg("planner_gate.rb").current_dir(&dir)
+    let output = emit_and_run::ruby().arg("planner_gate.rb").current_dir(&*dir)
         .env("PLANNER_BINDS", if bound { "1" } else { "0" }).output().unwrap();
     assert!(output.status.success(), "{}\n{}\n{}", dir.display(),
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));

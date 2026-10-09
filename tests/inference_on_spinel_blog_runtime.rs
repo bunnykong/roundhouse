@@ -47,7 +47,15 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_untyped(key, path, out);
+                collect_untyped(value, path, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
             collect_untyped(then_branch, &format!("{path}/if.then"), out);
@@ -263,7 +271,35 @@ fn untyped_subexpressions_baseline() {
     // inference improves; failing low is a good thing (un-pin and
     // record the new lower bound). The point of the bound is to
     // catch regressions, not to lock in today's number.
-    const CEILING: usize = 500;
+    // 2026-10-05: 500 -> 505, MEASURED after the request-key finder
+    // refresh onto 132a26c7. With this same analyzer and collector,
+    // pristine 4f5a1239 / 132a26c7 runtimes measure 470 / 476; the
+    // finder runtime on those bases measures 497 / 505. The eight new
+    // candidate sites are Relation#include? (+5) and #more_than? (+3).
+    // Two membership call arguments additionally inherit the cast's
+    // unresolved input when no signatures/caller context are supplied.
+    // Existing finder/parser sites are unchanged. The companion RBS
+    // probe and full-context runtime gate still require every new finder
+    // method to be fully typed; no node is excluded from this raw probe.
+    // Float request inputs: 505 -> 512, MEASURED with the identical
+    // collector over the runtime before/after the numeric-value fix.
+    // All seven added sites are IntegerKeyCast#parse's unseeded Float
+    // guard/input reads and comparisons; no existing site changes.
+    // Its RBS-paired method still has the separate zero-residual assertion.
+    // TokenFor (#450) on the same collector: 512 -> 519, MEASURED on
+    // pristine upstream/main after #450+#438. The seven new sites are
+    // ActiveRecord::TokenFor helpers under the spinel-blog runtime
+    // probe; the Float ceiling was never re-measured against TokenFor.
+    // exists? key dispatch (#549 / #403): 519 -> 523, MEASURED. Four new
+    // Base sites from exists? / _exists_primary_key_input (nil guard +
+    // cast + adapter). Companion RBS probe stays at zero residual.
+    // Pessimistic locking (#644 / #671): 523 -> 529, MEASURED. The six
+    // new sites are `with_lock`'s `*args` split (the trailing options
+    // Hash and the lock clause) and the `isolation:` / `requires_new:` /
+    // `joinable:` pass-through into `transaction`, all accepted and
+    // ignored under SQLite. Its RBS-paired methods keep the gradual
+    // `untyped` escape `self.transaction` already has.
+    const CEILING: usize = 529;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

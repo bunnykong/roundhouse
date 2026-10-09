@@ -49,6 +49,13 @@ fn cases() -> Vec<Case> {
             expect_name: "posts/show",
             expect_format: "html",
         },
+        Case {
+            engine: ViewEngine::Slim,
+            rel_path: "posts/show.html.slim",
+            source: "h1 = @post.title\n.body\n  = @post.body\n",
+            expect_name: "posts/show",
+            expect_format: "html",
+        },
     ]
 }
 

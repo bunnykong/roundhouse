@@ -225,11 +225,11 @@ Db.close
         success(
             Command::new(std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into()))
                 .args(["bind_values.rb", "-o", "bind_values"])
-                .current_dir(&dir),
+                .current_dir(&*dir),
         );
-        success(Command::new(dir.join("bind_values")).current_dir(&dir));
+        success(Command::new(dir.join("bind_values")).current_dir(&*dir));
     } else {
-        success(Command::new("ruby").arg("bind_values.rb").current_dir(&dir));
+        success(Command::new("ruby").arg("bind_values.rb").current_dir(&*dir));
     }
 }
 
@@ -318,5 +318,5 @@ raise "different date" unless row.date_matches(Date.new(2024, 3, 1)) == 0
 puts "typed values: native Ruby Date/String and NULL predicates passed"
 Db.close
 "#).unwrap();
-    success(Command::new("ruby").arg("date_gate.rb").current_dir(dir));
+    success(Command::new("ruby").arg("date_gate.rb").current_dir(&*dir));
 }

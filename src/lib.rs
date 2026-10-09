@@ -25,8 +25,10 @@ pub mod fixtures;
 /// dependency classified (framework / stdlib / modeled / infrastructure /
 /// unknown). Shared by every analysis skin; the unknown list feeds
 /// [`analyze::attribution`].
+pub mod gem_boundary;
 pub mod gems;
 pub mod haml;
+pub mod slim;
 pub mod ide;
 pub mod ident;
 pub mod ingest;

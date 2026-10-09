@@ -497,10 +497,22 @@ pub(crate) fn opens_passthrough_block(code: &str) -> bool {
     is_block_expr(t)
 }
 
+/// Double-quoted Ruby literal for `s`. A balanced `#{…}` keeps its body
+/// verbatim — it is code (HAML/Slim text interpolation), so its own
+/// quotes and backslashes must not be escaped; an unbalanced `#{` is
+/// plain text.
 pub(crate) fn ruby_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if rest.starts_with("#{") {
+            if let Some(end) = interpolation_end(rest) {
+                out.push_str(&rest[..end]);
+                rest = &rest[end..];
+                continue;
+            }
+        }
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -509,9 +521,79 @@ pub(crate) fn ruby_string_literal(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             other => out.push(other),
         }
+        rest = &rest[c.len_utf8()..];
     }
     out.push('"');
     out
+}
+
+/// Byte length of the `#{…}` at the start of `s` (brace-balanced, skipping
+/// quoted strings), or `None` when it never closes.
+fn interpolation_end(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut chars = s.char_indices().skip(1);
+    let mut prev = '{'; // last non-blank char outside strings, for `%` literals
+    while let Some((i, c)) = chars.next() {
+        // A percent literal (`%q(})`, `%w[a]`, `%(x)`) hides its own braces.
+        // `%` after an operand is the modulo operator instead.
+        if quote.is_none() && c == '%' && !(prev.is_alphanumeric() || matches!(prev, ')' | ']' | '}' | '_')) {
+            let rest = &s[i + 1..];
+            let skip = usize::from(rest.starts_with(['q', 'Q', 'w', 'W', 'i', 'I', 'r', 's', 'x']));
+            if let Some(open) = rest[skip..].chars().next().filter(|d| !d.is_alphanumeric() && !d.is_whitespace()) {
+                let close = match open {
+                    '(' => ')',
+                    '[' => ']',
+                    '{' => '}',
+                    '<' => '>',
+                    other => other,
+                };
+                let (mut nest, mut body) = (0, rest[skip + open.len_utf8()..].char_indices());
+                let mut end = None;
+                while let Some((j, d)) = body.next() {
+                    if d == '\\' {
+                        body.next();
+                    } else if d == close && nest == 0 {
+                        end = Some(j);
+                        break;
+                    } else if d == close {
+                        nest -= 1;
+                    } else if d == open && open != close {
+                        nest += 1;
+                    }
+                }
+                if let Some(j) = end {
+                    // Resume scanning after the literal's closing delimiter.
+                    let resume = i + 1 + skip + open.len_utf8() + j + close.len_utf8();
+                    while chars.clone().next().is_some_and(|(k, _)| k < resume) {
+                        chars.next();
+                    }
+                    prev = close;
+                    continue;
+                }
+            }
+        }
+        if quote.is_none() && !c.is_whitespace() {
+            prev = c;
+        }
+        match (quote, c) {
+            (Some(_), '\\') => {
+                chars.next();
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '{') => depth += 1,
+            (None, '}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn find_at(bytes: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
@@ -527,6 +609,19 @@ fn find_at(bytes: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_literal_keeps_interpolation_code_verbatim() {
+        assert_eq!(ruby_string_literal("a\"b #{x ? \"m\" : 'f'} \"c"), "\"a\\\"b #{x ? \"m\" : 'f'} \\\"c\"");
+        // A percent literal hides its closing brace; modulo does not.
+        assert_eq!(
+            ruby_string_literal("#{ %q(}) + \"x\" } \"y"),
+            "\"#{ %q(}) + \"x\" } \\\"y\"",
+        );
+        assert_eq!(ruby_string_literal("#{ a % (b) + \"x\" }"), "\"#{ a % (b) + \"x\" }\"");
+        // Unbalanced `#{` is text, and escapes still apply.
+        assert_eq!(ruby_string_literal("#{ \"x"), "\"#{ \\\"x\"");
+    }
 
     /// Translate a compiled offset and assert it lands on the template
     /// offset where `needle` starts.

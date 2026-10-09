@@ -85,6 +85,24 @@ in `src/project.rs`. Shape notes worth knowing:
   `scaffold/` tree overlaid into
   every emitted Ruby/Spinel project, and a `test/` tree of
   target-specific test files.
+- `runtime/spinel/db_pg.rb` implements the same `Db` contract over
+  PostgreSQL, on the pure-Ruby spinel-pg driver (no libpq). No target
+  selects it yet. `tests/spinel_pg_db.rs` compiles it with Spinel and
+  runs it against a live server.
+  - `Db.exec_returning` answers the returned rows.
+  - `Db.last_insert_rowid` reads the inserted table's own sequence, so
+    it works for serial and identity keys only; any other key raises.
+  - Server errors whose SQLSTATE ActiveRecord names are raised as that
+    class through `runtime/spinel/pg_errors.rb`.
+  - A transaction keeps its connection, and a lease that ends inside
+    one rolls it back.
+  - The pool is sharded per thread, as `runtime/spinel/db.rb`'s is.
+    `Db.prepare` runs through a named statement cached per connection
+    (at most 128, closed on the server when evicted); finalizing a read
+    releases its handle and keeps the statement. There is no request
+    query cache yet.
+  - The SQLite-only boot hooks (read snapshot, checkpointer) do
+    nothing there, and `seed_from_file` raises.
 
 ## Framework runtime — `runtime/ruby/`
 
@@ -248,7 +266,7 @@ Each `RH_STMT_STATS` line reports:
   before failed cleanup destroys a statement.
 
 Counters are cumulative; subtract snapshots to measure a phase. The native cache's
-128-entry cap is soft within a request, with insertion-order trimming at lease
+128-entry cap is soft within a request, with least-recently-used trimming at lease
 boundaries after every outstanding cursor is released. Summing per-connection
 `distinct_sql` is not a count of globally unique SQL strings. The diagnostic is
 implemented for compiled Spinel; CRuby and JRuby do not emit these summaries.
@@ -310,6 +328,79 @@ instead. **A divergence must be recorded here when it is chosen**: an
 undocumented one reads as intent to the next session precisely because
 it is applied consistently, and the emit gives no signal that anyone
 weighed it.
+
+### A JSON body is not wrapped on the strict targets
+
+Rails' ParamsWrapper copies a JSON request body under the controller's
+model name (`params[:article]`) when the app's `load_defaults` is 7.0
+or later, an initializer asks for it, or the controller says so with
+`wrap_parameters`. The ruby family does the same: the compiler decides
+each controller's key and copied keys
+(`lower::controller_to_library::params_wrapper`), the generated
+`process_action` opens with `Params.wrap` (`runtime/ruby/params.rb`),
+and the dispatchers hand the request its body params apart from the
+query string and the path (`request_parameters`).
+
+The strict targets do not: Rust and Python read no JSON body at all,
+and the TypeScript server merges one into `params` without keeping the
+body apart. A client posting the fields at the top level gets them at
+the top level only, so `params.expect(article: …)` finds nothing there.
+The capability is `FormatBreadth::wraps_json_params`.
+
+### A missing strong-params resource is `{}` on the strict targets, not 400
+
+Rails refuses `params.expect(article: [...])` when `article` is missing,
+blank, a scalar, an array, or a hash of only unpermitted keys, and
+`params.require(:article)` when it is missing or blank (a scalar reaches
+`permit` and is a 500): both raise `ActionController::ParameterMissing`,
+which an unrescued request answers with 400. The ruby family does the
+same: the typed factory is handed `Params.expect_present(@params, …)` /
+`Params.require_present(@params, …)` (`runtime/ruby/params.rb`), and both
+dispatchers answer an unrescued `ParameterMissing` with 400.
+
+The strict targets have no exception control flow and hand-written
+`Params` primitives, so their factory keeps reading `@params`: a missing
+resource is an empty one, the model's validation usually refuses it, and
+the request answers 422 where Rails says 400. The capability is
+`FormatBreadth::raises_param_missing` (`src/lower/controller/body.rs`).
+
+### Spinel `Date` is a bounded runtime value
+
+The Spinel target defines a small `Date` class in
+`runtime/spinel/date.rb` for Rails date columns. It stores a Gregorian
+year, month, and day; database storage and JSON use `YYYY-MM-DD`, with
+no clock or zone. Its ISO parser accepts only that exact format and
+validates the calendar date.
+
+This is not Ruby's stdlib `date` package. `DateTime`, Julian/Italian
+calendar modes, natural-language and non-ISO parsing, schema date
+defaults, ActiveSupport date extensions beyond `Date.current` and the
+month/day edges `time_calendar` lowers, date picker helpers, and
+`require "date"` are not included. `strftime` implements the date
+directives used by the admitted runtime contract and raises on other
+directives. The compiler continues diagnosing those unsupported paths.
+JRuby and other targets keep their existing Date boundary until they
+have their own runtime.
+
+The Date package — `runtime/spinel/date.rb`, date parse/format
+(`active_support_date_parsing.rb`), the date JSON rewrite
+(`active_record_date_serialization.rb`), matching RBS, and boot
+requires — is injected only when `app_uses_date` is true (schema date
+columns or date values in emitted roots). Default `as_json` stays
+always-on via `active_record_serialization.rb`. Loading
+`Date#strftime` into every Spinel app currently breaks poly
+`Time | Date` receivers for `Time#strftime` (matz/spinel#7334);
+Campfire has no date columns and must not pay that cost. Once upstream
+fixes the poly method table, unconditional load is safe again.
+
+Date-column JSON is rewritten in the omit-gated Spinel reopen (after
+the shared time-aware `_as_json_only`), not in `runtime/ruby/
+active_record/connection.rb` — the CRuby overlay has its own
+reflection-aware Date path, and a shared date branch would tax Bar B /
+AR RBS probes for every app. Raw `where(due_on: some_date)` predicates
+format through `SqliteAdapter.escape_value` →
+`ActiveSupport.format_db_date` so the SQL compares against
+`YYYY-MM-DD` text, not a timestamp.
 
 ### `id` is `0` before save, not `nil` (`""` for a string key)
 
@@ -918,7 +1009,14 @@ process keeps one record per digest scheme. Purging a blob purges its
 variant records, their image blobs and their files first. The app's
 libvips loader policy (`Vips.block_untrusted(true)`, `Vips.block(op,
 true)` in an initializer) is lifted at ingest onto the `Rails
-::Application` reopen and applied when the processor loads. `variable?`
+::Application` reopen and applied when the processor loads. The
+processor also wraps `Vips.vips_foreign_find_load` so a blocked
+loader is not selected: libvips 8.15+ skips BLOCKED classes in
+`vips_foreign_map`, but 8.14 still names Magick/Svg after
+`block_untrusted` even though load itself raises. The wrap reaches
+the C finder through `VipsExt` (the spinel package's binding, or an
+FFI stand-in on the gem). Wrapping the Ruby finder in place re-enters
+the wrapper on the spinel package. `variable?`
 is Rails' content-type question, answered from `variable_content_types`
 minus what the app's initializer subtracts (ingest lifts
 `config.active_storage.variable_content_types -= %w[…]` onto the same
@@ -1242,12 +1340,18 @@ warns about.
 overlay records the Hash, so a test that reads `entry[:payload]` and
 subscripts it passes on CRuby and does not on spinel. Both entries carry
 `action: :message` and the stream, which is what `assert_broadcasts`
-reads, so the test helper itself agrees across the two. The narrower
-consequence is in the renderer: `payload_json` writes Integer values
-only, because two call sites in one app is the whole surface anybody has
-asked for. A String or nested value needs the renderer widened — and
-that is a monomorphization decision to take deliberately, not a cast to
-sneak in.
+reads, so the test helper itself agrees across the two.
+
+**The text is what Rails writes** (#619). Rails encodes a broadcast with
+ActiveSupport::JSON, so every value is JSON (a String, nil, a Float, a
+Symbol, a nested Hash or Array) and `<`, `>` and `&` inside strings come
+out as `\u003c`, `\u003e`, `\u0026`. Both lanes write exactly that with
+`JsonBuilder.escape_html_entities(JSON.generate(...))`: spinel's
+`payload_json` and Turbo `Transport`, the overlay's `Registry.deliver`,
+and both lanes' `pubsub.broadcasts`. `payload_json` used to write
+Integer values only (`value.to_s`), enough for campfire's two call sites;
+a String value - a terminal relayed over a channel broadcasts its output
+as one - came out as invalid JSON, which the client drops.
 
 ### Active Storage's engine routes are mounted by the dispatcher
 
@@ -4335,3 +4439,66 @@ façade, which stands aside only when the app registers both `stddev` and
 
 Found 2026-09-25 bringing current lobsters' benchmark routes up on the
 ruby lane; the spinel install landed the same day.
+
+### `request.format.json?` raised NoMethodError — the predicate stays on `request_format`, not a Mime-typed `Request#format` — FIXED
+
+`protect_from_forgery unless: -> { request.format.json? }` — Rails' own
+guide idiom for an API controller that still inherits
+`ActionController::Base` — raised `NoMethodError` on every dispatched
+action: `private method 'format' called for nil` outside a real
+dispatch (`request` is nil until a dispatcher parks one, as in a
+unit-style `controller.process_action` call), or `undefined method
+'json?' for an instance of String` behind a real one (the shared
+`ActionDispatch::Request#format` is a plain `attr_reader` over a name
+String; the CRuby overlay's twin carries no `format` at all).
+
+**Why the fix is not a typed `Mime::Type` on `Request#format`.** The
+per-request format is already modeled elsewhere, correctly: every
+controller carries `request_format`, a plain Symbol attribute the
+dispatcher sets from the path's `.json` suffix / a `(.:format)` route
+segment / a route-forced format (`main.rb`, both ruby-family lanes),
+and action bodies already compare against it directly (`if
+request_format == :json`, the Jbuilder-lowerer's `respond_to`
+flatten). A `request.format.html?`-shaped call in an ACTION body was
+already rewritten to `self.request_format == :html` at the AST level
+(`lower::controller_to_library::rewrites::rewrite_request_format`) —
+precisely because the Request object's own `format` cannot answer the
+predicate on either lane. Giving `Request#format` a real Mime-typed
+value instead would duplicate that state in two places that could
+disagree (a `request_format` and a `request.format` seeded from
+different negotiations), and would still leave the CRuby overlay's
+Request with nothing to return. `runtime/ruby/mime.rb`'s ported
+`Mime::Type` — used elsewhere, for the Mime registry's own callers —
+deliberately omits `json?`/`html?` for a related reason (its own
+comment: "a call beyond [`lookup`/`lookup_by_extension`/`[]`] stays an
+honest gap"); `request.format` is answered from `request_format`
+instead of reopening that gap.
+
+**Where the gap was.** `rewrite_request_format` ran over action bodies
+only (`lower_action_body`). Expressions spliced into the synthesized
+`process_action` — filter `if:`/`unless:` lambdas (`protect_from_forgery`
+and any `before_action …, if:`/`unless:`), block-form filter bodies
+(`before_action -> { … }`), and `rescue_from` handlers — bypass that
+pipeline. The guide idiom
+`protect_from_forgery unless: -> { request.format.json? }` was the
+first shape that surfaced; structurally every dispatcher-embedded expr
+had the same hole.
+
+**Fix.** `synthesize_process_action` runs `rewrite_request_format` once
+over the finished dispatcher body (after rescue wrapping). `map_expr`
+walks guards, block-form filter bodies, and rescue handlers in one
+pass — the same helper action bodies already get, applied at the
+dispatcher boundary rather than bolted into `cond_from_guards` alone.
+
+**What was verified.**
+`tests/protect_from_forgery_unless_request_format.rs`'s
+`protect_from_forgery_unless_request_format_json_does_not_raise`: a
+`:json`-formatted dispatch skips the forgery check and runs the action
+(previously `NoMethodError`); an html POST with no token still hits
+the check and is blocked (422) — proving the rewritten guard still
+protects a non-json request, not just stopped raising.
+
+Found 2026-10-07 probing `request.format` on a from-scratch Rails API
+app under `--target spinel`; reproduces identically under `--target
+ruby`, since both lanes consume the same `controller_to_library`
+universal IR.

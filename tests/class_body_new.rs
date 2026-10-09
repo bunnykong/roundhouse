@@ -93,17 +93,18 @@ fn a_class_side_method_body_gets_it_too() {
     );
 }
 
-/// An INSTANCE method's bare `new` is a NoMethodError in Ruby too —
-/// there is nothing there to preserve, and nothing to rewrite.
+/// An instance method's bare `new` is a NoMethodError in Ruby too. The
+/// explicit constructor call still keeps its receiver, while flattened
+/// optional keywords are respelled to match `initialize`.
 #[test]
-fn an_instance_method_is_left_alone() {
+fn an_explicit_constructor_in_an_instance_method_keeps_its_receiver() {
     let src = emitted(
         "class Sound\n  def initialize(name: nil)\n    @name = name\n  end\n\n  \
          def sibling\n    Sound.new(name: \"x\")\n  end\nend\n",
     );
     assert!(
-        src.contains("Sound.new(name: \"x\")") && !src.contains("Sound.new(Sound"),
-        "an explicit constructor stays exactly one constructor:\n{src}"
+        src.contains("Sound.new(\"x\")") && !src.contains("Sound.new(Sound"),
+        "the constructor stays on Sound and its flattened keyword binds positionally:\n{src}"
     );
 }
 
@@ -125,6 +126,39 @@ fn a_self_constructing_constant_still_defers_past_the_methods() {
         builtin > init,
         "a constant that constructs its own class must be emitted AFTER \
          the methods it calls:\n{src}"
+    );
+}
+
+/// INDEX reads BUILTIN after index_by grounding qualifies it as
+/// `Sound::BUILTIN`. Deferral must follow that spelling too — otherwise
+/// INDEX stays eager, emits above BUILTIN, and campfire dies at load
+/// with `uninitialized constant Sound::BUILTIN`.
+const SOUND_WITH_INDEX: &str = r#"class Sound
+  attr_reader :name
+
+  def initialize(name:)
+    @name = name
+  end
+
+  BUILTIN = [ new(name: "bell"), new(name: "honk") ]
+  INDEX = BUILTIN.index_by(&:name)
+end
+"#;
+
+#[test]
+fn a_constant_reading_a_deferred_own_class_const_also_defers() {
+    let src = emitted(SOUND_WITH_INDEX);
+    let builtin = src.find("BUILTIN =").expect("BUILTIN emitted");
+    let index = src.find("INDEX =").expect("INDEX emitted");
+    let init = src.find("def initialize").expect("initialize emitted");
+    assert!(
+        builtin > init && index > init,
+        "both self-constructing BUILTIN and INDEX-that-reads-it must \
+         follow the methods:\n{src}"
+    );
+    assert!(
+        index > builtin,
+        "INDEX references Sound::BUILTIN, so it must emit after BUILTIN:\n{src}"
     );
 }
 

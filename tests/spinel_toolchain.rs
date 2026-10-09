@@ -33,10 +33,55 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/class_attribute.rs"]
+mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_broadcast_json.rs"]
+mod cable_broadcast_json_contract;
+#[path = "spinel_toolchain/cable_broadcast_json.rs"]
+mod cable_broadcast_json;
+#[path = "support/anonymous_keywords.rs"]
+mod anonymous_keywords;
+#[path = "support/native_http.rs"]
+mod native_http;
+#[path = "spinel_toolchain/strong_params.rs"]
+mod strong_params;
+#[path = "spinel_toolchain/params_wrapper.rs"]
+mod params_wrapper;
+#[path = "support/io_process_constants.rs"]
+mod io_process_constants_contract;
+#[path = "spinel_toolchain/io_process_constants.rs"]
+mod io_process_constants;
+
+/// The native counterpart of the generic emitted-Ruby regression test.
+#[test]
+#[ignore = "requires Spinel; run in its CI lane"]
+fn anonymous_keyword_forwarding_runs_natively() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/services/keyword_forwarder.rb",
+            anonymous_keywords::SOURCE,
+        )
+        .run_spinel(anonymous_keywords::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("anonymous keyword forwarding contract passed"));
+    let emitted = std::fs::read_to_string(run.emitted.join("app/models/keyword_forwarder.rb"))
+        .expect("emitted keyword forwarding class");
+    assert!(emitted.contains("class KeywordForwarder"), "{emitted}");
+    assert!(emitted.contains("request(kind: :get, path: path, **)"), "{emitted}");
+}
+
+#[path = "support/engine_mount.rs"]
+mod engine_mount;
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn literal_isolated_engine_mount_dispatches_on_native_http() {
+    engine_mount::spinel_http_witness();
+}
 
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
@@ -49,6 +94,24 @@ fn finite_concern_class_configuration_runs_natively() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// The native half of `emit_and_run::concern_class_attribute_macros_run_at_class_load`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn concern_class_attribute_macros_run_at_class_load_natively() {
+    let run = class_attribute::overlay().run_spinel(class_attribute::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute contract passed"));
+}
+
+/// The native half of `emit_and_run::concern_class_attribute_set_to_nil_is_not_unset`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn concern_class_attribute_set_to_nil_is_not_unset_natively() {
+    let run = class_attribute::nil_overlay().run_spinel(class_attribute::NIL_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute nil contract passed"));
 }
 
 /// The native half of `emit_and_run::rails_root_join_takes_any_number_of_parts`:

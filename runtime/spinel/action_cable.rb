@@ -61,8 +61,11 @@ module ActionCable
     #
     # LOG FIRST, then dispatch — the order `Broadcasts.record` uses, so a
     # transport that raises cannot lose the record of the attempt.
-    def broadcast(stream, payload)
-      json = ActionCable.payload_json(payload)
+    # `coder: nil` — Rails' "the payload is already encoded": campfire
+    # encodes the unread notice once and hands every member the same
+    # text (basecamp/once-campfire#292), so it goes out as given.
+    def broadcast(stream, payload, coder: :json)
+      json = coder.nil? ? payload.to_s : ActionCable.payload_json(payload)
       Broadcasts.log_append({ action: :message, stream: stream, payload: json })
       Cable.publish_raw(stream, json)
       nil
@@ -183,12 +186,12 @@ module ActionCable
         if entry[:action] == :message
           out << entry[:payload].to_s
         else
-          out << JSON.generate(Broadcasts.render_fragment(
+          out << JsonBuilder.escape_html_entities(JSON.generate(Broadcasts.render_fragment(
             action: entry[:action],
             target: entry[:target],
             html: entry[:html],
             attributes: entry[:attributes].to_s,
-          ))
+          )))
         end
       end
       out
@@ -231,24 +234,19 @@ module ActionCable
     SERVER
   end
 
-  # Render a raw-publish payload to JSON object text.
+  # Render a raw-publish payload to JSON text, as Rails does: Action
+  # Cable encodes the payload with ActiveSupport::JSON, so a String,
+  # a Symbol, nil, a Float or a nested Hash or Array is written as JSON
+  # (not with `to_s`), and `<`, `>` and `&` inside strings come out as
+  # `\u003c`, `\u003e`, `\u0026`. `JSON.generate` walks the value
+  # whatever it holds; `escape_html_entities` adds Rails' escapes. The
+  # CRuby overlay's transport writes the same text (`Registry.deliver`).
   #
-  # Integer-valued because that is the whole surface an ingested app has
-  # asked for so far (campfire's two call sites are `{room_id: <id>}` and
-  # `{roomId: <id>}`). Widening it is a monomorphization decision, not a
-  # cast: give the emitter one element type per container and it stays a
-  # struct field; make it a bag and every target pays.
+  # The payload was Integer-valued only (`value.to_s`), which is what
+  # campfire's two call sites need; a terminal relayed over a channel
+  # broadcasts String output, which came out as invalid JSON (#619).
   def self.payload_json(payload)
-    out = "{"
-    first = true
-    payload.each do |key, value|
-      if !first
-        out = out + ","
-      end
-      first = false
-      out = out + JSON.generate(key.to_s) + ":" + value.to_s
-    end
-    out + "}"
+    JsonBuilder.escape_html_entities(JSON.generate(payload))
   end
 
   module Channel
@@ -378,6 +376,13 @@ module ActionCable
       # What `subscribed` asked for, in the order it asked. The CALLER
       # registers these; nothing here touches the transport.
       def streams
+        @streams
+      end
+
+      # Rails 8.2's channel tests read the stream names off the
+      # subscription (`subscription.stream_names`); `streams` beside it
+      # became private there. Here they are the same list.
+      def stream_names
         @streams
       end
 

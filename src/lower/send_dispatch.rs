@@ -72,12 +72,212 @@ pub fn apply_send_static_dispatch(
     let providers = collect_hash_providers(app);
     let defined = defined_method_name_counts(app);
     let mut diags = Vec::new();
+    apply_param_selector_dispatch(app, &providers, registry, &mut diags);
     super::for_each_hook_body(app, &mut |body| {
         let elems = collect_var_element_sets(body);
         let origins = collect_provider_var_origins(body, &providers, &defined);
         rewrite(body, &elems, &providers, &origins, &[], registry, &mut diags);
     });
     diags
+}
+
+// ---------------------------------------------------------------------
+// Shape D: the name is a parameter, and every caller passes a literal
+// ---------------------------------------------------------------------
+
+/// `public_send(direction, size)` where `direction` is a parameter of
+/// the enclosing method and every call site passes a Symbol literal in
+/// that position — basecamp/once-campfire#292's
+/// `Page.load(relation, direction, size)`, called with `:first` and
+/// `:last`. The literals ARE the name set, so the parameter is bound to
+/// them exactly as Shape A binds a block parameter to its collection.
+///
+/// Call sites counted: a constant receiver that resolves to the class
+/// (by its full name, or a trailing part of it naming exactly one
+/// class), and a receiver-less or `self` call from the class's own
+/// methods. Any other call of the same method name on an untyped
+/// receiver, or one typed as the class, could pass anything, so it
+/// leaves the parameter unproven and the site on the residue ledger.
+fn apply_param_selector_dispatch(
+    app: &mut App,
+    providers: &HashProviders,
+    registry: &HashMap<ClassId, ClassInfo>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    use crate::dialect::MethodReceiver;
+    // (class, method, receiver) -> per positional index: Some(names)
+    // while every call passes a Symbol literal there, None once one
+    // does not.
+    type Key = (ClassId, Symbol, bool);
+    let mut targets: HashMap<Key, usize> = HashMap::new();
+    for lc in &app.library_classes {
+        for m in &lc.methods {
+            let positional = m.params.iter().filter(|p| !p.keyword && !p.rest && !p.forwarding).count();
+            if positional > 0 && body_has_param_send(&m.body, &m.params) {
+                targets.insert((lc.name.clone(), m.name.clone(), m.receiver == MethodReceiver::Class), positional);
+            }
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+    let class_names: Vec<ClassId> = app
+        .library_classes
+        .iter()
+        .map(|lc| lc.name.clone())
+        .chain(app.models.iter().map(|m| m.name.clone()))
+        .collect();
+    let resolve = |path: &[Symbol]| -> Option<ClassId> {
+        let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let suffix = format!("::{joined}");
+        let mut found: Option<ClassId> = None;
+        for c in &class_names {
+            if c.0.as_str() == joined || c.0.as_str().ends_with(&suffix) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(c.clone());
+            }
+        }
+        found
+    };
+    let mut seen: HashMap<Key, Vec<Option<Vec<String>>>> = HashMap::new();
+    let mut poisoned: std::collections::HashSet<Key> = std::collections::HashSet::new();
+    let record = |key: &Key, args: &[Expr], seen: &mut HashMap<Key, Vec<Option<Vec<String>>>>| {
+        let Some(&positional) = targets.get(key) else { return };
+        let slots = seen.entry(key.clone()).or_insert_with(|| vec![Some(Vec::new()); positional]);
+        for (i, slot) in slots.iter_mut().enumerate() {
+            match (slot.as_mut(), args.get(i).map(|a| &*a.node)) {
+                (Some(names), Some(ExprNode::Lit { value: Literal::Sym { value } })) => {
+                    push_unique(names, value.as_str().to_string());
+                }
+                _ => *slot = None,
+            }
+        }
+    };
+    {
+        let mut visit = |owner: Option<&ClassId>, body: &Expr| {
+            fn walk(
+                e: &Expr,
+                owner: Option<&ClassId>,
+                resolve: &dyn Fn(&[Symbol]) -> Option<ClassId>,
+                targets: &HashMap<Key, usize>,
+                f: &mut dyn FnMut(Key, &[Expr], bool),
+            ) {
+                if let ExprNode::Send { recv, method, args, .. } = &*e.node {
+                    match recv.as_ref().map(|r| (&*r.node, r.ty.as_ref())) {
+                        Some((ExprNode::Const { path }, _)) => {
+                            if let Some(c) = resolve(path) {
+                                f((c, method.clone(), true), args, false);
+                            }
+                        }
+                        None | Some((ExprNode::SelfRef, _)) => {
+                            if let Some(c) = owner {
+                                for class_side in [true, false] {
+                                    f((c.clone(), method.clone(), class_side), args, false);
+                                }
+                            }
+                        }
+                        Some((_, ty)) => {
+                            let unknown = match ty {
+                                None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
+                                Some(Ty::Class { id, .. }) => targets.keys().any(|k| &k.0 == id),
+                                _ => false,
+                            };
+                            if unknown {
+                                for k in targets.keys().filter(|k| &k.1 == method) {
+                                    f(k.clone(), args, true);
+                                }
+                            }
+                        }
+                    }
+                }
+                e.node.for_each_child(&mut |c| walk(c, owner, resolve, targets, f));
+            }
+            walk(body, owner, &resolve, &targets, &mut |key, args, poison| {
+                if poison {
+                    poisoned.insert(key);
+                } else {
+                    record(&key, args, &mut seen);
+                }
+            });
+        };
+        super::for_each_owned_hook_body(app, &mut |owner, body| visit(owner, &*body));
+    }
+    for lc in &mut app.library_classes {
+        for m in &mut lc.methods {
+            let key = (lc.name.clone(), m.name.clone(), m.receiver == MethodReceiver::Class);
+            if poisoned.contains(&key) {
+                continue;
+            }
+            let Some(slots) = seen.get(&key) else { continue };
+            let positional: Vec<&crate::dialect::Param> =
+                m.params.iter().filter(|p| !p.keyword && !p.rest && !p.forwarding).collect();
+            let mut owned: Vec<(Symbol, Vec<Expr>)> = Vec::new();
+            for (i, p) in positional.iter().enumerate() {
+                let Some(Some(names)) = slots.get(i) else { continue };
+                if names.is_empty() || param_reassigned(&m.body, &p.name) {
+                    continue;
+                }
+                let elems = names
+                    .iter()
+                    .map(|n| Expr::new(
+                        m.body.span,
+                        ExprNode::Lit { value: Literal::Sym { value: Symbol::from(n.as_str()) } },
+                    ))
+                    .collect();
+                owned.push((p.name.clone(), elems));
+            }
+            if owned.is_empty() {
+                continue;
+            }
+            let bindings: Vec<IterBinding<'_>> =
+                owned.iter().map(|(n, e)| IterBinding { name: n, elems: e }).collect();
+            rewrite(&mut m.body, &HashMap::new(), providers, &HashMap::new(), &bindings, registry, diags);
+        }
+    }
+}
+
+/// True when `body` sends with a parameter as the method name.
+fn body_has_param_send(body: &Expr, params: &[crate::dialect::Param]) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, params: &[crate::dialect::Param], found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { method, args, .. } = &*e.node {
+            if is_send_method(method.as_str()) {
+                if let Some(ExprNode::Var { name, .. }) = args.first().map(|a| &*a.node) {
+                    if params.iter().any(|p| &p.name == name) {
+                        *found = true;
+                        return;
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, params, found));
+    }
+    walk(body, params, &mut found);
+    found
+}
+
+/// True when `body` assigns to the local `name` anywhere.
+fn param_reassigned(body: &Expr, name: &Symbol) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, name: &Symbol, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Assign { target: crate::expr::LValue::Var { name: n, .. }, .. } = &*e.node {
+            if n == name {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, name, found));
+    }
+    walk(body, name, &mut found);
+    found
 }
 
 fn residue(expr: &Expr, reason: &str) -> Diagnostic {
@@ -254,7 +454,11 @@ fn rewrite(
     ) {
         return;
     }
-    if !recv_is_duplicable(recv) {
+    // The receiver lands in every arm, and the case evaluates the
+    // scrutinee before it. Only one arm runs, so the receiver is still
+    // evaluated once; what could change is ORDER, and a plain variable
+    // scrutinee has no effect to reorder against.
+    if !recv_is_duplicable(recv) && !matches!(&*target.node, ExprNode::Var { .. }) {
         diags.push(residue(e, "receiver is not an effect-free reader"));
         return;
     }
@@ -589,19 +793,25 @@ impl HashProviders {
     }
 }
 
+// Match complete source-resolved names, never a last-segment alias.
+fn constant_key(path: &[Symbol]) -> String {
+    path.iter().map(Symbol::as_str).collect::<Vec<_>>().join("::")
+        .trim_start_matches("::").to_string()
+}
+
 fn collect_hash_providers(app: &App) -> HashProviders {
     let mut by_class_method = HashMap::new();
-    let mut register = |class: &str, consts: &HashMap<&str, &Expr>, name: &Symbol, body: &Expr| {
+    let mut register = |class: &str, consts: &HashMap<String, &Expr>, name: &Symbol, body: &Expr| {
         if let Some(keysets) = hash_return_key_sets(body, consts) {
             by_class_method.insert((Symbol::from(class), name.clone()), keysets);
         }
     };
     for lc in &app.library_classes {
         // Constants visible to this class's method bodies.
-        let consts: HashMap<&str, &Expr> = lc
+        let consts: HashMap<String, &Expr> = lc
             .constants
             .iter()
-            .map(|(n, e)| (n.as_str(), e))
+            .flat_map(|(n, e)| [(n.as_str().to_string(), e), (format!("{}::{n}", lc.name.0), e)])
             .collect();
         for m in &lc.methods {
             register(lc.name.0.as_str(), &consts, &m.name, &m.body);
@@ -609,8 +819,8 @@ fn collect_hash_providers(app: &App) -> HashProviders {
     }
     for model in &app.models {
         let constants = super::model_to_library::collect_model_constants(model);
-        let consts: HashMap<&str, &Expr> =
-            constants.iter().map(|(n, e)| (n.as_str(), e)).collect();
+        let consts: HashMap<String, &Expr> =
+            constants.iter().flat_map(|(n, e)| [(n.as_str().to_string(), e), (format!("{}::{n}", model.name.0), e)]).collect();
         for item in &model.body {
             if let ModelBodyItem::Method { method, .. } = item {
                 register(model.name.0.as_str(), &consts, &method.name, &method.body);
@@ -752,7 +962,7 @@ fn walk_provider_origins(
 /// value is provably a string set in *every* returned literal survive.
 fn hash_return_key_sets(
     body: &Expr,
-    consts: &HashMap<&str, &Expr>,
+    consts: &HashMap<String, &Expr>,
 ) -> Option<HashMap<Symbol, BTreeSet<String>>> {
     let mut literals: Vec<&Expr> = Vec::new();
     collect_return_positions(body, &mut literals)?;
@@ -768,8 +978,8 @@ fn hash_return_key_sets(
         // A tail naming a hash CONSTANT answers that constant's literal —
         // lobsters' `time_interval` returns `PLACEHOLDER` on bad input.
         let lit: &Expr = match &*lit.node {
-            ExprNode::Const { path } if path.len() == 1 => {
-                unwrap_freeze(consts.get(path[0].as_str())?)
+            ExprNode::Const { path } => {
+                unwrap_freeze(consts.get(&constant_key(path))?)
             }
             _ => lit,
         };
@@ -862,7 +1072,7 @@ fn collect_early_returns<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) -> bool {
 /// no write at all (a parameter).
 fn string_values_in(
     e: &Expr,
-    consts: &HashMap<&str, &Expr>,
+    consts: &HashMap<String, &Expr>,
     body: &Expr,
     depth: usize,
 ) -> Option<BTreeSet<String>> {
@@ -905,7 +1115,7 @@ fn string_values_in(
 fn slot_values(
     v: &Expr,
     i: usize,
-    consts: &HashMap<&str, &Expr>,
+    consts: &HashMap<String, &Expr>,
     body: &Expr,
     depth: usize,
 ) -> Option<BTreeSet<String>> {
@@ -947,17 +1157,14 @@ fn visit_local_writes<'e>(e: &'e Expr, name: &Symbol, f: &mut dyn FnMut(LocalWri
     e.node.for_each_child(&mut |c| visit_local_writes(c, name, f));
 }
 
-fn string_values_const(e: &Expr, consts: &HashMap<&str, &Expr>) -> Option<BTreeSet<String>> {
+fn string_values_const(e: &Expr, consts: &HashMap<String, &Expr>) -> Option<BTreeSet<String>> {
     match &*e.node {
         ExprNode::Lit { value: Literal::Str { value } } => {
             Some(std::iter::once(value.clone()).collect())
         }
         ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "[]" => {
             let ExprNode::Const { path } = &*r.node else { return None };
-            if path.len() != 1 {
-                return None;
-            }
-            let cval = consts.get(path[0].as_str())?;
+            let cval = consts.get(&constant_key(path))?;
             let hash = unwrap_freeze(cval);
             let ExprNode::Hash { entries, .. } = &*hash.node else { return None };
             let mut out = BTreeSet::new();

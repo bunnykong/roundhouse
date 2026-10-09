@@ -69,6 +69,7 @@ pub fn is_roda_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
 /// `views/`, `app.rb`, `seeds.rb`.
 pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<App> {
     super::sources::reset();
+    let _source_root = super::sources::set_root(dir);
     let mut app = App::new();
 
     // Schema — Sequel apps have no schema.rb; fold migrations in
@@ -124,6 +125,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
     app.models.push(crate::dialect::Model {
         name: ClassId(Symbol::from("ApplicationRecord")),
         parent: Some(ClassId(Symbol::from("ActiveRecord::Base"))),
+        parent_span: Default::default(),
         table: crate::ident::TableRef(Symbol::from("application_records")),
         primary_key: None,
         attributes: Row::closed(),
@@ -131,6 +133,8 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         span: Span::synthetic(),
         enums: indexmap::IndexMap::new(),
         enum_defaults: indexmap::IndexMap::new(),
+        class_attr_defaults: indexmap::IndexMap::new(),
+        lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
     });
     let models_dir = dir.join("models");
@@ -348,6 +352,7 @@ fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<S
             name: helper_id,
             is_module: true,
             parent: None,
+            parent_span: Default::default(),
             includes: Vec::new(),
             methods: helper_methods,
             nullable_columns: Vec::new(),
@@ -365,6 +370,7 @@ fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<S
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("ApplicationController")),
         parent: Some(ClassId(Symbol::from("ActionController::Base"))),
+        parent_span: Default::default(),
         body: Vec::new(),
         layout: LayoutDecl::Inherit,
         sibling_classes: Vec::new(),
@@ -804,7 +810,10 @@ impl<'f> RouteWalker<'f> {
         let mut entries: Vec<RouteSpec> = Vec::new();
         for leaf in &leaves {
             if leaf.is_root {
-                entries.push(RouteSpec::Root { target: "root#index".to_string() });
+                entries.push(RouteSpec::Root {
+                    target: "root#index".to_string(),
+                    as_name: None,
+                });
                 continue;
             }
             let controller_stem = leaf.controller.clone().unwrap_or_else(|| "root".into());
@@ -828,7 +837,7 @@ impl<'f> RouteWalker<'f> {
                 scope: Default::default(),
             });
         }
-        app.routes = RouteTable { entries, direct_helpers: Vec::new(), redirects: Vec::new() };
+        app.routes = RouteTable { entries, direct_helpers: Vec::new(), redirects: Vec::new(), diagnostics: Vec::new() };
 
         // Controllers — group leaves by controller stem, first-seen
         // order.
@@ -923,6 +932,7 @@ impl<'f> RouteWalker<'f> {
             app.controllers.push(Controller {
                 name: ClassId(Symbol::from(class_name)),
                 parent: Some(ClassId(Symbol::from("ApplicationController"))),
+                parent_span: Default::default(),
                 body,
                 layout: LayoutDecl::Inherit,
                 sibling_classes: Vec::new(),

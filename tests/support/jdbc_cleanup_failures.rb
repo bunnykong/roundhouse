@@ -290,6 +290,43 @@ module JdbcCleanupFailures
       check("successful retry clears all retained connections", Db.instance_variable_get(:@all).nil?)
     end
 
+    def shutdown_release_failure_case
+      Db.configure(":memory:", pool_size: 3)
+      conns = Db.instance_variable_get(:@all).dup
+      statements = []
+      first_error = RuntimeError.new("first shutdown release failure")
+      conns.each_with_index do |conn, index|
+        Fiber[:db_handle] = conn
+        idle = Db.prepare("SELECT 37 AS shutdown_idle")
+        statements << idle.pstmt
+        Db.finalize(idle)
+        held = Db.prepare("SELECT 41 AS shutdown_held")
+        transient = Db.prepare("SELECT 41 AS shutdown_held")
+        statements.push(held.pstmt, transient.pstmt)
+        check("shutdown readers step", Db.step?(held) && Db.step?(transient))
+        if index < 2
+          release_error = index == 0 ? first_error : RuntimeError.new("later shutdown release failure")
+          held.pstmt.define_singleton_method(:clear_parameters) { raise release_error }
+        end
+      end
+      Fiber[:db_handle] = nil
+      error = begin
+        Db.close
+        nil
+      rescue RuntimeError => e
+        e
+      end
+      check("shutdown closes all statements", statements.all?(&:is_closed))
+      check("shutdown closes all connections", conns.all? { |conn| conn.raw.is_closed })
+      check("shutdown drains all checkouts", conns.all? { |conn| conn.open_statements.empty? })
+      check("shutdown clears free connections", Db.instance_variable_get(:@free).nil?)
+      check("shutdown clears all connections", Db.instance_variable_get(:@all).nil?)
+      check("shutdown clears quarantine", Db.instance_variable_get(:@quarantined).empty?)
+      check("shutdown preserves first release error", error.equal?(first_error))
+      Db.close
+      puts "jdbc cleanup: shutdown release failure drains all connections passed"
+    end
+
     def run
       @checks = 0
       Db.configure("file:jdbc_cleanup_failures?mode=memory&cache=shared", pool_size: 1)
@@ -307,6 +344,7 @@ module JdbcCleanupFailures
       Db.exec("DROP TABLE jdbc_cleanup_rows")
       shutdown_retry_case
       idle_cached_shutdown_retry_case
+      shutdown_release_failure_case
       puts "jdbc cleanup: #{@checks} assertions passed"
     ensure
       Db.close

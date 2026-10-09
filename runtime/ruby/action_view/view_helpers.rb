@@ -117,10 +117,11 @@ module ActionView
   
     HTML_ESCAPE_PATTERN = /[&<>"']/.freeze
   
-    # Monomorphic: param typed String. Callers handle nil/non-String
-    # coercion explicitly. Contracts the dispatch surface so every
-    # backend compiler sees a stable input shape.
+    # Monomorphic String. Skip gsub when already safe (ERB::Util).
+    # Probe with `include?`, not `match?(re)` — Rust/Python have no
+    # portable match? emit.
     def self.html_escape(s)
+      return s unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("'")
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
 
@@ -138,6 +139,7 @@ module ActionView
     BUILDER_TEXT_PATTERN = /[&<>]/.freeze
 
     def self.builder_text(s)
+      return s unless s.include?("&") || s.include?("<") || s.include?(">")
       s.gsub(BUILDER_TEXT_PATTERN, BUILDER_TEXT_ESCAPES)
     end
 
@@ -155,6 +157,7 @@ module ActionView
     BUILDER_ATTR_PATTERN = /[&<>"\n\r]/.freeze
 
     def self.builder_attr(s)
+      return s unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("\n") || s.include?("\r")
       s.gsub(BUILDER_ATTR_PATTERN, BUILDER_ATTR_ESCAPES)
     end
 
@@ -203,13 +206,14 @@ module ActionView
       "<" => "%3C", "=" => "%3D", ">" => "%3E", "?" => "%3F",
       "@" => "%40", "[" => "%5B", "\\" => "%5C", "]" => "%5D",
       "^" => "%5E", "`" => "%60", "{" => "%7B", "|" => "%7C",
-      "}" => "%7D",
+      "}" => "%7D", "\r" => "%0D", "\n" => "%0A", "\0" => "%00",
     }.freeze
 
-    URL_ESCAPE_PATTERN = /[ !"\#$%&'()*+,\/:;<=>?@\[\\\]^`{|}]/.freeze
+    URL_ESCAPE_PATTERN = /[\x00\r\n !"\#$%&'()*+,\/:;<=>?@\[\\\]^`{|}]/.freeze
 
-    # Monomorphic: param typed String, like `html_escape`.
+    # Same include? probe as html_escape (no portable match? emit).
     def self.url_encode(s)
+      return s unless needs_url_escape?(s)
       s.gsub(URL_ESCAPE_PATTERN, URL_ESCAPES)
     end
 
@@ -273,7 +277,7 @@ module ActionView
       "<" => "%3C", "=" => "%3D", ">" => "%3E", "?" => "%3F",
       "@" => "%40", "[" => "%5B", "\\" => "%5C", "]" => "%5D",
       "^" => "%5E", "`" => "%60", "{" => "%7B", "|" => "%7C",
-      "}" => "%7D",
+      "}" => "%7D", "\r" => "%0D", "\n" => "%0A", "\0" => "%00",
     }.freeze
 
     # `URL_ESCAPE_PATTERN` minus the `@`, for `mail_to`'s address.
@@ -286,11 +290,37 @@ module ActionView
 
     # Monomorphic, like `url_encode`.
     def self.url_encode_component(s)
+      return s unless needs_url_escape?(s)
       s.gsub(URL_ESCAPE_PATTERN, URI_ESCAPES)
     end
 
     def self.url_encode_mailto_address(s)
+      return s unless needs_mailto_escape?(s)
       s.gsub(MAILTO_ESCAPE_PATTERN, URI_ESCAPES)
+    end
+
+    # True when URL_ESCAPE_PATTERN would match. include?, not match?.
+    def self.needs_url_escape?(s)
+      s.include?(" ") || s.include?("!") || s.include?("\"") || s.include?("#") ||
+        s.include?("$") || s.include?("%") || s.include?("&") || s.include?("'") ||
+        s.include?("(") || s.include?(")") || s.include?("*") || s.include?("+") ||
+        s.include?(",") || s.include?("/") || s.include?(":") || s.include?(";") ||
+        s.include?("<") || s.include?("=") || s.include?(">") || s.include?("?") ||
+        s.include?("@") || s.include?("[") || s.include?("\\") || s.include?("]") ||
+        s.include?("^") || s.include?("`") || s.include?("{") || s.include?("|") ||
+        s.include?("}") || s.include?("\r") || s.include?("\n") || s.include?("\0")
+    end
+
+    # Like `needs_url_escape?` but without `@` — `MAILTO_ESCAPE_PATTERN`.
+    def self.needs_mailto_escape?(s)
+      s.include?(" ") || s.include?("!") || s.include?("\"") || s.include?("#") ||
+        s.include?("$") || s.include?("%") || s.include?("&") || s.include?("'") ||
+        s.include?("(") || s.include?(")") || s.include?("*") || s.include?("+") ||
+        s.include?(",") || s.include?("/") || s.include?(":") || s.include?(";") ||
+        s.include?("<") || s.include?("=") || s.include?(">") || s.include?("?") ||
+        s.include?("[") || s.include?("\\") || s.include?("]") ||
+        s.include?("^") || s.include?("`") || s.include?("{") || s.include?("|") ||
+        s.include?("}")
     end
 
     def self.truncate(s, length: 30, omission: "...")
@@ -365,28 +395,20 @@ module ActionView
     end
   
     # ── HTML element helpers ─────────────────────────────────────────
-  
-    def self.link_to(text, href, opts = {})
-      # `opts.to_h` is a no-op on Ruby Hash and a NamedTuple→Hash
-      # conversion under Crystal. Call sites that use kwargs syntax
-      # (`link_to "Show", "/x", class: "btn"`) lift to NamedTuple
-      # in Crystal, but the receiver builds a Hash via `merge` —
-      # NamedTuple#merge can't take a Hash, and Hash#merge can't
-      # take a NamedTuple. Same `.to_h` pattern applies to every
-      # helper below that merges user opts into a default Hash.
+
+    # Frozen empty default so no-opts helpers do not allocate a Hash.
+    # Methods that delete keys dup first.
+    EMPTY_HTML_OPTS = {}.freeze
+
+    def self.link_to(text, href, opts = EMPTY_HTML_OPTS)
+      # `opts.to_h` is a no-op on Ruby Hash and NamedTuple→Hash on
+      # Crystal. Do not gate `opts.is_a?(Hash)`: Rust emit maps that
+      # to `HashMap#is_object`, which does not exist.
       #
-      # ORDER IS RAILS' ORDER: the html options first and `href` LAST
-      # (`link_to` does `html_options["href"] ||= url` after the options
-      # are in hand), so `link_to "T", url, rel: "noreferrer", target:
-      # "_blank"` is `<a rel="noreferrer" target="_blank" href="…">`.
-      # campfire's opengraph-embed test matches on exactly that
-      # string. An `href:` the caller put in the options wins, as
-      # `||=` has it. The href is appended as text rather than merged
-      # in: `opts.merge({ href: … })` puts a Hash literal in ARGUMENT
-      # position, which two strict emitters type from the literal
-      # (Crystal a NamedTuple, Swift a `[String: String]` cast on the
-      # receiver), where every other merge in this file has the
-      # literal as the receiver. Same escape `render_attrs` applies.
+      # Html options first, href last (Rails). An explicit `href:` in
+      # opts wins. Append href as text: merging `{ href: … }` in
+      # argument position types as a NamedTuple / `[String: String]`
+      # on strict targets.
       given = opts.to_h
       attrs = render_attrs(given)
       attrs = attrs + " href=\"" + html_escape(href) + "\"" unless given.key?(:href)
@@ -400,7 +422,7 @@ module ActionView
     # link-preview partial links a title only when the preview kept an
     # href, which its `web_url` drops for anything that is not a web URL
     # on another host.
-    def self.link_to_if(condition, text, href, opts = {})
+    def self.link_to_if(condition, text, href, opts = EMPTY_HTML_OPTS)
       return link_to(text, href, opts) if condition
       html_escape(text.to_s)
     end
@@ -443,7 +465,7 @@ module ActionView
     # list because a `next` inside an `each` is not a shape the Rust
     # emitter lowers, and the `delete`s are separate statements because
     # a `delete` USED AS A VALUE types as `Option<Value>` there too.
-    def self.mail_to(email, name = "", opts = {})
+    def self.mail_to(email, name = "", opts = EMPTY_HTML_OPTS)
       cc = opts.fetch(:cc, nil)
       bcc = opts.fetch(:bcc, nil)
       body = opts.fetch(:body, nil)
@@ -471,7 +493,7 @@ module ActionView
     # There's no safe-buffer type in the transpiled runtime, so the
     # Ruby emit path rewrites `link_to(raw(x), ...)` to this variant,
     # which skips the label escape Rails would skip for a safe buffer.
-    def self.link_to_raw(text, href, opts = {})
+    def self.link_to_raw(text, href, opts = EMPTY_HTML_OPTS)
       attrs = render_attrs({ href: href }.merge(opts.to_h))
       "<a#{attrs}>#{text}</a>"
     end
@@ -494,7 +516,7 @@ module ActionView
       parts.join(separator)
     end
   
-    def self.button_to(text, href, opts = {})
+    def self.button_to(text, href, opts = EMPTY_HTML_OPTS)
       # Use `.fetch(k, nil)` instead of bare `opts[:k]`: Ruby's Hash#[]
       # returns nil for missing keys, but Crystal's strict Hash#[]
       # raises KeyError. fetch-with-default produces nil-on-missing in
@@ -549,20 +571,16 @@ module ActionView
     # `authenticity_token` value is the form-field name; the token value
     # is empty here because spinel-blog doesn't sign sessions.
     def self.csrf_meta_tags
-      %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="#{form_authenticity_token}" />)
+      %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="#{html_escape(form_authenticity_token)}" />)
     end
 
     # The per-request CSRF token every csrf-emitting helper
     # (csrf_meta_tags / csrf_token_hidden_input / button_to) reads.
-    # Empty in the shared runtime — targets without session-backed
-    # token generation render the same empty value they always have,
-    # and the compare harness blanks the attribute either way. The
-    # CRuby overlay overrides this with a session-backed lazy
-    # generator (runtime/action_controller_session.rb), which is how
-    # real tokens reach lobsters' login form without the shared
-    # runtime needing SecureRandom or a session on every target.
+    # Session-backed and lazy: a page with no form does not grow a
+    # session. Empty when no controller is parked (unit helpers, or a
+    # target whose dispatcher does not assign Current.controller).
     def self.form_authenticity_token
-      ""
+      ActionController.masked_authenticity_token
     end
   
     # Empty in dev mode without a CSP nonce configured, mirroring Rails'
@@ -573,7 +591,7 @@ module ActionView
       ""
     end
   
-    def self.stylesheet_link_tag(name, opts = {})
+    def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
       href = "/assets/#{name}.css"
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
       "<link#{attrs}>"
@@ -584,7 +602,7 @@ module ActionView
     # `javascript_path` (see the `image_path` note on why no digests);
     # absolute paths and URLs pass verbatim. Rails takes a Symbol source
     # too, and a value can hold one, so the source becomes a String here.
-    def self.javascript_include_tag(source, opts = {})
+    def self.javascript_include_tag(source, opts = EMPTY_HTML_OPTS)
       source_s = source.to_s
       name = source_s.include?(".") ? source_s : "#{source_s}.js"
       src = name.start_with?("/") || name.include?("://") ? name : "/assets/#{name}"
@@ -687,7 +705,7 @@ module ActionView
     # runtime has no untyped-hash mutation, and the strict targets have no
     # destructuring, so the split lands through explicit indexing rather
     # than `w, h = size.split("x")`.
-    def self.image_tag(source, opts = {})
+    def self.image_tag(source, opts = EMPTY_HTML_OPTS)
       attrs = {}
       size = nil
       opts.to_h.each do |k, v|
@@ -713,7 +731,7 @@ module ActionView
     # content default is nil, NOT "" — `content` is untyped, which
     # lands as C# `object`, and C# rejects any non-null default on a
     # reference-typed parameter (CS1763); `to_s` maps nil → "".
-    def self.content_tag(name, content = nil, opts = {})
+    def self.content_tag(name, content = nil, opts = EMPTY_HTML_OPTS)
       n = name.to_s
       "<#{n}#{render_attrs(opts.to_h)}>#{html_escape(content.to_s)}</#{n}>"
     end
@@ -831,7 +849,7 @@ module ActionView
       # on that lane). The explicit comparison is false for every
       # target's unset shape and for `false` alike.
       return "" if @broadcast_rendering == true
-      %(<input type="hidden" name="authenticity_token" value="#{form_authenticity_token}">)
+      %(<input type="hidden" name="authenticity_token" value="#{html_escape(form_authenticity_token)}">)
     end
 
     # Bracket a broadcast partial render (the lowered
@@ -942,7 +960,7 @@ module ActionView
     # is the same target-portable shape `button_to` above uses: a
     # literal Symbol key written into a hash derived from an untyped
     # one is what the strict emitters reject.
-    def self.form_with(opts = {})
+    def self.form_with(opts = EMPTY_HTML_OPTS)
       attrs = opts.to_h.dup
       attrs.delete(:method)
       attrs.delete(:url)
@@ -952,8 +970,12 @@ module ActionView
       attrs.delete(:builder)
       url = opts.fetch(:url, nil)
       action = url.nil? ? "" : %( action="#{html_escape(url.to_s)}")
+      # Stringify at this boundary: `opts.fetch` is Hash[Symbol, untyped]
+      # and a gradual Value must not cross into `method_override_input`'s
+      # `String | Symbol` param (rust `&str`). Same shape as `mail_to`.
+      method = opts.fetch(:method, :post)
       %(<form#{render_attrs(attrs)}#{action} accept-charset="UTF-8" method="post">) +
-        method_override_input(opts.fetch(:method, :post)) +
+        method_override_input(method.to_s) +
         csrf_token_hidden_input +
         "</form>"
     end
@@ -1012,7 +1034,9 @@ module ActionView
     # a `next unless` — the same kotlin gap sits latent there.)
     def self.render_attrs(attrs)
       return "" if attrs.empty?
-      pairs = []
+      # Concat, not `<<`: `out << s` lowers as `.add` / write-into-`&str`
+      # on Kotlin/C#/Rust/Python/Elixir. Same shape as `sanitize_to_id`.
+      out = ""
       attrs.each do |k, v|
         # The name bindings sit ABOVE the nil guards on purpose: the
         # TypeScript emitter declares a local where it is FIRST
@@ -1031,7 +1055,7 @@ module ActionView
                 # `(String) -> String` and the untyped values flowing
                 # through Hash[String, untyped] need explicit
                 # stringification.
-                pairs << " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
+                out = out + " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
               end
             end
           elsif boolean_attr?(name)
@@ -1049,13 +1073,13 @@ module ActionView
             # Rails (truthy) and is omitted here — no corpus site
             # writes one, and literal sites lower through the
             # compile-time loops, not this method.
-            pairs << " #{name}=\"#{name}\"" unless v.to_s == "false"
+            out = out + " #{name}=\"#{name}\"" unless v.to_s == "false"
           else
-            pairs << " #{name}=\"#{html_escape(attr_value_text(name, v))}\""
+            out = out + " #{name}=\"#{html_escape(attr_value_text(name, v))}\""
           end
         end
       end
-      pairs.join
+      out
     end
 
     # The TEXT of one attribute value, before escaping: `to_s` here,

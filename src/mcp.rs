@@ -460,6 +460,7 @@ impl Server {
             crate::gems::GemFate::Framework,
             crate::gems::GemFate::Stdlib,
             crate::gems::GemFate::Infrastructure,
+            crate::gems::GemFate::InRepo,
         ] {
             for g in census.gems.iter().filter(|g| g.fate == fate) {
                 let version = g.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
@@ -1001,19 +1002,19 @@ mod tests {
         // analyzer doesn't ingest must show up as an ingest gap rather
         // than vanish. real-blog's own `mailer.text.erb` /
         // `manifest.json.erb` used to be the witnesses; they are ingested
-        // now (analysis-only), so the witness is a `.slim` view added to
+        // now (analysis-only), so the witness is a `.rabl` view added to
         // a copy of the fixture. This also guards the survey-mode wiring
         // in `analyze()`: drop `survey::activate()` and the gap collector
         // stays empty, so the line disappears.
-        let dir = std::env::temp_dir().join(format!("rh-mcp-slim-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rh-mcp-rabl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         copy_dir(crate::fixtures::real_blog(), &dir);
-        std::fs::write(dir.join("app/views/articles/extra.html.slim"), "h1 Extra\n").unwrap();
+        std::fs::write(dir.join("app/views/articles/extra.html.rabl"), "object @article\n").unwrap();
         let text = text_of(&call(&Server { root: dir.clone() }, "diagnostics", json!({})));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
-            text.contains("view template not ingested: slim"),
-            "expected the un-ingested slim template to be surfaced as a gap, got: {text}"
+            text.contains("view template not ingested: rabl"),
+            "expected the un-ingested rabl template to be surfaced as a gap, got: {text}"
         );
         // And the templates every `rails new` app carries are no longer gaps.
         let text = text_of(&call(&server(), "diagnostics", json!({})));

@@ -75,6 +75,9 @@ pub enum ViewHelperKind<'a> {
     TurboStreamFrom { streamables: &'a [Expr] },
     /// `<%= dom_id(record [, prefix]) %>`.
     DomId { record: &'a Expr, prefix: Option<&'a Expr> },
+    /// `render_attrs(hash)` — the attribute-hash helper the HAML and Slim
+    /// compilers emit for dynamic attributes (never written in ERB).
+    RenderAttrs { attrs: &'a Expr },
     /// `<%= pluralize(count, "word") %>`.
     Pluralize { count: &'a Expr, word: &'a Expr },
     /// `<%= truncate(text [, opts]) %>`.
@@ -154,6 +157,13 @@ pub enum RenderPartial<'a> {
         /// locals: { room: room }`), so the partial's non-record params
         /// have to be bound per iteration like any named render's.
         locals: Option<&'a [(Expr, Expr)]>,
+        /// `cached: true` — Rails' collection cache. The concatenated
+        /// partials are stored under one key (each element's
+        /// `cache_key_with_version`) so a warm campfire room page is
+        /// one `read_str`, not 40 fragment lookups. A proc / non-true
+        /// value is declined: that shape customizes the key and is
+        /// not modeled.
+        cached: bool,
     },
     /// `render partial: @above` — the partial NAME is a runtime value
     /// (an ivar/local), not a literal, so it can't be resolved to one
@@ -360,6 +370,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
     let mut as_name: Option<&str> = None;
     let mut first_local: Option<&Expr> = None;
     let mut locals_entries: Option<&[(Expr, Expr)]> = None;
+    let mut cached = false;
     for (k, v) in entries {
         match key_of(k).as_deref() {
             Some("partial") => match &*v.node {
@@ -382,6 +393,9 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
                 if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
                     as_name = Some(value.as_str());
                 }
+            }
+            Some("cached") => {
+                cached = matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: true } });
             }
             // An explicit `locals: {…}` hash — keep the entries so the
             // emitter can bind record + extra locals by name.
@@ -425,6 +439,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
             partial,
             as_name,
             locals: locals_entries,
+            cached,
         })
     } else {
         Some(RenderPartial::Named {
@@ -512,6 +527,7 @@ pub fn classify_view_helper<'a>(
         ("turbo_stream_from", n) if n >= 1 => {
             Some(ViewHelperKind::TurboStreamFrom { streamables: args })
         }
+        ("render_attrs", 1) => Some(ViewHelperKind::RenderAttrs { attrs: &args[0] }),
         ("dom_id", 1) => Some(ViewHelperKind::DomId {
             record: &args[0],
             prefix: None,

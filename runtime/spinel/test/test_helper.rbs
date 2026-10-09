@@ -95,6 +95,15 @@ module ActionDispatch
   end
 end
 
+# rack-test's StringIO form; it is the file params carry.
+module Rack
+  module Test
+    class UploadedFile < ActionDispatch::Http::UploadedFile
+      def initialize: (StringIO io, ?String content_type, ?bool binary, original_filename: String) -> void
+    end
+  end
+end
+
 class ActionResponse
   def status: () -> Integer
   def body: () -> String
@@ -309,7 +318,7 @@ module RequestDispatch
   # values are recursive Hash | original-leaf, both unified as untyped.
   def stringify_keys: (Hash[untyped, untyped] hash) -> Hash[String, untyped]
 
-  def assert_response: (Symbol | Integer expected, ?ActionResponse response) -> void
+  def assert_response: (Symbol | Integer expected, ?String? message) -> void
   def assert_redirected_to: (String expected_path, ?ActionResponse response) -> void
 
   # Two positional + optional content/opts forms + optional block.

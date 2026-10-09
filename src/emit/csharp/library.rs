@@ -246,7 +246,13 @@ pub fn emit_test_class(
 /// string→string hash), and the RHS is target-typed `new()` to match.
 pub fn emit_module_constant(name: &str, value: &Expr) -> String {
     let (ty, rhs) = match &*value.node {
-        ExprNode::Hash { entries, .. } if !entries.is_empty() => {
+        // Empty `{}` has no annotated ty after `.freeze` is peeled.
+        // Pin Dictionary<string, object?> so `opts ??= EMPTY_HTML_OPTS`
+        // type-checks against helper params.
+        ExprNode::Hash { entries, .. } if entries.is_empty() => {
+            ("Dictionary<string, object?>".to_string(), "new()".to_string())
+        }
+        ExprNode::Hash { entries, .. } => {
             let vty = homogeneous_lit_type(entries.iter().map(|(_, v)| v));
             let pairs: Vec<String> = entries
                 .iter()

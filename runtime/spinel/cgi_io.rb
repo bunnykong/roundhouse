@@ -23,6 +23,7 @@
 # Hash mutation. No metaprogramming.
 
 require "json"
+require_relative "http_headers"
 
 module CgiIo
   REASON_PHRASES = {
@@ -42,13 +43,16 @@ module CgiIo
   }.freeze
 
   # Parse a CGI request from the given env hash + body-readable IO.
-  # Returns: { method:, path:, params:, cookies: }.
+  # Returns: { method:, path:, params:, body_params:, cookies:, accept: }.
+  # `body_params` holds the body's params alone (Rails'
+  # `request_parameters`), which ParamsWrapper copies from.
   def self.parse_request(env, stdin)
     method = (env["REQUEST_METHOD"] || "GET").upcase
     path   = env["PATH_INFO"] || "/"
     query  = env["QUERY_STRING"] || ""
 
     params = {}
+    body_params = {}
     parse_form_into(query, params) unless query.empty?
 
     if method == "POST" || method == "PATCH" || method == "PUT"
@@ -56,15 +60,15 @@ module CgiIo
       ctype  = env["CONTENT_TYPE"] || ""
       if length > 0 && ctype.start_with?("application/x-www-form-urlencoded")
         body = stdin.read(length).to_s
-        parse_form_into(body, params)
+        parse_form_into(body, body_params)
       elsif length > 0 && ctype.start_with?("multipart/form-data")
         # File parts land in the params tree as UploadedFile objects
         # under their bracket-nested name, the way Rack nests them; see
         # runtime/multipart.rb.
         body = stdin.read(length).to_s
         form = ActionDispatch::Http::Multipart.parse(body, ctype)
-        form.fields.each { |k, v| assign_form_pair(params, k, v) }
-        form.files.each { |k, v| assign_form_pair(params, k, v) }
+        form.fields.each { |k, v| assign_form_pair(body_params, k, v) }
+        form.files.each { |k, v| assign_form_pair(body_params, k, v) }
       elsif length > 0 && ctype.start_with?("application/json")
         # `@rails/request.js` with `contentType: "application/json"`
         # (campfire's link unfurl): Rails parses the object into params,
@@ -73,11 +77,13 @@ module CgiIo
         body = stdin.read(length).to_s
         begin
           parsed = JSON.parse(body)
-          parsed.each { |k, v| params[k] = v } if parsed.is_a?(Hash)
+          parsed.each { |k, v| body_params[k] = v } if parsed.is_a?(Hash)
         rescue JSON::ParserError
           nil
         end
       end
+      # Merged `params` is body ∪ query (query already landed above).
+      body_params.each { |k, v| params[k] = v }
     end
 
     # Rails-style method override: a POST with hidden `_method=delete` (or
@@ -102,7 +108,7 @@ module CgiIo
     # same URL typed into the address bar.
     accept = env.fetch("HTTP_ACCEPT", "").to_s
 
-    { method: method, path: path, params: params, cookies: cookies, accept: accept }
+    { method: method, path: path, params: params, body_params: body_params, cookies: cookies, accept: accept }
   end
 
   # Write a CGI response to the given writable IO. `set_cookies` is
@@ -111,18 +117,32 @@ module CgiIo
     code   = status.is_a?(Integer) ? status : status.to_i
     reason = REASON_PHRASES.fetch(code, "OK")
     io.write("Status: #{code} #{reason}\r\n")
-    io.write("Content-Type: #{content_type}\r\n")
-    io.write("Location: #{location}\r\n") unless location.nil?
-    extra_headers.each { |k, v| io.write("#{k}: #{v}\r\n") unless v.nil? }
+    write_header(io, "Content-Type", content_type.to_s)
+    write_header(io, "Location", location.to_s) unless location.nil?
+    extra_headers.each { |k, v| write_header(io, k.to_s, v.to_s) unless v.nil? }
     set_cookies.each do |name, val|
       if val.nil?
-        io.write("Set-Cookie: #{name}=; Path=/; Max-Age=0\r\n")
+        write_header(io, "Set-Cookie", "#{name}=; Path=/; Max-Age=0")
       else
-        io.write("Set-Cookie: #{name}=#{url_encode(val.to_s)}; Path=/; HttpOnly\r\n")
+        write_header(io, "Set-Cookie", "#{name}=#{url_encode(val.to_s)}; Path=/; HttpOnly")
       end
     end
     io.write("\r\n")
     io.write(body.to_s)
+    nil
+  end
+
+  # One header line, or nothing when it cannot be one line. A value can
+  # carry request data (a redirect Location, a Content-Disposition, a
+  # blob's Content-Type), and a CR or LF in it would end the header and
+  # write the rest as a header the app never set. Puma's rule, the same
+  # one the spinel servers apply (`Tep.header_lines` — this lane does
+  # not load Tep, so the two predicates are twins): DROP a key holding a
+  # control character, space, `"` or `:`, or a value holding a control
+  # character other than tab.
+  def self.write_header(io, key, value)
+    return nil unless HttpHeaders.key_ok?(key) && HttpHeaders.value_ok?(value)
+    io.write(key + ": " + value + "\r\n")
     nil
   end
 

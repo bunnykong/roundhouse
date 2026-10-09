@@ -23,7 +23,7 @@ use crate::erb::{ErbSegment, is_block_expr, opens_passthrough_block, ruby_string
 
 /// HTML void elements: rendered without a close tag and never opening a
 /// child frame.
-const VOID_ELEMENTS: &[&str] = &[
+pub(crate) const VOID_ELEMENTS: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
     "track", "wbr",
 ];
@@ -31,7 +31,7 @@ const VOID_ELEMENTS: &[&str] = &[
 /// Ruby control-flow continuations: at the same indent as their opener,
 /// they continue the block (emit inline, keep the frame) rather than
 /// closing it.
-fn is_middle_marker(code: &str) -> bool {
+pub(crate) fn is_middle_marker(code: &str) -> bool {
     let head = code.trim_start();
     for kw in ["else", "elsif", "when", "in", "rescue", "ensure"] {
         if head == kw || head.starts_with(&format!("{kw} ")) {
@@ -42,7 +42,7 @@ fn is_middle_marker(code: &str) -> bool {
 }
 
 /// How an open frame closes when the indentation drops below it.
-enum Close {
+pub(crate) enum Close {
     /// An HTML element — emit `</tag>` as buffer text.
     Tag(String),
     /// A Ruby control block (`- if`, `- each do`, …) — emit `end`.
@@ -57,7 +57,7 @@ enum Close {
 
 /// How child lines (more indented than this frame) are handled.
 #[derive(PartialEq)]
-enum Capture {
+pub(crate) enum Capture {
     /// Normal HAML nesting.
     None,
     /// `:ruby` filter — children are raw Ruby statements.
@@ -66,13 +66,13 @@ enum Capture {
     Skip,
 }
 
-struct Frame {
-    indent: usize,
-    close: Close,
-    capture: Capture,
+pub(crate) struct Frame {
+    pub(crate) indent: usize,
+    pub(crate) close: Close,
+    pub(crate) capture: Capture,
     /// Ruby control block — eligible to be continued by an `else`/`when`/…
     /// middle marker at the same indent.
-    ruby_block: bool,
+    pub(crate) ruby_block: bool,
 }
 
 /// Compile HAML source to the `_buf`-append Ruby program.
@@ -141,15 +141,15 @@ pub fn compile_haml_mapped(source: &str) -> (String, Vec<ErbSegment>) {
     (c.out, c.map)
 }
 
-struct Compiler {
-    out: String,
-    map: Vec<ErbSegment>,
-    stack: Vec<Frame>,
+pub(crate) struct Compiler {
+    pub(crate) out: String,
+    pub(crate) map: Vec<ErbSegment>,
+    pub(crate) stack: Vec<Frame>,
 }
 
 impl Compiler {
     /// Append a static buffer text chunk (no segment — synthesized glue).
-    fn text(&mut self, s: &str) {
+    pub(crate) fn text(&mut self, s: &str) {
         self.out.push_str("_buf = _buf + ");
         self.out.push_str(&ruby_string_literal(s));
         self.out.push('\n');
@@ -157,7 +157,7 @@ impl Compiler {
 
     /// Append a template-derived buffer text chunk, mapped back to its
     /// source range so text diagnostics attribute correctly.
-    fn text_mapped(&mut self, s: &str, e_start: usize, e_end: usize) {
+    pub(crate) fn text_mapped(&mut self, s: &str, e_start: usize, e_end: usize) {
         self.out.push_str("_buf = _buf + ");
         let c_start = self.out.len();
         self.out.push_str(&ruby_string_literal(s));
@@ -167,14 +167,14 @@ impl Compiler {
 
     /// Emit raw Ruby code (a `- code` line / `:ruby` body line), mapped to
     /// its template range.
-    fn code(&mut self, code: &str, e_start: usize) {
+    pub(crate) fn code(&mut self, code: &str, e_start: usize) {
         let c_start = self.out.len();
         self.out.push_str(code);
         self.seg(c_start, e_start, e_start + code.len());
         self.out.push('\n');
     }
 
-    fn seg(&mut self, c_start: usize, e_start: usize, e_end: usize) {
+    pub(crate) fn seg(&mut self, c_start: usize, e_start: usize, e_end: usize) {
         self.map.push(ErbSegment {
             c_start: c_start as u32,
             c_end: self.out.len() as u32,
@@ -186,7 +186,7 @@ impl Compiler {
     /// Close every frame at or below `indent`. A middle marker
     /// (`else`/`when`/…) at the same indent as a Ruby block keeps that
     /// block open so the marker continues it.
-    fn close_to(&mut self, indent: usize, middle: bool) {
+    pub(crate) fn close_to(&mut self, indent: usize, middle: bool) {
         while let Some(top) = self.stack.last() {
             if top.indent < indent {
                 break;
@@ -199,7 +199,7 @@ impl Compiler {
         }
     }
 
-    fn emit_close(&mut self, f: &Frame) {
+    pub(crate) fn emit_close(&mut self, f: &Frame) {
         match &f.close {
             Close::Tag(tag) => self.text(&format!("</{tag}>")),
             Close::RubyEnd => self.out.push_str("end\n"),
@@ -262,7 +262,7 @@ impl Compiler {
 
     /// `= expr` / `~ expr` / `!= expr` — buffer-output an expression,
     /// opening an output block when it ends in `do`/`{`.
-    fn output(&mut self, expr: &str, _raw: bool, indent: usize, e_start: usize) {
+    pub(crate) fn output(&mut self, expr: &str, _raw: bool, indent: usize, e_start: usize) {
         self.out.push_str("_buf = _buf + (");
         let c_start = self.out.len();
         self.out.push_str(expr);
@@ -289,7 +289,7 @@ impl Compiler {
     /// `- code` — passthrough Ruby. Opens a `end`-closed frame when it
     /// starts a block; middle markers (`else`/…) emit inline and continue
     /// the frame `close_to` kept open.
-    fn silent(&mut self, code: &str, indent: usize, e_start: usize) {
+    pub(crate) fn silent(&mut self, code: &str, indent: usize, e_start: usize) {
         self.code(code, e_start);
         if is_middle_marker(code) {
             return;
@@ -323,7 +323,7 @@ impl Compiler {
         });
     }
 
-    fn html_comment(&mut self, rest: &str, indent: usize) {
+    pub(crate) fn html_comment(&mut self, rest: &str, indent: usize) {
         self.text("<!--");
         if !rest.is_empty() {
             self.text(&format!(" {rest}"));
@@ -579,7 +579,7 @@ fn is_tag_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b':'
 }
 
-fn is_name_char(b: u8) -> bool {
+pub(crate) fn is_name_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
 }
 
@@ -605,7 +605,7 @@ fn matching_brace(bytes: &[u8], open: usize) -> Option<usize> {
 }
 
 /// Split into `(byte_offset, line_without_newline)` pairs.
-fn split_lines(source: &str) -> Vec<(usize, &str)> {
+pub(crate) fn split_lines(source: &str) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
     let mut start = 0;
     for (i, b) in source.bytes().enumerate() {

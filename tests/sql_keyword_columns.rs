@@ -75,7 +75,10 @@ fn the_ddl_quotes_them() {
 fn the_model_sql_quotes_them() {
     let files = files();
     let model = file(&files, "app/models/application.rb");
-    assert!(model.contains(r#"applications.\"index\" AS \"index\""#), "{model}");
+    // Rails' quoting in the projection: table and column always quoted,
+    // the alias only where the name needs it.
+    assert!(model.contains(r#"\"applications\".\"index\" AS \"index\""#), "{model}");
+    assert!(model.contains(r#"\"applications\".\"name\" AS name"#), "{model}");
     assert!(model.contains(r#"SELECT id, name, \"index\", \"values\""#), "{model}");
     assert!(!model.contains(" index,"), "{model}");
 }

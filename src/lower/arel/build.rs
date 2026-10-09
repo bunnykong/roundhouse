@@ -127,6 +127,12 @@ pub fn try_build_arel_with_assocs(
             // reached any other way stays on the runtime Relation
             // (issue #78).
             if let Some(grouped) = crate::lower::group_count::grouped_count_parts(send) {
+                // HAVING / DISTINCT / an explicit select list stay on
+                // Relation SQL (#343). The Arel fold is COUNT(*) per
+                // group with no HAVING.
+                if !crate::lower::group_count::group_immediately_precedes_count(send) {
+                    return None;
+                }
                 let base = grouped.base?;
                 let (op, owner) = try_chain_recv(base, schema, registry, assocs)?;
                 return apply_group_count(op, grouped.group_args, schema)
@@ -439,7 +445,7 @@ fn direction_from_value(v: &Expr) -> Option<super::ir::Direction> {
 /// then the last segment alone (`Bar`) since the model lowerer
 /// registers app classes under their bare name. Returns None when
 /// the receiver isn't a Const or the class isn't registered.
-fn const_to_class_id(recv: &Expr, registry: &HashMap<ClassId, ClassInfo>) -> Option<ClassId> {
+pub(super) fn const_to_class_id(recv: &Expr, registry: &HashMap<ClassId, ClassInfo>) -> Option<ClassId> {
     let ExprNode::Const { path } = recv.node.as_ref() else {
         return None;
     };
@@ -638,6 +644,7 @@ mod tests {
     use crate::span::Span;
     use indexmap::IndexMap;
 
+    /// Creates the comments schema and class registry used by the Arel builder tests.
     fn fixture() -> (Schema, HashMap<ClassId, ClassInfo>) {
         let mut tables = IndexMap::new();
         tables.insert(
@@ -651,6 +658,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: true,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                     Column {
                         name: Symbol::from("article_id"),
@@ -658,6 +668,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: false,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                     Column {
                         name: Symbol::from("body"),
@@ -665,6 +678,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: false,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                 ],
                 indexes: vec![],

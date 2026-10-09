@@ -110,6 +110,18 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "&lt;b&gt;hi&lt;/b&gt;", ViewHelpers.html_escape("<b>hi</b>")
   end
 
+  def test_html_escape_returns_plain_text_unchanged
+    plain = "Alice"
+    # Value equality — identity (`assert_same`) is a CRuby allocation
+    # property and is not meaningful under TS/Kotlin/Swift string copies.
+    assert_equal plain, ViewHelpers.html_escape(plain)
+  end
+
+  def test_url_encode_returns_safe_token_unchanged
+    token = "1234567890"
+    assert_equal token, ViewHelpers.url_encode(token)
+  end
+
   def test_html_escape_handles_quotes_and_apostrophes
     assert_equal "&quot;hi&quot; &amp; &#39;bye&#39;",
       ViewHelpers.html_escape(%("hi" & 'bye'))
@@ -231,6 +243,21 @@ class ViewHelpersTest < Minitest::Test
   def test_link_to_escapes_text
     out = ViewHelpers.link_to("<b>hi</b>", "/x")
     assert_includes out, "&lt;b&gt;hi&lt;/b&gt;"
+  end
+
+  def test_link_to_with_explicit_empty_options_hash
+    out = ViewHelpers.link_to("Show", "/articles/42", {})
+    assert_equal %(<a href="/articles/42">Show</a>), out
+  end
+
+  def test_content_tag_without_options
+    out = ViewHelpers.content_tag(:span, "hi")
+    assert_equal "<span>hi</span>", out
+  end
+
+  def test_content_tag_with_options
+    out = ViewHelpers.content_tag(:span, "hi", class: "badge")
+    assert_equal %(<span class="badge">hi</span>), out
   end
 
   # Every expectation below is the byte-for-byte output of Rails 8.1's
@@ -364,6 +391,12 @@ class ViewHelpersTest < Minitest::Test
   def test_method_override_input_empty_for_get_post
     assert_equal "", ViewHelpers.method_override_input(:get)
     assert_equal "", ViewHelpers.method_override_input(:post)
+  end
+
+  def test_form_with_stringifies_method_from_opts
+    out = ViewHelpers.form_with(url: "/articles", method: :patch)
+    assert_includes out, %(name="_method")
+    assert_includes out, %(value="patch")
   end
 
   def test_optional_value_attr_emits_for_non_empty

@@ -33,6 +33,50 @@ fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
             cls.instance_methods.entry(m.clone()).or_insert_with(|| ty.clone());
         }
     }
+    // Beyond what the runtime implements, the connection a program gets is
+    // Rails' `AbstractAdapter`, and code that reaches for the adapter
+    // (`quote_column_name` in a hand-built query, `transaction_open?` in a
+    // guard) calls its documented surface. Those names were reported as
+    // unknown methods of `ActiveRecord::Connection`. The runtime's own
+    // signatures above win where both speak; what is added has plain Ruby
+    // result types, and the adapter objects it hands out (the transaction
+    // manager, the pool, the current transaction) stay untyped.
+    let str = Ty::Str;
+    let untyped_rows = Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) };
+    let untyped_list = Ty::Array { elem: Box::new(Ty::Untyped) };
+    let cls = classes.entry(ClassId(Symbol::from("ActiveRecord::Connection"))).or_default();
+    for (name, ty) in [
+        ("quote_column_name", str.clone()),
+        ("quote_table_name", str.clone()),
+        ("quoted_date", str.clone()),
+        ("quoted_true", str.clone()),
+        ("quoted_false", str.clone()),
+        ("transaction_open?", Ty::Bool),
+        ("table_exists?", Ty::Bool),
+        ("column_exists?", Ty::Bool),
+        ("index_exists?", Ty::Bool),
+        ("active?", Ty::Bool),
+        ("supports_json?", Ty::Bool),
+        ("open_transactions", Ty::Int),
+        ("select_rows", untyped_rows),
+        ("select_values", untyped_list.clone()),
+        ("select_one", Ty::Untyped),
+        ("select_value", Ty::Untyped),
+        ("tables", Ty::Array { elem: Box::new(Ty::Str) }),
+        ("columns", untyped_list.clone()),
+        ("indexes", untyped_list),
+        ("insert", Ty::Untyped),
+        ("update", Ty::Int),
+        ("delete", Ty::Int),
+        ("transaction", Ty::Untyped),
+        ("current_transaction", Ty::Untyped),
+        ("transaction_manager", Ty::Untyped),
+        ("pool", Ty::Untyped),
+        ("raw_connection", Ty::Untyped),
+        ("database_version", Ty::Untyped),
+    ] {
+        cls.instance_methods.entry(Symbol::from(name)).or_insert(ty);
+    }
 }
 
 pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
@@ -50,18 +94,44 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // real `active_record/base.rb` library file (none in practice)
     // would still win.
     {
-        let mut base = ClassInfo::default();
+        // Prefer `entry().or_default()` so later registration cannot
+        // drop methods we seed here. Raw-SQL helpers live in
+        // `connection.rbs` / `connection.rb` (`sanitize_sql`,
+        // `sanitize_sql_array`, …) — without them on Base, app calls
+        // fail `send_dispatch` even though the runtime defines them
+        // (#400).
+        let base = classes
+            .entry(ClassId(Symbol::from("ActiveRecord::Base")))
+            .or_default();
         for m in [
             "transaction",
             "connection_pool",
             "establish_connection",
         ] {
-            base.class_methods.insert(Symbol::from(m), Ty::Untyped);
+            base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Untyped);
         }
-        base.class_methods.insert(Symbol::from("connection"), connection_ty());
-        classes
-            .entry(ClassId(Symbol::from("ActiveRecord::Base")))
-            .or_insert(base);
+        base.class_methods
+            .entry(Symbol::from("connection"))
+            .or_insert_with(connection_ty);
+        for m in ["sanitize_sql", "sanitize_sql_array"] {
+            base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
+        }
+        // Association / ActionText macro helpers call these on the
+        // literal Base (and on every model via the AR catalog). Seed
+        // Base itself so concern bodies typed with `self =
+        // ActiveRecord::Base` (sole includer of a load-hook module)
+        // do not ledger "lacks a shared runtime" for live AR API.
+        base.class_methods
+            .entry(Symbol::from("reflect_on_association"))
+            .or_insert(Ty::Class {
+                id: ClassId(Symbol::from(
+                    "ActiveRecord::Reflection::AssociationReflection",
+                )),
+                args: vec![],
+            });
+        base.class_methods
+            .entry(Symbol::from("strict_loading_by_default"))
+            .or_insert(Ty::Bool);
     }
 
     // CollectionProxy — the runtime helper transpiled models use
@@ -216,6 +286,51 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         );
         classes.insert(attached_id.clone(), attached);
 
+        // `has_many_attached` proxy — `attachments` answers
+        // `ManyAttachment` (runtime join-row value), not the
+        // synthesized Attachment MODEL, so the registry can name it
+        // without racing the model loop.
+        {
+            let many_row_id = ClassId(Symbol::from("ActiveStorage::ManyAttachment"));
+            let mut many_row = ClassInfo::default();
+            many_row.instance_methods.insert(Symbol::from("id"), Ty::Int);
+            many_row.instance_methods.insert(
+                Symbol::from("blob"),
+                Ty::Union {
+                    variants: vec![class_ty(&blob_id), Ty::Nil],
+                },
+            );
+            many_row.instance_methods.insert(
+                Symbol::from("filename"),
+                Ty::Union {
+                    variants: vec![class_ty(&filename_id), Ty::Nil],
+                },
+            );
+            many_row.instance_methods.insert(
+                Symbol::from("content_type"),
+                Ty::Union {
+                    variants: vec![Ty::Str, Ty::Nil],
+                },
+            );
+            many_row.instance_methods.insert(Symbol::from("url"), Ty::Str);
+            classes.insert(many_row_id.clone(), many_row);
+
+            let many_id = ClassId(Symbol::from("ActiveStorage::AttachedMany"));
+            let mut many = ClassInfo::default();
+            many.instance_methods.insert(Symbol::from("attached?"), Ty::Bool);
+            many.instance_methods.insert(
+                Symbol::from("attachments"),
+                Ty::Array {
+                    elem: Box::new(class_ty(&many_row_id)),
+                },
+            );
+            many.instance_methods.insert(Symbol::from("attach_blob"), Ty::Nil);
+            many.instance_methods.insert(Symbol::from("attach"), Ty::Nil);
+            many.instance_methods.insert(Symbol::from("purge"), Ty::Nil);
+            many.instance_methods.insert(Symbol::from("destroy"), Ty::Nil);
+            classes.insert(many_id, many);
+        }
+
         let mut blob = ClassInfo::default();
         for (m, ty) in [
             ("id", Ty::Int),
@@ -232,6 +347,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("audio?", Ty::Bool),
             ("variable?", Ty::Bool),
             ("url", Ty::Str),
+            // Attachment#url and Attached#url call `redirect_url`;
+            // register it beside `url` so synthesized helpers type.
+            ("redirect_url", Ty::Str),
             // Action Text's `_blob` partial: a previewable or variable
             // blob renders through `representation(transformations)`.
             ("representable?", Ty::Bool),
@@ -249,6 +367,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("find_signed", nilable(class_ty(&blob_id))),
             ("create_and_upload!", class_ty(&blob_id)),
             ("from_attachable", nilable(class_ty(&blob_id))),
+            ("from_io_hash", nilable(class_ty(&blob_id))),
             ("generate_key", Ty::Str),
         ] {
             blob.class_methods.insert(Symbol::from(m), ty);
@@ -326,6 +445,28 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         );
         classes.insert(analyzer_id, analyzer);
 
+        // `ActiveStorage::Previewer` / nested `VideoPreviewer` — the
+        // class-side `poster` is the draw path; the nested class is the
+        // constant apps subclass (campfire's `TimeLimitedVideoPreviewer`).
+        // Both must resolve so inheritance and `previewers` identity
+        // checks type as classes rather than unsupported constants.
+        let previewer_id = ClassId(Symbol::from("ActiveStorage::Previewer"));
+        let mut previewer = ClassInfo::default();
+        previewer.class_methods.insert(Symbol::from("poster"), Ty::Str);
+        classes.insert(previewer_id.clone(), previewer);
+        let mut video_previewer = ClassInfo::default();
+        video_previewer.parent = Some(previewer_id);
+        classes.insert(
+            ClassId(Symbol::from("ActiveStorage::Previewer::VideoPreviewer")),
+            video_previewer,
+        );
+        // Rails' error hierarchy: `PreviewError < Error < StandardError`.
+        let as_error_id = ClassId(Symbol::from("ActiveStorage::Error"));
+        classes.insert(as_error_id.clone(), ClassInfo::default());
+        let mut preview_error = ClassInfo::default();
+        preview_error.parent = Some(as_error_id);
+        classes.insert(ClassId(Symbol::from("ActiveStorage::PreviewError")), preview_error);
+
         // The multipart part a permitted `has_one_attached` field
         // carries (`runtime/spinel/multipart.rbs` verbatim): what the
         // synthesized params class types the field as, and what
@@ -335,6 +476,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         uploaded.instance_methods.insert(Symbol::from("content_type"), Ty::Str);
         uploaded.instance_methods.insert(Symbol::from("read"), Ty::Str);
         uploaded.instance_methods.insert(Symbol::from("size"), Ty::Int);
+        // The file behind the part, as Rack hands it over: the Tempfile
+        // (`params[:file].tempfile`) and its path on disk. The Tempfile
+        // is not modelled, so it is a gradual boundary.
+        uploaded.instance_methods.insert(Symbol::from("tempfile"), Ty::Untyped);
+        uploaded.instance_methods.insert(Symbol::from("path"), Ty::Str);
         uploaded.instance_methods.insert(Symbol::from("to_s"), Ty::Str);
         let uploaded_id = ClassId(Symbol::from("ActionDispatch::Http::UploadedFile"));
         uploaded.class_methods.insert(
@@ -350,6 +496,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             storage.class_methods.insert(Symbol::from(m), Ty::Array { elem: Box::new(Ty::Str) });
         }
         storage.class_methods.insert(Symbol::from("variable_content_type?"), Ty::Bool);
+        storage.class_methods.insert(Symbol::from("content_type_for_format"), Ty::Str);
+        storage.class_methods.insert(Symbol::from("content_type_for_filename"), Ty::Str);
         storage.class_methods.insert(Symbol::from("url_filename"), Ty::Str);
         classes.insert(ClassId(Symbol::from("ActiveStorage")), storage);
     }
@@ -527,7 +675,7 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     let node_ty = Ty::Class { id: node_id.clone(), args: vec![] };
     let mut fragment = ClassInfo::default();
     fragment.class_methods.insert(Symbol::from("wrap"), fragment_ty.clone());
-    for m in ["to_s", "to_html", "source"] {
+    for m in ["to_s", "to_html", "source", "to_plain_text"] {
         fragment.instance_methods.insert(Symbol::from(m), Ty::Str);
     }
     for m in ["find_all", "css"] {

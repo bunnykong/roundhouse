@@ -45,8 +45,15 @@ class BaseTest < Minitest::Test
 
     def self.table_name = "items"
     def self.schema_columns = [:id, :title]
+    def self.hydrate_count
+      @hydrate_count || 0
+    end
+    def self.hydrate_count=(n)
+      @hydrate_count = n
+    end
 
     def self.instantiate(row)
+      self.hydrate_count = hydrate_count + 1
       it = new
       # Two cross-target patterns at play here:
       #   1. String-keyed row access (`row["id"]`, not `row[:id]`).
@@ -119,6 +126,7 @@ class BaseTest < Minitest::Test
     Db.configure(":memory:")
     Db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)")
     ActiveRecord.adapter = SqliteAdapter
+    Item.hydrate_count = 0
   end
 
   def teardown
@@ -237,6 +245,403 @@ class BaseTest < Minitest::Test
     last = Item.last
     raise "expected last to return non-nil after save" if last.nil?
     assert_equal b.id, last.id
+  end
+
+  def test_relation_last_n_keeps_order_and_takes_the_tail
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    tail = ActiveRecord::Relation.new(Item).order("id").last_n(2)
+    assert_equal 2, tail.length
+    assert_equal "T3", tail[0].title
+    assert_equal "T4", tail[1].title
+  end
+
+  def test_relation_last_n_limits_in_sql
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    ActiveRecord::Relation.new(Item).order("id").last_n(2)
+    assert_equal 2, Item.hydrate_count
+  end
+
+  def test_relation_last_is_one_sql_row
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    last = ActiveRecord::Relation.new(Item).order("id").last
+    raise "expected last to return a row" if last.nil?
+    assert_equal "T4", last.title
+    assert_equal 1, Item.hydrate_count
+  end
+
+  def test_relation_exists_does_not_hydrate
+    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    rel = ActiveRecord::Relation.new(Item)
+    assert rel.exists?
+    assert_equal 0, Item.hydrate_count
+    refute ActiveRecord::Relation.new(Item).where(title: "Nope").exists?
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_limit_zero_exists_is_false
+    it = Item.new; it.title = "A"; it.save()
+    refute ActiveRecord::Relation.new(Item).limit(0).exists?
+  end
+
+  def test_relation_empty_any_use_exists_not_hydrate
+    it = Item.new; it.title = "A"; it.save()
+    Item.hydrate_count = 0
+    rel = ActiveRecord::Relation.new(Item)
+    refute rel.empty?
+    assert rel.any?
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_many_and_one_probe_without_hydrate
+    2.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    assert ActiveRecord::Relation.new(Item).many?
+    assert_equal 0, Item.hydrate_count
+    refute ActiveRecord::Relation.new(Item).where(title: "T0").many?
+    assert ActiveRecord::Relation.new(Item).where(title: "T0").one?
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_exists_sql_selects_one_with_limit
+    sql = ActiveRecord::Relation.new(Item).where(title: "A").exists_sql(1)
+    assert_match(/SELECT 1 AS one FROM items/, sql)
+    assert_match(/LIMIT 1/, sql)
+    refute_match(/COUNT\(\*\)/, sql)
+    refute_match(/ORDER BY/, sql)
+  end
+
+  def test_relation_size_counts_without_hydrate_when_unloaded
+    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    assert_equal 3, ActiveRecord::Relation.new(Item).size
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_last_page_short_loaded_page_skips_count_path
+    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).order("id").limit(10)
+    rel.to_a
+    # Loaded page has 3 < 10 and is non-empty, so last_page? is true
+    # without total_count.
+    assert rel.last_page?
+  end
+
+  def test_relation_last_page_empty_out_of_range_is_not_last
+    it = Item.new; it.title = "A"; it.save()
+    # Page past the end loads empty; last_page? is false there
+    # (current_page > total_pages), not true via the short-page shortcut.
+    rel = ActiveRecord::Relation.new(Item).order("id").limit(10).offset(10)
+    rel.to_a
+    refute rel.last_page?
+    assert rel.out_of_range?
+  end
+
+
+
+  def test_relation_include_unloaded_does_not_hydrate
+    a = Item.new; a.title = "A"; a.save()
+    b = Item.new; b.title = "B"; b.save()
+    rel = ActiveRecord::Relation.new(Item).order("id")
+    Item.hydrate_count = 0
+    assert rel.include?(a)
+    refute rel.where(title: "Nope").include?(a)
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_include_loaded_uses_cache
+    a = Item.new; a.title = "A"; a.save()
+    rel = ActiveRecord::Relation.new(Item)
+    rel.to_a
+    Item.hydrate_count = 0
+    assert rel.include?(a)
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_campfire_last_page_shape_limits_in_sql
+    # Message::Pagination.last_page is ordered.last(PAGE_SIZE).
+    50.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    Item.hydrate_count = 0
+    page = ActiveRecord::Relation.new(Item).order("id").last_n(40)
+    assert_equal 40, page.length
+    assert_equal 40, Item.hydrate_count
+    assert_equal "T10", page[0].title
+    assert_equal "T49", page[-1].title
+  end
+
+
+  def test_campfire_messages_any_uses_exists_sql
+    it = Item.new; it.title = "A"; it.save()
+    rel = ActiveRecord::Relation.new(Item)
+    sql = rel.exists_sql(1)
+    assert_match(/SELECT 1 AS one/, sql)
+    refute_match(/ORDER BY/, sql)
+    Item.hydrate_count = 0
+    assert rel.any?
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_size_respects_limit_when_unloaded
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    assert_equal 2, ActiveRecord::Relation.new(Item).limit(2).size
+    assert_equal 1, ActiveRecord::Relation.new(Item).limit(2).offset(4).size
+  end
+
+  def test_relation_distinct_size_respects_limit_without_collapsing
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    # `SELECT DISTINCT 1 … LIMIT 5` would collapse to one row; size must
+    # still answer the limited distinct cardinality.
+    assert_equal 3, ActiveRecord::Relation.new(Item).distinct.limit(3).size
+  end
+
+  def test_relation_distinct_many_and_one_see_separate_rows
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    assert ActiveRecord::Relation.new(Item).distinct.many?
+    refute ActiveRecord::Relation.new(Item).where(title: "T0").distinct.many?
+    assert ActiveRecord::Relation.new(Item).where(title: "T0").distinct.one?
+  end
+
+  def test_relation_distinct_count_counts_distinct_pks
+    5.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    # Five rows, two title values. Distinct on primary key is still 5 —
+    # count_sql must not answer the underlying non-distinct row total
+    # via a bare COUNT(*) that ignores DISTINCT (#343).
+    assert_equal 5, ActiveRecord::Relation.new(Item).distinct.count
+    sql = ActiveRecord::Relation.new(Item).distinct.count_sql
+    assert_match(/DISTINCT/, sql)
+    assert_match(/__rh_count/, sql)
+  end
+
+  def test_relation_select_distinct_count_uses_projection
+    5.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).select("title").distinct
+    assert_equal 2, rel.count
+    sql = rel.count_sql
+    assert_match(/DISTINCT/, sql)
+    assert_match(/title/, sql)
+  end
+
+  def test_relation_grouped_count_sql_counts_groups
+    4.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).group("title")
+    sql = rel.count_sql
+    assert_match(/GROUP BY/, sql)
+    assert_match(/__rh_count/, sql)
+    assert_equal 2, rel.count
+  end
+
+  def test_relation_grouped_count_sql_keeps_select_aliases
+    rel = ActiveRecord::Relation.new(Item)
+      .select("title, COUNT(*) AS n")
+      .group("title")
+      .having("n > 1")
+    sql = rel.count_sql
+    assert_match(/COUNT\(\*\) AS n/, sql)
+    assert_match(/HAVING/, sql)
+  end
+
+  def test_sanitize_sql_preserves_question_marks_in_quotes
+    sql = ActiveRecord::Base.sanitize_sql_array(
+      ["SELECT '?' AS marker, ? AS value", 42]
+    )
+    assert_equal "SELECT '?' AS marker, 42 AS value", sql
+  end
+
+  def test_sanitize_sql_backslash_is_literal_in_sqlite_quotes
+    # SQLite: backslash does not escape; the second `'` closes the string.
+    sql = ActiveRecord::Base.sanitize_sql_array(
+      ["SELECT '\\' AS slash, ? AS value", 42]
+    )
+    assert_equal "SELECT '\\' AS slash, 42 AS value", sql
+  end
+
+  def test_relation_grouped_distinct_count_sql_keeps_distinct
+    rel = ActiveRecord::Relation.new(Item)
+      .select("title")
+      .group("title")
+      .distinct
+    sql = rel.count_sql
+    assert_match(/DISTINCT/, sql)
+    assert_match(/GROUP BY/, sql)
+  end
+
+  def test_relation_from_distinct_count_sql_uses_bare_primary_key
+    rel = ActiveRecord::Relation.new(Item).from("parents").distinct
+    sql = rel.count_sql
+    assert_match(/FROM parents/, sql)
+    refute_match(/items\.id/, sql)
+    assert_match(/DISTINCT id/, sql)
+  end
+
+  def test_relation_from_joined_distinct_count_qualifies_primary_key
+    Db.exec("CREATE TABLE parents (id INTEGER PRIMARY KEY, title TEXT)")
+    Db.exec("CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER, title TEXT)")
+    Db.exec("INSERT INTO parents (id, title) VALUES (1, 'P')")
+    Db.exec("INSERT INTO children (id, parent_id, title) VALUES (10, 1, 'C')")
+    rel = ActiveRecord::Relation.new(Item)
+      .from("parents")
+      .joins("INNER JOIN children ON children.parent_id = parents.id")
+      .distinct
+    sql = rel.count_sql
+    assert_match(/DISTINCT parents\.id/, sql)
+    refute_match(/DISTINCT id FROM/, sql)
+    assert_equal 1, rel.count
+  end
+
+  def test_group_count_hash_counts_rows_per_group
+    4.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    got = ActiveRecord::Relation.new(Item).group("title").group_count
+    assert_equal 2, got["T0"]
+    assert_equal 2, got["T1"]
+    assert_equal 2, got.length
+  end
+
+  def test_group_count_hash_drops_groups_that_fail_having
+    3.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).group("title").having("COUNT(*) > 1")
+    got = rel.group_count
+    assert_equal 2, got["T0"]
+    refute got.key?("T1")
+    assert_equal 1, got.length
+    assert_equal 1, rel.count
+  end
+
+  def test_group_count_distinct_counts_distinct_ids_per_group
+    2.times { it = Item.new; it.title = "T0"; it.save() }
+    rel = ActiveRecord::Relation.new(Item)
+      .joins("INNER JOIN items AS copies ON copies.title = items.title")
+      .group("items.title")
+    assert_equal 4, rel.group_count["T0"]
+    distinct = ActiveRecord::Relation.new(Item)
+      .joins("INNER JOIN items AS copies ON copies.title = items.title")
+      .group("items.title")
+      .distinct
+    assert_equal 2, distinct.group_count["T0"]
+  end
+
+  # HAVING must see the original grouped relation (aggregates / source
+  # columns), not the outer DISTINCT count wrapper.
+  def test_group_count_distinct_having_filters_groups_before_distinct
+    3.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item)
+      .group("title")
+      .distinct
+      .having("COUNT(*) > 1")
+    got = rel.group_count
+    assert_equal 2, got["T0"]
+    refute got.key?("T1")
+    by_title = ActiveRecord::Relation.new(Item)
+      .group("title")
+      .distinct
+      .having("title = 'T0'")
+    assert_equal({ "T0" => 2 }, by_title.group_count)
+  end
+
+  def test_scalar_count_on_grouped_relation_counts_groups
+    4.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).group("title")
+    assert_equal 2, rel.count
+    assert_kind_of Integer, rel.count
+  end
+
+  def test_relation_each_does_not_rehydrate_and_returns_self
+    it = Item.new; it.title = "A"; it.save()
+    rel = ActiveRecord::Relation.new(Item)
+    first = rel.each { }
+    Item.hydrate_count = 0
+    second = rel.each { }
+    assert_same rel, first
+    assert_same rel, second
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_each_return_is_not_the_mutable_cache
+    it = Item.new; it.title = "A"; it.save()
+    rel = ActiveRecord::Relation.new(Item)
+    out = rel.each { }
+    assert_same rel, out
+    refute_kind_of Array, out
+  end
+
+  def test_relation_last_n_on_loaded_takes_in_memory_tail
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).order("id")
+    rel.to_a
+    Item.hydrate_count = 0
+    tail = rel.last_n(2)
+    assert_equal ["T3", "T4"], tail.map(&:title)
+    assert_equal 0, Item.hydrate_count
+  end
+
+  def test_relation_last_n_with_prior_limit_uses_window_tail
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    # limit(3).last_n(2) is the last 2 of those 3, not the last 2 of all.
+    tail = ActiveRecord::Relation.new(Item).order("id").limit(3).last_n(2)
+    assert_equal ["T1", "T2"], tail.map(&:title)
+  end
+
+  def test_relation_last_n_with_offset_falls_back_to_materialize
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    tail = ActiveRecord::Relation.new(Item).order("id").offset(1).last_n(2)
+    assert_equal ["T3", "T4"], tail.map(&:title)
+  end
+
+  def test_order_term_nested_hash_qualifies_table_column
+    rel = ActiveRecord::Relation.new(Item)
+    assert_equal "rooms.updated_at DESC", rel.order_term({ rooms: { updated_at: :desc } })
+    assert_equal "updated_at DESC", rel.order_term({ updated_at: :desc })
+    assert_equal "updated_at", rel.order_term(:updated_at)
+    assert_equal "id DESC", rel.order_term("id DESC")
+  end
+
+  def test_spawn_copies_state_without_sharing_accumulators
+    base = ActiveRecord::Relation.new(Item).where(title: "A")
+    prior = base.to_sql
+    fork = base.spawn.where(title: "B")
+    assert_match(/title = 'B'/, fork.to_sql)
+    assert_equal prior, base.to_sql
+    # Copy-on-write: mutating the parent after spawn must not rewrite the fork.
+    base.where(title: "C")
+    assert_match(/title = 'B'/, fork.to_sql)
+    refute_match(/title = 'C'/, fork.to_sql)
+    ordered = ActiveRecord::Relation.new(Item).where(title: "A")
+    prior_order = ordered.to_sql
+    fork_order = ordered.spawn
+    ordered.order!(:id)
+    assert_equal prior_order, fork_order.to_sql
+    assert_match(/ORDER BY/, ordered.to_sql)
+  end
+
+  def test_find_in_batches_yields_loaded_records_once
+    3.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    batches = []
+    ActiveRecord::Relation.new(Item).order("id").find_in_batches { |batch| batches << batch.map(&:title) }
+    assert_equal 1, batches.length
+    assert_equal ["T0", "T1", "T2"], batches[0]
+  end
+
+  def test_relation_more_than_probes_without_hydrate_or_mutation
+    5.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).where("title LIKE 'T%'")
+    prior = rel.to_sql
+    Item.hydrate_count = 0
+    assert rel.more_than?(4)
+    refute rel.more_than?(5)
+    assert_equal 0, Item.hydrate_count
+    assert_equal prior, rel.to_sql
+    assert_nil rel.offset_value
+  end
+
+  def test_model_any_none_do_not_hydrate
+    Item.hydrate_count = 0
+    refute Item.any?
+    assert Item.none?
+    it = Item.new; it.title = "A"; it.save()
+    assert Item.any?
+    refute Item.none?
+    assert_equal 0, Item.hydrate_count
   end
 
   # ── update + destroy ────────────────────────────────────────
