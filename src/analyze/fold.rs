@@ -269,6 +269,7 @@ pub(crate) fn param_ref(class: &ClassId, method: &Symbol, index: usize, value: T
         // reseeded passes both seed it.
         let value = match s.values.get(&slot) {
             Some(old) if super::handoff::join_on() => super::handoff::join_slot(old.clone(), value),
+            _ if super::det::det_on() => super::det::lat_norm(value),
             _ => value,
         };
         if s.values.get(&slot) != Some(&value) {
@@ -359,6 +360,7 @@ fn accumulate(key: SlotKey, value: Ty) -> Ty {
         let joined = match s.values.get(&slot) {
             Some(old) if super::handoff::join_on() => super::handoff::join_slot(old.clone(), value),
             Some(old) if !fresh => super::handoff::join(old.clone(), value),
+            _ if super::det::det_on() => super::det::lat_norm(value),
             _ => value,
         };
         if s.values.get(&slot) != Some(&joined) {

@@ -255,6 +255,7 @@ pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool
 /// the harvest's own rule does (#521); two informative values join after
 /// their unknown arms are stripped.
 pub(crate) fn join(old: Ty, new: Ty) -> Ty {
+    if super::det::det_on() { return super::det::lat_join(old, new); }
     if old == new {
         return new;
     }
@@ -286,6 +287,7 @@ pub(crate) fn join_slot(old: Ty, new: Ty) -> Ty {
     if contains_arm(&old, &new) {
         return old;
     }
+    if super::det::det_on() { return super::det::lat_join(old, new); }
     if !informative(&old) && !informative(&new) {
         return super::body::union_of(old, new);
     }
