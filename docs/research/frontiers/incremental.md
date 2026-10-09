@@ -10,7 +10,17 @@ Editors and agents re-check after every change. A full check of Discourse takes 
 
 ## The check
 
-On [`fixpoint-warm`](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-warm), `RH_WARM=<dir> RH_WARM_SHADOW=1 RH_WARM_TIMINGS=1` stores evaluations, replays them after an edit, and runs a cold check alongside to compare. It passes when every edit matches cold and the warm path takes well under a tenth of a second on Mastodon. The six public edits used so far aren't published yet.
+[`warm-edits`](../../../tools/research/warm-edits) applies six fixed edits (a boolean change, a return-type change and a removed read, on Mastodon and on Discourse) to scratch copies of the pinned apps. It runs the warm check with its cold shadow on [`fixpoint-warm`](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-warm), and prints one JSON line per edit: `match` or `mismatch`, with warm and cold analysis seconds. It needs Python 3 and CRuby 4.0.7.
+
+```sh
+git clone -b fixpoint-warm https://github.com/bunnykong/roundhouse rh-warm
+(cd rh-warm && cargo build --release --locked)
+curl -fsSLO https://raw.githubusercontent.com/bunnykong/roundhouse/fixpoint-research/tools/research/warm-edits
+chmod +x warm-edits
+./warm-edits            # or: ./warm-edits mastodon
+```
+
+Today all six match cold, and the warm analysis takes 149–372 s against 4–14 s cold. It passes when all six match and the warm path takes well under a tenth of a second on Mastodon.
 
 ## Known
 

@@ -10,7 +10,21 @@ Every expression that falls back to `untyped` is a hole in the generated code an
 
 ## The check
 
-On the five public apps, against main at the same commit: the share of expressions fully typed (no `untyped` or `Var` at any depth) and the share holding `untyped`, with the [soundness](soundness.md) check beside it. It passes when fully typed ≥ main, holding `untyped` ≤ main, and the oracle rejects nothing new. The census that computes these shares isn't published yet; publishing it is the first task here.
+On `fixpoint-next`, `RH_PRECISION_CENSUS=1` adds a `precision` field to the report, and `PROBE_BASE=1` runs main's behavior in the same binary, so one build gives both sides. Pooled over the five apps:
+
+```sh
+for app in campfire mastodon chatwoot forem discourse; do
+  PROBE_BASE=1 ./probe $app RH_PRECISION_CENSUS=1 RH_FIXPOINT_VERIFY=0
+  ./probe $app RH_PRECISION_CENSUS=1 RH_FIXPOINT_VERIFY=0
+done | jq -s 'if length != 10 then error("expected ten reports") else . end
+  | [[.[0,2,4,6,8].precision], [.[1,3,5,7,9].precision]]
+  | map(reduce .[] as $c ({t: 0, f: 0, u: 0};
+          .t += $c.typed | .f += $c.fully_typed | .u += $c.untyped_anywhere)
+        | {fully_typed: (100 * .f / .t), holding_untyped: (100 * .u / .t)})
+  | {main: .[0], S3: .[1]}'
+```
+
+Today it prints 69.02% → 68.83% fully typed and 14.34% → 14.55% holding `untyped`. It passes when fully typed ≥ main and holding `untyped` ≤ main, with the [soundness](soundness.md) check beside it. The shares measure opacity, not correctness; `Bottom` counts as fully typed.
 
 ## Known
 

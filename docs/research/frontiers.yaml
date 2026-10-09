@@ -24,16 +24,16 @@
   brief: frontiers/precision.md
   stands: "Fully typed is 0.19 points behind main (F7)."
   check: "fully typed >= main and untyped <= main on five apps, with the soundness check beside it"
-  check_public: false  # the precision census isn't published yet
+  check_public: true
   skills: [rust, type inference, rails idioms]
-  branch: fixpoint-staged
+  branch: fixpoint-next
 
 - id: incremental
   title: "Exact re-checking in milliseconds"
   brief: frontiers/incremental.md
   stands: "Agrees with a cold check on six edits, but the warm portion takes 21.55-32.01x as long as a cold check (F15)."
   check: "RH_WARM shadow matches cold on every edit; warm under 0.1 s on Mastodon"
-  check_public: partly  # the edit suite isn't published yet
+  check_public: true
   skills: [incremental computation, rust performance, serialization]
   branch: fixpoint-warm
 
