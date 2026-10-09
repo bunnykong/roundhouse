@@ -7337,6 +7337,7 @@ fn block_filter_gates(call: &Expr) -> (Vec<Symbol>, Vec<Symbol>) {
 /// - already a Union containing `observed` → keep
 /// - otherwise → widen via `union_of`
 fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
+    if det::det_on() { return det::lat_join(stored, observed); }
     if stored == observed {
         return stored;
     }
