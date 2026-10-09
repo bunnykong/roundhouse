@@ -114,6 +114,41 @@ SERVERS.each_key do |server|
   end
 end
 
+# A short first recv creates the same header offset without pipelining.
+class FragmentedHeaderWire < Wire
+  def recv(n)
+    super(@recvs == 0 ? [n, 4034].min : n)
+  end
+end
+
+prefix = "POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nab".b
+SERVERS.each_key do |server|
+  [65535, 65536, 66000, 69000].each do |size|
+    head = "GET /large-header HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nX-Pad: ".b
+    header = head + "x" * (size - head.bytesize - 4) + "\r\n\r\n"
+    [false, true].each do |queued|
+      [false, true].each do |utf8|
+        wire_class = queued ? Wire : FragmentedHeaderWire
+        Sock.wire = wire_class.new((queued ? prefix : "") + header + SECOND, utf8: utf8, chunk: 4096)
+        Sock.closes = 0
+        APP.reset
+        case server
+        when "threaded" then Tep::Server::Threaded.handle_connection(7)
+        when "scheduled" then Tep::Server::Scheduled.handle_connection(7)
+        when "blocking" then Tep::Server.new(APP).handle_connection(7)
+        end
+        paths = queued ? ["/first"] : []
+        paths << "/large-header" if size <= 65535
+        statuses = Sock.wire.out.scan(/HTTP\/1\.\d (\d{3})/).flatten.map(&:to_i)
+        name = "#{server}: #{size}-byte header, queued=#{queued}, utf8=#{utf8}"
+        check("#{name}: only headers within the limit dispatch", APP.paths == paths, APP.paths.inspect)
+        check("#{name}: only accepted requests get responses", statuses == [200] * paths.length, statuses.inspect)
+        check("#{name}: the connection closes once", Sock.closes == 1)
+      end
+    end
+  end
+end
+
 # Bounds are measured at the connection-owned buffer, not on TCP input size.
 if Tep.const_defined?(:InputBuffer)
   class Tep::InputBuffer

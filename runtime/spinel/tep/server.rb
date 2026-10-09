@@ -147,7 +147,7 @@ module Tep
       buf = input.take_pending_input
       return buf if buf.include?("\r\n\r\n")
       while buf.bytesize < 65535
-        chunk = Sock.sp_net_recv_some(client, 4096).b
+        chunk = Sock.sp_net_recv_some(client, [4096, 65535 - buf.bytesize].min).b
         if chunk.length == 0
           return ""
         end

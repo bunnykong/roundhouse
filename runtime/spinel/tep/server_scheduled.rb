@@ -252,7 +252,7 @@ module Tep
           if ready == 0
             return ""
           end
-          chunk = Sock.sphttp_recv_some(fd, 4096).b
+          chunk = Sock.sphttp_recv_some(fd, [4096, MAX_REQUEST_BYTES - buf.bytesize].min).b
           if chunk.length == 0
             return ""
           end
