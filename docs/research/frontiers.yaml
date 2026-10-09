@@ -38,13 +38,13 @@
     lab: "0cc656a6"
   claims:
     - who: eddygarcas
-      scope: "items 1–6 of the claim's join and merge defects on main, in one PR against main; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag."
+      scope: "items 1–6 of the claim's join and merge defects on main, against main; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag."
       status: active
       since: "2026-10-09T07:40Z"
       expires: "2026-10-16T07:40Z"
       pr: null
       source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
-      note: "Overlaps @dai199's claim in parameter rows; the order is to be agreed on #617."
+      note: "Order agreed with #674: items 3–6 first; items 1–2 rebase onto #674 after it lands (https://github.com/rubys/roundhouse/issues/617#issuecomment-6079454560)."
 
 - id: soundness
   name: Soundness
@@ -70,7 +70,7 @@
       expires: "2026-10-16T08:52Z"
       pr: "https://github.com/rubys/roundhouse/pull/674"
       source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6077674666"
-      note: "Overlaps @eddygarcas's claim in parameter rows; the order is to be agreed on #617."
+      note: "Lands first in parameter rows; @eddygarcas rebases items 1–2 of his claim onto it (https://github.com/rubys/roundhouse/issues/617#issuecomment-6079454560)."
 
 - id: precision
   name: Precision
