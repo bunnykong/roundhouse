@@ -808,8 +808,13 @@ fn readable_class_methods_store_keywords_blocks_and_filter_options() {
 }
 
 #[test]
-fn finite_configuration_does_not_admit_unrelated_controller_singletons() {
-    assert!(configuration_app(WINDOW_SETTINGS, "def self.unrelated; eval('1'); end").is_err());
+fn configuration_keeps_unrelated_class_methods_out_of_its_macro_carriers() {
+    let mut app = configuration_app(WINDOW_SETTINGS, "def self.unrelated; eval('1'); end").expect("ordinary class methods are retained");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let diagnostics = roundhouse::analyze::diagnose(&app);
+    assert!(diagnostics.iter().any(|d| d.message.contains("eval")), "{diagnostics:?}");
+    assert!(app.controllers.iter().flat_map(|c| &c.body).any(|item| matches!(item,
+        ControllerBodyItem::ClassMethod { method, configuration_slot: None, .. } if method.name.as_str() == "unrelated")));
 }
 
 #[test]
@@ -1199,5 +1204,250 @@ end
             ControllerBodyItem::Unknown { .. } => "unknown",
             _ => "other",
         }).collect::<Vec<_>>()
+    );
+}
+
+/// The `setup_mobile!` filters `call` expands to, as their `only` lists.
+/// `has_mobile_version(*actions)` peels its options with
+/// `extract_options!` and reads `options[:if]`.
+fn mobile_version_filters(call: &str) -> Vec<Vec<String>> {
+    let concern = r#"
+module MobileableConcern
+  extend ActiveSupport::Concern
+
+  module ClassMethods
+    def has_mobile_version(*actions)
+      options = actions.extract_options!
+      before_action(:setup_mobile!, if: options[:if], only: actions)
+    end
+  end
+
+  private
+    def setup_mobile!
+    end
+end
+"#;
+    let controller = format!(
+        "class ThingsController < ApplicationController\n  ACTIONS = %i[index show]\n  {call}\n  def index; end\n  def show; end\nend\n"
+    );
+    let tree = vec![
+        ("app/controllers/concerns/mobileable_concern.rb", concern.to_string()),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include MobileableConcern\nend\n".to_string(),
+        ),
+        ("app/controllers/things_controller.rb", controller),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+    .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    filters(&app)
+        .into_iter()
+        .filter(|(kind, target, ..)| *kind == FilterKind::Before && target == "setup_mobile!")
+        .map(|(_, _, only, _)| only)
+        .collect()
+}
+
+/// The call's symbols are the filter's `only`; an absent `if:` is nil,
+/// no guard.
+#[test]
+fn rest_actions_macro_with_extract_options_expands_to_a_scoped_filter() {
+    let scoped = vec![vec!["index".to_string(), "show".to_string()]];
+    assert_eq!(mobile_version_filters("has_mobile_version :index, :show"), scoped);
+    // A literal array splat spreads its elements.
+    assert_eq!(mobile_version_filters("has_mobile_version *%i[index show]"), scoped);
+    // A repeated key reads its last value, as Ruby does.
+    assert_eq!(mobile_version_filters("has_mobile_version :index, :show, if: :x, if: nil"), scoped);
+}
+
+/// What expansion cannot read stays unexpanded rather than becoming a
+/// broader or unguarded filter.
+#[test]
+fn rest_actions_macro_refuses_what_it_cannot_read() {
+    for call in [
+        // Unknown actions: expanding would drop them from `only`.
+        "has_mobile_version *ACTIONS",
+        "has_mobile_version *[:index, ACTIONS.first]",
+        "has_mobile_version :index, ACTIONS.first",
+        // The last `if:` is a guard this expansion does not carry.
+        "has_mobile_version :index, if: nil, if: :x",
+        // A computed key might be `:if`.
+        "has_mobile_version :index, \"if\".to_sym => :x",
+    ] {
+        assert!(mobile_version_filters(call).is_empty(), "{call} expanded");
+    }
+}
+
+/// `ingest::class_attribute` is all or nothing per carrier: anything in
+/// `included do` beyond `class_attribute` and filter DSL, or a class
+/// method using `@name` itself, leaves the macro call unexpanded.
+#[test]
+fn class_attribute_carrier_refuses_what_it_cannot_carry() {
+    /// `(method, slot)` of each carried class_attribute method.
+    fn class_attribute_methods(included: &str, writer: &str) -> Vec<(String, String)> {
+        let concern = format!(
+            "module Preloads\n  extend ActiveSupport::Concern\n  included do\n{included}\n  end\n  class_methods do\n    def preload(codes)\n      {writer}\n    end\n  end\nend\n"
+        );
+        let tree = vec![
+            ("app/controllers/concerns/preloads.rb", concern),
+            (
+                "app/controllers/application_controller.rb",
+                "class ApplicationController < ActionController::Base\nend\n".to_string(),
+            ),
+            (
+                "app/controllers/things_controller.rb",
+                "class ThingsController < ApplicationController\n  include Preloads\n  preload %w[a]\n  def show; end\nend\n"
+                    .to_string(),
+            ),
+        ]
+        .into_iter()
+        .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+        .collect();
+        let app = ingest_app_from_tree(tree).expect("ingest");
+        let c = app
+            .controllers
+            .iter()
+            .find(|c| c.name.0.as_str() == "ThingsController")
+            .expect("ThingsController ingested");
+        c.body
+            .iter()
+            .filter_map(|item| match item {
+                ControllerBodyItem::ClassMethod {
+                    method,
+                    configuration_slot: Some(configuration_slot),
+                    configuration_role: Some(
+                        roundhouse::dialect::ClassConfigurationRole::ClassAttribute,
+                    ),
+                    ..
+                } => Some((
+                    method.name.as_str().to_string(),
+                    configuration_slot.1.as_str().to_string(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+    let carried = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs.iter().map(|(m, s)| (m.to_string(), s.to_string())).collect()
+    };
+    let attr = "    class_attribute :defs, default: []\n    before_action :run_preloads";
+    let write = "self.defs += [codes]";
+    assert_eq!(
+        class_attribute_methods(attr, write),
+        carried(&[("defs", "defs"), ("preload", "defs")]),
+        "reader and macro are carried"
+    );
+    assert!(
+        class_attribute_methods(&format!("{attr}\n    helper_method :defs"), write).is_empty(),
+        "an `included` statement that is neither class_attribute nor filter DSL"
+    );
+    roundhouse::ingest::survey::activate();
+    let _ = class_attribute_methods(&format!("{attr}\n    helper_method :defs"), write);
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|g| matches!(
+            g,
+            roundhouse::ingest::IngestError::Unsupported { message, .. }
+                if message.contains("included do")
+        )),
+        "unsupported included body must be carrier-ledgered; got {gaps:?}"
+    );
+    assert!(
+        class_attribute_methods(attr, "@defs = [codes]").is_empty(),
+        "a source `@defs` is not the attribute's storage"
+    );
+    // Each method is keyed to the attribute it writes.
+    let two = format!("{attr}\n    class_attribute :more, default: []");
+    assert_eq!(
+        class_attribute_methods(&two, "self.more += [codes]"),
+        carried(&[("defs", "defs"), ("more", "more"), ("preload", "more")]),
+    );
+    assert!(
+        class_attribute_methods(&two, "self.defs += [codes]; self.more += [codes]").is_empty(),
+        "one method writing two attributes has no single slot"
+    );
+}
+
+/// A carrier included only through another module must stay unexpanded:
+/// stripping its class methods without copying them onto the controller
+/// would leave the class-body call as `Unknown` / `NoMethodError`.
+#[test]
+fn class_attribute_carrier_included_through_another_module_is_refused() {
+    let nested = r#"
+module Preloads
+  extend ActiveSupport::Concern
+  included do
+    class_attribute :defs, default: []
+  end
+  class_methods do
+    def preload(codes)
+      self.defs += [codes]
+    end
+  end
+end
+"#;
+    // A bodiless `include` wrapper is dropped by library-class ingest;
+    // keep an instance method so Bundle remains and records Preloads.
+    let outer = r#"
+module Bundle
+  extend ActiveSupport::Concern
+  include Preloads
+  def bundle_marker
+    1
+  end
+end
+"#;
+    let tree = [
+        ("app/controllers/concerns/preloads.rb", nested),
+        ("app/controllers/concerns/bundle.rb", outer),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            "class ThingsController < ApplicationController\n  include Bundle\n  preload %w[a]\n  def show; end\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|g| matches!(
+            g,
+            roundhouse::ingest::IngestError::Unsupported { message, .. }
+                if message.contains("included through another module")
+        )),
+        "nested carrier must be ledgered; got {gaps:?}"
+    );
+    let c = app
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "ThingsController")
+        .expect("ThingsController");
+    assert!(
+        !c.body.iter().any(|item| matches!(
+            item,
+            ControllerBodyItem::ClassMethod {
+                configuration_role: Some(
+                    roundhouse::dialect::ClassConfigurationRole::ClassAttribute
+                ),
+                ..
+            }
+        )),
+        "nested carrier must not expand onto the controller"
+    );
+    let preloads = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Preloads")
+        .expect("Preloads");
+    assert!(
+        preloads.methods.iter().any(|m| m.name.as_str() == "preload"),
+        "refused carrier must keep its class methods on the module"
     );
 }

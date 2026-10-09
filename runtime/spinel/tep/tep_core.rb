@@ -1,5 +1,6 @@
 require "digest"
 require "zlib"
+require_relative "../http_headers"
 
 module Tep
   # The name the server announces itself by. scaffold/main.rb sets
@@ -41,8 +42,8 @@ module Tep
   # rule — it rejects any Content-Length matching /[^\d]/ — so no sign,
   # no junk after the number; `.to_i` let both through ("12abc" read as
   # 12, "-1" as a length that drained nothing). "" is what an absent
-  # header reads as through str_hash, and Puma reads an empty value as
-  # zero too.
+  # header reads as through str_hash. Parser rejects an explicitly empty
+  # Content-Length before it can be confused with an absent header.
   #
   # Leading zeros are skipped, so a zero-padded value reads as its value
   # (Puma's `.to_i` does the same). More than 18 SIGNIFICANT digits
@@ -80,6 +81,38 @@ module Tep
       i += 1
     end
     v
+  end
+
+  # The response's header lines and Set-Cookie lines, each ending in
+  # CRLF — every server's head is its status line, this, and its own
+  # framing headers. A value the app wrote can come from a request
+  # (a redirect Location built from a param, a Content-Disposition, a
+  # cookie option), and a CR or LF inside one ends the header early and
+  # writes whatever follows as a header — or a body — of the attacker's
+  # choosing. So a header that cannot be written as ONE line is DROPPED,
+  # Puma's rule (`illegal_header_key?` / `illegal_header_value?`, puma
+  # 8.0): a key with a control character, space, `"` or `:`, or a value
+  # with a control character other than tab. The rest of the response
+  # goes out.
+  def self.header_lines(res)
+    out = +""
+    res.headers.each do |k, v|
+      if HttpHeaders.key_ok?(k) && HttpHeaders.value_ok?(v)
+        out << k + ": " + v + "\r\n"
+      end
+    end
+    res.set_cookies.each do |line|
+      out << "Set-Cookie: " + line + "\r\n" if HttpHeaders.value_ok?(line)
+    end
+    out
+  end
+
+  def self.header_key_ok?(k)
+    HttpHeaders.key_ok?(k)
+  end
+
+  def self.header_value_ok?(v)
+    HttpHeaders.value_ok?(v)
   end
 
   # The largest request body the servers will read, in bytes. Headers

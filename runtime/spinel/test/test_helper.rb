@@ -1522,9 +1522,10 @@ module RequestDispatch
   # body under `Content-Type: application/json`, and the app reads
   # them back as params because Rails parses that body. The harness
   # hands the params to the controller directly — the parse Rails does
-  # on the way in — and sets the content type and format the encoder
-  # would; a controller that reads the raw body sees an empty one.
-  # campfire's direct-upload tests are the corpus's use.
+  # on the way in — and sets the content type, format, and
+  # `request_parameters` (body alone) the encoder would; a controller
+  # that reads the raw body sees an empty one. campfire's direct-upload
+  # tests are the corpus's use.
   def get(path, params: {}, headers: {}, env: {}, as: nil)
     dispatch_request("GET", path, params, headers.merge(env), as)
   end
@@ -1771,6 +1772,24 @@ module RequestDispatch
     env["QUERY_STRING"]   = request_query
     controller.request = ActionDispatch::Request.for(env, merged)
     controller.request.body = request_body
+    # Body params alone — what ParamsWrapper copies from. Production
+    # dispatchers fill this from the parsed JSON body; the harness
+    # skipped the parse, so without this a wrap under `as: :json`
+    # would nest an empty hash and break flat `params.expect`.
+    if as == :json && !params.is_a?(String)
+      body_params = {}
+      params.each do |k, v|
+        if v.is_a?(Hash)
+          body_params[k.to_s] = stringify_keys(v)
+        else
+          body_params[k.to_s] = v
+        end
+      end
+      controller.request.request_parameters = body_params
+    end
+    # Raw query for path-option redirects that keep it — same slot every
+    # target's dispatcher seeds (`query_string` on the controller).
+    controller.query_string = request_query
     # Same object where module-function helpers reach it, and the
     # controller alongside — mirrors the dispatcher's pair.
     ActionController::Current.request = controller.request
@@ -1816,6 +1835,13 @@ module RequestDispatch
     @__cookies = ActionController::CookieJar.new(
       accept_cookies(cookies.to_h, controller.cookies.pending)
     )
+    copied_headers = {}
+    hi = 0
+    hn = controller.headers.size
+    while hi < hn
+      copied_headers[controller.headers.key_at(hi)] = controller.headers.val_at(hi)
+      hi += 1
+    end
     @__response = ActionResponse.new(
       status:   controller.status,
       body:     controller.body,
@@ -1825,7 +1851,7 @@ module RequestDispatch
       content_type: controller.content_type,
       cache_control_max_age: controller.cache_control_max_age,
       cache_control_public: controller.cache_control_public,
-      headers:  controller.headers,
+      headers:  copied_headers,
     )
     # Rails' OWN names, alongside the `__`-prefixed ones the harness
     # methods read. An integration test writes `@response.body` and

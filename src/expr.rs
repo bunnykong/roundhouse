@@ -21,9 +21,24 @@ use crate::ty::Ty;
 /// The source reference names a modeled class or module. The Ruby emitter
 /// uses its resolved `Ty::Class` when it changes lexical nesting.
 pub const RESOLVED_CLASS_REF: u64 = 1 << 2;
+/// The value is a proven class/module object, rather than a nominal instance.
+pub const CLASS_OBJECT_VALUE: u64 = 1 << 5;
+/// This receiver's operator call is backed by a registered method definition.
+pub const RESOLVED_OPERATOR_RECEIVER: u64 = 1 << 6;
+/// The cast's type was declared by source, rather than synthesized by lowering.
+pub const SOURCE_TYPE_ASCRIPTION: u64 = 1 << 7;
+/// A generated constant may borrow a source span for diagnostics/layout;
+/// that position is not a written Ruby constant reference to index.
+pub const GENERATED_CONST_REF: u64 = 1 << 4;
 
 /// An admitted library-class Data factory with its exact declaration identity.
 pub const RESOLVED_DATA_FACTORY: u64 = 1 << 3;
+
+/// A `permit` Send that the source wrote as `params.expect(r: [...])`.
+/// `rewrite_params` respells `expect` as `require(:r).permit(...)`, and
+/// the two refuse a malformed request differently in Rails, so the
+/// strong-params lowering reads this to know which refusal to apply.
+pub const FROM_PARAMS_EXPECT: u64 = 1 << 8;
 
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
@@ -168,6 +183,9 @@ impl Expr {
     /// threading a span argument through every small IR constructor.
     pub fn inherit_span(&mut self, enclosing: Span) {
         if self.span.is_synthetic() {
+            if matches!(&*self.node, ExprNode::Const { .. }) {
+                self.decisions |= GENERATED_CONST_REF;
+            }
             self.span = enclosing;
         }
         let here = self.span;
@@ -450,6 +468,13 @@ pub enum ExprNode {
     /// This is an opaque packet sourced from the enclosing anonymous
     /// keyword-rest formal, not a value or a synthetic local binding.
     ForwardKeywords,
+    /// Ordered literal keyword pairs followed by anonymous keyword
+    /// forwarding (`key: value, **`) in call argument position. The
+    /// forwarded packet merges after the explicit pairs, so it may
+    /// override them; each pair expression still evaluates once and in
+    /// source order. The pair values are children for typing/effects,
+    /// while the opaque forwarded packet is not a capturable value.
+    ForwardKeywordsWithPairs { entries: Vec<(Expr, Expr)> },
     /// Native Ruby syntax query. The operand is syntax, not a value child:
     /// generic typing/lowering must not resolve or rewrite it. Reachability
     /// may inspect it to retain methods whose existence is being queried.
@@ -557,6 +582,7 @@ impl ExprNode {
             ExprNode::Splat { .. } => "Splat",
             ExprNode::ForwardArgs => "ForwardArgs",
             ExprNode::ForwardKeywords => "ForwardKeywords",
+            ExprNode::ForwardKeywordsWithPairs { .. } => "ForwardKeywordsWithPairs",
             ExprNode::Defined { .. } => "Defined",
             ExprNode::KeywordSplat { .. } => "KeywordSplat",
             ExprNode::MultiAssign { .. } => "MultiAssign",
@@ -609,6 +635,12 @@ impl ExprNode {
             | ExprNode::ForwardKeywords
             | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
+            ExprNode::ForwardKeywordsWithPairs { entries } => {
+                for (k, v) in entries {
+                    f(k);
+                    f(v);
+                }
+            }
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
                     f(k);
@@ -815,6 +847,12 @@ impl ExprNode {
             | ExprNode::ForwardKeywords
             | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
+            ExprNode::ForwardKeywordsWithPairs { entries } => {
+                for (k, v) in entries {
+                    f(k);
+                    f(v);
+                }
+            }
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
                     f(k);

@@ -76,9 +76,36 @@ module ActiveStorage
         value
       elsif value.is_a?(String)
         Blob.find_signed(value)
+      elsif value.is_a?(Hash)
+        from_io_hash(value)
       else
         nil
       end
+    end
+
+    # Rails' `attach(io:, filename:, content_type:)`, when the hash is
+    # a value (a yielded bag, a local) rather than a literal the
+    # lowerer already grounded. `io` that is already bytes is kept;
+    # anything else is read. Missing `content_type` uses the filename
+    # extension. Keys beyond `io` / `filename` / `content_type` are
+    # unsupported here (`identify:`, `key:`) — decline rather than
+    # attach with a silently dropped option.
+    def self.from_io_hash(value)
+      value.each_key do |key|
+        name = key.to_s
+        return nil unless name == "io" || name == "filename" || name == "content_type"
+      end
+      io = value[:io]
+      io = value["io"] if io.nil?
+      raw_name = value[:filename]
+      raw_name = value["filename"] if raw_name.nil?
+      return nil if io.nil? || raw_name.nil?
+      filename = raw_name.to_s
+      raw_type = value[:content_type]
+      raw_type = value["content_type"] if raw_type.nil?
+      content_type = raw_type.nil? ? ActiveStorage.content_type_for_filename(filename) : raw_type.to_s
+      data = io.is_a?(String) ? io : io.read.to_s
+      Blob.create_and_upload!(data, filename, content_type)
     end
   end
 
@@ -442,10 +469,12 @@ module ActiveStorage
         head(:not_found)
         return nil
       end
-      @headers["Content-Disposition"] = disposition + "; filename=\"" +
-        ActiveStorage.url_filename(blob.filename.to_s) + "\""
-      @headers["Cache-Control"] = "max-age=3600, public"
+      headers["Cache-Control"] = "max-age=3600, public"
       send_data(service.download(key), type: blob.content_type, disposition: disposition)
+      # send_data writes only `inline`/`attachment`; restore the
+      # sanitized filename after that overwrite.
+      headers["Content-Disposition"] = (disposition == "attachment" ? "attachment" : "inline") + "; filename=\"" +
+        ActiveStorage.url_filename(blob.filename.to_s) + "\""
       nil
     end
   end

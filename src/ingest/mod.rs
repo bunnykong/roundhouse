@@ -17,6 +17,7 @@
 
 mod alba;
 mod graphql_ruby;
+pub(crate) mod class_attribute;
 mod class_configuration;
 pub mod allow_browser;
 pub mod app;
@@ -25,24 +26,34 @@ pub mod controller;
 pub mod expr;
 pub mod fixture;
 pub(crate) mod forwarding;
+pub(crate) mod controller_macro_synth;
+pub(crate) mod devise_routes;
+pub mod impersonates;
+pub mod invisible_captcha;
+pub mod generated_helpers;
 pub mod jbuilder;
 pub mod library_class;
 pub mod channel_callbacks;
 pub mod current_attributes;
 pub mod delegate;
+mod model_delegate;
 pub mod thread_mattr;
 pub mod model;
+mod delegated_type;
 mod model_macros;
 pub mod on_load_reopen;
 pub mod prism;
+pub mod rbi;
 pub mod rate_limit;
 pub mod roda_app;
 pub mod routes;
+pub mod singleton_class;
 pub mod schema;
 pub mod sequel_migration;
 pub mod sequel_model;
 pub mod sorbet_sig;
 pub mod sources;
+pub mod type_ascription;
 pub mod sql_functions;
 pub mod structure_sql;
 pub mod survey;
@@ -62,10 +73,15 @@ pub use library_class::{
 pub use model::ingest_model;
 pub use roda_app::{ingest_roda_app_with_vfs, is_roda_app};
 pub use routes::ingest_routes;
-pub use schema::{ingest_migration, ingest_schema};
+pub use schema::{
+    ingest_migration, ingest_migration_with_generated_expression_dialect, ingest_schema,
+    ingest_schema_with_generated_expression_dialect,
+};
 pub use sequel_migration::ingest_sequel_migration;
 pub use sequel_model::ingest_sequel_model;
-pub use structure_sql::ingest_structure_sql;
+pub use structure_sql::{
+    ingest_structure_sql, ingest_structure_sql_with_generated_expression_dialect,
+};
 pub use test::{ingest_test_file, ingest_test_files};
 pub use view::ingest_view;
 

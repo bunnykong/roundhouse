@@ -422,6 +422,12 @@ pub fn parse_library_with_rbs(
     let mut library_classes = ingest_library_classes(ruby_src, file)
         .map_err(|e| format!("ingest_library_classes: {e:?}"))?;
     let sigs_by_class = crate::rbs::parse_app_signatures(rbs_src)?;
+    // `@ivar: T` decls (e.g. HeaderStore `@keys: Array[String]`). Pass B
+    // seeds these so empty `[]`/`{}` initializers stamp via
+    // `propagate_expected_to_empty_container` — without this, Go/Kotlin/
+    // C#/Swift emit `[]interface{}` / `MutableList<Any?>` and fail when
+    // `[]` returns `String?`.
+    let rbs_ivars_by_class = crate::rbs::parse_app_ivars(rbs_src)?;
 
     // The class-grouped sig parser doesn't carry the `%a{abstract}`
     // annotation; the flat parser does. Use the flat result purely as
@@ -626,6 +632,16 @@ pub fn parse_library_with_rbs(
                 }
             }
         }
+        // Explicit RBS `@ivar: T` wins last — including over a
+        // zero-arg computed method of the same name (e.g. `@items:
+        // Array[String]` must not be replaced by `def items; …; end`
+        // returning Integer). Same contract as the seed that made
+        // HeaderStore `@keys`/`@vals` Array[String].
+        if let Some(declared) = rbs_ivars_by_class.get(&lc.name) {
+            for (name, ty) in declared {
+                flow_ivars.insert(name.clone(), ty.clone());
+            }
+        }
         if !flow_ivars.is_empty() {
             let reseeded: std::collections::HashMap<Symbol, Ty> = flow_ivars
                 .into_iter()
@@ -713,6 +729,51 @@ fn seed_well_known_classes(
     classes
         .entry(ClassId(Symbol::from("ActiveRecord::AdapterInterface")))
         .or_insert(adapter_iface);
+}
+
+/// Private typing view: re-attach this file's full `Ty::Fn` for methods
+/// that declare a block. Shared registries are often return-only
+/// (`ret` stripped); `block_params_for` needs the Fn. Non-block entries
+/// already present in `classes` still win (registry-seeded returns).
+///
+/// When the caller registry lacks the enclosing class, `or_default`
+/// would otherwise build a sparse `ClassInfo` with only block-bearing
+/// methods — `send(name)` then unions to `Nil` instead of `Untyped`,
+/// and `{ (instance) -> void }` siblings stay unresolved. For those
+/// classes, also fill non-block local signatures with `or_insert`.
+/// Never mutates `classes`.
+fn typing_classes_with_local_block_contracts(
+    classes: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+    methods: &[MethodDef],
+) -> std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo> {
+    let declares_block: std::collections::HashSet<&Symbol> = methods
+        .iter()
+        .filter(|m| matches!(m.signature, Some(Ty::Fn { block: Some(_), .. })))
+        .filter_map(|m| m.enclosing_class.as_ref())
+        .collect();
+
+    let mut typing_classes = classes.clone();
+    for m in methods {
+        let (Some(enclosing), Some(sig)) = (&m.enclosing_class, &m.signature) else {
+            continue;
+        };
+        if !declares_block.contains(enclosing) {
+            continue;
+        }
+        let info = typing_classes
+            .entry(crate::ident::ClassId(enclosing.clone()))
+            .or_default();
+        let table = match m.receiver {
+            MethodReceiver::Instance => &mut info.instance_methods,
+            MethodReceiver::Class => &mut info.class_methods,
+        };
+        if matches!(sig, Ty::Fn { block: Some(_), .. }) {
+            table.insert(m.name.clone(), sig.clone());
+        } else {
+            table.entry(m.name.clone()).or_insert_with(|| sig.clone());
+        }
+    }
+    typing_classes
 }
 
 /// Same as `parse_methods_with_rbs` but takes a pre-built class
@@ -856,11 +917,8 @@ pub fn parse_methods_with_rbs_in_ctx(
     // Reads now resolve cleanly even when they lexically precede
     // the assignment (e.g. `@cache ||= compute` lowers to a `BoolOp`
     // whose left arm reads the unset ivar).
-    //
-    // Runtime code doesn't reference user classes today, so the
-    // dispatch table is empty — the body-typer falls back to its
-    // primitive method tables for everything.
-    let typer = crate::analyze::BodyTyper::new(classes);
+    let typing_classes = typing_classes_with_local_block_contracts(classes, &methods);
+    let typer = crate::analyze::BodyTyper::new(&typing_classes);
 
     // Extract module-level constants from the .rb so dispatch on
     // `STATUS_CODES.fetch(...)` etc. resolves through the constant's
@@ -872,6 +930,7 @@ pub fn parse_methods_with_rbs_in_ctx(
                      ivars: &std::collections::HashMap<Symbol, Ty>|
      -> crate::analyze::Ctx {
         let mut ctx = crate::analyze::Ctx::default();
+        ctx.class_side = m.receiver == MethodReceiver::Class;
         if let Some(Ty::Fn { params, .. }) = &m.signature {
             for (param, p) in m.params.iter().zip(params.iter()) {
                 ctx.local_bindings.insert(param.name.clone(), p.ty.clone());
@@ -1907,5 +1966,49 @@ mod tests {
         let m = &methods[0];
         // The If as a whole unions its branches (both StringInterp → Str).
         assert_eq!(m.body.ty.as_ref(), Some(&Ty::Str));
+    }
+
+    /// RBS `@keys`/`@vals` must stamp empty `[]` initializers so
+    /// Go/Kotlin/C#/Swift emit typed slices/lists, not `interface{}`/`Any?`.
+    #[test]
+    fn rbs_ivar_decls_stamp_empty_array_initializers() {
+        let ruby = include_bytes!("../runtime/ruby/action_controller/base.rb");
+        let rbs = include_str!("../runtime/ruby/action_controller/base.rbs");
+        let classes = parse_library_with_rbs(ruby, rbs, "action_controller/base.rb")
+            .expect("action_controller/base parses and types");
+        let hs = classes
+            .iter()
+            .find(|c| c.name.0.as_str() == "ActionController::HeaderStore")
+            .expect("HeaderStore class");
+        let init = hs
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == "initialize")
+            .expect("initialize");
+        fn ivar_assign_ty<'a>(e: &'a crate::expr::Expr, name: &str) -> Option<&'a Ty> {
+            use crate::expr::{ExprNode, LValue};
+            match &*e.node {
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: n },
+                    value,
+                } if n.as_str() == name => value.ty.as_ref(),
+                ExprNode::Seq { exprs } => exprs.iter().find_map(|x| ivar_assign_ty(x, name)),
+                _ => None,
+            }
+        }
+        match ivar_assign_ty(&init.body, "keys") {
+            Some(Ty::Array { elem }) => assert!(
+                matches!(elem.as_ref(), Ty::Str),
+                "expected Array[String], got Array[{elem:?}]"
+            ),
+            other => panic!("@keys = [] must carry Array[String], got {other:?}"),
+        }
+        match ivar_assign_ty(&init.body, "vals") {
+            Some(Ty::Array { elem }) => assert!(
+                matches!(elem.as_ref(), Ty::Str),
+                "expected Array[String], got Array[{elem:?}]"
+            ),
+            other => panic!("@vals = [] must carry Array[String], got {other:?}"),
+        }
     }
 }

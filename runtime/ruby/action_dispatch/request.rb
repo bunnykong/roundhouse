@@ -127,6 +127,10 @@ module ActionDispatch
     attr_accessor :host
     attr_reader :format
     attr_accessor :env
+    # Rails' `request_parameters`: the BODY's params alone, without the
+    # query string or the path captures. ParamsWrapper copies from these
+    # (`Params.wrap`); the dispatcher fills them.
+    attr_accessor :request_parameters
 
     def initialize
       @remote_ip = "127.0.0.1"
@@ -140,6 +144,7 @@ module ActionDispatch
       @body = +""
       @body_io = nil
       @env = {}
+      @request_parameters = {}
       # `@params` too, and for a reason `@env` shows: `Request.for`
       # COPIES into both (`params.each { |k, v| r.params[k] = v }`),
       # which READS the slot before anything writes it. Unset, that read

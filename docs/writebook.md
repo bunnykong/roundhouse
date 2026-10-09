@@ -60,6 +60,18 @@ incorrect `Book | untyped` union. The inventory admits exactly those two
 additional warnings, without dropping the call warnings, changing the
 Writebook pin, or relaxing error, gap, emission or corpus checks.
 
+The anonymous keyword-forwarding recovery in PR #614 ingests five previously
+skipped helper bodies across `ArrangementHelper`, `BooksHelper`, and
+`LeavesHelper`. Their `tag.div`, `button_to`, `tag.li`, `tag.nav`, and
+`form_with` destinations still lack verified retained keyword contracts, so
+the inventory records five explicit all-target errors at those calls and ten
+`gradual_untyped` warnings at their view callers. The five corresponding
+ingest-gap occurrences and old Spinel keyword-rest declaration errors are
+removed; corpus identities, lowering residue, and Ruby-emission residue are
+unchanged. This reviewed inventory change records recovered source and its
+remaining limits, not runnable Writebook helper or whole-app support. The
+corpus pin and the inventory gate are unchanged.
+
 ## Roadmap, not a support claim
 
 1. **Routes.** [PR #199](https://github.com/rubys/roundhouse/pull/199) owns the
@@ -76,14 +88,18 @@ Writebook pin, or relaxing error, gap, emission or corpus checks.
    helpers against an emitted Ruby database, including parent/filter selection,
    ordering, self-exclusion and private dispatch. This proves those helpers,
    not Positionable's complete locking/rebalancing behavior or native Writebook.
-3. **Markdown declarations and runtime.** `has_markdown` remains unsupported.
-   Its statically known `class_eval` template could be parsed without executing
-   application Ruby, but allowing that would amend the boundary in
-   [issue #30](https://github.com/rubys/roundhouse/issues/30). First establish
-   association scoping by owner/name, build/assign/save/reload behavior,
-   inverse/autosave/destruction semantics and load-hook installation. Expanding
-   only its methods would not make the declaration work. Markdown rendering,
-   attachments and unmodeled gems remain separate obligations.
+3. **Markdown declarations and runtime.** Bare `has_markdown :name` is claimed
+   as a first-class named plain-text association (`lower::plain_text_attr`),
+   the same shape as `has_rich_text`: scoped `markdown_<name>` storage on
+   `ActionText::Markdown`, reader/predicate/writer through `.content`, ordinary
+   autosave (including blanks), dependent destroy, and preload scopes.
+   Assign/save/reload (including blank autosave) is pinned by abstract
+   `emit_and_run`; destroy/preload synthesis by lowering unit tests — not by
+   expanding the concern's interpolatable `class_eval` / leftover `has_one`
+   template (generic string eval stays unsupported per
+   [issue #30](https://github.com/rubys/roundhouse/issues/30)). Option-carrying
+   forms (`strict_loading:`), Markdown rendering, attachments and unmodeled
+   gems remain separate obligations.
 4. **Original tests.** Run Writebook's own tests against the Ruby output,
    starting with positioning and Page behavior. Record total tests and named
    failures; ratchet passing tests upward. Add negative authorization tests
@@ -94,39 +110,49 @@ Writebook pin, or relaxing error, gap, emission or corpus checks.
    Keep upstream-master toolchain tracking advisory, separate from reproducible
    gates. Broaden to other emitters only after executable behavior is proven.
 
-## Markdown prerequisite: visible load-hook installation gaps
+## Markdown / named plain-text association
 
-At pin `f3fadd21907ad9b18cb23800d971c2cc25045e2a`, the installer in
-`lib/rails_ext/action_text_has_markdown.rb` is a direct
-`include ActionText::HasMarkdown` inside `ActiveSupport.on_load :active_record`.
-The survey now reports that dropped installation with its hook and source file.
-This is a reporting milestone, **not Markdown support**: no mixin is installed,
-no string `class_eval` is expanded, and `has_markdown` remains unclaimed.
-Coverage is bounded to direct receiverless includes in the top-level hooks
-already scanned; conditional/nested includes and other hook execution remain
-unsupported. `tests/on_load_includes.rs` proves unchanged IR/emission and executes
-the negative boundary against emitted Ruby; `tests/attachable_locate.rs` proves
-that a recognized reopen in the same hook does not hide the include gap.
+At pin `f3fadd21907ad9b18cb23800d971c2cc25045e2a`, bare `has_markdown :body` on
+`Page` is claimed by `lower::plain_text_attr` (ingest skips concern `class_eval`
+expansion for that form so leftover interpolated `has_one`/scopes do not
+fail-close). Association scoping by owner/name, build/assign/save/reload, and
+ordinary autosave including blanks are pinned by
+`tests/emit_and_run.rs::named_plain_text_attr_assign_save_reload`. Dependent
+destroy and preload-scope synthesis are pinned by
+`tests/plain_text_attr_lowering.rs` (not yet by a runtime destroy/preload
+overlay). Storage for `ActionText::Markdown` (table `action_text_markdowns`,
+attr `content`) was the prior prerequisite and remains covered by
+`tests/action_text_markdown_ingest.rs` plus the storage-only emit overlay.
+`delegated_type` singular readers composing with the plain-text attr
+(`entry.page.body`) are pinned by
+`tests/relation_delegated_reader_typing.rs` and
+`tests/emit_and_run.rs::delegated_type_singular_reader_plain_text_body_runs`.
 
-The next record-storage prerequisite is ordinary model ingestion for
-`ActionText::Markdown < Record` under `module ActionText` in `lib/rails_ext`,
-including lexical superclass resolution and the framework's `action_text_`
-table prefix. Its table is `action_text_markdowns` and its raw attribute is
-`content`; neither is the RichText table/body coder. Preserve lexical shadowing,
-explicit table names and the abstract-base/STI distinction. Recognition alone
-must not count as storage support: prove construction, save and reload through
-an emitted database test before claiming it.
-
-Declaration support still requires owner-type/id/name isolation, inverse identity
-on unsaved owners, owner-id propagation, autosave/failure/touch behavior,
-reload/cache invalidation, scoped destruction and both preload scopes. Do not
-inherit RichText's intentional suppression of new blank rows: Writebook declares
-ordinary autosave, including empty content and read-materialized children.
-Renderer/Redcarpet, `safe_markdown_attribute`, embeds/uploads (including
-authorization), strict loading and load-hook notifications remain separate gaps.
-A named semantic replacement for this macro needs an explicit clarification of
-[issue #30](https://github.com/rubys/roundhouse/issues/30); generic string eval
-must stay unsupported.
+Model `delegate` declarations and delegates inside concern `included do`
+blocks are lowered to ordinary methods after those items are spliced into
+their models. Top-level `delegate` calls in module bodies remain unsupported:
+their receiver and generated method surface depend on each eventual includer.
+This covers
+zero-argument forwarding, setters and fixed-arity operators, `prefix: true` or
+an explicit Symbol/String prefix. `allow_nil: true` remains unsupported because
+Rails distinguishes a nil target that responds to the delegated method from
+one that does not; a simple nil guard would change behavior. Delegated names
+that collide with the model's synthesized method surface are also left
+unexpanded rather than silently choosing the wrong definition. The four
+Writebook `Leafable#title` check errors are cleared; the behavior is also
+exercised by abstract `emit_and_run` overlays, which execute emitted Ruby
+through persisted `belongs_to` and polymorphic `delegated_type` associations.
+The latter covers Leaf's `searchable_content`-style delegation. This does not
+claim collection association proxies, arbitrary argument/block forwarding or
+unsupported options such as `private:`; targets using `yield` or
+`block_given?` are left unexpanded, as are declarations under a lexical
+`private`/`protected` marker rather than being emitted with the wrong
+visibility. The remaining `URI::HTTPS`
+constant error is cleared by registering the bundled Ruby class value; this
+does not claim the separate embed-provider or sanitizer integrations.
+Renderer/Redcarpet, embeds/uploads, option-carrying
+`strict_loading:`, and load-hook notifications remain separate. Generic string
+eval stays unsupported.
 
 The original Page tests were emitted with `--target ruby --survey
 --allow-unsupported` and attempted with `ruby -Itest -I. test/models/page_test.rb`.

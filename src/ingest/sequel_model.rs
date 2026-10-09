@@ -86,6 +86,7 @@ pub fn ingest_sequel_model(
         // The emitted app runs on the AR-shaped framework runtime;
         // `Sequel::Model` plays the role `ApplicationRecord` does there.
         parent: Some(ClassId(Symbol::from("ApplicationRecord"))),
+        parent_span: Default::default(),
         table: TableRef(Symbol::from(table_name)),
         // Sequel's own override (`set_primary_key`) is not yet
         // recognized; models declaring one keep the `id` default.
@@ -94,6 +95,8 @@ pub fn ingest_sequel_model(
         body,
         enums: indexmap::IndexMap::new(),
         enum_defaults: indexmap::IndexMap::new(),
+        class_attr_defaults: indexmap::IndexMap::new(),
+        lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
         span: Span {
             file: super::sources::file_id(file),
@@ -254,6 +257,8 @@ fn parse_sequel_association(
                 .unwrap_or_else(|| Symbol::from(format!("{owner_snake}_id"))),
             dependent: Dependent::None,
             as_interface: None,
+            scope: None,
+            autosave: false,
         },
         "many_to_one" => Association::BelongsTo {
             name: name.clone(),
@@ -272,6 +277,8 @@ fn parse_sequel_association(
             // Sequel has no `touch:` on the association; its equivalent
             // is the `touch` plugin, declared on the model.
             touch: None,
+            foreign_type: None,
+            primary_key: None,
         },
         "many_to_many" => Association::HasAndBelongsToMany {
             name: name.clone(),

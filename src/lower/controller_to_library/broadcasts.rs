@@ -36,15 +36,23 @@ use crate::span::Span;
 use crate::ty::Ty;
 
 use super::rewrites::partial_view_call_with_record;
-use super::util::map_expr;
 
 /// Rewrite every recognized broadcast call in a controller method body.
+#[allow(dead_code)]
 pub(super) fn rewrite_broadcast_to(
     expr: &Expr,
     module_name: Option<&str>,
     partials: &super::PartialMap,
 ) -> Expr {
-    map_expr(expr, &|e| try_rewrite(e, module_name, partials))
+    super::util::map_expr(expr, &|e| try_rewrite(e, module_name, partials))
+}
+
+pub(super) fn rewrite_broadcast_to_in_place(
+    expr: &mut Expr,
+    module_name: Option<&str>,
+    partials: &super::PartialMap,
+) -> bool {
+    super::util::map_expr_mut(expr, &|e| try_rewrite(e, module_name, partials))
 }
 
 fn try_rewrite(
@@ -354,9 +362,9 @@ fn streamable(arg: &Expr) -> Option<Streamable> {
     if let Some(text) = literal_text(arg) {
         return Some(Streamable::Literal(text));
     }
+    record_singular(arg)?;
     Some(Streamable::Record {
-        singular: record_singular(arg)?,
-        id: read_id(arg.clone(), arg.span),
+        record: arg.clone(),
     })
 }
 
@@ -398,19 +406,6 @@ fn record_singular(e: &Expr) -> Option<String> {
         }
         _ => None,
     }
-}
-
-fn read_id(recv: Expr, span: Span) -> Expr {
-    Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(recv),
-            method: Symbol::from("id"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    )
 }
 
 #[derive(Clone, Copy)]

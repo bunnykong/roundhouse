@@ -13,7 +13,9 @@ module Tep
     if status == 401; return "Unauthorized"; end
     if status == 403; return "Forbidden"; end
     if status == 404; return "Not Found"; end
+    if status == 409; return "Conflict"; end
     if status == 413; return "Content Too Large"; end
+    if status == 422; return "Unprocessable Content"; end
     if status == 500; return "Internal Server Error"; end
     "OK"
   end
@@ -171,7 +173,7 @@ module Tep
         send_simple(client, refusal, refusal == 413 ? "request body too large" : "bad request")
         return false
       end
-      req.consume_body(client)
+      return false unless req.consume_body(client)
       res = Response.new
       begin
         @app.dispatch(req, res)
@@ -265,24 +267,19 @@ module Tep
     def build_head(req, res)
       reason = Tep.reason(res.status)
       head = req.http_version + " " + res.status.to_s + " " + reason + "\r\n"
-      res.headers.each do |k, v|
-        head << k + ": " + v + "\r\n"
-      end
-      # Set-Cookie can repeat; emit each on its own line.
-      ci = 0
-      while ci < res.set_cookies.length
-        head << "Set-Cookie: " + res.set_cookies[ci] + "\r\n"
-        ci += 1
-      end
+      # Set-Cookie can repeat; header_lines emits each on its own line.
+      head << Tep.header_lines(res)
       head + "\r\n"
     end
 
+    # bytesize, as write_response: a multibyte `msg` would otherwise
+    # announce fewer bytes than the page carries.
     def send_simple(client, status, msg)
       reason = Tep.reason(status)
       body = "<h1>" + status.to_s + " " + reason + "</h1><p>" + msg + "</p>\n"
       head = "HTTP/1.0 " + status.to_s + " " + reason + "\r\n" +
              "Content-Type: text/html; charset=utf-8\r\n" +
-             "Content-Length: " + body.length.to_s + "\r\n" +
+             "Content-Length: " + body.bytesize.to_s + "\r\n" +
              "Connection: close\r\n\r\n"
       Sock.sphttp_write_str(client, head + body)
     end

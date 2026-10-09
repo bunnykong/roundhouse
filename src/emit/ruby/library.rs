@@ -599,6 +599,7 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         "find", "find_by", "first", "last", "all", "each", "map", "to_a", "count",
         "exists?", "empty?", "any?", "none?", "sum", "maximum", "minimum", "pluck",
         "pick", "destroy_all", "delete_all", "update_all", "klass", "where_clauses",
+        "spawn", "find_each", "find_in_batches",
     ];
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     // name -> [(model, params)] in app-model order, names sorted — the
@@ -616,9 +617,15 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         // than a `__scope_` hop to a body that returns its argument;
         // leaving them here would make `by_name` claim them and the
         // identity arm skip them as "a declared scope of the same name".
+        let plain_preload = if crate::lower::plain_text_attr::record_table_present(&app.schema) {
+            crate::lower::plain_text_attr::preload_scope_names(model)
+        } else {
+            Vec::new()
+        };
         let synthesized: std::collections::HashSet<String> =
             crate::lower::rich_text::preload_scope_names(model)
                 .into_iter()
+                .chain(plain_preload)
                 .chain(crate::lower::attached::preload_scope_names(model))
                 .map(|n| n.as_str().to_string())
                 .collect();
@@ -634,13 +641,13 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
                 .push((&model.name, per[n].as_slice()));
         }
     }
-    // The SYNTHESIZED preload scopes — `with_attached_<attr>` and
-    // `with_rich_text_<attr>` — which Rails declares beside the
-    // attachment macro and this compiler adds at emit time
-    // (`attached::push_preload_scope_methods` and its rich-text twin).
-    // They never pass through `build_scope_registry`, which reads the
-    // app's own `scope` declarations, so a call CHAINED ON A RELATION
-    // had no delegate at all: campfire's
+    // The SYNTHESIZED preload scopes — `with_attached_<attr>`,
+    // `with_rich_text_<attr>`, `with_markdown_<attr>` — which Rails
+    // declares beside the attachment / Action Text macros and this
+    // compiler adds at emit time. They never pass through
+    // `build_scope_registry`, which reads the app's own `scope`
+    // declarations, so a call CHAINED ON A RELATION had no delegate at
+    // all: campfire's
     // `find_autocompletable_users.with_attached_avatar.ordered` is a
     // NoMethodError on a class method that plainly exists, because the
     // receiver is a relation value and not the class.
@@ -648,16 +655,22 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
     // The delegate is `preload(:<assoc>)`, with no `__scope_` dispatch
     // behind it: there is no arity to detect and no model to pick,
     // because every model that declares the attachment preloads the
-    // same named association (`<attr>_attachment`, `rich_text_<attr>`),
-    // and a model that does not never has the name reached on it. It
-    // used to answer `self` — the scopes were identity while the
-    // readers queried per record — and a delegate that preloads is
-    // what lets the batch loader run when the scope is reached
-    // mid-chain, not only from the class.
+    // same named association (`<attr>_attachment`, `rich_text_<attr>`,
+    // `markdown_<attr>`), and a model that does not never has the name
+    // reached on it. It used to answer `self` — the scopes were
+    // identity while the readers queried per record — and a delegate
+    // that preloads is what lets the batch loader run when the scope is
+    // reached mid-chain, not only from the class.
     let mut preloads: std::collections::BTreeMap<String, String> = Default::default();
     for model in &app.models {
+        let plain_scopes = if crate::lower::plain_text_attr::record_table_present(&app.schema) {
+            crate::lower::plain_text_attr::preload_scopes(model)
+        } else {
+            Vec::new()
+        };
         let scopes = crate::lower::rich_text::preload_scopes(model)
             .into_iter()
+            .chain(plain_scopes)
             .chain(crate::lower::attached::preload_scopes(model));
         for (n, assoc) in scopes {
             let n = n.as_str().to_string();
@@ -1097,11 +1110,49 @@ fn push_assoc_scope_skip(model: &crate::ident::ClassId, method: &Symbol, reason:
 /// method every call site now passes a relation to. Placement is before
 /// the first keyword in both, since `def f(__rel = …, k:)` is the only
 /// legal ordering.
-fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) -> bool {
+///
+/// A method with a REST param (`*tags`) is the exception: an optional
+/// POSITIONAL can't follow a splat (`def f(*tags, __rel = …)` is a
+/// syntax error — no slot for it to default INTO), so there `__rel`
+/// becomes an optional KEYWORD instead (`def f(*tags, __rel: …)`,
+/// legal after a splat), typed as the Relation rather than Untyped so
+/// the `.rbs` reads `?__rel: ActiveRecord::Relation` instead of
+/// `?__rel: untyped` — nothing else about the method declares
+/// keywords, so Untyped would be the only typed thing losing its type.
+/// It goes ahead of a `**opts` (`def f(*tags, __rel: …, **opts)`), the
+/// only thing a keyword can't follow; a `&blk` lives in `block_param`,
+/// not `params`, and is rendered last anyway. A method without a rest
+/// param is untouched: same positional-with-default as always.
+fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol, owner: &ClassId) -> bool {
     if m.params.iter().any(|p| p.forwarding) {
         crate::emit::diagnostics::report_unsupported(m.name_span, "ruby", "full argument forwarding",
             "full forwarding cannot use the relation-threading argument ABI");
         return false;
+    }
+    let has_rest = m.params.iter().any(|p| p.rest && !p.keyword);
+    if has_rest {
+        let at = m.params.iter().position(|p| p.rest && p.keyword).unwrap_or(m.params.len());
+        m.params.insert(
+            at,
+            crate::dialect::Param::keyword(
+                rel_param.clone(),
+                Some(crate::lower::model_to_library::relation_new_self()),
+            ),
+        );
+        if let Some(Ty::Fn { params, .. }) = &mut m.signature {
+            let at = params
+                .iter()
+                .position(|p| {
+                    matches!(p.kind, crate::ty::ParamKind::KeywordRest | crate::ty::ParamKind::Block)
+                })
+                .unwrap_or(params.len());
+            params.insert(at, crate::ty::Param {
+                name: rel_param.clone(),
+                ty: Ty::Relation { of: owner.clone() },
+                kind: crate::ty::ParamKind::Keyword { required: false },
+            });
+        }
+        return true;
     }
     let insert_at = m.params.iter().position(|p| p.keyword).unwrap_or(m.params.len());
     m.params.insert(
@@ -1111,7 +1162,7 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) -> bo
             crate::lower::model_to_library::relation_new_self(),
         ),
     );
-    if let Some(crate::ty::Ty::Fn { params, .. }) = &mut m.signature {
+    if let Some(Ty::Fn { params, .. }) = &mut m.signature {
         let at = params
             .iter()
             .position(|p| matches!(p.kind, crate::ty::ParamKind::Keyword { .. }))
@@ -1120,7 +1171,7 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) -> bo
             at,
             crate::ty::Param {
                 name: rel_param.clone(),
-                ty: crate::ty::Ty::Untyped,
+                ty: Ty::Untyped,
                 kind: crate::ty::ParamKind::Optional,
             },
         );
@@ -1131,11 +1182,12 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) -> bo
 /// Lower demanded model and association chains to Relations, including
 /// scope-free apps; each body still has its own rewrite demand gate.
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
-    // `has_rich_text`'s two preload scopes, and `has_one_attached`'s
-    // one. Ahead of the `any_scopes` early return below, because an app
-    // can declare a rich-text attribute or an attachment and no `scope`
-    // at all — and these still have to exist or every call site
-    // chaining through them is a NoMethodError.
+    // `has_rich_text` / `has_markdown` preload scopes, and
+    // `has_one_attached`'s one. Ahead of the `any_scopes` early return
+    // below, because an app can declare a rich-text / plain-text
+    // attribute or an attachment and no `scope` at all — and these
+    // still have to exist or every call site chaining through them is
+    // a NoMethodError.
     // `attachable_sgid` for the models that mix in
     // `ActionText::Attachable` (campfire declares it one level down,
     // through `User::Mentionable`). Ruby-family only, like the
@@ -1144,6 +1196,9 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     for lc in lcs.iter_mut() {
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::rich_text::push_preload_scope_methods(&mut lc.methods, model);
+            if crate::lower::plain_text_attr::record_table_present(&app.schema) {
+                crate::lower::plain_text_attr::push_preload_scope_methods(&mut lc.methods, model);
+            }
             crate::lower::attached::push_preload_scope_methods(&mut lc.methods, model);
             crate::lower::attachable::push_attachable_sgid(&mut lc.methods, model, &attachable);
             crate::lower::broadcasts::push_to_gid_param(&mut lc.methods, model);
@@ -1301,7 +1356,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     // scope's __rel is not last.
                     && !m.params.iter().any(|p| p.as_str() == "__rel")
                 {
-                    if !insert_rel_param(m, &rel_param) { continue; }
+                    if !insert_rel_param(m, &rel_param, &lc.name) { continue; }
                     crate::lower::scope_chain::rewrite_scope_body(
                         &mut m.body,
                         &lc.name,
@@ -1340,7 +1395,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 {
                     continue;
                 }
-                if !insert_rel_param(m, &rel_param) { continue; }
+                if !insert_rel_param(m, &rel_param, &lc.name) { continue; }
                 if creates {
                     crate::lower::scope_chain::merge_scope_attributes(
                         &mut m.body,
@@ -3408,9 +3463,11 @@ fn rewrite_helper_calls(
         }
         if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
             let m = method.as_str();
-            if (m == "request" || m == "cookies" || m == "session" || m == "flash"
-                || m == "params")
+            if (m == "request" || m == "controller" || m == "cookies" || m == "session"
+                || m == "flash" || m == "params")
                 && args.is_empty()
+                && (m != "controller"
+                    || (!own_methods.contains(method) && !own_params.contains(method)))
             {
                 let span = expr.span;
                 let current = Expr::new(
@@ -3422,8 +3479,8 @@ fn rewrite_helper_calls(
                         ],
                     },
                 );
-                let (recv, meth) = if m == "request" {
-                    (current, Symbol::from("request"))
+                let (recv, meth) = if m == "request" || m == "controller" {
+                    (current, method.clone())
                 } else {
                     (
                         Expr::new(
@@ -5197,6 +5254,29 @@ pub(crate) fn apply_hydration_nil_lowering(lcs: &mut [LibraryClass], app: &App) 
         if let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) {
             for m in &mut lc.methods {
                 widen_fk_zero_guards(&mut m.body, &nullable_fks);
+                // Polymorphic readers dispatch on the type discriminator,
+                // so they have no zero-sentinel guard to widen. Guard their
+                // nullable FK here too, before any key-typed adapter call.
+                if m.name_span.is_synthetic() {
+                    for assoc in model.associations() {
+                        if let crate::dialect::Association::BelongsTo {
+                            name, foreign_key, polymorphic: true, ..
+                        } = assoc {
+                            if m.name == *name && nullable.contains(foreign_key) {
+                                let cond = Expr::new(Span::synthetic(), ExprNode::Send {
+                                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Ivar { name: foreign_key.clone() })),
+                                    method: Symbol::from("nil?"), args: vec![], block: None,
+                                    parenthesized: false,
+                                });
+                                m.body = Expr::new(m.body.span, ExprNode::If {
+                                    cond,
+                                    then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                                    else_branch: m.body.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -5275,10 +5355,8 @@ fn widen_fk_zero_guards(expr: &mut Expr, fks: &BTreeSet<Symbol>) {
             if method.as_str() == "==" && args.len() == 1 =>
         {
             matches!(&*r.node, ExprNode::Ivar { name } if fks.contains(name))
-                && matches!(
-                    &*args[0].node,
-                    ExprNode::Lit { value: Literal::Int { value: 0 } }
-                )
+                && (matches!(&*args[0].node, ExprNode::Lit { value: Literal::Int { value: 0 } })
+                    || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value.is_empty()))
         }
         _ => false,
     };
@@ -5834,6 +5912,67 @@ pub(super) fn emit_library_class_pair_with_synthesized(
     vec![rb, rbs]
 }
 
+/// A lowered read owns its statement from prepare until finalize, including
+/// argument serialization and row hydration. Release within that scope even
+/// when the caller rescues inside a longer connection lease. This Ruby-only
+/// pass leaves strict-target IR unchanged and covers reloads and preloads too.
+fn read_statement_cleanup(lc: &LibraryClass) -> std::borrow::Cow<'_, LibraryClass> {
+    fn db_send(expr: &Expr, name: &str) -> bool {
+        matches!(&*expr.node, ExprNode::Send { recv: Some(recv), method, .. }
+            if method.as_str() == name && matches!(&*recv.node,
+                ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Db"))
+    }
+    fn prepare(expr: &Expr) -> bool {
+        db_send(expr, "prepare") || db_send(expr, "prepare_uncached")
+    }
+    fn prepared_name(expr: &Expr) -> Option<&Symbol> {
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, value } if prepare(value) => Some(name),
+            _ => None,
+        }
+    }
+    fn finalize(expr: &Expr, name: &Symbol) -> bool {
+        db_send(expr, "finalize") && matches!(&*expr.node,
+            ExprNode::Send { args, .. } if args.len() == 1
+                && matches!(&*args[0].node, ExprNode::Var { name: actual, .. } if actual == name))
+    }
+    fn needs_cleanup(expr: &Expr) -> bool {
+        let mut found = prepared_name(expr).is_some();
+        expr.node.for_each_child(&mut |child| found |= needs_cleanup(child));
+        found
+    }
+    fn rewrite(expr: &mut Expr) {
+        expr.node.for_each_child_mut(&mut rewrite);
+        let ExprNode::Seq { exprs } = expr.node.as_mut() else { return };
+        let mut start = 0;
+        while start < exprs.len() {
+            if let Some(name) = prepared_name(&exprs[start]) {
+                if let Some(end) = (start + 1..exprs.len()).find(|&i| finalize(&exprs[i], name)) {
+                    let mut work: Vec<_> = exprs.drain(start + 1..=end).collect();
+                    let cleanup = work.pop().unwrap();
+                    let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: work });
+                    exprs.insert(start + 1, Expr::new(Span::synthetic(), ExprNode::BeginRescue {
+                        body,
+                        rescues: vec![],
+                        else_branch: None,
+                        ensure: Some(cleanup),
+                        implicit: false,
+                    }));
+                }
+            }
+            start += 1;
+        }
+    }
+    if !lc.methods.iter().any(|m| needs_cleanup(&m.body)) {
+        return std::borrow::Cow::Borrowed(lc);
+    }
+    let mut adapted = lc.clone();
+    for method in &mut adapted.methods {
+        rewrite(&mut method.body);
+    }
+    std::borrow::Cow::Owned(adapted)
+}
+
 /// Emit a group of LibraryFunctions sharing a `module_path` as a
 /// single Ruby file. Mirrors `typescript::library::emit_module_file`
 /// — converts the function group into a synthetic
@@ -5937,6 +6076,7 @@ fn synthesize_module_lc(
         name: module_id,
         is_module: true,
         parent: None,
+        parent_span: Default::default(),
         includes: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
@@ -5984,6 +6124,8 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     out_path: PathBuf,
     synthesized_siblings: &[(String, String)],
 ) -> EmittedFile {
+    let guarded = read_statement_cleanup(lc);
+    let lc = guarded.as_ref();
     // The one chokepoint every library-shape file goes through, and the
     // only place that knows which class is being emitted — the send
     // emitter is a free function reached from a dozen callers. A reopen
@@ -6013,8 +6155,21 @@ fn emit_library_class_decl_inner(
     // bodies' constant refs into LOAD time with it — `Sound::BUILTIN`
     // calls `initialize`, which reads `Sound::Image`. Those refs would
     // otherwise be classified body-only and left to the aggregator.
-    let (eager, deferred) = partition_deferred_constants(lc);
-    let load_time_bodies = !deferred.is_empty();
+    // Source class state can call methods and read constants between writes.
+    // Keep those declarations in source order; synthesized framework classes
+    // and mattr/cattr `@@` seeds retain their existing initialization policy.
+    // Lowered controllers also have no origin, but Concern methods carry
+    // spans from another file. Their offsets cannot order the controller's
+    // macro calls: those initializers must run after all collected methods.
+    let ordered_body = lc.origin.is_none()
+        && lc.has_source_ivar_initializers()
+        && !app.controllers.iter().any(|controller| controller.name == lc.name);
+    let (mut eager, mut deferred, initializers_call_self) = partition_deferred_constants(lc);
+    let load_time_bodies = initializers_call_self || !deferred.is_empty();
+    if ordered_body {
+        eager = (0..lc.constants.len()).collect();
+        deferred.clear();
+    }
 
     // Parent + body-derived `require_relative` headers. Helpers return
     // project-root-anchored paths; we relpath each one against `out_dir`
@@ -6132,6 +6287,52 @@ fn emit_library_class_decl_inner(
         walk_const_paths(e, &mut paths);
         paths.iter().filter_map(|p| resolve(p, load_time)).collect()
     };
+    // Initializers and eager constants share the source's load-time order,
+    // including when a dependency requires closing and reopening the class.
+    enum BodyItem<'a> {
+        Constant(usize, &'a Expr),
+        Initializer(&'a Expr),
+        Method(&'a MethodDef),
+    }
+    let mut body: Vec<_> = eager.iter().map(|&i| {
+        (lc.constants[i].1.span.start, BodyItem::Constant(i, &lc.constants[i].1))
+    }).collect();
+    body.extend(lc.class_ivar_initializers.iter().filter(|init| {
+        // Source-ordered bodies interleave only real `@ivar` writes; keep
+        // synthetic mattr/cattr `@@` seeds on the partitioned path below.
+        !ordered_body || (!init.span.is_synthetic() && matches!(
+            &*init.node,
+            ExprNode::Assign { target: LValue::Ivar { .. }, .. }
+                | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
+        ))
+    }).map(|init| {
+        (init.span.start, BodyItem::Initializer(init))
+    }));
+    // Concern-spliced and other foreign-file methods keep foreign
+    // `name_span` offsets; interleave only same-file declarations.
+    let body_file = lc.class_ivar_initializers.iter().find_map(|init| {
+        (!init.span.is_synthetic()
+            && matches!(
+                &*init.node,
+                ExprNode::Assign { target: LValue::Ivar { .. }, .. }
+                    | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
+            ))
+        .then_some(init.span.file)
+    });
+    let method_in_ordered_body = |m: &MethodDef| {
+        ordered_body
+            && !m.name_span.is_synthetic()
+            && body_file.is_some_and(|file| m.name_span.file == file)
+    };
+    if ordered_body {
+        body.extend(
+            lc.methods
+                .iter()
+                .filter(|m| method_in_ordered_body(m))
+                .map(|m| (m.name_span.start, BodyItem::Method(m))),
+        );
+    }
+    body.sort_by_key(|(start, _)| *start);
     // Every require the file needs at its TOP: the class-body calls and
     // deferred constants (both run at load), and the method bodies.
     let mut body_requires: BTreeSet<String> = BTreeSet::new();
@@ -6144,7 +6345,7 @@ fn emit_library_class_decl_inner(
     for m in &lc.methods {
         body_requires.extend(resolve_all(&m.body, false));
     }
-    // …and each eager constant's own, in order, because WHERE those go
+    // …and each eager initializer's own, in order, because WHERE those go
     // matters. A class body runs top to bottom, and a required file can
     // read this one's earlier constants — campfire's `ContentFilters`
     // defines `EDITOR_FORMATTING_TAGS`, then builds
@@ -6153,9 +6354,9 @@ fn emit_library_class_decl_inner(
     // autoloads `SanitizeTags` at that reference, after the constant
     // exists; a require at the top of the file ran it first, and
     // `require_relative`'s mid-load short-circuit left the constant
-    // undefined. So the first constant (after at least one other) that
-    // needs a file nothing earlier needs SPLITS the body: the file
-    // closes, requires what the rest needs, and reopens. Spinel splices
+    // undefined. Each initializer needing a new file that reads an earlier
+    // constant SPLITS the body: the file closes, requires that dependency,
+    // and reopens. Later dependencies wait for their own use. Spinel splices
     // a `require_relative` where it stands, so both lanes read the
     // same order.
     //
@@ -6163,36 +6364,40 @@ fn emit_library_class_decl_inner(
     // looks at this class's constants is churn (lobsters' `Markdowner`
     // requiring `user`), so the trigger is a required file whose own
     // load-time code reads one of the constants above it.
-    let per_const: Vec<BTreeSet<String>> =
-        eager.iter().map(|&i| resolve_all(&lc.constants[i].1, true)).collect();
+    let per_body: Vec<BTreeSet<String>> =
+        body.iter().map(|(_, item)| match item {
+            BodyItem::Constant(_, expr) | BodyItem::Initializer(expr) => resolve_all(expr, true),
+            BodyItem::Method(_) => BTreeSet::new(),
+        }).collect();
     let readers = constant_readers(lc, app, &resolve);
-    let mut split: Option<(usize, BTreeSet<String>)> = None;
-    for p in 1..per_const.len() {
+    let mut splits = std::collections::BTreeMap::new();
+    for p in 1..per_body.len() {
         let mut before: BTreeSet<String> = body_requires.clone();
         before.extend(requires.iter().cloned());
-        for q in &per_const[..p] {
+        for q in &per_body[..p] {
             before.extend(q.iter().cloned());
         }
-        let earlier: BTreeSet<&String> = eager[..p]
+        let earlier: BTreeSet<&String> = body[..p]
             .iter()
-            .filter_map(|&i| readers.get(lc.constants[i].0.as_str()))
+            .filter_map(|(_, item)| match item {
+                BodyItem::Constant(i, _) => readers.get(lc.constants[*i].0.as_str()),
+                _ => None,
+            })
             .flatten()
             .collect();
-        if per_const[p].iter().any(|r| !before.contains(r) && earlier.contains(r)) {
-            let rest: BTreeSet<String> = per_const[p..]
+        if per_body[p].iter().any(|r| !before.contains(r) && earlier.contains(r)) {
+            let needed: BTreeSet<String> = per_body[p]
                 .iter()
-                .flatten()
                 .filter(|r| !before.contains(*r))
                 .cloned()
                 .collect();
-            split = Some((p, rest));
-            break;
+            splits.insert(p, needed);
         }
     }
-    for (p, reqs) in per_const.iter().enumerate() {
+    let deferred_requires: BTreeSet<&String> = splits.values().flatten().collect();
+    for reqs in &per_body {
         for r in reqs {
-            let deferred_here = split.as_ref().is_some_and(|(at, rest)| p >= *at && rest.contains(r));
-            if !deferred_here {
+            if !deferred_requires.contains(r) {
                 body_requires.insert(r.clone());
             }
         }
@@ -6323,65 +6528,7 @@ fn emit_library_class_decl_inner(
             }
         }
     };
-    match &split {
-        Some((at, reqs)) => {
-            render_constants(&mut s, &eager[..*at]);
-            for i in (0..depth).rev() {
-                writeln!(s, "{}end", "  ".repeat(i)).unwrap();
-            }
-            writeln!(s).unwrap();
-            for r in reqs {
-                writeln!(s, "require_relative {r:?}").unwrap();
-            }
-            writeln!(s).unwrap();
-            open_header(&mut s);
-            render_constants(&mut s, &eager[*at..]);
-        }
-        None => render_constants(&mut s, &eager),
-    }
-    if !eager.is_empty() && !lc.methods.is_empty() {
-        writeln!(s).unwrap();
-    }
-
-    // Class-body calls the ingest didn't model (`LibraryClass::
-    // unknown_calls`), replayed verbatim when — and only when — the
-    // class extends a base we don't model at all. See
-    // `replays_foreign_class_body`. After the constants (a captured
-    // call may reference one) and before the methods.
-    if replays_foreign_class_body(lc, app) {
-        for call in &lc.unknown_calls {
-            for line in super::emit_expr(call).lines() {
-                if line.is_empty() {
-                    writeln!(s).unwrap();
-                } else {
-                    writeln!(s, "{body_pad}{line}").unwrap();
-                }
-            }
-        }
-        if !lc.unknown_calls.is_empty() && !lc.methods.is_empty() {
-            writeln!(s).unwrap();
-        }
-    } else {
-        for call in &lc.unknown_calls {
-            report_dropped_class_body_call(lc, call);
-        }
-    }
-
-    // Finite class-side initialization is lowered IR, not replay of a
-    // framework DSL. Each assignment runs once on this class object;
-    // unset subclasses deliberately keep their ivar absent.
-    for init in &lc.class_ivar_initializers {
-        for line in super::emit_expr(init).lines() {
-            writeln!(s, "{body_pad}{line}").unwrap();
-        }
-    }
-
-    let mut first = true;
-    for m in &lc.methods {
-        if !first {
-            writeln!(s).unwrap();
-        }
-        first = false;
+    let render_method = |s: &mut String, m: &MethodDef| {
         let body = super::emit_method(m);
         for line in body.lines() {
             if line.is_empty() {
@@ -6412,6 +6559,122 @@ fn emit_library_class_decl_inner(
         };
         if let Some(directive) = directive {
             writeln!(s, "{body_pad}{directive} :{}", m.name).unwrap();
+        }
+    };
+    let render_body = |s: &mut String, items: &[(u32, BodyItem<'_>)]| {
+        for (_, item) in items {
+            match item {
+                BodyItem::Constant(i, _) => render_constants(s, &[*i]),
+                BodyItem::Initializer(expr) if ordered_body => {
+                    for line in super::emit_expr(expr).lines() {
+                        writeln!(s, "{body_pad}{line}").unwrap();
+                    }
+                }
+                // Keep initialization in the require plan even when the
+                // lowered class renders it after its methods below.
+                BodyItem::Initializer(_) => {}
+                BodyItem::Method(method) => {
+                    writeln!(s).unwrap();
+                    render_method(s, method);
+                    writeln!(s).unwrap();
+                }
+            }
+        }
+    };
+    // Concern-spliced / synthetic-span methods cannot order against
+    // source `@ivar` writes; emit them before the interleaved body.
+    if ordered_body {
+        let mut first = true;
+        for m in lc.methods.iter().filter(|m| !method_in_ordered_body(m)) {
+            if !first {
+                writeln!(s).unwrap();
+            }
+            first = false;
+            render_method(&mut s, m);
+        }
+        if lc.methods.iter().any(|m| !method_in_ordered_body(m)) && !body.is_empty() {
+            writeln!(s).unwrap();
+        }
+    }
+
+    let mut start = 0;
+    for (at, reqs) in &splits {
+        render_body(&mut s, &body[start..*at]);
+        for i in (0..depth).rev() {
+            writeln!(s, "{}end", "  ".repeat(i)).unwrap();
+        }
+        writeln!(s).unwrap();
+        for r in reqs {
+            writeln!(s, "require_relative {r:?}").unwrap();
+        }
+        writeln!(s).unwrap();
+        open_header(&mut s);
+        start = *at;
+    }
+    render_body(&mut s, &body[start..]);
+    if !eager.is_empty() && !lc.methods.is_empty() {
+        writeln!(s).unwrap();
+    }
+
+    // Class-body calls the ingest didn't model (`LibraryClass::
+    // unknown_calls`), replayed verbatim when — and only when — the
+    // class extends a base we don't model at all. See
+    // `replays_foreign_class_body`. After the constants (a captured
+    // call may reference one) and before the methods.
+    if replays_foreign_class_body(lc, app) {
+        for call in &lc.unknown_calls {
+            for line in super::emit_expr(call).lines() {
+                if line.is_empty() {
+                    writeln!(s).unwrap();
+                } else {
+                    writeln!(s, "{body_pad}{line}").unwrap();
+                }
+            }
+        }
+        if !lc.unknown_calls.is_empty() && !lc.methods.is_empty() {
+            writeln!(s).unwrap();
+        }
+    } else {
+        for call in &lc.unknown_calls {
+            report_dropped_class_body_call(lc, call);
+        }
+    }
+
+    // Non-ordered classes keep the methods-then-initializers partition.
+    // Ordered bodies already emitted foreign methods above and same-file
+    // methods inside the interleaved body.
+    if !ordered_body {
+        let mut first = true;
+        for m in &lc.methods {
+            if !first {
+                writeln!(s).unwrap();
+            }
+            first = false;
+            render_method(&mut s, m);
+        }
+    }
+
+    // Finite class-side initialization is lowered IR, not replay of a
+    // framework DSL. Runs after class methods (a Concern macro may write
+    // its `class_attribute`). Per-class `@ivar` seeds leave unset
+    // subclasses absent; `mattr_*` / `cattr_*` seeds are `@@` and share
+    // across the hierarchy by Ruby class-variable rules. Source-ordered
+    // `@ivar` writes already interleaved above; remaining seeds still run.
+    let remaining_inits = |init: &Expr| {
+        !ordered_body
+            || init.span.is_synthetic()
+            || !matches!(
+                &*init.node,
+                ExprNode::Assign { target: LValue::Ivar { .. }, .. }
+                    | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
+            )
+    };
+    if lc.class_ivar_initializers.iter().any(remaining_inits) && !lc.methods.is_empty() {
+        writeln!(s).unwrap();
+    }
+    for init in lc.class_ivar_initializers.iter().filter(|init| remaining_inits(init)) {
+        for line in super::emit_expr(init).lines() {
+            writeln!(s, "{body_pad}{line}").unwrap();
         }
     }
 
@@ -6455,7 +6718,7 @@ fn constant_readers(
         for (_, v) in &other.constants {
             walk_const_paths(v, &mut paths);
         }
-        for call in &other.unknown_calls {
+        for call in other.unknown_calls.iter().chain(&other.class_ivar_initializers) {
             walk_const_paths(call, &mut paths);
         }
         for path in &paths {
@@ -6485,7 +6748,8 @@ fn constant_readers(
 /// SPELLED WITH THE CLASS NAME (`Sound.new(…)`) — or when it reads a
 /// constant that already deferred. A self-dispatch inside a STORED
 /// closure doesn't count: that body runs on call, not on load. Returns
-/// index lists so both groups keep source order.
+/// index lists so both groups keep source order, and whether class-ivar
+/// initializers also reach method bodies at load time.
 ///
 /// The class-name spelling is not hypothetical: `lower::class_body_new`
 /// gives a class body's bare `new` its receiver (a receiverless call is
@@ -6497,11 +6761,36 @@ fn constant_readers(
 /// suite's 52 files. The fact the rule is about is "does this
 /// initializer dispatch to this class", and both spellings are that
 /// fact.
-fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
+fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>, bool) {
     fn is_own_class(recv: &Option<Expr>, class_name: &str) -> bool {
         let Some(r) = recv else { return false };
+        if matches!(&*r.node, ExprNode::SelfRef) { return true; }
         let ExprNode::Const { path } = &*r.node else { return false };
         path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::") == class_name
+    }
+    /// Does this Const name a constant already marked deferred — bare
+    /// `BUILTIN`, or `OwnClass::BUILTIN` (qualified by a later rewrite)?
+    fn const_names_deferred(
+        path: &[crate::ident::Symbol],
+        deferred_names: &std::collections::HashSet<String>,
+        class_name: &str,
+    ) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        if path.len() == 1 {
+            return deferred_names.contains(path[0].as_str());
+        }
+        let leaf = path[path.len() - 1].as_str();
+        if !deferred_names.contains(leaf) {
+            return false;
+        }
+        let prefix = path[..path.len() - 1]
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("::");
+        prefix == class_name
     }
     fn calls_self(expr: &Expr, own: &std::collections::HashSet<&str>, deferred_names: &std::collections::HashSet<String>, class_name: &str) -> bool {
         match &*expr.node {
@@ -6544,9 +6833,12 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
                             _ => calls_self(b, own, deferred_names, class_name),
                         }))
             }
-            ExprNode::Const { path }
-                if path.len() == 1 && deferred_names.contains(path[0].as_str()) =>
-            {
+            // Bare `BUILTIN` *and* `Sound::BUILTIN` — index_by grounding
+            // (and similar) rewrites the receiver to the qualified form,
+            // and a rule that only matched path.len() == 1 left INDEX
+            // eager while BUILTIN deferred: `uninitialized constant
+            // Sound::BUILTIN` at load (campfire models.rb → sound.rb).
+            ExprNode::Const { path } if const_names_deferred(path, deferred_names, class_name) => {
                 true
             }
             _ => {
@@ -6573,7 +6865,9 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
             eager.push(i);
         }
     }
-    (eager, deferred)
+    let initializers_call_self = lc.class_ivar_initializers.iter()
+        .any(|init| calls_self(init, &own, &deferred_names, lc.name.0.as_str()));
+    (eager, deferred, initializers_call_self)
 }
 
 /// Project-root-anchored require target for a parent class, if one is needed.
@@ -6945,6 +7239,9 @@ fn require_path_for_body_const(
     // body to need this: `created_at: <%= 1.hour.ago %>` grounds to
     // `ActiveSupport::Duration.hour(1)` and `test/fixtures/<x>.rb` is
     // reached from the test harness, not from main.rb's require chain.
+    if joined == "ActiveSupport::SecurityUtils" {
+        return Some("runtime/security_utils".to_string());
+    }
     if joined == "ActiveSupport::Duration" {
         return Some("runtime/active_support_duration".to_string());
     }
@@ -7384,11 +7681,12 @@ fn boolean_cast_body(col: &Symbol) -> Expr {
 // campfire's `Message.with_attachment_details` costs the room page two
 // queries where it cost eighty.
 //
-// Known gaps, deliberate: has_one, direct has_many with a scope or
-// polymorphic owner, and scope-carrying through-assocs (other than a
-// plain `order("...")`) get no batch arm — the dispatch
+// Known gaps, deliberate: scoped / polymorphic has_one, direct has_many
+// with a scope or polymorphic owner, and scope-carrying through-assocs
+// (other than a plain `order("...")`) get no batch arm — the dispatch
 // falls through and the lazy reader stays correct (just N+1, matching
-// Rails, which also lazy-loads what `includes` doesn't name). Assigning
+// Rails, which also lazy-loads what `includes` doesn't name). Unscoped
+// non-polymorphic has_one uses PreloadKind::HasOne (first-wins). Assigning
 // a belongs_to (`c.story = s`) on a PRELOADED record does not refresh
 // the cache (fresh records never have the loaded flag set, so the
 // benchmark's build-then-render flows are unaffected).
@@ -7517,6 +7815,9 @@ enum PreloadKind {
     BelongsTo { fk: String, target: String, table: String },
     /// (fk column on the target, target class)
     HasMany { fk: String, target: String },
+    /// `has_one` — same FK-on-target batch as has_many, installing one
+    /// record (or nil) per owner through the single-record preload setter.
+    HasOne { fk: String, target: String },
     /// Batched form of the through-reader join:
     /// `SELECT <t>.*, <thr>.<thr_fk> AS __src FROM <t> JOIN <thr> ON
     /// <thr>.<src_fk> = <t>.id WHERE <thr>.<thr_fk> IN (...)`.
@@ -7528,9 +7829,17 @@ enum PreloadKind {
     /// (`lower::attached::variations_ruby_source`), the proxy's fourth
     /// constructor argument.
     Attached { attr: String, owner: String, variations: String },
+    /// `has_many_attached :<attr>`: install an `AttachedMany` proxy per
+    /// record. Rows are still loaded on ask (`AttachedMany#attachments`);
+    /// the batch here is the memoized proxy, matching One's "one proxy
+    /// per record" contract.
+    AttachedMany { attr: String, owner: String },
     /// `has_rich_text :<attr>`: one `IN` over `action_text_rich_texts`,
     /// installed through the owner's load-once setter.
     RichText { attr: String, owner: String },
+    /// `has_markdown :<attr>`: one `IN` over `action_text_markdowns`,
+    /// installed through the owner's load-once setter.
+    PlainText { attr: String, owner: String },
 }
 
 /// Select association shapes whose batch queries preserve the reader's filters,
@@ -7569,6 +7878,24 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                 out.push((
                     name.as_str().to_string(),
                     PreloadKind::HasMany {
+                        fk: foreign_key.as_str().to_string(),
+                        target: target.0.as_str().to_string(),
+                    },
+                ));
+            }
+            // Same restriction as has_many: FK-only batch. Scoped or
+            // polymorphic has_one stays on the lazy reader until the
+            // batch can preserve those predicates.
+            Association::HasOne {
+                name, target, foreign_key,
+                scope: None, as_interface: None, ..
+            } => {
+                if !model_exists(target) {
+                    continue;
+                }
+                out.push((
+                    name.as_str().to_string(),
+                    PreloadKind::HasOne {
                         fk: foreign_key.as_str().to_string(),
                         target: target.0.as_str().to_string(),
                     },
@@ -7639,11 +7966,33 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
             },
         ));
     }
+    for (_span, attr) in crate::lower::attached::many_attached_attrs(model) {
+        out.push((
+            crate::lower::attached::many_attachments_assoc_name(&attr)
+                .as_str()
+                .to_string(),
+            PreloadKind::AttachedMany {
+                attr: attr.as_str().to_string(),
+                owner: model.name.0.as_str().to_string(),
+            },
+        ));
+    }
     if model_exists(&crate::lower::rich_text::record_class()) {
         for (_span, attr) in crate::lower::rich_text::rich_text_attrs(model) {
             out.push((
                 format!("rich_text_{}", attr.as_str()),
                 PreloadKind::RichText {
+                    attr: attr.as_str().to_string(),
+                    owner: model.name.0.as_str().to_string(),
+                },
+            ));
+        }
+    }
+    if model_exists(&crate::lower::plain_text_attr::record_class()) {
+        for (_span, attr) in crate::lower::plain_text_attr::plain_text_attrs(model) {
+            out.push((
+                format!("markdown_{}", attr.as_str()),
+                PreloadKind::PlainText {
                     attr: attr.as_str().to_string(),
                     owner: model.name.0.as_str().to_string(),
                 },
@@ -7738,6 +8087,32 @@ end
 "#
                 );
             }
+            PreloadKind::HasOne { fk, target } => {
+                let _ = write!(
+                    src,
+                    r#"
+def self._preload_batch_{name}(records)
+  ids = []
+  records.each do |r|
+    ids << r.id
+  end
+  by_id = {{}}
+  loaded = []
+  if ids.length > 0
+    loaded = ActiveRecord::Relation.new({target}).where({fk}: ids).to_a
+  end
+  loaded.each do |rec|
+    k = rec.{fk}
+    by_id[k] = rec if by_id[k].nil?
+  end
+  records.each do |r|
+    r._preload_{name}(by_id[r.id])
+  end
+  loaded
+end
+"#
+                );
+            }
             PreloadKind::Through { target, join, group_col, order } => {
                 let table = crate::naming::pluralize_snake(target.as_str());
                 let order_sql = match order {
@@ -7812,6 +8187,19 @@ end
 "#
                 );
             }
+            PreloadKind::AttachedMany { attr, owner } => {
+                let _ = write!(
+                    src,
+                    r#"
+def self._preload_batch_{name}(records)
+  records.each do |r|
+    r._preload_{name}(ActiveStorage::AttachedMany.new("{owner}", r.id, "{attr}"))
+  end
+  []
+end
+"#
+                );
+            }
             // One IN over the rich-text table; a record with no row is
             // told so, which is the state the load-once reader must not
             // re-query.
@@ -7840,6 +8228,31 @@ end
 "#
                 );
             }
+            PreloadKind::PlainText { attr, owner } => {
+                let _ = write!(
+                    src,
+                    r#"
+def self._preload_batch_{name}(records)
+  ids = []
+  records.each do |r|
+    ids << r.id
+  end
+  by_id = {{}}
+  loaded = []
+  if ids.length > 0
+    loaded = ActiveRecord::Relation.new(ActionText::Markdown).where(record_type: "{owner}", name: "{attr}", record_id: ids).to_a
+  end
+  loaded.each do |rec|
+    by_id[rec.record_id] = rec
+  end
+  records.each do |r|
+    r._preload_{name}(by_id[r.id])
+  end
+  loaded
+end
+"#
+                );
+            }
         }
     }
 
@@ -7855,12 +8268,14 @@ end
             let target = match kind {
                 PreloadKind::BelongsTo { target, .. } => Some(target.as_str()),
                 PreloadKind::HasMany { target, .. } => Some(target.as_str()),
+                PreloadKind::HasOne { target, .. } => Some(target.as_str()),
                 PreloadKind::Through { target, .. } => Some(target.as_str()),
                 PreloadKind::RichText { .. } => Some("ActionText::RichText"),
+                PreloadKind::PlainText { .. } => Some("ActionText::Markdown"),
                 // `includes(logo_attachment: :blob)`: the blob is already
                 // in the row the loader fetched; there is no model to
-                // recurse into.
-                PreloadKind::Attached { .. } => None,
+                // recurse into. Many installs the proxy only.
+                PreloadKind::Attached { .. } | PreloadKind::AttachedMany { .. } => None,
             };
             match target {
                 Some(target) => {
@@ -8070,5 +8485,138 @@ fn rewrite_raw_helper_calls(e: &mut Expr, sites: &BTreeSet<(Symbol, usize)>) {
         let i = *idx;
         *method = Symbol::from(format!("{}_raw", method.as_str()));
         args[i] = inner;
+    }
+}
+
+#[cfg(test)]
+mod insert_rel_param_tests {
+    use super::*;
+    use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, MethodVisibility, Param};
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ty::ParamKind;
+
+    fn bare_method(params: Vec<Param>, signature: Option<Ty>) -> MethodDef {
+        MethodDef {
+            visibility: MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("those_tagged"),
+            receiver: MethodReceiver::Class,
+            params,
+            body: Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            signature,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: Some(Symbol::from("Widget")),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        }
+    }
+
+    /// The decided fix, at the type level: a rest-param method's `__rel`
+    /// is a KEYWORD in `m.params` (a default, not a positional default —
+    /// the only legal ordering after a splat), and in the `Ty::Fn`
+    /// signature it is `ParamKind::Keyword { required: false }`, typed
+    /// as the owning model's `Relation` — NOT `Ty::Untyped` — so a
+    /// target whose `.rbs` DOES read the signature (unlike this
+    /// fixture's own, which the general stamping pass declines to give
+    /// one; see `tests/relation_rest_param_class_method.rs`) writes
+    /// `?__rel: ActiveRecord::Relation`, matching every other typed slot
+    /// on the method instead of losing its type to the one param this
+    /// fix touches.
+    #[test]
+    fn rest_param_method_gets_rel_as_a_typed_keyword_in_params_and_signature() {
+        let owner = ClassId(Symbol::from("Widget"));
+        let params = vec![Param::rest(Symbol::from("tags"))];
+        let sig = Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: Symbol::from("tags"),
+                ty: Ty::Untyped,
+                kind: ParamKind::Rest,
+            }],
+            block: None,
+            ret: Box::new(Ty::Untyped),
+            effects: crate::effect::EffectSet::pure(),
+        };
+        let mut m = bare_method(params, Some(sig));
+        let rel_param = Symbol::from("__rel");
+        assert!(insert_rel_param(&mut m, &rel_param, &owner));
+
+        let rel = m.params.iter().find(|p| p.name == rel_param).expect("__rel param");
+        assert!(rel.keyword, "a keyword, not a positional, after a splat: {rel:?}");
+        assert!(!rel.rest);
+        assert!(rel.default.is_some(), "optional: carries a default");
+
+        let Some(Ty::Fn { params, .. }) = &m.signature else {
+            panic!("the signature must not be dropped");
+        };
+        let rel_ty_param = params.iter().find(|p| p.name == rel_param).expect("__rel in signature");
+        assert_eq!(rel_ty_param.kind, ParamKind::Keyword { required: false });
+        assert_eq!(rel_ty_param.ty, Ty::Relation { of: owner });
+    }
+
+    /// The untouched case: no rest param, `__rel` stays exactly what it
+    /// always was — a positional with a default, inserted before any
+    /// keywords, typed `Untyped` in the signature (unchanged from
+    /// before this fix).
+    #[test]
+    fn non_rest_method_keeps_the_untyped_positional_default() {
+        let owner = ClassId(Symbol::from("Widget"));
+        let params = vec![Param::positional(Symbol::from("user"))];
+        let sig = Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: Symbol::from("user"),
+                ty: Ty::Untyped,
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(Ty::Untyped),
+            effects: crate::effect::EffectSet::pure(),
+        };
+        let mut m = bare_method(params, Some(sig));
+        let rel_param = Symbol::from("__rel");
+        assert!(insert_rel_param(&mut m, &rel_param, &owner));
+
+        let rel = m.params.iter().find(|p| p.name == rel_param).expect("__rel param");
+        assert!(!rel.keyword, "unchanged: still a positional-with-default: {rel:?}");
+        assert!(rel.default.is_some());
+
+        let Some(Ty::Fn { params, .. }) = &m.signature else {
+            panic!("the signature must not be dropped");
+        };
+        let rel_ty_param = params.iter().find(|p| p.name == rel_param).expect("__rel in signature");
+        assert_eq!(rel_ty_param.kind, ParamKind::Optional);
+        assert_eq!(rel_ty_param.ty, Ty::Untyped, "unchanged: still Untyped, not Relation");
+    }
+
+    /// `def f(*tags, **opts)`: no keyword may follow `**opts`, so `__rel:`
+    /// goes ahead of it, in the params and in the signature.
+    #[test]
+    fn rest_and_kwrest_method_gets_rel_ahead_of_the_kwrest() {
+        let owner = ClassId(Symbol::from("Widget"));
+        let kwrest = Param { keyword: true, ..Param::rest(Symbol::from("opts")) };
+        let params = vec![Param::rest(Symbol::from("tags")), kwrest];
+        let sig = Ty::Fn {
+            params: vec![
+                crate::ty::Param { name: Symbol::from("tags"), ty: Ty::Untyped, kind: ParamKind::Rest },
+                crate::ty::Param { name: Symbol::from("opts"), ty: Ty::Untyped, kind: ParamKind::KeywordRest },
+            ],
+            block: None,
+            ret: Box::new(Ty::Untyped),
+            effects: crate::effect::EffectSet::pure(),
+        };
+        let mut m = bare_method(params, Some(sig));
+        let rel_param = Symbol::from("__rel");
+        assert!(insert_rel_param(&mut m, &rel_param, &owner));
+
+        let names: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["tags", "__rel", "opts"]);
+        let Some(Ty::Fn { params, .. }) = &m.signature else {
+            panic!("the signature must not be dropped");
+        };
+        let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["tags", "__rel", "opts"]);
     }
 }

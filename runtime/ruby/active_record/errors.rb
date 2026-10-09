@@ -43,6 +43,17 @@ module ActiveRecord
     end
   end
 
+  # Rails raises this from `sole` / `find_sole_by` when more than one
+  # record matches ("Wanted only one Widget"). Rails hangs it off
+  # ActiveRecordError and passes the model class; with no such base
+  # here, StandardError is the parent and the caller builds the
+  # message, as for the classes above.
+  class SoleRecordExceeded < StandardError
+    def initialize(message = "Wanted only one record")
+      super(message)
+    end
+  end
+
   class RecordInvalid < StandardError
     attr_reader :record
 

@@ -840,6 +840,12 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
         ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
             count += walk(value, ParentExpect::None, ctx);
         }
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                count += walk(key, ParentExpect::None, ctx);
+                count += walk(value, ParentExpect::None, ctx);
+            }
+        }
         // Leaves and shapes that carry no string-typed children we
         // model today.
         ExprNode::Lit { .. }
@@ -1068,6 +1074,7 @@ mod tests {
             name: ClassId(Symbol::from(name)),
             is_module: false,
             parent: None,
+            parent_span: Default::default(),
             includes: vec![],
             methods,
             nullable_columns: Vec::new(),

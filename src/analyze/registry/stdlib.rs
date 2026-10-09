@@ -32,6 +32,27 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     );
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
 
+    // GlobalID mint + Locator — unsigned `param`/`uri`/`signed` and the
+    // locate / locate_signed class methods. Return types for locate*
+    // with a literal `only:` are refined in `body/send.rs` to the named
+    // model (nilable); Untyped here is the gradual fallback for a
+    // computed `only:`.
+    {
+        let mut gid = ClassInfo::default();
+        for m in ["param", "uri", "signed"] {
+            gid.class_methods.insert(Symbol::from(m), Ty::Str);
+        }
+        classes.insert(ClassId(Symbol::from("GlobalID")), gid);
+        let mut locator = ClassInfo::default();
+        locator
+            .class_methods
+            .insert(Symbol::from("locate"), Ty::Untyped);
+        locator
+            .class_methods
+            .insert(Symbol::from("locate_signed"), Ty::Untyped);
+        classes.insert(ClassId(Symbol::from("GlobalID::Locator")), locator);
+    }
+
     // `ActionController::BrowserBlocker.blocked?(user_agent, floors)` —
     // the gate `ingest::allow_browser` synthesizes into a controller
     // body for `allow_browser`, answered by
@@ -50,6 +71,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     let mut limiter = ClassInfo::default();
     limiter.class_methods.insert(Symbol::from("exceeded?"), Ty::Bool);
     classes.insert(ClassId(Symbol::from("ActionController::RateLimiter")), limiter);
+
+    // `ActionController::InvisibleCaptcha.spam?(params)` — the honeypot
+    // gate `ingest::invisible_captcha` synthesizes into a controller
+    // body; runtime/ruby/action_controller/invisible_captcha.rb answers
+    // it. Registered for the same reason as RateLimiter / BrowserBlocker.
+    let mut captcha = ClassInfo::default();
+    captcha.class_methods.insert(Symbol::from("spam?"), Ty::Bool);
+    classes.insert(ClassId(Symbol::from("ActionController::InvisibleCaptcha")), captcha);
 
     // Time singleton — `Time.now` (Ruby core) / `Time.current`
     // (Rails) / `Time.at` all yield a Time *value*, and `Time.zone`
@@ -183,6 +212,37 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("mkdir", Ty::Int),
         ("pwd", Ty::Str), ("home", Ty::Str),
     ], &[]);
+    // Psych/YAML — campfire's Purchaser loads `config/purchased_by.yml`
+    // via `YAML.load_file`. Register the class-side surface the corpus
+    // writes so the constant is modeled (not a silent raise stub) and
+    // ruby-family emit keeps the call. Return types stay gradual: the
+    // document shape is whatever the file held.
+    register_stdlib_class(classes, "YAML", &[
+        ("load", Ty::Untyped), ("load_file", Ty::Untyped),
+        ("safe_load", Ty::Untyped), ("safe_load_file", Ty::Untyped),
+        ("dump", Ty::Str),
+    ], &[]);
+    // Framework modules an app `include`s that emit already handles
+    // (Attachable sgid, Turbo stream names, ActiveModel callbacks,
+    // SanitizeHelper). Empty module markers so the unresolved-include
+    // gate does not refuse known seams; methods come from lowering /
+    // other registry entries.
+    for name in [
+        "ActionText::Attachable",
+        "Turbo::Streams::StreamName",
+        "Turbo::Streams::StreamName::ClassMethods",
+        "ActiveModel::Validations::Callbacks",
+        "ActionView::Helpers::SanitizeHelper",
+    ] {
+        let info = classes.entry(ClassId(Symbol::from(name))).or_default();
+        info.is_module = true;
+    }
+    // SanitizeHelper readers Opengraph::Metadata calls after include.
+    if let Some(sanitize) = classes.get_mut(&ClassId(Symbol::from("ActionView::Helpers::SanitizeHelper"))) {
+        for m in ["sanitize", "strip_tags", "sanitize_css"] {
+            sanitize.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
+        }
+    }
     register_stdlib_class(classes, "Math", &[
         ("sqrt", Ty::Float), ("cbrt", Ty::Float), ("log", Ty::Float),
         ("log2", Ty::Float), ("log10", Ty::Float), ("exp", Ty::Float),
@@ -281,9 +341,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // would hand a strict target a non-null it has to trust.
     let match_data = Ty::Class { id: ClassId(Symbol::from("MatchData")), args: vec![] };
     let str_or_nil_m = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
-    register_stdlib_class(classes, "Regexp", &[], &[
+    register_stdlib_class(classes, "Regexp", &[
+        // Class side: escaping is a pure String -> String function, `last_match` reads the
+        // `$~` of the previous match, `union` builds a Regexp.
+        ("escape", Ty::Str),
+        ("quote", Ty::Str),
+        ("last_match", Ty::Union { variants: vec![match_data.clone(), Ty::Nil] }),
+        ("union", Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![] }),
+    ], &[
         ("match", Ty::Union { variants: vec![match_data.clone(), Ty::Nil] }),
         ("match?", Ty::Bool),
+        ("=~", Ty::Union { variants: vec![Ty::Int, Ty::Nil] }),
+        ("===", Ty::Bool),
         ("source", Ty::Str),
     ]);
     register_stdlib_class(classes, "MatchData", &[], &[
@@ -401,40 +470,71 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // loop below repeats itself. The list is Ruby's own hierarchy under
     // `StandardError` plus `Exception` itself, which `rescue Exception`
     // names and campfire's `MessagesHelper` actually writes.
+    // `cause` is the exception being handled when this one was raised, or
+    // nil; `exception` answers the exception itself (`raise e` and
+    // `e.exception("msg")` both go through it).
+    let exception_surface = [
+        ("message", Ty::Str),
+        ("to_s", Ty::Str),
+        ("full_message", Ty::Str),
+        ("detailed_message", Ty::Str),
+        ("inspect", Ty::Str),
+        ("backtrace", Ty::Array { elem: Box::new(Ty::Str) }),
+        ("backtrace_locations", Ty::Array { elem: Box::new(Ty::Untyped) }),
+        ("set_backtrace", Ty::Untyped),
+        ("exception", Ty::Untyped),
+        (
+            "cause",
+            Ty::Union {
+                variants: vec![
+                    Ty::Class { id: ClassId(Symbol::from("Exception")), args: vec![] },
+                    Ty::Nil,
+                ],
+            },
+        ),
+    ];
     for exc in [
         "Exception", "StandardError", "RuntimeError", "ArgumentError",
         "TypeError", "NameError", "NoMethodError", "IndexError",
         "KeyError", "RangeError", "IOError", "NotImplementedError",
         "FrozenError", "ZeroDivisionError", "StopIteration",
-        // Both CRuby's bundled libraries and Spinel's uri/net packages
-        // define these exception classes; emitted requires load them.
+        "ThreadError", "ClosedQueueError",
+        // CRuby's bundled libraries and Spinel's uri/net/json packages
+        // recognize these exception names; emitted requires load them.
         "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
-        "OpenSSL::OpenSSLError", "JSON::ParserError",
+        "OpenSSL::OpenSSLError", "JSON::ParserError", "JSON::GeneratorError",
+        // Campfire tip: `rescue SystemCallError` / `OpenSSL::SSL::SSLError`
+        // on pooled web-push connections; `rescue Vips::Error` beside
+        // ActiveStorage::PreviewError when drawing attachment variants.
+        "SystemCallError", "OpenSSL::SSL::SSLError", "Vips::Error",
+        // `Timeout.timeout` / `rescue Timeout::Error` — Campfire unfurl
+        // deadline and TimeLimitedVideoPreviewer#capture.
+        "Timeout::Error",
+        // `rescue EOFError` around `readpartial` on a pipe or a pty.
+        "EOFError",
     ] {
-        register_stdlib_class(classes, exc, &[], &[
-            ("message", Ty::Str),
-            ("to_s", Ty::Str),
-            ("full_message", Ty::Str),
-            ("inspect", Ty::Str),
-            ("backtrace", Ty::Array { elem: Box::new(Ty::Str) }),
-        ]);
+        register_stdlib_class(classes, exc, &[], &exception_surface);
     }
-    let exception_surface = [
-        ("message", Ty::Str),
-        ("to_s", Ty::Str),
-        ("full_message", Ty::Str),
-        ("inspect", Ty::Str),
-        ("backtrace", Ty::Array { elem: Box::new(Ty::Str) }),
-    ];
+    // `rescue Errno::ENOENT` / `Errno::EIO`: every Errno class that both
+    // CRuby (on every POSIX platform) and Spinel's runtime define. The
+    // lookup is by exact name, so the family is registered whole.
+    register_stdlib_class(classes, "Errno", &[], &[]);
+    for name in ERRNO_CLASSES {
+        register_stdlib_class(classes, &format!("Errno::{name}"), &[], &exception_surface);
+    }
     for (exc, extra) in [
         ("ActiveRecord::RecordNotFound", None),
         ("ActiveRecord::RecordNotUnique", None),
         ("ActiveRecord::ValueTooLong", None),
+        ("ActiveRecord::SoleRecordExceeded", None),
         // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
         ("ActiveRecord::RecordInvalid", Some(("record", Ty::Untyped))),
+        // Names overlap `project::RUBY_FAMILY_RUNTIME_CONSTANTS` (emit
+        // ledger). Keep extras here — inference needs the readers.
         ("ActionController::ParameterMissing", Some(("param", Ty::Str))),
         ("ActionController::UnpermittedParameters", None),
         ("ActionController::UnknownFormat", None),
+        ("ActionController::RoutingError", Some(("failures", Ty::Array { elem: Box::new(Ty::Str) }))),
     ] {
         let mut methods = exception_surface.to_vec();
         methods.extend(extra);
@@ -446,10 +546,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
     ]);
     // Not a typed store: a thread-local slot holds whatever the caller put there, so `[]` answers untyped.
+    // `new` / `pass` / `kill` / `join` — `runtime/ruby/timeout.rb`'s wall-clock
+    // port (Spinel lane) starts a worker and kills it past the deadline.
     let thread = Ty::Class { id: ClassId(Symbol::from("Thread")), args: vec![] };
-    register_stdlib_class(classes, "Thread", &[("current", thread.clone())], &[
+    register_stdlib_class(classes, "Thread", &[
+        ("current", thread.clone()),
+        ("new", thread.clone()),
+        ("pass", Ty::Nil),
+    ], &[
         ("[]", Ty::Untyped),
         ("[]=", Ty::Untyped),
+        ("kill", thread.clone()),
+        ("join", thread.clone()),
     ]);
     // The spinel `csv` package's writer surface: `CSV.generate { |csv| csv << row }` answers the accumulated String.
     let csv = Ty::Class { id: ClassId(Symbol::from("CSV")), args: vec![] };
@@ -509,6 +617,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // A class test such as `URI.parse(url).is_a?(URI::HTTP)` names the
     // real bundled class, without claiming any extra instance methods.
     register_stdlib_class(classes, "URI::HTTP", &[], &[]);
+    register_stdlib_class(classes, "URI::HTTPS", &[], &[]);
     for response in ["Net::HTTPRedirection", "Net::HTTPOK"] {
         register_stdlib_class(classes, response, &[], &[]);
     }
@@ -518,6 +627,59 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "StringIO", &[], &[
         ("string", Ty::Str), ("<<", string_io),
     ]);
+    // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
+    // in indexed app source (`time_limited_video_previewer`, web-push
+    // connection pool, unfurl deadline). They were listed in
+    // `RUBY_TOP_LEVEL` (declared-type noise) but never registered, so
+    // Const resolution raised Unsupported. Register the class objects
+    // for Const resolution only. Class-method returns for `Process.*`,
+    // `Timeout.timeout`, and `IO.popen` / `copy_stream` live in the
+    // send special-cases (`body/send.rs`) — catalog entries would win
+    // before those cases and kill unit-aware `clock_gettime` (Float for
+    // `:millisecond`). Nested *namespace* Consts (`Process::CLOCK_*`)
+    // stay empty ClassIds the way `URI::HTTP` is. Value Consts
+    // (`IO::NULL` / `File::NULL`) are typed Strings via CORE_RBS — do
+    // not also register them here or the ClassId fallback disagrees.
+    // Instance methods on an `IO` handle still belong here. `winsize` /
+    // `winsize=` wait on carrying `require "io/console"` into the
+    // emitted tree; admitting them without that load is check-quiet /
+    // runtime `NoMethodError`.
+    let io = Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![] };
+    register_stdlib_class(classes, "IO", &[], &[
+        ("pid", Ty::Int),
+        ("read", Ty::Str),
+        ("readpartial", Ty::Str),
+        ("write", Ty::Int),
+        ("closed?", Ty::Bool),
+        ("rewind", Ty::Int),
+        ("binmode", io.clone()),
+        ("close", Ty::Nil),
+    ]);
+    // `File < IO` — Ruby's hierarchy (not a PTY detail). File's class
+    // methods are registered earlier; the parent is set once `IO` exists
+    // so instance methods (`readpartial`, `closed?`, …) resolve on a
+    // File handle, including `PTY.spawn`'s reader/writer.
+    classes
+        .get_mut(&ClassId(Symbol::from("File")))
+        .expect("File registered above")
+        .parent = Some(ClassId(Symbol::from("IO")));
+    // `require "pty"`. `PTY.spawn`'s return is a send special case: its
+    // block form answers nil; block yields are typed in `block_params_for`.
+    register_stdlib_class(classes, "PTY", &[], &[]);
+    // A default gem a booted Rails app has already loaded; the BUNDLED
+    // row emits its require.
+    register_stdlib_class(classes, "Shellwords", &[
+        ("escape", Ty::Str), ("shellescape", Ty::Str),
+        ("join", Ty::Str), ("shelljoin", Ty::Str),
+        ("split", str_arr()), ("shellsplit", str_arr()), ("shellwords", str_arr()),
+    ], &[]);
+    register_stdlib_class(classes, "Process", &[], &[]);
+    register_stdlib_class(classes, "Process::CLOCK_MONOTONIC", &[], &[]);
+    register_stdlib_class(classes, "Process::CLOCK_REALTIME", &[], &[]);
+    // Module Const only — `timeout` return is the send special-case.
+    // Exception is `Timeout::Error` above. CRuby loads via BUNDLED
+    // `require "timeout"`; Spinel gets `runtime/ruby/timeout.rb`.
+    register_stdlib_class(classes, "Timeout", &[], &[]);
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;
     // a source-backed reference must also recognize its exact namespace.
     register_stdlib_class(classes, "JSON", &[], &[]);
@@ -527,6 +689,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Do not invent member or synchronization return types here.
     register_stdlib_class(classes, "Struct", &[], &[]);
     register_stdlib_class(classes, "Mutex", &[], &[]);
+    // The queue constructors, Thread's core aliases, and the standard
+    // mixins likewise need exact entries for source constant resolution.
+    // No queue element, synchronization or mixin method types are added;
+    // the Ruby-family runtimes supply the actual behavior.
+    for name in ["Queue", "SizedQueue", "Thread::Queue", "Thread::SizedQueue",
+        "Thread::Mutex", "Comparable", "Enumerable"] {
+        register_stdlib_class(classes, name, &[], &[]);
+    }
     // `Array.wrap` is folded by `lower::enumerable_ext` before emit.
     // Registered so the analyzer does not report it as unknown. The
     // element type is not known from a scalar argument.
@@ -540,7 +710,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // implement the collection operations the app uses; don't invent
     // one concrete representation for the two runtimes.
     register_stdlib_class(classes, "Rails::HTML5::SafeListSanitizer", &[
-        ("allowed_tags", Ty::Untyped), ("allowed_attributes", Ty::Untyped),
+        ("allowed_tags", Ty::Union { variants: vec![Ty::Array { elem: Box::new(Ty::Str) }, Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] }] }),
+        ("allowed_attributes", Ty::Union { variants: vec![Ty::Array { elem: Box::new(Ty::Str) }, Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] }] }),
     ], &[]);
     // `Set` is a value type: `Set.new` yields `Class { Set }` (via the
     // universal `.new`), then these instance methods dispatch on it.
@@ -620,3 +791,17 @@ fn register_stdlib_class(
             .or_insert_with(|| ty.clone());
     }
 }
+
+/// The Errno classes CRuby defines on every POSIX platform that Spinel's
+/// runtime (`lib/sp_exc.c`) defines too.
+const ERRNO_CLASSES: &[&str] = &[
+    "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO", "E2BIG", "ENOEXEC", "EBADF",
+    "ECHILD", "EAGAIN", "ENOMEM", "EACCES", "EFAULT", "EBUSY", "EEXIST", "EXDEV", "ENODEV",
+    "ENOTDIR", "EISDIR", "EINVAL", "ENFILE", "EMFILE", "ENOTTY", "EFBIG", "ENOSPC", "ESPIPE",
+    "EROFS", "EMLINK", "EPIPE", "EDOM", "ERANGE", "EDEADLK", "ENAMETOOLONG", "ENOLCK",
+    "ENOSYS", "ENOTEMPTY", "ELOOP", "ENOTSOCK", "EMSGSIZE", "EPROTOTYPE", "ENOPROTOOPT",
+    "EPROTONOSUPPORT", "ENOTSUP", "EOPNOTSUPP", "EAFNOSUPPORT", "EADDRINUSE",
+    "EADDRNOTAVAIL", "ENETDOWN", "ENETUNREACH", "ENETRESET", "ECONNABORTED", "ECONNRESET",
+    "ENOBUFS", "EISCONN", "ENOTCONN", "ETIMEDOUT", "ECONNREFUSED", "EHOSTUNREACH",
+    "EALREADY", "EINPROGRESS", "ESTALE", "EDQUOT", "ECANCELED", "EOVERFLOW", "EILSEQ",
+];
