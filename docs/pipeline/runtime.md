@@ -1587,8 +1587,8 @@ a plain `void`.
 true` — and `response.cache_control.replace(private: true, no_store:
 true)`, the shape a `before_action :set_cache_control_defaults` filter
 actually writes — now both reach the wire. The two TYPED
-`cache_control_max_age` / `cache_control_public` readers are gone,
-replaced by `ActionController::CacheControlStore`
+`cache_control_max_age` / `cache_control_public` readers remain, now
+delegating to `ActionController::CacheControlStore`
 (`action_controller/base.rb`): one bool/Integer field per Rails option
 (`public`, `private`, `no_store`, `no_cache`, `must_revalidate`,
 `must_understand`, `immutable`, `max_age`, `stale_while_revalidate`,
