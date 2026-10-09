@@ -8,7 +8,7 @@ mod emit_and_run;
 use roundhouse::project::BuildTarget;
 use std::process::Command;
 
-// These probes run on the two supported local runtimes. Pin their default
+// These probes run on the three supported local runtimes. Pin their default
 // independently of the production capability table, then inspect actual emit.
 fn expected_binds(target: BuildTarget) -> bool {
     match std::env::var("ROUNDHOUSE_PARAM_BINDS").as_deref() {
@@ -229,7 +229,8 @@ Db.close
         );
         success(Command::new(dir.join("bind_values")).current_dir(&*dir));
     } else {
-        success(Command::new("ruby").arg("bind_values.rb").current_dir(&*dir));
+        let ruby = if target == BuildTarget::Jruby { "jruby" } else { "ruby" };
+        success(Command::new(ruby).arg("bind_values.rb").current_dir(&*dir));
     }
 }
 
@@ -242,6 +243,12 @@ fn typed_values_ruby() {
 #[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
 fn typed_values_spinel() {
     emitted("typed_values_spinel", BuildTarget::Spinel);
+}
+
+#[test]
+#[ignore = "requires JRuby 10+ and jdbc-sqlite3"]
+fn typed_values_jruby() {
+    emitted("typed_values_jruby", BuildTarget::Jruby);
 }
 
 #[test]
