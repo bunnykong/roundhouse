@@ -15,7 +15,7 @@ Background for [Any order](../frontiers/any-order.md). In an unpublished researc
 
 Dependencies set this order; it is argued, not yet carried out or proved. Step 2 could instead discover the structure monotonically, as the brief's [leads](../frontiers/any-order.md#leads) describe.
 
-1. **Shapes and stamps:** tuple shape from syntax, each position joined on its own, stamps never read back, plus two one-line writer fixes: all-arms block binding pads both operands, and attribute assignment returns its right-hand side. It depends on nothing.
+1. **Shapes and stamps:** tuple shape from syntax, each position joined on its own, stamps never read back, plus two writer rules: all-arms block binding pads both operands, and attribute assignment returns its right-hand side. The rules are small, but a prototype showed they reach diagnostic dispatch and emission classification, so the change is larger than the rules. It depends on nothing.
 2. **Structure declared before typing,** from the program text with explicit candidates for dynamic calls. Unwritten slots read ⊥, and filters treat inline values and references alike. It defines the system later rules must be monotone on. One change, gated by an equal structure digest across schedules and from start to end.
 3. **Pending split from gradual:** pending receivers contribute nothing, a union's dispatch joins its arms' answers, writers lose their gates, errors are counted after settling, and a slot left ⊥ prints as unresolved `untyped`. One change, scored by the [error census](../checks/error-census.md).
 4. **Positive projections:** empty results are ⊥; dead branches are labeled after the run. It needs steps 2 and 3; otherwise a leftover ⊥ prints as a type like `Array[Bottom]`.
