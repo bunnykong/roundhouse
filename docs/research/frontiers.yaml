@@ -65,12 +65,12 @@
   claims:
     - who: dai199
       scope: "parameter rows keyed by receiver side, the follow-up named in #551 (the lab's `name_collision`), in one PR against main."
-      status: review
+      status: done
       since: "2026-10-09T08:52Z"
       expires: "2026-10-16T08:52Z"
       pr: "https://github.com/rubys/roundhouse/pull/674"
       source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6077674666"
-      note: "Lands first in parameter rows; @eddygarcas rebases items 1–2 of his claim onto it (https://github.com/rubys/roundhouse/issues/617#issuecomment-6079454560)."
+      note: "Merged on 2026-10-09 as c19524c7, with the owner walk looking on the call's side first (https://github.com/rubys/roundhouse/issues/617#issuecomment-6081357575)."
 
 - id: precision
   name: Precision
