@@ -45,6 +45,12 @@ fn bytes_block_has_escaping_break(e: &Expr) -> bool {
     }
 }
 
+/// A forwarded `&local` whose binding may be nil at runtime — Ruby then
+/// passes no block. Bare `Nil` is handled separately as definite absence.
+fn forwarded_block_may_be_nil(ty: &Ty) -> bool {
+    matches!(ty, Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)))
+}
+
 mod diagnostic;
 mod const_resolution;
 pub(crate) use const_resolution::{ConstResolver, ConstResolverTask};
@@ -340,6 +346,19 @@ impl<'a> BodyTyper<'a> {
     /// stays private to this module; `send.rs` reaches it here.
     pub(super) fn classes(&self) -> &'a HashMap<ClassId, ClassInfo> {
         self.classes
+    }
+
+    fn has_unknown_ancestor(&self, id: &crate::ident::ClassId) -> bool {
+        let mut current = Some(id);
+        for step in 0..32 {
+            let Some(cid) = current else { return false };
+            let Some(cls) = self.classes.get(cid) else { return step > 0 };
+            if cls.open {
+                return true;
+            }
+            current = cls.parent.as_ref();
+        }
+        false
     }
 
     /// Whether `self`'s class, its includes or its ancestors register
@@ -1317,6 +1336,19 @@ impl<'a> BodyTyper<'a> {
                     match &*b.node {
                         ExprNode::Lambda { body, .. } => body.ty.clone(),
                         ExprNode::MethodRef { .. } => Some(method_ref_ty),
+                        // Forwarded proc (`&callback`): Var in the block
+                        // slot, no body to type. Presence must still reach
+                        // dispatch — `PTY.spawn` with a block answers nil.
+                        // A nil local (`callback = nil; …(&callback)`) is
+                        // Ruby's no-block path, as is a literal `&nil`.
+                        // A nilable local is refined for `PTY.spawn` after
+                        // dispatch (Tuple | Nil); leave presence absent
+                        // here so `String#bytes(&maybe)` stays the array.
+                        ExprNode::Var { name, .. } => match ctx.local_bindings.get(name) {
+                            Some(Ty::Nil) => None,
+                            Some(ty) if forwarded_block_may_be_nil(ty) => None,
+                            _ => Some(Ty::Untyped),
+                        },
                         _ => None,
                     }
                 } else {
@@ -1485,6 +1517,25 @@ impl<'a> BodyTyper<'a> {
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // `PTY.spawn(..., &maybe)` when `maybe` is nilable: Ruby
+                // may take the block (nil) or not (tuple). Presence was
+                // left absent above so other methods keep their no-block
+                // answer; widen the spawn result here.
+                if method.as_str() == "spawn"
+                    && matches!(&recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "PTY")
+                    && let Some(b) = block.as_ref()
+                    && let ExprNode::Var { name, .. } = &*b.node
+                    && ctx
+                        .local_bindings
+                        .get(name)
+                        .is_some_and(forwarded_block_may_be_nil)
+                {
+                    let file = Ty::Class { id: ClassId(Symbol::from("File")), args: vec![].into() };
+                    return union_of(
+                        Ty::Tuple { elems: vec![file.clone(), file, Ty::Int].into() },
+                        Ty::Nil,
+                    );
+                }
                 if let Some(receiver) = recv.as_mut() {
                     receiver.decisions &= !crate::expr::RESOLVED_OPERATOR_RECEIVER;
                     if matches!(method.as_str(), "+" | "-" | "*" | "/" | "**" | "%" | "<" | "<=" | ">" | ">=")
@@ -1559,10 +1610,22 @@ impl<'a> BodyTyper<'a> {
                         {
                             Some("Object extension")
                         }
+                        // Not refused again on a receiver the constant refusal already accounts for.
+                        _ if matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped))
+                            && recv.as_ref().is_some_and(|r| rooted_in_refused_constant(r)) => None,
                         _ if matches!(method.as_str(), "to_query" | "instance_values" | "acts_like?" | "presence_in" | "as_json" | "with_options" | "pretty_inspect") => Some("Object extension"),
                         _ => None,
                     };
-                    if let Some(owner) = gap.filter(|_| expr.diagnostic.is_none()) {
+                    // Not an Object extension under an unseen ancestor: a gem likely defines it, and only a dispatch miss keeps the receiver attribution needs.
+                    let gem_ancestry = recv_ty
+                        .clone()
+                        .filter(|ty| gap == Some("Object extension") && matches!(ty, Ty::Class { id, .. } if self.has_unknown_ancestor(id)));
+                    if let Some(recv_ty) = gem_ancestry.filter(|_| expr.diagnostic.is_none()) {
+                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::SendDispatchFailed {
+                            method: method.clone(),
+                            recv_ty,
+                        });
+                    } else if let Some(owner) = gap.filter(|_| expr.diagnostic.is_none()) {
                         expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from(owner),
@@ -4352,6 +4415,17 @@ fn is_ivar_params_rooted(e: &crate::expr::Expr, locals: &HashMap<Symbol, Ty>) ->
 /// Nil: comparing nil with a non-nil value raises, so a nil result cannot
 /// occur. A single nilable element (`[maybe].min`) or an all-nilable
 /// literal can still return nil without a comparison error.
+fn rooted_in_refused_constant(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Const { .. } => matches!(
+            &expr.diagnostic,
+            Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "constant"
+        ),
+        ExprNode::Send { recv: Some(recv), .. } => rooted_in_refused_constant(recv),
+        _ => false,
+    }
+}
+
 fn literal_extremum_ty(recv: Option<&Expr>, recv_ty: &Ty, method: &Symbol, args: &[Expr]) -> Option<Ty> {
     if !matches!(method.as_str(), "min" | "max") || !args.is_empty() {
         return None;

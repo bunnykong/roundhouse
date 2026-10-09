@@ -215,6 +215,8 @@ module Main
     # ENV would reject); params delegation gets the same merged hash the
     # controller sees.
     controller.request = ActionDispatch::Request.new(env.to_h, merged)
+    # The body's params alone, for ParamsWrapper (`Params.wrap`).
+    controller.request.request_parameters = request[:body_params]
     # Same object, module-reachable — helpers are module functions with
     # no controller context (see ActionController::Current).
     ActionController::Current.request = controller.request
@@ -224,8 +226,12 @@ module Main
 
     begin
       controller.process_action(matched.action)
-    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError
+    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
       return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+    rescue ActionController::ParameterMissing
+      # `params.expect` / `params.require` refused the request and the app
+      # did not rescue it: Rails' rescue_responses answer :bad_request.
+      return [400, "<h1>400 Bad Request</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     end
 
     # Dispatch on status, not on @location nil-ness: redirect_to

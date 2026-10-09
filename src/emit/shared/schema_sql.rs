@@ -83,6 +83,40 @@ impl Dialect {
     /// One primary-key column definition, name included. The IR keeps a
     /// key's name and type but not a `default:` given to `create_table`,
     /// so each dialect applies its default convention for the type.
+    /// The column's `default:` as a SQL literal, for the writes that
+    /// never pass through a model — `insert_all`, `upsert_all`, a raw
+    /// `INSERT` — which in Rails get the DATABASE's default. (A record
+    /// gets the same value from the model layer either way.) Only the
+    /// unambiguous literal kinds render: a number on a numeric column, a
+    /// boolean, a string on a string column. Anything else — a date, a
+    /// JSON or binary value, a default ingest could not read — is left to
+    /// the model layer, as before.
+    fn column_default(self, col: &Column) -> Option<String> {
+        let raw = col.default.as_deref()?;
+        if col.generated.is_some() {
+            return None;
+        }
+        match &col.col_type {
+            ColumnType::Integer | ColumnType::BigInt => {
+                raw.parse::<i64>().ok().map(|n| n.to_string())
+            }
+            ColumnType::Float | ColumnType::Decimal { .. } => {
+                raw.parse::<f64>().ok().filter(|f| f.is_finite()).map(|_| raw.to_string())
+            }
+            ColumnType::Boolean => match (raw, self) {
+                ("true", Dialect::Sqlite) => Some("1".to_string()),
+                ("false", Dialect::Sqlite) => Some("0".to_string()),
+                ("true", Dialect::Postgres) => Some("TRUE".to_string()),
+                ("false", Dialect::Postgres) => Some("FALSE".to_string()),
+                _ => None,
+            },
+            ColumnType::String { .. } | ColumnType::Text => {
+                Some(format!("'{}'", raw.replace('\'', "''")))
+            }
+            _ => None,
+        }
+    }
+
     fn key_column(self, col: &Column) -> String {
         let name = self.ident(col.name.as_str());
         match self {
@@ -199,6 +233,10 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
             if !col.nullable {
                 line.push_str(" NOT NULL");
             }
+            if let Some(default) = dialect.column_default(col) {
+                line.push_str(" DEFAULT ");
+                line.push_str(&default);
+            }
             lines.push(line);
         }
         writeln!(s, "{}", lines.join(",\n")).unwrap();
@@ -233,6 +271,10 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
 /// invokes this gate before emitting any files; the PostgreSQL renderer
 /// also checks it directly.
 pub fn validate_schema_for_dialect(schema: &Schema, dialect: Dialect) -> Result<(), String> {
+    let expression_dialect = match dialect {
+        Dialect::Sqlite => crate::schema::generated::GeneratedExpressionDialect::Portable,
+        Dialect::Postgres => crate::schema::generated::GeneratedExpressionDialect::Postgres,
+    };
     for table in schema.tables.values() {
         if let Some(vm) = &table.virtual_module {
             if dialect != Dialect::Sqlite {
@@ -243,7 +285,9 @@ pub fn validate_schema_for_dialect(schema: &Schema, dialect: Dialect) -> Result<
                 ));
             }
         }
-        for (column, reason) in crate::schema::generated::validate_table(table) {
+        for (column, reason) in
+            crate::schema::generated::validate_table_with_dialect(table, expression_dialect)
+        {
             return Err(format!("generated column unsupported: {}.{column}: {reason}", table.name.as_str()));
         }
         if dialect == Dialect::Postgres {
@@ -406,6 +450,7 @@ fn sqlite_type(ct: &ColumnType) -> &'static str {
         | ColumnType::DateTime
         | ColumnType::Time
         | ColumnType::Json
+        | ColumnType::Jsonb
         | ColumnType::Uuid => "TEXT",
         ColumnType::Reference { .. } => "INTEGER",
     }
@@ -415,9 +460,8 @@ fn sqlite_type(ct: &ColumnType) -> &'static str {
 /// creates for it (`NATIVE_DATABASE_TYPES`; `datetime` is Rails 7+'s
 /// `timestamp(6)`), in the spelling `pg_dump` prints.
 ///
-/// The IR is what ingest left: `jsonb` and `json` are both `Json`,
-/// which renders `jsonb` — the type Postgres apps use, and the one that
-/// has equality and a btree index; `timestamptz` is a `DateTime`, and
+/// Ingest preserves `json` and `jsonb` independently so PostgreSQL schema
+/// output retains the source type. `timestamptz` is a `DateTime`, and
 /// `citext` and the network types render as their text storage. A
 /// decimal scale without a precision, which Rails rejects, renders as a
 /// bare `numeric`.
@@ -437,7 +481,8 @@ fn postgres_type(ct: &ColumnType) -> String {
         ColumnType::DateTime => "timestamp(6) without time zone".into(),
         ColumnType::Time => "time without time zone".into(),
         ColumnType::Binary => "bytea".into(),
-        ColumnType::Json => "jsonb".into(),
+        ColumnType::Json => "json".into(),
+        ColumnType::Jsonb => "jsonb".into(),
         ColumnType::Uuid => "uuid".into(),
     }
 }
@@ -454,6 +499,7 @@ mod tests {
         render_schema_statements_for(&schema, dialect).expect("render")
     }
 
+    /// Builds a plain schema column without generated expressions or source-type provenance.
     fn column(name: &str, col_type: ColumnType, nullable: bool, primary_key: bool) -> Column {
         Column {
             name: Symbol::from(name),
@@ -463,6 +509,7 @@ mod tests {
             primary_key,
             generated: None,
             generated_text_compatible: None,
+            generated_int4_compatible: None,
         }
     }
 
@@ -499,15 +546,17 @@ end
             vec![
                 "CREATE TABLE IF NOT EXISTS articles (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  \
                  title TEXT NOT NULL,\n  body TEXT,\n  author_id INTEGER NOT NULL,\n  \
-                 published INTEGER NOT NULL,\n  created_at TEXT NOT NULL\n)",
+                 published INTEGER NOT NULL DEFAULT 0,\n  created_at TEXT NOT NULL\n)",
                 "CREATE INDEX IF NOT EXISTS index_articles_on_author_id ON articles (author_id)",
                 "CREATE UNIQUE INDEX IF NOT EXISTS index_articles_on_title_and_author_id ON articles (title, author_id)",
             ]
         );
     }
 
-    /// Column defaults are not rendered in either dialect (the model
-    /// layer applies them), so `published` has no `DEFAULT false`.
+    /// A literal column default renders in each dialect's spelling —
+    /// `published`'s `default: false` is `DEFAULT FALSE` here and
+    /// `DEFAULT 0` on SQLite — for the writes that bypass the model
+    /// layer (`insert_all`).
     #[test]
     fn postgres_renders_rails_column_types_and_the_default_key() {
         assert_eq!(
@@ -515,7 +564,7 @@ end
             vec![
                 "CREATE TABLE IF NOT EXISTS \"articles\" (\n  \"id\" bigserial PRIMARY KEY,\n  \
                  \"title\" character varying NOT NULL,\n  \"body\" text,\n  \
-                 \"author_id\" bigint NOT NULL,\n  \"published\" boolean NOT NULL,\n  \
+                 \"author_id\" bigint NOT NULL,\n  \"published\" boolean NOT NULL DEFAULT FALSE,\n  \
                  \"created_at\" timestamp(6) without time zone NOT NULL\n)",
                 "CREATE INDEX IF NOT EXISTS \"index_articles_on_author_id\" ON \"articles\" (\"author_id\")",
                 "CREATE UNIQUE INDEX IF NOT EXISTS \"index_articles_on_title_and_author_id\" \
@@ -781,8 +830,8 @@ end
             (ColumnType::DateTime, "timestamp(6) without time zone"),
             (ColumnType::Time, "time without time zone"),
             (ColumnType::Binary, "bytea"),
-            // Ingest folds `jsonb` and `json` into one `Json`.
-            (ColumnType::Json, "jsonb"),
+            (ColumnType::Json, "json"),
+            (ColumnType::Jsonb, "jsonb"),
             (ColumnType::Uuid, "uuid"),
             // Not something Rails emits (it rejects a scale without a
             // precision): the scale is dropped rather than a precision

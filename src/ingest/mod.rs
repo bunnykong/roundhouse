@@ -36,6 +36,7 @@ pub mod library_class;
 pub mod channel_callbacks;
 pub mod current_attributes;
 pub mod delegate;
+mod model_delegate;
 pub mod thread_mattr;
 pub mod model;
 mod delegated_type;
@@ -72,10 +73,15 @@ pub use library_class::{
 pub use model::ingest_model;
 pub use roda_app::{ingest_roda_app_with_vfs, is_roda_app};
 pub use routes::ingest_routes;
-pub use schema::{ingest_migration, ingest_schema};
+pub use schema::{
+    ingest_migration, ingest_migration_with_generated_expression_dialect, ingest_schema,
+    ingest_schema_with_generated_expression_dialect,
+};
 pub use sequel_migration::ingest_sequel_migration;
 pub use sequel_model::ingest_sequel_model;
-pub use structure_sql::ingest_structure_sql;
+pub use structure_sql::{
+    ingest_structure_sql, ingest_structure_sql_with_generated_expression_dialect,
+};
 pub use test::{ingest_test_file, ingest_test_files};
 pub use view::ingest_view;
 

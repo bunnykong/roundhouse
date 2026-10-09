@@ -816,7 +816,27 @@ fn every_runtime_method_body_concretely_typed() {
     // block/return gradual after `sec: Integer | Float` — polymorphic yield.
     // `AttachedMany#attachments` stays typed via raw SQL + ManyAttachment
     // (not Relation over the synthesized Attachment MODEL).
-    const CEILING: usize = 304;
+    // `ActiveRecord::Base#with_lock` (#644) adds 1: its block's return
+    // value is gradual, same `untyped` escape as `self.transaction`'s
+    // block value (`lock!` itself stays concretely typed — it's a
+    // plain `reload`).
+    // `with_lock`'s Rails 8.1 options split (#671) adds 5: the trailing
+    // transaction-options Hash this runtime doesn't carry
+    // `extract_options!` for is read by hand (`transaction_opts[:iso
+    // lation]`, `[:requires_new]`, `.key?(:joinable) ? [:joinable] :
+    // true`), and each `Hash[Symbol, untyped]` value read is gradual —
+    // same shape `connection.rb`'s other `opts`-style Hash call sites
+    // already carry.
+    // `ActiveRecord::RecordNotFound#initialize` (model/primary_key/id)
+    // adds 1, MEASURED on the runtime after #671: the `@id = id` store
+    // of the id Rails passes through, whose RBS type is the flat
+    // `String | Integer | Float | Array | nil` union (Float added after
+    // #689 review; MEASURED, no change).
+    // Campfire's repin past 2393f01 adds 5, MEASURED, each from a value
+    // Rails itself leaves dynamic: `Connection#select_value` (one SQL cell, as
+    // `select_rows`' rows are), `Base.uncached`'s block value (the
+    // `Timeout.timeout` shape), and `Relation#to_h`'s yielded pairs.
+    const CEILING: usize = 316;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

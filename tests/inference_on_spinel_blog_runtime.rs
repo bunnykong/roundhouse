@@ -293,7 +293,29 @@ fn untyped_subexpressions_baseline() {
     // exists? key dispatch (#549 / #403): 519 -> 523, MEASURED. Four new
     // Base sites from exists? / _exists_primary_key_input (nil guard +
     // cast + adapter). Companion RBS probe stays at zero residual.
-    const CEILING: usize = 523;
+    // Pessimistic locking (#644 / #671): 523 -> 529, MEASURED. The six
+    // new sites are `with_lock`'s `*args` split (the trailing options
+    // Hash and the lock clause) and the `isolation:` / `requires_new:` /
+    // `joinable:` pass-through into `transaction`, all accepted and
+    // ignored under SQLite. Its RBS-paired methods keep the gradual
+    // `untyped` escape `self.transaction` already has.
+    // RecordNotFound's model/primary_key/id: 529 -> 534, MEASURED on
+    // the runtime after #671. The five new sites are the finder inputs
+    // the raises now pass through: `id` in Base#find (x2), Relation#find
+    // and Relation#find_ids, and the ruby-family Base#find_by!'s
+    // `conditions`. Companion RBS probe stays at zero residual.
+    // Rails 8.1 finder-miss wording: 534 -> 540, MEASURED. The net six
+    // new sites are all in Relation#find_ids' multi-id message (the
+    // `inspect`ed id list and the interpolated model, key and expected
+    // count); the single-id messages trade one site for one.
+    // Relation#find(nil)'s "without an ID" raise (#689 review):
+    // 540 -> 541, MEASURED. The one new site is the `id.nil?` guard's
+    // read of the unseeded `id`.
+    // `Base.uncached` (campfire's push pool test): 541 -> 547, MEASURED.
+    // The six new sites are its `Db.query_cache_*` calls and the block
+    // value, read here without the Db contract — the same escape
+    // `self.transaction`'s `Db.exec` calls already take.
+    const CEILING: usize = 547;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

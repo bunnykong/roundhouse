@@ -743,6 +743,12 @@ class ActionResponse
   # Rails hands a test: campfire's logo test reads
   # `@response.headers["content-type"]`, and against a Hash keyed the
   # way the header is spelled on the wire that read is nil.
+  # Rails' `response.media_type`: the content type without its
+  # parameters (`text/html`, not `text/html; charset=utf-8`).
+  def media_type
+    @content_type.split(";").first.to_s.strip
+  end
+
   def headers
     out = {}
     @extra_headers.each { |k, v| out[k.to_s.downcase] = v }
@@ -1067,12 +1073,34 @@ class TestBase
     end
   end
 
+  # Rails' `travel(duration) { … }` travels for the block and back.
+  # Taking no block here dropped it unrun — a test whose body sat in the
+  # block passed without executing a line of it.
   def travel(duration)
     travel_to(Time.now + duration.to_i)
+    return unless block_given?
+    begin
+      yield
+    ensure
+      travel_back
+    end
   end
 
   def travel_back
     ActiveSupport.travel(0)
+  end
+
+  # Rails' `freeze_time`: `travel_to(Time.now)`, held still — every
+  # read until `travel_back` (the block's end, or the next test's
+  # setup) answers the same whole second.
+  def freeze_time
+    ActiveSupport.freeze(ActiveSupport.now.to_i)
+    return unless block_given?
+    begin
+      yield
+    ensure
+      travel_back
+    end
   end
 
   # `assert_match` left as a method — nilable value handling differs
@@ -1522,9 +1550,10 @@ module RequestDispatch
   # body under `Content-Type: application/json`, and the app reads
   # them back as params because Rails parses that body. The harness
   # hands the params to the controller directly — the parse Rails does
-  # on the way in — and sets the content type and format the encoder
-  # would; a controller that reads the raw body sees an empty one.
-  # campfire's direct-upload tests are the corpus's use.
+  # on the way in — and sets the content type, format, and
+  # `request_parameters` (body alone) the encoder would; a controller
+  # that reads the raw body sees an empty one. campfire's direct-upload
+  # tests are the corpus's use.
   def get(path, params: {}, headers: {}, env: {}, as: nil)
     dispatch_request("GET", path, params, headers.merge(env), as)
   end
@@ -1771,6 +1800,21 @@ module RequestDispatch
     env["QUERY_STRING"]   = request_query
     controller.request = ActionDispatch::Request.for(env, merged)
     controller.request.body = request_body
+    # Body params alone — what ParamsWrapper copies from. Production
+    # dispatchers fill this from the parsed JSON body; the harness
+    # skipped the parse, so without this a wrap under `as: :json`
+    # would nest an empty hash and break flat `params.expect`.
+    if as == :json && !params.is_a?(String)
+      body_params = {}
+      params.each do |k, v|
+        if v.is_a?(Hash)
+          body_params[k.to_s] = stringify_keys(v)
+        else
+          body_params[k.to_s] = v
+        end
+      end
+      controller.request.request_parameters = body_params
+    end
     # Raw query for path-option redirects that keep it — same slot every
     # target's dispatcher seeds (`query_string` on the controller).
     controller.query_string = request_query

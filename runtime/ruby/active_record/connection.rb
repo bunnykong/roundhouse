@@ -199,6 +199,12 @@ module ActiveRecord
       ActiveRecord.adapter.select_rows(sql).map { |row| row.values }
     end
 
+    # `select_value(sql)` — the first column of the first row, or nil
+    # (campfire's room test counts FTS rows this way).
+    def select_value(sql)
+      select_rows(sql).dig(0, 0)
+    end
+
     def exec_query(sql)
       execute(sql)
     end
@@ -268,9 +274,19 @@ module ActiveRecord
     # Reject nil before a key-typed adapter can coerce it to a real
     # zero/empty-string key.
     def self.find(id)
-      raise RecordNotFound, "Couldn't find #{name} with id=#{id}" if id.nil?
+      raise RecordNotFound.new("Couldn't find #{name} without an ID", name, primary_key, id) if id.nil?
       result = _find_primary_key_input(id)
-      raise RecordNotFound, "Couldn't find #{name} with id=#{id}" if result.nil?
+      raise RecordNotFound.new("Couldn't find #{name} with '#{primary_key}'=#{id.inspect}", name, primary_key, id) if result.nil?
+      result
+    end
+
+    # `find_by!` with Rails' readers on the error: the model and its key,
+    # and no id. Here rather than in the shared base.rb, as with `find`
+    # above: base.rb transpiles into the strict targets, whose emitters
+    # render only the `raise Class, message` form.
+    def self.find_by!(conditions)
+      result = find_by(conditions)
+      raise RecordNotFound.new("Couldn't find #{name}", name, primary_key) if result.nil?
       result
     end
 
@@ -388,11 +404,31 @@ module ActiveRecord
       sanitize_sql(statement)
     end
 
+    # Rails' `uncached { }`: the block's reads go to the database, not
+    # the per-request replay cache, which comes back on after it.
+    def self.uncached
+      was = Db.query_cache_enabled?
+      Db.query_cache_end if was
+      begin
+        yield
+      ensure
+        Db.query_cache_begin if was
+      end
+    end
+
     # `Model.transaction { ... }` — the block inside BEGIN/COMMIT, with
     # ROLLBACK + re-raise on any exception. Flat transactions only: the
     # corpus never nests (a nested BEGIN would error in SQLite rather
     # than silently join, which is the honest failure).
-    def self.transaction
+    #
+    # `isolation:`, `requires_new:`, and `joinable:` are Rails'
+    # `DatabaseStatements#transaction` keyword options (the same three
+    # `with_lock` forwards — see base.rb). All three are accepted and
+    # ignored: no isolation levels, and no SAVEPOINT-backed nesting
+    # under this flat implementation. They exist on the signature so a
+    # call that passes them (directly, or via `with_lock`) doesn't
+    # raise `ArgumentError`.
+    def self.transaction(isolation: nil, requires_new: nil, joinable: true)
       Db.exec("BEGIN")
       begin
         result = yield
@@ -402,6 +438,15 @@ module ActiveRecord
         Db.exec("ROLLBACK")
         raise e
       end
+    end
+
+    # `Model.delete_all` for a model without the lowerer-emitted
+    # override: the rows the DELETE removed, read off the statement
+    # rather than counted beforehand. Ruby-family-only because
+    # `changes` is — see base.rb's default.
+    def self.delete_all
+      ActiveRecord.adapter.delete_all(table_name)
+      ActiveRecord.adapter.changes
     end
 
     # `Model.update_counters(id, col: delta, …)` — atomic column

@@ -244,6 +244,41 @@ undocumented one reads as intent to the next session precisely because
 it is applied consistently, and the emit gives no signal that anyone
 weighed it.
 
+### A JSON body is not wrapped on the strict targets
+
+Rails' ParamsWrapper copies a JSON request body under the controller's
+model name (`params[:article]`) when the app's `load_defaults` is 7.0
+or later, an initializer asks for it, or the controller says so with
+`wrap_parameters`. The ruby family does the same: the compiler decides
+each controller's key and copied keys
+(`lower::controller_to_library::params_wrapper`), the generated
+`process_action` opens with `Params.wrap` (`runtime/ruby/params.rb`),
+and the dispatchers hand the request its body params apart from the
+query string and the path (`request_parameters`).
+
+The strict targets do not: Rust and Python read no JSON body at all,
+and the TypeScript server merges one into `params` without keeping the
+body apart. A client posting the fields at the top level gets them at
+the top level only, so `params.expect(article: …)` finds nothing there.
+The capability is `FormatBreadth::wraps_json_params`.
+
+### A missing strong-params resource is `{}` on the strict targets, not 400
+
+Rails refuses `params.expect(article: [...])` when `article` is missing,
+blank, a scalar, an array, or a hash of only unpermitted keys, and
+`params.require(:article)` when it is missing or blank (a scalar reaches
+`permit` and is a 500): both raise `ActionController::ParameterMissing`,
+which an unrescued request answers with 400. The ruby family does the
+same: the typed factory is handed `Params.expect_present(@params, …)` /
+`Params.require_present(@params, …)` (`runtime/ruby/params.rb`), and both
+dispatchers answer an unrescued `ParameterMissing` with 400.
+
+The strict targets have no exception control flow and hand-written
+`Params` primitives, so their factory keeps reading `@params`: a missing
+resource is an empty one, the model's validation usually refuses it, and
+the request answers 422 where Rails says 400. The capability is
+`FormatBreadth::raises_param_missing` (`src/lower/controller/body.rs`).
+
 ### Spinel `Date` is a bounded runtime value
 
 The Spinel target defines a small `Date` class in
@@ -1220,12 +1255,18 @@ warns about.
 overlay records the Hash, so a test that reads `entry[:payload]` and
 subscripts it passes on CRuby and does not on spinel. Both entries carry
 `action: :message` and the stream, which is what `assert_broadcasts`
-reads, so the test helper itself agrees across the two. The narrower
-consequence is in the renderer: `payload_json` writes Integer values
-only, because two call sites in one app is the whole surface anybody has
-asked for. A String or nested value needs the renderer widened — and
-that is a monomorphization decision to take deliberately, not a cast to
-sneak in.
+reads, so the test helper itself agrees across the two.
+
+**The text is what Rails writes** (#619). Rails encodes a broadcast with
+ActiveSupport::JSON, so every value is JSON (a String, nil, a Float, a
+Symbol, a nested Hash or Array) and `<`, `>` and `&` inside strings come
+out as `\u003c`, `\u003e`, `\u0026`. Both lanes write exactly that with
+`JsonBuilder.escape_html_entities(JSON.generate(...))`: spinel's
+`payload_json` and Turbo `Transport`, the overlay's `Registry.deliver`,
+and both lanes' `pubsub.broadcasts`. `payload_json` used to write
+Integer values only (`value.to_s`), enough for campfire's two call sites;
+a String value - a terminal relayed over a channel broadcasts its output
+as one - came out as invalid JSON, which the client drops.
 
 ### Active Storage's engine routes are mounted by the dispatcher
 

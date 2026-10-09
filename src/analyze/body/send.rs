@@ -400,6 +400,16 @@ impl<'a> BodyTyper<'a> {
             Ty::Class { id, .. } if id.0.as_str() == "CSV" && method.as_str() == "generate" => {
                 Some(vec![recv_ty.clone()])
             }
+            // `PTY.spawn(...) { |r, w, pid| ... }` yields the same three
+            // values the non-block form answers as a Tuple.
+            Ty::Class { id, .. }
+                if class_object_receiver
+                    && id.0.as_str() == "PTY"
+                    && method.as_str() == "spawn" =>
+            {
+                let file = Ty::Class { id: ClassId(Symbol::from("File")), args: vec![].into() };
+                Some(vec![file.clone(), file, Ty::Int])
+            }
             // ActiveModel::Errors iteration yields an Error to the block.
             Ty::Class { id, .. } if id.0.as_str() == "ActiveModel::Errors" => {
                 match method.as_str() {
@@ -631,9 +641,18 @@ impl<'a> BodyTyper<'a> {
         else {
             return None;
         };
-        if !args.is_empty() {
+        // `association(:name).loaded?` — the reflection spelling of the
+        // same question, for any association with a flat predicate.
+        let assoc = if assoc.as_str() == "association" && args.len() == 1 {
+            match &*args[0].node {
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value,
+                _ => return None,
+            }
+        } else if args.is_empty() {
+            assoc
+        } else {
             return None;
-        }
+        };
         let flat = Symbol::from(format!("{}_loaded?", assoc.as_str()));
         let has_flat = |id: &ClassId| -> bool {
             let mut current = Some(id);
@@ -1525,6 +1544,19 @@ impl<'a> BodyTyper<'a> {
                 // Timeout::Error. Campfire unfurl + video previewer.
                 if id.0.as_str() == "Timeout" && method.as_str() == "timeout" {
                     return Ty::Untyped;
+                }
+                // `r, w, pid = PTY.spawn(env, *cmd)`: the pty's reader
+                // and writer and the child's pid. With a block — brace,
+                // `do`, or forwarded `&callback` — CRuby yields those
+                // and answers nil. `block_ret.is_some()` is presence
+                // (forwarded procs carry `Untyped`); not only a typed
+                // lambda body.
+                if id.0.as_str() == "PTY" && method.as_str() == "spawn" {
+                    if block_ret.is_some() {
+                        return Ty::Nil;
+                    }
+                    let file = || Ty::Class { id: ClassId(Symbol::from("File")), args: vec![].into() };
+                    return Ty::Tuple { elems: vec![file(), file(), Ty::Int].into() };
                 }
                 // `IO.popen` / `IO.copy_stream` — capture path; popen is
                 // polymorphic (block vs handle), copy_stream answers bytes.

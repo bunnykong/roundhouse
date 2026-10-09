@@ -411,7 +411,10 @@ pub(super) fn ingest_model_with_enum_constants(
                 if let ModelBodyItem::Method { method, .. } = &mut item {
                     visibility.apply(&statement, method);
                 } else if let ModelBodyItem::Unknown { .. } = &item {
-                    visibility.check_model_item(&statement, file)?;
+                    if let Err(err) = visibility.check_model_item(&statement, file) {
+                        super::survey::continue_or_fail(err)?;
+                        continue;
+                    }
                 }
                 item.set_leading_blank_line(leading_blank && i == 0);
                 body.push(item);
@@ -1872,6 +1875,9 @@ pub(super) fn ingest_method(
         if let Some(rest) = pn.rest() {
             if let Some(loc) = rest.as_rest_parameter_node().and_then(|rp| rp.name()) {
                 params.push(crate::dialect::Param::rest(Symbol::from(constant_id_str(&loc))));
+            } else if let Some(name) = &formals.anonymous_rest_name {
+                // An unforwarded `*`: see `forwarding`'s module doc.
+                params.push(crate::dialect::Param::rest(name.clone()));
             }
         }
         for post in pn.posts().iter() {
@@ -2867,7 +2873,7 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // boundary (`JsonColumn`); analysis uses the deliberate gradual
         // type. A `has_json` declaration adds its stronger per-key schema
         // separately in `lower::has_json`.
-        ColumnType::Json => Ty::Untyped,
+        ColumnType::Json | ColumnType::Jsonb => Ty::Untyped,
         ColumnType::Uuid => Ty::Str,
         ColumnType::Reference { .. } => Ty::Int,
     }

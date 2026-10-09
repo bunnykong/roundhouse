@@ -66,9 +66,10 @@ module Main
     accept.split(";", 2)[0].to_s.strip == "*/*"
   end
 
-  def self.request_params(req, path_params)
-    query = ParamBuilder.from_query_string(req.raw_query)
-    return nil if query.nil?
+  # The body's params alone - Rails' `request_parameters`, which
+  # ParamsWrapper copies from - nested by `ParamBuilder`; nil where Rails
+  # answers 400.
+  def self.request_body_params(req)
     body = {}
     if req.form?
       body = ParamBuilder.from_query_string(req.raw_body)
@@ -83,6 +84,13 @@ module Main
       end
       body = ParamBuilder.build(keys, values, present)
     end
+    body
+  end
+
+  def self.request_params(req, path_params)
+    query = ParamBuilder.from_query_string(req.raw_query)
+    return nil if query.nil?
+    body = Main.request_body_params(req)
     return nil if body.nil?
     out = body
     query.each { |k, v| out[k] = v }
@@ -454,6 +462,9 @@ module Main
     # The body's declared type, for the one route that checks it
     # against what was promised: Active Storage's direct-upload PUT.
     request_obj.env["CONTENT_TYPE"] = req.req_headers.fetch("content-type", "")
+    # The body's params alone, for ParamsWrapper (`Params.wrap`).
+    body_params = Main.request_body_params(req)
+    request_obj.request_parameters = body_params unless body_params.nil?
     controller.request = request_obj
     controller.query_string = request_obj.query_string
     ActionController::Current.request = request_obj
@@ -506,9 +517,15 @@ module Main
 
     begin
       controller.process_action(matched.action)
-    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError
+    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
       res.status = 404
       res.body = "<h1>404 Not Found</h1>"
+      return
+    rescue ActionController::ParameterMissing
+      # `params.expect` / `params.require` refused the request and the app
+      # did not rescue it: Rails' rescue_responses answer :bad_request.
+      res.status = 400
+      res.body = "<h1>400 Bad Request</h1>"
       return
     end
 

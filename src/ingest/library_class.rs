@@ -172,7 +172,7 @@ pub fn ingest_rails_application_singleton_methods(
         if path.join("::") != "Rails" {
             continue;
         }
-        let body = walk_decl_body(sc.body(), &owner, file, false)?;
+        let body = walk_decl_body(sc.body(), &owner, file, DeclBodyMode::Instance)?;
         if !body.class_initializers.is_empty() {
             return Err(IngestError::Unsupported {
                 file: file.into(),
@@ -244,7 +244,7 @@ pub(super) fn library_class_and_struct_base(
         mut unknown_calls,
         mut class_initializers,
         class_attributes: _,
-    } = walk_decl_body(class.body(), &owner, file, false)?;
+    } = walk_decl_body(class.body(), &owner, file, DeclBodyMode::Instance)?;
 
     // A `T::Struct` is a class GENERATOR, not an annotation: `const
     // :name, String` IS the constructor and the reader. Lower it into
@@ -1086,7 +1086,7 @@ pub(super) fn library_class_from_module_node_with_scope(
         mut unknown_calls,
         mut class_initializers,
         class_attributes: _,
-    } = walk_decl_body_with_visibility(module.body(), &owner, file, false, &visibility)?;
+    } = walk_decl_body_with_visibility(module.body(), &owner, file, DeclBodyMode::Instance, &visibility)?;
     class_initializers.extend(take_class_ivar_initializers(&mut unknown_calls));
     Ok(LibraryClass {
         name: owner,
@@ -1118,10 +1118,20 @@ fn take_class_ivar_initializers(calls: &mut Vec<Expr>) -> Vec<Expr> {
 /// declarations are still dropped; those surface separately via the
 /// plural ingest entry points.
 ///
-/// `force_class_receiver` is true when we're recursing into a
-/// `class << self` block; it overrides every synthesized method's
-/// receiver to `Class`, so e.g. `attr_accessor :adapter` inside
-/// `class << self` produces class-level getter/setter pairs.
+/// The declaration context determines which receivers/accessors are
+/// synthesized and whether include-like calls affect the class side.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeclBodyMode {
+    Instance,
+    ClassMethods,
+    SingletonClass,
+}
+
+impl DeclBodyMode {
+    fn is_class_side(self) -> bool {
+        !matches!(self, Self::Instance)
+    }
+}
 #[derive(Default)]
 struct DeclBody {
     includes: Vec<ClassId>,
@@ -1461,17 +1471,17 @@ fn walk_decl_body<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
     file: &str,
-    force_class_receiver: bool,
+    mode: DeclBodyMode,
 ) -> IngestResult<DeclBody> {
     let visibility = Visibility::resolve(body.as_ref(), file, None)?;
-    walk_decl_body_with_visibility(body, owner, file, force_class_receiver, &visibility)
+    walk_decl_body_with_visibility(body, owner, file, mode, &visibility)
 }
 
 fn walk_decl_body_with_visibility<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
     file: &str,
-    force_class_receiver: bool,
+    mode: DeclBodyMode,
     visibility: &Visibility,
 ) -> IngestResult<DeclBody> {
     let mut out = DeclBody::default();
@@ -1587,7 +1597,7 @@ fn walk_decl_body_with_visibility<'pr>(
         }
         // A direct write initializes this class/module object. Inside
         // `class << self` the receiver is its singleton class instead.
-        if !force_class_receiver
+        if !mode.is_class_side()
             && (stmt.as_instance_variable_write_node().is_some()
                 || stmt.as_instance_variable_or_write_node().is_some()
                 || stmt.as_instance_variable_and_write_node().is_some()
@@ -1619,7 +1629,7 @@ fn walk_decl_body_with_visibility<'pr>(
             // / `module ClassMethods`, and (like those) contributes no
             // `included` method of its own.
             if let Some(singleton_body) = included_hook_class_methods_body(&def) {
-                out.extend(walk_decl_body_with_visibility(Some(singleton_body), owner, file, true, visibility)?);
+                out.extend(walk_decl_body_with_visibility(Some(singleton_body), owner, file, DeclBodyMode::ClassMethods, visibility)?);
                 continue;
             }
             if has_class_methods && is_class_methods_bridge(&def) {
@@ -1639,7 +1649,7 @@ fn walk_decl_body_with_visibility<'pr>(
                     m.visibility = crate::dialect::MethodVisibility::Public;
                 }
             }
-            if force_class_receiver || module_function_active || extend_self_active {
+            if mode.is_class_side() || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
             }
             // A real `def` replaces a synthesized attr_* half of the
@@ -1697,7 +1707,7 @@ fn walk_decl_body_with_visibility<'pr>(
         // `class << self ... end` — singleton class block. Body
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
-            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, true, visibility)?);
+            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, DeclBodyMode::SingletonClass, visibility)?);
             continue;
         }
         // `module ClassMethods … end` — ActiveSupport::Concern's OTHER
@@ -1711,7 +1721,7 @@ fn walk_decl_body_with_visibility<'pr>(
         // reason — otherwise the same defs would emit twice.
         if let Some(m) = stmt.as_module_node() {
             if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
-                let class_methods = walk_decl_body_with_visibility(m.body(), owner, file, true, visibility)?;
+                let class_methods = walk_decl_body_with_visibility(m.body(), owner, file, DeclBodyMode::ClassMethods, visibility)?;
                 // ClassMethods methods materialize on the enclosing module.
                 // Mattr/cattr `@@attr = nil` seeds (synthetic or matching a
                 // declared class attribute) relocate with them. Any other
@@ -1731,7 +1741,7 @@ fn walk_decl_body_with_visibility<'pr>(
         if let Some(alias) = stmt.as_alias_method_node() {
             let to = alias_keyword_name(&alias.new_name());
             let from = alias_keyword_name(&alias.old_name());
-            let receiver = if force_class_receiver { MethodReceiver::Class } else { MethodReceiver::Instance };
+            let receiver = if mode.is_class_side() { MethodReceiver::Class } else { MethodReceiver::Instance };
             if let Some((to, from)) = to.zip(from) {
                 if let Some(source) = out.methods.iter().rposition(|method| method.name.as_str() == from && method.receiver == receiver) {
                     let mut copy = out.methods[source].clone();
@@ -1766,13 +1776,24 @@ fn walk_decl_body_with_visibility<'pr>(
                 // registry's concern fold copies them onto includers.
                 if kw == "class_methods" {
                     if let Some(block) = call.block().and_then(|blk| blk.as_block_node()) {
-                        out.extend(walk_decl_body_with_visibility(block.body(), owner, file, true, visibility)?);
+                        out.extend(walk_decl_body_with_visibility(block.body(), owner, file, DeclBodyMode::ClassMethods, visibility)?);
                         continue;
                     }
                 }
                 match kw {
                     "include" => {
                         if let Some(args) = call.arguments() {
+                            let args: Vec<_> = args.arguments().iter().collect();
+                            if mode == DeclBodyMode::SingletonClass
+                                && args.iter().all(|arg| constant_path_of(arg).is_some())
+                            {
+                                let mut expr = ingest_expr(&stmt, file)?;
+                                if let ExprNode::Send { method, .. } = &mut *expr.node {
+                                    *method = Symbol::from("extend");
+                                }
+                                out.unknown_calls.push(expr);
+                                continue;
+                            }
                             // `include Resolvers.for(:product)`: a module
                             // computed at load time. Dropping it emitted
                             // the class without its mixin and told every
@@ -1780,14 +1801,14 @@ fn walk_decl_body_with_visibility<'pr>(
                             // Kept as an unknown call: the Ruby family
                             // replays it, the rest see a class body they
                             // cannot model.
-                            if args.arguments().iter().any(|arg| {
+                            if args.iter().any(|arg| {
                                 constant_path_of(&arg).is_none() && !crate::ingest::util::is_rails_url_helpers_chain(&arg)
                             }) {
                                 if let Ok(e) = ingest_expr(&stmt, file) {
                                     out.unknown_calls.push(e);
                                 }
                             }
-                            for arg in args.arguments().iter() {
+                            for arg in args {
                                 if let Some(path) = constant_path_of(&arg) {
                                     // lobsters' `TimeSeries` includes
                                     // `ActionView::Helpers::NumberHelper`
@@ -1816,6 +1837,25 @@ fn walk_decl_body_with_visibility<'pr>(
                                     out.includes.push(ClassId(Symbol::from("RouteHelpers")));
                                 }
                             }
+                        }
+                    }
+                    "send" | "public_send"
+                        if mode == DeclBodyMode::SingletonClass
+                            && call.arguments().is_some_and(|args| {
+                                args.arguments().iter().next().is_some_and(|arg| {
+                                    symbol_value(&arg).as_deref() == Some("include")
+                                })
+                            }) =>
+                    {
+                        if let Ok(mut expr) = ingest_expr(&stmt, file) {
+                            if let ExprNode::Send { args, .. } = &mut *expr.node {
+                                if let Some(first) = args.first_mut() {
+                                    first.node = Box::new(ExprNode::Lit {
+                                        value: crate::expr::Literal::Sym { value: Symbol::from("extend") },
+                                    });
+                                }
+                            }
+                            out.unknown_calls.push(expr);
                         }
                     }
                     "attr_reader" | "attr_writer" | "attr_accessor"
@@ -1863,7 +1903,7 @@ fn walk_decl_body_with_visibility<'pr>(
                             class_attributes.extend(names.iter().cloned());
                             out.class_attributes.extend(names.iter().cloned());
                         }
-                        let recv = if is_class_attr || force_class_receiver {
+                        let recv = if is_class_attr || mode.is_class_side() {
                             MethodReceiver::Class
                         } else {
                             MethodReceiver::Instance
@@ -1920,10 +1960,10 @@ fn walk_decl_body_with_visibility<'pr>(
                     // not define (an inherited or gem method) is still
                     // captured below.
                     "alias_method"
-                        if alias_source(&call, &out.methods, force_class_receiver).is_some() =>
+                        if alias_source(&call, &out.methods, mode.is_class_side()).is_some() =>
                     {
                         let (to, source) =
-                            alias_source(&call, &out.methods, force_class_receiver).unwrap();
+                            alias_source(&call, &out.methods, mode.is_class_side()).unwrap();
                         let mut copy = out.methods[source].clone();
                         copy.name = Symbol::from(to.as_str());
                         copy.name_span = Span {
@@ -2463,6 +2503,9 @@ pub(super) fn ingest_library_method(
                     if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
                         params.push(Param::rest(Symbol::from(s)));
                     }
+                } else if let Some(name) = &formals.anonymous_rest_name {
+                    // An unforwarded `*`: see `forwarding`'s module doc.
+                    params.push(Param::rest(name.clone()));
                 }
             }
         }
@@ -3399,6 +3442,7 @@ const CONCERN_MODEL_MACROS: &[&str] = &[
     "has_json",
     "typed_store",
     "broadcasts_to",
+    "delegate",
     // `included do include Other end` runs on the includer: spliced
     // after the includer's own `include` line, `Other` sits ahead of
     // this concern in the lookup order, as in Ruby.

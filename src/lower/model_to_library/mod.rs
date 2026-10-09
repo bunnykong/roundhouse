@@ -1058,6 +1058,21 @@ pub(crate) fn build_methods(
     build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar)
 }
 
+/// Return the instance method surface synthesized for a model, for ingest
+/// passes that need collision checks without depending on `MethodDef` details.
+pub(crate) fn method_names(
+    model: &Model,
+    models: &[Model],
+    schema: &Schema,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
+) -> HashSet<String> {
+    build_methods(model, models, schema, params_specs)
+        .into_iter()
+        .filter(|method| method.receiver == MethodReceiver::Instance)
+        .map(|method| method.name.as_str().to_string())
+        .collect()
+}
+
 /// Add the schema dispatch only when its shared Ruby-family owner is shipped.
 fn build_methods_with_finder_inputs(
     model: &Model,
@@ -1265,13 +1280,14 @@ fn build_methods_with_finder_inputs(
 ///     `@parsed_url` reader left the ivar untyped/unread and Spinel's
 ///     strict emit failed with `error[ivar_unresolved]`.
 ///   * Column / association / scope synthesizers still win over a
-///     duplicate body name (the corpus does not redefine those). The
-///     replace predicate matches unsigned bare-ivar attr_* halves only
-///     (`signature: None`); schema column readers stamp a signature and
-///     are never replaced.
+///     duplicate body name. A later source-level `delegate` may replace
+///     an earlier real method, but only when that method was already
+///     selected from the model body; generated framework methods are not
+///     reordered by source spans.
 fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     use crate::dialect::{AccessorKind, ModelBodyItem};
     use crate::expr::{ExprNode, LValue};
+    let mut selected_source_methods = HashSet::new();
     for item in &model.body {
         let ModelBodyItem::Method { method, .. } = item else { continue };
         if let Some(idx) = methods
@@ -1309,12 +1325,22 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
                     }
                     AccessorKind::Method => false,
                 };
-            if incoming_is_real && existing_is_attr_half {
+            let incoming_is_later_delegate =
+                method.receiver == crate::dialect::MethodReceiver::Instance
+                    && !method.name_span.is_synthetic()
+                    && method.name_span.start == method.name_span.end
+                    && selected_source_methods.contains(&existing.name_span)
+                    && existing.name_span.file == method.name_span.file
+                    && method.name_span.start > existing.name_span.start;
+            if incoming_is_real && (existing_is_attr_half || incoming_is_later_delegate) {
+                selected_source_methods.remove(&existing.name_span);
                 methods[idx] = method.clone();
+                selected_source_methods.insert(method.name_span);
             }
             continue;
         }
         methods.push(method.clone());
+        selected_source_methods.insert(method.name_span);
     }
 }
 
@@ -1335,14 +1361,30 @@ pub(crate) fn push_scope_methods(
         // `__rel` is an optional POSITIONAL param — it must precede any
         // keyword params in the def (`def recent(user = nil, __rel = …,
         // unmerged: true)`), or the signature is a syntax error.
-        let insert_at = params
-            .iter()
-            .position(|p| p.keyword)
-            .unwrap_or(params.len());
-        params.insert(
-            insert_at,
-            Param::with_default(rel_param.clone(), relation_new_self()),
-        );
+        //
+        // A REST param (`*tags`) is the same exception `insert_rel_param`
+        // (the emit-side twin of this function, for user-written
+        // relation-taking class methods) has: an optional positional
+        // can't follow a splat, so `__rel` goes in as an optional
+        // KEYWORD instead, ahead of any `**opts`. `parse_scope` drops a
+        // scope lambda's splat today, so `scope.params` never actually
+        // carries a rest param yet — this branch is dead until that
+        // changes (a separate, later fix) — but kept here so the two
+        // insertion sites stay consistent rather than silently diverging
+        // the day it does.
+        if params.iter().any(|p| p.rest && !p.keyword) {
+            let at = params.iter().position(|p| p.rest && p.keyword).unwrap_or(params.len());
+            params.insert(at, Param::keyword(rel_param.clone(), Some(relation_new_self())));
+        } else {
+            let insert_at = params
+                .iter()
+                .position(|p| p.keyword)
+                .unwrap_or(params.len());
+            params.insert(
+                insert_at,
+                Param::with_default(rel_param.clone(), relation_new_self()),
+            );
+        }
 
         let mut body = scope.body.clone();
         crate::lower::scope_chain::rewrite_scope_body(
@@ -1710,6 +1752,15 @@ fn build_class_info_with_finder_inputs(
                 Ty::Class { .. } => true,
                 Ty::Union { variants } => variants.iter().any(|ty| matches!(ty, Ty::Class { .. }))
                     && variants.iter().all(|ty| matches!(ty, Ty::Class { .. } | Ty::Nil)),
+                // An Array of scalars carries no key coercion or
+                // record identity to repeat, and without it a test's
+                // `assert_equal [2, 4], Model.evens` reads an untyped
+                // call: the `.to_a` the assertion lowering adds stays
+                // a dynamic send no typed target defines on its list.
+                Ty::Array { elem } => matches!(
+                    **elem,
+                    Ty::Int | Ty::Float | Ty::Str | Ty::Sym | Ty::Bool
+                ),
                 _ => false,
             })
         else {
@@ -2288,15 +2339,7 @@ fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
         .map(|p| crate::ty::Param {
             name: p.name.clone(),
             ty: Ty::Untyped.into(),
-            kind: if p.rest {
-                crate::ty::ParamKind::Rest
-            } else if p.keyword {
-                crate::ty::ParamKind::Keyword { required: p.default.is_none() }
-            } else if p.default.is_some() {
-                crate::ty::ParamKind::Optional
-            } else {
-                crate::ty::ParamKind::Required
-            },
+            kind: p.ty_kind(),
         })
         .collect();
     method.signature = Some(Ty::Fn {
@@ -2384,14 +2427,15 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
         ColumnType::Boolean => Ty::Bool,
         ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Str,
         ColumnType::Binary => Ty::Str,
-        // A `json` column is stored TEXT and nothing parses it: the
+        // A schema-less `json` or `jsonb` column is stored TEXT and nothing
+        // parses it: the
         // Row field, hydration, `[]`, `attributes` and the adapter's
         // escape all move the serialized string. `Hash[String, String]`
         // was a declaration no synthesized path implemented. What gives
         // such a column STRUCTURE is a `has_json` declaration, and that
         // is modeled as typed per-key accessors over this text
         // (`lower::has_json`), not as a Hash the whole column decodes to.
-        ColumnType::Json => Ty::Str,
+        ColumnType::Json | ColumnType::Jsonb => Ty::Str,
         ColumnType::Uuid => Ty::Str,
         ColumnType::Reference { .. } => Ty::Int,
     }
@@ -2609,6 +2653,28 @@ mod tests {
             callable.signature = None;
             callable.body.ty = Some(ty);
             assert!(!article_info(&app, &methods).instance_methods.contains_key(&Symbol::from("callable")));
+        }
+    }
+
+    /// A test body types `Article.evens` from this registry; without the
+    /// entry `assert_equal [2, 4], Article.evens` compared against an
+    /// untyped call, and its `.to_a` reached typed targets as a dynamic
+    /// send their lists do not define.
+    #[test]
+    fn scalar_array_body_type_is_registered_but_not_an_untyped_one() {
+        let app = app("  def self.evens\n    [1, 2].map { |x| x * 2 }\n  end");
+        let mut methods = article_methods(&app);
+        let ints = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
+        for (ty, kept) in [(ints.clone(), true), (Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }, false)] {
+            let evens = methods.iter_mut().find(|m| m.name.as_str() == "evens").unwrap();
+            evens.signature = None;
+            evens.body.ty = Some(ty);
+            let got = article_info(&app, &methods).class_methods.get(&Symbol::from("evens")).cloned();
+            match got {
+                Some(Ty::Fn { ret, .. }) if kept => assert_eq!(*ret, ints),
+                None if !kept => {}
+                other => panic!("unexpected registry entry: {other:?}"),
+            }
         }
     }
 

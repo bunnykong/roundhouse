@@ -291,6 +291,9 @@ pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol 
 pub struct UserMethodReturns {
     pub instance: HashMap<Symbol, Option<ClassId>>,
     pub class: HashMap<(ClassId, Symbol), ClassId>,
+    /// Scopes whose body answers something OTHER than a relation (see
+    /// [`non_relation_scopes`]). A call to one ends the chain's model.
+    pub non_relation_scopes: HashSet<(ClassId, Symbol)>,
 }
 
 impl UserMethodReturns {
@@ -326,7 +329,80 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
                 .or_insert(Some(target));
         }
     }
+    reg.non_relation_scopes = non_relation_scopes(models, &model_ids);
     reg
+}
+
+/// Scopes that answer a non-relation VALUE — campfire's `scope
+/// :last_page, -> { last_page_of(PAGE_SIZE) }`, whose class method ends
+/// in `Page.load(…)`, an Array subclass. Rails returns a scope body's
+/// value as-is when it is not nil, so such a call is not a relation and
+/// `page.first(2)` on it is `Array#first`, not the counted terminal.
+///
+/// Proved, not guessed: the body's tail — followed through same-model
+/// bare calls to scopes and class methods — must end in a call on a
+/// constant that names no model. Anything else stays a relation, as
+/// before.
+fn non_relation_scopes(models: &[Model], model_ids: &HashSet<ClassId>) -> HashSet<(ClassId, Symbol)> {
+    let mut out = HashSet::new();
+    for m in models {
+        let mut bodies: HashMap<&Symbol, &Expr> = HashMap::new();
+        for item in &m.body {
+            match item {
+                ModelBodyItem::Scope { scope, .. } => {
+                    bodies.insert(&scope.name, &scope.body);
+                }
+                ModelBodyItem::Method { method, .. }
+                    if method.receiver == crate::dialect::MethodReceiver::Class =>
+                {
+                    bodies.entry(&method.name).or_insert(&method.body);
+                }
+                _ => {}
+            }
+        }
+        for item in &m.body {
+            let ModelBodyItem::Scope { scope, .. } = item else { continue };
+            if tail_is_foreign_const_call(&scope.body, &bodies, model_ids, 0) {
+                out.insert((m.name.clone(), scope.name.clone()));
+            }
+        }
+    }
+    out
+}
+
+fn tail_is_foreign_const_call(
+    body: &Expr,
+    bodies: &HashMap<&Symbol, &Expr>,
+    model_ids: &HashSet<ClassId>,
+    depth: usize,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let tail = match &*body.node {
+        ExprNode::Seq { exprs } => match exprs.last() {
+            Some(e) => e,
+            None => return false,
+        },
+        _ => body,
+    };
+    let ExprNode::Send { recv, method, .. } = &*tail.node else {
+        return false;
+    };
+    match recv.as_ref().map(|r| &*r.node) {
+        Some(ExprNode::Const { path }) => {
+            let name = path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
+            let last = path.last().map(|p| p.as_str()).unwrap_or("");
+            !model_ids.iter().any(|id| {
+                id.0.as_str() == name || id.0.as_str().rsplit("::").next() == Some(last)
+            })
+        }
+        // A bare/self call, or a scope reached on a relation chain
+        // (`before(m).last_page`): follow the named sibling's body.
+        _ => bodies
+            .get(method)
+            .is_some_and(|b| tail_is_foreign_const_call(b, bodies, model_ids, depth + 1)),
+    }
 }
 
 // ---- class methods reached THROUGH an association ------------------
@@ -1811,6 +1887,8 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                             | "destroy_all"
                             | "delete_all"
                             | "update_all"
+                            | "find_each"
+                            | "find_in_batches"
                     )
             {
                 if let ExprNode::Send { method: aname, args: aargs, block: None, .. } = &*r.node {
@@ -2109,6 +2187,15 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Does a call to scope `method` on `model` keep the relation? False
+    /// for a scope proved to answer some other value
+    /// ([`UserMethodReturns::non_relation_scopes`]).
+    fn scope_keeps_relation(&self, model: &ClassId, method: &Symbol) -> bool {
+        !self
+            .user_returns
+            .non_relation_scopes
+            .contains(&(model.clone(), method.clone()))
+    }
     fn scope_of(&self, model: &ClassId, method: &Symbol) -> bool {
         self.scopes.get(model).is_some_and(|s| s.contains_key(method))
     }
@@ -2184,21 +2271,33 @@ fn syn(span: crate::span::Span, node: ExprNode) -> Expr {
 /// the relation, so `hottest` → `Story.hottest(nil, nil, __rel)` not
 /// `Story.hottest(__rel)`. `leading` is the scope's user params (no `__rel`).
 fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span: crate::span::Span) -> Vec<Expr> {
+    // A callee with a REST param (`*tags`) cannot take `__rel` as a
+    // trailing optional positional — an optional positional can't
+    // follow a splat, which is why `insert_rel_param` makes `__rel` a
+    // keyword param instead for exactly this shape. Thread it the same
+    // way here: no positional padding (there is no fixed slot to pad
+    // toward — Ruby fills a bare call's REST with nothing, not a
+    // specific param), and pass the relation as `__rel: rel`, a keyword
+    // argument.
+    let has_rest = leading.is_some_and(|ps| ps.iter().any(|p| p.rest && !p.keyword));
+
     // A trailing kwargs hash (`base(user, unmerged: unmerged)`) binds
     // the scope's KEYWORD params; the relation is a positional and must
     // land before it. Split it off, pad, thread, re-append.
     //
-    // ONLY when the callee declares keywords. Ruby hands `f(a: 1)` to a
-    // `def f(h)` as the POSITIONAL hash `h` — which is how campfire's
-    // `messages.create_with_attachment!(creator:, attachment:)` reaches
-    // its one `attributes` param, and how a `**opts` param (ingested as
-    // a positional defaulting to `{}`) is fed. Splitting it off there
-    // padded that param with `nil` and pushed the hash PAST `__rel`,
-    // handing three positionals to a method taking one or two. Left in
-    // place it is an ordinary argument, so it counts toward the padding
-    // below — and its `kwargs` flag has to go, or the emitter renders it
-    // bare and Ruby reads keywords ahead of the `__rel` positional.
-    let takes_keywords = leading.map_or(true, |ps| ps.iter().any(|p| p.keyword));
+    // ONLY when the callee declares keywords (or, now, has a rest param
+    // — its `__rel` is itself a keyword, so the same split applies).
+    // Ruby hands `f(a: 1)` to a `def f(h)` as the POSITIONAL hash `h` —
+    // which is how campfire's `messages.create_with_attachment!(creator:,
+    // attachment:)` reaches its one `attributes` param, and how a
+    // `**opts` param (ingested as a positional defaulting to `{}`) is
+    // fed. Splitting it off there padded that param with `nil` and
+    // pushed the hash PAST `__rel`, handing three positionals to a
+    // method taking one or two. Left in place it is an ordinary
+    // argument, so it counts toward the padding below — and its
+    // `kwargs` flag has to go, or the emitter renders it bare and Ruby
+    // reads keywords ahead of the `__rel` positional.
+    let takes_keywords = has_rest || leading.map_or(true, |ps| ps.iter().any(|p| p.keyword));
     let kwargs_tail = match args.last() {
         Some(e) if matches!(&*e.node, ExprNode::Hash { kwargs: true, .. }) => {
             if takes_keywords {
@@ -2212,6 +2311,31 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
         }
         _ => None,
     };
+
+    if has_rest {
+        // No padding: the pad loop below doesn't exclude a rest param
+        // itself (it only filters out `p.keyword`), so a bare chained
+        // call to a rest callee — `widget.active.those_tagged` — used
+        // to pad a spurious positional `nil` into `*tags` before
+        // appending the relation. Skipping padding entirely for a rest
+        // callee fixes that latent bug along with the syntax error:
+        // `Widget.those_tagged(__rel: Widget.active)`, not
+        // `Widget.those_tagged(nil, __rel: Widget.active)`.
+        let rel_key = syn(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("__rel") } });
+        let mut entries: Vec<(Expr, Expr)> = match kwargs_tail {
+            Some(tail) => {
+                let ExprNode::Hash { entries, .. } = *tail.node else {
+                    unreachable!("kwargs_tail is always a kwargs Hash")
+                };
+                entries
+            }
+            None => Vec::new(),
+        };
+        entries.push((rel_key, rel));
+        args.push(syn(span, ExprNode::Hash { entries, kwargs: true }));
+        return args;
+    }
+
     if let Some(params) = leading {
         // Only positional params pad — keywords are bound by name via
         // the kwargs tail (or their own defaults).
@@ -2268,6 +2392,10 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
         // is a NoMethodError today and a scoped statement after
         // (campfire's `memberships.destroy_by user: users`).
         "destroy_by" | "delete_by" => block.is_none(),
+        // Batch iteration: a query Rails runs against the association's
+        // relation (`room.messages.find_each(&:destroy)`), where the
+        // association read alone is an Array with no `find_each`.
+        "find_each" | "find_in_batches" => true,
         _ => matches!(
             name,
             "ids" | "pluck" | "count" | "first" | "last" | "exists?" | "any?" | "empty?" | "size"
@@ -3179,9 +3307,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 }
                 if ctx.scope_of(self_model, &method) {
                     let leading = ctx.scope_params(self_model, &method);
+                    let keeps = ctx.scope_keeps_relation(self_model, &method);
                     let new_args = thread_rel(args, var_expr(span, rel), leading, span);
                     *expr = put(span, Some(const_expr(span, self_model)), method, new_args, block, true);
-                    return Some(self_model.clone());
+                    return keeps.then(|| self_model.clone());
                 }
                 // One of the model's own class methods that takes the
                 // relation (`last_page_of(PAGE_SIZE)` in campfire's
@@ -3224,9 +3353,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return Some(self_model);
                 }
                 if ctx.scope_of(&self_model, &method) {
+                    let keeps = ctx.scope_keeps_relation(&self_model, &method);
                     *expr =
                         put(span, Some(const_expr(span, &self_model)), method, args, block, true);
-                    return Some(self_model);
+                    return keeps.then_some(self_model);
                 }
                 if is_relation_chain_method(method.as_str()) {
                     let _ = lower_relation_args(&self_model, &method, &mut args, ctx);
@@ -3328,8 +3458,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return None;
                 }
                 if ctx.scope_of(&m, &method) {
+                    let keeps = ctx.scope_keeps_relation(&m, &method);
                     *expr = put(span, Some(r), method, args, block, parenthesized);
-                    return Some(m);
+                    return keeps.then_some(m);
                 }
                 if is_relation_chain_method(method.as_str())
                     || method.as_str() == "all"
@@ -3667,6 +3798,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             }
                             if is_scope {
                                 let leading = ctx.scope_params(&target, &method);
+                                let keeps = ctx.scope_keeps_relation(&target, &method);
                                 let new_args = thread_rel(args, seed, leading, span);
                                 *expr = put(
                                     span,
@@ -3676,7 +3808,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                     block,
                                     true,
                                 );
-                                return Some(target);
+                                return keeps.then_some(target);
                             }
                             // `find_sole_by` on a seeded association —
                             // `gadget.widgets.find_sole_by(created_at:
@@ -3840,9 +3972,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 }
                 if ctx.scope_of(&mr, &method) {
                     let leading = ctx.scope_params(&mr, &method);
+                    let keeps = ctx.scope_keeps_relation(&mr, &method);
                     let new_args = thread_rel(args, r, leading, span);
                     *expr = put(span, Some(const_expr(span, &mr)), method, new_args, block, true);
-                    return Some(mr);
+                    return keeps.then_some(mr);
                 }
                 // A registered association-scoped class method takes the
                 // relation the same way a scope does — the relation is
@@ -4129,6 +4262,76 @@ mod tests {
         let out = thread_rel(vec![], rel_marker(), Some(&vec![]), span());
         assert_eq!(out.len(), 1);
         assert!(is_rel(&out[0]));
+    }
+
+    /// A trailing kwargs-Hash arg's entries, panicking with a readable
+    /// message if `e` isn't one.
+    fn kwargs_entries(e: &Expr) -> &[(Expr, Expr)] {
+        match &*e.node {
+            ExprNode::Hash { entries, kwargs: true } => entries,
+            other => panic!("not a kwargs Hash: {other:?}"),
+        }
+    }
+
+    /// `(key, value)` names `__rel` and the value is the threaded marker.
+    fn is_rel_kwarg(entry: &(Expr, Expr)) -> bool {
+        matches!(&*entry.0.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "__rel")
+            && is_rel(&entry.1)
+    }
+
+    #[test]
+    fn thread_rel_rest_callee_zero_args_threads_as_a_keyword_with_no_nil_pad() {
+        // `def those_tagged(*tags)` called bare (`Widget.active.those_tagged`)
+        // — the LATENT bug: the old pad loop didn't exclude a rest param
+        // from `filter(|p| !p.keyword)`, so it padded a positional `nil`
+        // into `*tags` before appending the relation. Fixed shape: no
+        // padding at all, and the relation threads as a keyword —
+        // `Widget.those_tagged(__rel: Widget.active)`, not
+        // `Widget.those_tagged(nil, __rel: Widget.active)` and not
+        // `Widget.those_tagged(__rel: Widget.active)` as a POSITIONAL
+        // (which would be a syntax error on the def side).
+        let leading = vec![Param::rest(Symbol::from("tags"))];
+        let out = thread_rel(vec![], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 1, "no nil padding, no separate positional: {out:?}");
+        let entries = kwargs_entries(&out[0]);
+        assert_eq!(entries.len(), 1, "just __rel:, nothing else: {entries:?}");
+        assert!(is_rel_kwarg(&entries[0]), "a single __rel: kwarg: {entries:?}");
+    }
+
+    #[test]
+    fn thread_rel_rest_callee_with_supplied_args_appends_the_keyword() {
+        // `Widget.active.those_tagged(:a)` → the splat-fed positional
+        // stays exactly as the caller wrote it; `__rel:` is appended.
+        let leading = vec![Param::rest(Symbol::from("tags"))];
+        let a = Expr::new(span(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from("a") } });
+        let out = thread_rel(vec![a], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&*out[0].node, ExprNode::Lit { value: Literal::Sym { .. } }));
+        let entries = kwargs_entries(&out[1]);
+        assert_eq!(entries.len(), 1);
+        assert!(is_rel_kwarg(&entries[0]));
+    }
+
+    #[test]
+    fn thread_rel_rest_callee_merges_into_an_existing_kwargs_tail() {
+        // `def those_tagged(*tags, limit: 10)` called as
+        // `those_tagged(:a, limit: 5)` — the existing `limit:` kwarg and
+        // the new `__rel:` kwarg land in ONE trailing Hash, not two.
+        let leading = vec![
+            Param::rest(Symbol::from("tags")),
+            Param::keyword(Symbol::from("limit"), Some(int_lit(10))),
+        ];
+        let a = Expr::new(span(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from("a") } });
+        let limit_key = Expr::new(span(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from("limit") } });
+        let kw = Expr::new(
+            span(),
+            ExprNode::Hash { entries: vec![(limit_key, int_lit(5))], kwargs: true },
+        );
+        let out = thread_rel(vec![a, kw], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 2, "one positional, ONE merged kwargs hash: {out:?}");
+        let entries = kwargs_entries(&out[1]);
+        assert_eq!(entries.len(), 2, "limit: AND __rel: in the same hash: {entries:?}");
+        assert!(entries.iter().any(is_rel_kwarg), "entries {entries:?}");
     }
 
     // ---- lower_relation_args ----------------------------------------

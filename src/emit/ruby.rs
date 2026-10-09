@@ -588,6 +588,8 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
             route_id_segments: Some(&route_ids),
             inferred_params: Some(&app.inferred_method_params),
             models: &app.models,
+            wrap_parameters_by_default: app.wrap_parameters_by_default,
+            concern_spliced_actions: Some(&app.concern_spliced_actions),
         },
     )
 }

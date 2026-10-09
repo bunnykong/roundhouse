@@ -11,6 +11,10 @@ mod emit_and_run;
 mod class_attribute;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
+#[path = "emit_and_run/strong_params.rs"]
+mod strong_params;
+#[path = "emit_and_run/params_wrapper.rs"]
+mod params_wrapper;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
@@ -20,8 +24,32 @@ mod runtime_block_signature;
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_broadcast_json.rs"]
+mod cable_broadcast_json_contract;
+#[path = "emit_and_run/cable_broadcast_json.rs"]
+mod cable_broadcast_json;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
+#[path = "support/delegate_association.rs"]
+mod delegate_association;
+#[path = "support/io_process_constants.rs"]
+mod io_process_constants_contract;
+#[path = "emit_and_run/io_process_constants.rs"]
+mod io_process_constants;
+#[path = "emit_and_run/helper_anonymous_rest.rs"]
+mod helper_anonymous_rest;
+#[path = "emit_and_run/controller_response_body.rs"]
+mod controller_response_body;
+#[path = "emit_and_run/render_to_string_partial_ivar.rs"]
+mod render_to_string_partial_ivar;
+#[path = "emit_and_run/request_optional_port.rs"]
+mod request_optional_port;
+#[path = "emit_and_run/controller_super_ivars.rs"]
+mod controller_super_ivars;
+#[path = "emit_and_run/assoc_pluck_typed.rs"]
+mod assoc_pluck_typed;
+#[path = "emit_and_run/sti_global_id.rs"]
+mod sti_global_id;
 
 /// A generated text column on the real-blog Article model exercises the
 /// schema-to-runtime path together with Rails-style symbol callbacks. The
@@ -95,6 +123,70 @@ fn anonymous_keyword_forwarding_runs_without_capturing_or_reordering_values() {
         .expect("emitted keyword forwarding class");
     assert!(emitted.contains("class KeywordForwarder"), "{emitted}");
     assert!(emitted.contains("request(kind: :get, path: path, **)"), "{emitted}");
+}
+
+#[test]
+fn model_concern_delegate_through_belongs_to_runs() {
+    let run = delegate_association::overlay().run_ruby(delegate_association::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("model concern delegate passed"));
+}
+
+#[test]
+fn later_delegate_replaces_an_earlier_handwritten_method() {
+    let run = delegate_association::overlay()
+        .write(
+            "app/models/comment.rb",
+            r#"class Comment < ApplicationRecord
+  belongs_to :article
+
+  def article_body
+    "handwritten"
+  end
+
+  delegate :body, to: :article, prefix: true
+end
+"#,
+        )
+        .run_ruby(
+            r#"article = Article.create!(title: "Association title", body: "article body")
+comment = Comment.create!(article: article, commenter: "Reader", body: "Comment body")
+raise "later delegate did not replace the earlier method" unless comment.article_body == "article body"
+puts "later delegate ordering passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("later delegate ordering passed"));
+}
+
+/// `to_sql` renders a relation as SQL another query can embed: the
+/// subquery runs, and selects exactly the commented article.
+#[test]
+fn a_relations_to_sql_runs_as_a_subquery() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def self.commented
+    where(\"articles.id IN (#{Comment.select(:article_id).to_sql})\")
+  end
+",
+        )
+        .run_ruby(
+            r#"commented = Article.create!(title: "Commented", body: "A sufficiently long body.")
+Article.create!(title: "Quiet", body: "A sufficiently long body.")
+Comment.create!(article: commented, commenter: "Reader", body: "Comment body")
+sql = Article.where(title: "Quiet").to_sql
+raise "to_sql: #{sql}" unless sql.start_with?("SELECT") && sql.include?("articles")
+ids = Article.commented.map(&:id)
+raise "subquery: #{ids.inspect}" unless ids == [commented.id]
+puts "to_sql subquery passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("to_sql subquery passed"));
 }
 
 /// A class object and its instances that define the same names: each
@@ -454,6 +546,9 @@ fn dynamic_engine_route_targets_keep_their_source_boundary() {
         engine_mount::describe_errors(&app, &errors)
     );
 }
+
+#[path = "emit_and_run/integer_query_exists.rs"]
+mod integer_query_exists;
 
 #[test]
 fn critic_corrections_preserve_class_objects_reflection_and_operators() {
@@ -1556,16 +1651,17 @@ end
         )
         .write(
             "app/models/page.rb",
-            "class Page < ApplicationRecord\n  has_markdown :body\nend\n",
+            "class Page < ApplicationRecord\n  has_markdown :body\n\n  def searchable_content\n    body.content\n  end\nend\n",
         )
         .write(
             "app/models/section.rb",
-            "class Section < ApplicationRecord\nend\n",
+            "class Section < ApplicationRecord\n  def searchable_content\n    body\n  end\nend\n",
         )
         .write(
             "app/models/entry.rb",
             r#"class Entry < ApplicationRecord
   delegated_type :entryable, types: %w[ Page Section ]
+  delegate :searchable_content, to: :entryable
 end
 "#,
         )
@@ -1584,6 +1680,10 @@ raise "page reader nil" unless entry.page
 raise "body content lost: #{entry.page.body.content.inspect}" unless entry.page.body.content == "# Hello"
 # Zero-arg `page` on a record is the delegated_type reader, not pagination.
 raise "page reader must be Page, got #{entry.page.class}" unless entry.page.is_a?(Page)
+raise "delegated method lost" unless entry.searchable_content == "# Hello"
+section = Section.create!(body: "Section content")
+section_entry = Entry.create!(entryable: section)
+raise "delegated method lost on second type" unless section_entry.searchable_content == "Section content"
 puts "delegated_type singular reader plain text body passed"
 "##,
         )
@@ -3701,6 +3801,155 @@ fn a_partial_reading_a_reserved_word_local_assign_runs() {
     run.assert_passes();
 }
 
+/// `Rails.application.routes.recognize_path` in a helper. `check` was
+/// clean, and the emitted app raised NameError on `#routes`. Each
+/// expected value is the output of Rails 7.2.4 for the same routes.
+/// Rails returns Symbol keys with String values, puts `:format` last,
+/// and raises `ActionController::RoutingError` when no route matches.
+/// Rails takes a full URL, and normalizes any other path: one leading
+/// slash, no doubled slashes and no trailing slash. The error message
+/// shows the normalized path.
+/// The `:method` of the second argument is the verb, a Symbol or a
+/// String in any case, and GET is the default. A verb that Rails does
+/// not accept raises `ActionController::UnknownHttpMethod`, which is not
+/// a `RoutingError`. The helper rescues it as a `StandardError`: app
+/// code that names the class gets a `check` error.
+/// The emitted view does not escape the result of a helper call, and
+/// Rails does. The `(&quot;|")` alternative in the message check only
+/// tolerates that gap, which exists before this test.
+#[test]
+fn a_helper_recognizes_a_path_with_the_application_routes() {
+    let run = on_the_index(
+        emit_and_run::real_blog().write(
+            "app/helpers/articles_helper.rb",
+            r##"module ArticlesHelper
+  def route_of(path, environment = {})
+    recognized = Rails.application.routes.recognize_path(path, environment)
+    recognized.map { |key, value| "#{key}=#{value}" }.join(" ")
+  rescue ActionController::RoutingError => e
+    "none: #{e.message}"
+  rescue StandardError => e
+    "#{e.class.name}: #{e.message}"
+  end
+end
+"##,
+        ),
+        r#"<i id="rp-index"><%= route_of("/articles") %></i>
+<i id="rp-show"><%= route_of("/articles/7?tab=comments") %></i>
+<i id="rp-fragment"><%= route_of("/articles/7#comments") %></i>
+<i id="rp-root"><%= route_of("/") %></i>
+<i id="rp-json"><%= route_of("/articles/7.json") %></i>
+<i id="rp-missing"><%= route_of("/nowhere") %></i>
+<i id="rp-get"><%= route_of("/articles", method: :get) %></i>
+<i id="rp-post"><%= route_of("/articles", method: :post) %></i>
+<i id="rp-string"><%= route_of("/articles/7/comments/3", method: "Delete") %></i>
+<i id="rp-no-verb"><%= route_of("/articles", method: :put) %></i>
+<i id="rp-direct"><%= Rails.application.routes.recognize_path("/articles", method: :post)[:action] %></i>
+<i id="rp-head"><%= route_of("/articles/7", method: :head) %></i>
+<i id="rp-any"><%= route_of("/articles", method: :any) %></i>
+<i id="rp-foo"><%= route_of("/articles", method: :foo) %></i>
+<i id="rp-url"><%= route_of("http://example.com/articles/7") %></i>
+<i id="rp-url-port"><%= route_of("https://example.com:3000/articles?x=1") %></i>
+<i id="rp-relative"><%= route_of("articles/7") %></i>
+<i id="rp-relative-miss"><%= route_of("nowhere") %></i>
+<i id="rp-relative-url-query"><%= route_of("articles/7?next=http://x") %></i>
+<i id="rp-doubled"><%= route_of("/articles//7") %></i>
+<i id="rp-trailing-miss"><%= route_of("/nowhere/") %></i>
+<i id="rp-bad-uri"><%= route_of("/articles/a b") %></i>
+<i id="rp-url-trailing"><%= route_of("http://example.com/articles/7/") %></i>
+<i id="rp-percent"><%= route_of("/nowhere/%7e") %></i>
+<i id="rp-bad-uri-first"><%= route_of("/a b", method: :foo) %></i>
+<i id="rp-same"><%= Rails.application.routes.recognize_path("/articles/7.json") == { controller: "articles", action: "show", id: "7", format: "json" } %></i>
+"#,
+        r#"    assert_match(/<i id="rp-index">controller=articles action=index<\/i>/, response.body)
+    assert_match(/<i id="rp-show">controller=articles action=show id=7<\/i>/, response.body)
+    assert_match(/<i id="rp-fragment">controller=articles action=show id=7<\/i>/, response.body)
+    assert_match(/<i id="rp-root">controller=articles action=index<\/i>/, response.body)
+    assert_match(/<i id="rp-json">controller=articles action=show id=7 format=json<\/i>/, response.body)
+    assert_match(/<i id="rp-missing">none: No route matches (&quot;|")\/nowhere(&quot;|")<\/i>/, response.body)
+    assert_match(/<i id="rp-get">controller=articles action=index<\/i>/, response.body)
+    assert_match(/<i id="rp-post">controller=articles action=create<\/i>/, response.body)
+    assert_match(/<i id="rp-string">controller=comments action=destroy article_id=7 id=3<\/i>/, response.body)
+    assert_match(/<i id="rp-no-verb">none: No route matches (&quot;|")\/articles(&quot;|")<\/i>/, response.body)
+    assert_match(/<i id="rp-direct">create<\/i>/, response.body)
+    assert_match(/<i id="rp-head">controller=articles action=show id=7<\/i>/, response.body)
+    assert_includes(response.body, '<i id="rp-any">ActionController::UnknownHttpMethod: ANY, accepted HTTP methods are OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE, CONNECT, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK, VERSION-CONTROL, REPORT, CHECKOUT, CHECKIN, UNCHECKOUT, MKWORKSPACE, UPDATE, LABEL, MERGE, BASELINE-CONTROL, MKACTIVITY, ORDERPATCH, ACL, SEARCH, MKCALENDAR, and PATCH</i>')
+    assert_match(/<i id="rp-foo">ActionController::UnknownHttpMethod: FOO, accepted HTTP methods are OPTIONS, GET, /, response.body)
+    assert_match(/<i id="rp-url">controller=articles action=show id=7<\/i>/, response.body)
+    assert_match(/<i id="rp-url-port">controller=articles action=index<\/i>/, response.body)
+    assert_match(/<i id="rp-relative">controller=articles action=show id=7<\/i>/, response.body)
+    assert_match(/<i id="rp-relative-miss">none: No route matches (&quot;|")\/nowhere(&quot;|")<\/i>/, response.body)
+    assert_match(/<i id="rp-relative-url-query">controller=articles action=show id=7<\/i>/, response.body)
+    assert_match(/<i id="rp-doubled">controller=articles action=show id=7<\/i>/, response.body)
+    assert_match(/<i id="rp-trailing-miss">none: No route matches (&quot;|")\/nowhere(&quot;|")<\/i>/, response.body)
+    assert_match(/<i id="rp-bad-uri">none: bad URI \(is not URI\?\): (&quot;|")\/articles\/a b(&quot;|")<\/i>/, response.body)
+    assert_match(/<i id="rp-url-trailing">none: No route matches (&quot;|")http:\/\/example.com\/articles\/7\/(&quot;|")<\/i>/, response.body)
+    assert_match(/<i id="rp-percent">none: No route matches (&quot;|")\/nowhere\/%7E(&quot;|")<\/i>/, response.body)
+    assert_match(/<i id="rp-bad-uri-first">none: bad URI \(is not URI\?\): (&quot;|")\/a b(&quot;|")<\/i>/, response.body)
+    assert_match(/<i id="rp-same">true<\/i>/, response.body)
+"#,
+    );
+    run.assert_passes();
+}
+
+/// `recognize_path` gives the Rails controller path, not the flat
+/// router name, for a namespaced controller, for the health controller
+/// and for the Active Storage controllers. It skips a redirect route and
+/// tries the later routes, as Rails does. The app has no root route, so
+/// `/` matches no route. Each expected value is the output of Rails
+/// 7.2.4 for the same routes.
+#[test]
+fn a_helper_recognizes_controller_paths_and_skips_redirect_routes() {
+    let run = on_the_index(
+        emit_and_run::real_blog()
+            .edit("config/routes.rb", "  root \"articles#index\"\n", "")
+            .edit(
+                "config/routes.rb",
+                "  resources :articles do",
+                "  namespace :admin do\n    resources :articles, only: [:index]\n  end\n  \
+                 get \"old\", to: redirect(\"/articles\")\n  \
+                 get \"moved\", to: redirect(\"/articles\")\n  \
+                 get \"moved\", to: \"articles#index\"\n  \
+                 get \"up\" => \"rails/health#show\"\n  \
+                 resources :articles do",
+            )
+            .write(
+                "app/controllers/admin/articles_controller.rb",
+                "class Admin::ArticlesController < ApplicationController\n  def index\n    @articles = Article.all\n  end\nend\n",
+            )
+            .write("app/views/admin/articles/index.html.erb", "<p>admin</p>\n")
+            .write(
+                "app/helpers/articles_helper.rb",
+                r##"module ArticlesHelper
+  def route_of(path)
+    recognized = Rails.application.routes.recognize_path(path)
+    recognized.map { |key, value| "#{key}=#{value}" }.join(" ")
+  rescue ActionController::RoutingError => e
+    "none: #{e.message}"
+  end
+end
+"##,
+            ),
+        r#"<i id="rp-namespaced"><%= route_of("/admin/articles") %></i>
+<i id="rp-redirect"><%= route_of("/old") %></i>
+<i id="rp-after-redirect"><%= route_of("/moved") %></i>
+<i id="rp-health"><%= route_of("/up") %></i>
+<i id="rp-disk"><%= route_of("/rails/active_storage/disk/k/x.png") %></i>
+<i id="rp-blob"><%= route_of("/rails/active_storage/blobs/redirect/abc/x.png") %></i>
+<i id="rp-no-root"><%= route_of("/") %></i>
+"#,
+        r#"    assert_match(/<i id="rp-namespaced">controller=admin\/articles action=index<\/i>/, response.body)
+    assert_match(/<i id="rp-redirect">none: No route matches (&quot;|")\/old(&quot;|")<\/i>/, response.body)
+    assert_match(/<i id="rp-after-redirect">controller=articles action=index<\/i>/, response.body)
+    assert_match(/<i id="rp-health">controller=rails\/health action=show<\/i>/, response.body)
+    assert_match(/<i id="rp-disk">controller=active_storage\/disk action=show encoded_key=k filename=x format=png<\/i>/, response.body)
+    assert_match(/<i id="rp-blob">controller=active_storage\/blobs\/redirect action=show signed_id=abc filename=x format=png<\/i>/, response.body)
+    assert_match(/<i id="rp-no-root">none: No route matches (&quot;|")\/(&quot;|")<\/i>/, response.body)
+"#,
+    );
+    run.assert_passes();
+}
+
 /// B4 in NEXUS_BUGS.md: a partial in `app/views/application/` that a
 /// view in another directory renders. Rails looks in the view's own
 /// directory first, so a same-name partial there wins.
@@ -5396,6 +5645,10 @@ fn bundled_uri_and_http_exception_constants_run() {
     URI.parse(url).is_a?(URI::HTTP)
   end
 
+  def self.https?(url)
+    URI.parse(url).is_a?(URI::HTTPS)
+  end
+
   def self.invalid_uri
     begin
       URI.parse("https://bad host/")
@@ -5406,6 +5659,10 @@ fn bundled_uri_and_http_exception_constants_run() {
 
   def self.construct
     URI::HTTP.new("http", nil, "example.test", 80, nil, "/", nil, nil, nil).to_s
+  end
+
+  def self.construct_https
+    URI::HTTPS.new("https", nil, "example.test", 443, nil, "/", nil, nil, nil).to_s
   end
 
   def self.invalid_constructor
@@ -5435,8 +5692,11 @@ end
         .run_ruby(
             r#"raise unless HttpConstantProbe.http?("https://example.test/")
 raise if HttpConstantProbe.http?("ftp://example.test/")
+raise unless HttpConstantProbe.https?("https://example.test/")
+raise if HttpConstantProbe.https?("http://example.test/")
 raise unless HttpConstantProbe.invalid_uri == "invalid"
 raise unless HttpConstantProbe.construct == "http://example.test/"
+raise unless HttpConstantProbe.construct_https == "https://example.test/"
 raise unless HttpConstantProbe.invalid_constructor == "arity"
 raise unless HttpConstantProbe.timeout("open") == "open"
 raise unless HttpConstantProbe.timeout("read") == "read"
@@ -5847,6 +6107,15 @@ end
 
 #[path = "emit_and_run/concern_accessors.rs"]
 mod concern_accessors;
+
+#[path = "emit_and_run/action_not_found.rs"]
+mod action_not_found;
+
+#[path = "emit_and_run/finder_miss_readers.rs"]
+mod finder_miss_readers;
+
+#[path = "emit_and_run/finder_miss_messages.rs"]
+mod finder_miss_messages;
 
 /// A concern split in two, mixed into more than one controller: the
 /// inner module calls a method only its includers have (through the
@@ -8348,5 +8617,241 @@ raise counts.inspect unless counts == { "b" => 3, "a" => 2, "c" => 1 }
 raise article.top_word.inspect unless article.top_word == "b"
 "#,
         )
+        .assert_passes();
+}
+
+/// A class an initializer defines and the app reads only through `[]`
+/// (forem's `ApplicationConfig["KEY"]`) is the app's, as `X.` and `X::` are.
+#[test]
+fn an_initializer_class_read_through_brackets_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "config/initializers/app_settings.rb",
+            "class AppSettings\n  DEFAULTS = { \"BANNER\" => \"Welcome\" }.freeze\n\n  def self.[](key)\n    DEFAULTS.fetch(key, \"\")\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def banner\n    \"#{AppSettings[\"BANNER\"]}: #{title}\"\n  end\n",
+        )
+        .run_ruby(
+            r#"article = Article.create!(title: "Brackets", body: "Body text here")
+raise article.banner.inspect unless article.banner == "Welcome: Brackets"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Array `&` and `|` are set intersection and union in Ruby. The
+/// typed targets used to print their native operators: bitwise on
+/// TypeScript (two arrays coerce to `0`), a `TypeError` on Python
+/// lists, and a `.&(…)` method call that Rust cannot parse.
+fn array_set_operators_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def self.common_ids\n    [1, 2, 2, 3] & [2, 3, 4]\n  end\n\n  def self.either_ids\n    [3, 1, 1] | [2, 1]\n  end\n",
+        )
+        .write(
+            "test/models/set_ops_test.rb",
+            "require \"test_helper\"\n\nclass SetOpsTest < ActiveSupport::TestCase\n  test \"array set operators\" do\n    assert_equal [2, 3], Article.common_ids\n    assert_equal [3, 1, 2], Article.either_ids\n  end\nend\n",
+        )
+}
+
+#[test]
+fn array_set_operators_run() {
+    array_set_operators_app()
+        .run_test("test/models/set_ops_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn array_set_operators_are_not_native_infix_on_typed_targets() {
+    use roundhouse::project::BuildTarget;
+    for (target, file, intersect, union) in [
+        (
+            BuildTarget::Typescript,
+            "app/models/article.ts",
+            "((__l, __r) => [...new Set([...__l])].filter(x => __r.includes(x)))([1, 2, 2, 3], [2, 3, 4])",
+            "[...new Set([...[3, 1, 1], ...[2, 1]])]",
+        ),
+        (
+            BuildTarget::Python,
+            "app/v2/models.py",
+            "(lambda __l, __r, __eq: [x for i, x in enumerate(__l) if any(__eq(x, y) for y in __r) and not any(__eq(x, y) for y in __l[:i])])([1, 2, 2, 3], [2, 3, 4], lambda a, b: type(a) is type(b) and a == b)",
+            "(lambda __a, __eq: [x for i, x in enumerate(__a) if not any(__eq(x, y) for y in __a[:i])])([*[3, 1, 1], *[2, 1]], lambda a, b: type(a) is type(b) and a == b)",
+        ),
+        (
+            BuildTarget::Rust,
+            "src/models/article.rs",
+            "if __rhs.contains(x) && !__out.contains(x)",
+            "for x in __lhs.iter().chain(__rhs.iter())",
+        ),
+    ] {
+        let (tree, errors) = array_set_operators_app().emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:?}");
+        let src = std::fs::read_to_string(tree.join(file))
+            .unwrap_or_else(|e| panic!("{target:?}: read {file}: {e}"));
+        assert!(src.contains(intersect), "{target:?} `&`:\n{src}");
+        assert!(src.contains(union), "{target:?} `|`:\n{src}");
+    }
+}
+
+/// `Model.delete_all` returns the affected-row count, as Rails does —
+/// the class form and the scoped `Relation` form alike. The class form
+/// used to type as `Int` while running to `nil`.
+#[test]
+fn delete_all_returns_affected_row_count() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_delete_all_test.rb",
+            r#"require "test_helper"
+
+class ArticleDeleteAllTest < ActiveSupport::TestCase
+  test "delete_all returns the number of rows deleted" do
+    Comment.delete_all
+    Article.delete_all
+    3.times { |i| Article.create!(title: "gone-#{i}", body: "Body text here") }
+    Article.create!(title: "kept", body: "Body text here")
+    assert_equal 3, Article.where("title LIKE 'gone-%'").delete_all
+    assert_equal 1, Article.delete_all
+    assert_equal 0, Article.delete_all
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_delete_all_test.rb")
+        .assert_passes();
+}
+
+/// Destructured block parameters and nested multi-write targets bind
+/// every name. campfire's `|(host, secure, origin), index|` was emitted
+/// as `|index|`, and its body read three names nothing bound.
+#[test]
+fn nested_destructuring_binds_every_name() {
+    const SOURCE: &str = r#"class NestedDestructureProbe
+  def self.block_params
+    out = []
+    [[1, 2, 3], [4, 5, 6]].each_with_index do |(a, b, c), index|
+      out << [a, b, c, index]
+    end
+    out
+  end
+  def self.deep_block
+    [[1, [2, 3]]].map { |(a, (b, c))| [a, b, c] }
+  end
+  def self.lambda_param
+    adder = ->((a, b)) { a + b }
+    adder.call([20, 22])
+  end
+  def self.multi_write
+    _, (_, removed) = [1, [2, 3]]
+    removed
+  end
+  def self.deep_multi_write
+    a, (b, (c, d)) = [1, [2, [3, 4]]]
+    [a, b, c, d]
+  end
+  def self.expression
+    (a, (b, c) = [1, [2, 3]])
+  end
+end
+"#;
+    const ASSERTIONS: &str = r##"
+expected = {block_params: [[1, 2, 3, 0], [4, 5, 6, 1]], deep_block: [[1, 2, 3]], lambda_param: 42, multi_write: 3, deep_multi_write: [1, 2, 3, 4], expression: [1, [2, 3]]}
+expected.each do |method, want|
+  got = NestedDestructureProbe.public_send(method)
+  raise "#{method}: #{got.inspect}, expected #{want.inspect}" unless got == want
+end
+"##;
+    let native = std::process::Command::new("ruby").arg("-e")
+        .arg(format!("{SOURCE}\n{ASSERTIONS}"))
+        .output().expect("CRuby control");
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    emit_and_run::real_blog()
+        .write("app/services/nested_destructure_probe.rb", SOURCE)
+        .run_ruby(ASSERTIONS).assert_passes();
+}
+
+/// `recv.m(**payload, badge: b)` where nothing types `recv`: the app's
+/// one `m` takes `**rest`, so the `**` the ingest desugar erased is put
+/// back (campfire's `WebPush::Pool#deliver_later`). Passed positionally
+/// it is Ruby 3's `wrong number of arguments (given 1, expected 0)`.
+#[test]
+fn a_keyword_splat_to_an_untyped_receiver_keeps_its_double_splat() {
+    emit_and_run::real_blog()
+        // A MODEL method, as campfire's `Push::Subscription#notification`
+        // is: models keep `badge:` a keyword beside `**params`.
+        .edit("app/models/comment.rb", "  validates :commenter", r#"  def kwsplat_probe_note(badge: 0, **params)
+    KwSplatNote.new(**params, badge: badge)
+  end
+
+  validates :commenter"#)
+        .write("app/services/kwsplat_probe.rb", r#"class KwSplatNote
+  attr_reader :title, :badge
+
+  def initialize(title:, badge:)
+    @title, @badge = title, badge
+  end
+end
+
+class KwSplatCaller
+  def self.call(items, payload)
+    items.map { |item| item.kwsplat_probe_note(**payload, badge: 3) }
+  end
+end
+"#)
+        .run_ruby(r#"
+article = Article.create!(title: "Splat title", body: "A sufficiently long article body.")
+comment = Comment.create!(article: article, commenter: "Reader", body: "Comment body")
+got = KwSplatCaller.call([comment], { title: "t" }).map { |n| [n.title, n.badge] }
+raise "keyword splat lost: #{got.inspect}" unless got == [["t", 3]]
+"#)
+        .assert_passes();
+}
+
+/// Rails' `association(:name).loaded?` on a belongs_to: false until the
+/// reader runs, true after — the question campfire's presentation tests
+/// ask of a page of messages.
+#[test]
+fn association_loaded_answers_for_a_belongs_to() {
+    emit_and_run::real_blog()
+        .write("app/services/loaded_probe.rb", r#"class LoadedProbe
+  def self.flags(comment)
+    before = comment.association(:article).loaded?
+    comment.article
+    [before, comment.association(:article).loaded?]
+  end
+end
+"#)
+        .run_ruby(r#"
+article = Article.create!(title: "Loaded title", body: "A sufficiently long article body.")
+comment = Comment.create!(article: article, commenter: "Reader", body: "Comment body")
+got = LoadedProbe.flags(Comment.find(comment.id))
+raise "association(:article).loaded? answered #{got.inspect}" unless got == [false, true]
+"#)
+        .assert_passes();
+}
+
+/// `owner.<has_many>.reload` reads the rows again (campfire's rooms
+/// test: `assert_empty room.memberships.reload`).
+#[test]
+fn has_many_reload_reads_the_rows_again() {
+    emit_and_run::real_blog()
+        .write("app/services/reload_probe.rb", r#"class ReloadProbe
+  def self.counts(article)
+    before = article.comments.size
+    Comment.create!(article_id: article.id, commenter: "Late", body: "Arrived later")
+    [before, article.comments.reload.size]
+  end
+end
+"#)
+        .run_ruby(r#"
+article = Article.create!(title: "Reload title", body: "A sufficiently long article body.")
+Comment.create!(article: article, commenter: "Reader", body: "Comment body")
+got = ReloadProbe.counts(Article.find(article.id))
+raise "reload answered #{got.inspect}" unless got == [1, 2]
+"#)
         .assert_passes();
 }

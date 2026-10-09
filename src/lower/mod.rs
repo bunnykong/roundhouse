@@ -138,6 +138,7 @@ pub mod destroy_by;
 pub mod has_one_builder;
 pub mod inquiry;
 pub mod byte_size;
+pub mod numeric_unary;
 pub mod tag_builder;
 pub mod kwsplat;
 pub mod literal_append;
@@ -507,6 +508,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("symbolize_keys", &["config_reader"]),
     // No runs_after: it reads the ingested enum tables and rewrites only the key argument.
     ("enum_mapping_keys", &[]),
+    // `-x` / `+x` on a typed Integer or Float → `x * -1` / `x`; local
+    // expression rewrite, no ordering constraints.
+    ("numeric_unary", &[]),
     // `f(**h)` (erased to `f(h)` at ingest) → `f(k: h[:k], …)` when the
     // callee declares explicit keywords. Reads the arg count against the
     // callee's signature, so it must see the argument list as ingested —
@@ -868,6 +872,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("symbolize_keys");
     enum_mapping_keys::apply_enum_mapping_keys(app);
     ran!("enum_mapping_keys");
+    numeric_unary::apply_numeric_unary_lowering(app);
+    ran!("numeric_unary");
     diags.extend(crate::timings::phase("post-analyze: kwsplat", || {
         kwsplat::apply_kwsplat_expansion(app)
     }));
@@ -961,7 +967,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("attached_url");
     diags.extend(kwrest_forward::apply_kwrest_forward_lowering(app));
     ran!("kwrest_forward");
-    helper_kwargs::apply_helper_kwarg_positional_lowering(app);
+    diags.extend(helper_kwargs::apply_helper_kwarg_positional_lowering(app));
     ran!("helper_kwargs");
     view_to_library::form_wrapper::preserve_argument_owners(app, registry);
     ran!("form_wrapper_owners");

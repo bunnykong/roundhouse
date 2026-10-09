@@ -361,6 +361,20 @@ module ActionController
     # subscript spelling.
     attr_reader   :cache_control_max_age, :cache_control_public
 
+    # `response` is this controller in the shared runtime, so controller
+    # actions that set `response.content_type` need the same writer Rails'
+    # response object exposes.
+    def content_type=(value)
+      @content_type = value
+      @content_type
+    end
+
+    # Rails' `response.media_type`, the content type without its
+    # parameters; campfire's CachedResponses only stores `text/html`.
+    def media_type
+      @content_type.to_s.split(";").first.to_s.strip
+    end
+
     def initialize
       @params  = {}
       @path_parameters = {}
@@ -536,6 +550,20 @@ module ActionController
     # the harness when a consumer needs them.
     def response
       self
+    end
+
+    # Rails' `self.response_body =` (campfire's MessagesController and
+    # CachedResponses serve a prebuilt page this way). A body is a
+    # response, so the before_action halting check sees it; nil clears
+    # it, as in Rails, and `body` stays the String it always is.
+    def response_body
+      @body
+    end
+
+    def response_body=(value)
+      @body = value.to_s
+      @performed = !value.nil?
+      @body
     end
 
     # ---- conditional GET: ALWAYS FRESH -----------------------------

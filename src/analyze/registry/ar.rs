@@ -675,7 +675,7 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     let node_ty = Ty::Class { id: node_id.clone(), args: vec![].into() };
     let mut fragment = ClassInfo::default();
     fragment.class_methods.insert(Symbol::from("wrap"), fragment_ty.clone());
-    for m in ["to_s", "to_html", "source"] {
+    for m in ["to_s", "to_html", "source", "to_plain_text"] {
         fragment.instance_methods.insert(Symbol::from(m), Ty::Str);
     }
     for m in ["find_all", "css"] {
@@ -710,6 +710,9 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     for m in ["blank?", "empty?", "present?"] {
         content.instance_methods.insert(Symbol::from(m), Ty::Bool);
     }
+    // The element view the runtime's `Content#fragment` builds
+    // (campfire's `Message#plain_text_body` asks it for attachments).
+    content.instance_methods.insert(Symbol::from("fragment"), fragment_ty.clone());
     content
         .instance_methods
         .insert(Symbol::from("links"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });

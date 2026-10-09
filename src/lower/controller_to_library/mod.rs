@@ -27,6 +27,7 @@
 mod broadcasts;
 mod process_action;
 pub mod params;
+pub mod params_wrapper;
 pub mod rewrites;
 pub mod util;
 
@@ -276,6 +277,18 @@ pub struct LowerControllerOptions<'a> {
     /// (`ParamsSpecs::mark_file_fields`). Empty (the default) types
     /// every field a String, which is what it was before.
     pub models: &'a [crate::dialect::Model],
+    /// `App::wrap_parameters_by_default` - Rails' ParamsWrapper default
+    /// for every controller. Read only when the tree
+    /// `FormatBreadth::wraps_json_params`.
+    pub wrap_parameters_by_default: bool,
+    /// `App::concern_spliced_actions`: per controller, the methods the
+    /// ingest copied in from included modules. They count as defined
+    /// for the missing-action check (`missing_action_check`). `None`
+    /// (the default) leaves the check off, which is what every caller
+    /// without routes gets anyway.
+    pub concern_spliced_actions: Option<
+        &'a std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, ClassId>>,
+    >,
 }
 
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
@@ -294,6 +307,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         route_id_segments,
         inferred_params,
         models,
+        wrap_parameters_by_default,
+        concern_spliced_actions,
     } = opts;
     // `None` (every wrapper's default) means the projection stays
     // purely shape-directed — what it was before this table existed.
@@ -326,7 +341,25 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             // `None` → legacy: every public method is an action.
             let routed = routed_by_controller
                 .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
-            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params);
+            // Rails' ParamsWrapper, decided here for the whole ancestry.
+            let wrapper = if format_breadth.wraps_json_params {
+                self::params_wrapper::wrapper_spec(
+                    controller,
+                    &ancestor_chain(controller, controllers),
+                    models,
+                    schema,
+                    wrap_parameters_by_default,
+                )
+            } else {
+                None
+            };
+            let action_check = missing_action_check(
+                controller,
+                controllers,
+                library_classes,
+                concern_spliced_actions,
+            );
+            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref(), action_check.as_ref());
             all_methods.push((methods, controller));
         }
         subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
@@ -607,6 +640,8 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         FormatBreadth::NARROW,
         &std::collections::HashMap::new(),
         None,
+        None,
+        None,
     );
     methods.extend(collect_attr_accessor_methods(controller));
     apply_alias_methods(controller, &mut methods);
@@ -755,13 +790,15 @@ fn collect_attr_accessor_methods(controller: &Controller) -> Vec<MethodDef> {
 /// exist, an ordering this pass (which only ever sees one controller's
 /// own `methods`) doesn't have access to. Ledgered rather than
 /// dropped so the survey names exactly which alias didn't resolve.
-fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
+/// The `alias_method :new, :old` pairs in a controller's class body, in
+/// declaration order, as `(new, old)`.
+fn alias_method_pairs(controller: &Controller) -> Vec<(Symbol, Symbol)> {
     use crate::expr::Literal;
     let sym = |e: &Expr| match &*e.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
         _ => None,
     };
-    let aliases: Vec<(Symbol, Symbol)> = controller
+    controller
         .body
         .iter()
         .filter_map(|item| {
@@ -776,8 +813,11 @@ fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
             let old_name = sym(args.get(1)?)?;
             Some((new_name, old_name))
         })
-        .collect();
-    for (new_name, old_name) in aliases {
+        .collect()
+}
+
+fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
+    for (new_name, old_name) in alias_method_pairs(controller) {
         let Some(old) = methods.iter().find(|m| m.name == old_name).cloned() else {
             crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
                 file: controller.name.0.as_str().to_string(),
@@ -993,6 +1033,43 @@ fn subclass_template_hooks(
     }
 }
 
+/// The input to the missing-action check in `build_methods`: the
+/// names a controller gets from included modules, which count as
+/// defined beside its own and inherited public methods. These are the
+/// methods the ingest spliced in from a module it could read
+/// (`App::concern_spliced_actions`), on this controller and on every
+/// ancestor.
+///
+/// `None` skips the check for this controller: its OWN class body
+/// includes a module that is not among the app's library classes (a
+/// gem's, or one the ingest did not read), so a routed name may be an
+/// action defined there. Its unknown actions then fall through the
+/// dispatcher as before. An ancestor's unreadable include does not
+/// skip the check, so an action that comes ONLY from a module that
+/// ApplicationController (or another ancestor) includes, and that the
+/// ingest could not read, still answers 404 here where Rails would
+/// dispatch it. That is the residual risk of this rule.
+fn missing_action_check(
+    controller: &Controller,
+    all_controllers: &[Controller],
+    library_classes: &[LibraryClass],
+    spliced: Option<&std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, ClassId>>>,
+) -> Option<std::collections::HashSet<Symbol>> {
+    let spliced = spliced?;
+    let readable = |m: &ClassId| library_classes.iter().any(|lc| &lc.name == m);
+    if crate::analyze::controller_include_groups(controller).iter().flatten().any(|m| !readable(m)) {
+        return None;
+    }
+    let mut names = std::collections::HashSet::new();
+    let chain = std::iter::once(controller).chain(ancestor_chain(controller, all_controllers));
+    for c in chain {
+        if let Some(methods) = spliced.get(&c.name) {
+            names.extend(methods.keys().cloned());
+        }
+    }
+    Some(names)
+}
+
 fn build_methods(
     controller: &Controller,
     all_controllers: &[Controller],
@@ -1011,6 +1088,9 @@ fn build_methods(
     format_breadth: FormatBreadth,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
+    // Rails' ParamsWrapper for this controller, when its requests get one.
+    wrapper: Option<&self::params_wrapper::WrapperSpec>,
+    action_check: Option<&std::collections::HashSet<Symbol>>,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = controller.class_methods().cloned().collect();
 
@@ -1182,6 +1262,35 @@ fn build_methods(
     }
     inherited.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
+    // Routed actions nothing defines: no public method on this
+    // controller or an ancestor (a template-only action already has a
+    // synthesized method by now) and no method spliced in from an
+    // included module (`missing_action_check`). Rails answers these
+    // with `AbstractController::ActionNotFound` (404), which the
+    // dispatcher raises and the server maps to 404. `None` skips the
+    // check: the controller includes a module the ingest could not
+    // read, so a routed name may be an action it cannot see.
+    let mut missing: Vec<Symbol> = Vec::new();
+    if let (Some(routed), Some(spliced)) = (routed, action_check) {
+        let mut defined: std::collections::HashSet<Symbol> = publics_inlined
+            .iter()
+            .map(|a| a.name.clone())
+            .chain(inherited.iter().cloned())
+            .chain(spliced.iter().cloned())
+            .collect();
+        // `alias_method :index, :show` makes `index` a public action
+        // when `show` is one. `apply_alias_methods` writes the copy
+        // only after this point, so count it here. An alias of an
+        // alias resolves in declaration order, as Ruby does.
+        for (new_name, old_name) in alias_method_pairs(controller) {
+            if defined.contains(&old_name) {
+                defined.insert(new_name);
+            }
+        }
+        missing = routed.iter().filter(|a| !defined.contains(*a)).cloned().collect();
+        missing.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    }
+
     // Actions whose default render belongs in the dispatcher because a
     // subclass reaches this body with `super`. Empty for every
     // controller nobody subclasses that way, which is all of them
@@ -1190,7 +1299,7 @@ fn build_methods(
     let deferred_renders = actions_reached_by_super(controller, all_controllers);
     let mut pending_dispatcher: Option<(Vec<PreambleStmt>, process_action::WrapFilters)> = None;
 
-    if !publics_inlined.is_empty() || !inherited.is_empty() {
+    if !publics_inlined.is_empty() || !inherited.is_empty() || !missing.is_empty() {
         // The before_action preamble: everything the body-inlining above
         // can't reach — inherited filters (ApplicationController's
         // `authenticate_user` firing for subclass actions), own filters
@@ -1204,7 +1313,17 @@ fn build_methods(
             &privs,
             /*own_privs_inlined=*/ inlining_ordered,
         );
-        pending_dispatcher = Some(preamble);
+        let (mut stmts, wraps) = preamble;
+        // ParamsWrapper runs before every callback in Rails (it wraps
+        // `process_action` outside them), so it leads as `Lead` — not a
+        // filter `Block` with empty guards.
+        if let Some(spec) = wrapper {
+            stmts.insert(
+                0,
+                PreambleStmt::Lead { body: self::params_wrapper::wrap_statement(spec) },
+            );
+        }
+        pending_dispatcher = Some((stmts, wraps));
     }
 
     // Actions BEFORE the dispatcher: a deferred action hands its
@@ -1241,6 +1360,7 @@ fn build_methods(
                 &rescues,
                 &wraps,
                 reads,
+                &missing,
             ),
         );
     }
@@ -2149,11 +2269,13 @@ fn can_respond_within(
         if *found {
             return;
         }
+        if crate::lower::controller::is_response_terminal(e) {
+            *found = true;
+            return;
+        }
         if let ExprNode::Send { recv, method, .. } = &*e.node {
-            if matches!(
-                method.as_str(),
-                "render" | "redirect_to" | "redirect_back_or_to" | "head" | "render_404"
-            ) || crate::lower::controller::HTTP_AUTH_CHALLENGES.contains(&method.as_str())
+            if method.as_str() == "render_404"
+                || crate::lower::controller::HTTP_AUTH_CHALLENGES.contains(&method.as_str())
             {
                 *found = true;
                 return;
@@ -2254,6 +2376,24 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     info.instance_methods
         .entry(Symbol::from("performed?"))
         .or_insert_with(|| fn_sig(vec![], Ty::Bool));
+
+    // Rails' response surface on the controller, which IS the response
+    // in the shared runtime: `self.response_body = body` serves a page
+    // rendered to a string (campfire's MessagesController and
+    // CachedResponses), and `media_type` is the content type without
+    // its parameters. `runtime/ruby/action_controller/base.rb` defines
+    // all three; without these entries a strict target cannot resolve
+    // the sends that reach them.
+    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    info.instance_methods
+        .entry(Symbol::from("response_body"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Str));
+    info.instance_methods
+        .entry(Symbol::from("response_body="))
+        .or_insert_with(|| fn_sig(vec![(Symbol::from("value"), str_or_nil)], Ty::Str));
+    info.instance_methods
+        .entry(Symbol::from("media_type"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Str));
 
     // Rails' implicit `protect_from_forgery` heads every chain; the
     // preamble emits a bare `verify_authenticity_token` send that must
@@ -2916,7 +3056,8 @@ fn lower_action_body(
     // the typed factory `<Resource>Params.from_raw(@params)`. The
     // controller's `<resource>_params` helper body becomes that single
     // call; downstream call sites see a typed value, not a Hash.
-    let with_typed_params = self::params::rewrite_to_from_raw(&with_params, params_specs);
+    let with_typed_params =
+        self::params::rewrite_to_from_raw(&with_params, params_specs, format_breadth.raises_param_missing);
     let with_redirects = rewrite_redirect_to(&with_typed_params, route_id_segments);
     // Rewrite `<Model>.new(<resource>_params)` → `<Model>.from_params(<resource>_params)`
     // BEFORE the assoc-through-parent rewrite, so the build path picks
