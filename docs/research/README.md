@@ -28,9 +28,7 @@ Roundhouse infers types for a whole Rails app without annotations, by re-typing 
 | [Typed recursion](frontiers/typed-recursion.md) | Code generation; the type systems of Rust, Crystal and the other targets | A Rust `enum` and a Crystal `alias` work for three of the four shapes recorded in [#589](https://github.com/rubys/roundhouse/issues/589), behind a flag ([F13](facts.md)). | Cover the fourth shape: mutual recursion between two class methods. |
 | [Cost](frontiers/cost.md) | Rust performance and profiling; hash-consing; data-structure design | Exact type identities and a union memo make the large app faster than main; earlier profiles point at unification and expression walks ([F12](facts.md), [F11](facts.md), [F10](facts.md)). | Re-profile with type identities on, then choose the next target. |
 
-Claims in force ([how to claim](#claiming)):
-
-- **[Any order](frontiers/any-order.md):** @eddygarcas, in review until 2026-10-16T07:40Z, PR [#724](https://github.com/rubys/roundhouse/pull/724) ([claim](https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589)): items 1–2 of the claim: one join for parameter slots over the classified arm set, built on [#674](https://github.com/rubys/roundhouse/issues/674)'s rows; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag. Uses option (a): only a non-nil concrete type absorbs `untyped`, so `Nil | untyped` stays. Also bounds each parameter row once after its fold. Emitted output byte-identical on three apps × 12 targets; with [#705](https://github.com/rubys/roundhouse/issues/705) on `fixpoint-next`, fully typed 69.01% → 69.45% (S3) and 69.22% → 69.84% (`PROBE_BASE=1`), base verify moved 652 → 475.
+No claims are in force; [claim](#claiming) a frontier before starting work on it.
 <!-- end generated -->
 
 ## Running a check
