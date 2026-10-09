@@ -536,6 +536,32 @@ fn norm_opt(t: &Ty, top: bool) -> Option<Ty> {
                     None => arms.push(v.clone()),
                 }
             }
+            // A Tuple is a fixed-length Array: beside an Array arm it folds
+            // into that arm's element (`Array[e] ⊔ Tuple[a, b] = Array[e | a |
+            // b]`). An array literal is typed as a Tuple when its elements
+            // differ and as an Array when they agree, so one literal flips
+            // shape as its elements resolve (breaker's g2_const); without
+            // this the join keeps the stale shape beside the final one.
+            if let Some(ai) = arms.iter().position(|v| matches!(v, Ty::Array { .. }))
+                && arms.iter().any(|v| matches!(v, Ty::Tuple { .. }))
+            {
+                let mut elem = match &arms[ai] {
+                    Ty::Array { elem } => (**elem).clone(),
+                    _ => unreachable!(),
+                };
+                for v in arms.iter() {
+                    if let Ty::Tuple { elems } = v {
+                        for e in elems.iter() {
+                            elem = lat_join(elem, e.clone());
+                        }
+                    }
+                }
+                arms.retain(|v| !matches!(v, Ty::Tuple { .. }));
+                if let Some(a) = arms.iter_mut().find(|v| matches!(v, Ty::Array { .. })) {
+                    *a = Ty::Array { elem: std::sync::Arc::new(elem) };
+                }
+                changed = true;
+            }
             let mut i = 0;
             while i < arms.len() {
                 let mut k = i + 1;
