@@ -22,6 +22,10 @@
   check_public: partly  # only the 12-value settling reproduction is runnable today
   skills: [ruby, rails, runtime tracing, type systems]
   branch: fixpoint-next
+  claims:
+    - who: dai199
+      what: "Parameter rows keyed by receiver side (the lab's name_collision; the follow-up named in #551), one PR against main"
+      where: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6077674666"
 
 - id: precision
   title: "At least as precise as main"
