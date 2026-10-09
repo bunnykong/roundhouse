@@ -130,6 +130,7 @@ fn visit(e: &Expr, app: &App, typer: &BodyTyper<'_>, body: usize, ordinal: &mut 
         let mut row = recv(r.ty.as_ref(), |arm| {
             typer.errgate_answer(arm, method, block_ret, args)
         });
+        row["receiver_ty"] = serde_json::json!(r.ty.as_ref().map(label));
         row["recv_slot"] = serde_json::json!(origin_slot(&r.span));
         row["schema"] = 1.into();
         row["kind"] = "send_dispatch_failed".into();
