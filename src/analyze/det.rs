@@ -517,9 +517,21 @@ fn norm_opt(t: &Ty, top: bool) -> Option<Ty> {
                     continue;
                 }
                 match norm_opt(v, top) {
+                    // A nested union (built outside `union_of`) is spliced, so
+                    // equal arm sets have one form.
+                    Some(Ty::Union { variants: inner }) => {
+                        changed = true;
+                        arms.extend(inner.iter().cloned());
+                    }
                     Some(n) => {
                         changed = true;
                         arms.push(n);
+                    }
+                    None if matches!(v, Ty::Union { .. }) => {
+                        changed = true;
+                        if let Ty::Union { variants: inner } = v {
+                            arms.extend(inner.iter().cloned());
+                        }
                     }
                     None => arms.push(v.clone()),
                 }
