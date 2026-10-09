@@ -19,6 +19,10 @@
 //!   often the harvest cut a return that nests its previous round's (#528's
 //!   `harvest_untie_cut`); and, when they run, the fold's and the worklist's
 //!   counters.
+//! - `RH_PRECISION_CENSUS=1`: aggregate counts of emit-bound expressions with
+//!   a type, fully typed (no `untyped` or `Var` at any depth), holding `untyped`,
+//!   holding only `Var`, and missing a type, in the `precision` field. Shares
+//!   use expressions with a type as their denominator.
 //!
 //! Each prints one `rh-fixpoint:` JSON line on stderr at the end of
 //! `analyze`. It holds counts and hashes only: no names, spans or types.
@@ -551,7 +555,7 @@ impl Analyzer {
 
     /// The `rh-fixpoint:` line, when any canary is on.
     pub(super) fn report_fixpoint_checks(&self, app: &App) {
-        if !(*VERIFY || *DIGEST || *STATS) {
+        if !(*VERIFY || *DIGEST || *STATS || super::precision::on()) {
             return;
         }
         let rounds: FixpointRounds = self.fixpoint_rounds;
@@ -608,6 +612,9 @@ impl Analyzer {
             if let Some(worklist) = self.sccq_stats() {
                 line["worklist"] = worklist;
             }
+        }
+        if super::precision::on() {
+            line["precision"] = serde_json::json!(super::precision::census(app));
         }
         eprintln!("rh-fixpoint: {line}");
     }

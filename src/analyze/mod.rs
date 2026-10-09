@@ -49,6 +49,7 @@ pub mod graphql;
 mod harvest_return;
 mod fixpoint_bound;
 mod fixpoint_check;
+mod precision;
 mod det;
 mod detfp;
 mod structure;
