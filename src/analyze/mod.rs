@@ -5971,10 +5971,11 @@ impl Analyzer {
                     let record_initialize = method.as_str() == "new"
                         && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
                     for class_id in recv_classes {
-                        let data_factory = self.data_factories.values().any(|ty| {
-                            matches!(ty, Ty::Class { id, .. } if id == &class_id)
-                        });
-                        if record_initialize && !data_factory {
+                        if record_initialize
+                            && !self.data_factories.values().any(|ty| {
+                                matches!(ty, Ty::Class { id, .. } if id == &class_id)
+                            })
+                        {
                             out.push((
                                 class_id.clone(),
                                 Symbol::from("initialize"),
