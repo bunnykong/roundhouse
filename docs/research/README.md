@@ -30,7 +30,7 @@ Roundhouse infers types for a whole Rails app without annotations, by re-typing 
 
 Claims in force ([how to claim](#claiming)):
 
-- **[Any order](frontiers/any-order.md):** @eddygarcas, active until 2026-10-16T07:40Z ([claim](https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589)): items 1–2 of the claim: one join for parameter slots over the classified arm set, built on [#674](https://github.com/rubys/roundhouse/issues/674)'s rows; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag. Open choice: option (a), preferred on [#617](https://github.com/rubys/roundhouse/issues/617), lets only a non-nil concrete type absorb `untyped`, so `Nil | untyped` never narrows to bare `Nil` (https://github.com/rubys/roundhouse/issues/617#issuecomment-6083322797).
+- **[Any order](frontiers/any-order.md):** @eddygarcas, in review until 2026-10-16T07:40Z, PR [#724](https://github.com/rubys/roundhouse/pull/724) ([claim](https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589)): items 1–2 of the claim: one join for parameter slots over the classified arm set, built on [#674](https://github.com/rubys/roundhouse/issues/674)'s rows; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag. Uses option (a): only a non-nil concrete type absorbs `untyped`, so `Nil | untyped` stays. Also bounds each parameter row once after its fold. Emitted output byte-identical on three apps × 12 targets; with [#705](https://github.com/rubys/roundhouse/issues/705) on `fixpoint-next`, fully typed 69.01% → 69.45% (S3) and 69.22% → 69.84% (`PROBE_BASE=1`), base verify moved 652 → 475.
 <!-- end generated -->
 
 ## Running a check
