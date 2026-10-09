@@ -137,10 +137,27 @@ fn disjoint(a: &Reach, b: &Reach) -> bool {
     }
 }
 
+fn nullable(item: &Item) -> bool {
+    matches!(item.quant(), Quant::Opt | Quant::Star)
+}
+
+/// A variable item must be disjoint from every item it can meet next:
+/// the following item, and past any item that can match nothing, the
+/// one after that, up to the first required item. In `a*b?a`, `b?`
+/// can be skipped, so `a*` meets the final `a`; a greedy pass would
+/// consume it and reject `"a"`, which the regex accepts.
 fn check_safe_adjacency(items: &[Item]) -> Option<()> {
-    for w in items.windows(2) {
-        if w[0].quant().variable() && !disjoint(&reach_of(&w[0]), &reach_of(&w[1])) {
-            return None;
+    for (idx, item) in items.iter().enumerate() {
+        if !item.quant().variable() {
+            continue;
+        }
+        for next in &items[idx + 1..] {
+            if !disjoint(&reach_of(item), &reach_of(next)) {
+                return None;
+            }
+            if !nullable(next) {
+                break;
+            }
         }
     }
     Some(())
@@ -522,5 +539,12 @@ mod tests {
         // Both classes can match 'a' — a correct engine would need to
         // backtrack; this compiler refuses rather than guess.
         refused(r"[a-z]+[a-m]");
+    }
+
+    #[test]
+    fn overlap_past_a_nullable_item_is_refused() {
+        // `b?` can match nothing, so `a*` also meets the final `a`.
+        refused(r"a*b?a");
+        refused(r"[0-9]*-?[0-9]");
     }
 }
