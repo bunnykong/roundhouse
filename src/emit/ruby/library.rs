@@ -1455,28 +1455,48 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             let instance_self = (m.receiver == MethodReceiver::Instance)
                 .then(|| if is_model { Some(lc.name.clone()) } else { concern_owner.clone() })
                 .flatten();
-            if crate::lower::scope_chain::mentions_scope(&m.body, &names)
-                || crate::lower::scope_chain::mentions_model_chain_start(&m.body, &models)
-                || crate::lower::scope_chain::mentions_assoc_constructor(&m.body, &assocs)
-                || crate::lower::scope_chain::mentions_assoc_lookup(&m.body, &assocs)
-                || crate::lower::scope_chain::mentions_assoc_alias(&m.body, &assocs)
-                || crate::lower::scope_chain::mentions_assoc_extension(&m.body, &assocs)
-                || crate::lower::scope_chain::mentions_model_insert_all(&m.body, &models)
-                || crate::lower::scope_chain::mentions_assoc_class_method(
-                    &m.body,
-                    &assocs,
-                    &scopes,
-                    &assoc_class_methods,
-                )
-                || (class_self.is_some()
-                    && crate::lower::scope_chain::mentions_bare_chain_start(&m.body))
-            {
+            let mentions = |e: &Expr| {
+                crate::lower::scope_chain::mentions_scope(e, &names)
+                    || crate::lower::scope_chain::mentions_model_chain_start(e, &models)
+                    || crate::lower::scope_chain::mentions_assoc_constructor(e, &assocs)
+                    || crate::lower::scope_chain::mentions_assoc_lookup(e, &assocs)
+                    || crate::lower::scope_chain::mentions_assoc_alias(e, &assocs)
+                    || crate::lower::scope_chain::mentions_assoc_extension(e, &assocs)
+                    || crate::lower::scope_chain::mentions_model_insert_all(e, &models)
+                    || crate::lower::scope_chain::mentions_assoc_class_method(
+                        e,
+                        &assocs,
+                        &scopes,
+                        &assoc_class_methods,
+                    )
+                    || (class_self.is_some()
+                        && crate::lower::scope_chain::mentions_bare_chain_start(e))
+            };
+            if mentions(&m.body) {
                 crate::lower::scope_chain::rewrite_call_site(
                     &mut m.body,
                     &regs,
                     class_self.as_ref(),
                     instance_self.as_ref(),
                 );
+            }
+            // An instance method's parameter DEFAULT is evaluated in the
+            // method's own scope, so it is a call site too — campfire's
+            // `def notification(badge: user.memberships.unread.count, …)`.
+            // (A class method's default stays as written; see
+            // tests/default_self_recv.rs.)
+            let instance_defaults = m.receiver == MethodReceiver::Instance;
+            for p in m.params.iter_mut().filter(|_| instance_defaults) {
+                if let Some(d) = p.default.as_mut() {
+                    if mentions(d) {
+                        crate::lower::scope_chain::rewrite_call_site(
+                            d,
+                            &regs,
+                            class_self.as_ref(),
+                            instance_self.as_ref(),
+                        );
+                    }
+                }
             }
         }
     }
@@ -3529,6 +3549,24 @@ fn rewrite_helper_calls(
     if is_base_dot_helpers(&expr.node) {
         *expr.node = ExprNode::Const { path: view_helpers_path() };
         return;
+    }
+
+    // Case 1b: a controller's own `helpers.<m>(…)` — Rails' view-context
+    // proxy (campfire's `helpers.dom_id(@boost.message, :boosts)`). An
+    // app helper resolves to its module, anything else to ViewHelpers.
+    if !own_methods.contains(&Symbol::from("helpers")) {
+        if let ExprNode::Send { recv: Some(r), method, .. } = &mut *expr.node {
+            let bare_helpers = matches!(&*r.node,
+                ExprNode::Send { recv: None, method: h, args, block: None, .. }
+                    if h.as_str() == "helpers" && args.is_empty());
+            if bare_helpers {
+                let path = match index.get(method) {
+                    Some(module) => module.0.as_str().split("::").map(Symbol::from).collect(),
+                    None => view_helpers_path(),
+                };
+                *r.node = ExprNode::Const { path };
+            }
+        }
     }
 
     // Case 2: collapse `Rails.application.routes.url_helpers` to RouteHelpers.

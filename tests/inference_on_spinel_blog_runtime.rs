@@ -311,7 +311,15 @@ fn untyped_subexpressions_baseline() {
     // Relation#find(nil)'s "without an ID" raise (#689 review):
     // 540 -> 541, MEASURED. The one new site is the `id.nil?` guard's
     // read of the unseeded `id`.
-    const CEILING: usize = 541;
+    // `Base.uncached` (campfire's push pool test): 541 -> 547, MEASURED.
+    // The six new sites are its `Db.query_cache_*` calls and the block
+    // value, read here without the Db contract — the same escape
+    // `self.transaction`'s `Db.exec` calls already take.
+    // `Relation#order_sql` / `#reorder_sql` (`order(Arel.sql(…))`,
+    // campfire's `reorder(Arel.sql("+messages.created_at"))`): 547 ->
+    // 549, MEASURED — each one's `fragment` parameter, read here
+    // without its RBS.
+    const CEILING: usize = 549;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

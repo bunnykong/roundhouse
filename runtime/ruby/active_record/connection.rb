@@ -199,6 +199,12 @@ module ActiveRecord
       ActiveRecord.adapter.select_rows(sql).map { |row| row.values }
     end
 
+    # `select_value(sql)` — the first column of the first row, or nil
+    # (campfire's room test counts FTS rows this way).
+    def select_value(sql)
+      select_rows(sql).dig(0, 0)
+    end
+
     def exec_query(sql)
       execute(sql)
     end
@@ -398,6 +404,18 @@ module ActiveRecord
       sanitize_sql(statement)
     end
 
+    # Rails' `uncached { }`: the block's reads go to the database, not
+    # the per-request replay cache, which comes back on after it.
+    def self.uncached
+      was = Db.query_cache_enabled?
+      Db.query_cache_end if was
+      begin
+        yield
+      ensure
+        Db.query_cache_begin if was
+      end
+    end
+
     # `Model.transaction { ... }` — the block inside BEGIN/COMMIT, with
     # ROLLBACK + re-raise on any exception. Flat transactions only: the
     # corpus never nests (a nested BEGIN would error in SQLite rather
@@ -419,6 +437,33 @@ module ActiveRecord
       rescue => e
         Db.exec("ROLLBACK")
         raise e
+      end
+    end
+
+    # `#with_lock` (`ActiveRecord::Locking::Pessimistic#with_lock`) —
+    # locks the record, then runs the block inside a transaction,
+    # answering the block's value. Dispatches through
+    # `self.class.transaction` (same `self.class.` pattern as
+    # `schema_columns` elsewhere in this file) rather than a bare
+    # `transaction`: Base has no instance-level transaction delegator
+    # like Rails' `ActiveRecord::Transactions#transaction`, only the
+    # class one in connection.rb. An exception raised in the block
+    # rolls the transaction back and re-raises, same as `transaction`
+    # itself.
+    #
+    # Rails spells the trailing transaction options as a Hash
+    # (`args.extract_options!`); here they are the same three keywords
+    # `transaction` takes, and the lock clause is the optional
+    # positional. Lives in this ruby-family reopen, not base.rb, because
+    # it leans on `Base.transaction` (see the note in base.rb).
+    def with_lock(lock = nil, isolation: nil, requires_new: nil, joinable: true)
+      self.class.transaction(
+        isolation: isolation,
+        requires_new: requires_new,
+        joinable: joinable
+      ) do
+        lock!(lock)
+        yield
       end
     end
 

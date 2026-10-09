@@ -307,6 +307,24 @@ module ActiveRecord
       self
     end
 
+    # `order(Arel.sql("…"))` — a caller-authored ordering fragment, kept
+    # as written (Rails takes an `Arel.sql` literal past its column-name
+    # check; campfire's `reorder(Arel.sql("+messages.created_at"))`
+    # keeps SQLite off an index). `lower::arel_sql_order` renames the
+    # call; the bare String `order` still validates. A loaded relation
+    # reads again rather than guess at a fragment's sort.
+    def order_sql(fragment)
+      own_lists
+      @orders << fragment
+      @records = nil
+      self
+    end
+
+    def reorder_sql(fragment)
+      @orders = []
+      order_sql(fragment)
+    end
+
     # `reorder(*parts)` — Rails' "replace the ordering": drop every term
     # gathered so far, then order by these. Same in-memory resort as
     # `order` when the records are already loaded.
@@ -1074,6 +1092,13 @@ module ActiveRecord
       loaded_records.map { |x| yield x }
     end
 
+    # Enumerable's `to_h { |rec| [k, v] }` over the materialized rows
+    # (campfire's push pool test keys each subscription's badge by its
+    # endpoint this way).
+    def to_h
+      loaded_records.to_h { |x| yield x }
+    end
+
     # `collect` is Enumerable's second name for `map`, and Rails
     # relations answer it because they delegate the whole of Enumerable
     # to `to_a`. campfire's membership extension reaches it
@@ -1416,9 +1441,8 @@ module ActiveRecord
       ok
     end
 
-    # `exists?` / `exists?(id)`. Hash/String forms are unsupported.
-    # Integer? narrows by early return — rust2 does not narrow Option
-    # across `unless x.nil?`. Unloaded: exists_sql (SELECT 1 LIMIT 1).
+    # Hash conditions share where's predicate builder; scalar conditions
+    # select the primary key. Unloaded: exists_sql (SELECT 1 LIMIT 1).
     def exists?(id = nil)
       return false if @limit == 0
       if id.nil?
@@ -1427,10 +1451,20 @@ module ActiveRecord
         return probe_existence(1) > 0
       end
       own_lists
-      @wheres << "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(id)}"
-      found = probe_existence(1) > 0
-      @wheres.pop
-      found
+      # Popped for the same reason `find` and `find_by` pop: a terminal
+      # that answered a question must not narrow the relation it was
+      # asked on.
+      sql = if id.is_a?(Hash)
+        hash_conditions(id)
+      else
+        "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(id)}"
+      end
+      @wheres << sql unless sql.empty?
+      begin
+        probe_existence(1) > 0
+      ensure
+        @wheres.pop unless sql.empty?
+      end
     end
 
     # How many probe rows `exists_sql(n)` returns. Shared by `exists?`,
@@ -2012,6 +2046,7 @@ module ActiveRecord
     # into a JOINed query where the bare name would be ambiguous —
     # `hidden_stories.user_id`, not `user_id`, after `joins(:hidings)`.
     def column_predicate(col, val)
+      col = sql_ident(col)
       qcol = col.include?(".") ? col : "#{@table}.#{col}"
       if val.is_a?(Relation)
         # A relation value is Rails' subquery form —
