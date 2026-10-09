@@ -1498,6 +1498,15 @@ impl Analyzer {
                 TypingMode::ViewsAndTests,
             )
         });
+        let _quiescent = if det::keep_unresolved_on()
+            && ![rounds.production, rounds.views_and_tests, rounds.absorb].contains(&LoopEnd::RanToCap)
+        {
+            let scope = det::quiescent_scope();
+            self.fixpoint_rounds.absorb = self.settle_unresolved_returns(app, &round_inputs, FIXPOINT_CAP);
+            Some(scope)
+        } else {
+            None
+        };
         // Effects are a function of the converged typed trees, not of
         // the fixpoint. Collecting inside every typing round walked
         // the same bodies two or three times per round for no harvest

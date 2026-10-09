@@ -420,6 +420,32 @@ pub(crate) fn det_on() -> bool {
     *DET >= 1
 }
 
+/// `RH_DET_KEEP_UNRESOLVED=1`: retain inference gaps once pending slots settle.
+static KEEP_UNRESOLVED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("RH_DET_KEEP_UNRESOLVED").as_deref() == Ok("1"));
+
+std::thread_local! {
+    static QUIESCENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn keep_unresolved_on() -> bool {
+    det_on() && *KEEP_UNRESOLVED
+}
+
+pub(crate) struct Quiescent(bool);
+
+impl Drop for Quiescent {
+    fn drop(&mut self) {
+        QUIESCENT.with(|q| q.set(self.0));
+    }
+}
+
+/// Replay settled producers before handoff: a remaining Var is an inference
+/// gap, not a pending value that a later round can replace.
+pub(crate) fn quiescent_scope() -> Quiescent {
+    Quiescent(QUIESCENT.with(|q| q.replace(true)))
+}
+
 /// How a writer's new value meets the entry it wrote before
 /// (`RH_DET_WRITE=join|last`, default `join`): `join` is the inflationary
 /// join of everything the entry was ever written; `last` is the
@@ -503,7 +529,9 @@ fn norm_opt(t: &Ty, top: bool) -> Option<Ty> {
         }
     }
     let below = !top && !keep_gradual();
+    let unresolved = top && QUIESCENT.with(|q| q.get());
     match t {
+        Ty::Var { .. } if unresolved => Some(Ty::unresolved()),
         Ty::Var { .. } if below => Some(Ty::pending_untyped()),
         Ty::Union { variants } => {
             let mut changed = false;
@@ -511,7 +539,9 @@ fn norm_opt(t: &Ty, top: bool) -> Option<Ty> {
             for v in variants.iter() {
                 if matches!(v, Ty::Var { .. }) {
                     changed = true;
-                    if below {
+                    if unresolved {
+                        arms.push(Ty::unresolved());
+                    } else if below {
                         arms.push(Ty::pending_untyped());
                     }
                     continue;
@@ -580,7 +610,8 @@ fn norm_opt(t: &Ty, top: bool) -> Option<Ty> {
                 && arms.iter().any(|v| matches!(v, Ty::Untyped { .. }))
                 && arms.iter().any(|v| !matches!(v, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Bottom | Ty::Nil))
             {
-                arms.retain(|v| !matches!(v, Ty::Untyped { .. }));
+                arms.retain(|v| !matches!(v, Ty::Untyped { .. })
+                    || (unresolved && v.provenance() == Some(crate::ty::Provenance::Unresolved)));
                 changed = true;
             }
             if !changed {
@@ -622,12 +653,17 @@ fn norm_opt(t: &Ty, top: bool) -> Option<Ty> {
 
 /// One value on its own, normalized as a join with ⊥ would leave it.
 pub(crate) fn lat_norm(t: Ty) -> Ty {
+    if QUIESCENT.with(|q| q.get()) {
+        // The synthetic join identity is not an unresolved producer.
+        return norm_opt(&t, true).unwrap_or(t);
+    }
     lat_join(Ty::Var { var: crate::ident::TyVar(0) }, t)
 }
 
 #[cfg(test)]
 mod lat_tests {
     use super::*;
+    use crate::analyze::body::union_of;
 
     #[test]
     fn lat_join_is_order_free_on_pending_pairs() {
@@ -638,5 +674,23 @@ mod lat_tests {
         assert_eq!(lat_join(a.clone(), b.clone()), lat_join(b, a));
         let nil = crate::analyze::body::union_of(Ty::Nil, Ty::unresolved());
         assert_eq!(lat_join(nil.clone(), Ty::Nil), lat_join(Ty::Nil, nil));
+    }
+
+    #[test]
+    fn quiescent_variables_stay_unresolved_but_the_identity_does_not() {
+        let v = Ty::Var { var: crate::ident::TyVar(0) };
+        let nil = union_of(Ty::Nil, v.clone());
+        assert_eq!(lat_norm(nil.clone()), Ty::Nil);
+        {
+            let _scope = quiescent_scope();
+            assert_eq!(lat_norm(nil), union_of(Ty::Nil, Ty::unresolved()));
+            assert_eq!(lat_norm(v.clone()), Ty::unresolved());
+            assert_eq!(lat_norm(Ty::Int), Ty::Int);
+            assert_eq!(lat_join(Ty::Str, v), union_of(Ty::Str, Ty::unresolved()));
+            assert_eq!(lat_norm(union_of(Ty::Str, Ty::unresolved())),
+                union_of(Ty::Str, Ty::unresolved()));
+        }
+        assert_eq!(lat_norm(union_of(Ty::Nil,
+            Ty::Var { var: crate::ident::TyVar(0) })), Ty::Nil);
     }
 }

@@ -389,6 +389,43 @@ fn loop_end(end: LoopEnd) -> serde_json::Value {
 }
 
 impl Analyzer {
+    /// Keep surviving inference gaps after the pending-value fixpoint settles.
+    /// Full rounds propagate the restored arms through returns, params and views.
+    pub(super) fn settle_unresolved_returns(&mut self, app: &mut App, inputs: &RoundInputs<'_>, cap: usize) -> LoopEnd {
+        for round in 0..cap {
+            let before = self.state_fp(app);
+            self.run_typing_passes(
+                app,
+                inputs.dynamic_render_ivars,
+                inputs.existing_view_names,
+                inputs.module_methods,
+                inputs.module_includes,
+                inputs.parent_link_by_name,
+                TypingMode::Production { dirty: None },
+            );
+            self.run_typing_passes(
+                app,
+                inputs.dynamic_render_ivars,
+                inputs.existing_view_names,
+                inputs.module_methods,
+                inputs.module_includes,
+                inputs.parent_link_by_name,
+                TypingMode::ViewsAndTests,
+            );
+            self.harvest_returns_to_registry(app, true);
+            self.unify_params_from_call_sites(app, UnifyScope::WithViews);
+            self.overlay_test_params(app);
+            let moved = self.state_fp(app).moved(&before);
+            if stats_on() {
+                eprintln!("rh-det-unresolved: {}", serde_json::json!({"round": round, "moved": moved}));
+            }
+            if moved.values().all(|n| *n == 0) {
+                return LoopEnd::Settled(round);
+            }
+        }
+        LoopEnd::RanToCap
+    }
+
     /// The carried state (see the module docs), one hash per entry.
     pub(super) fn state_fp(&self, app: &App) -> StateFp {
         let mut parts: BTreeMap<&'static str, BTreeMap<String, u64>> = BTreeMap::new();
