@@ -82,7 +82,7 @@
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Fix the class-guard and `Array(…)` losses, and measure each with the check."
+  next: "Model the methods behind the dispatch fallbacks (classes missing a method, unmodeled receivers; F18), as agreed on #617, and fix the class-guard and `Array(…)` losses; measure each with the check."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
