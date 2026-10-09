@@ -1,12 +1,12 @@
 # Typed recursion: recursive types in generated code
 
 **Question:** can a recursive type compile as a native recursive type on every target, rather than as `untyped`?
-**Stands:** a Rust `enum` and a Crystal `alias` work for three of #589's four recorded shapes, behind a flag ([F13](../facts.md)).
+**Stands:** a Rust `enum` and a Crystal `alias` work for three of [#589](https://github.com/rubys/roundhouse/issues/589)'s four recorded shapes, behind a flag ([F13](../facts.md)).
 **Skills:** code generation; the type systems of Rust, Crystal and the other targets.
 
 ## Why it matters
 
-Recursive data, such as JSON-like hashes, trees and nested params, is common in Rails apps. Printed as `untyped`, it costs the compiled targets their speed and their checks. #589 recorded where that bites.
+Recursive data, such as JSON-like hashes, trees and nested params, is common in Rails apps. Printed as `untyped`, it costs the compiled targets their speed and their checks. [#589](https://github.com/rubys/roundhouse/issues/589) recorded where that bites.
 
 ## The check
 
@@ -19,7 +19,7 @@ The lab's [emit-rec demo](https://github.com/bunnykong/roundhouse-fixpoint-lab/t
 
 ## Leads
 
-- The fourth shape involves a class method and an instance method of one name. #630's dispatch fix on main may make it straightforward.
+- The fourth shape involves a class method and an instance method of one name. [#630](https://github.com/rubys/roundhouse/issues/630)'s dispatch fix on main may make it straightforward.
 - Which other targets have a natural recursive form? TypeScript has recursive aliases and Swift has indirect enums; Go needs an interface for the alternatives.
 
 ## Read first

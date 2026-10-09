@@ -1,6 +1,6 @@
 # Facts
 
-What is established so far, each with the commit it was measured on and where to check it. IDs stay stable, and a fact that turns out wrong is struck through and corrected, never deleted. M1 and M2 are the [first](https://github.com/rubys/roundhouse/issues/617#issuecomment-6064040601) and [second](https://github.com/rubys/roundhouse/issues/617#issuecomment-6072303988) progress updates on #617.
+What is established so far, each with the commit it was measured on and where to check it. IDs stay stable, and a fact that turns out wrong is struck through and corrected, never deleted. M1 and M2 are the [first](https://github.com/rubys/roundhouse/issues/617#issuecomment-6064040601) and [second](https://github.com/rubys/roundhouse/issues/617#issuecomment-6072303988) progress updates on [#617](https://github.com/rubys/roundhouse/issues/617).
 
 | ID | Fact | Receipt |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ What is established so far, each with the commit it was measured on and where to
 | F10 | Sharing cuts the large app's peak memory to 3.0 GiB at S3, against 4.0 on main. | `92844f68`; M1 |
 | F11 | With exact type identities and a union memo, the large app's `check` takes 34.0 s, against 43.0 s for S3 and 41.7 s for main (three interleaved runs, loaded host). | [`fixpoint-arena`](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-arena); M2 |
 | F12 | Sharing could swap `untyped` tags between equal-looking values. Storage equality in the interner fixes the tags on six apps and changes nothing printed; the join memo gets the same fix. | `060a91d8`, `4485e7db`; M2 |
-| F13 | Recursive types compile as a Rust `enum` and a Crystal `alias` for three of #589's four shapes, and the pages render as CRuby's do. | [lab: emit-rec](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/patches/emit-rec) |
+| F13 | Recursive types compile as a Rust `enum` and a Crystal `alias` for three of [#589](https://github.com/rubys/roundhouse/issues/589)'s four shapes, and the pages render as CRuby's do. | [lab: emit-rec](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/patches/emit-rec) |
 | F14 | One merge per slot raises fully typed from 68.83% to 70.77% but adds 107 errors on the public apps (net +87). Source review finds none of its 84 new dispatch errors real; in 59 the receiver collapsed to `nil`. | [`fixpoint-onemerge`](https://github.com/bunnykong/roundhouse/compare/fixpoint-next...fixpoint-onemerge) |
 | F15 | Replaying stored evaluations after an edit matches a full check on six public edits, but runs 21–32× slower (one timed pair per edit). | [`fixpoint-warm`](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-warm) |
 | F16 | Freezing the call graph and the recursive set before typing makes both schedule-independent, but answers change while slots and writers are still found during typing. | [`fixpoint-structure`](https://github.com/bunnykong/roundhouse/compare/fixpoint-next...fixpoint-structure); M2 |

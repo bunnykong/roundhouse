@@ -2,7 +2,7 @@
 
 > **Draft, not proposed for merge in this form.** This directory makes the research behind [#617](https://github.com/rubys/roundhouse/issues/617) public: the open problems, how each one is checked, and what has been tried, dead ends included. If the maintainers want any of it in-tree, it can be reshaped to fit.
 
-Roundhouse infers types for a whole Rails app without annotations, by re-typing methods until nothing changes. On real apps that loop often stops at a round cap instead of settling, and its answer then depends on where it stopped. #617 proposes making it settle, and small stage PRs land the changes one at a time. The problems below are still open. Anyone is welcome to take one on.
+Roundhouse infers types for a whole Rails app without annotations, by re-typing methods until nothing changes. On real apps that loop often stops at a round cap instead of settling, and its answer then depends on where it stopped. [#617](https://github.com/rubys/roundhouse/issues/617) proposes making it settle, and small stage PRs land the changes one at a time. The problems below are still open. Anyone is welcome to take one on.
 
 ## Start here
 
@@ -12,7 +12,7 @@ Roundhouse infers types for a whole Rails app without annotations, by re-typing 
 | What is established, each with its receipt | [facts.md](facts.md) |
 | What has been tried, including what failed | [attempts.md](attempts.md) |
 | The open problems, machine-readable | [frontiers.yaml](frontiers.yaml) |
-| How the analyzer works today | [../pipeline/analyze.md](../pipeline/analyze.md) |
+| How the analyzer works today | [docs/pipeline/analyze.md](../pipeline/analyze.md) |
 
 ## Open problems
 
@@ -44,8 +44,8 @@ chmod +x probe
 ## Contributing
 
 1. **Pick** a frontier. Its brief lists the skills it needs and the code to read first.
-2. **Claim** it in a comment on #617, so parallel work doesn't collide.
+2. **Claim** it in a comment on [#617](https://github.com/rubys/roundhouse/issues/617), so parallel work doesn't collide.
 3. **Check** the change with the frontier's check on the [five pinned public apps](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/corpus).
-4. **Report** the check's output on #617, whether it's a step forward or a dead end. Both get recorded in [attempts.md](attempts.md).
+4. **Report** the check's output on [#617](https://github.com/rubys/roundhouse/issues/617), whether it's a step forward or a dead end. Both get recorded in [attempts.md](attempts.md).
 
 Three rules hold for every frontier: public inputs only; with its flag off, a change leaves emitted code byte-identical; and precision is reported with the runtime oracle beside it, never as a count alone.

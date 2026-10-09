@@ -17,7 +17,7 @@ On the five public apps, against main at the same commit: the share of expressio
 - S3 is less precise than main on 4,823 expressions and more precise on 2,334. About half the losses hold `untyped` before references are expanded, a quarter pick it up during expansion, and the rest hold an unresolved type variable.
 - Switching rules off one at a time puts roughly a third each on the worklist's order, on reference slots, and on S2b's joins and all-arms binding.
 - One merge per slot gains 1.94 points, but part of the gain is unsound (F14).
-- One cause, class-versus-instance dispatch, is already fixed on main by #630, which the staged branch predates.
+- One cause, class-versus-instance dispatch, is already fixed on main by [#630](https://github.com/rubys/roundhouse/issues/630), which the staged branch predates.
 
 ## Leads
 

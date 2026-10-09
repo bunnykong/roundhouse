@@ -16,7 +16,7 @@ The lab's [runtime oracle](https://github.com/bunnykong/roundhouse-fixpoint-lab/
 
 - `@data` in Discourse's `app/jobs/base.rb` is typed as a hash of `Integer` values after both a `String` and an `Integer` are stored in it. The join over its `[]=` writes loses the earlier contents (F8).
 - With one merge per slot, 59 receivers collapse to `nil` where the source builds an object: a pending value is dropped, leaving only its `nil` arm (F14).
-- The lab's [2×2 reproduction](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/reproductions/settle_sound) shows that correct flow and settling are both needed. It was measured before #634 changed how main reads `to_h` pairs, so it needs re-checking.
+- The lab's [2×2 reproduction](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/reproductions/settle_sound) shows that correct flow and settling are both needed. It was measured before [#634](https://github.com/rubys/roundhouse/issues/634) changed how main reads `to_h` pairs, so it needs re-checking.
 
 ## Leads
 

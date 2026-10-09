@@ -4,7 +4,7 @@
 
 Roundhouse types each method body from what it knows about the rest of the app: the returns of the methods it calls, the types of instance variables, and the parameter types its callers pass. Typing one body changes what others see, so the analyzer repeats rounds until a round changes nothing. It runs three such loops (production, views and tests, absorb), each capped at 12 rounds.
 
-On main the loops often reach the cap. Recursive data grows one level deeper each round, some rules replace a type instead of adding to it, and #584's size bound cuts types that grow too large. A loop stopped by the cap has no single answer: the round it stopped in decides the result.
+On main the loops often reach the cap. Recursive data grows one level deeper each round, some rules replace a type instead of adding to it, and [#584](https://github.com/rubys/roundhouse/issues/584)'s size bound cuts types that grow too large. A loop stopped by the cap has no single answer: the round it stopped in decides the result.
 
 ## The proposal, in four ideas
 
@@ -35,7 +35,7 @@ Against main at a named commit, on the [five pinned public apps](https://github.
 | Precision | Share of expressions fully typed and share holding `untyped`, with the [runtime oracle](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/oracle) beside it |
 | Cost | `check --continue` wall time and peak memory, interleaved runs |
 
-The flags live on the [follow-up branch](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-next); `RH_FIXPOINT_*` is also in #657.
+The flags live on the [follow-up branch](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-next); `RH_FIXPOINT_*` is also in [#657](https://github.com/rubys/roundhouse/issues/657).
 
 ## Terms
 

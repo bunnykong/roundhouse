@@ -6,7 +6,7 @@
 
 ## Why it matters
 
-An answer that depends on processing order changes when unrelated code changes: a new file or a renamed method elsewhere can change inferred types, errors and emitted code. "The same answer every time, in any order" is also the first gate rubys set for #617.
+An answer that depends on processing order changes when unrelated code changes: a new file or a renamed method elsewhere can change inferred types, errors and emitted code. "The same answer every time, in any order" is also the first gate rubys set for [#617](https://github.com/rubys/roundhouse/issues/617).
 
 ## The check
 
