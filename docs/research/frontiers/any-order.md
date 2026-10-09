@@ -3,6 +3,7 @@
 **Question:** does the analysis reach the same answer whatever order it types methods in?
 **Stands:** no. On four of the five public apps, the structure the fixpoint works over differs between schedules ([F5](../facts.md)).
 **Skills:** Rust; fixpoint and lattice theory; the analyzer's harvest, dispatch and fold code.
+**Background:** [notes/order-dependence.md](../notes/order-dependence.md)
 
 ## Why it matters
 
@@ -26,6 +27,7 @@ It passes when each app prints three identical lines and the last number, the to
 
 - Monotone rules alone can't fix it. The slots, the writers of each and the set of recursive references are discovered during typing, and the discovery depends on the schedule ([foundations](../foundations.md#when-order-cant-matter)).
 - Freezing the call graph and the recursive set before typing makes those two parts schedule-independent. The rest is still discovered during typing, and freezing only part of it changes answers (F16).
+- Seven joins on main break those laws (commutative, associative, idempotent, pending as identity), each confirmed with a unit test: [the list](https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589), from @eddygarcas, who has claimed a PR fixing six of them against main.
 - The `RH_DET` bundle, which makes `decide_harvested_return` the one merge per slot and normalizes joins, improves several order-dependent components but still fails on four apps (F14).
 
 ## Leads

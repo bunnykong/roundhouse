@@ -11,7 +11,8 @@ Roundhouse infers types for a whole Rails app without annotations, by re-typing 
 | The ideas, the theory and the terms, in one read | [foundations.md](foundations.md) |
 | What is established, each with its receipt | [facts.md](facts.md) |
 | What has been tried, including what failed | [attempts.md](attempts.md) |
-| The open problems, machine-readable | [frontiers.yaml](frontiers.yaml) |
+| The open problems, machine-readable, with who has claimed what | [frontiers.yaml](frontiers.yaml) |
+| Background: order dependence, the incremental design, the error census | [notes/](notes/) |
 | How the analyzer works today | [docs/pipeline/analyze.md](../pipeline/analyze.md) |
 
 ## Open problems
@@ -44,7 +45,7 @@ chmod +x probe
 ## Contributing
 
 1. **Pick** a frontier. Its brief lists the skills it needs and the code to read first.
-2. **Claim** it in a comment on [#617](https://github.com/rubys/roundhouse/issues/617), so parallel work doesn't collide.
+2. **Claim** it in a comment on [#617](https://github.com/rubys/roundhouse/issues/617), so parallel work doesn't collide. Claims are recorded in `frontiers.yaml`.
 3. **Check** the change with the frontier's check on the [five pinned public apps](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/corpus).
 4. **Report** the check's output on [#617](https://github.com/rubys/roundhouse/issues/617), whether it's a step forward or a dead end. Both get recorded in [attempts.md](attempts.md).
 

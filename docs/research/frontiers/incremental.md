@@ -3,6 +3,7 @@
 **Question:** after an edit, can the answer be updated exactly in milliseconds, instead of by a full check?
 **Stands:** replaying stored evaluations agrees with a cold check on six public edits, but its warm portion takes 21.55–32.01× as long ([F15](../facts.md)).
 **Skills:** incremental computation; Rust performance; serialization.
+**Background:** [notes/incremental-design.md](../notes/incremental-design.md)
 
 ## Why it matters
 

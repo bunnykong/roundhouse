@@ -17,8 +17,8 @@ On main the loops often reach the cap. Recursive data grows one level deeper eac
 
 A classical result, chaotic iteration: on a lattice of finite height, starting from ⊥ (nothing known), every fair order of applying a fixed, finite set of monotone equations, joining what they contribute, reaches the same least solution. For the analyzer that takes two conditions:
 
-- **Structure fixed by the program.** The slots, the writers that feed each slot, and the slots that become recursive references come from the source, not from what typing happened to discover first. Reading a slot nobody has written yet gives ⊥.
-- **Monotone writers.** More input never removes anything from a writer's output, and a slot's value is the join of its writers' contributions.
+- **Structure fixed by the program.** The slots, the writers that feed each slot, and the slots that become recursive references come from the source, not from what typing happened to discover first. Slots may be created lazily, as long as reading one nobody has written gives ⊥ and which slot a write goes to never depends on current values.
+- **Monotone writers.** More input never removes anything from a writer's output, and a slot's value is the join of its writers' contributions, under one join per slot that is commutative, associative and idempotent, with pending as its identity.
 
 Neither condition is established for the analyzer yet; both belong to the [any-order frontier](frontiers/any-order.md). The lab's [Lean proof](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/proof) assumes both, plus finiteness.
 
@@ -31,7 +31,7 @@ Against main at a named commit, on the [five pinned public apps](https://github.
 | Flags off changes nothing | Emitted code byte-identical on 105 fixture × target pairs; the default suite and typing ceilings as main |
 | Settling | `RH_FIXPOINT_VERIFY=1` repeats a round after each loop and reports what moved |
 | The same answer | `RH_FIXPOINT_DIGEST=1` digests the carried state; compare across runs and across `RH_SHUFFLE=<seed>` schedules |
-| Errors by kind | `RH_ERRGATE=1 RH_PUBLIC_INPUT=1` records each failing call site; `python3 tools/errgate.py BASE.stderr CANDIDATE.stderr` sorts the differences into *exposed*, *regressed*, *hidden*, *gained arm* and *undetermined* |
+| Errors by kind | `RH_ERRGATE=1 RH_PUBLIC_INPUT=1` records every call with a receiver and every arithmetic or comparison operator; `python3 tools/errgate.py BASE.stderr CANDIDATE.stderr` labels each difference: [the census](notes/error-census.md) |
 | Precision | Share of expressions fully typed and share holding `untyped`, with the [runtime oracle](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/oracle) beside it |
 | Cost | `check --continue` wall time and peak memory, interleaved runs |
 

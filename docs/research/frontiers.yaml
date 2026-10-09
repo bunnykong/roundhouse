@@ -9,6 +9,10 @@
   check_public: true
   skills: [rust, lattice theory, analyzer internals]
   branch: fixpoint-next
+  claims:
+    - who: eddygarcas
+      what: "Join laws on main: items 1-6 of the linked list, one PR against main"
+      where: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
 
 - id: soundness
   title: "Types that admit what the app really does"

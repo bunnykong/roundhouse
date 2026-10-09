@@ -16,6 +16,7 @@ The lab's [runtime oracle](https://github.com/bunnykong/roundhouse-fixpoint-lab/
 
 - `@data` in Discourse's `app/jobs/base.rb` is typed as a hash of `Integer` values after both a `String` and an `Integer` are stored in it. The join over its `[]=` writes loses the earlier contents (F8).
 - With the `RH_DET` bundle, 59 new dispatch errors have receivers that are `nil` alone, where the source builds an object; source review judges 58 impossible and one unclear. Their cause at the producer isn't traced yet (F14).
+- On main, `strip_unknown` maps a pending `Var` to `untyped`, so a pending arm beside `nil` becomes a gradual `Nil | untyped` ([details](https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589), item 7). With the `RH_DET` bundle, only `nil` is left.
 - The settling reproduction shows that correct flow and settling are both needed, and it still holds on current main `9b2dd5e9`, after [#634](https://github.com/rubys/roundhouse/pull/634): main settles but rejects 6 of 12 recorded values, and with the flow fix it runs to the cap and rejects none (F17).
 
 ## Leads

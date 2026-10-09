@@ -42,4 +42,4 @@ Today it prints 69.02% → 68.83% fully typed and 14.34% → 14.55% holding `unt
 
 ## Read first
 
-On [`fixpoint-staged`](https://github.com/rubys/roundhouse/compare/main...bunnykong:roundhouse:fixpoint-staged): `src/analyze/narrowing.rs` (class guards), `Expander::expand` in `src/analyze/fold.rs`, the `Array(…)` conversion in `src/analyze/body/mod.rs`, and the re-applied harvests in `src/analyze/sccq.rs`.
+On [`fixpoint-staged`](https://github.com/rubys/roundhouse/compare/main...bunnykong:roundhouse:fixpoint-staged): `src/analyze/body/narrowing.rs` (class guards), `Expander::expand` in `src/analyze/fold.rs`, the `Array(…)` conversion in `src/analyze/body/mod.rs`, and the re-applied harvests in `src/analyze/sccq.rs`.
