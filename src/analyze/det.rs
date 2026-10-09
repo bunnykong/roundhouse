@@ -411,3 +411,151 @@ pub(crate) fn note_registry(
         }
     }
 }
+
+/// Optional normalized joins; zero leaves existing typing rules unchanged.
+static DET: LazyLock<u8> = LazyLock::new(|| std::env::var("RH_DET").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0));
+
+/// The replacements are on.
+pub(crate) fn det_on() -> bool {
+    *DET >= 1
+}
+
+/// How a writer's new value meets the entry it wrote before
+/// (`RH_DET_WRITE=join|last`, default `join`): `join` is the inflationary
+/// join of everything the entry was ever written; `last` is the
+/// per-writer entry (the Kleene step), which needs monotone body transfers:
+/// it is intended for monotone body transfers.
+static WRITE_JOIN: LazyLock<bool> = LazyLock::new(|| !std::env::var("RH_DET_WRITE").is_ok_and(|v| v == "last"));
+pub(crate) fn write_join() -> bool {
+    *WRITE_JOIN
+}
+
+/// J₁: the gradual bit is kept by every join (the best transformer); J₀
+/// (`RH_DET=1`) lets an informative non-`Nil` arm absorb it, as main does.
+pub(crate) fn keep_gradual() -> bool {
+    *DET >= 2
+}
+
+/// `Var` arms vanish at every depth (⊥ is the identity of the join); a bare
+/// `Var`, or a union of nothing else, stays one pending `Var`. Subtrees with
+/// no `Var` are shared, not copied; a union whose arms changed is re-sorted
+/// and deduplicated, so it stays in `union_of`'s canonical form.
+pub(crate) fn strip_var_deep(t: Ty) -> Ty {
+    strip_var_opt(&t).unwrap_or(t)
+}
+
+fn strip_var_opt(t: &Ty) -> Option<Ty> {
+    fn each(xs: &[Ty]) -> Option<Vec<Ty>> {
+        let mut out: Option<Vec<Ty>> = None;
+        for (i, x) in xs.iter().enumerate() {
+            if let Some(n) = strip_var_opt(x) {
+                out.get_or_insert_with(|| xs[..i].to_vec()).push(n);
+            } else if let Some(o) = out.as_mut() {
+                o.push(x.clone());
+            }
+        }
+        out
+    }
+    match t {
+        Ty::Union { variants } => {
+            let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
+            let mut changed = has_var;
+            let mut out: Vec<Ty> = Vec::with_capacity(variants.len());
+            for v in variants.iter() {
+                if matches!(v, Ty::Var { .. }) {
+                    continue;
+                }
+                match strip_var_opt(v) {
+                    Some(n) => {
+                        changed = true;
+                        out.push(n);
+                    }
+                    None => out.push(v.clone()),
+                }
+            }
+            if !changed {
+                return None;
+            }
+            Ty::canonicalize_variants(&mut out);
+            out.dedup();
+            Some(match out.len() {
+                0 => Ty::Var { var: crate::ident::TyVar(0) },
+                1 => out.pop().unwrap(),
+                _ => Ty::Union { variants: out.into() },
+            })
+        }
+        Ty::Array { elem } => strip_var_opt(elem).map(|e| Ty::Array { elem: std::sync::Arc::new(e) }),
+        Ty::Hash { key, value } => {
+            let (k, v) = (strip_var_opt(key), strip_var_opt(value));
+            if k.is_none() && v.is_none() {
+                return None;
+            }
+            Some(Ty::Hash {
+                key: std::sync::Arc::new(k.unwrap_or_else(|| (**key).clone())),
+                value: std::sync::Arc::new(v.unwrap_or_else(|| (**value).clone())),
+            })
+        }
+        Ty::Tuple { elems } => each(elems).map(|e| Ty::Tuple { elems: e.into() }),
+        Ty::Class { id, args } => each(args).map(|a| Ty::Class { id: id.clone(), args: a.into() }),
+        Ty::Record { row } => {
+            let vals: Vec<Ty> = row.fields.iter().map(|(_, v)| v.clone()).collect();
+            each(&vals).map(|nv| Ty::Record {
+                row: crate::ty::Row {
+                    fields: row.fields.iter().map(|(k, _)| k.clone()).zip(nv).collect(),
+                    rest: row.rest.clone(),
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+/// J₀'s reading of the bit: a top-level `untyped` arm beside an informative
+/// arm other than `Nil` is absorbed (main's opacity; `Nil | untyped` stays,
+/// harvest_return's Campfire exception). Applied to a join's result it keeps
+/// the join associative: whether the arm goes depends only on the arm set.
+fn absorb_gradual(t: Ty) -> Ty {
+    match t {
+        Ty::Union { variants }
+            if variants.iter().any(|v| matches!(v, Ty::Untyped { .. }))
+                && variants.iter().any(|v| !matches!(v, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Bottom | Ty::Nil)) =>
+        {
+            let kept: Vec<Ty> = variants.iter().filter(|v| !matches!(v, Ty::Untyped { .. })).cloned().collect();
+            match kept.len() {
+                0 => Ty::pending_untyped(),
+                1 => kept.into_iter().next().unwrap(),
+                _ => Ty::Union { variants: kept.into() },
+            }
+        }
+        other => other,
+    }
+}
+
+/// The join of D : `union_of` (canonical, spine-merging), then
+/// `Var` arms removed at every depth, then, under J₀, the bit absorbed.
+/// Commutative, associative and idempotent, so no write order can matter.
+pub(crate) fn lat_join(a: Ty, b: Ty) -> Ty {
+    let j = strip_var_deep(super::body::union_of(a, b));
+    if keep_gradual() { j } else { absorb_gradual(j) }
+}
+
+/// One value on its own, normalized as a join with ⊥ would leave it.
+pub(crate) fn lat_norm(t: Ty) -> Ty {
+    lat_join(Ty::Var { var: crate::ident::TyVar(0) }, t)
+}
+
+#[cfg(test)]
+mod lat_tests {
+    use super::*;
+
+    #[test]
+    fn lat_join_is_order_free_on_pending_pairs() {
+        let v = Ty::Var { var: crate::ident::TyVar(4) };
+        assert_eq!(lat_join(v.clone(), Ty::unresolved()), lat_join(Ty::unresolved(), v.clone()));
+        let a = crate::analyze::body::union_of(Ty::Str, Ty::unresolved());
+        let b = crate::analyze::body::union_of(Ty::Str, v.clone());
+        assert_eq!(lat_join(a.clone(), b.clone()), lat_join(b, a));
+        let nil = crate::analyze::body::union_of(Ty::Nil, Ty::unresolved());
+        assert_eq!(lat_join(nil.clone(), Ty::Nil), lat_join(Ty::Nil, nil));
+    }
+}
