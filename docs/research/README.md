@@ -21,13 +21,13 @@ Roundhouse infers types for a whole Rails app without annotations, by re-typing 
 | [Any order](frontiers/any-order.md) | Is the answer the same whatever order methods are typed in? | No: the structure itself depends on the order |
 | [Soundness](frontiers/soundness.md) | Does every inferred type admit what the app really does? | One unsound join known; no runtime traces of app code |
 | [Precision](frontiers/precision.md) | Is the settled answer at least as precise as main's? | 0.19 points behind, with causes allocated |
-| [Incremental](frontiers/incremental.md) | Can an edit be re-checked exactly, in milliseconds? | Exact, but 21–32× slower than a full check |
+| [Incremental](frontiers/incremental.md) | Can an edit be re-checked exactly, in milliseconds? | Agrees with cold, but its warm part is 21–32× slower |
 | [Typed recursion](frontiers/typed-recursion.md) | Do recursive types compile natively on every target? | Three of four recorded shapes, on two targets |
 | [Cost](frontiers/cost.md) | Where does the time per typing go? | Unification and expression walks lead |
 
 ## Running a check
 
-Build the follow-up branch, fetch the pinned apps, and fetch the probe:
+With Git, Rust (rustup), a native build toolchain, Python 3.9+, Bash, curl and jq installed, run this from an empty directory:
 
 ```sh
 git clone -b fixpoint-next https://github.com/bunnykong/roundhouse rh
@@ -39,7 +39,7 @@ chmod +x probe
 ./probe campfire
 ```
 
-[`probe`](../../tools/research/probe) runs `check --continue` on one app with every fixpoint flag on and prints one JSON line: digests of the carried state, the structure, how each loop ended, and the counters. Each brief's check builds on it.
+[`probe`](../../tools/research/probe) runs `check --continue` on one app with every fixpoint flag on and prints one JSON line: digests of the carried state, the structure, how each loop ended, and the counters. It looks for the binary at `rh/target/release/roundhouse` and the apps under `lab/corpus/apps`; set `RH_BIN` or `APPS` if yours are elsewhere. The run's diagnostics go to `probe-APP.stderr`. For a brief whose code is on another branch, check that branch out in `rh` and rebuild. The lab's demos have their own recipes.
 
 ## Contributing
 

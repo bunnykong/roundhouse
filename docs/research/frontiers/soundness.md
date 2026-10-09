@@ -1,7 +1,7 @@
 # Soundness: types that admit what the app really does
 
 **Question:** does every inferred type admit every value the app produces at runtime?
-**Stands:** at least one S3 type is unsound on a public app ([F8](../facts.md)), and the runtime oracle has no traces of app code, so it can't find the rest.
+**Stands:** at least one S3 type is unsound on a public app ([F8](../facts.md)), and there are no runtime traces of app code to find the rest.
 **Skills:** Ruby and Rails semantics; runtime tracing on CRuby 4.0.7; type systems.
 
 ## Why it matters
@@ -10,18 +10,18 @@ A type that drops a value the app really produces becomes wrong generated code o
 
 ## The check
 
-The lab's [runtime oracle](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/oracle) records values at runtime and checks them against the exported types. Today it covers 53 traces of small reproductions (F9). It passes when the oracle rejects no value that main's types accept, on the reproductions and on traces of the apps.
+The lab's [runtime oracle](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/oracle) records values at runtime and checks them against exported types. The historical comparison used 53 traces of small reproductions (F9); that trace suite and its exporter aren't public yet. Runnable today: the lab's [`reproductions/settle_sound`](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/reproductions/settle_sound), a 12-value check. The check passes when the oracle rejects no value that main's types accept, on the reproductions and on traces of the apps.
 
 ## Known
 
 - `@data` in Discourse's `app/jobs/base.rb` is typed as a hash of `Integer` values after both a `String` and an `Integer` are stored in it. The join over its `[]=` writes loses the earlier contents (F8).
-- With one merge per slot, 59 receivers collapse to `nil` where the source builds an object: a pending value is dropped, leaving only its `nil` arm (F14).
-- The lab's [2×2 reproduction](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/reproductions/settle_sound) shows that correct flow and settling are both needed. It was measured before [#634](https://github.com/rubys/roundhouse/issues/634) changed how main reads `to_h` pairs, so it needs re-checking.
+- With the `RH_DET` bundle, 59 new dispatch errors have receivers that are `nil` alone, where the source builds an object; source review judges 58 impossible and one unclear. Their cause at the producer isn't traced yet (F14).
+- The settling reproduction shows that correct flow and settling are both needed. It was measured before [#634](https://github.com/rubys/roundhouse/pull/634) changed how main reads `to_h` pairs, so it needs re-checking.
 
 ## Leads
 
 - Keep the prior contents when joining `[]=` writes into an instance variable.
-- Never let a pending arm vanish beside `nil`: keep it pending until its producer resolves.
+- Trace the `nil`-only receivers back to their producers, and keep every value the source can produce.
 - Record traces from the apps' own test suites with the oracle's `record.rb`. That one step would turn this frontier from blind to measured.
 
 ## Read first

@@ -3,15 +3,26 @@
 #
 # Runs `roundhouse check --continue` on one pinned public app with every fixpoint
 # flag on (S3) and the canaries enabled, and prints the run's rh-fixpoint report as
-# one JSON line. Extra VAR=VALUE arguments are added to the environment.
+# one JSON line. Extra VAR=VALUE arguments are added to the environment. The run's
+# diagnostics go to probe-APP.stderr in the current directory.
 #
 # RH_BIN: the roundhouse binary (default rh/target/release/roundhouse)
 # APPS:   the pinned apps (default lab/corpus/apps, from the fixpoint lab)
+#
+# Needs bash and jq. Exits non-zero, with a message on stderr, unless the run
+# printed exactly one valid report.
 set -euo pipefail
-app=$1; shift
+app=${1:?usage: probe APP [VAR=VALUE ...]}; shift
 bin=${RH_BIN:-rh/target/release/roundhouse}
+apps=${APPS:-lab/corpus/apps}
+log="$PWD/probe-$app.stderr"
+[ -x "$bin" ] || { echo "probe: no roundhouse binary at $bin; build fixpoint-next or set RH_BIN" >&2; exit 2; }
+[ -d "$apps/$app" ] || { echo "probe: no app at $apps/$app; run lab/corpus/fetch.sh or set APPS" >&2; exit 2; }
 bin=$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")
-cd "${APPS:-lab/corpus/apps}/$app"
-env RH_FOLD=1 RH_FOLD_SLOTS=1 RH_FOLD_JOIN=1 RH_FOLD_TAIL=1 RH_BRK_ALLARMS=1 RH_SCHED=sccq \
-    RH_FIXPOINT_VERIFY=1 RH_FIXPOINT_DIGEST=1 RH_FIXPOINT_STATS=1 "$@" \
-    "$bin" check --continue . 2>&1 >/dev/null | sed -n 's/^rh-fixpoint: //p'
+(cd "$apps/$app" &&
+  env RH_FOLD=1 RH_FOLD_SLOTS=1 RH_FOLD_JOIN=1 RH_FOLD_TAIL=1 RH_BRK_ALLARMS=1 RH_SCHED=sccq \
+      RH_FIXPOINT_VERIFY=1 RH_FIXPOINT_DIGEST=1 RH_FIXPOINT_STATS=1 "$@" \
+      "$bin" check --continue . 2>"$log" >/dev/null) || true
+sed -n 's/^rh-fixpoint: //p' "$log" |
+  jq -ces 'if length == 1 then .[0] else error("expected one report, got \(length)") end' ||
+  { echo "probe: no valid rh-fixpoint report for $app; see $log" >&2; exit 1; }

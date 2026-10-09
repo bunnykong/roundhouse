@@ -1,7 +1,7 @@
 # Incremental: exact re-checking in milliseconds
 
 **Question:** after an edit, can the answer be updated exactly in milliseconds, instead of by a full check?
-**Stands:** replaying stored evaluations is exact on six public edits, but 21–32× slower than a full check ([F15](../facts.md)).
+**Stands:** replaying stored evaluations agrees with a cold check on six public edits, but its warm portion takes 21.55–32.01× as long ([F15](../facts.md)).
 **Skills:** incremental computation; Rust performance; serialization.
 
 ## Why it matters
@@ -14,7 +14,7 @@ On [`fixpoint-warm`](https://github.com/bunnykong/roundhouse/compare/fixpoint-st
 
 ## Known
 
-- By design, replay is exact when every read is recorded, transfers are monotone and writes are justified: replaying the stored records, then running the worklist, reaches the same fixpoint as a cold start. All six edits agree with cold.
+- By design, replay is exact when every read is recorded, transfers are monotone and writes are justified: replaying the stored records, then running the worklist, reaches the same fixpoint as a cold start. All six edits agree with the mandatory cold shadow; the hypotheses aren't proved for the Rust analyzer.
 - The warm analysis took 151–168 s on Mastodon and 343–359 s on Discourse. That includes fingerprinting, guard validation, replay, fresh typing and recording, which haven't been profiled separately.
 - The stored evaluations are large: 66,173 records in 478 MB of JSON on Mastodon, and 127,847 in 1.74 GB on Discourse.
 - Boolean edits replay over 98% of the surviving records.

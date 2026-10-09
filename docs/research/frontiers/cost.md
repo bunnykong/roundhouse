@@ -1,7 +1,7 @@
 # Cost: where the time per typing goes
 
 **Question:** what does each typing cost, and how much can be removed without changing any answer?
-**Stands:** exact type identities and a union memo make the large app faster than main ([F11](../facts.md)). Unification and expression walks are now the largest costs.
+**Stands:** exact type identities and a union memo make the large app faster than main ([F11](../facts.md)). Earlier profiles point at unification and expression walks; re-profile after the type-identity change before choosing.
 **Skills:** Rust performance and profiling; hash-consing; data-structure design.
 
 ## Why it matters
@@ -10,7 +10,7 @@
 
 ## The check
 
-Interleaved `check --continue` timings against the base, on Mastodon, Discourse and Chatwoot, with every digest and diagnostic identical (`./probe` before and after). A change that alters any answer fails, however fast it is.
+Build the change and its parent commit. Time `check --continue` with each, interleaved, five runs per app on Mastodon, Discourse and Chatwoot, and compare the medians. Every digest must stay identical (`./probe` with each binary, via `RH_BIN`), and so must the diagnostics. A change that alters any answer fails, however fast it is.
 
 ## Known
 
@@ -21,7 +21,7 @@ Interleaved `check --continue` timings against the base, on Mastodon, Discourse 
 ## Leads
 
 - Unification: memoize it, or batch it by type identity.
-- Expression walks: skip subtrees whose types didn't change. The read recorder already knows which ones those are.
+- Expression walks: skip subtrees whose types didn't change. The read recorder tracks dependencies per whole body, so this needs finer tracking.
 
 ## Read first
 

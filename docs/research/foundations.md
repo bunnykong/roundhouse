@@ -4,7 +4,7 @@
 
 Roundhouse types each method body from what it knows about the rest of the app: the returns of the methods it calls, the types of instance variables, and the parameter types its callers pass. Typing one body changes what others see, so the analyzer repeats rounds until a round changes nothing. It runs three such loops (production, views and tests, absorb), each capped at 12 rounds.
 
-On main the loops often reach the cap. Recursive data grows one level deeper each round, some rules replace a type instead of adding to it, and [#584](https://github.com/rubys/roundhouse/issues/584)'s size bound cuts types that grow too large. A loop stopped by the cap has no single answer: the round it stopped in decides the result.
+On main the loops often reach the cap. Recursive data grows one level deeper each round, some rules replace a type instead of adding to it, and [#584](https://github.com/rubys/roundhouse/pull/584)'s size bound cuts types that grow too large. Hitting the cap doesn't establish a fixpoint, and changing the cap can change the answer.
 
 ## The proposal, in four ideas
 
@@ -15,12 +15,12 @@ On main the loops often reach the cap. Recursive data grows one level deeper eac
 
 ## When order can't matter
 
-A classical result, chaotic iteration, says that if the set of equations is fixed and each equation only ever adds information, every fair order of evaluation reaches the same least fixpoint. The analyzer needs two conditions for that:
+A classical result, chaotic iteration: on a lattice of finite height, starting from ⊥ (nothing known), every fair order of applying a fixed, finite set of monotone equations, joining what they contribute, reaches the same least solution. For the analyzer that takes two conditions:
 
 - **Structure fixed by the program.** The slots, the writers that feed each slot, and the slots that become recursive references come from the source, not from what typing happened to discover first. Reading a slot nobody has written yet gives ⊥.
-- **Monotone writers.** Each writer's contribution only grows, and a slot's value is the join of its writers' contributions.
+- **Monotone writers.** More input never removes anything from a writer's output, and a slot's value is the join of its writers' contributions.
 
-The second is largely in place. The first is not, which is the [any-order frontier](frontiers/any-order.md). The lab's [Lean proof](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/proof) assumes both.
+Neither condition is established for the analyzer yet; both belong to the [any-order frontier](frontiers/any-order.md). The lab's [Lean proof](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/proof) assumes both, plus finiteness.
 
 ## How results are measured
 
@@ -31,11 +31,11 @@ Against main at a named commit, on the [five pinned public apps](https://github.
 | Flags off changes nothing | Emitted code byte-identical on 105 fixture × target pairs; the default suite and typing ceilings as main |
 | Settling | `RH_FIXPOINT_VERIFY=1` repeats a round after each loop and reports what moved |
 | The same answer | `RH_FIXPOINT_DIGEST=1` digests the carried state; compare across runs and across `RH_SHUFFLE=<seed>` schedules |
-| Errors by kind | `RH_ERRGATE=1` matches each failing call site against a baseline: *exposed*, *regressed*, *hidden*, *gained arm*, *undetermined* |
+| Errors by kind | `RH_ERRGATE=1 RH_PUBLIC_INPUT=1` records each failing call site; `python3 tools/errgate.py BASE.stderr CANDIDATE.stderr` sorts the differences into *exposed*, *regressed*, *hidden*, *gained arm* and *undetermined* |
 | Precision | Share of expressions fully typed and share holding `untyped`, with the [runtime oracle](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/oracle) beside it |
 | Cost | `check --continue` wall time and peak memory, interleaved runs |
 
-The flags live on the [follow-up branch](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-next); `RH_FIXPOINT_*` is also in [#657](https://github.com/rubys/roundhouse/issues/657).
+The flags live on the [follow-up branch](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-next); `RH_FIXPOINT_*` is also in [#657](https://github.com/rubys/roundhouse/pull/657).
 
 ## Terms
 
