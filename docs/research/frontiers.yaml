@@ -39,12 +39,12 @@
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
-      status: review
+      status: done
       since: "2026-10-09T07:40Z"
       expires: "2026-10-16T07:40Z"
       pr: "https://github.com/rubys/roundhouse/pull/705"
       source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
-      note: "Emitted output unchanged on all 12 targets; pooled fully typed 68.83% → 68.99% on S3, 69.02% → 69.20% with `PROBE_BASE=1` (https://github.com/rubys/roundhouse/issues/617#issuecomment-6083167837)."
+      note: "Merged on 2026-10-09 as a1d038d8. Emitted output unchanged on all 12 targets; pooled fully typed 68.83% → 68.99% on S3, 69.02% → 69.20% with `PROBE_BASE=1` (https://github.com/rubys/roundhouse/issues/617#issuecomment-6083167837)."
     - who: eddygarcas
       scope: "items 1–2 of the claim: one join for parameter slots over the classified arm set, built on #674's rows; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag."
       status: active

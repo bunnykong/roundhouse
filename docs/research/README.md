@@ -30,7 +30,6 @@ Roundhouse infers types for a whole Rails app without annotations, by re-typing 
 
 Claims in force ([how to claim](#claiming)):
 
-- **[Any order](frontiers/any-order.md):** @eddygarcas, in review until 2026-10-16T07:40Z, PR [#705](https://github.com/rubys/roundhouse/pull/705) ([claim](https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589)): items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests. Emitted output unchanged on all 12 targets; pooled fully typed 68.83% → 68.99% on S3, 69.02% → 69.20% with `PROBE_BASE=1` (https://github.com/rubys/roundhouse/issues/617#issuecomment-6083167837).
 - **[Any order](frontiers/any-order.md):** @eddygarcas, active until 2026-10-16T07:40Z ([claim](https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589)): items 1–2 of the claim: one join for parameter slots over the classified arm set, built on [#674](https://github.com/rubys/roundhouse/issues/674)'s rows; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag. Open choice: option (a), preferred on [#617](https://github.com/rubys/roundhouse/issues/617), lets only a non-nil concrete type absorb `untyped`, so `Nil | untyped` never narrows to bare `Nil` (https://github.com/rubys/roundhouse/issues/617#issuecomment-6083322797).
 <!-- end generated -->
 
