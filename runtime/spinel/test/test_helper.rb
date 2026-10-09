@@ -856,6 +856,7 @@ class ActionResponse
     out[:immutable] = true if store[:immutable]
     out[:stale_while_revalidate] = store[:stale_while_revalidate] unless store[:stale_while_revalidate].nil?
     out[:stale_if_error] = store[:stale_if_error] unless store[:stale_if_error].nil?
+    out[:extras] = store[:extras] unless store[:extras].empty?
     out
   end
 
