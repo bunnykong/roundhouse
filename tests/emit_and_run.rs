@@ -189,6 +189,81 @@ puts "to_sql subquery passed"
     assert!(run.stdout.contains("to_sql subquery passed"));
 }
 
+/// A has_many reader followed by `to_sql` is rooted as the association's
+/// relation: the reader alone answers an Array, which has no `to_sql`,
+/// and `check` was clean while the emitted method raised NoMethodError.
+#[test]
+fn a_has_many_readers_to_sql_is_the_scoped_query() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def comment_sql
+    comments.to_sql
+  end
+",
+        )
+        .run_ruby(
+            r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
+sql = a.comment_sql
+raise "comment_sql: #{sql}" unless sql.include?("comments") && sql.include?("article_id = #{a.id}")
+puts "has_many to_sql passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("has_many to_sql passed"));
+}
+
+/// `in_batches` with a block hands each batch as a relation; without
+/// one, `update_all` and `touch_all` reach every row.
+#[test]
+fn in_batches_runs_with_and_without_a_block() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  scope :batched, -> { in_batches }
+
+  def self.batch_total
+    total = 0
+    in_batches(of: 1) { |batch| total += batch.count }
+    total
+  end
+
+  def self.rename_all(title)
+    in_batches.update_all(title: title)
+  end
+
+  def self.touch_everything
+    in_batches(order: :desc).touch_all
+  end
+
+  def touch_comments
+    comments.in_batches.touch_all
+  end
+",
+        )
+        .run_ruby(
+            r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
+Article.create!(title: "Two", body: "A sufficiently long body.")
+Comment.create!(article: a, commenter: "Reader", body: "Comment body")
+raise "batch_total: #{Article.batch_total}" unless Article.batch_total == 2
+Article.rename_all("Renamed")
+raise "rename_all" unless Article.all.map(&:title).uniq == ["Renamed"]
+raise "touch_everything" unless Article.touch_everything == 2
+raise "touch_comments" unless a.touch_comments == 1
+raise "batched scope" unless Article.batched.where(title: "Renamed").count == 2
+puts "in_batches passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("in_batches passed"));
+}
+
 /// A class object and its instances that define the same names: each
 /// side's call types and runs as that side's method.
 #[test]
@@ -1217,6 +1292,52 @@ end
 "#,
         )
         .run_test("test/controllers/echoes_controller_test.rb")
+        .assert_passes();
+}
+
+/// `Date.parse(params[:from])` types the way a String argument does: a
+/// request parameter is a union whose other arms (nil, an Array, nested
+/// params) raise in Rails as well. The calendar sends after it run too:
+/// a week that starts on a named day, and `in_time_zone` with a zone
+/// that may be nil. Expected values are Rails 8.1's.
+#[test]
+fn date_parse_of_a_request_parameter_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/week\", to: \"weeks#show\"\n",
+        )
+        .write(
+            "app/controllers/weeks_controller.rb",
+            r#"class WeeksController < ApplicationController
+  def show
+    from = Date.parse(params[:from])
+    zone = Article.new.title
+    at = Time.utc(2024, 2, 15, 10, 0, 0)
+    render plain: [
+      from.iso8601, from.beginning_of_month.iso8601, Date.parse(params.require(:from)).year,
+      from.beginning_of_week.iso8601, from.beginning_of_week(:sunday).iso8601, from.end_of_week(:sunday).iso8601,
+      at.beginning_of_week(:sunday).day, at.end_of_week(:wednesday).day,
+      from.in_time_zone(zone).strftime("%H:%M")
+    ].join(" ")
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/weeks_controller_test.rb",
+            r#"require "test_helper"
+
+class WeeksControllerTest < ActionDispatch::IntegrationTest
+  test "a request parameter parses as a date" do
+    get "/week", params: { from: "2024-02-15" }
+    assert_equal "2024-02-15 2024-02-01 2024 2024-02-12 2024-02-11 2024-02-17 11 20 00:00", response.body
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/weeks_controller_test.rb")
         .assert_passes();
 }
 
