@@ -1,0 +1,56 @@
+# The open problems behind rubys/roundhouse#617, for tools that pick work.
+# Each brief is the source of truth; this index summarizes it.
+
+- id: any-order
+  title: The same answer in any order
+  brief: frontiers/any-order.md
+  stands: The structure differs between schedules on 4 of 5 public apps (F5).
+  check: probe APP with RH_SHUFFLE unset, 1 and 2; structure and value digests equal, start equals end
+  check_public: true
+  skills: [rust, lattice theory, analyzer internals]
+  branch: fixpoint-next
+
+- id: soundness
+  title: Types that admit what the app really does
+  brief: frontiers/soundness.md
+  stands: At least one unsound S3 type on a public app (F8); no runtime traces of app code.
+  check: lab oracle on reproductions and app traces; no new rejections against main
+  check_public: partly  # app traces don't exist yet
+  skills: [ruby, rails, runtime tracing, type systems]
+  branch: fixpoint-next
+
+- id: precision
+  title: At least as precise as main
+  brief: frontiers/precision.md
+  stands: Fully typed is 0.19 points behind main (F7).
+  check: fully typed >= main and untyped <= main on five apps, with the soundness check beside it
+  check_public: false  # the precision census isn't published yet
+  skills: [rust, type inference, rails idioms]
+  branch: fixpoint-staged
+
+- id: incremental
+  title: Exact re-checking in milliseconds
+  brief: frontiers/incremental.md
+  stands: Exact on six edits, but 21-32x slower than a full check (F15).
+  check: RH_WARM shadow matches cold on every edit; warm under 0.1 s on Mastodon
+  check_public: partly  # the edit suite isn't published yet
+  skills: [incremental computation, rust performance, serialization]
+  branch: fixpoint-warm
+
+- id: typed-recursion
+  title: Recursive types in generated code
+  brief: frontiers/typed-recursion.md
+  stands: Rust enum and Crystal alias for 3 of #589's 4 shapes (F13).
+  check: lab emit-rec demo; cargo check and crystal build pass, output equals CRuby's
+  check_public: true
+  skills: [code generation, rust, crystal]
+  branch: lab patches/emit-rec
+
+- id: cost
+  title: Where the time per typing goes
+  brief: frontiers/cost.md
+  stands: Large app faster than main with type identities (F11); unification and walks lead.
+  check: interleaved check timings; every digest and diagnostic identical
+  check_public: true
+  skills: [rust performance, profiling, hash-consing]
+  branch: fixpoint-arena

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# probe APP [VAR=VALUE ...]
+#
+# Runs `roundhouse check --continue` on one pinned public app with every fixpoint
+# flag on (S3) and the canaries enabled, and prints the run's rh-fixpoint report as
+# one JSON line. Extra VAR=VALUE arguments are added to the environment.
+#
+# RH_BIN: the roundhouse binary (default rh/target/release/roundhouse)
+# APPS:   the pinned apps (default lab/corpus/apps, from the fixpoint lab)
+set -euo pipefail
+app=$1; shift
+bin=${RH_BIN:-rh/target/release/roundhouse}
+bin=$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")
+cd "${APPS:-lab/corpus/apps}/$app"
+env RH_FOLD=1 RH_FOLD_SLOTS=1 RH_FOLD_JOIN=1 RH_FOLD_TAIL=1 RH_BRK_ALLARMS=1 RH_SCHED=sccq \
+    RH_FIXPOINT_VERIFY=1 RH_FIXPOINT_DIGEST=1 RH_FIXPOINT_STATS=1 "$@" \
+    "$bin" check --continue . 2>&1 >/dev/null | sed -n 's/^rh-fixpoint: //p'
