@@ -1,6 +1,6 @@
 # Order dependence
 
-Background for [Any order](../frontiers/any-order.md). The classes come from tracing each value that differed between shuffled schedules on Chatwoot and Mastodon to its deciding rule, in an unpublished research build.
+Background for [Any order](../frontiers/any-order.md). In an unpublished research build, every recorded key that differed between shuffled schedules on Chatwoot and Mastodon was classified by its local deciding rule; some upstream causes remain unresolved.
 
 ## The six classes
 
@@ -11,18 +11,12 @@ Background for [Any order](../frontiers/any-order.md). The classes come from tra
 5. **History cuts.** A nested copy of the previous return is cut to `untyped` before storing (`untie_recursive_return`), though matching the previous value isn't evidence of recursion.
 6. **Writers.** Slots don't keep one entry per writer: some bindings count only while free of `untyped` and pending arms, and merging call sites drops `untyped` beside concrete arguments.
 
-## The order to fix them
+## One proposed order
 
-Dependencies set this order.
+Dependencies set this order; it is argued, not yet carried out or proved. Step 2 could instead discover the structure monotonically, as the brief's [leads](../frontiers/any-order.md#leads) describe.
 
 1. **Shapes and stamps:** tuple shape from syntax, each position joined on its own, stamps never read back, plus two one-line writer fixes: all-arms block binding pads both operands, and attribute assignment returns its right-hand side. It depends on nothing.
 2. **Structure declared before typing,** from the program text with explicit candidates for dynamic calls. Unwritten slots read ⊥, and filters treat inline values and references alike. It defines the system later rules must be monotone on. One change, gated by an equal structure digest across schedules and from start to end.
-3. **Pending split from gradual:** pending receivers contribute nothing, a union's dispatch joins its arms' answers, writers lose their gates, errors are counted after settling, and a slot left ⊥ prints as unresolved `untyped`. One change, scored by the [error census](error-census.md). *Not:* an early guess kept forever.
-4. **Positive projections:** empty results are ⊥; dead branches are labeled after the run. It needs steps 2 and 3; otherwise a leftover ⊥ prints as a type like `Array[Bottom]`. *Not:* reachability state in the loop.
-5. **History cuts removed:** with recursion declared, require zero cuts, then delete the cut, the cross-round joins and the re-applied harvests together, keeping one entry per writer. *Not:* deleting the cut alone, which can fail to settle.
-
-## Already learned
-
-Freezing only the call graph and the recursive set made those parts schedule-independent, but answers changed while the rest was still found during typing ([F16](../facts.md)). Step 2 must land whole.
-
-The order is argued, not yet carried out, and unproved.
+3. **Pending split from gradual:** pending receivers contribute nothing, a union's dispatch joins its arms' answers, writers lose their gates, errors are counted after settling, and a slot left ⊥ prints as unresolved `untyped`. One change, scored by the [error census](../checks/error-census.md).
+4. **Positive projections:** empty results are ⊥; dead branches are labeled after the run. It needs steps 2 and 3; otherwise a leftover ⊥ prints as a type like `Array[Bottom]`.
+5. **History cuts removed:** with recursion declared, require zero cuts, then delete the cut, the cross-round joins and the re-applied harvests together, keeping one entry per writer.

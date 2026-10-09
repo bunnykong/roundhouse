@@ -24,14 +24,14 @@ Neither condition is established for the analyzer yet; both belong to the [any-o
 
 ## How results are measured
 
-Against main at a named commit, on the [five pinned public apps](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/corpus) (Campfire, Mastodon, Chatwoot, Forem, Discourse). Some results add a large private Rails app, reported only as aggregates.
+Against main at a named commit, on the inputs each check specifies, most often the [five pinned public apps](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/corpus) (Campfire, Mastodon, Chatwoot, Forem, Discourse). Some results add a large private Rails app, reported only as aggregates.
 
 | Measure | How |
 | --- | --- |
 | Flags off changes nothing | Emitted code byte-identical on 105 fixture × target pairs; the default suite and typing ceilings as main |
 | Settling | `RH_FIXPOINT_VERIFY=1` repeats a round after each loop and reports what moved |
 | The same answer | `RH_FIXPOINT_DIGEST=1` digests the carried state; compare across runs and across `RH_SHUFFLE=<seed>` schedules |
-| Errors by kind | `RH_ERRGATE=1 RH_PUBLIC_INPUT=1` records every call with a receiver and every arithmetic or comparison operator; `python3 tools/errgate.py BASE.stderr CANDIDATE.stderr` labels each difference: [the census](notes/error-census.md) |
+| Errors by kind | `RH_ERRGATE=1 RH_PUBLIC_INPUT=1` records every call with a receiver and every arithmetic or comparison operator; `python3 tools/errgate.py BASE.stderr CANDIDATE.stderr` labels each difference: [the census](checks/error-census.md) |
 | Precision | Share of expressions fully typed and share holding `untyped`, with the [runtime oracle](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/oracle) beside it |
 | Cost | `check --continue` wall time and peak memory, interleaved runs |
 

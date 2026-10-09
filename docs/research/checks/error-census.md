@@ -1,6 +1,6 @@
 # Error census
 
-Background for the errors row in [Foundations](../foundations.md#how-results-are-measured). A raw error count misleads both ways: a change can hide errors behind `untyped`, and removing absorption surfaces every error it hid. The census pairs call sites between a baseline and a candidate and labels each difference.
+How to run and read the errors row in [Foundations](../foundations.md#how-results-are-measured). A raw error count misleads both ways: a change can hide errors behind `untyped`, and removing absorption surfaces every error it hid. The census pairs call sites between a baseline and a candidate and labels each difference.
 
 ## Running it
 
@@ -20,7 +20,7 @@ An error only the candidate reports is:
 
 - **exposed:** the baseline's receiver was `T | untyped`, or `T` with a pending arm, and no arm of `T` answers the call in the analyzer's method catalog. Only the extra arm kept it silent.
 - **exposed-pending:** the baseline's receiver was only `untyped` or pending (besides `nil`), and every arm of the candidate's receiver is one the baseline held, then dropped, in the return slot the receiver comes from.
-- **regressed:** an arm that answered the call in the baseline is missing from the candidate's receiver.
+- **regressed:** a baseline answering-arm label is absent from candidate labels; rendering differences can trigger this without a demonstrated lost runtime possibility.
 - **undetermined:** anything else, including copies of one site that pair differently.
 
 An error only the baseline reports is:
@@ -34,6 +34,6 @@ Anything else is undetermined. Rows exist only for calls with an explicit receiv
 
 ## Reading it
 
-- **Fewer can mean hidden.** Of S3's 13 fewer errors than main on Discourse, 10 are hidden and 3 gained an arm ([F6](../facts.md)).
-- **Exposed means absorption used to hide the error, not that the error is real.** The verdict trusts the catalog: it shows neither that the failing arm reaches the call nor that the app lacks the method. In the one-merge trial (the `RH_DET` bundle), source review judged 80 of the 84 new dispatch errors impossible and four unclear, and confirmed none as real ([F14](../facts.md)). Check exposed errors against the source or the runtime oracle before counting them as bugs. The corrected change is accounting, not a count of real regressions.
+- **Fewer can mean hidden.** On Discourse, most of the errors S3 no longer reports are hidden, not fixed ([F6](../facts.md)).
+- **Exposed means absorption used to hide the error, not that the error is real.** The verdict trusts the catalog: it shows neither that the failing arm reaches the call nor that the app lacks the method. In the `RH_DET` trial, source review confirmed none of the new dispatch errors as real ([F14](../facts.md)). Check exposed errors against the source or the runtime oracle before counting them as bugs. The corrected change is accounting, not a count of real regressions.
 - **Zero regressed is not soundness.** A receiver that was pending in the baseline has no answering arm to lose.

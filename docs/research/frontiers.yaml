@@ -1,64 +1,142 @@
-# The open problems behind rubys/roundhouse#617, for tools that pick work.
-# Each brief is the source of truth; this index summarizes it.
+# The open problems behind rubys/roundhouse#617, for people and tools that pick work.
+#
+# This file is the single source for each frontier's status, stands, skills, next
+# action, latest facts, check availability, pins and claims. tools/research/sync
+# renders the README's dashboard and each brief's Stands, Skills and Claims lines
+# from it: edit here, then run the script; `sync --check` fails on drift.
+# Briefs own the question, the check's commands and acceptance criteria, and the
+# leads. facts.md owns dated findings; attempts.md links fact IDs instead of
+# repeating their numbers.
+#
+# status:       open | blocked | solved
+# facts:        the latest facts on this frontier, newest first
+# check:        the brief's check; read it there, it is not restated here
+# check_public: public | partial | unavailable
+# pins:         the commits the latest result was measured or validated on
+# claims:       leases taken on #617 (README.md#claiming). status is active,
+#               review, done or released; a lease expires seven days after
+#               `since` unless its owner renews it, which moves `expires`.
+#
+# Quote any value that holds ": " or " #", or that YAML could read as a
+# number, date or boolean; sync rejects it otherwise.
 
 - id: any-order
-  title: "The same answer in any order"
+  name: Any order
   brief: frontiers/any-order.md
-  stands: "The structure differs between schedules on 4 of 5 public apps (F5)."
-  check: "probe each app with RH_SHUFFLE unset, 1 and 2; final structure and value digests equal; zero verify movement"
-  check_public: true
-  skills: [rust, lattice theory, analyzer internals]
-  branch: fixpoint-next
+  status: open
+  stands: "No public app passes; on four of the five, the structure itself differs between schedules."
+  facts: [F16, F14, F5]
+  skills:
+    - Rust
+    - fixpoint and lattice theory
+    - the analyzer's harvest, dispatch and fold code
+  next: "Declare the rest of the structure before typing, or discover it monotonically."
+  check: frontiers/any-order.md#the-check
+  check_public: public
+  pins:
+    compiler: "fixpoint-next 200d6b0e"
+    lab: "0cc656a6"
   claims:
     - who: eddygarcas
-      what: "Join laws on main: items 1-6 of the linked list, one PR against main"
-      where: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
+      scope: "items 1–6 of the claim's join and merge defects on main, in one PR against main; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag."
+      status: active
+      since: "2026-10-09T07:40Z"
+      expires: "2026-10-16T07:40Z"
+      pr: null
+      source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
+      note: "Overlaps @dai199's claim in parameter rows; the order is to be agreed on #617."
 
 - id: soundness
-  title: "Types that admit what the app really does"
+  name: Soundness
   brief: frontiers/soundness.md
-  stands: "At least one unsound S3 type on a public app (F8); no runtime traces of app code."
-  check: "runtime oracle on reproductions and app traces; no new rejections against main"
-  check_public: partly  # only the 12-value settling reproduction is runnable today
-  skills: [ruby, rails, runtime tracing, type systems]
-  branch: fixpoint-next
+  status: open
+  stands: "At least one S3 type is unsound on a public app, and no runtime traces of app code exist to find the rest."
+  facts: [F18, F17, F14, F8]
+  skills:
+    - Ruby and Rails semantics
+    - Runtime tracing on CRuby 4.0.7
+    - Type systems
+  next: "Record traces from the apps' own test suites with the oracle's `record.rb`."
+  check: frontiers/soundness.md#the-check
+  check_public: partial
+  pins:
+    compiler: "main 9b2dd5e9"
+    lab: "0cc656a6"
   claims:
     - who: dai199
-      what: "Parameter rows keyed by receiver side (the lab's name_collision; the follow-up named in #551), one PR against main"
-      where: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6077674666"
+      scope: "parameter rows keyed by receiver side, the follow-up named in #551 (the lab's `name_collision`), in one PR against main."
+      status: review
+      since: "2026-10-09T08:52Z"
+      expires: "2026-10-16T08:52Z"
+      pr: "https://github.com/rubys/roundhouse/pull/674"
+      source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6077674666"
+      note: "Overlaps @eddygarcas's claim in parameter rows; the order is to be agreed on #617."
 
 - id: precision
-  title: "At least as precise as main"
+  name: Precision
   brief: frontiers/precision.md
-  stands: "Fully typed is 0.19 points behind main (F7)."
-  check: "fully typed >= main and untyped <= main on five apps, with the soundness check beside it"
-  check_public: true
-  skills: [rust, type inference, rails idioms]
-  branch: fixpoint-next
+  status: open
+  stands: "S3 is 0.19 points behind main `194f26cf` in fully typed expressions, with the losses allocated to causes."
+  facts: [F18, F14, F7]
+  skills:
+    - Rust
+    - type inference
+    - "Rails idioms such as guards, memoization and `Array(…)`"
+  next: "Fix the class-guard and `Array(…)` losses, and measure each with the check."
+  check: frontiers/precision.md#the-check
+  check_public: public
+  pins:
+    compiler: "fixpoint-next 08859f37"
+    lab: "0cc656a6"
+    runner: "fixpoint-research 389ea1e3"
 
 - id: incremental
-  title: "Exact re-checking in milliseconds"
+  name: Incremental
   brief: frontiers/incremental.md
-  stands: "Agrees with a cold check on six edits, but the warm portion takes 21.55-32.01x as long as a cold check (F15)."
-  check: "RH_WARM shadow matches cold on every edit; warm under 0.1 s on Mastodon"
-  check_public: true
-  skills: [incremental computation, rust performance, serialization]
-  branch: fixpoint-warm
+  status: open
+  stands: "Replay agrees with the cold shadow on six public edits, but its warm portion takes 21.55–32.01× as long as a cold check."
+  facts: [F15]
+  skills:
+    - Incremental computation
+    - Rust performance
+    - serialization
+  next: "Profile the parts of the warm path before optimizing any of them."
+  check: frontiers/incremental.md#the-check
+  check_public: public
+  pins:
+    compiler: "fixpoint-warm 990137f7"
+    lab: "0cc656a6"
+    runner: "fixpoint-research 389ea1e3"
 
 - id: typed-recursion
-  title: "Recursive types in generated code"
+  name: Typed recursion
   brief: frontiers/typed-recursion.md
-  stands: "Rust enum and Crystal alias for 3 of the 4 shapes recorded in #589 (F13)."
-  check: "lab emit-rec demo; cargo check and crystal build pass, output equals CRuby's"
-  check_public: true
-  skills: [code generation, rust, crystal]
-  branch: "lab patches/emit-rec"
+  status: open
+  stands: "A Rust `enum` and a Crystal `alias` work for three of the four shapes recorded in #589, behind a flag."
+  facts: [F13]
+  skills:
+    - Code generation
+    - the type systems of Rust, Crystal and the other targets
+  next: "Cover the fourth shape: mutual recursion between two class methods."
+  check: frontiers/typed-recursion.md#the-check
+  check_public: public
+  pins:
+    compiler: "main b28b17b6 with the lab's patches"
+    lab: "0cc656a6"
 
 - id: cost
-  title: "Where the time per typing goes"
+  name: Cost
   brief: frontiers/cost.md
-  stands: "Large app faster than main with type identities (F11); re-profile before choosing the next target."
-  check: "interleaved check timings against the parent commit; every digest and diagnostic identical"
-  check_public: true
-  skills: [rust performance, profiling, hash-consing]
-  branch: fixpoint-arena
+  status: open
+  stands: "Exact type identities and a union memo make the large app faster than main; earlier profiles point at unification and expression walks."
+  facts: [F12, F11, F10]
+  skills:
+    - Rust performance and profiling
+    - hash-consing
+    - data-structure design
+  next: "Re-profile with type identities on, then choose the next target."
+  check: frontiers/cost.md#the-check
+  check_public: public
+  pins:
+    compiler: "fixpoint-arena 96519abf"
+    lab: "0cc656a6"
