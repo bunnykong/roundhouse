@@ -230,11 +230,9 @@ module Tep
           return false
         end
 
-        # Streaming responses use chunked Connection: close (same
-        # simplification as the prefork server).
-        keep_alive = req.keep_alive? && !res.halted_close? && !res.streaming && !res.upgrading_ws
+        # The writer returns the keep-alive decision it actually sends.
+        keep_alive = req.keep_alive? && !res.halted_close?
         Tep::Server::Threaded.write_response(client, io, req, res, keep_alive)
-        keep_alive
       end
 
       # Request reader. Returns the accumulated blob once "\r\n\r\n" is
@@ -290,7 +288,7 @@ module Tep
           ensure
             res.ws_driver.retire
           end
-          return 0
+          return false
         end
 
         # Streaming branch -- chunked, Connection: close.
@@ -307,7 +305,7 @@ module Tep
           out = Tep::Stream.new(client)
           res.streamer.pump(out)
           Sock.sphttp_write_chunk_end(client)
-          return 0
+          return false
         end
 
         # Default Content-Type for inline-body responses.
@@ -325,6 +323,10 @@ module Tep
         end
         if res.file_path.length > 0
           fs = Sock.sphttp_filesize(res.file_path)
+          if fs < 0
+            Tep::Server::Threaded.send_simple(client, 404, "file not found")
+            return false
+          end
           head << "Content-Length: " + fs.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
           Sock.sphttp_sendfile(client, res.file_path) unless req.verb == "HEAD"
@@ -340,7 +342,7 @@ module Tep
             Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
           end
         end
-        0
+        keep_alive
       end
 
       # bytesize, as write_response: a multibyte `msg` would otherwise

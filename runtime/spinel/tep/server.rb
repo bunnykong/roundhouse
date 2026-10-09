@@ -194,11 +194,11 @@ module Tep
         send_simple(client, 500, "internal server error")
         return false
       end
-      keep_alive = req.keep_alive? && !res.halted_close? && !res.streaming
+      keep_alive = req.keep_alive? && !res.halted_close?
       write_response(client, req, res, keep_alive)
-      keep_alive
     end
 
+    # Return the keep-alive decision actually sent by the writer.
     def write_response(client, req, res, keep_alive)
       if res.streaming
         # Chunked-encoding stream. Send headers immediately, hand a
@@ -215,7 +215,7 @@ module Tep
         out = Stream.new(client)
         res.streamer.pump(out)
         Sock.sphttp_write_chunk_end(client)
-        return
+        return false
       end
 
       if res.file_path.length > 0
@@ -223,7 +223,7 @@ module Tep
         sz = Sock.sphttp_filesize(res.file_path)
         if sz < 0
           send_simple(client, 404, "file not found")
-          return
+          return false
         end
         res.headers["Content-Length"] = sz.to_s
         if !res.headers.key?("Content-Type")
@@ -237,7 +237,7 @@ module Tep
         head = build_head(req, res)
         Sock.sphttp_write_str(client, head)
         Sock.sphttp_sendfile(client, res.file_path) unless req.verb == "HEAD"
-        return
+        return keep_alive
       end
 
       if res.body.length > 0 && !res.headers.key?("Content-Type")
@@ -262,6 +262,7 @@ module Tep
       if res.body.bytesize > 0 && req.verb != "HEAD"
         Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
       end
+      keep_alive
     end
 
     def build_head(req, res)

@@ -232,13 +232,9 @@ module Tep
           return false
         end
 
-        # Streaming responses use chunked Connection: close (same
-        # simplification as the prefork server) -- force the keep-alive
-        # loop to end after this response so the stream's terminator isn't
-        # followed by a stale read on the same fd.
-        keep_alive = req.keep_alive? && !res.halted_close? && !res.streaming && !res.upgrading_ws
+        # The writer returns the keep-alive decision it actually sends.
+        keep_alive = req.keep_alive? && !res.halted_close?
         Tep::Server::Scheduled.write_response(client, req, res, keep_alive)
-        keep_alive
       end
 
       # Non-blocking request reader. Returns the accumulated blob
@@ -286,7 +282,7 @@ module Tep
           # other connection. Refuse the upgrade rather than serve it wrong.
           Tep::Server::Scheduled.send_simple(client, 501,
             "websocket upgrade needs TEP_SERVER=thread")
-          return 0
+          return false
         end
 
         # Streaming branch -- cooperative mirror of Tep::Server's
@@ -312,7 +308,7 @@ module Tep
           out = Tep::Stream.new(client)
           res.streamer.pump(out)
           Sock.sphttp_write_chunk_end(client)
-          return 0
+          return false
         end
 
         # Default Content-Type for inline-body responses. Matches
@@ -333,6 +329,10 @@ module Tep
         end
         if res.file_path.length > 0
           fs = Sock.sphttp_filesize(res.file_path)
+          if fs < 0
+            Tep::Server::Scheduled.send_simple(client, 404, "file not found")
+            return false
+          end
           head << "Content-Length: " + fs.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
           Sock.sphttp_sendfile(client, res.file_path) unless req.verb == "HEAD"
@@ -355,7 +355,7 @@ module Tep
             Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
           end
         end
-        0
+        keep_alive
       end
 
       # bytesize, as write_response: a multibyte `msg` would otherwise

@@ -18,6 +18,8 @@ class RecordingApp
     res.body = "ok"
     res.start_stream(Tep::Streamer.new) if req.path == "/stream"
     res.start_websocket("test", Tep::WebSocket::Driver.new(0)) if req.path == "/upgrade"
+    res.send_file(File.join(__dir__, "missing-pipelined-file")) if req.path == "/missing-file"
+    res.headers["connection"] = "keep-alive, CLOSE" if req.path == "/response-close"
   end
 end
 
@@ -56,6 +58,8 @@ THIRD = "POST /third HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\né"
 close_first = "POST /posts HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".b
 stream_first = "GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n".b
 upgrade_first = "GET /upgrade HTTP/1.1\r\nHost: localhost\r\n\r\n".b
+missing_first = "GET /missing-file HTTP/1.1\r\nHost: localhost\r\n\r\n".b
+response_close_first = "GET /response-close HTTP/1.1\r\nHost: localhost\r\n\r\n".b
 scenarios = [
   ["two-byte body", post(2, "é".b), SECOND, ["/posts", "/next"], ["é".b, ""]],
   ["zero-length body", post(0, ""), SECOND, ["/posts", "/next"], ["", ""]],
@@ -67,6 +71,8 @@ scenarios = [
   ["body requiring a drain", post(6000, "é".b * 3000), SECOND, ["/posts", "/next"], ["é".b * 3000, ""]],
   ["Connection close", close_first, SECOND, ["/posts"], [""]],
   ["streaming close", stream_first, SECOND, ["/stream"], [""]],
+  ["missing file close", missing_first, SECOND, ["/missing-file"], [""]],
+  ["response Connection close", response_close_first, SECOND, ["/response-close"], [""]],
   ["WebSocket upgrade", upgrade_first, SECOND, ["/upgrade"], [""]]
 ]
 
@@ -96,6 +102,8 @@ SERVERS.each_key do |server|
         statuses = Sock.wire.out.scan(/HTTP\/1\.\d (\d{3})/).flatten.map(&:to_i)
         expected_statuses = if label == "WebSocket upgrade"
           server == "threaded" ? [101] : [501]
+        elsif label == "missing file close"
+          [404]
         else
           [200] * paths.length
         end
