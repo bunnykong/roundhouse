@@ -35,7 +35,7 @@ Against main at a named commit, on the inputs each check specifies, most often t
 | Precision | Share of expressions fully typed and share holding `untyped`, with the [runtime oracle](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/oracle) beside it |
 | Cost | `check --continue` wall time and peak memory, interleaved runs |
 
-The flags live on the [follow-up branch](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-next); `RH_FIXPOINT_*` is also in [#657](https://github.com/rubys/roundhouse/pull/657).
+The flags live on the [follow-up branch](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-next); the canaries (`RH_FIXPOINT_VERIFY`, `RH_FIXPOINT_DIGEST`, `RH_FIXPOINT_STATS`) are on main since [#657](https://github.com/rubys/roundhouse/pull/657).
 
 ## Terms
 
