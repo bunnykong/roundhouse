@@ -74,6 +74,8 @@ pub(crate) fn reset() {
 /// harvest. Called after the harvest and again after the registry copies,
 /// so a copy carries the joined value.
 pub(crate) fn join_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
+    // The return harvest and call-site row fold already decide these merges.
+    if super::det::det_on() { return ; }
     if !*JOIN {
         return;
     }
@@ -136,6 +138,8 @@ fn join_reference_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
 
 /// Join every parameter row with the row it had last round.
 pub(crate) fn join_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
+    // The return harvest and call-site row fold already decide these merges.
+    if super::det::det_on() { return ; }
     if !*JOIN {
         return;
     }
@@ -194,6 +198,8 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
 /// [`join_rets`] for one reference-mode method (both sides), after the
 /// worklist harvested it.
 pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &ClassId, method: &Symbol) {
+    // The return harvest and call-site row fold already decide these merges.
+    if super::det::det_on() { return ; }
     if !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(class, method) {
         return;
     }
@@ -223,6 +229,8 @@ pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &Cl
 /// [`join_params`] for one row the worklist recomputed: a reference-mode
 /// method's row joins with its previous row (`commit` records it).
 pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool) -> Option<Vec<Ty>> {
+    // The return harvest and call-site row fold already decide these merges.
+    if super::det::det_on() { return raw; }
     if !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(&key.0, &key.1) {
         return raw;
     }

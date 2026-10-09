@@ -929,7 +929,7 @@ impl<'a> Expander<'a> {
                 r
             }
             Ty::Union { variants } => {
-                if *CANON_EXPAND && variants.iter().filter(|v| matches!(v, Ty::Rec { .. })).count() > 1 {
+                if (*CANON_EXPAND || super::det::det_on()) && variants.iter().filter(|v| matches!(v, Ty::Rec { .. })).count() > 1 {
                     let order = reference_arm_order(variants);
                     let vs: Vec<Ty> = order.iter().map(|i| self.go(&variants[*i], budget)).collect();
                     return super::body::union_many(vs);
