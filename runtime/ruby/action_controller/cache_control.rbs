@@ -1,0 +1,21 @@
+# Typing contract for cache_control.rb beside this file. Hash-like
+# surface over the typed `CacheControlStore` declared in base.rbs; see
+# this file's .rb for the per-key dispatch each method follows.
+module ActionController
+  class CacheControlStore
+    def []: (Symbol key) -> untyped
+    def []=: (Symbol key, untyped value) -> untyped
+    def delete: (Symbol key) -> untyped
+    def merge!: (**untyped opts) -> ActionController::CacheControlStore
+    def replace: (**untyped opts) -> ActionController::CacheControlStore
+  end
+
+  class Base
+    # Re-declared here (already on Base in base.rbs): this file is
+    # typed per-file, and `cache_control`/`commit_cache_control!` both
+    # read the ivar `initialize` (base.rb) already constructs.
+    @cache_control: ActionController::CacheControlStore
+    def cache_control: () -> ActionController::CacheControlStore
+    def commit_cache_control!: () -> void
+  end
+end

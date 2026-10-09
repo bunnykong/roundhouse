@@ -194,3 +194,124 @@ class ActionControllerExpiresInTest < Minitest::Test
     assert_equal "max-age=60, public", store.to_header
   end
 end
+
+# `response.cache_control`'s Hash-like surface
+# (`action_controller/cache_control.rb`, ruby-family only): `[]`,
+# `[]=`, `delete`, `merge!`, `replace`, and `commit_cache_control!`
+# (the wire-side write onto the buffered `headers` store). RUBY-FAMILY
+# ONLY, like `cookies_test.rb` beside this file — see that file's own
+# header comment for why coverage for a reopen outside the strict-
+# target tables lives in a file of its own rather than beside
+# `ac_base_test.rb`'s.
+class CacheControlHashSurfaceTest < Minitest::Test
+  class TestController < ActionController::Base
+    def process_action(action_name)
+    end
+  end
+
+  def setup
+    @controller = TestController.new
+  end
+
+  def cache_control
+    @controller.cache_control
+  end
+
+  # ── replace / merge! ─────────────────────────────────────────
+
+  def test_replace_is_the_before_action_shape_679_asked_for
+    cache_control.replace(private: true, no_store: true)
+    assert_equal "private, no-store", cache_control.to_header
+  end
+
+  def test_merge_bang_no_store_wins_over_public_and_max_age
+    cache_control.merge!(no_store: true, public: true, max_age: 5)
+    assert_equal "no-store", cache_control.to_header
+  end
+
+  def test_replace_clears_whatever_a_prior_replace_left
+    cache_control.replace(private: true, no_store: true)
+    cache_control.replace(no_cache: true)
+    assert_equal "no-cache", cache_control.to_header
+  end
+
+  # ── [] / []= ─────────────────────────────────────────────────
+
+  def test_bracket_assign_public_alone
+    cache_control[:public] = true
+    assert_equal "public", cache_control.to_header
+  end
+
+  def test_bracket_read_is_nil_not_false_when_unset
+    assert_nil cache_control[:public]
+    cache_control[:public] = true
+    assert_equal true, cache_control[:public]
+  end
+
+  # A STATED zero `max_age` reads back as `0`, not nil.
+  def test_bracket_read_max_age_present_even_when_zero
+    cache_control[:max_age] = 0
+    assert_equal 0, cache_control[:max_age]
+  end
+
+  def test_bracket_assign_coerces_integer_fields_with_to_i
+    cache_control[:max_age] = "45"
+    assert_equal 45, cache_control[:max_age]
+  end
+
+  def test_bracket_assign_nil_clears_a_bool_flag
+    cache_control[:public] = true
+    cache_control[:public] = nil
+    assert_nil cache_control[:public]
+  end
+
+  def test_bracket_assign_unrecognized_key_raises
+    assert_raises(ArgumentError) { cache_control[:s_maxage] = 60 }
+  end
+
+  # ── delete ───────────────────────────────────────────────────
+
+  def test_delete_returns_the_prior_value_and_clears_it
+    cache_control[:public] = true
+    assert_equal true, cache_control.delete(:public)
+    assert_nil cache_control[:public]
+  end
+
+  def test_delete_of_an_unset_key_returns_nil
+    assert_nil cache_control.delete(:public)
+  end
+
+  # ── expires_in interaction (the two order-dependent pins) ────
+
+  def test_expires_in_then_replace_the_replace_wins
+    @controller.expires_in(60, public: true)
+    cache_control.replace(private: true, no_store: true)
+    assert_equal "private, no-store", cache_control.to_header
+  end
+
+  def test_replace_then_expires_in_the_expires_in_wins
+    cache_control.replace(private: true, no_store: true)
+    @controller.expires_in(60, public: true)
+    assert_equal "max-age=60, public", cache_control.to_header
+  end
+
+  def test_expires_in_then_delete_public_falls_back_to_private
+    @controller.expires_in(60, public: true)
+    cache_control.delete(:public)
+    assert_equal "max-age=60, private", cache_control.to_header
+  end
+
+  # ── commit_cache_control! (the wire-side write) ──────────────
+
+  def test_commit_cache_control_writes_the_header_when_the_store_is_not_empty
+    cache_control.replace(private: true, no_store: true)
+    @controller.commit_cache_control!
+    assert_equal "private, no-store", @controller.headers["Cache-Control"]
+  end
+
+  def test_commit_cache_control_leaves_a_direct_header_write_alone_when_the_store_is_empty
+    @controller.headers["Cache-Control"] = "max-age=0, private"
+    @controller.commit_cache_control!
+    assert_equal "max-age=0, private", @controller.headers["Cache-Control"]
+  end
+end
