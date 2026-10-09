@@ -130,6 +130,27 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     if matches!(existing, Ty::Fn { .. }) {
         return HarvestWrite::Keep;
     }
+    // Join here, before any history-dependent return replacement rules.
+    if super::det::det_on() {
+        let new = match untie_recursive_return(existing, &new) {
+            Some(untied) => {
+                super::fixpoint_check::note_untie_cut();
+                super::det::note_cap("harvest_untie_cut");
+                super::det::note("harvest.untie", Some(existing), &untied);
+                untied
+            }
+            None => new,
+        };
+        let next = if super::det::write_join() {
+            super::det::lat_join(existing.clone(), new)
+        } else {
+            super::det::lat_norm(new)
+        };
+        if existing == &next {
+            return HarvestWrite::Keep;
+        }
+        return HarvestWrite::Set("harvest.det", next);
+    }
     if existing == &new {
         return HarvestWrite::Keep;
     }
@@ -173,6 +194,9 @@ pub(super) fn insert_inferred_return(
     let ty = super::fixpoint_bound::bound(ty);
     match table.get(method) {
         None => {
+            let ty = if super::det::det_on() && !matches!(ty, Ty::Fn { .. }) {
+                super::det::lat_norm(ty)
+            } else { ty };
             super::det::note_named("harvest.first", method.as_str(), None, &ty);
             table.insert(method.clone(), ty);
         }
