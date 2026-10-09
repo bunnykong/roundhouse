@@ -44,6 +44,8 @@ mod controller_response_body;
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/request_optional_port.rs"]
 mod request_optional_port;
+#[path = "emit_and_run/controller_super_ivars.rs"]
+mod controller_super_ivars;
 #[path = "emit_and_run/assoc_pluck_typed.rs"]
 mod assoc_pluck_typed;
 #[path = "emit_and_run/sti_global_id.rs"]
@@ -155,6 +157,36 @@ puts "later delegate ordering passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("later delegate ordering passed"));
+}
+
+/// `to_sql` renders a relation as SQL another query can embed: the
+/// subquery runs, and selects exactly the commented article.
+#[test]
+fn a_relations_to_sql_runs_as_a_subquery() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def self.commented
+    where(\"articles.id IN (#{Comment.select(:article_id).to_sql})\")
+  end
+",
+        )
+        .run_ruby(
+            r#"commented = Article.create!(title: "Commented", body: "A sufficiently long body.")
+Article.create!(title: "Quiet", body: "A sufficiently long body.")
+Comment.create!(article: commented, commenter: "Reader", body: "Comment body")
+sql = Article.where(title: "Quiet").to_sql
+raise "to_sql: #{sql}" unless sql.start_with?("SELECT") && sql.include?("articles")
+ids = Article.commented.map(&:id)
+raise "subquery: #{ids.inspect}" unless ids == [commented.id]
+puts "to_sql subquery passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("to_sql subquery passed"));
 }
 
 /// A class object and its instances that define the same names: each
@@ -6072,6 +6104,15 @@ end
 
 #[path = "emit_and_run/concern_accessors.rs"]
 mod concern_accessors;
+
+#[path = "emit_and_run/action_not_found.rs"]
+mod action_not_found;
+
+#[path = "emit_and_run/finder_miss_readers.rs"]
+mod finder_miss_readers;
+
+#[path = "emit_and_run/finder_miss_messages.rs"]
+mod finder_miss_messages;
 
 /// A concern split in two, mixed into more than one controller: the
 /// inner module calls a method only its includers have (through the
