@@ -541,6 +541,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             controller,
             param,
             path: path_segment,
+            constraints: resource_constraints,
         } => {
             // `path:` moves the URL segment only; the helpers and the
             // controller below still come from `name`.
@@ -651,6 +652,27 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 if suffix.contains(":id") && !params.iter().any(|p| p == id_param) {
                     params.push(id_param.to_string());
                 }
+                // Inherited block-level `constraints(id: /.../) do …
+                // end` (propagated onto this `Resources` node at
+                // ingest) applies only to the actions whose path
+                // actually carries the constrained param — `show`/
+                // `edit`/`update`/`destroy` for the common `id` case,
+                // never `index`/`new`/`create`. Same digit-class split
+                // as the `Explicit` arm above.
+                let int_params: Vec<String> = resource_constraints
+                    .iter()
+                    .filter(|(name, rx)| {
+                        params.iter().any(|p| p == name.as_str()) && digit_class_regex(rx)
+                    })
+                    .map(|(name, _)| name.as_str().to_string())
+                    .collect();
+                let other_constraints: Vec<(String, String)> = resource_constraints
+                    .iter()
+                    .filter(|(name, rx)| {
+                        params.iter().any(|p| p == name.as_str()) && !digit_class_regex(rx)
+                    })
+                    .map(|(name, rx)| (name.as_str().to_string(), rx.clone()))
+                    .collect();
                 let as_name = resource_as_name(
                     action_name,
                     &helper_singular,
@@ -670,8 +692,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     named: ctx.helpers_enabled,
                     helpers_enabled: ctx.helpers_enabled,
                     format: ctx.default_format(),
-                    int_params: vec![],
-                    constraints: vec![],
+                    int_params: int_params.clone(),
+                    constraints: other_constraints.clone(),
                 });
                 // Rails routes `update` on BOTH `PATCH` and `PUT` — the
                 // verb changed in Rails 4 and the older one was kept, so
@@ -697,8 +719,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                         named: false,
                         helpers_enabled: ctx.helpers_enabled,
                         format: ctx.default_format(),
-                        int_params: vec![],
-                        constraints: vec![],
+                        int_params,
+                        constraints: other_constraints,
                     });
                 }
             }
