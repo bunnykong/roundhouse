@@ -436,19 +436,30 @@ pub(crate) fn keep_gradual() -> bool {
     *DET >= 2
 }
 
-/// `Var` arms vanish at every depth (⊥ is the identity of the join); a bare
-/// `Var`, or a union of nothing else, stays one pending `Var`. Subtrees with
-/// no `Var` are shared, not copied; a union whose arms changed is re-sorted
-/// and deduplicated, so it stays in `union_of`'s canonical form.
-pub(crate) fn strip_var_deep(t: Ty) -> Ty {
-    strip_var_opt(&t).unwrap_or(t)
+/// The join of D : `union_of` (canonical, spine-merging), then
+/// `norm`. Commutative, associative and idempotent, so no write order can
+/// matter.
+pub(crate) fn lat_join(a: Ty, b: Ty) -> Ty {
+    let j = super::body::union_of(a, b);
+    norm_opt(&j, true).unwrap_or(j)
 }
 
-fn strip_var_opt(t: &Ty) -> Option<Ty> {
+/// D's normal form, at every position: `Var` arms vanish (⊥); arms of one
+/// shape merge pointwise, as `union_of` already does for Array and Hash
+/// spines (Tuples of one arity, Classes of one id and arity, Records of one
+/// key set), so a transient arm typed against a pending input is absorbed by
+/// the arm it later becomes instead of staying beside it; under J₀ an
+/// `untyped` arm beside an informative arm other than `Nil` is absorbed. The
+/// result depends only on the arm set at each position, so the join stays
+/// associative. Below the top, J₀ reads `untyped` as ⊥ like `Var`, so the
+/// two are one marker there (printed `untyped`): `Array[Var]` from an empty
+/// literal and `Array[untyped]` from the same literal typed against a
+/// placeholder are the same value. `None` when `t` is already normal.
+fn norm_opt(t: &Ty, top: bool) -> Option<Ty> {
     fn each(xs: &[Ty]) -> Option<Vec<Ty>> {
         let mut out: Option<Vec<Ty>> = None;
         for (i, x) in xs.iter().enumerate() {
-            if let Some(n) = strip_var_opt(x) {
+            if let Some(n) = norm_opt(x, false) {
                 out.get_or_insert_with(|| xs[..i].to_vec()).push(n);
             } else if let Some(o) = out.as_mut() {
                 o.push(x.clone());
@@ -456,37 +467,98 @@ fn strip_var_opt(t: &Ty) -> Option<Ty> {
         }
         out
     }
+    fn same_shape(a: &Ty, b: &Ty) -> bool {
+        match (a, b) {
+            (Ty::Tuple { elems: x }, Ty::Tuple { elems: y }) => x.len() == y.len(),
+            (Ty::Class { id: i, args: x }, Ty::Class { id: j, args: y }) => i == j && x.len() == y.len() && !x.is_empty(),
+            (Ty::Record { row: x }, Ty::Record { row: y }) => {
+                x.fields.len() == y.fields.len() && x.fields.iter().all(|(k, _)| y.fields.iter().any(|(k2, _)| k2.as_str() == k.as_str()))
+            }
+            _ => false,
+        }
+    }
+    fn pointwise(a: &Ty, b: &Ty) -> Ty {
+        let j = |x: &Ty, y: &Ty| lat_join(x.clone(), y.clone());
+        match (a, b) {
+            (Ty::Tuple { elems: x }, Ty::Tuple { elems: y }) => {
+                Ty::Tuple { elems: x.iter().zip(y.iter()).map(|(p, q)| j(p, q)).collect() }
+            }
+            (Ty::Class { id, args: x }, Ty::Class { args: y, .. }) => {
+                Ty::Class { id: id.clone(), args: x.iter().zip(y.iter()).map(|(p, q)| j(p, q)).collect() }
+            }
+            (Ty::Record { row: x }, Ty::Record { row: y }) => Ty::Record {
+                row: crate::ty::Row {
+                    fields: x
+                        .fields
+                        .iter()
+                        .map(|(k, v)| {
+                            let w = y.fields.iter().find(|(k2, _)| k2.as_str() == k.as_str()).map(|(_, w)| w.clone());
+                            (k.clone(), match w { Some(w) => j(v, &w), None => v.clone() })
+                        })
+                        .collect(),
+                    rest: x.rest.clone(),
+                },
+            },
+            _ => a.clone(),
+        }
+    }
+    let below = !top && !keep_gradual();
     match t {
+        Ty::Var { .. } if below => Some(Ty::pending_untyped()),
         Ty::Union { variants } => {
-            let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
-            let mut changed = has_var;
-            let mut out: Vec<Ty> = Vec::with_capacity(variants.len());
+            let mut changed = false;
+            let mut arms: Vec<Ty> = Vec::with_capacity(variants.len());
             for v in variants.iter() {
                 if matches!(v, Ty::Var { .. }) {
+                    changed = true;
+                    if below {
+                        arms.push(Ty::pending_untyped());
+                    }
                     continue;
                 }
-                match strip_var_opt(v) {
+                match norm_opt(v, top) {
                     Some(n) => {
                         changed = true;
-                        out.push(n);
+                        arms.push(n);
                     }
-                    None => out.push(v.clone()),
+                    None => arms.push(v.clone()),
                 }
+            }
+            let mut i = 0;
+            while i < arms.len() {
+                let mut k = i + 1;
+                while k < arms.len() {
+                    if same_shape(&arms[i], &arms[k]) {
+                        let b = arms.remove(k);
+                        arms[i] = pointwise(&arms[i], &b);
+                        changed = true;
+                    } else {
+                        k += 1;
+                    }
+                }
+                i += 1;
+            }
+            if !keep_gradual()
+                && arms.iter().any(|v| matches!(v, Ty::Untyped { .. }))
+                && arms.iter().any(|v| !matches!(v, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Bottom | Ty::Nil))
+            {
+                arms.retain(|v| !matches!(v, Ty::Untyped { .. }));
+                changed = true;
             }
             if !changed {
                 return None;
             }
-            Ty::canonicalize_variants(&mut out);
-            out.dedup();
-            Some(match out.len() {
+            Ty::canonicalize_variants(&mut arms);
+            arms.dedup();
+            Some(match arms.len() {
                 0 => Ty::Var { var: crate::ident::TyVar(0) },
-                1 => out.pop().unwrap(),
-                _ => Ty::Union { variants: out.into() },
+                1 => arms.pop().unwrap(),
+                _ => Ty::Union { variants: arms.into() },
             })
         }
-        Ty::Array { elem } => strip_var_opt(elem).map(|e| Ty::Array { elem: std::sync::Arc::new(e) }),
+        Ty::Array { elem } => norm_opt(elem, false).map(|e| Ty::Array { elem: std::sync::Arc::new(e) }),
         Ty::Hash { key, value } => {
-            let (k, v) = (strip_var_opt(key), strip_var_opt(value));
+            let (k, v) = (norm_opt(key, false), norm_opt(value, false));
             if k.is_none() && v.is_none() {
                 return None;
             }
@@ -508,35 +580,6 @@ fn strip_var_opt(t: &Ty) -> Option<Ty> {
         }
         _ => None,
     }
-}
-
-/// J₀'s reading of the bit: a top-level `untyped` arm beside an informative
-/// arm other than `Nil` is absorbed (main's opacity; `Nil | untyped` stays,
-/// harvest_return's Campfire exception). Applied to a join's result it keeps
-/// the join associative: whether the arm goes depends only on the arm set.
-fn absorb_gradual(t: Ty) -> Ty {
-    match t {
-        Ty::Union { variants }
-            if variants.iter().any(|v| matches!(v, Ty::Untyped { .. }))
-                && variants.iter().any(|v| !matches!(v, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Bottom | Ty::Nil)) =>
-        {
-            let kept: Vec<Ty> = variants.iter().filter(|v| !matches!(v, Ty::Untyped { .. })).cloned().collect();
-            match kept.len() {
-                0 => Ty::pending_untyped(),
-                1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept.into() },
-            }
-        }
-        other => other,
-    }
-}
-
-/// The join of D : `union_of` (canonical, spine-merging), then
-/// `Var` arms removed at every depth, then, under J₀, the bit absorbed.
-/// Commutative, associative and idempotent, so no write order can matter.
-pub(crate) fn lat_join(a: Ty, b: Ty) -> Ty {
-    let j = strip_var_deep(super::body::union_of(a, b));
-    if keep_gradual() { j } else { absorb_gradual(j) }
 }
 
 /// One value on its own, normalized as a join with ⊥ would leave it.
