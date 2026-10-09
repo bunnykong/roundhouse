@@ -1113,6 +1113,7 @@ impl Analyzer {
     /// the refined registry. Iterates to a fixed point (capped; see
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
+        self.fixpoint_checks = fixpoint_check::Checks::start();
         det::reset();
         errgate::reset();
         handoff::reset();
