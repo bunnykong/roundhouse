@@ -314,4 +314,85 @@ class CacheControlHashSurfaceTest < Minitest::Test
     @controller.commit_cache_control!
     assert_equal "max-age=0, private", @controller.headers["Cache-Control"]
   end
+
+  # ── merging a directly-written header with the store (#694 review) ──
+  # Every expected string below is Rails 8.1.4's own
+  # (ActionDispatch::Http::Cache::Response#merge_and_normalize_cache_
+  # control!, verified running a real ActionDispatch::Response against
+  # the gem) — not guessed from the RFC.
+  #
+  # The bug: a `before_action`/filter calls `expires_in`, then (or
+  # before) the action writes `headers["Cache-Control"]` directly —
+  # two independent writes to the same header, same request.
+  # `commit_cache_control!` used to replace the header with the
+  # store's rendering OUTRIGHT whenever the store was non-empty,
+  # discarding anything the existing header carried that the store
+  # didn't ALSO state. Rails instead merges: the store's stated
+  # directives win over the existing header's, but what the existing
+  # header alone carries (an extras token, `private`/`must-understand`
+  # under a store that states `no_store` without restating them)
+  # survives.
+
+  # The review's own example. Pinned exactly (Rails 8.1.4): the
+  # explicit `private, no-store` does NOT survive — `expires_in`
+  # states `max_age`/`public`, and Rails' merge deletes any `no-store`
+  # the existing header carried before layering the store on (its own
+  # comment: "any caching directive coming from a controller overrides
+  # no-cache/no-store in the default Cache-Control header"), and the
+  # three-branch composer's "otherwise" arm never reads `:private` at
+  # all once `:public` is true. So THIS PARTICULAR pin is identical
+  # before and after the fix — confirmed against both the gem and the
+  # unpatched runtime — because every byte of the existing header here
+  # falls in the set Rails discards unconditionally once the store
+  # states anything. It stays as a Rails-accuracy regression pin;
+  # `test_an_existing_private_and_must_understand_survive_a_bare_
+  # no_store_store` below is what actually distinguishes the fixed
+  # merge from the old outright-replace.
+  def test_expires_in_then_a_direct_header_write_the_store_wins
+    @controller.expires_in(60, public: true)
+    @controller.headers["Cache-Control"] = "private, no-store"
+    @controller.commit_cache_control!
+    assert_equal "max-age=60, public", @controller.headers["Cache-Control"]
+  end
+
+  # Same note as above: also identical before/after the fix for the
+  # same reason (a directly-written `no-cache` is exactly the kind of
+  # content Rails' merge discards once the store states anything, and
+  # the store alone already renders "max-age=60, public"). Order
+  # doesn't matter either way — Rails' own merge is order-independent
+  # (both are just mutated state read once at commit time) — checked
+  # here with the header written FIRST and `expires_in` called after.
+  def test_a_direct_no_cache_header_does_not_survive_a_stated_store
+    @controller.headers["Cache-Control"] = "no-cache"
+    @controller.expires_in(60, public: true)
+    @controller.commit_cache_control!
+    assert_equal "max-age=60, public", @controller.headers["Cache-Control"]
+  end
+
+  # This one DOES distinguish the fix: the existing header's `private`
+  # and `must-understand` are outside the set Rails' merge ever
+  # touches (only `no-cache`/`no-store` get deleted before the store
+  # is layered on), so they must survive even though the store states
+  # only `no_store: true` and nothing else. The unpatched
+  # commit_cache_control! replaced the header outright with the
+  # store's own to_header ("no-store" alone, dropping both) — this
+  # fails without the merge and passes with it.
+  def test_an_existing_private_and_must_understand_survive_a_bare_no_store_store
+    @controller.headers["Cache-Control"] = "private, must-understand, no-store"
+    cache_control.merge!(no_store: true)
+    @controller.commit_cache_control!
+    assert_equal "private, must-understand, no-store", @controller.headers["Cache-Control"]
+  end
+
+  # An existing header's unrecognized directive (not one of Rails'
+  # seven special keys) rides through as `:extras`, store's own extras
+  # first, deduplicated — same shape `cache_control_headers` gives it.
+  # Also distinguishes the fix: the unpatched code dropped both
+  # `max-age=10` and the extras token outright.
+  def test_an_existing_extras_directive_survives_the_merge
+    @controller.headers["Cache-Control"] = "community=UCI, max-age=10"
+    cache_control.replace(public: true)
+    @controller.commit_cache_control!
+    assert_equal "max-age=10, public, community=UCI", @controller.headers["Cache-Control"]
+  end
 end

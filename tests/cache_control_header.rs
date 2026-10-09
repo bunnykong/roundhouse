@@ -104,6 +104,47 @@ puts "ALL OK"
         .assert_passes();
 }
 
+/// The review's literal example (rubys/roundhouse#694), end to end:
+/// `expires_in 60, public: true` followed by a DIRECT
+/// `headers["Cache-Control"] = "private, no-store"` write — two
+/// independent writes to the same header, same request.
+/// `commit_cache_control!` used to replace the header outright with
+/// the store's own rendering whenever the store was non-empty,
+/// discarding the explicit write unconditionally; it now merges the
+/// two the way Rails does. Expected string pinned against a real
+/// `ActionDispatch::Response` under actionpack 8.1.4 — see
+/// `cache_control_test.rb`'s own note on why this particular pin
+/// happens to render identically before and after the fix (Rails'
+/// composer never reads `:private` once `:public` is true), and
+/// why that file's `an_existing_private_and_must_understand…` /
+/// `an_existing_extras_directive…` unit tests are what actually
+/// distinguish the merge from the old outright-replace. A standalone
+/// app (no `before_action` filter) keeps the inputs identical to the
+/// pinned unit test's.
+#[test]
+fn expires_in_then_a_direct_header_write_merges_rather_than_clobbers() {
+    emit_and_run::empty_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n create_table :widgets do |t|\n  t.string :name\n end\nend\n",
+        )
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write(
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def merge_with_direct_header\n    expires_in 60, public: true\n    headers[\"Cache-Control\"] = \"private, no-store\"\n    head :ok\n  end\nend\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get '/widgets/merge_with_direct_header', to: 'widgets#merge_with_direct_header'\nend\n")
+        .run_ruby(
+            r#"
+status, headers, _body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/widgets/merge_with_direct_header", "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+raise "status #{status}" unless status == 200
+raise "Cache-Control #{headers["cache-control"].inspect}" unless headers["cache-control"] == "max-age=60, public"
+puts "ALL OK"
+"#,
+        )
+        .assert_passes();
+}
+
 /// Same contract, compiled and run as a native Spinel binary rather
 /// than CRuby: the filter and action run on a controller instance
 /// directly (no HTTP server/database — `run_spinel` boots libraries),
@@ -133,4 +174,44 @@ puts "ALL OK"
 "#,
     )
     .assert_passes();
+}
+
+/// Rails 8.1.4's `head` (#736) on the cache-control wire path: the
+/// store is committed for a bodyless `head :no_content` too (no
+/// Content-Type, but Cache-Control still rides), and a `Cache-Control`
+/// written through `head`'s options hash is merged with the store
+/// like any direct header write, so the store's directives win over
+/// its `no-cache`. Both expectations pinned against a real
+/// `ActionController::Base` under actionpack 8.1.4:
+/// `[204, "max-age=60, public", nil]` and `[200, "max-age=60, public"]`.
+#[test]
+fn expires_in_reaches_the_header_of_a_head_response() {
+    emit_and_run::empty_app()
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n create_table :widgets do |t|\n  t.string :name\n end\nend\n",
+        )
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write(
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def bodyless\n    expires_in 60, public: true\n    head :no_content\n  end\n\n  def with_option\n    expires_in 60, public: true\n    head :ok, cache_control: \"no-cache\"\n  end\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get '/widgets/bodyless', to: 'widgets#bodyless'\n  get '/widgets/with_option', to: 'widgets#with_option'\nend\n",
+        )
+        .run_ruby(
+            r#"
+env = ->(path) { { "REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new("") } }
+status, headers, _body = Main.run_rack(env.("/widgets/bodyless"))
+raise "bodyless status #{status}" unless status == 204
+raise "bodyless content-type #{headers["content-type"].inspect}" unless headers["content-type"].nil?
+raise "bodyless Cache-Control #{headers["cache-control"].inspect}" unless headers["cache-control"] == "max-age=60, public"
+status, headers, _body = Main.run_rack(env.("/widgets/with_option"))
+raise "with_option status #{status}" unless status == 200
+raise "with_option Cache-Control #{headers["cache-control"].inspect}" unless headers["cache-control"] == "max-age=60, public"
+puts "ALL OK"
+"#,
+        )
+        .assert_passes();
 }

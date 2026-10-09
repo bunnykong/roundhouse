@@ -1005,7 +1005,20 @@ fn every_runtime_method_body_concretely_typed() {
     // which of its sites main already counts.
     // Rebased onto main's 376 (after #736's Head and the savepoint fix):
     // MEASURED 398 on 2026-10-10 at this commit (the store surface adds 22).
-    const CEILING: usize = 452;
+    // MEASURED 2026-10-09 (rubys/roundhouse#694 review fix, on top of
+    // this same 341): `commit_cache_control!`'s merge with a directly-
+    // written `Cache-Control` header (`action_controller/
+    // cache_control.rb`) adds 14 — `parse_cache_control_header`'s
+    // comma-split/Symbol-dispatch parse of an arbitrary header String
+    // and `cache_control_as_hash`'s per-key Hash snapshot are both
+    // `Hash[Symbol, untyped]`-shaped, the same tax the Hash-like `[]`/
+    // `[]=` surface already pays; ruby-family only, never reaches a
+    // strict target. 341 + 14 = 355.
+    // Rebased onto main's 376 (after #736's Head and the savepoint fix):
+    // MEASURED 459 on 2026-10-10 against main's 423 (445 at the Hash-surface commit + 14).
+    // Rebased onto main's 428 (after the exception classes and the date-column hook):
+    // MEASURED 466 on 2026-10-10, main 9249df4d (452 at the Hash-surface commit + 14).
+    const CEILING: usize = 466;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

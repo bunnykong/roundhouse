@@ -130,15 +130,139 @@ module ActionController
       @cache_control
     end
 
-    # Writes the composed `Cache-Control` header from the typed store
-    # onto the buffered response — unless the store is empty, in which
-    # case an action that never touched `response.cache_control`
-    # leaves alone whatever (if anything) it wrote directly via
-    # `headers["Cache-Control"] = …`. Called once per request, right
-    # before the header copy, by every wire path that requires this
-    # file.
-    def commit_cache_control!
-      @headers["Cache-Control"] = @cache_control.to_header unless @cache_control.empty?
+    # `response.cache_control`'s current state as a plain Hash —
+    # exactly the Symbol-keyed subset `[]` answers non-nil for,
+    # `:extras` included only when it is non-empty (matching the
+    # store's own `empty?`). Feeds `commit_cache_control!`'s merge.
+    def cache_control_as_hash
+      store = cache_control
+      hash = {}
+      keys = [:public, :private, :no_store, :no_cache, :must_revalidate,
+              :must_understand, :immutable, :max_age,
+              :stale_while_revalidate, :stale_if_error]
+      keys.each do |key|
+        value = store[key]
+        hash[key] = value unless value.nil?
+      end
+      extras = store[:extras]
+      hash[:extras] = extras unless extras.nil? || extras.empty?
+      hash
     end
+
+    # Writes the composed `Cache-Control` header — merging whatever
+    # `response.cache_control` STATES over whatever the action wrote
+    # directly via `headers["Cache-Control"] = …`, the way Rails'
+    # `merge_and_normalize_cache_control!` does (actionpack 8.1.4,
+    # `ActionDispatch::Http::Cache::Response#before_committed`): an
+    # action that writes `headers["Cache-Control"] = "private,
+    # no-store"` and ALSO calls `expires_in 60, public: true` — two
+    # independent writes, same request — must not have the typed
+    # store silently overwritten by whichever one happened to run
+    # last, and must not have the store's own directives silently
+    # lost under the hand-written header either. Rails' answer, which
+    # this mirrors exactly: parse the existing header, delete any
+    # `no-cache`/`no-store` it carried (`expires_in`/`replace`/
+    # `merge!` always win over those two — same rule `expires_in`
+    # itself already applies to a PRIOR `no_store`), merge the store's
+    # stated directives on top, fold `:extras` from both sides
+    # (store's own first, existing's appended, deduplicated), and
+    # render with the normal three-branch order.
+    #
+    # An untouched store (`response.cache_control` never read or
+    # written) leaves a directly-written header RENORMALIZED but
+    # otherwise unchanged — same as Rails: a header already in
+    # canonical order round-trips byte for byte. A store with nothing
+    # stated AND no existing header leaves `headers["Cache-Control"]`
+    # unset, same as before this method existed.
+    #
+    # Called once per request, right before the header copy, by every
+    # wire path that requires this file.
+    def commit_cache_control!
+      control = ActionController.parse_cache_control_header(@headers["Cache-Control"])
+      stated = cache_control_as_hash
+      return if control.empty? && stated.empty?
+
+      unless stated.empty?
+        control.delete(:no_cache)
+        control.delete(:no_store)
+        existing_extras = control.delete(:extras)
+        unless existing_extras.nil?
+          combined = []
+          unless stated[:extras].nil?
+            stated[:extras].each { |e| combined << e }
+          end
+          existing_extras.each { |e| combined << e }
+          merged = []
+          combined.each { |e| merged << e unless merged.include?(e) }
+          stated[:extras] = merged
+        end
+        stated.each { |key, value| control[key] = value }
+      end
+
+      options = []
+      if control[:no_store]
+        options << "private" if control[:private]
+        options << "must-understand" if control[:must_understand]
+        options << "no-store"
+      elsif control[:no_cache]
+        options << "public" if control[:public]
+        options << "no-cache"
+        unless control[:extras].nil?
+          control[:extras].each { |e| options << e }
+        end
+      else
+        options << "max-age=#{control[:max_age].to_i}" unless control[:max_age].nil?
+        options << (control[:public] ? "public" : "private")
+        options << "must-revalidate" if control[:must_revalidate]
+        unless control[:stale_while_revalidate].nil?
+          options << "stale-while-revalidate=#{control[:stale_while_revalidate].to_i}"
+        end
+        unless control[:stale_if_error].nil?
+          options << "stale-if-error=#{control[:stale_if_error].to_i}"
+        end
+        options << "immutable" if control[:immutable]
+        unless control[:extras].nil?
+          control[:extras].each { |e| options << e }
+        end
+      end
+
+      @headers["Cache-Control"] = options.join(", ")
+    end
+  end
+
+  # Rails' own directive names `cache_control_headers`
+  # (ActionDispatch::Http::Cache::Response) recognizes BY NAME rather
+  # than folding into `:extras` — deliberately narrower than this
+  # store's own field list. Verified running actionpack 8.1.4: a
+  # pre-existing header naming `immutable`, `stale-while-revalidate=N`
+  # or `stale-if-error=N` is NOT parsed into those fields; it rides
+  # through as a literal `:extras` entry, same as any directive Rails
+  # itself does not recognize. This mirrors that gap exactly rather
+  # than "fixing" it — a difference here would make an existing header
+  # round-trip differently than it does under Rails.
+  CACHE_CONTROL_SPECIAL_KEYS = ["no-store", "no-cache", "max-age", "public",
+                                "private", "must-revalidate", "must-understand"]
+
+  # Parses an existing `Cache-Control` header value the same way
+  # Rails' `cache_control_headers` does: comma-separated segments
+  # (spaces stripped first), each a bare flag or `directive=value`;
+  # one of `CACHE_CONTROL_SPECIAL_KEYS` lands under its own
+  # (underscored) Symbol key — a bare flag's value is `true` — and
+  # anything else rides in as a literal String under `:extras`.
+  def self.parse_cache_control_header(header)
+    parsed = {}
+    return parsed if header.nil? || header.empty?
+    stripped = header.delete(" ")
+    stripped.split(",").each do |segment|
+      directive, argument = segment.split("=", 2)
+      if CACHE_CONTROL_SPECIAL_KEYS.include?(directive)
+        key = directive.tr("-", "_")
+        parsed[key.to_sym] = argument.nil? ? true : argument
+      else
+        parsed[:extras] = [] if parsed[:extras].nil?
+        parsed[:extras] << segment
+      end
+    end
+    parsed
   end
 end
