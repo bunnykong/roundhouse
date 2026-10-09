@@ -24,13 +24,13 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "No public app passes; on four of the five, the structure itself differs between schedules."
+  stands: "On the recorded staged pins, no public app passes; on four of the five, the structure itself differs between schedules."
   facts: [F16, F14, F5]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Declare the rest of the structure before typing, or discover it monotonically."
+  next: "Re-check after bringing #674, #705 and #724 onto the staged branch; declare the rest of the structure before typing, or discover it monotonically."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
@@ -58,7 +58,7 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "At least one S3 type is unsound on a public app, and no runtime traces of app code exist to find the rest."
+  stands: "The recorded S3 types include an unsound public-app result; runtime traces from the apps' own code are still missing."
   facts: [F18, F17, F14, F8]
   skills:
     - Ruby and Rails semantics
@@ -68,7 +68,7 @@
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "main 9b2dd5e9"
+    compiler: "main 1ce99695 (F17); fixpoint-staged 92844f68 (F8)"
     lab: "0cc656a6"
   claims:
     - who: dai199
