@@ -86,6 +86,52 @@ pub struct FlatRoute {
     /// (it rides `format`); digit-class regexes are excluded (they ride
     /// `int_params` / the `Integer` matcher).
     pub constraints: Vec<(String, String)>,
+    /// `constraints` entries the router CAN enforce, each compiled by
+    /// `segment_pattern::compile` into its portable encoded form — a
+    /// sequence of literal/char-class items with no backtracking
+    /// needed, checkable with plain char comparisons on every target
+    /// (`seg_patterns` rides `Route.new`'s `seg_constraints` the way
+    /// `int_params` rides its own slot). A route carrying a
+    /// `constraints` entry that DIDN'T compile is refused outright at
+    /// `collect_flat_routes` — it never reaches `out` at all, rather
+    /// than serve a requirement it can't actually check (the original
+    /// bug was exactly that: a route that claims a restriction but
+    /// doesn't enforce it).
+    pub seg_patterns: Vec<(String, String)>,
+}
+
+/// Compile every non-digit-class requirement on one concrete route
+/// into the router's segment-pattern form, or refuse the WHOLE route
+/// (returning `None`) when any one of them needs more than the
+/// supported subset (`segment_pattern`'s module docs name it).
+/// Serving the route with only SOME of its requirements enforced
+/// would just reproduce the original bug under a different regex
+/// shape, so nothing partial is ever emitted — `route_desc` names the
+/// route (method, path, and for `resources`, the action) in the
+/// recorded gap.
+fn compile_seg_patterns(
+    other_constraints: &[(String, String)],
+    route_desc: &str,
+) -> Option<Vec<(String, String)>> {
+    let mut out = Vec::with_capacity(other_constraints.len());
+    for (name, rx) in other_constraints {
+        match crate::lower::segment_pattern::compile(rx) {
+            Some(pattern) => out.push((name.clone(), pattern)),
+            None => {
+                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                    file: "config/routes.rb".to_string(),
+                    message: format!(
+                        "route dropped from the dispatch table: {route_desc} — `{name}:` \
+                         requirement `{rx}` is outside the router's supported segment-pattern \
+                         subset (no lookahead/backreference/alternation/anchors, and no shape \
+                         needing backtracking)"
+                    ),
+                });
+                return None;
+            }
+        }
+    }
+    Some(out)
 }
 
 /// Is this constraint regex a plain digit class (`\d+` / `[0-9]+`,
@@ -464,6 +510,16 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     .filter(|(n, _)| params.contains(n))
                     .cloned()
                     .collect();
+                // Any non-digit requirement outside the router's
+                // supported segment-pattern subset refuses the WHOLE
+                // route rather than serve it unenforced — a route
+                // that advertises `[^@/.]+` but can't actually check
+                // it is exactly the original bug.
+                let Some(seg_patterns) =
+                    compile_seg_patterns(&constraints, &format!("{method:?} {vpath}"))
+                else {
+                    continue;
+                };
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: vpath,
@@ -478,6 +534,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     path_params: params,
                     int_params,
                     constraints,
+                    seg_patterns,
                 });
             }
         }
@@ -529,6 +586,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 required_params: 0,
                 int_params: vec![],
                 constraints: vec![],
+                seg_patterns: vec![],
             });
         }
         RouteSpec::Resources {
@@ -680,6 +738,15 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     &ctx.parent_name_prefix(),
                     &ctx.name_prefix,
                 );
+                // Same fail-closed rule as the `Explicit` arm: a
+                // requirement outside the supported subset refuses
+                // this action's route rather than serve it unenforced.
+                let Some(seg_patterns) = compile_seg_patterns(
+                    &other_constraints,
+                    &format!("{method:?} {full_path} ({action_name})"),
+                ) else {
+                    continue;
+                };
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: full_path.clone(),
@@ -694,6 +761,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     format: ctx.default_format(),
                     int_params: int_params.clone(),
                     constraints: other_constraints.clone(),
+                    seg_patterns: seg_patterns.clone(),
                 });
                 // Rails routes `update` on BOTH `PATCH` and `PUT` — the
                 // verb changed in Rails 4 and the older one was kept, so
@@ -721,6 +789,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                         format: ctx.default_format(),
                         int_params,
                         constraints: other_constraints,
+                        seg_patterns,
                     });
                 }
             }

@@ -40,6 +40,7 @@ pub mod library_extras;
 pub mod model_to_library;
 pub mod routes;
 pub mod routes_to_library;
+pub mod segment_pattern;
 pub mod scope_chain;
 pub mod schema_to_library;
 pub mod seeds_to_library;
