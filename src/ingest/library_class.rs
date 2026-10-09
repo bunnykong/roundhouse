@@ -36,6 +36,14 @@ pub fn ingest_library_class(
     let Some(class) = find_first_class(&root) else {
         return Ok(None);
     };
+    if class.body().is_some_and(|body| flatten_statements(body).iter()
+        .any(|statement| super::data_factory::declaration(statement).is_some()))
+    {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "Data.define blocks require plural library-class ingestion".into(),
+        });
+    }
     Ok(Some(library_class_from_node(&class, file)?))
 }
 
@@ -68,6 +76,7 @@ pub fn ingest_library_classes(
         if let Some(base) = struct_base {
             out.push(base);
         }
+        out.extend(super::data_factory::collect(class.body(), &lc.name, file)?);
         out.push(lc);
     }
     for (scope, module) in find_all_modules_with_scope(&root) {
@@ -80,9 +89,11 @@ pub fn ingest_library_classes(
         {
             continue;
         }
-        out.push(library_class_from_module_node_with_scope(
+        let lc = library_class_from_module_node_with_scope(
             &module, &scope, file,
-        )?);
+        )?;
+        out.extend(super::data_factory::collect(module.body(), &lc.name, file)?);
+        out.push(lc);
     }
     // Constants written at FILE level, outside any class — lobsters'
     // `search_parser.rb` opens with `MYISAM_STOPWORDS = %w[…]` and the
@@ -1591,7 +1602,11 @@ fn walk_decl_body_with_visibility<'pr>(
                 continue;
             }
             let name = Symbol::from(constant_id_str(&cw.name()));
-            let value = ingest_expr(&cw.value(), file)?;
+            let value = if let Some(call) = super::data_factory::declaration(&stmt) {
+                super::data_factory::head(&call, file)?
+            } else {
+                ingest_expr(&cw.value(), file)?
+            };
             out.constants.push((name, value));
             continue;
         }
@@ -2460,6 +2475,15 @@ pub(super) fn ingest_library_method(
     owner: &ClassId,
     file: &str,
 ) -> IngestResult<crate::dialect::MethodDef> {
+    ingest_library_method_with_keywords(def, owner, file, false)
+}
+
+pub(super) fn ingest_library_method_with_keywords(
+    def: &ruby_prism::DefNode<'_>,
+    owner: &ClassId,
+    file: &str,
+    preserve_keywords: bool,
+) -> IngestResult<crate::dialect::MethodDef> {
     use crate::dialect::{MethodDef, MethodReceiver};
 
     let formals = super::forwarding::parse(def);
@@ -2532,7 +2556,7 @@ pub(super) fn ingest_library_method(
         // both flattenings are MARKED below: `lower::kwrest_forward`
         // repairs the call, and the marks are the only record that
         // these slots were not positional in the source.
-        let keeps_keywords = params.iter().any(|p| p.rest)
+        let keeps_keywords = preserve_keywords || params.iter().any(|p| p.rest)
             // Nameless `**` must keep the adjacent keyword group too:
             // a flattened optional would otherwise bind its default
             // while the keyword disappears into this rest slot.

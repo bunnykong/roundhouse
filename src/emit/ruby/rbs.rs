@@ -10,7 +10,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
-use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+use crate::dialect::{AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver};
 use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
 use crate::ty::{Param, ParamKind, Ty};
 
@@ -18,8 +18,16 @@ use crate::ty::{Param, ParamKind, Ty};
 /// path mirrors `rb_path` under a top-level `sig/` tree with the
 /// extension swapped to `.rbs`.
 pub(super) fn emit_library_class_rbs(lc: &LibraryClass, rb_path: &Path) -> EmittedFile {
+    emit_library_class_rbs_with_factories(lc, rb_path, &[])
+}
+
+pub(super) fn emit_library_class_rbs_with_factories(
+    lc: &LibraryClass,
+    rb_path: &Path,
+    classes: &[LibraryClass],
+) -> EmittedFile {
     let path = sig_path_for(rb_path);
-    let content = render_class(lc);
+    let content = render_class(lc, classes);
     EmittedFile { path, content }
 }
 
@@ -36,7 +44,7 @@ fn sig_path_for(rb_path: &Path) -> PathBuf {
     }
 }
 
-fn render_class(lc: &LibraryClass) -> String {
+fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
     let mut s = String::new();
     let name = lc.name.0.as_str();
     let segments: Vec<&str> = name.split("::").collect();
@@ -68,7 +76,11 @@ fn render_class(lc: &LibraryClass) -> String {
     }
 
     for (name, value) in &lc.constants {
-        render_data_factory(&mut s, lc, name.as_str(), value, &body_pad);
+        let factory = classes.iter().find(|class| {
+            matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
+                if declaration_span == value.span)
+        });
+        render_data_factory(&mut s, lc, name.as_str(), value, &body_pad, factory);
     }
 
     for m in &lc.methods {
@@ -83,7 +95,7 @@ fn render_class(lc: &LibraryClass) -> String {
     s
 }
 
-fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: &Expr, pad: &str) {
+fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: &Expr, pad: &str, factory: Option<&LibraryClass>) {
     if value.decisions & RESOLVED_DATA_FACTORY == 0 {
         return;
     }
@@ -99,7 +111,16 @@ fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: 
     writeln!(s, "{pad}class {name} < ::Data").unwrap();
     writeln!(s, "{pad}  def self.new: (*untyped, **untyped) -> instance").unwrap();
     for member in members {
+        if factory.is_some_and(|class| class.methods.iter().any(|m| m.name.as_str() == member)) {
+            continue;
+        }
         writeln!(s, "{pad}  def `{member}`: () -> untyped").unwrap();
+    }
+    if let Some(factory) = factory {
+        let enclosing: Vec<_> = factory.name.0.as_str().split("::").collect();
+        for method in &factory.methods {
+            writeln!(s, "{pad}  {}", render_method(method, &enclosing)).unwrap();
+        }
     }
     writeln!(s, "{pad}end").unwrap();
 }

@@ -37,6 +37,8 @@ mod emit_and_run;
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/data_factory.rs"]
+mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
 #[path = "support/cable_broadcast_json.rs"]
@@ -59,6 +61,16 @@ mod params_wrapper;
 mod io_process_constants_contract;
 #[path = "spinel_toolchain/io_process_constants.rs"]
 mod io_process_constants;
+
+#[test]
+#[ignore = "requires Spinel; run in its CI lane"]
+fn custom_data_factories_run_natively() {
+    let run = emit_and_run::real_blog()
+        .write("app/services/factory_examples.rb", data_factory::CUSTOM_DECLARATIONS)
+        .run_spinel(data_factory::CUSTOM_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("custom Data factory contract passed"));
+}
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]

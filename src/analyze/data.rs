@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::App;
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::diagnostic::Diagnostic;
+use crate::dialect::LibraryClassOrigin;
+use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -54,8 +56,13 @@ pub(super) fn register(
             return;
         };
         // Rehomed constants are not emitted in their original source scope.
+        let custom = app.library_classes.iter().any(|class| {
+            class.name == id && matches!(class.origin,
+                Some(LibraryClassOrigin::DataFactory { declaration_span }) if declaration_span == value.span)
+        });
         if id.0.as_str() != format!("{}::{}", owner.0.as_str(), name.as_str())
-            || classes.contains_key(&id)
+            || (classes.contains_key(&id) && !custom)
+            || (custom && app.library_classes.iter().filter(|class| class.name == id).count() != 1)
         {
             return;
         }
@@ -63,15 +70,16 @@ pub(super) fn register(
             id: id.clone(),
             args: vec![],
         };
-        let mut info = ClassInfo::default();
+        let info = classes.entry(id).or_default();
         info.class_methods
             .insert(Symbol::from("new"), instance.clone());
+        info.declares_constructor = true;
         // A member declaration establishes a reader, not its value type.
         // Data has no generated writers.
         for member in members {
-            info.instance_methods.insert(member, Ty::Untyped);
+            info.instance_methods.entry(member).or_insert(Ty::Untyped);
         }
-        classes.insert(id, info);
+        info.instance_methods.entry(Symbol::from("with")).or_insert(instance.clone());
         factories.insert(value.span, instance);
     };
     for class in &app.library_classes {
@@ -80,6 +88,32 @@ pub(super) fn register(
         }
     }
     factories
+}
+
+pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
+    if !app.library_classes.iter().any(|class| matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. }))) {
+        return Vec::new();
+    }
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    let mut diagnostics = Vec::new();
+    for factory in &app.library_classes {
+        let Some(LibraryClassOrigin::DataFactory { declaration_span }) = factory.origin else {
+            continue;
+        };
+        let admitted = app.library_classes.iter().flat_map(|class| &class.constants)
+            .any(|(_, value)| value.span == declaration_span && value.decisions & RESOLVED_DATA_FACTORY != 0);
+        let subclassed = app.library_classes.iter().any(|class| {
+            class.parent.as_ref().is_some_and(|parent| {
+                let path: Vec<_> = parent.0.as_str().split("::").map(Symbol::from).collect();
+                resolver.declaration_name(class.parent_span, &path) == Some(factory.name.0.as_str())
+            })
+        });
+        if !admitted || subclassed {
+            diagnostics.push(Diagnostic::unsupported(declaration_span, None, "Data.define",
+                "custom Data factories require the built-in Data, distinct literal member names, and no class reopening or subclassing"));
+        }
+    }
+    diagnostics
 }
 
 fn reader_name(member: &str) -> bool {

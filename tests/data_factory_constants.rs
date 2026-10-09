@@ -570,13 +570,50 @@ fn core_data_new_remains_unsupported() {
 }
 
 #[test]
+fn custom_factory_blocks_are_not_silently_discarded() {
+    let source = b"class Owner; State = Data.define(:name) do; def label; name; end; end; end";
+    assert!(roundhouse::ingest::ingest_library_class(source, "probe.rb").is_err());
+    for block in [
+        "def label; name; end; LIMIT = 4",
+        "def label; name; end; include Comparable",
+        "def label; name; end; puts 'side effect'",
+        "def self.label; 1; end",
+        "|value| def label; name; end",
+    ] {
+        let source = format!("class Owner; State = Data.define(:name) do {block}; end; end");
+        assert!(roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb").is_err(), "{source}");
+    }
+}
+
+#[test]
+fn custom_factories_outside_the_literal_subset_report_errors() {
+    use roundhouse::diagnostic::{DiagnosticKind, Severity};
+
+    for source in [
+        "class Owner; MEMBER = :name; State = Data.define(MEMBER) do; def label; name; end; end; end",
+        "class Owner; State = Data.define(:name, :name) do; def label; name; end; end; end",
+        "class Owner; State = Data.define(:name=) do; def label; 1; end; end; end",
+        "class Owner; class Data; def self.define(name); name; end; end; State = Data.define(:name) do; def label; name; end; end; end",
+        "class Data; end; class Owner; State = ::Data.define(:name) do; def label; name; end; end; end",
+        "class Owner; State = Data.define(:name) do; def label; name; end; end; class State; def extra; 1; end; end; end",
+        "class Owner; State = Data.define(:name) do; def label; name; end; end; class Child < State; end; end",
+    ] {
+        let mut app = ingest(source, "nil");
+        roundhouse::session::analyze_and_lower(&mut app);
+        let diagnostics = roundhouse::analyze::diagnose(&app);
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.severity == Severity::Error
+            && matches!(&diagnostic.kind, DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "Data.define")), "{source}: {diagnostics:?}");
+    }
+}
+
+#[test]
 fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
     use roundhouse::diagnostic::{DiagnosticKind, Severity};
     use roundhouse::project::{BuildTarget, target_files};
 
     let mut app = ingest(
-        data_factory::DECLARATIONS,
-        "FactoryExamples::First::Result.new(\"first\", 1.0, false)",
+        &format!("{}\n{}", data_factory::DECLARATIONS, data_factory::CUSTOM_DECLARATIONS),
+        "FactoryExamples::Stateful::State.new(10, true)",
     );
     roundhouse::session::analyze_and_lower(&mut app);
     let errors: Vec<_> = roundhouse::analyze::diagnose(&app)
@@ -595,7 +632,7 @@ fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
             result.is_err(),
             "{target:?} silently emitted a Data factory"
         );
-        assert_eq!(diagnostics.len(), 3, "{target:?}: {diagnostics:?}");
+        assert_eq!(diagnostics.len(), 6, "{target:?}: {diagnostics:?}");
         for diagnostic in diagnostics {
             assert_eq!(diagnostic.severity, Severity::Error);
             assert!(!diagnostic.span.is_synthetic(), "{diagnostic:?}");
@@ -614,7 +651,7 @@ fn ruby_and_spinel_emit_declared_factory_types_without_data_errors() {
     use roundhouse::project::{BuildTarget, target_files};
 
     let mut app = ingest(
-        data_factory::DECLARATIONS,
+        &format!("{}\n{}", data_factory::DECLARATIONS, data_factory::CUSTOM_DECLARATIONS),
         "FactoryExamples::First::Result.new(\"first\", 1.0, false)",
     );
     roundhouse::session::analyze_and_lower(&mut app);
@@ -649,5 +686,13 @@ fn ruby_and_spinel_emit_declared_factory_types_without_data_errors() {
             signatures.contains_key(&ClassId(Symbol::from("FactoryExamples::First::Result"))),
             "{target:?}: {sidecar}"
         );
+        let path = format!("{prefix}app/models/factory_examples/stateful.rbs");
+        let sidecar = &files.iter().find(|(name, _)| name == &path).expect("custom factory sidecar").1;
+        let signatures = roundhouse::rbs::parse_app_signatures(sidecar).expect("custom factory RBS parses");
+        let methods = &signatures[&ClassId(Symbol::from("FactoryExamples::Stateful::State"))];
+        for name in ["new", "initialize", "quantity", "enabled", "label", "secret"] {
+            assert!(methods.contains_key(&Symbol::from(name)), "{target:?}: {sidecar}");
+        }
+        assert_eq!(sidecar.matches("class State < ::Data").count(), 1, "{sidecar}");
     }
 }

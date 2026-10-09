@@ -479,6 +479,9 @@ impl Visibility {
             if node.as_class_node().is_some() {
                 continue;
             }
+            if super::data_factory::declaration(node).is_some() {
+                continue;
+            }
             if let Some(module) = node.as_module_node() {
                 if module_name_path(&module).as_deref() == Some(&["ClassMethods".to_string()]) {
                     self.walk_carrier(module.body(), file)?;

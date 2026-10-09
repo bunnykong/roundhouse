@@ -835,6 +835,7 @@ struct SourceContractIndex<'a> {
     parents: HashMap<ClassId, &'a ClassId>,
     includes: HashMap<ClassId, Vec<ClassId>>,
     modules: HashSet<ClassId>,
+    data_factories: HashSet<ClassId>,
     unmodeled_constructor_lookup: HashSet<ClassId>,
     fragments: HashMap<ClassId, usize>,
     instance: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
@@ -858,6 +859,7 @@ impl<'a> SourceContractIndex<'a> {
             parents: HashMap::new(),
             includes: HashMap::new(),
             modules: HashSet::new(),
+            data_factories: HashSet::new(),
             unmodeled_constructor_lookup: HashSet::new(),
             fragments: HashMap::new(),
             instance: HashMap::new(),
@@ -872,6 +874,9 @@ impl<'a> SourceContractIndex<'a> {
             class_owners.insert(class.name.clone());
             if class.is_module {
                 index.modules.insert(class.name.clone());
+            }
+            if matches!(class.origin, Some(crate::dialect::LibraryClassOrigin::DataFactory { .. })) {
+                index.data_factories.insert(class.name.clone());
             }
             index.add_fragment(
                 &class.name,
@@ -1126,7 +1131,8 @@ impl<'a> SourceContractIndex<'a> {
     ) -> Option<(&'a MethodDef, bool)> {
         self.declaration(owner, name, receiver, &mut HashSet::new())
             .or_else(|| {
-                (name.as_str() == "new" && receiver == MethodReceiver::Class)
+                (name.as_str() == "new" && receiver == MethodReceiver::Class
+                    && !self.data_factories.contains(owner))
                     .then(|| {
                         self.declaration(
                             owner,
