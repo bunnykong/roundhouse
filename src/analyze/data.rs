@@ -63,8 +63,14 @@ pub(super) fn register(
             class.name == id && matches!(class.origin,
                 Some(LibraryClassOrigin::DataFactory { declaration_span }) if declaration_span == value.span)
         });
+        // The main branch also ingests Struct block classes into the same
+        // registry. Preserve those generated declarations when a factory
+        // adds its constructor and readers.
+        let reopened = app.library_classes.iter().any(|class| {
+            class.name == id && !class.is_module && class.parent.is_none()
+        });
         if id.0.as_str() != format!("{}::{}", owner.0.as_str(), name.as_str())
-            || (classes.contains_key(&id) && !custom)
+            || (classes.contains_key(&id) && !custom && !reopened)
             || (custom && app.library_classes.iter().filter(|class| class.name == id).count() != 1)
         {
             return;
@@ -73,16 +79,18 @@ pub(super) fn register(
             id: id.clone(),
             args: vec![],
         };
-        let info = classes.entry(id).or_default();
+        let mut info = classes.remove(&id).unwrap_or_default();
         info.class_methods
             .insert(Symbol::from("new"), instance.clone());
         info.declares_constructor = true;
         // A member declaration establishes a reader, not its value type.
-        // Data has no generated writers.
+        // Data has no generated writers. A block method of the same name
+        // overrides the reader, as it does in Ruby.
         for member in members {
             info.instance_methods.entry(member).or_insert(Ty::Untyped);
         }
         info.instance_methods.entry(Symbol::from("with")).or_insert(instance.clone());
+        classes.insert(id, info);
         factories.insert(value.span, instance);
     };
     for class in &app.library_classes {

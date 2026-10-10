@@ -1236,9 +1236,9 @@ fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
 /// adds beyond the raw `after_commit` hook in `CallbackHook`, plus
 /// `after_initialize` (fires on construction AND hydration — the
 /// runtime hook call is appended by `synth_initialize` / the
-/// hydration factories when a model declares it). `pub(crate)`: the
-/// concern-items ingest keeps block-form callbacks by this list.
-pub(crate) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
+/// hydration factories when a model declares it). The concern-items
+/// ingest asks `block_callback_shape`, which reads this list.
+pub(super) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
     "after_initialize",
     "before_validation",
     "after_validation",
@@ -1501,7 +1501,7 @@ pub(super) fn block_defaults_bindable(block: &Expr) -> bool {
 /// when it declines the shape. `model_to_library`'s unlowered-DSL report
 /// claims a callback exactly when this answers `Some`, so the two cannot
 /// disagree about which callbacks become hooks.
-pub(super) fn block_callback_shape(
+pub(crate) fn block_callback_shape(
     expr: &Expr,
 ) -> Option<(&Expr, &str, Option<crate::dialect::CallbackOn>)> {
     let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {

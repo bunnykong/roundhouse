@@ -73,6 +73,29 @@ fn literal_data_declarations_register_exact_members_without_writers() {
 }
 
 #[test]
+fn custom_data_initializer_parameters_are_inferred_from_new_calls() {
+    let source = r#"class FactoryExamples
+  State = Data.define(:value) do
+    def initialize(value:)
+      super
+    end
+  end
+end
+"#;
+    let mut app = ingest(source, "FactoryExamples::State.new(value: \"typed\")");
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+
+    assert_eq!(
+        analyzer.inferred_param_types(
+            &ClassId(Symbol::from("FactoryExamples::State")),
+            &Symbol::from("initialize"),
+        ),
+        Some(&[Ty::Str][..]),
+    );
+}
+
+#[test]
 fn factories_outside_the_literal_subset_are_not_admitted() {
     let other = r#"module Other
   class Data

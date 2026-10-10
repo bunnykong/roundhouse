@@ -6,6 +6,8 @@
 # while-loops with post-loop reads hit the functionalize sign-threading
 # gap) — they join the universal file when those lanes' emitters catch
 # up and lobsters reaches them.
+require_relative "../action_view_number_helper"
+
 module ActionView
   module ViewHelpers
     # `content_security_policy_nonce` — the per-request CSP script
@@ -70,28 +72,12 @@ module ActionView
       tokens.join(" ")
     end
 
-    # `number_with_delimiter(12345)` → "12,345" — comma grouping every
-    # three digits, sign-aware. Integer-only, matching the signature
-    # (every corpus arg is a count); while-loop over the digit string
-    # so every target runtime types it; byte-equal to the CRuby overlay
-    # variant it supersedes on the replay-locked /u page. The overlay's
-    # `delimiter:` kwarg and float handling have no caller — the shared
-    # version stays monomorphic.
-    def self.number_with_delimiter(value)
-      int = value.to_s
-      sign = +""
-      if int.start_with?("-")
-        sign = "-"
-        int = int[1, int.length - 1].to_s
-      end
-      out = +""
-      i = int.length
-      while i > 3
-        out = "," + int[i - 3, 3].to_s + out
-        i = i - 3
-      end
-      out = int[0, i].to_s + out
-      sign + out
+    def self.number_helper_for_template(method, value, options = {})
+      ActionView::Helpers::NumberHelper.template_number_helper(method, value, options)
+    end
+
+    def self.number_with_delimiter(value, options = {})
+      number_helper_for_template(:number_with_delimiter, value, options)
     end
 
     # Rails' sanitize_to_id — the default `id` a `*_tag` control
@@ -169,30 +155,28 @@ module ActionView
       "<textarea#{render_attrs(head)}#{render_attrs(opts)}>\n#{html_escape(content.to_s)}</textarea>"
     end
 
-    # `number_with_precision(4.5678, precision: 2)` → "4.57" — the
-    # overlay number-helper's exact shape; here so the spinel tree
-    # carries it (users/show renders karma averages). On CRuby the
-    # overlay's later require re-defines it, same bytes.
-    def self.number_with_precision(value, precision: 3)
-      format("%.#{precision}f", value.to_f)
+    def self.number_with_precision(value, options = {})
+      number_helper_for_template(:number_with_precision, value, options)
     end
 
-    # `number_to_human(5, format: "%n%u")` → "5"; `number_to_human(1500)`
-    # → "1 Thousand". Rails scales by powers of 1000 with a unit label.
-    # lobsters' `upvoter_score` passes a small INTEGER score + format
-    # "%n%u", so the unit-less common case renders as the plain number;
-    # integer-only (no float/precision machinery) keeps every site typed.
-    def self.number_to_human(value, format: "%n %u")
-      units = ["", "Thousand", "Million", "Billion", "Trillion", "Quadrillion"]
-      neg = value < 0
-      n = neg ? -value : value
-      idx = 0
-      while n >= 1000 && idx < units.length - 1
-        n = n / 1000
-        idx = idx + 1
-      end
-      num = neg ? "-" + n.to_s : n.to_s
-      format.sub("%n", num).sub("%u", units[idx]).strip
+    def self.number_to_currency(value, options = {})
+      number_helper_for_template(:number_to_currency, value, options)
+    end
+
+    def self.number_to_human(value, options = {})
+      number_helper_for_template(:number_to_human, value, options)
+    end
+
+    def self.number_to_human_size(value, options = {})
+      number_helper_for_template(:number_to_human_size, value, options)
+    end
+
+    def self.number_to_percentage(value, options = {})
+      number_helper_for_template(:number_to_percentage, value, options)
+    end
+
+    def self.number_to_phone(value, options = {})
+      number_helper_for_template(:number_to_phone, value, options)
     end
 
     # `time_ago_in_words` / `distance_of_time_in_words`. The bucket walk
