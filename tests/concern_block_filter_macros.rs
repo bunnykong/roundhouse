@@ -764,3 +764,56 @@ fn a_positional_splat_this_binder_cannot_model_is_refused() {
         c.body
     );
 }
+
+#[test]
+fn a_duplicate_keyword_key_binds_the_last_value_and_drops_earlier_duplicates() {
+    // Ruby collapses a duplicate keyword key to its LAST value before the
+    // call ever runs. `sunset` must bind to the last duplicate, and the
+    // earlier one must not survive into `**kwargs` where a literal read
+    // (`kwargs[:sunset]`) could fold back to the stale value.
+    let concern = r#"module SunsetConcern
+  extend ActiveSupport::Concern
+  class_methods do
+    def retire_endpoint(date, sunset: nil, **kwargs)
+      before_action do |controller|
+        response.headers['Deprecation'] = date
+        response.headers['Sunset'] = sunset
+        response.headers['SunsetRest'] = kwargs[:sunset]
+      end
+    end
+  end
+end
+"#;
+    let widgets = "class WidgetsController < ApplicationController\n  retire_endpoint '2022-11-14', sunset: '2023-01-01', sunset: '2024-06-01'\n\n  def index\n    head :ok\n  end\nend\n";
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("app/controllers/concerns/sunset_concern.rb", concern.to_string()),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include SunsetConcern\nend\n"
+                .to_string(),
+        ),
+        ("app/controllers/widgets_controller.rb", widgets.to_string()),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n".to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (PathBuf::from(p), s.into_bytes()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("ingest must not hard-fail");
+    let gaps = survey::drain();
+    assert!(!has_gap(&gaps, "retire_endpoint"), "{gaps:?}");
+    let src = emitted_widgets(app);
+    assert_parses(&src);
+    assert!(
+        src.contains("2024-06-01"),
+        "sunset must bind to the LAST duplicate, as Ruby does:\n{src}"
+    );
+    assert!(
+        !src.contains("2023-01-01"),
+        "an earlier duplicate must not leak into **kwargs, where a literal \
+         `kwargs[:sunset]` read could fold back to it:\n{src}"
+    );
+}

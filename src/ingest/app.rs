@@ -3875,8 +3875,17 @@ fn bind_params_by_name(
             .rev()
             .find(|(i, (k, _))| !consumed[*i] && key_name(k).as_ref() == Some(&p.name));
         match found {
-            Some((i, (_, v))) => {
-                consumed[i] = true;
+            Some((_, (_, v))) => {
+                // Every entry sharing this name is spent, not just the
+                // last one: Ruby's own Hash literal construction already
+                // collapsed the earlier duplicates by the time the call
+                // runs, so none of them is real data left over for
+                // `**rest` — only the bound value is.
+                for (j, (k, _)) in entries.iter().enumerate() {
+                    if key_name(k).as_ref() == Some(&p.name) {
+                        consumed[j] = true;
+                    }
+                }
                 keyword_bindings.push((p.name.clone(), v.clone()));
             }
             None => match &p.default {
