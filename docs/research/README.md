@@ -9,6 +9,7 @@ Roundhouse infers types for a whole Rails app without annotations, by re-typing 
 | You want… | Read |
 | --- | --- |
 | The ideas, the theory and the terms, in one read | [foundations.md](foundations.md) |
+| The open problems, each with the check that would settle it | [open-problems.md](open-problems.md) |
 | What is established, each with its receipt | [facts.md](facts.md) |
 | What has been tried, including what failed | [attempts.md](attempts.md) |
 | Each frontier's status, claims and pins, machine-readable: the source of the table below | [frontiers.yaml](frontiers.yaml) |
