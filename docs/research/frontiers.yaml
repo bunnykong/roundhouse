@@ -24,18 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "On the recorded staged pins, no public app passes; on four of the five, the structure itself differs between schedules."
-  facts: [F16, F14, F5]
+  stands: "On the October 10 current-main condition (`c210f226`), S3 reports every loop settled on all five public apps, but passes any-order on 0/5; four differ in observed structure. The writer-law instrument records the remaining local violations."
+  facts: [F25, F24, F22, F16, F14, F5]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Re-check after bringing #674, #705 and #724 onto the staged branch; declare the rest of the structure before typing, or discover it monotonically."
+  next: "Use the writer-law counterexamples to assess the remaining return, projection and stamp policies; declare the rest of the structure before typing, or discover it monotonically, then re-check the complete any-order gate."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "fixpoint-next 200d6b0e"
-    lab: "0cc656a6"
+    compiler: "main c210f226; fixpoint-next 38403140; writer-law-harness bf2f052f"
+    lab: "56255dd54bed3815b4774282ae92380524b13136"
+    runner: "baseline-2026-10-10/probe 42a29d21aedeafd48ce89b1287851b2478242b5828e963a0bf3f71c6652d6a9e"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,8 +59,8 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "The recorded S3 types include an unsound public-app result; runtime traces from the apps' own code are still missing."
-  facts: [F20, F19, F18, F17, F14, F8]
+  stands: "At next `38403140`, three early Discourse initializer reads still omit an earlier String write, while the late read retains it. The refreshed error census includes hidden removals; runtime traces from the apps' own code remain missing."
+  facts: [F28, F27, F25, F20, F19, F18, F17, F14, F8]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
@@ -68,8 +69,8 @@
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "main 1ce99695 (F17); fixpoint-staged 92844f68 (F8)"
-    lab: "0cc656a6"
+    compiler: "fixpoint-next 38403140 (F27–F28); main 1ce99695 (F17); fixpoint-staged 92844f68 (F8)"
+    lab: "56255dd54bed3815b4774282ae92380524b13136"
   claims:
     - who: dai199
       scope: "parameter rows keyed by receiver side, the follow-up named in #551 (the lab's `name_collision`), in one PR against main."
@@ -84,8 +85,8 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "S3 is 0.19 points behind main `194f26cf` in fully typed expressions, with the losses allocated to causes."
-  facts: [F19, F18, F14, F7]
+  stands: "On the October 10 current-main condition, S3 is 69.8135% fully typed against the main-compatible base's 70.1619%, a gap of 0.3484 percentage points. A new paired loss attribution remains separate work."
+  facts: [F27, F23, F19, F18, F14, F7]
   skills:
     - Rust
     - type inference
@@ -94,9 +95,9 @@
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "fixpoint-next 08859f37"
-    lab: "0cc656a6"
-    runner: "fixpoint-research 389ea1e3"
+    compiler: "main c210f226; fixpoint-next 38403140"
+    lab: "56255dd54bed3815b4774282ae92380524b13136"
+    runner: "baseline-2026-10-10/probe 42a29d21aedeafd48ce89b1287851b2478242b5828e963a0bf3f71c6652d6a9e"
 
 - id: incremental
   name: Incremental
