@@ -3078,10 +3078,49 @@ fn report_unrecognized_controller_macros(app: &App) {
         };
         for item in &controller.body {
             let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
                 continue;
             };
             if CONSUMED_CONTROLLER_MACROS.contains(&method.as_str()) {
+                continue;
+            }
+            // A class-body call carrying a BLOCK that no lowering
+            // claims — the same "vanished with no trace" shape #778
+            // was: `around_block_filter` already claims a block-form
+            // `around_action` (successfully lowered, so it is no
+            // longer `Unknown` at all by the time this runs; or
+            // refused, which records its OWN specific gap already —
+            // either way this generic bucket must not ALSO flag it),
+            // and `lambda_filter_target` claims the `before_action`/
+            // `after_action`/`prepend_before_action` block forms the
+            // same way. `rescue_from`/`helper_method`/`layout` (with or
+            // without a block) are already excluded above via
+            // `CONSUMED_CONTROLLER_MACROS`, since that list is keyed on
+            // the method name alone. `respond_to` at class-body level
+            // writes no block in any fixture here, but is excluded on
+            // the same reasoning in case one ever does. Concern-only
+            // shapes (`included do`, `class_methods do`) never reach
+            // this loop at all — it walks `app.controllers`, and
+            // those two live on the CONCERN module, consumed before
+            // the splice ever copies anything controller-side.
+            if block.is_some() {
+                const CLAIMED_CONTROLLER_BLOCKS: &[&str] = &[
+                    "before_action",
+                    "after_action",
+                    "prepend_before_action",
+                    "around_action",
+                    "respond_to",
+                ];
+                if CLAIMED_CONTROLLER_BLOCKS.contains(&method.as_str()) {
+                    continue;
+                }
+                survey::record(&IngestError::Unsupported {
+                    file: file_of(expr.span.file),
+                    message: format!(
+                        "controller class-body block not recognized: `{}` (its effect is dropped from the output)",
+                        method.as_str()
+                    ),
+                });
                 continue;
             }
             // `const` / `prop` belong to a lowered `T::Struct` (or a
