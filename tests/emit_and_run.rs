@@ -465,6 +465,62 @@ puts "savepoints passed"
     assert!(run.stdout.contains("savepoints passed"));
 }
 
+/// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
+/// `SocketError` resolves where the app names it without a require (Rails
+/// has loaded socket); both lanes define the classes.
+fn uri_and_socket_errors_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/article.rb",
+        "  validates :title, presence: true\n",
+        "  validates :title, presence: true
+
+  def self.parsed?(url)
+    URI.parse(url)
+    true
+  rescue URI::Error
+    false
+  end
+
+  def self.socket_failure
+    raise SocketError, \"unreachable\"
+  rescue SocketError => e
+    e.message
+  end
+",
+    )
+}
+
+const URI_AND_SOCKET_ASSERTIONS: &str = r#"raise "parsed good" unless Article.parsed?("https://example.com/a")
+raise "parsed bad" if Article.parsed?("http://bad uri")
+raise "socket: #{Article.socket_failure}" unless Article.socket_failure == "unreachable"
+puts "uri and socket errors passed"
+"#;
+
+#[test]
+fn uri_and_socket_errors_are_rescued() {
+    let run = uri_and_socket_errors_app().run_ruby(URI_AND_SOCKET_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("uri and socket errors passed"));
+}
+
+/// The emitted model requires what it rescues, rather than relying on
+/// another runtime file to have loaded socket first.
+#[test]
+fn rescued_socket_and_uri_errors_bring_their_requires() {
+    let (emitted, errors) = uri_and_socket_errors_app().emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let model = std::fs::read_to_string(emitted.join("app/models/article.rb")).expect("emitted model");
+    for line in ["require \"socket\"", "require \"uri\""] {
+        assert!(model.lines().any(|l| l.trim() == line), "missing {line}:\n{model}");
+    }
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn uri_and_socket_errors_are_rescued_on_spinel() {
+    uri_and_socket_errors_app().run_spinel(URI_AND_SOCKET_ASSERTIONS).assert_passes();
+}
+
 /// A Sidekiq worker's class-side entries run its `perform` inline, as an
 /// ActiveJob's `perform_later` does: `include Sidekiq::Job` (or `Worker`)
 /// and `sidekiq_options` leave the emitted class, `perform_in` /

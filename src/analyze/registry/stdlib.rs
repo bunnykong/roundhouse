@@ -574,8 +574,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "ThreadError", "ClosedQueueError",
         // CRuby's bundled libraries and Spinel's uri/net/json packages
         // recognize these exception names; emitted requires load them.
-        "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
-        "OpenSSL::OpenSSLError", "JSON::ParserError", "JSON::GeneratorError",
+        "URI::Error", "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
+        "SocketError", "OpenSSL::OpenSSLError", "JSON::ParserError", "JSON::GeneratorError",
         // Campfire tip: `rescue SystemCallError` / `OpenSSL::SSL::SSLError`
         // on pooled web-push connections; `rescue Vips::Error` beside
         // ActiveStorage::PreviewError when drawing attachment variants.
