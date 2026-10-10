@@ -1826,6 +1826,65 @@ fn walk_files(dir: &std::path::Path) -> Vec<String> {
     out
 }
 
+/// Rails' own exception classes the app raises answer the status
+/// Rails' rescue_responses give them, through the production
+/// dispatcher: `ActionController::BadRequest` 400,
+/// `ActiveRecord::RecordNotSaved` / `RecordInvalid` /
+/// `ActionController::InvalidAuthenticityToken` 422. A rescued
+/// `ActiveRecord::ReadOnlyRecord` carries its message.
+#[test]
+fn rails_exception_classes_answer_their_status() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/fail/:kind\", to: \"failures#show\"\n",
+        )
+        .write(
+            "app/controllers/failures_controller.rb",
+            r#"class FailuresController < ApplicationController
+  def show
+    case params[:kind]
+    when "bad" then raise ActionController::BadRequest, "nope"
+    when "not_saved" then raise ActiveRecord::RecordNotSaved.new("not saved", Article.new)
+    when "invalid" then Article.new(title: "").save!
+    when "token" then raise ActionController::InvalidAuthenticityToken
+    when "readonly"
+      begin
+        raise ActiveRecord::ReadOnlyRecord, "frozen"
+      rescue ActiveRecord::ReadOnlyRecord => e
+        render plain: e.message
+      end
+    else
+      render plain: "ok"
+    end
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r##"def call(path)
+  status, _headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  [status, body.respond_to?(:join) ? body.join : body.to_s]
+end
+{
+  "/fail/bad" => 400,
+  "/fail/not_saved" => 422,
+  "/fail/invalid" => 422,
+  "/fail/token" => 422,
+  "/fail/none" => 200,
+  "/fail/readonly" => 200,
+}.each do |path, want|
+  got, = call(path)
+  raise "#{path} answered #{got}, want #{want}" unless got == want
+end
+_, body = call("/fail/readonly")
+raise "readonly body #{body.inspect}" unless body.include?("frozen")
+"##,
+        )
+        .assert_passes();
+}
+
 /// A job `perform_later` enqueues under the test adapter is held, not
 /// dropped, and a blockless `perform_enqueued_jobs only:` runs it
 /// (basecamp/once-campfire#296's tests). Its broadcast is JSON encoded

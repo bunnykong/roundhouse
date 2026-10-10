@@ -254,6 +254,8 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
     raise ActionController::RoutingError.new("page out of bounds", []) if params[:page] == "0"
     raise ActionController::UnknownFormat.new("no format") if params[:page] == "1"
     raise ActionController::ParameterMissing.new("page") if params[:page] == "2"
+    raise ActionController::BadRequest.new("bad page") if params[:page] == "3"
+    raise ActionController::InvalidAuthenticityToken if params[:page] == "4"
     head :ok
   end
 
