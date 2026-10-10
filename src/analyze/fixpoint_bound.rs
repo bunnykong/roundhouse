@@ -1,9 +1,9 @@
 //! A size and depth bound on the types the whole-program fixpoint carries
 //! from one round to the next.
 //!
-//! Harvested returns and unified parameter types are the next round's
-//! input, so a method whose result reaches its own input rebuilds its type
-//! from the previous one every round. `harvest_return` cuts the direct
+//! Harvested returns, unified parameter types and harvested ivar types
+//! are the next round's input, so a method whose result reaches its own
+//! input rebuilds its type from the previous one every round. `harvest_return` cuts the direct
 //! case, a return that nests its own previous copy. Two shapes escape any
 //! comparison with earlier types:
 //!
@@ -242,6 +242,101 @@ mod tests {
         let wide = body::union_many(classes.chain([arr(Ty::Int)]).collect());
         assert!(measure(&wide).1 > MAX_NODES);
         assert_eq!(bound(wide), Ty::unresolved());
+    }
+
+    /// An ivar's type is carried too: the next round seeds it into every
+    /// method that reads it, and a write rebuilt from it (`@h = @h.…`)
+    /// grows it the same way.
+    #[test]
+    fn an_ivar_harvested_from_a_write_is_bounded() {
+        let mut value = crate::expr::Expr::new(
+            crate::span::Span::synthetic(),
+            crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil },
+        );
+        value.ty = Some(nested_arrays(MAX_DEPTH + 4));
+        let write = crate::expr::Expr::new(
+            crate::span::Span::synthetic(),
+            crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name: Symbol::from("h") }, value },
+        );
+        let mut ivars = std::collections::HashMap::new();
+        super::super::extract_ivar_assignments(&write, &mut ivars);
+        assert_eq!(measure(&ivars[&Symbol::from("h")]).0, MAX_DEPTH);
+
+        // `@h["k"] = v` widens the Hash's value type from the written value.
+        let mut deep = crate::expr::Expr::new(
+            crate::span::Span::synthetic(),
+            crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil },
+        );
+        deep.ty = Some(nested_arrays(MAX_DEPTH + 4));
+        let ivar = crate::expr::Expr::new(crate::span::Span::synthetic(), crate::expr::ExprNode::Ivar { name: Symbol::from("g") });
+        let key = crate::expr::Expr::new(crate::span::Span::synthetic(), crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil });
+        let index_write = crate::expr::Expr::new(
+            crate::span::Span::synthetic(),
+            crate::expr::ExprNode::Assign { target: crate::expr::LValue::Index { recv: ivar, index: key }, value: deep },
+        );
+        super::super::extract_ivar_assignments(&index_write, &mut ivars);
+        assert_eq!(measure(&ivars[&Symbol::from("g")]).0, MAX_DEPTH);
+    }
+
+    /// `bound` doesn't distribute over the join, so applying it after
+    /// every write made an ivar slot depend on the order of its
+    /// writes: with a 10-deep Array and two Hashes of 300 classes each,
+    /// one order cut the slot to `untyped` and another kept the deep
+    /// Array (#617). The bound applies once per slot, after the walk.
+    fn wide_hash(prefix: &str) -> Ty {
+        let classes = (0..300).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("{prefix}{i}").as_str())), args: vec![].into() });
+        str_hash(body::union_many(classes.collect()))
+    }
+
+    fn bound_order_writers() -> [Ty; 3] {
+        [nested_arrays(10), wide_hash("A"), wide_hash("B")]
+    }
+
+    #[test]
+    fn an_ivar_slot_is_bounded_once_after_its_writes() {
+        let write = |ty: Ty| {
+            let mut value = crate::expr::Expr::new(
+                crate::span::Span::synthetic(),
+                crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil },
+            );
+            value.ty = Some(ty);
+            crate::expr::Expr::new(
+                crate::span::Span::synthetic(),
+                crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name: Symbol::from("h") }, value },
+            )
+        };
+        let harvest = |order: [usize; 3]| {
+            let writers = bound_order_writers();
+            let body = crate::expr::Expr::new(
+                crate::span::Span::synthetic(),
+                crate::expr::ExprNode::Seq { exprs: order.iter().map(|&i| write(writers[i].clone())).collect() },
+            );
+            let mut ivars = std::collections::HashMap::new();
+            super::super::extract_ivar_assignments(&body, &mut ivars);
+            ivars.remove(&Symbol::from("h")).unwrap()
+        };
+        let first = harvest([0, 1, 2]);
+        for order in [[1, 2, 0], [2, 0, 1], [0, 2, 1]] {
+            assert_eq!(harvest(order), first, "writes in order {order:?}");
+        }
+    }
+
+    /// The same for a parameter row: its call sites' observations are
+    /// joined first and the row is bounded once.
+    #[test]
+    fn a_param_slot_is_bounded_once_after_its_observations() {
+        let key = (ClassId(Symbol::from("C")), Symbol::from("m"), crate::dialect::MethodReceiver::Instance);
+        let fold = |order: [usize; 3]| {
+            let writers = bound_order_writers();
+            let mut rows = std::collections::HashMap::new();
+            let observations = order.iter().map(|&i| (key.clone(), vec![writers[i].clone()])).collect();
+            super::super::fold_param_observations(&mut rows, observations);
+            rows.remove(&key).unwrap()
+        };
+        let first = fold([0, 1, 2]);
+        for order in [[1, 2, 0], [2, 0, 1], [0, 2, 1]] {
+            assert_eq!(fold(order), first, "observations in order {order:?}");
+        }
     }
 
     #[test]

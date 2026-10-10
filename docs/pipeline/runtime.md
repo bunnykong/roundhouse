@@ -85,6 +85,24 @@ in `src/project.rs`. Shape notes worth knowing:
   `scaffold/` tree overlaid into
   every emitted Ruby/Spinel project, and a `test/` tree of
   target-specific test files.
+- `runtime/spinel/db_pg.rb` implements the same `Db` contract over
+  PostgreSQL, on the pure-Ruby spinel-pg driver (no libpq). No target
+  selects it yet. `tests/spinel_pg_db.rs` compiles it with Spinel and
+  runs it against a live server.
+  - `Db.exec_returning` answers the returned rows.
+  - `Db.last_insert_rowid` reads the inserted table's own sequence, so
+    it works for serial and identity keys only; any other key raises.
+  - Server errors whose SQLSTATE ActiveRecord names are raised as that
+    class through `runtime/spinel/pg_errors.rb`.
+  - A transaction keeps its connection, and a lease that ends inside
+    one rolls it back.
+  - The pool is sharded per thread, as `runtime/spinel/db.rb`'s is.
+    `Db.prepare` runs through a named statement cached per connection
+    (at most 128, closed on the server when evicted); finalizing a read
+    releases its handle and keeps the statement. There is no request
+    query cache yet.
+  - The SQLite-only boot hooks (read snapshot, checkpointer) do
+    nothing there, and `seed_from_file` raises.
 
 ## Framework runtime — `runtime/ruby/`
 
@@ -225,6 +243,41 @@ instead. **A divergence must be recorded here when it is chosen**: an
 undocumented one reads as intent to the next session precisely because
 it is applied consistently, and the emit gives no signal that anyone
 weighed it.
+
+### A JSON body is not wrapped on the strict targets
+
+Rails' ParamsWrapper copies a JSON request body under the controller's
+model name (`params[:article]`) when the app's `load_defaults` is 7.0
+or later, an initializer asks for it, or the controller says so with
+`wrap_parameters`. The ruby family does the same: the compiler decides
+each controller's key and copied keys
+(`lower::controller_to_library::params_wrapper`), the generated
+`process_action` opens with `Params.wrap` (`runtime/ruby/params.rb`),
+and the dispatchers hand the request its body params apart from the
+query string and the path (`request_parameters`).
+
+The strict targets do not: Rust and Python read no JSON body at all,
+and the TypeScript server merges one into `params` without keeping the
+body apart. A client posting the fields at the top level gets them at
+the top level only, so `params.expect(article: …)` finds nothing there.
+The capability is `FormatBreadth::wraps_json_params`.
+
+### A missing strong-params resource is `{}` on the strict targets, not 400
+
+Rails refuses `params.expect(article: [...])` when `article` is missing,
+blank, a scalar, an array, or a hash of only unpermitted keys, and
+`params.require(:article)` when it is missing or blank (a scalar reaches
+`permit` and is a 500): both raise `ActionController::ParameterMissing`,
+which an unrescued request answers with 400. The ruby family does the
+same: the typed factory is handed `Params.expect_present(@params, …)` /
+`Params.require_present(@params, …)` (`runtime/ruby/params.rb`), and both
+dispatchers answer an unrescued `ParameterMissing` with 400.
+
+The strict targets have no exception control flow and hand-written
+`Params` primitives, so their factory keeps reading `@params`: a missing
+resource is an empty one, the model's validation usually refuses it, and
+the request answers 422 where Rails says 400. The capability is
+`FormatBreadth::raises_param_missing` (`src/lower/controller/body.rs`).
 
 ### Spinel `Date` is a bounded runtime value
 
@@ -538,8 +591,13 @@ was spelled, so an untouched node is still the source bytes), and
 write-through — the two shapes campfire's mutating filters use
 (`fragment.replace("div") { |n| n.tap { |x| x.inner_html = … } }`,
 `fragment.update { |s| s.at_css("div")["class"] = … }`). `find_all`
-stays a read. Every expectation in `runtime/ruby/test/action_text_test.rb`
-for these was measured against Rails' Nokogiri-backed Fragment.
+stays a read. An update block can also scan `css("*")` and call
+`Node#remove`; that removes each disallowed element with its contents while
+leaving allowed nodes in the copied fragment. This is a removal primitive,
+not a general sanitizer: the caller supplies the allowlist, and allowed-node
+attributes are not filtered. Every expectation in
+`runtime/ruby/test/action_text_test.rb` for these was measured against Rails'
+Nokogiri-backed Fragment.
 
 **What always worked.** The PARSE: `#attachments` returns every node
 with every attribute it carried (`sgid`, `content_type`, `caption`,
@@ -658,18 +716,21 @@ Analyze additionally types the column reader `untyped` where the emitted
 reader returns `String`: that is the source-shaped accessor object, and
 it exists only between the two hops the lowering erases.
 
-### `insert_all` runs save callbacks and issues one INSERT per row
+### `insert_all` / `insert_all!` issue one INSERT per row
 
 `Model.insert_all(rows)` is INLINED at the call site (Ruby family,
-`scope_chain.rs`) as `rows.each { |a| Model.new(a)
-.save_after_validation }`. Rails issues ONE multi-row INSERT and skips
-validations *and* callbacks; this skips validations and their callbacks,
-fills timestamps, and runs the save callbacks.
+`scope_chain.rs`) as `rows.each { |a| Model.new(a)._insert_row }`, and
+`Model.insert_all!(rows, returning: cols)` as
+`ActiveRecord::Result.new(rows.map { |a| r = Model.new(a); r._insert_row;
+{ "id" => r.id, … } })`. Rails issues ONE multi-row INSERT; this issues
+one per row. Like Rails, neither runs validations or callbacks, and both
+fill timestamps.
 
-**Why `save_after_validation`.** It is the seam Rails' own
-validation-skipping writes (`update_attribute`) already enter at, so
-this reuses one definition of "write without validating" rather than
-adding a second path that has to be kept in step.
+**Why `_insert_row`.** It is the raw insert the fixture loader uses too
+(Rails' `insert_fixtures_set` is the same kind of write): timestamps the
+attributes left out, then the INSERT, nothing else. Until 2026-10-09 both
+bulk inserts entered at `save_after_validation` and so ran the save
+callbacks Rails skips.
 
 **Why inlined, not a synthesized method.** A per-model `insert_all`
 would land on every model of every app to serve the handful that call
@@ -703,13 +764,16 @@ as a conflict. The check reads the existing row, not the new one, so a
 new row the predicate does not cover is still skipped when a covered row
 shares its key; Rails inserts it.
 
-**What it costs.** N statements instead of one, plus one SELECT per row
-for the conflict check, and callbacks Rails would not run — visible on
-any model whose `after_create` has side effects. The corpus caller
-(campfire's `Room has_many :memberships do def grant_to … end end`)
-inserts Membership rows whose callbacks are inert.
+**`insert_all!` has no guard.** A duplicate raises, as Rails'
+`RecordNotUnique` does. Its value is Rails': an `ActiveRecord::Result`
+of the RETURNING columns (the primary key when `returning:` is left
+out, SQLite's default), whose `rows` are Arrays of values. Only a
+literal column list lowers; anything else declines.
 
-**And it answers a different value.** Rails returns an
+**What it costs.** N statements instead of one, plus, for `insert_all`,
+one SELECT per row for the conflict check.
+
+**And `insert_all` answers a different value.** Rails returns an
 `ActiveRecord::Result`; the inlined `rows.each { … }` returns `rows`,
 the Array of attribute hashes it was given. The catalog says
 `ArrayOfUntyped` for that reason — the type of what this pipeline
@@ -895,10 +959,21 @@ previewer here. ffmpeg is a runtime prerequisite the way libvips is:
 campfire's Dockerfile installs it, so does the archive's, and the
 conformance job. Without it the previewer raises, as Rails does. The
 image DIMENSIONS are read from the file header at upload
-(`ImageAnalyzer`, ruby family: PNG/GIF/JPEG/BMP/WebP), so
-`metadata[:width]` answers what Rails' analyzer would.
+(`ImageAnalyzer`, ruby family: PNG/GIF/JPEG/BMP/WebP), and a video's
+from ffprobe on its first stream (Rails' `VideoAnalyzer`; no ffprobe
+leaves them empty, as a failed analyzer does), so `metadata[:width]`
+answers what Rails' analyzer would. A named preview (`preview(:poster)`)
+resolves the variant the `has_one_attached` block declares, and
+`processed` draws the frame and then makes that variant, as Rails'
+`variant.processed if variant?` does. `processed?` and a variant's
+`image` look the record up and make nothing, so a view that asks "was it
+made?" never makes one.
 
-**Where the preview still differs.** `representation(...)` answers the
+**Where the preview still differs.** The poster is drawn by
+`Previewer.poster`, not through the app's previewer class: an app
+subclass that overrides Rails' private `capture` (campfire's
+`TimeLimitedVideoPreviewer`, which kills ffmpeg past a time limit) is
+not what runs, and `ActiveStorage.paths[:ffmpeg]` is not modeled. `representation(...)` answers the
 variant whatever the blob is, where Rails answers a `Preview` for a
 previewable one — kept so the reader has one type (a union would box
 every image on the room page); campfire only asks for a representation
@@ -1202,12 +1277,18 @@ warns about.
 overlay records the Hash, so a test that reads `entry[:payload]` and
 subscripts it passes on CRuby and does not on spinel. Both entries carry
 `action: :message` and the stream, which is what `assert_broadcasts`
-reads, so the test helper itself agrees across the two. The narrower
-consequence is in the renderer: `payload_json` writes Integer values
-only, because two call sites in one app is the whole surface anybody has
-asked for. A String or nested value needs the renderer widened — and
-that is a monomorphization decision to take deliberately, not a cast to
-sneak in.
+reads, so the test helper itself agrees across the two.
+
+**The text is what Rails writes** (#619). Rails encodes a broadcast with
+ActiveSupport::JSON, so every value is JSON (a String, nil, a Float, a
+Symbol, a nested Hash or Array) and `<`, `>` and `&` inside strings come
+out as `\u003c`, `\u003e`, `\u0026`. Both lanes write exactly that with
+`JsonBuilder.escape_html_entities(JSON.generate(...))`: spinel's
+`payload_json` and Turbo `Transport`, the overlay's `Registry.deliver`,
+and both lanes' `pubsub.broadcasts`. `payload_json` used to write
+Integer values only (`value.to_s`), enough for campfire's two call sites;
+a String value - a terminal relayed over a channel broadcasts its output
+as one - came out as invalid JSON, which the client drops.
 
 ### Active Storage's engine routes are mounted by the dispatcher
 
@@ -2297,6 +2378,63 @@ surface twice. Do it with the golden dumps regenerated in the same
 commit, and check `compare-*` on every target rather than assuming a
 DOM comparison cannot see it.
 
+### Pooled web push connections do not track their stage on spinel — not yet
+
+campfire's `WebPush::Connections` (upstream since #351) opens pooled push
+connections as `class HTTP < Net::HTTP; include Stages; end`, where
+`Stages` overrides two private methods of CRuby's net/http to learn how
+far a request got before it failed:
+
+```ruby
+def begin_transport(...); @stage = :checking; super.tap { @stage = :sent }; end
+def connect(...);        @stage = :connecting if @stage == :checking; super;  end
+```
+
+On the ruby family this runs as written, against Ruby's own net/http
+(19 of campfire's 20 push tests pass against the TLS server its own
+test helper starts; the twentieth mixes a module into one connection
+with `extend`, the per-object mixin no compiled target has).
+
+On spinel it does not, for two reasons, and both are work not done
+rather than a subset boundary:
+
+- **Our side.** The spinel emit refuses `def m(...)` forwarding into
+  `super` (`full argument forwarding not supported`), which is two of
+  the strict-emit errors CI's ceiling counts. The parent methods'
+  signatures are known (`begin_transport(req)`, `connect()`), so the
+  forwarding can be spelled out.
+- **Spinel's side.** `packages/net`'s `Net::HTTP` has neither method:
+  its request path is `request` → `perform` → `reconnect`, and it has no
+  `keep_alive_timeout`. The hooks have to exist there, shaped as CRuby's,
+  for an override of them to mean anything.
+
+Until both land, `WebPush::Connections::HTTP` is not defined in the
+spinel binary (spinel warns "defined nowhere in the program"), so a
+pooled push delivery there raises where it reaches the class.
+
+### Smaller shapes campfire main reaches, each narrower than Rails
+
+- **`I18n.locale` / `default_locale` answer `:en`** (`runtime/ruby/i18n_locale.rb`),
+  Rails' default when nothing sets one. Setting a locale (`I18n.locale =`,
+  `with_locale`, `config.i18n.default_locale`) and translation (`I18n.t`)
+  are not modeled.
+- **`fragment_name_with_digest(name, digest_path)` adds no template
+  digest**: templates carry none here (see
+  `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted
+  `digest_path` adds nothing and an explicit one is kept in front.
+- **Token-free forms are read from one shape only**: an app helper whose
+  `token_tag` body is exactly `""` (campfire's header-only forgery
+  protection) synthesizes `token_fields_omitted`. Another `token_tag`
+  body is not read, and the forms keep their token field.
+- **`config.after_initialize` blocks do not run at boot.** campfire has
+  two: `Room::MessagesCount.ensure!` (its counter triggers, which
+  `schema.rb` cannot dump) and starting the WAL checkpointer outside
+  tests. The test suite gets the first through its `load_fixtures`
+  override, which is read; a served tree gets neither.
+- **`Rails.application.env_config` holds what is set and is consulted
+  for nothing**: a forgery failure always renders the 422 that
+  `action_dispatch.show_exceptions = :rescuable` asks for.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of
@@ -2476,6 +2614,30 @@ has three filled cells and one empty one:
   accepts both spellings and we accept only the first.
   `x_url(…, only_path: true)` is Rails asking the URL spelling for a
   path, and gets one.
+
+  A hostless `_url` in a **controller** body is
+  `url_from_path(RouteHelpers.x_path(…))`
+  (`controller_to_library::rewrites::rewrite_controller_route_helpers`).
+  `ActionController::Base#url_from_path` is Rails' `url_options` merge:
+  the request's protocol, host and optional port, each replaced by the
+  key the controller's `default_url_options` names (a nil value removes
+  it), then `build_host_url` drops the scheme's standard port. So
+  `render plain: articles_url` in an integration test answers
+  `http://www.example.com/articles`, as Rails does; it used to answer
+  `/articles`. With no host at all it answers the path, where Rails
+  raises "Missing host to link to!". A TEST body's `_url` still renders
+  the path, and the harness meets Rails halfway: `assert_redirected_to`
+  compares both sides as absolute URLs, and `get`/`follow_redirect!`
+  accept an absolute one. Targets whose controller runtime has no
+  request (`request_host_for_redirect` is `""` there) keep the path.
+  A jbuilder template's `_url` (`json.url article_url(a, format:
+  :json)`) is `ActionView::ViewHelpers.url_for_path(RouteHelpers
+  .article_path(…) + ".json")`. The universal body answers the path,
+  because a strict target's view has no request in scope. The ruby
+  family reopens it (`view_helpers_ext.rb`) over
+  `Rails.application.protocol` + `.domain`, the grounding an ERB
+  view's `_url` gets, and so renders Rails' absolute URL. Neither sees
+  a controller's `default_url_options` yet.
 * **`anchor:`** is rendered, `#tag`, after the query string — the order
   `path_for` applies `add_params` and then `add_anchor` in.
 * **`format:`** is `lower::route_format_suffix`'s, which monomorphizes

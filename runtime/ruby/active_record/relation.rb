@@ -307,6 +307,24 @@ module ActiveRecord
       self
     end
 
+    # `order(Arel.sql("…"))` — a caller-authored ordering fragment, kept
+    # as written (Rails takes an `Arel.sql` literal past its column-name
+    # check; campfire's `reorder(Arel.sql("+messages.created_at"))`
+    # keeps SQLite off an index). `lower::arel_sql_order` renames the
+    # call; the bare String `order` still validates. A loaded relation
+    # reads again rather than guess at a fragment's sort.
+    def order_sql(fragment)
+      own_lists
+      @orders << fragment
+      @records = nil
+      self
+    end
+
+    def reorder_sql(fragment)
+      @orders = []
+      order_sql(fragment)
+    end
+
     # `reorder(*parts)` — Rails' "replace the ordering": drop every term
     # gathered so far, then order by these. Same in-memory resort as
     # `order` when the records are already loaded.
@@ -1067,11 +1085,24 @@ module ActiveRecord
       self
     end
 
+    # Not split into `of:`-row relations: one batch is the same answer at corpus sizes (as `find_in_batches`), so the block and the enumerator are this relation.
+    def in_batches(of: 1000, order: nil)
+      yield self if block_given?
+      self
+    end
+
     # Via loaded_records (not to_a): no shallow Array copy of the
     # memoized rows. to_a keeps its Rails dup contract for callers that
     # mutate the returned array.
     def map
       loaded_records.map { |x| yield x }
+    end
+
+    # Enumerable's `to_h { |rec| [k, v] }` over the materialized rows
+    # (campfire's push pool test keys each subscription's badge by its
+    # endpoint this way).
+    def to_h
+      loaded_records.to_h { |x| yield x }
     end
 
     # `collect` is Enumerable's second name for `map`, and Rails
@@ -1169,7 +1200,7 @@ module ActiveRecord
     # dispatch layer) instead of returning nil when the relation is empty.
     def first!
       record = first
-      raise RecordNotFound, "Couldn't find record in #{@model.table_name}" if record.nil?
+      raise RecordNotFound.new("Couldn't find #{@model.name}", @model.name, @model.primary_key) if record.nil?
       record
     end
 
@@ -1260,6 +1291,43 @@ module ActiveRecord
       out
     end
 
+    # `sole`'s loaded-relation reading: the first two (or fewer) of an
+    # already-loaded page, still in relation order — the loaded-cache
+    # counterpart to `loaded_tail`, and every `loaded`-touching step of
+    # it (the cap, the indexing loop) lives in THIS top-level helper
+    # rather than inline in `sole` itself. `@records`'s own ivar type
+    # carries an untyped/poly component, and `sole` also assigns the
+    # unloaded branch's `to_a` Array to a `rows` local of its own;
+    # splitting the loaded branch's work out to a call boundary, same
+    # as `loaded_tail`, gives `loaded` here its own concrete `Array
+    # [Base]` type from the narrowed (non-nil) argument rather than
+    # carrying that poly residue into `sole`'s body, which is what the
+    # ceiling tests on this runtime's type precision caught.
+    def loaded_sole_rows(loaded)
+      cap = loaded.length < 2 ? loaded.length : 2
+      out = []
+      i = 0
+      while i < cap
+        out << loaded[i]
+        i += 1
+      end
+      out
+    end
+
+    # `sole`'s unloaded-probe size: `min(2, limit)`, nil meaning the
+    # usual 2, clamped at 0 or above. A top-level helper rather than a
+    # local computed inline in `sole` with an if/else (one arm the
+    # literal `2`, the other derived from `@limit`): merging those two
+    # origins into one local left it an unresolved type variable where
+    # `sole` assigns it back to `@limit` — same `Integer? -> Integer`
+    # call-boundary fix as `loaded_head`, above.
+    def sole_probe_limit(limit)
+      return 2 if limit.nil?
+      return 0 if limit < 0
+      return 2 if limit > 2
+      limit
+    end
+
     def count
       rows = ActiveRecord.adapter.select_rows(count_sql)
       rows.length == 0 ? 0 : rows[0]["n"].to_i
@@ -1277,6 +1345,103 @@ module ActiveRecord
       rows = ActiveRecord.adapter.select_rows(sql)
       rows.length == 0 ? 0.0 : rows[0]["n"].to_f
     end
+
+    # `minimum(:column)` / `maximum(:column)` — SQL extrema over the
+    # current relation. The aggregate replaces the projection and ordering,
+    # while the relation's filters, grouping and pagination remain in place.
+    def minimum(expr)
+      extreme(expr, "MIN")
+    end
+
+    def maximum(expr)
+      extreme(expr, "MAX")
+    end
+
+    def extreme(expr, function)
+      column = expr.to_s.to_sym
+      raise ArgumentError, "unknown aggregate column: #{expr}" unless @model.schema_columns.include?(column)
+      return grouped_extreme(column.to_s, function) if @groups.length > 0
+      scoped = spawn
+      projection = "#{function}(#{@table}.#{ActiveRecord.adapter.quote_column_name(column)}) AS value"
+      projection = "#{@select_sql}, #{projection}" if @havings.length > 0 && !@select_sql.nil?
+      scoped.select(projection)
+      scoped.reorder
+      rows = ActiveRecord.adapter.select_rows(scoped.to_sql)
+      return nil if rows.length == 0
+      value = rows[0]["value"]
+      cast_schema_value(value, column)
+    end
+    private :extreme
+
+    # Grouped calculations return a key-to-extreme Hash, as Rails does.
+    # Aliasing each group expression keeps both scalar keys and composite
+    # Array keys stable even when a group expression is qualified.
+    def grouped_extreme(column, function)
+      names = []
+      selects = []
+      @groups.each_with_index do |group, index|
+        name = "__rh_group_#{index}"
+        names << name
+        selects << "#{group} AS #{name}"
+      end
+      selects << "#{function}(#{@table}.#{ActiveRecord.adapter.quote_column_name(column)}) AS value"
+      scoped = spawn
+      selects.unshift(@select_sql) if @havings.length > 0 && !@select_sql.nil?
+      scoped.select(selects.join(", "))
+      scoped.reorder
+      rows = ActiveRecord.adapter.select_rows(scoped.to_sql)
+      grouped = {}
+      rows.each do |row|
+        key_values = []
+        names.each_with_index do |name, index|
+          value = row[name]
+          group = @groups[index]
+          group_column = schema_group_column(group)
+          key_values << (group_column.nil? ? value : cast_schema_value(value, group_column))
+        end
+        key = names.length == 1 ? key_values[0] : key_values
+        grouped[key] = cast_schema_value(row["value"], column.to_sym)
+      end
+      grouped
+    end
+    private :grouped_extreme
+
+    # Recover a model-column group key only from a bare or explicitly
+    # model-qualified identifier. Arbitrary SQL and joined-table columns
+    # remain untyped rather than borrowing a coincidentally named schema field.
+    def schema_group_column(group)
+      expression = group.strip
+      table_name = @model.table_name.to_s
+      quoted_table = "\"#{table_name.gsub("\"", "\"\"")}\""
+      prefixes = ["#{@table}.", "#{table_name}.", "#{quoted_table}."]
+      column = nil
+      prefixes.each do |prefix|
+        if expression.start_with?(prefix)
+          column = expression[prefix.length..]
+          break
+        end
+      end
+      column = expression if column.nil?
+      if column.start_with?("\"") && column.end_with?("\"")
+        column = column[1...-1].gsub("\"\"", "\"")
+      end
+      return nil unless column.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/)
+      candidate = column.to_sym
+      @model.schema_columns.include?(candidate) ? candidate : nil
+    end
+    private :schema_group_column
+
+    # Raw aggregate rows need the same schema-selected conversions as
+    # hydrated model fields; otherwise SQLite returns temporal values as text.
+    def cast_schema_value(value, column)
+      return nil if value.nil?
+      return ActiveSupport.cast_boolean(value) if @model.schema_boolean_columns.include?(column)
+      return ActiveSupport.parse_db_time(value) if @model.schema_time_columns.include?(column)
+      return ActiveSupport.parse_db_date(value) if @model.schema_date_columns.include?(column)
+      return value.to_f if @model.schema_decimal_columns.include?(column)
+      value
+    end
+    private :cast_schema_value
 
     # `group(:col).count` — Rails hands back a Hash of group-key =>
     # COUNT. The group_count lowering renames the grouped chain's
@@ -1379,9 +1544,8 @@ module ActiveRecord
       ok
     end
 
-    # `exists?` / `exists?(id)`. Hash/String forms are unsupported.
-    # Integer? narrows by early return — rust2 does not narrow Option
-    # across `unless x.nil?`. Unloaded: exists_sql (SELECT 1 LIMIT 1).
+    # Hash conditions share where's predicate builder; scalar conditions
+    # select the primary key. Unloaded: exists_sql (SELECT 1 LIMIT 1).
     def exists?(id = nil)
       return false if @limit == 0
       if id.nil?
@@ -1390,10 +1554,20 @@ module ActiveRecord
         return probe_existence(1) > 0
       end
       own_lists
-      @wheres << "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(id)}"
-      found = probe_existence(1) > 0
-      @wheres.pop
-      found
+      # Popped for the same reason `find` and `find_by` pop: a terminal
+      # that answered a question must not narrow the relation it was
+      # asked on.
+      sql = if id.is_a?(Hash)
+        hash_conditions(id)
+      else
+        "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(id)}"
+      end
+      @wheres << sql unless sql.empty?
+      begin
+        probe_existence(1) > 0
+      ensure
+        @wheres.pop unless sql.empty?
+      end
     end
 
     # How many probe rows `exists_sql(n)` returns. Shared by `exists?`,
@@ -1605,7 +1779,17 @@ module ActiveRecord
     # narrow every later use of it to that one row. Popped BEFORE the
     # raise for the same reason — an exception a caller rescues must not
     # leave the relation altered.
+    #
+    # The messages are Rails 8.1's (`raise_record_not_found_exception!`)
+    # minus the ` [WHERE ...]` suffix Rails appends for a scoped
+    # relation: Rails renders it from Arel with `?` binds, while the
+    # wheres here are SQL text with the values already filled in, so
+    # the suffix could not match. An unscoped relation's message is
+    # exactly Rails'.
     def find(id)
+      # Rails compacts the ids first, so `find(nil)` has none: the
+      # "without an ID" form, with no id, as `Base.find(nil)` raises.
+      raise RecordNotFound.new("Couldn't find #{@model.name} without an ID", @model.name, @model.primary_key) if id.nil?
       return find_ids(id) if id.is_a?(Array)
       key = @model._cast_primary_key(id)
       prior_limit = @limit
@@ -1620,7 +1804,7 @@ module ActiveRecord
         @wheres.pop
       end
       if record.nil?
-        raise RecordNotFound, "Couldn't find record in #{@model.table_name} with id=#{id}"
+        raise RecordNotFound.new("Couldn't find #{@model.name} with '#{@model.primary_key}'=#{id.inspect}", @model.name, @model.primary_key, id)
       end
       record
     end
@@ -1663,7 +1847,8 @@ module ActiveRecord
         @wheres.pop
       end
       if rows.length != expected
-        raise RecordNotFound, "Couldn't find all records in #{@table} with ids=#{ids}"
+        listed = ids.map { |each_id| each_id.inspect }.join(", ")
+        raise RecordNotFound.new("Couldn't find all #{Inflector.pluralize_word(@model.name, 2)} with '#{@model.primary_key}': (#{listed}) (found #{rows.length} results, but was looking for #{expected}).", @model.name, @model.primary_key, ids)
       end
       if @orders.empty?
         keys.map { |key| rows.find { |row| row.id == key } }
@@ -1695,7 +1880,74 @@ module ActiveRecord
     # `find_by!` — `find_by` that raises `RecordNotFound` on no match.
     def find_by!(conditions)
       record = find_by(conditions)
-      raise RecordNotFound, "Couldn't find record in #{@model.table_name}" if record.nil?
+      raise RecordNotFound.new("Couldn't find #{@model.name}", @model.name, @model.primary_key) if record.nil?
+      record
+    end
+
+    # `sole` (Rails 7.0) — the relation's one record: `RecordNotFound`
+    # when it matches none, `SoleRecordExceeded` when it matches more.
+    # Rails reads `first(2)` and checks the size, so one query of at
+    # most two rows tells the three cases apart.
+    #
+    # A LOADED relation decides from the memoized `@records` instead of
+    # re-querying — Rails' own `first(2)` reads the loaded Array once
+    # `loaded?` — so a caller that already has the page in memory (an
+    # eager-loaded association, a prior `each`) costs no second trip to
+    # the database.
+    #
+    # Unloaded, `first_n` cannot serve the probe: it always asks for
+    # its own `n`, which would override a SMALLER existing `@limit`
+    # (`limit(1).sole` must probe 1 row, not 2, so two matching rows
+    # settle as the first one rather than `SoleRecordExceeded`; a
+    # `limit(0)` relation must probe 0 and always read as
+    # `RecordNotFound`), and it unconditionally clears `@records`
+    # afterward, which would discard a cache this branch never had to
+    # begin with. So the probe borrows and restores `@limit` itself,
+    # capped at the relation's own limit (nil meaning the usual 2,
+    # clamped at 0 or above), and restores `@records` to nil — what it
+    # was, since this branch only runs when the relation is unloaded —
+    # rather than to whatever the probe's own LIMIT happened to cache.
+    def sole
+      loaded = @records
+      unless loaded.nil?
+        rows = loaded_sole_rows(loaded)
+        raise RecordNotFound.new("Couldn't find #{@model.name}", @model.name, @model.primary_key) if rows.length == 0
+        raise SoleRecordExceeded, "Wanted only one #{@model.name}" if rows.length > 1
+        return rows[0]
+      end
+      prior_limit = @limit
+      @limit = sole_probe_limit(prior_limit)
+      rows = to_a
+      @limit = prior_limit
+      @records = nil
+      raise RecordNotFound.new("Couldn't find #{@model.name}", @model.name, @model.primary_key) if rows.length == 0
+      raise SoleRecordExceeded, "Wanted only one #{@model.name}" if rows.length > 1
+      rows[0]
+    end
+
+    # `find_sole_by(conditions)` — Rails' `where(conditions).sole`. A
+    # terminal, so its predicate is popped as in `find_by`; popped in an
+    # `ensure` because `sole` raises on the two answers that are not one
+    # record, and a caller that rescues must get the relation back as
+    # it was.
+    #
+    # `add_condition` unconditionally clears `@records` — it has no way
+    # to know in advance whether the new predicate still matches a
+    # loaded set — so a relation that was loaded before this call loses
+    # its memo the moment the temporary condition is pushed. The
+    # `ensure` restores the ORIGINAL `@records` saved before that push,
+    # not whatever `sole`'s own probe leaves behind, so a loaded
+    # relation's records are intact afterward whether `sole` returns or
+    # raises.
+    def find_sole_by(conditions)
+      prior_records = @records
+      pushed = add_condition(conditions, [], false)
+      begin
+        record = sole
+      ensure
+        @wheres.pop if pushed
+        @records = prior_records
+      end
       record
     end
 
@@ -1897,6 +2149,7 @@ module ActiveRecord
     # into a JOINed query where the bare name would be ambiguous —
     # `hidden_stories.user_id`, not `user_id`, after `joins(:hidings)`.
     def column_predicate(col, val)
+      col = sql_ident(col)
       qcol = col.include?(".") ? col : "#{@table}.#{col}"
       if val.is_a?(Relation)
         # A relation value is Rails' subquery form —

@@ -124,12 +124,12 @@ impl Analyzer {
             bs.hash(&mut bh);
             sig.insert(format!("{}:b", id.0.as_str()), bh.finish());
         }
-        for ((id, m), row) in &self.inferred_params {
+        for ((id, m, side), row) in &self.inferred_params {
             let mut h = DefaultHasher::new();
             for t in row {
                 type_hash(t, &mut memo).hash(&mut h);
             }
-            sig.insert(format!("{}:p:{}", id.0.as_str(), m.as_str()), h.finish());
+            sig.insert(format!("{}:{side:?}:p:{}", id.0.as_str(), m.as_str()), h.finish());
         }
         let mut ir: Vec<(u32, u32, u32, u64, u64)> = Vec::new();
         fn walk(e: &Expr, out: &mut Vec<(u32, u32, u32, u64, u64)>, memo: &mut HashMap<u32, u64>) {

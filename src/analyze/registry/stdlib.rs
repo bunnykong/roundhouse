@@ -17,7 +17,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // propagate through dispatch without bottoming out at Var.
     // `Rails.env` is the one we can type concretely as Str.
     let mut rails_cls = ClassInfo::default();
-    for m in ["application", "logger", "cache", "configuration", "root"] {
+    for m in ["application", "logger", "cache", "configuration", "root", "public_path"] {
         rails_cls.class_methods.insert(Symbol::from(m), Ty::gradual());
     }
     // `Rails.env` is an ActiveSupport::StringInquirer (a String
@@ -368,8 +368,81 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `runtime/ruby/zlib.rb`); registering only it keeps a call to
     // `Zlib.deflate` an honest gap instead of a method that types and
     // then fails to resolve.
+    // `gzip` is Ruby's own on the ruby family and spinel's
+    // `packages/zlib` on spinel, so it types here and a strict target,
+    // whose port has no deflate, refuses the call by name
+    // (`project::RUBY_SPINEL_ONLY_METHODS`).
     register_stdlib_class(classes, "Zlib", &[
         ("crc32", Ty::Int),
+        ("gzip", Ty::Str),
+    ], &[]);
+    // `SQLite3::Database` — the sqlite3 gem on the ruby family, and
+    // `runtime/spinel/sqlite3_database.rb` (the same surface over the FFI)
+    // on spinel. ONLY that surface: campfire's `ResponseCache` keeps a
+    // read-only observer (`new(path, readonly: true)`,
+    // `get_first_value("PRAGMA data_version")`, `close`) and its WAL
+    // checkpointer opens a block-form connection, sets
+    // `busy_handler_timeout=` and `execute`s a pragma. A row is an Array
+    // of column values.
+    let sqlite_db = Ty::Class { id: ClassId(Symbol::from("SQLite3::Database")), args: vec![].into() };
+    register_stdlib_class(classes, "SQLite3::Database", &[
+        ("new", sqlite_db.clone()),
+        ("open", sqlite_db.clone()),
+    ], &[
+        ("execute", Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) }) }),
+        ("get_first_row", Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) }, Ty::Nil].into() }),
+        ("get_first_value", Ty::gradual()),
+        ("close", Ty::Nil),
+        ("closed?", Ty::Bool),
+        ("readonly?", Ty::Bool),
+        ("busy_timeout=", Ty::Int),
+        ("busy_handler_timeout=", Ty::Int),
+    ]);
+    // `ActiveSupport::Cache` — `expand_cache_key` and the bounded
+    // `MemoryStore`, in runtime/spinel/active_support_cache.rb (the ruby
+    // family and spinel). A cached value is whatever was written.
+    register_stdlib_class(classes, "ActiveSupport::Cache", &[
+        ("expand_cache_key", Ty::Str),
+    ], &[]);
+    let memory_store = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::Cache::MemoryStore")), args: vec![].into() };
+    register_stdlib_class(classes, "ActiveSupport::Cache::MemoryStore", &[
+        ("new", memory_store),
+    ], &[
+        ("read", Ty::gradual()),
+        ("write", Ty::Bool),
+        ("fetch", Ty::gradual()),
+        ("delete", Ty::Bool),
+        ("exist?", Ty::Bool),
+        ("clear", Ty::gradual()),
+        ("cleanup", Ty::Nil),
+        ("prune", Ty::Nil),
+        ("read_multi", Ty::Hash { key: std::sync::Arc::new(Ty::gradual()), value: std::sync::Arc::new(Ty::gradual()) }),
+        ("write_multi", Ty::Bool),
+    ]);
+
+    // `FileUtils` — a default gem / spinel's `packages/fileutils`.
+    register_stdlib_class(classes, "FileUtils", &[
+        ("mkdir_p", Ty::gradual()), ("makedirs", Ty::gradual()),
+        ("rm_rf", Ty::gradual()), ("rm_f", Ty::gradual()),
+        ("remove_entry", Ty::Nil), ("touch", Ty::gradual()),
+    ], &[]);
+    // `ActiveSupport::JSON` — Rails' coder, in `runtime/ruby/
+    // active_support_ext.rb` (the ruby family and spinel). `encode`
+    // answers the document; `decode` whatever the document holds.
+    register_stdlib_class(classes, "ActiveSupport::JSON", &[
+        ("encode", Ty::Str),
+        ("decode", Ty::gradual()),
+    ], &[]);
+    // `Rack::Utils` — the two encoding-negotiation functions, ported
+    // into `runtime/ruby/rack_utils.rb` (the rack gem's own on the ruby
+    // family). ONLY that surface, the IPAddr rule. A pair is
+    // `[name, quality]`; the name is nil for an empty header part.
+    let q_pair = Ty::Tuple {
+        elems: vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }, Ty::Float].into(),
+    };
+    register_stdlib_class(classes, "Rack::Utils", &[
+        ("q_values", Ty::Array { elem: Box::new(q_pair).into() }),
+        ("select_best_encoding", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
     ], &[]);
     register_stdlib_class(classes, "IPAddr", &[], &[
         ("ipv4?", Ty::Bool), ("ipv6?", Ty::Bool), ("ipv4_mapped?", Ty::Bool),
@@ -510,13 +583,32 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // `Timeout.timeout` / `rescue Timeout::Error` — Campfire unfurl
         // deadline and TimeLimitedVideoPreviewer#capture.
         "Timeout::Error",
+        // `rescue EOFError` around `readpartial` on a pipe or a pty.
+        "EOFError",
+        // `rescue SQLite3::Exception` — campfire's `ResponseCache` drops
+        // its observer on any driver error (see `SQLite3::Database`).
+        "SQLite3::Exception", "SQLite3::CantOpenException",
+        "SQLite3::BusyException", "SQLite3::SQLException",
+        // `rescue ArgumentError, RQRCodeCore::QRCodeRunTimeError` —
+        // campfire's `QrCodeController#show` answers 400 for data too
+        // long to encode. rqrcode_core's classes on the ruby family, the
+        // spinel-rqrcode package's (same names, same raise) on spinel.
+        "RQRCodeCore::QRCodeRunTimeError", "RQRCodeCore::QRCodeArgumentError",
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
+    }
+    // `rescue Errno::ENOENT` / `Errno::EIO`: every Errno class that both
+    // CRuby (on every POSIX platform) and Spinel's runtime define. The
+    // lookup is by exact name, so the family is registered whole.
+    register_stdlib_class(classes, "Errno", &[], &[]);
+    for name in ERRNO_CLASSES {
+        register_stdlib_class(classes, &format!("Errno::{name}"), &[], &exception_surface);
     }
     for (exc, extra) in [
         ("ActiveRecord::RecordNotFound", None),
         ("ActiveRecord::RecordNotUnique", None),
         ("ActiveRecord::ValueTooLong", None),
+        ("ActiveRecord::SoleRecordExceeded", None),
         // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
         ("ActiveRecord::RecordInvalid", Some(("record", Ty::gradual()))),
         // Names overlap `project::RUBY_FAMILY_RUNTIME_CONSTANTS` (emit
@@ -525,6 +617,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActionController::UnpermittedParameters", None),
         ("ActionController::UnknownFormat", None),
         ("ActionController::RoutingError", Some(("failures", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }))),
+        ("AbstractController::ActionNotFound", None),
     ] {
         let mut methods = exception_surface.to_vec();
         methods.extend(extra);
@@ -607,6 +700,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // A class test such as `URI.parse(url).is_a?(URI::HTTP)` names the
     // real bundled class, without claiming any extra instance methods.
     register_stdlib_class(classes, "URI::HTTP", &[], &[]);
+    register_stdlib_class(classes, "URI::HTTPS", &[], &[]);
     for response in ["Net::HTTPRedirection", "Net::HTTPOK"] {
         register_stdlib_class(classes, response, &[], &[]);
     }
@@ -625,18 +719,43 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `Timeout.timeout`, and `IO.popen` / `copy_stream` live in the
     // send special-cases (`body/send.rs`) — catalog entries would win
     // before those cases and kill unit-aware `clock_gettime` (Float for
-    // `:millisecond`). Nested value Consts (`IO::NULL`,
-    // `Process::CLOCK_MONOTONIC`) are empty ClassIds the way `URI::HTTP`
-    // is. Instance methods on an `IO` handle still belong here.
+    // `:millisecond`). Nested *namespace* Consts (`Process::CLOCK_*`)
+    // stay empty ClassIds the way `URI::HTTP` is. Value Consts
+    // (`IO::NULL` / `File::NULL`) are typed Strings via CORE_RBS — do
+    // not also register them here or the ClassId fallback disagrees.
+    // Instance methods on an `IO` handle still belong here. `winsize` /
+    // `winsize=` wait on carrying `require "io/console"` into the
+    // emitted tree; admitting them without that load is check-quiet /
+    // runtime `NoMethodError`.
     let io = Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() };
     register_stdlib_class(classes, "IO", &[], &[
         ("pid", Ty::Int),
         ("read", Ty::Str),
+        ("readpartial", Ty::Str),
+        ("write", Ty::Int),
+        ("closed?", Ty::Bool),
         ("rewind", Ty::Int),
         ("binmode", io.clone()),
         ("close", Ty::Nil),
     ]);
-    register_stdlib_class(classes, "IO::NULL", &[], &[]);
+    // `File < IO` — Ruby's hierarchy (not a PTY detail). File's class
+    // methods are registered earlier; the parent is set once `IO` exists
+    // so instance methods (`readpartial`, `closed?`, …) resolve on a
+    // File handle, including `PTY.spawn`'s reader/writer.
+    classes
+        .get_mut(&ClassId(Symbol::from("File")))
+        .expect("File registered above")
+        .parent = Some(ClassId(Symbol::from("IO")));
+    // `require "pty"`. `PTY.spawn`'s return is a send special case: its
+    // block form answers nil; block yields are typed in `block_params_for`.
+    register_stdlib_class(classes, "PTY", &[], &[]);
+    // A default gem a booted Rails app has already loaded; the BUNDLED
+    // row emits its require.
+    register_stdlib_class(classes, "Shellwords", &[
+        ("escape", Ty::Str), ("shellescape", Ty::Str),
+        ("join", Ty::Str), ("shelljoin", Ty::Str),
+        ("split", str_arr()), ("shellsplit", str_arr()), ("shellwords", str_arr()),
+    ], &[]);
     register_stdlib_class(classes, "Process", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_MONOTONIC", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_REALTIME", &[], &[]);
@@ -660,6 +779,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     for name in ["Queue", "SizedQueue", "Thread::Queue", "Thread::SizedQueue",
         "Thread::Mutex", "Comparable", "Enumerable"] {
         register_stdlib_class(classes, name, &[], &[]);
+    }
+    for (class, method) in BUILTIN_BLOCK_VALUE_METHODS {
+        classes
+            .entry(ClassId(Symbol::from(*class)))
+            .or_default()
+            .block_value_methods
+            .insert(Symbol::from(*method));
     }
     // `Array.wrap` is folded by `lower::enumerable_ext` before emit.
     // Registered so the analyzer does not report it as unknown. The
@@ -737,6 +863,20 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     }
 }
 
+/// Library methods that answer their block's value, by Ruby's (or
+/// ActiveSupport's) definition rather than by inference:
+/// `mutex.synchronize { … }` — campfire's `ResponseCache#version` is
+/// `@mutex.synchronize { current_version }` — and a cache `fetch`, which
+/// answers the block's value on a miss and what such a block wrote on a
+/// hit. Only an informative block type is adopted (`block_value_return`).
+/// Re-seeded after every harvest of the app's own block-value methods
+/// (`Analyzer::harvest_block_value_methods`), which starts from empty.
+pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
+    ("Mutex", "synchronize"),
+    ("Thread::Mutex", "synchronize"),
+    ("ActiveSupport::Cache::MemoryStore", "fetch"),
+];
+
 fn register_stdlib_class(
     classes: &mut HashMap<ClassId, ClassInfo>,
     name: &str,
@@ -755,3 +895,17 @@ fn register_stdlib_class(
             .or_insert_with(|| ty.clone());
     }
 }
+
+/// The Errno classes CRuby defines on every POSIX platform that Spinel's
+/// runtime (`lib/sp_exc.c`) defines too.
+const ERRNO_CLASSES: &[&str] = &[
+    "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO", "E2BIG", "ENOEXEC", "EBADF",
+    "ECHILD", "EAGAIN", "ENOMEM", "EACCES", "EFAULT", "EBUSY", "EEXIST", "EXDEV", "ENODEV",
+    "ENOTDIR", "EISDIR", "EINVAL", "ENFILE", "EMFILE", "ENOTTY", "EFBIG", "ENOSPC", "ESPIPE",
+    "EROFS", "EMLINK", "EPIPE", "EDOM", "ERANGE", "EDEADLK", "ENAMETOOLONG", "ENOLCK",
+    "ENOSYS", "ENOTEMPTY", "ELOOP", "ENOTSOCK", "EMSGSIZE", "EPROTOTYPE", "ENOPROTOOPT",
+    "EPROTONOSUPPORT", "ENOTSUP", "EOPNOTSUPP", "EAFNOSUPPORT", "EADDRINUSE",
+    "EADDRNOTAVAIL", "ENETDOWN", "ENETUNREACH", "ENETRESET", "ECONNABORTED", "ECONNRESET",
+    "ENOBUFS", "EISCONN", "ENOTCONN", "ETIMEDOUT", "ECONNREFUSED", "EHOSTUNREACH",
+    "EALREADY", "EINPROGRESS", "ESTALE", "EDQUOT", "ECANCELED", "EOVERFLOW", "EILSEQ",
+];

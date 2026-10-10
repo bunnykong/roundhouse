@@ -99,7 +99,7 @@ pub(crate) fn pseudo_site(tag: &str) -> SiteId {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SlotKey {
     Ret { class: ClassId, method: Symbol, class_side: bool },
-    Param { class: ClassId, method: Symbol, index: usize },
+    Param { class: ClassId, method: Symbol, side: crate::dialect::MethodReceiver, index: usize },
     /// A reference narrowed by a type test (`is_a?`, `case`/`when`, nil
     /// checks) at a narrowing site: the union of everything narrowed there
     /// through `filter`.
@@ -253,11 +253,11 @@ pub(crate) fn ret_ref(class: &ClassId, method: &Symbol, class_side: bool) -> Opt
 
 /// A read of a parameter slot, when it is in reference mode. `value` is
 /// what the body would otherwise have been seeded with.
-pub(crate) fn param_ref(class: &ClassId, method: &Symbol, index: usize, value: Ty) -> Ty {
+pub(crate) fn param_ref(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver, index: usize, value: Ty) -> Ty {
     if !active() || !is_rec_method(class, method) {
         return value;
     }
-    let key = SlotKey::Param { class: class.clone(), method: method.clone(), index };
+    let key = SlotKey::Param { class: class.clone(), method: method.clone(), side, index };
     super::structure::fold_write(&key, "parameter-seed");
     let slot = intern(key);
     // A slot's own top-level reference contributes nothing (X = X | A is A).
@@ -268,7 +268,7 @@ pub(crate) fn param_ref(class: &ClassId, method: &Symbol, index: usize, value: T
         // variable: two bodies can share the key, and a model's first and
         // reseeded passes both seed it.
         let value = match s.values.get(&slot) {
-            Some(old) if super::handoff::join_on() => super::handoff::join_slot(old.clone(), value),
+            Some(old) if super::handoff::join_on() => super::unify_param_ty(old.clone(), value),
             _ => value,
         };
         if s.values.get(&slot) != Some(&value) {

@@ -14,6 +14,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use roundhouse::analyze::ClassInfo;
 use roundhouse::dialect::MethodDef;
@@ -81,6 +82,95 @@ fn inflector_pluralize_lives_in_runtime_python() {
 fn inflector_pluralize_lives_in_runtime_rust() {
     let emitted = roundhouse::emit::rust::emit_method(&pluralize_method());
     assert_emitted_lives_in(&emitted, "runtime/rust/view_helpers.rs");
+}
+
+#[test]
+fn active_support_squish_bang_emits_for_rust() {
+    let methods = load_typed("active_support_ext");
+    let method = methods
+        .into_iter()
+        .find(|m| m.name.as_str() == "squish!")
+        .expect("active_support_ext.rb defines squish!");
+    let emitted = roundhouse::emit::rust::emit_method(&method);
+    assert!(
+        emitted.starts_with("pub fn squish_bang(text: &mut String) -> &mut String"),
+        "ActiveSupport.squish! must emit a mutating Rust function:\n{emitted}"
+    );
+
+    let scratch = std::env::temp_dir().join(format!(
+        "roundhouse-runtime-rust-squish-bang-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&scratch).expect("create generated Rust scratch directory");
+    let source = format!(
+        r#"{emitted}
+#[test]
+fn squish_bang_mutates_and_returns_the_receiver() {{
+    let mut value = "  foo\tbar \n baz  ".to_string();
+    let receiver = &value as *const String;
+    let result = squish_bang(&mut value);
+    assert_eq!(result, "foo bar baz");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(value, "foo bar baz");
+}}
+
+#[test]
+fn squish_bang_handles_unicode_and_noop_values() {{
+    let mut unicode = "\u{{00a0}}foo\u{{2003}}bar\u{{2028}}".to_string();
+    let receiver = &unicode as *const String;
+    let result = squish_bang(&mut unicode);
+    assert_eq!(result, "foo bar");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(unicode, "foo bar");
+    let mut unchanged = "already squished".to_string();
+    let receiver = &unchanged as *const String;
+    let result = squish_bang(&mut unchanged);
+    assert_eq!(result, "already squished");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(unchanged, "already squished");
+}}
+
+#[test]
+fn squish_bang_strips_rails_nul_boundaries() {{
+    let mut trailing_nul = "foo\0".to_string();
+    let receiver = &trailing_nul as *const String;
+    let result = squish_bang(&mut trailing_nul);
+    assert_eq!(result, "foo");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(trailing_nul, "foo");
+
+    let mut space_then_nul = "foo \0".to_string();
+    let receiver = &space_then_nul as *const String;
+    let result = squish_bang(&mut space_then_nul);
+    assert_eq!(result, "foo");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(space_then_nul, "foo");
+}}
+"#
+    );
+    let source_path = scratch.join("squish_bang.rs");
+    let binary_path = scratch.join("squish_bang");
+    fs::write(&source_path, source).expect("write emitted Rust test");
+    let compile = Command::new("rustc")
+        .args(["--test"])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .expect("compile emitted Rust test");
+    assert!(
+        compile.status.success(),
+        "emitted ActiveSupport.squish! did not compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&binary_path)
+        .output()
+        .expect("run emitted Rust test");
+    assert!(
+        run.status.success(),
+        "emitted ActiveSupport.squish! behavior failed:\n{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
 }
 
 // Phase D3 (2026-06-05) retired runtime/elixir/view_helpers.ex — the v2
@@ -160,6 +250,12 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
         | N::ForwardKeywords
         | N::Defined { .. }
         | N::SelfRef => {}
+        N::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                count_gradual_recurse(key, total);
+                count_gradual_recurse(value, total);
+            }
+        }
         N::If { cond, then_branch, else_branch } => {
             count_gradual_recurse(cond, total);
             count_gradual_recurse(then_branch, total);
@@ -277,6 +373,12 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::ForwardKeywords
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_untyped(key, path, out);
+                collect_untyped(value, path, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
             collect_untyped(then_branch, &format!("{path}/if.then"), out);
@@ -783,7 +885,7 @@ fn every_runtime_method_body_concretely_typed() {
     }
 
     eprintln!(
-        "framework runtime Bar B residual (Ty::Untyped sites): {total_gradual} \
+        "framework runtime Bar B residual (Ty::unresolved() sites): {total_gradual} \
          across {} files",
         by_file.len(),
     );
@@ -804,11 +906,108 @@ fn every_runtime_method_body_concretely_typed() {
     // block/return gradual after `sec: Integer | Float` — polymorphic yield.
     // `AttachedMany#attachments` stays typed via raw SQL + ManyAttachment
     // (not Relation over the synthesized Attachment MODEL).
-    const CEILING: usize = 304;
+    // `ActiveRecord::Base#with_lock` (#644) adds 1: its block's return
+    // value is gradual, same `untyped` escape as `self.transaction`'s
+    // block value (`lock!` itself stays concretely typed — it's a
+    // plain `reload`).
+    // `with_lock`'s Rails 8.1 options split (#671) adds 5: the trailing
+    // transaction-options Hash this runtime doesn't carry
+    // `extract_options!` for is read by hand (`transaction_opts[:iso
+    // lation]`, `[:requires_new]`, `.key?(:joinable) ? [:joinable] :
+    // true`), and each `Hash[Symbol, untyped]` value read is gradual —
+    // same shape `connection.rb`'s other `opts`-style Hash call sites
+    // already carry.
+    // `ActiveRecord::RecordNotFound#initialize` (model/primary_key/id)
+    // adds 1, MEASURED on the runtime after #671: the `@id = id` store
+    // of the id Rails passes through, whose RBS type is the flat
+    // `String | Integer | Float | Array | nil` union (Float added after
+    // #689 review; MEASURED, no change).
+    // Campfire's repin past 2393f01 adds 5, MEASURED, each from a value
+    // Rails itself leaves dynamic: `Connection#select_value` (one SQL cell, as
+    // `select_rows`' rows are), `Base.uncached`'s block value (the
+    // `Timeout.timeout` shape), and `Relation#to_h`'s yielded pairs.
+    // `ActiveStorage::AttachedMany#each` (Rails' `delegate_missing_to
+    // :attachments`, for campfire's `body.embeds.each`) adds 1,
+    // MEASURED: the value of its `yield`, the same block-return escape
+    // `Relation#each` carries.
+    // `in_batches` adds 2, MEASURED: the `yield self` in
+    // `Relation#in_batches` and in the class-side fallback in
+    // connection.rb, whose value is the block's — gradual, as
+    // `find_in_batches`' `yield records` already is.
+    // `Relation#minimum` / `#maximum` add 2, MEASURED: the two indexed
+    // reads of the SQL aggregate's column-dependent scalar. The adapter
+    // contract intentionally keeps raw SQL result values `untyped`;
+    // coercing them would break Rails' column-dependent return type.
+    // MEASURED 2026-10-09 (against origin/main a28539b6): `haml_class`
+    // (the HAML shortcut-class + hash `class:` merge) adds 2 on top of
+    // the above — its `value` param is `untyped` (a scalar the HAML
+    // compiler could not narrow further: String, Symbol, nil, or a
+    // conditional/ternary result), and the body reads it twice
+    // (`value.nil?`, `value.to_s`).
+    // Rebased onto main after `in_batches`: MEASURED 317 with haml_class, under main's 318.
+    // `self.transaction`'s `ensure`-based depth/commit restore on a
+    // non-local exit (spinel-txn-pin #693, CodeRabbit): the nested
+    // branch's `ensure` (a second `Db._txn_depth = depth`, alongside the
+    // `rescue`'s own copy, now folded into the `begin`'s value position)
+    // adds 1; the outer branch's `ensure` adds 3 — its `if rolled_back
+    // then nil else … end` has to unify `nil` against `Db.exec("COMMIT")`'s
+    // declared `void` return, the same kind of escape this file's other
+    // `opts`-style branches already carry. Rebased onto main's
+    // `in_batches` (#713): re-measured fresh on this tree rather than
+    // summed from either side's base, since unrelated main changes
+    // shift base.rb/connection.rb's own counts independently
+    // (spinel-txn-pin #693) — 321, MEASURED after rebasing past #705/#709.
+    // `Relation#minimum` / `#maximum` add 2, MEASURED: the two indexed
+    // reads of the SQL aggregate's column-dependent scalar. The adapter
+    // contract intentionally keeps raw SQL result values `untyped`;
+    // coercing them would break Rails' column-dependent return type. The
+    // merged tree measures 323 after the transaction-runtime change above.
+    // Schema-driven extrema deserialization adds 9 measured gradual sites
+    // in Relation: aggregate values and group keys cross the raw SQL boundary
+    // as column-dependent Boolean/Date/Time values. The concrete method-body
+    // gate still requires every call and body to resolve.
+    // Decimal extrema normalization adds 2 measured gradual sites: the raw
+    // adapter value is column-dependent, and its `to_f` conversion is the
+    // schema-selected Ruby boundary that matches the model's Float contract.
+    // The emitted regression covers scalar and grouped decimal extrema.
+    // Canonical main 99dd482b measures 374 sites. The ActionText fragment
+    // mutation runtime adds 47 measured sites on that baseline (45 range/edit
+    // and 2 pending-index writes); the merged tree measures 421. Bar A still
+    // requires zero untyped method bodies.
+    const CEILING: usize = 421;
     assert!(
         total_gradual <= CEILING,
-        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
+        "{total_gradual} Ty::unresolved() sites exceeds ceiling of {CEILING}",
     );
+}
+
+#[test]
+fn active_support_inflector_slice_adds_no_bar_b_sites() {
+    let methods = load_typed("active_support_inflections");
+    for name in [
+        "camelize",
+        "deconstantize",
+        "foreign_key",
+        "upcase_first",
+        "downcase_first",
+        "ordinalize",
+    ] {
+        let method = methods
+            .iter()
+            .find(|method| {
+                method.name.as_str() == name
+                    && method
+                        .enclosing_class
+                        .as_ref()
+                        .is_some_and(|class| class.as_str() == "Inflector")
+            })
+            .unwrap_or_else(|| panic!("ActiveSupport::Inflector.{name} exists in runtime source"));
+        assert_eq!(
+            count_gradual(&method.body),
+            0,
+            "ActiveSupport::Inflector.{name} introduces no Ty::unresolved() Bar B sites",
+        );
+    }
 }
 
 #[test]

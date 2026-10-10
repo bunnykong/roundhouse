@@ -72,9 +72,20 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         if matches!(&expr.diagnostic,
             Some(DiagnosticKind::Unsupported { .. }))
         {
-            if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic {
+            if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic
+                && construct.as_str() != crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
+            {
                 out.push(Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone()));
             }
+        }
+        // Not dropped with the policy's other misses: the typer stamps it only in place of an Object-extension refusal.
+        if let Some(kind @ DiagnosticKind::SendDispatchFailed { method, recv_ty }) = &expr.diagnostic {
+            out.push(Diagnostic {
+                span: expr.span,
+                severity: Diagnostic::default_severity(kind),
+                kind: kind.clone(),
+                message: format!("no known method `{}` on {}", method.as_str(), render_ty(recv_ty)),
+            });
         }
         expr.node.for_each_child(&mut |child| collect_constants(child, out));
     }
@@ -291,12 +302,18 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             // Produced by `graphql::diagnose` as a returned list.
             DiagnosticKind::GraphqlNullableField { .. } => Diagnostic::stub_text(kind),
         };
-        out.push(Diagnostic {
-            span: expr.span,
-            kind: kind.clone(),
-            severity: Diagnostic::default_severity(kind),
-            message,
-        });
+        if !matches!(
+            kind,
+            DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
+        ) {
+            out.push(Diagnostic {
+                span: expr.span,
+                kind: kind.clone(),
+                severity: Diagnostic::default_severity(kind),
+                message,
+            });
+        }
     }
 
     // RBS-declared `untyped` reaches this site. Emit a GradualUntyped
@@ -312,6 +329,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         && !matches!(
             &*expr.node,
             ExprNode::Seq { .. } | ExprNode::ForwardArgs | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
         )
     {
         let kind = DiagnosticKind::GradualUntyped {
@@ -540,6 +558,12 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             if let Some(v) = value { diagnose_expr(v, out); }
         }
         ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => diagnose_expr(value, out),
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                diagnose_expr(key, out);
+                diagnose_expr(value, out);
+            }
+        }
         ExprNode::MultiAssign { targets, value } => {
             diagnose_expr(value, out);
             for target in targets {

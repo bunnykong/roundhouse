@@ -45,6 +45,9 @@ const DEPENDENCY_RBS: &[&str] = &[
     "runtime/ruby/rails.rbs",
     "runtime/ruby/action_controller/message_verifier.rbs",
     "runtime/ruby/active_support_time_parsing.rbs",
+    "runtime/ruby/active_support_ext.rbs",
+    // `Inflector.pluralize_word`, for the multi-id RecordNotFound message.
+    "runtime/ruby/inflector_ext.rbs",
 ];
 
 /// Walk a typed expression tree, collecting every node whose `ty` is
@@ -66,6 +69,12 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::ForwardKeywords
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_untyped(key, path, out);
+                collect_untyped(value, path, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
             collect_untyped(then_branch, &format!("{path}/if.then"), out);
@@ -505,9 +514,11 @@ fn qualified_runtime_signatures_seed_contexts_and_results() {
             },
         );
         typer.analyze_expr(&mut probes[0].methods[0].body, &ctx);
+        // `rows` answers Rails' shape, each row an Array of its values;
+        // the constructor above still takes the row hashes.
         assert_eq!(
             probes[0].methods[0].body.ty,
-            Some(rows.clone()),
+            Some(Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::unresolved()) }) }),
             "{class}"
         );
     }

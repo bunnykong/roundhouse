@@ -50,6 +50,12 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::ForwardKeywords
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_untyped(key, path, out);
+                collect_untyped(value, path, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
             collect_untyped(then_branch, &format!("{path}/if.then"), out);
@@ -287,7 +293,67 @@ fn untyped_subexpressions_baseline() {
     // exists? key dispatch (#549 / #403): 519 -> 523, MEASURED. Four new
     // Base sites from exists? / _exists_primary_key_input (nil guard +
     // cast + adapter). Companion RBS probe stays at zero residual.
-    const CEILING: usize = 523;
+    // Pessimistic locking (#644 / #671): 523 -> 529, MEASURED. The six
+    // new sites are `with_lock`'s `*args` split (the trailing options
+    // Hash and the lock clause) and the `isolation:` / `requires_new:` /
+    // `joinable:` pass-through into `transaction`, all accepted and
+    // ignored under SQLite. Its RBS-paired methods keep the gradual
+    // `untyped` escape `self.transaction` already has.
+    // RecordNotFound's model/primary_key/id: 529 -> 534, MEASURED on
+    // the runtime after #671. The five new sites are the finder inputs
+    // the raises now pass through: `id` in Base#find (x2), Relation#find
+    // and Relation#find_ids, and the ruby-family Base#find_by!'s
+    // `conditions`. Companion RBS probe stays at zero residual.
+    // Rails 8.1 finder-miss wording: 534 -> 540, MEASURED. The net six
+    // new sites are all in Relation#find_ids' multi-id message (the
+    // `inspect`ed id list and the interpolated model, key and expected
+    // count); the single-id messages trade one site for one.
+    // Relation#find(nil)'s "without an ID" raise (#689 review):
+    // 540 -> 541, MEASURED. The one new site is the `id.nil?` guard's
+    // read of the unseeded `id`.
+    // `Base.uncached` (campfire's push pool test): 541 -> 547, MEASURED.
+    // The six new sites are its `Db.query_cache_*` calls and the block
+    // value, read here without the Db contract — the same escape
+    // `self.transaction`'s `Db.exec` calls already take.
+    // `Relation#order_sql` / `#reorder_sql` (`order(Arel.sql(…))`,
+    // campfire's `reorder(Arel.sql("+messages.created_at"))`): 547 ->
+    // 549, MEASURED — each one's `fragment` parameter, read here
+    // without its RBS.
+    // Transaction join/pin + its `ensure`-based non-local-exit fix
+    // (spinel-txn-pin #693, matz/spinel#8182), rebased onto #704:
+    // 549 -> 561, MEASURED. `self.transaction`'s per-thread nesting
+    // depth reads/writes through `Db._txn_depth`/`=` (runtime/ruby/db.rbs)
+    // instead of a raw `Thread.current[:ar_txn_depth]`: the companion
+    // RBS-paired probe has no model for the `Db` the depth used to
+    // bypass, so the raw `Thread.current` read/write there typed as the
+    // unresolved `Var`, not the honest gradual `Untyped` — routing it
+    // through `Db`'s own declared contract is what brings that probe to
+    // zero residual (see its hand-authored RBS and the `insert_db_stub`
+    // mirror). This raw-inference probe (zero hand-authored signatures
+    // anywhere, not even for the app's own runtime shims) has no such
+    // stub for `Db` — confirmed by reverting to the `Thread.current` form
+    // and re-measuring: exactly 549 (this branch's base after rebasing),
+    // so the old form cost this probe nothing. Eleven of the twelve new
+    // sites are the depth variable's reads/writes/arithmetic now going
+    // through an unmodeled `Db` method; the twelfth is the `ensure`-based
+    // non-local-exit fix (CodeRabbit on #693) — its outer branch's
+    // `ensure`'s `if rolled_back then nil else … end` has to unify `nil`
+    // against the unresolved `Db.exec("COMMIT")` call. Its RBS-paired
+    // method stays at zero residual throughout.
+    // `raise ActiveRecord::Rollback` (campfire's messages_count and
+    // creation tests): 561 -> 562, MEASURED by removing the one line.
+    // The new site is the Rollback arm's `Db.exec("ROLLBACK")`, read
+    // here without the Db contract like the other arm's.
+    // `clear_query_caches_for_current_thread` and `raw_connection.
+    // transaction(:immediate)` (campfire's caching tests and its
+    // messages_count trigger repair): 562 -> 569, MEASURED by removing
+    // each — 4 for the former's `Db.query_cache_*` calls (the same escape
+    // `uncached` takes), 3 for the latter's `Db.exec` calls.
+    // `requires_new:` savepoints: 569 -> 578, MEASURED by removing them.
+    // All nine are the nested branch's new `Db.exec` SAVEPOINT / RELEASE /
+    // ROLLBACK TO calls (and the `if`/`unless` arms holding them) plus the
+    // `depth` read in the savepoint name, unmodeled here like the others.
+    const CEILING: usize = 578;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

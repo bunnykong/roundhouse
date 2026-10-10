@@ -57,16 +57,31 @@ pub fn unwrap_respond_to(expr: &Expr) -> Expr {
 pub struct FormatBreadth {
     pub json_any: bool,
     pub rss: bool,
+    /// The tree raises `ActionController::ParameterMissing` from
+    /// `params.expect` / `params.require` and its dispatcher answers an
+    /// unrescued one with 400, as Rails does. Ruby family only: the
+    /// strict targets have no exception control flow and hand-written
+    /// `Params` primitives, so a missing resource reads as `{}` there
+    /// (ledgered in docs/pipeline/runtime.md).
+    pub raises_param_missing: bool,
+    /// The tree wraps a JSON request body under the controller's model
+    /// name, as Rails' ParamsWrapper does (`Params.wrap`, and the body
+    /// params the ruby-family dispatchers hand the request). The strict
+    /// targets read no JSON body (Rust, Python) or no body params apart
+    /// (TypeScript), so they do not.
+    pub wraps_json_params: bool,
 }
 
 impl FormatBreadth {
     /// html only (plus the simple-`render :sym` json arms) — the emit
     /// paths that don't recognize `request_format` at all.
-    pub const NARROW: Self = Self { json_any: false, rss: false };
+    pub const NARROW: Self = Self { json_any: false, rss: false, raises_param_missing: false, wraps_json_params: false };
     /// The spinel/AOT tree: rss dispatch, no JsonRender.
-    pub const RSS_ONLY: Self = Self { json_any: false, rss: true };
+    pub const RSS_ONLY: Self =
+        Self { json_any: false, rss: true, raises_param_missing: true, wraps_json_params: true };
     /// The CRuby/JRuby trees, whose overlay answers the full surface.
-    pub const FULL: Self = Self { json_any: true, rss: true };
+    pub const FULL: Self =
+        Self { json_any: true, rss: true, raises_param_missing: true, wraps_json_params: true };
 }
 
 /// Format-dispatching variant of `unwrap_respond_to`.
@@ -134,7 +149,7 @@ fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool, breadth: For
             left: recurse(left),
             right: recurse(right),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: recurse(body),
@@ -998,14 +1013,49 @@ pub const HTTP_AUTH_CHALLENGES: &[&str] = &[
     "request_http_token_authentication",
 ];
 
+/// One statement that writes this controller's response: a send in
+/// `RESPONSE_TERMINALS`, or an assignment to `self.response_body` (Rails
+/// counts an assigned body as performed; campfire's MessagesController
+/// and CachedResponses serve a prebuilt page that way). Shared by the
+/// implicit-render guard here and the filter halting check in
+/// `controller_to_library`, so the two cannot disagree about what a
+/// response is.
+pub fn is_response_terminal(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Send { recv: None, method, .. } => RESPONSE_TERMINALS.contains(&method.as_str()),
+        // `self.render …` / `self.redirect_to …` are the same terminals.
+        ExprNode::Send { recv: Some(r), method, args, .. } => {
+            matches!(&*r.node, ExprNode::SelfRef)
+                && (RESPONSE_TERMINALS.contains(&method.as_str())
+                    || (method.as_str() == "response_body="
+                        && !args.first().is_some_and(is_nil_literal)))
+        }
+        // `self.response_body = nil` clears the body and performs
+        // nothing, so the action's implicit render still runs.
+        ExprNode::Assign { target: crate::expr::LValue::Attr { recv, name }, value } => {
+            matches!(&*recv.node, ExprNode::SelfRef)
+                && name.as_str() == "response_body"
+                && !is_nil_literal(value)
+        }
+        _ => false,
+    }
+}
+
+fn is_nil_literal(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+}
+
 fn contains_terminal(body: &Expr) -> bool {
     fn walk(e: &Expr, found: &mut bool) {
         if *found {
             return;
         }
+        if is_response_terminal(e) {
+            *found = true;
+            return;
+        }
         if let ExprNode::Send { recv: None, method, block, .. } = &*e.node {
-            if RESPONSE_TERMINALS.contains(&method.as_str())
-                || HTTP_AUTH_CHALLENGES.contains(&method.as_str())
+            if HTTP_AUTH_CHALLENGES.contains(&method.as_str())
                 || (method.as_str() == "respond_to" && block.is_some())
             {
                 *found = true;
@@ -1028,14 +1078,12 @@ fn contains_terminal(body: &Expr) -> bool {
 pub fn has_toplevel_terminal(body: &Expr) -> bool {
     match &*body.node {
         ExprNode::Seq { exprs } => exprs.last().map_or(false, has_toplevel_terminal),
-        ExprNode::Send { recv: None, method, block, .. } => {
-            RESPONSE_TERMINALS.contains(&method.as_str())
-                || (method.as_str() == "respond_to" && block.is_some())
-        }
+        ExprNode::Send { recv: None, method, block, .. }
+            if method.as_str() == "respond_to" && block.is_some() => true,
         ExprNode::If { then_branch, else_branch, .. } => {
             has_toplevel_terminal(then_branch) && has_toplevel_terminal(else_branch)
         }
-        _ => false,
+        _ => is_response_terminal(body),
     }
 }
 

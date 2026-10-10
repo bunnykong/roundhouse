@@ -486,9 +486,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // A partial's locals are its interface: every `locals:` key any call
     // site passes becomes a trailing nil-default param (sorted; see
     // render_locals_keys). Names already on the signature as the record
-    // or flash/defined? extras are skipped here; closure ivars are
-    // dropped after append by `drop_closure_names` (raw key vs
-    // `safe_local` name).
+    // or flash/defined? extras are skipped here.
     let mut extra_params = extra_params;
     if is_partial {
         let keys_map = &lx.locals_keys;
@@ -499,8 +497,16 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
                 }
             }
         }
-        drop_closure_names(&mut extra_params, &closure_ivars);
     }
+    // Closure ivars are dropped after append by `drop_closure_names` (raw
+    // key vs `safe_local` name) — for every view kind, not just partials.
+    // An action view's or a layout's `typed` params already include its
+    // closure ivars (above); a `defined?(@x)` marker or a `locals:` key
+    // naming that same ivar must not also append it as a nil-default
+    // extra, or the emitted method takes `x` twice — a duplicate
+    // argument name, which is a Ruby syntax error (#389's sibling: that
+    // one was partials only, this is every kind).
+    drop_closure_names(&mut extra_params, &closure_ivars);
 
     // A bound form local is NOT interface (see `partial_form_bindings`):
     // render_locals_keys already filters the locals channel, and this
@@ -722,6 +728,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         form_wrappers: lx.form_wrappers.clone(),
         stylesheets: app.stylesheets.clone(),
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
+        lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
         multipart_partials: lx.multipart_partials.clone(),
@@ -729,6 +736,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         strict_locals: lx.strict_locals.clone(),
         view_name: view.name.as_str().to_string(),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
+        str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
     };
 
     // A partial that receives a form builder as a local re-derives the
@@ -923,6 +931,15 @@ pub fn insert_db_stub(
         Symbol::from("close"),
         fn_sig(vec![], Ty::Nil),
     );
+    // The per-request replay cache, which `ActiveRecord::Base.uncached`
+    // (active_record/connection.rb, ruby family) suspends for a block.
+    for (name, ret) in [
+        ("query_cache_begin", Ty::Nil),
+        ("query_cache_end", Ty::Nil),
+        ("query_cache_enabled?", Ty::Bool),
+    ] {
+        db_info.class_methods.insert(Symbol::from(name), fn_sig(vec![], ret));
+    }
     db_info.class_methods.insert(
         Symbol::from("exec"),
         fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Nil),
@@ -1055,6 +1072,19 @@ pub fn insert_db_stub(
             vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("idx"), Ty::Int)],
             Ty::Bool,
         ),
+    );
+    // `ActiveRecord::Base.transaction`'s per-thread nesting depth
+    // (connection.rb) — boxed behind this accessor instead of a raw
+    // `Thread.current`/`Fiber[]` read so the body-typer resolves it
+    // concretely, same as every other Db call here. See the contract
+    // note in runtime/ruby/db.rbs.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_depth"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("_txn_depth="),
+        fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
     );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 
@@ -1232,8 +1262,13 @@ pub(crate) fn insert_framework_stubs(
         "hidden_field",
         "render",
         "time_ago_in_words",
+        "number_to_currency",
         "number_to_human",
+        "number_to_human_size",
+        "number_to_percentage",
+        "number_to_phone",
         "number_with_delimiter",
+        "number_with_precision",
         "pluralize",
         "raw",
         "safe_join",
@@ -1348,6 +1383,14 @@ pub(crate) fn insert_framework_stubs(
             vec![(Symbol::from("_armed"), Ty::Str), (Symbol::from("html"), Ty::Str)],
             Ty::Str,
         ),
+    );
+    // `url_for_path(path)` — the URL a jbuilder `<x>_url` answers
+    // (runtime/ruby/action_view/view_helpers.rb). Typed here so the
+    // jbuilder pair that encodes it sees a String, not an unknown the
+    // rust emitter would pass to `encode_value` as a `Value`.
+    vh.class_methods.insert(
+        Symbol::from("url_for_path"),
+        fn_sig(vec![(Symbol::from("path"), Ty::Str)], Ty::Str),
     );
     let nil_helpers = ["content_for_set", "content_for", "set_flash", "flash"];
     for name in nil_helpers {
@@ -2097,8 +2140,10 @@ pub(crate) fn partial_form_bindings(
     fn seed_scopes(e: &Expr, own_dir: Option<&str>, out: &mut Vec<(ViewKey, PartialFormBinding)>) {
         if let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*e.node {
             if method.as_str() == "form_with" {
-                if let ExprNode::Lambda { params, body, .. } = &*block.node {
-                    if let Some(form_param) = params.first() {
+                if let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node {
+                    // A block with optional or keyword parameters is not the
+                    // `|f|` scope this binds; it seeds nothing.
+                    if let Some(form_param) = params.first().filter(|_| extra_params.is_empty()) {
                         let mut record_refs: HashSet<String> = HashSet::new();
                         let mut id_prefix = String::new();
                         for arg in args {
@@ -2447,6 +2492,7 @@ pub(crate) fn partial_call_contracts(
 pub(crate) fn action_view_ivar_map(
     views: &[crate::dialect::View],
     controllers: &[crate::dialect::Controller],
+    models: &[crate::dialect::Model],
 ) -> std::collections::HashMap<(String, String), ViewArgs> {
     // The controller passes an action view its full render-tree ivar
     // closure (its own reads ∪ its partials' needs, including dynamic-
@@ -2454,6 +2500,7 @@ pub(crate) fn action_view_ivar_map(
     // deep partial reads (e.g. @user) is threaded even when the action
     // view itself doesn't read it.
     let closures = view_ivar_closures(views, controllers);
+    let json_closures = crate::lower::jbuilder_to_library::jbuilder_ivar_closures(views, models);
     let mut out = std::collections::HashMap::new();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
@@ -2502,13 +2549,12 @@ pub(crate) fn action_view_ivar_map(
             format!("{base}_{}", v.format.as_str())
         };
         let key = (module, stem);
-        // A json view has no closure entry (`view_ivar_closures` walks
-        // the ERB render tree, which a jbuilder template is not part
-        // of), so it lands on the direct-reads fallback — which is
-        // exactly right for it: a `json.partial!` child takes its
-        // record from the parent's collection expression, never from an
-        // ivar of its own. The jbuilder lowerer derives its PARAMS from
-        // the same call, so the two sides cannot disagree about arity.
+        // A json view's closure is the jbuilder render tree's
+        // (`jbuilder_ivar_closures`: its own reads and those of the
+        // partials it renders, which it passes on); `view_ivar_closures`
+        // walks the ERB tree, and a format-blind key would find an html
+        // twin's there. The jbuilder lowerer derives its PARAMS from the
+        // same map, so the two sides cannot disagree about arity.
         // The closure map is keyed the way `build_library_class` reads
         // it — `view_key_of`, the UNQUALIFIED stem — so a non-html view
         // must be looked up that way too. Reading it under the
@@ -2516,11 +2562,12 @@ pub(crate) fn action_view_ivar_map(
         // in READ order, and the call passed them in a different order
         // than the lowered view declares (lobsters' `stories.rss.builder`
         // got `@title` where it takes `stories`).
-        let ivars = view_key_of(v)
-            .and_then(|k| closures.get(&k))
-            .or_else(|| closures.get(&key))
-            .cloned()
-            .unwrap_or_else(|| view_read_ivars(&v.body));
+        let ivars = if v.jbuilder {
+            json_closures.get(&v.name).cloned()
+        } else {
+            view_key_of(v).and_then(|k| closures.get(&k)).or_else(|| closures.get(&key)).cloned()
+        }
+        .unwrap_or_else(|| view_read_ivars(&v.body));
         out.insert(
             key,
             ViewArgs {
@@ -3287,6 +3334,20 @@ fn mentions_relation(ty: &crate::ty::Ty) -> bool {
 /// `@edit_user` names its fields `user[...]` the way Rails does. Ivars
 /// whose type is anything else (a collection, a scalar, untyped) are
 /// left out — the caller falls back to its own convention.
+/// This view's ivars the analyzer typed `String` (`App::view_ivar_types`).
+fn view_str_ivars(app: &App, view_name: &Symbol) -> std::collections::HashSet<String> {
+    app.view_ivar_types
+        .get(view_name)
+        .map(|ivars| {
+            ivars
+                .iter()
+                .filter(|(_, ty)| matches!(ty, crate::ty::Ty::Str))
+                .map(|(name, _)| name.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn view_ivar_models(app: &App, view_name: &Symbol) -> std::collections::HashMap<String, String> {
     let Some(ivars) = app.view_ivar_types.get(view_name) else {
         return std::collections::HashMap::new();
@@ -3323,7 +3384,7 @@ pub(crate) fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
 /// Type of a partial/layout's record arg: a layout's `body` is the
 /// rendered-HTML String; a partial's record is the singular model for its
 /// directory (`stories/_listdetail` → `Story`), else Untyped.
-fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String]) -> crate::ty::Ty {
+pub(crate) fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String]) -> crate::ty::Ty {
     use crate::ty::Ty;
     if is_layout {
         return Ty::Str;
@@ -3455,7 +3516,16 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                 .collect(),
             kwargs: *kwargs,
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+            // A default (`|label = @page_title|`) reads the view local too.
+            extra_params: extra_params
+                .iter()
+                .map(|p| {
+                    let mut p = p.clone();
+                    p.default = p.default.as_ref().map(rewrite_ivars_to_locals);
+                    p
+                })
+                .collect(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_ivars_to_locals(body),
@@ -3541,7 +3611,7 @@ fn rewrite_lvalue(lv: &LValue) -> LValue {
 /// local (`keywords`, the strict locals after the first) keeps its name,
 /// because callers pass it by that name. Every other local is a
 /// positional param named by `safe_local` (`for` → `for_`).
-fn rewrite_local_assigns_to_locals(expr: &mut Expr, keywords: &[&str]) {
+pub(crate) fn rewrite_local_assigns_to_locals(expr: &mut Expr, keywords: &[&str]) {
     expr.node
         .for_each_child_mut(&mut |c| rewrite_local_assigns_to_locals(c, keywords));
     let reserved_read = match &*expr.node {
@@ -3603,6 +3673,12 @@ fn rewrite_defined_to_nil_check(expr: &mut Expr) {
         | ExprNode::ForwardKeywords
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                rewrite_defined_to_nil_check(key);
+                rewrite_defined_to_nil_check(value);
+            }
+        }
         ExprNode::Hash { entries, .. } => {
             for (k, v) in entries {
                 rewrite_defined_to_nil_check(k);
@@ -3998,6 +4074,10 @@ pub(super) struct ViewCtx {
     /// hidden input beside an empty `<trix-editor>` (the gem swaps the
     /// helper; `form_builder::emit_rich_text_area` follows it).
     pub(super) lexxy: bool,
+    /// Lexxy renders through Rails' `ActionText::Editor` adapter, which
+    /// drops the Trix-era `input="…_trix_input…"` attribute (see
+    /// [`lexxy_uses_editor_adapter`]).
+    pub(super) lexxy_editor_adapter: bool,
     /// Render-tree ivar closure (`view_ivar_closures`), shared across this
     /// view's scopes. `emit_render_partial` looks up a rendered partial's
     /// needed ivars here and passes them as call-site args (the caller's
@@ -4048,6 +4128,11 @@ pub(super) struct ViewCtx {
     pub(super) view_name: String,
     pub(super) ivar_models:
         std::rc::Rc<std::collections::HashMap<String, String>>,
+    /// This view's ivars the analyzer typed `String` — markup a
+    /// controller rendered ahead (`@message_html = render_to_string …`).
+    /// `turbo_stream.append target, @message_html` sends it as given
+    /// rather than rendering a partial named after it.
+    pub(super) str_ivars: std::rc::Rc<std::collections::HashSet<String>>,
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models
@@ -4301,25 +4386,16 @@ pub(crate) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
     send(Some(recv), method, args, None, true)
 }
 
-/// `"#{Rails.application.protocol}#{Rails.application.domain}#{RouteHelpers.<stem>_path(args)}"`
-/// — the grounding for bare `<x>_url` absolute route helpers
-/// (RouteHelpers only generates `_path` functions; the convention
-/// matches `rewrite_url_helpers_absolute`'s host-kwarg form). Shared
-/// by the form-action resolver and the URL-position classifier. The
-/// scheme is the request's, as Rails' `url_for` takes it: a literal
-/// `http://` was mixed content on every https page behind a proxy.
-pub(super) fn absolute_url_interp(stem: &str, args: Vec<Expr>) -> Expr {
+/// `ActionView::ViewHelpers.url_for_path(RouteHelpers.<stem>_path(args))`
+/// — the grounding for bare `<x>_url` helpers in ERB views.
+/// `url_for_path` is the shared URL seam used by jbuilder too: Ruby-family
+/// views preserve `Rails.application.domain` overrides and normalize the
+/// scheme's standard port, while strict targets keep the path because
+/// their views have no request context. Shared by ERB helper rewriting,
+/// the form-action resolver, and the URL-position classifier.
+pub(crate) fn absolute_url_interp(stem: &str, args: Vec<Expr>) -> Expr {
     let path_call = route_helpers_call(&format!("{stem}_path"), args);
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::StringInterp {
-            parts: vec![
-                InterpPart::Expr { expr: rails_application_call("protocol") },
-                InterpPart::Expr { expr: rails_application_call("domain") },
-                InterpPart::Expr { expr: path_call },
-            ],
-        },
-    )
+    view_helpers_call("url_for_path", vec![path_call])
 }
 
 /// `Rails.application.<method>` — the framework-default readers
@@ -4533,4 +4609,33 @@ mod tests {
         let n = infer_view_arg("show", "articles", false, &[]);
         assert_eq!(n, "article");
     }
+}
+
+/// Does Lexxy render through Rails' `ActionText::Editor` adapter?
+///
+/// The gem decides at boot (`Lexxy.supports_editor_adapter?`): it uses
+/// the adapter when `ActionText::Editor#editor_tag` takes a block, which
+/// is rails/rails#56926, and otherwise its own `action_text_tag.rb`
+/// (the one that writes `input="<id>_trix_input_<record>"`). Ingest
+/// sees no gem source, so the lockfile stands in: Lexxy 0.9.24 or later
+/// (the first with the adapter) over Action Text 8.2 or later. That is
+/// exact for every released Rails; the one window it misreads is a
+/// Rails main revision between the 8.2.0.alpha bump and #56926 (campfire
+/// 90b33002's rails 1a02651), which renders the old tag.
+pub(crate) fn lexxy_uses_editor_adapter(lock: &crate::gems::Lockfile) -> bool {
+    fn at_least(version: Option<&str>, min: &[u64]) -> bool {
+        let Some(v) = version else { return false };
+        let parts: Vec<u64> = v
+            .split(|c: char| c == '.' || c == '-')
+            .map_while(|p| p.parse().ok())
+            .collect();
+        for (i, want) in min.iter().enumerate() {
+            let got = parts.get(i).copied().unwrap_or(0);
+            if got != *want {
+                return got > *want;
+            }
+        }
+        true
+    }
+    at_least(lock.version_of("lexxy"), &[0, 9, 24]) && at_least(lock.version_of("actiontext"), &[8, 2])
 }

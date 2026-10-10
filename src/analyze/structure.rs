@@ -11,7 +11,7 @@ use std::hash::{Hash, Hasher};
 use super::{Analyzer, fold};
 use crate::App;
 use crate::expr::{Expr, ExprNode, LValue};
-use crate::ident::{ClassId, Symbol};
+use crate::ident::ClassId;
 
 #[derive(Clone, Default)]
 pub(super) struct Structure {
@@ -23,15 +23,15 @@ pub(super) struct Structure {
 #[derive(Default)]
 struct Observed {
     structure: Structure,
-    defined: BTreeSet<(ClassId, Symbol)>,
-    shapes: HashMap<(ClassId, Symbol), super::ParamShape>,
+    defined: BTreeSet<super::ParamKey>,
+    shapes: HashMap<super::ParamKey, super::ParamShape>,
 }
 thread_local! { static OBS: RefCell<Observed> = RefCell::new(Observed::default()); }
 
 pub(super) fn reset(
     inputs: impl FnOnce() -> (
-        BTreeSet<(ClassId, Symbol)>,
-        HashMap<(ClassId, Symbol), super::ParamShape>,
+        BTreeSet<super::ParamKey>,
+        HashMap<super::ParamKey, super::ParamShape>,
     ),
 ) {
     if super::fixpoint_check::stats_on() {
@@ -45,13 +45,13 @@ pub(super) fn reset(
         });
     }
 }
-pub(super) fn owner(f: impl FnOnce(&BTreeSet<(ClassId, Symbol)>) -> ClassId) -> ClassId {
-    OBS.with(|o| f(&o.borrow().defined))
-}
-pub(super) fn placed_arity(
-    f: impl FnOnce(&HashMap<(ClassId, Symbol), super::ParamShape>) -> usize,
-) -> usize {
-    OBS.with(|o| f(&o.borrow().shapes))
+pub(super) fn with_params<T>(
+    f: impl FnOnce(&BTreeSet<super::ParamKey>, &HashMap<super::ParamKey, super::ParamShape>) -> T,
+) -> T {
+    OBS.with(|o| {
+        let o = o.borrow();
+        f(&o.defined, &o.shapes)
+    })
 }
 pub(super) fn write(slot: String, writer: String) {
     if super::fixpoint_check::stats_on() {
@@ -64,8 +64,7 @@ pub(super) fn fold_write(key: &fold::SlotKey, writer: &str) {
     }
 }
 pub(super) fn param_site(
-    class: &ClassId,
-    method: &Symbol,
+    (class, method, side): &super::ParamKey,
     n: usize,
     span: &crate::span::Span,
     context: Option<&ClassId>,
@@ -75,7 +74,7 @@ pub(super) fn param_site(
     }
     for i in 0..n {
         write(
-            format!("param:{}#{}:{i}", class.0, method),
+            format!("param:{}:{side:?}#{}:{i}", class.0, method),
             format!("call:{:?}:context:{context:?}", fold::site_of(span)),
         );
     }
@@ -159,9 +158,9 @@ impl Analyzer {
                 s.add_slot(format!("attribute:{}@{name}", id.0));
             }
         }
-        for ((class, method), row) in &self.inferred_params {
+        for ((class, method, side), row) in &self.inferred_params {
             for i in 0..row.len() {
-                s.add_slot(format!("param:{}#{}:{i}", class.0, method));
+                s.add_slot(format!("param:{}:{side:?}#{}:{i}", class.0, method));
             }
         }
         for (decl, _) in &self.typed_constants {
@@ -187,10 +186,10 @@ impl Analyzer {
                 format!("body:{:?}:{context}", fold::site_of(&m.body.span)),
             );
             for (i, p) in m.params.iter().enumerate() {
-                s.add_slot(format!("param:{}#{}:{i}", id.0, m.name));
+                s.add_slot(format!("param:{}:{:?}#{}:{i}", id.0, m.receiver, m.name));
                 if let Some(default) = &p.default {
                     s.write(
-                        format!("param:{}#{}:{i}", id.0, m.name),
+                        format!("param:{}:{:?}#{}:{i}", id.0, m.receiver, m.name),
                         format!("default:{:?}:{context}", fold::site_of(&default.span)),
                     );
                     syntax(default, &context, id.0.as_str(), &mut s);

@@ -50,7 +50,7 @@ pub(crate) fn join_on() -> bool {
     *JOIN
 }
 
-type MethodKey = (ClassId, Symbol);
+type MethodKey = super::ParamKey;
 
 #[derive(Default)]
 struct State {
@@ -152,7 +152,7 @@ pub(crate) fn join_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
                 row.resize(prev.len(), Ty::Var { var: TyVar(0) });
             }
             for (slot, old) in row.iter_mut().zip(prev) {
-                let next = bound(join_slot(old.clone(), slot.clone()));
+                let next = bound(super::unify_param_ty(old.clone(), slot.clone()));
                 super::det::note("fold.join_params", Some(&old), &next);
                 *slot = next;
             }
@@ -169,7 +169,10 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
     }
     ST.with(|s| {
         let mut s = s.borrow_mut();
-        for key in super::fold::reference_mode_methods() {
+        let mut keys: Vec<_> = params.keys().chain(s.prev_params.keys()).cloned().collect();
+        keys.sort();
+        keys.dedup();
+        for key in keys.into_iter().filter(|k| super::fold::in_reference_mode(&k.0, &k.1)) {
             let prev = s.prev_params.get(&key).cloned();
             let row = params.entry(key.clone()).or_default();
             if let Some(prev) = prev {
@@ -177,7 +180,7 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
                     row.resize(prev.len(), Ty::Var { var: TyVar(0) });
                 }
                 for (slot, old) in row.iter_mut().zip(prev) {
-                    let next = join_slot(old.clone(), slot.clone());
+                    let next = super::unify_param_ty(old.clone(), slot.clone());
                     super::det::note("fold.join_param_row", Some(&old), &next);
                     *slot = next;
                 }
@@ -234,7 +237,7 @@ pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool
                 row.resize(prev.len(), Ty::Var { var: TyVar(0) });
             }
             for (slot, old) in row.iter_mut().zip(prev) {
-                let next = join_slot(old.clone(), slot.clone());
+                let next = super::unify_param_ty(old.clone(), slot.clone());
                 super::det::note("fold.join_param_row", Some(&old), &next);
                 *slot = next;
             }

@@ -45,6 +45,7 @@ BASE = [
     "build-roundhouse",
     "store-check",
     "compare-ruby",
+    "compare-ruby-next",
     "campfire-conformance",
     "campfire-compare",
 ]
@@ -53,6 +54,18 @@ BASE = [
 # must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
 CORE = ["spinel-build", "spinel-toolchain", "spinel-compare"]
+JRUBY_BIND_INPUTS = {
+    "tests/param_binds_jruby.rb",
+    "tests/support/jdbc_value_semantics.rb",
+    "tests/support/jdbc_cleanup_failures.rb",
+    "tests/param_binds_runtime.rb",
+    "tests/param_binds_nil.rb",
+    "tests/param_binds_values.rs",
+    "tests/param_binds_values.rb",
+    "tests/param_binds_cleanup.rs",
+    "tests/param_binds_cleanup.rb",
+    "runtime/spinel/test/statement_cache_cases.rb",
+}
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
     "date_columns_spinel",
@@ -63,8 +76,60 @@ SPINEL_TESTS = [
     "spinel_stmt_cache_lru",
     "db_sqlite_concurrency",
     "spinel_param_builder",
+    "spinel_net_http_start",
     "rails_compat_vectors_spinel",
+    "spinel_pg_db",
+    "generated_columns_spinel",
+    "postgres_json_types_spinel",
+    "pessimistic_locking",
+    "not_found_parity_spinel",
 ]
+# Inputs of the PostgreSQL Db gate (tests/spinel_pg_db.rs): the shim, its
+# RBS, the contract and time parsing it compiles with, and the cases.
+PG_DB_INPUTS = {
+    "runtime/spinel/db_pg.rb",
+    "runtime/spinel/db_pg.rbs",
+    "runtime/spinel/pg_errors.rb",
+    "runtime/spinel/pg_errors.rbs",
+    "runtime/ruby/db.rbs",
+    "runtime/spinel/active_support_time_parsing.rb",
+    "runtime/spinel/active_support_time_parsing.rbs",
+    "tests/spinel_pg_db_cases.rb",
+}
+GENERATED_COLUMNS_SPINEL_INPUTS = {
+    "src/emit/ruby/library.rs",
+    "src/emit/shared/schema_sql.rs",
+    "src/schema.rs",
+    "src/schema/generated.rs",
+    "src/ingest/schema.rs",
+    "src/ingest/structure_sql.rs",
+    "src/lower/persistence.rs",
+    "src/lower/generated_write_guard.rs",
+    "src/lower/model_to_library/mod.rs",
+    "src/lower/model_to_library/row.rs",
+    "src/lower/model_to_library/schema.rs",
+    "tests/support/emit_and_run.rs",
+}
+# Inputs of the reopened Net::HTTP gate (tests/spinel_net_http_start.rs):
+# the reopen and the two stub tables it compiles with.
+NET_HTTP_INPUTS = {
+    "runtime/spinel/net_http.rb",
+    "runtime/spinel/http_stub.rb",
+    "runtime/spinel/http_stub.rbs",
+    "runtime/spinel/tcp_socket_stub.rb",
+    "runtime/spinel/tcp_socket_stub.rbs",
+}
+JSON_TYPES_SPINEL_INPUTS = {
+    "src/schema.rs",
+    "src/ingest/schema.rs",
+    "src/ingest/structure_sql.rs",
+    "src/ingest/model.rs",
+    "src/emit/shared/schema_sql.rs",
+    "src/lower/arel/ruby_values.rs",
+    "src/lower/model_to_library/mod.rs",
+    "src/lower/model_to_library/schema.rs",
+}
+
 SPINEL11 = [
     "spinel-build",
     "spinel-framework",
@@ -80,8 +145,14 @@ SPINEL11 = [
 ]
 # Main-push / unknown-input Spinel suite (advisory). PR `ci:spinel` uses the
 # narrower CORE focus lane (built in focus_plan) and makes those jobs required.
-SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results"]
-ADVISORY = set(SPINEL11) - {"campfire-archive-build"}
+# campfire-latest runs where the advisory Spinel suite does (main push,
+# unknown inputs) and on Full: a same-day signal after every merge. A pull
+# request never plans it, `ci:full` and unknown inputs included
+# (`select(campfire_latest=False)`): the PR's own diff cannot move it.
+SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results", "campfire-latest"]
+# campfire-latest tracks basecamp/once-campfire main unpinned: it reports
+# how far main is from CAMPFIRE_SHA and never gates (see the workflow).
+ADVISORY = (set(SPINEL11) - {"campfire-archive-build"}) | {"campfire-latest"}
 # Extra-language ledger jobs: advisory on Full/path unless a focus label
 # makes them required for a fix round.
 LEDGER_EXTRAS = {"compare-extra", "smoke-extra"}
@@ -140,8 +211,8 @@ def focus_plan(extras=(), jruby=False, spinel=False):
     """BASE plus selected focus lanes; path ownership suppressed.
 
     Focused extras / jruby / CORE Spinel are merge-gate required for the
-    fix round. Unrelated extras, WASM, rust/ts compare, Writebook, and the
-    heavy Spinel11 Campfire suite stay off.
+    fix round. Unrelated extras, WASM, rust/ts compare, and the heavy
+    Spinel11 Campfire suite stay off.
     """
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
     jobs = list(BASE)
@@ -211,6 +282,15 @@ def native_coverage(path):
         suites.add(focused[1])
     if path == "tests/support/db_concurrency_spinel.rb":
         suites.add("db_sqlite_concurrency")
+    if (
+        path in GENERATED_COLUMNS_SPINEL_INPUTS
+        or path.startswith("tests/support/generated_columns_")
+        or path.startswith("src/lower/arel/")
+        or path.startswith("src/lower/model_to_library/adapter_emit/")
+    ):
+        suites.add("generated_columns_spinel")
+    if path in JSON_TYPES_SPINEL_INPUTS:
+        suites.add("postgres_json_types_spinel")
     # Gate drivers stay flat beside their Rust harness. Match the most
     # specific suite first (e.g. param_binds_values before param_binds).
     if path == "tests/param_binds_text_cleanup.rb":
@@ -223,6 +303,8 @@ def native_coverage(path):
                 break
     if path == "runtime/spinel/test/statement_cache_cases.rb":
         suites.add("param_binds")
+    if path in PG_DB_INPUTS:
+        suites.add("spinel_pg_db")
     if path in {
         "tests/support/emit_and_run.rs",
         "src/lower/model_to_library/adapter_emit.rs",
@@ -247,7 +329,11 @@ def native_coverage(path):
             )
         ) or path.startswith("runtime/spinel/tep/url."):
             owned_tests.add("rails_compat_vectors_spinel")
-        if any(
+        if name in {"db_pg.rb", "db_pg.rbs", "pg_errors.rb", "pg_errors.rbs"}:
+            # PostgreSQL, not SQLite: the SQLite database suites below
+            # never load it.
+            owned_tests.add("spinel_pg_db")
+        elif any(
             word in path for word in ("/db", "sqlite", "active_support_time_parsing")
         ):
             # Shared database inputs own lease/ownership, binds, cache recency,
@@ -262,6 +348,8 @@ def native_coverage(path):
             )
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
+        if path in NET_HTTP_INPUTS:
+            owned_tests.add("spinel_net_http_start")
         if name in {
             "date.rb",
             "date.rbs",
@@ -344,6 +432,7 @@ def select(
     focus_spinel=False,
     publish=False,
     project_scope=None,
+    campfire_latest=True,
 ):
     focus_extras = tuple(focus_extras or ())
     # Publication always requires full mode — reject before any narrow lane
@@ -356,7 +445,7 @@ def select(
         return focus_plan(focus_extras, focus_jruby, focus_spinel)
     if spinel_lane and not full:
         return finish(
-            SPINEL_LANE,
+            [j for j in SPINEL_LANE if campfire_latest or j != "campfire-latest"],
             [],
             [],
             False,
@@ -367,25 +456,18 @@ def select(
         )
     targets, smoke = set(), set()
     jobs_selected, spinel_tests = set(), set()
-    wasm = site = spinel = writebook = False
+    wasm = site = spinel = False
     reasons = []
     for path in paths:
         if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
             targets.update(("ruby", "jruby"))
             smoke.update(("ruby", "jruby"))
-            writebook = True
             if project_scope == "ruby-family":
                 spinel = True
                 jobs_selected.update(SPINEL11)
                 spinel_tests.update(SPINEL_TESTS)
             reasons.append(f"{path}: proven {project_scope} assembly bodies only")
             continue
-        if path in {
-            "tests/support/jdbc_cleanup_failures.rb",
-            "runtime/spinel/test/statement_cache_cases.rb",
-        }:
-            targets.add("jruby")
-            reasons.append(f"{path}: JDBC statement lifecycle")
         match = re.match(r"(?:src/emit/|runtime/)([^/.]+)(?:[/.]|$)", path)
         test = re.match(
             r"tests/(?:framework_tests_)?([a-z]+)_toolchain\.rs$|tests/framework_tests_([a-z]+)\.rs$",
@@ -398,6 +480,9 @@ def select(
             if test
             else None
         )
+        if path in JRUBY_BIND_INPUTS:
+            targets.add("jruby")
+            reasons.append(f"{path}: JDBC bind contract")
         native, interpreter_only, owned_tests = native_coverage(path)
         spinel_tests.update(owned_tests)
         if native or owned_tests:
@@ -460,14 +545,14 @@ def select(
         if archive_jobs:
             spinel = True
             jobs_selected.update(archive_jobs)
-        if path in {"tests/writebook.rs", "tests/fixtures/writebook-inventory.json"}:
-            writebook = True
     if full:
         targets.update(TARGETS)
         smoke.update(TARGETS)
-        wasm = site = spinel = writebook = True
+        wasm = site = spinel = True
         reasons.append("full validation requested")
         jobs_selected.update(SPINEL11)
+        if campfire_latest:
+            jobs_selected.add("campfire-latest")
         spinel_tests.update(SPINEL_TESTS)
     if spinel:
         jobs_selected.add("spinel-build")
@@ -500,9 +585,9 @@ def select(
         jobs.append("build-site")
     if "build-site" in jobs or {"build-site", "campfire-archive-build"} & jobs_selected:
         jobs_selected.add("archive-results")
-    jobs.extend(j for j in [*SPINEL11, "archive-results"] if j in jobs_selected)
-    if writebook:
-        jobs.append("writebook-inventory")
+    jobs.extend(
+        j for j in [*SPINEL11, "archive-results", "campfire-latest"] if j in jobs_selected
+    )
     if publish:
         if not full:
             raise ValueError("publication requires full validation mode")
@@ -857,6 +942,7 @@ def main():
         focus_spinel=focus_spinel,
         publish=publish,
         project_scope=project_scope,
+        campfire_latest=not pr,
     )
     if reason:
         plan["reasons"].append(reason)
@@ -874,6 +960,20 @@ def main():
             )
     if spinel and spinel != "master" and not SHA.fullmatch(spinel):
         raise ValueError("invalid Spinel revision")
+    campfire = ""
+    if "campfire-latest" in plan["jobs"]:
+        try:
+            campfire = subprocess.check_output(
+                ["gh", "api", "repos/basecamp/once-campfire/commits/main", "--jq", ".sha"],
+                text=True,
+            ).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            campfire = "main"
+            plan["reasons"].append(
+                "Campfire main lookup unavailable: campfire-latest fetches the branch tip"
+            )
+    if campfire and campfire != "main" and not SHA.fullmatch(campfire):
+        raise ValueError("invalid Campfire revision")
     write_outputs(
         {
             "plan": plan,
@@ -890,6 +990,7 @@ def main():
             "site": plan["site"],
             "publish": plan["publish"],
             "spinel-revision": spinel,
+            "campfire-latest-revision": campfire,
         }
     )
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):

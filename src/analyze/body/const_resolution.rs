@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rubydex::diagnostic::{Diagnostic as RubydexDiagnostic, Rule};
 use rubydex::indexing::local_graph::LocalGraph;
@@ -25,13 +25,13 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::{FileId, SourceFile, Span};
 use crate::ty::Ty;
 
-// Rubydex's minimal built-ins stop at Object/Module/Class. These are
-// Ruby core classes already modeled by Roundhouse's primitive dispatch,
-// declared as RBS so the source graph resolves them by Ruby name.
-const CORE_RBS: &str = "\
+// Rubydex's minimal built-ins stop at Object/Module/Class. Classes
+// without value Consts live in `CORE_RBS_BASE`; value Consts are one
+// table (`CORE_VALUE_CONSTS`) that builds both the RBS fields and the
+// typed answer — a second copy is how the type drifts from the graph.
+const CORE_RBS_BASE: &str = "\
 class Numeric < Object\nend\n\
 class Integer < Numeric\nend\n\
-class Float < Numeric\n  INFINITY: Float\n  NAN: Float\n  EPSILON: Float\n  MAX: Float\n  MIN: Float\nend\n\
 class String < Object\nend\n\
 class Array < Object\nend\n\
 class Hash < Object\nend\n\
@@ -43,6 +43,97 @@ class NilClass < Object\nend\n\
 class Regexp < Object\nend\n\
 class Exception < Object\nend\n\
 class StandardError < Exception\nend\n";
+
+/// `(owner, field, type)` — Ruby's `Owner::FIELD` value Consts.
+/// `core_rbs()` emits the RBS; `core_value_type` answers the type.
+const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
+    ("Float", "INFINITY", || Ty::Float),
+    ("Float", "NAN", || Ty::Float),
+    ("Float", "EPSILON", || Ty::Float),
+    ("Float", "MAX", || Ty::Float),
+    ("Float", "MIN", || Ty::Float),
+    ("IO", "NULL", || Ty::Str),
+    ("File", "NULL", || Ty::Str),
+    // `File.open(path, File::RDWR | File::CREAT, 0644)` and
+    // `file.flock(File::LOCK_EX | File::LOCK_NB)` — campfire's WAL
+    // checkpointer. Ruby defines them on `File::Constants`, which `File`
+    // includes; CRuby and spinel answer the same POSIX values.
+    ("File", "RDONLY", || Ty::Int),
+    ("File", "WRONLY", || Ty::Int),
+    ("File", "RDWR", || Ty::Int),
+    ("File", "CREAT", || Ty::Int),
+    ("File", "EXCL", || Ty::Int),
+    ("File", "TRUNC", || Ty::Int),
+    ("File", "APPEND", || Ty::Int),
+    ("File", "LOCK_SH", || Ty::Int),
+    ("File", "LOCK_EX", || Ty::Int),
+    ("File", "LOCK_NB", || Ty::Int),
+    ("File", "LOCK_UN", || Ty::Int),
+    ("Encoding", "UTF_8", encoding_ty),
+    ("Encoding", "BINARY", encoding_ty),
+    ("Encoding", "ASCII_8BIT", encoding_ty),
+    ("Encoding", "US_ASCII", encoding_ty),
+];
+
+/// Classes that own rows in `CORE_VALUE_CONSTS`, with their RBS parents.
+const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
+    ("Float", "Numeric"),
+    ("IO", "Object"),
+    ("File", "IO"),
+    ("Encoding", "Object"),
+];
+
+fn encoding_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("Encoding")), args: vec![].into() }
+}
+
+fn rbs_type_name(ty: &Ty) -> &'static str {
+    match ty {
+        Ty::Float => "Float",
+        Ty::Int => "Integer",
+        Ty::Str => "String",
+        Ty::Class { id, .. } if id.0.as_str() == "Encoding" => "Encoding",
+        _ => "untyped",
+    }
+}
+
+fn core_rbs() -> &'static str {
+    static RBS: OnceLock<String> = OnceLock::new();
+    RBS.get_or_init(|| {
+        let mut out = String::from(CORE_RBS_BASE);
+        for (class, parent) in CORE_VALUE_CLASSES {
+            out.push_str("class ");
+            out.push_str(class);
+            out.push_str(" < ");
+            out.push_str(parent);
+            out.push('\n');
+            for (owner, field, ty) in CORE_VALUE_CONSTS {
+                if owner == class {
+                    out.push_str("  ");
+                    out.push_str(field);
+                    out.push_str(": ");
+                    out.push_str(rbs_type_name(&ty()));
+                    out.push('\n');
+                }
+            }
+            out.push_str("end\n");
+        }
+        out
+    })
+    .as_str()
+}
+
+/// The type of a value constant `core_rbs()` declares, as Ruby defines it.
+fn core_value_type(name: &str) -> Option<Ty> {
+    CORE_VALUE_CONSTS.iter().find_map(|(owner, field, ty)| {
+        let need = owner.len() + 2 + field.len();
+        (name.len() == need
+            && name.as_bytes().get(..owner.len()) == Some(owner.as_bytes())
+            && name.as_bytes().get(owner.len()..owner.len() + 2) == Some(b"::".as_slice())
+            && name.as_bytes().get(owner.len() + 2..) == Some(field.as_bytes()))
+        .then(|| ty())
+    })
+}
 
 const CORE_URI: &str = "roundhouse-core:rbs";
 const RUNTIME_URI_PREFIX: &str = "roundhouse-runtime:";
@@ -499,7 +590,7 @@ fn index_sources(sources: &[SourceFile]) -> Graph {
     let mut documents = vec![Document {
         uri_prefix: CORE_URI,
         path: "",
-        text: CORE_RBS,
+        text: core_rbs(),
         language: LanguageId::Rbs,
     }];
     documents.extend(
@@ -664,22 +755,17 @@ fn answer_file(
                         })
                     });
                     let name = declaration.name();
-                    let builtin_float = matches!(
-                        name,
-                        "Float::INFINITY"
-                            | "Float::NAN"
-                            | "Float::EPSILON"
-                            | "Float::MAX"
-                            | "Float::MIN"
-                    ) && declaration.definitions().iter().all(|id| {
-                        graph
-                            .definitions()
-                            .get(id)
-                            .and_then(|definition| graph.documents().get(definition.uri_id()))
-                            .is_some_and(|document| document.uri() == CORE_URI)
+                    let builtin = core_value_type(name).filter(|_| {
+                        declaration.definitions().iter().all(|id| {
+                            graph
+                                .definitions()
+                                .get(id)
+                                .and_then(|definition| graph.documents().get(definition.uri_id()))
+                                .is_some_and(|document| document.uri() == CORE_URI)
+                        })
                     });
-                    let runtime = if builtin_float {
-                        Some(Arc::new(Ty::Float))
+                    let runtime = if let Some(ty) = builtin {
+                        Some(Arc::new(ty))
                     } else if !app_write && is_runtime_declaration(graph, declaration) {
                         runtime_value_types().get(declaration.name()).cloned()
                     } else {

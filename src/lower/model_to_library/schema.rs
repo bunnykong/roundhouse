@@ -358,6 +358,12 @@ pub(super) fn push_schema_methods(
     push_schema_symbol_list(methods, owner, "schema_date_columns", table, |c| {
         matches!(c.col_type, crate::schema::ColumnType::Date)
     });
+    push_schema_symbol_list(methods, owner, "schema_boolean_columns", table, |c| {
+        matches!(c.col_type, crate::schema::ColumnType::Boolean)
+    });
+    push_schema_symbol_list(methods, owner, "schema_decimal_columns", table, |c| {
+        matches!(c.col_type, crate::schema::ColumnType::Decimal { .. })
+    });
 
     // def self.instantiate(row); instance = from_row(<Model>Row.from_raw(row)); instance.mark_persisted!; instance; end
     //
@@ -366,6 +372,15 @@ pub(super) fn push_schema_methods(
     // the model via `<Model>.from_row(typed_row)`. The Hash-shaped
     // boundary stops at `from_raw`; everything downstream is typed.
     methods.push(synth_instantiate(owner, model_declares_after_initialize(model)));
+
+    // def attributes_before_type_cast; { "id" => @id, "created_at" => @created_at_raw, ... }; end
+    //
+    // Rails' raw column values, String-keyed: each column's STORAGE slot,
+    // which is exactly what hydration wrote (`hydration_setter`) — the
+    // DB text of a temporal column, an enum's stored integer, a JSON
+    // column's text. So `instantiate` on the result rebuilds the record; campfire's `RecordCache` snapshots records
+    // this way. Shaken when nothing calls it.
+    methods.push(synth_attributes_before_type_cast(owner, table));
 
     // def self.from_row(row); instance = new; instance.<col> = row.<col>; ...; instance; end
     //
@@ -530,7 +545,42 @@ pub fn shakeable_synthesized_names(table: &Table, model: &Model) -> Vec<Symbol> 
     }
     // Mirrors `synth_update_typed(.., bang: true)`.
     names.push(Symbol::from("update!"));
+    names.push(Symbol::from("attributes_before_type_cast"));
     names
+}
+
+fn synth_attributes_before_type_cast(owner: &ClassId, table: &Table) -> MethodDef {
+    let entries = table
+        .columns
+        .iter()
+        .map(|col| {
+            let key = with_ty(lit_str(col.name.as_str().to_string()), Ty::Str);
+            let value = with_ty(
+                Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
+                super::ty_of_column_slot(col),
+            );
+            (key, value)
+        })
+        .collect();
+    let ret = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::gradual()) };
+    let body = with_ty(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false }), ret.clone());
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("attributes_before_type_cast"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(Vec::new(), ret)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
 }
 
 fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
@@ -999,7 +1049,10 @@ fn is_generic_json_col(col: &Column, model: &Model) -> bool {
     if crate::lower::serialize::json_serialize_columns(model).contains(&col.name) {
         return true;
     }
-    matches!(col.col_type, crate::schema::ColumnType::Json)
+    matches!(
+        col.col_type,
+        crate::schema::ColumnType::Json | crate::schema::ColumnType::Jsonb
+    )
         && !crate::lower::has_json::has_json_decls(&model.body)
             .iter()
             .any(|decl| decl.column == col.name)
@@ -2731,8 +2784,9 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     // has_secure_password virtual attrs: `User.new(password: "...",
     // password_confirmation: "...")` is the factory/signup shape —
     // Rails routes them through the macro's plaintext writers (where
-    // digest computation lives). The digest COLUMN was already covered
-    // by the column loop above.
+    // digest computation lives). A supplied nil also reaches the writer;
+    // only an omitted key is skipped. The digest COLUMN was already
+    // covered by the column loop above.
     if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
         for key in [attr.as_str().to_string(), format!("{}_confirmation", attr.as_str())] {
             let lookup = Expr::new(
@@ -2745,7 +2799,24 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                     parenthesized: false,
                 },
             );
-            stmts.push(assign_via_writer_unless_nil(Symbol::from(format!("{key}=")), lookup));
+            let assign = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(self_ref()),
+                    method: Symbol::from(format!("{key}=")),
+                    args: vec![lookup],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: bool_send(var_ref(attrs.clone()), "key?", lit_sym(Symbol::from(key))),
+                    then_branch: assign,
+                    else_branch: nil_lit(),
+                },
+            ));
         }
     }
 
@@ -2829,6 +2900,28 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     // has_one gets `nil` (single record or absent). Harmless on dynamic
     // targets. Names from `associations::{cache_ivar,loaded_ivar}`.
     for assoc in model.associations() {
+        // belongs_to's `<name>_loaded?` (`push_singular_loaded_reader`)
+        // reads the flag the ruby family's load-once reader sets. The
+        // strict targets' reader queries every time and never sets it,
+        // so it has to exist there as `false` or the read names a field
+        // the class never declared (TS `article_loaded`, Go
+        // `ArticleLoaded`). On those targets `loaded?` stays false.
+        if let Association::BelongsTo { name, polymorphic: false, .. } = assoc {
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: super::associations::loaded_ivar(name) },
+                    value: with_ty(
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Lit { value: Literal::Bool { value: false } },
+                        ),
+                        Ty::Bool,
+                    ),
+                },
+            ));
+            continue;
+        }
         if let Association::HasOne { name, .. } = assoc {
             stmts.push(Expr::new(
                 Span::synthetic(),
@@ -3094,13 +3187,23 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         })
         .collect();
 
-    let body = Expr::new(
-        Span::synthetic(),
-        ExprNode::Case {
-            scrutinee: var_ref(name.clone()),
-            arms,
-        },
-    );
+    // An armless `case` (no columns at all) is a Ruby syntax error.
+    // `table.columns` is empty for a degenerate `create_table ..., id:
+    // false do |t| end` — the column-list twin of the controller-side
+    // `synth_index_read`'s bug when its permit list has no scalar keys
+    // (`tests/params_all_non_scalar_keys.rs`). Same `Ty::Untyped`
+    // signature either way.
+    let body = if arms.is_empty() {
+        nil_lit()
+    } else {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Case {
+                scrutinee: var_ref(name.clone()),
+                arms,
+            },
+        )
+    };
 
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -3340,13 +3443,37 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
         })
         .collect();
 
-    let body = Expr::new(
-        Span::synthetic(),
-        ExprNode::Case {
-            scrutinee: var_ref(name.clone()),
-            arms,
-        },
-    );
+    // Same armless-`case` gap as the reader right above (empty
+    // `table.columns`): nothing to assign, so the natural no-op body is
+    // a bare `nil`, discarding both `name` and `value` — Ruby doesn't
+    // require a method to use its params, so this stays a legal `[]=`
+    // that always and harmlessly declines the write (the actual
+    // behavior Rails' own `[]=` has on an unknown attribute: raise, not
+    // silently no-op, but THIS method is unreachable in practice — a
+    // column-free table has no model code that could call `[]=` with a
+    // real column name — so the choice here is simply "parses, does
+    // nothing", not an attempt to match Rails' semantics).
+    // Same armless-`case` gap as the reader right above (empty
+    // `table.columns`): nothing to assign, so the natural no-op body is
+    // a bare `nil`, discarding both `name` and `value` — Ruby doesn't
+    // require a method to use its params, so this stays a legal `[]=`
+    // that always and harmlessly declines the write (the actual
+    // behavior Rails' own `[]=` has on an unknown attribute: raise, not
+    // silently no-op, but THIS method is unreachable in practice — a
+    // column-free table has no model code that could call `[]=` with a
+    // real column name — so the choice here is simply "parses, does
+    // nothing", not an attempt to match Rails' semantics).
+    let body = if arms.is_empty() {
+        nil_lit()
+    } else {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Case {
+                scrutinee: var_ref(name.clone()),
+                arms,
+            },
+        )
+    };
 
     // Value/return types are a union of every column's type. Crystal
     // needs the value param annotated with this union so the per-arm
@@ -3901,6 +4028,7 @@ fn synth_update_hash(
     .chain(crate::lower::plain_text_attr::plain_text_attrs(model))
     .map(|(_s, a)| a)
     .collect();
+    let secure_password = crate::lower::secure_password::secure_password_attr(&model.body);
     let mut virtuals = super::writable_field_set(model, table);
     // Hand-written `def <field>=` in the model body. `writable_field_set`
     // deliberately leaves these out — its callers hold a field name and
@@ -3943,7 +4071,16 @@ fn synth_update_hash(
                 parenthesized: false,
             },
         );
-        stmts.push(guard_unless_nil(lookup(&field), assign));
+        // Only the secure-password pair changes nil dispatch here; other
+        // virtual writers retain their existing value guard.
+        let password_field = secure_password.as_ref().is_some_and(|attr| {
+            &field == attr || field.as_str() == format!("{}_confirmation", attr.as_str())
+        });
+        stmts.push(if password_field {
+            when_present(&field, assign)
+        } else {
+            guard_unless_nil(lookup(&field), assign)
+        });
     }
 
     stmts.push(Expr::new(

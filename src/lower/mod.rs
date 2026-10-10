@@ -77,6 +77,7 @@ pub mod class_body_new;
 pub mod mocha;
 pub mod webmock;
 pub mod global_id_locate;
+pub mod record_snapshot;
 pub mod array_ordinal;
 pub mod each_with_index;
 pub mod sti_is_a;
@@ -94,6 +95,8 @@ pub mod as_json_writer;
 pub mod as_json_super;
 pub mod parameterize;
 pub mod random_formatter;
+pub mod bigdecimal;
+pub mod range_enumerable;
 pub mod to_json;
 pub mod number_to_fs;
 pub mod string_inflections;
@@ -138,8 +141,10 @@ pub mod destroy_by;
 pub mod has_one_builder;
 pub mod inquiry;
 pub mod byte_size;
+pub mod numeric_unary;
 pub mod tag_builder;
 pub mod kwsplat;
+pub mod arel_sql_order;
 pub mod literal_append;
 pub mod html_safe;
 pub mod rails_cache;
@@ -161,6 +166,7 @@ pub mod send_file;
 pub mod helper_kwargs;
 pub mod kwrest_forward;
 pub mod column_ops;
+pub mod generated_write_guard;
 pub mod signed_id;
 pub(crate) mod secure_token;
 pub mod rich_text;
@@ -314,6 +320,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("number_to_fs", &[]),
     ("string_inflections", &[]),
     ("to_json", &[]),
+    ("bigdecimal", &[]),
+    ("range_enumerable", &[]),
     ("csv_generate", &[]),
     ("presence_in", &[]),
     ("enumerable_ext", &[]),
@@ -373,6 +381,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // (`attribute_aliases` keys on `read_attribute`). Extra test
     // constant / inner-class surfaces stay try_guard-only.
     ("try_guard", &[]),
+    // `Model.instantiate(attrs)` / `name.constantize.instantiate(attrs)` —
+    // Rails' raw-attribute rebuild. Keys on `instantiate` and nothing
+    // another pass produces.
+    ("record_snapshot", &[]),
     // After time_calendar (fused earlier): `t.all_month` becomes the Range literal this splits out.
     // Stays sequential: rewrite plus a diagnostic walk that tracks
     // `where`/`find_by` condition position. Fusing the rewrite would
@@ -506,6 +518,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("symbolize_keys", &["config_reader"]),
     // No runs_after: it reads the ingested enum tables and rewrites only the key argument.
     ("enum_mapping_keys", &[]),
+    // `-x` / `+x` on a typed Integer or Float → `x * -1` / `x`; local
+    // expression rewrite, no ordering constraints.
+    ("numeric_unary", &[]),
     // `f(**h)` (erased to `f(h)` at ingest) → `f(k: h[:k], …)` when the
     // callee declares explicit keywords. Reads the arg count against the
     // callee's signature, so it must see the argument list as ingested —
@@ -537,7 +552,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // so it has no ordering constraints of its own.
     ("module_mixins", &[]),
     ("transaction_ground", &[]),
-    ("column_ops", &[]),
+    ("generated_write_guard", &[]),
+    ("column_ops", &["generated_write_guard"]),
     // `signed_id(purpose: :avatar)` → the runtime SignedId call, with
     // the model name folded into the purpose. BEFORE `duration`: the
     // `expires_in:` argument this wraps in `.to_i` is an
@@ -580,7 +596,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // include dropped. Reads only the class's own writer surface and
     // writes only new methods, so no ordering constraints.
     ("active_model_model", &[]),
-    ("update_kwargs", &[]),
+    ("update_kwargs", &["generated_write_guard"]),
     // `record.update!(creator: user)` -> `update!(creator_id: user.id)`.
     // AFTER `update_kwargs`, which INLINES the same shape into typed
     // writer assignments when it can — and a `belongs_to` writer is the
@@ -769,6 +785,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("number_to_fs");
     ran!("string_inflections");
     ran!("to_json");
+    ran!("bigdecimal");
+    ran!("range_enumerable");
     ran!("csv_generate");
     ran!("presence_in");
     ran!("enumerable_ext");
@@ -813,6 +831,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("global_id_locate");
     ran!("assoc_pluck");
     ran!("try_guard");
+    record_snapshot::apply_record_snapshot_lowering(app);
+    ran!("record_snapshot");
     diags.extend(where_range_split::apply_where_range_split(app));
     ran!("where_range_split");
     sti_scope::apply_sti_scope_lowering(app);
@@ -866,6 +886,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("symbolize_keys");
     enum_mapping_keys::apply_enum_mapping_keys(app);
     ran!("enum_mapping_keys");
+    numeric_unary::apply_numeric_unary_lowering(app);
+    ran!("numeric_unary");
     diags.extend(crate::timings::phase("post-analyze: kwsplat", || {
         kwsplat::apply_kwsplat_expansion(app)
     }));
@@ -887,6 +909,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("module_mixins");
     transaction_ground::apply_transaction_grounding(app);
     ran!("transaction_ground");
+    diags.extend(generated_write_guard::apply(app));
+    ran!("generated_write_guard");
     column_ops::apply_column_ops_lowering(app);
     ran!("column_ops");
     signed_id::apply_signed_id_lowering(app);
@@ -957,7 +981,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("attached_url");
     diags.extend(kwrest_forward::apply_kwrest_forward_lowering(app));
     ran!("kwrest_forward");
-    helper_kwargs::apply_helper_kwarg_positional_lowering(app);
+    diags.extend(helper_kwargs::apply_helper_kwarg_positional_lowering(app));
     ran!("helper_kwargs");
     view_to_library::form_wrapper::preserve_argument_owners(app, registry);
     ran!("form_wrapper_owners");

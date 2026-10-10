@@ -67,6 +67,8 @@ module SQL
   # open_v2 flags: READWRITE | CREATE | URI. The first two are what plain
   # `sqlite3_open` uses, so a non-URI path opens identically either way.
   ffi_const :OPEN_URI_RWC, 70
+  # READONLY | URI, for `SQLite3::Database.new(path, readonly: true)`.
+  ffi_const :OPEN_URI_READONLY, 65
 
   ffi_func :sqlite3_open,              [:str, :ptr],                          :int
   # `sqlite3_open` honors a `file:` URI only on a build compiled with
@@ -123,10 +125,16 @@ module SQL
   ffi_func :sqlite3_errmsg,            [:ptr],                                :str
   ffi_func :sqlite3_last_insert_rowid, [:ptr],                                :long
   ffi_func :sqlite3_changes,           [:ptr],                                :int
+  # 3035000 for 3.35.0; Db.exec_returning needs at least that.
+  ffi_func :sqlite3_libversion_number, [],                                    :int
   # 0 while the connection is inside a transaction (BEGIN … COMMIT),
   # non-zero in autocommit — the "is a transaction open?" probe the
   # request read snapshot and the write permit ask before acting.
   ffi_func :sqlite3_get_autocommit,    [:ptr],                                :int
+  # `SQLite3::Database` (runtime/spinel/sqlite3_database.rb): a busy
+  # timeout per connection, and 64-bit integer columns.
+  ffi_func :sqlite3_busy_timeout,      [:ptr, :int],                          :int
+  ffi_func :sqlite3_column_int64,      [:ptr, :int],                          :long
 
   # Out-params — sqlite3_open writes the db handle here, prepare_v2
   # writes the stmt handle. 8 bytes is enough for a 64-bit pointer.
@@ -138,6 +146,10 @@ module SQL
   # The background checkpointer's own connection, opened from its thread
   # after the pool exists — its own buffer for the same reason as seed_out.
   ffi_buffer :ckpt_out, 8
+  # `SQLite3::Database`'s own out-params, so an app's connection never
+  # writes into a buffer the pool reads.
+  ffi_buffer :sq_db_out, 8
+  ffi_buffer :sq_stmt_out, 8
   ffi_read_ptr :read_ptr, 0
 end
 
@@ -669,6 +681,10 @@ class DbConn
   #
   # Only non-parameterized SQL participates: a `?`-bearing string's
   # result depends on binds set after prepare, which are not in the key.
+  def qc_on?
+    @qc_on
+  end
+
   def qc_begin
     @qc_on = true
     @qc_by_sql = {}
@@ -720,6 +736,33 @@ class DbConn
     end
     @qc_recording[ptr] = QcEntry.new(sql, ncols, names)
     nil
+  end
+
+  # A fresh, unbounded capture of `ptr`'s rows (Db.exec_returning).
+  def qc_entry_for(ptr, sql)
+    ncols = SQL.sqlite3_column_count(ptr)
+    names = []
+    i = 0
+    while i < ncols
+      n = SQL.sqlite3_column_name(ptr, i)
+      names.push(n.nil? ? "" : n)
+      i += 1
+    end
+    QcEntry.new(sql, ncols, names)
+  end
+
+  # A replay handle over rows already read in full. Unlike a cache hit it
+  # is never published, and it works with the request cache off: cursors
+  # last until the next lease boundary (qc_begin/qc_end).
+  def qc_adopt(entry)
+    @qc_cursors.push(QcCursor.new(entry, false))
+    @qc_cursors.length
+  end
+
+  # Test-only: the live slot count, to check that `qc_finalize` actually
+  # shrinks `@qc_cursors` back down instead of only nilling a slot.
+  def qc_cursors_count
+    @qc_cursors.length
   end
 
   # A capture is BOUNDED at this many rows; a result that grows past it
@@ -821,11 +864,24 @@ class DbConn
     step_checked(ptr)
   end
 
+  # Releases the cursor slot, same as a real stmt's finalize releasing
+  # its checkout. An already-finalized handle is a silent no-op, as
+  # `release` is for a real ptr already removed from `@open`.
+  #
+  # `@qc_cursors` is only cleared wholesale at a lease boundary
+  # (qc_begin/qc_end), so a script calling exec_returning + finalize
+  # outside with_connection kept every capture forever. Nil the slot and
+  # pop any now-trailing nils so the array does not grow unbounded, while
+  # every other live handle keeps its index (a popped middle slot would
+  # shift them).
   def qc_finalize(handle)
     c = qc_cursor(handle)
+    return nil if c.nil?
     if c.promoted
       release(c.real_ptr)
     end
+    @qc_cursors[handle - 1] = nil
+    @qc_cursors.pop while !@qc_cursors.empty? && @qc_cursors.last.nil?
     nil
   end
 
@@ -1012,6 +1068,32 @@ class DbPool
     @lock.synchronize do
       @free.push(idx)
       @cv.signal
+    end
+    nil
+  end
+
+  # Claim connection index `idx` SPECIFICALLY, not "any free index" —
+  # `pin_transaction` always claims index 0, the same connection
+  # `current_conn`'s unleased fallback hands out, so a `with_connection`
+  # lease elsewhere cannot also check that connection out from under an
+  # open, unleased (bare) transaction. Waits, like `lease`, while
+  # another lease already holds it.
+  def reserve(idx)
+    @lock.synchronize do
+      claimed = false
+      while !claimed
+        i = 0
+        while i < @free.length
+          if @free[i] == idx
+            @free.delete_at(i)
+            claimed = true
+            i = @free.length
+          else
+            i += 1
+          end
+        end
+        @cv.wait(@lock) if !claimed
+      end
     end
     nil
   end
@@ -1214,10 +1296,39 @@ module Db
     @prepare_lock
   end
 
+  # `ActiveRecord::Base.connection_db_config` answers from these
+  # (runtime/spinel/active_record_db_config.rb): the database this
+  # process configured, the adapter name Rails would report for it, and
+  # whether the holder is inside a transaction of its own — the request
+  # read snapshot is the shim's, not the app's, so it does not count.
+  def self.database_path
+    @db_path
+  end
+
+  def self.adapter_name
+    "sqlite3"
+  end
+
+  def self.transaction_open?
+    conn = current_conn
+    conn.in_txn? && conn.snap != 2
+  end
+
   def self.current_conn
     c = Thread.current[:db_conn]
     return c if !c.nil?
     @pools[0].first
+  end
+
+  # `ActiveRecord::Base.transaction`'s per-thread nesting depth
+  # (connection.rb) — see the contract note in runtime/ruby/db.rbs.
+  def self._txn_depth
+    d = Thread.current[:ar_txn_depth]
+    d.nil? ? 0 : d
+  end
+
+  def self._txn_depth=(value)
+    Thread.current[:ar_txn_depth] = value
   end
 
   # Request-scoped connection lease for the thread-per-connection
@@ -1244,6 +1355,11 @@ module Db
   end
 
   def self.with_connection
+    # Re-entrant: a nested lease, or one inside a transaction that a BEGIN
+    # outside any lease pinned (`pin_transaction`), keeps the thread's
+    # connection. A second lease would rebind it and, on release, unbind
+    # (and roll back) the outer holder's.
+    return yield if !Thread.current[:db_conn].nil?
     pool = pool_for_thread
     idx = pool.lease
     conn = pool.conn(idx)
@@ -1320,6 +1436,12 @@ module Db
 
   def self.query_cache_end
     current_conn.qc_end
+  end
+
+  # Is the replay cache on for this connection? `ActiveRecord::Base.
+  # uncached` turns it off for a block and back on after.
+  def self.query_cache_enabled?
+    current_conn.qc_on?
   end
 
   # ── The request read snapshot ──
@@ -1482,6 +1604,124 @@ module Db
   def self.exec(sql)
     record_query(sql)
     conn = current_conn
+    # A bare BEGIN reserves (and binds) the connection BEFORE it runs,
+    # not after: reserving only once the BEGIN has already executed
+    # left a window, between the statement completing and the
+    # reservation removing index 0 from the pool's free list, where a
+    # `with_connection` lease on another thread could still check that
+    # same connection out — same race `pin_transaction` otherwise
+    # closes, just narrowed to this one statement instead of the whole
+    # transaction. A failed BEGIN releases the reservation: no
+    # transaction opened, so there is nothing left to protect.
+    if sql == "BEGIN" && !conn.in_txn? && !in_lease?
+      @pools[0].reserve(0)
+      begin
+        write(conn, sql, false)
+      rescue Exception => e
+        @pools[0].release(0)
+        raise e
+      end
+      Thread.current[:db_conn] = conn
+      Thread.current[:db_txn_pin] = true
+    else
+      # A COMMIT or ROLLBACK that itself raises (SQLite already aborted
+      # the transaction some other way) must not skip pin_transaction:
+      # without it the reservation this thread took at BEGIN leaks, and
+      # on pool_size 1 no other thread can ever lease again. A plain
+      # `begin/ensure` with no `rescue` clause is the one shape Spinel
+      # (matz/spinel#8182) runs the `ensure` for even when the exception
+      # propagates uncaught, so this needs no explicit duplicate the way
+      # `self.transaction`'s `rescue`-plus-`ensure` does. pin_transaction
+      # reads `conn.in_txn?` itself to decide whether to release — a
+      # raise that left the transaction genuinely open (not SQLite's
+      # doing) keeps the reservation, same as a successful write that
+      # hasn't reached COMMIT/ROLLBACK yet.
+      begin
+        write(conn, sql, false)
+      ensure
+        pin_transaction(conn)
+      end
+    end
+    # A value, not `nil`: spinel compiles a method ending in a bare nil
+    # as void, and `Db.with_connection { Db.exec(...) }` assigns the
+    # block's value (`result = yield`), which cannot hold a void.
+    true
+  end
+
+  # A BEGIN outside a lease binds its connection to this thread until
+  # the transaction ends, as db_pg.rb does (roundhouse#585). Without it a
+  # lease taken inside the transaction (`Rails::Executor#wrap`, a cable
+  # broadcast, a job) checked out ANOTHER connection: its writes waited
+  # out the write permit and failed on SQLite's lock, or, when the shard
+  # handed back the transaction's own connection, `release_abandoned_write`
+  # rolled the transaction back at the lease's end and the rest of the
+  # block autocommitted. Pinned, `in_lease?` is true, so the executor and
+  # `with_connection` reuse the connection instead of leasing.
+  #
+  # The pin ALSO claims a real lease on the pool (`DbPool#reserve`), not
+  # just the thread-local binding: `current_conn`'s unleased fallback is
+  # always `@pools[0].first` (index 0), the exact connection this pins,
+  # so without a real reservation a `with_connection` lease on another
+  # thread could check that same connection out from under this open,
+  # unleased transaction — with pool_size 1 there is nowhere else for it
+  # to come from. Its cleanup (`release_abandoned_write`) would then roll
+  # this thread's still-open transaction back out from under it.
+  #
+  # `self.exec`'s own BEGIN case reserves and pins BEFORE running the
+  # statement (see its comment) rather than waiting for this method to
+  # notice `conn.in_txn?` afterward, so the `elsif !in_lease?` branch
+  # below is a defensive fallback for any OTHER path that might open a
+  # transaction, not the one BEGIN itself takes.
+  def self.pin_transaction(conn)
+    if !conn.in_txn?
+      if Thread.current[:db_txn_pin] == true
+        Thread.current[:db_conn] = nil
+        @pools[0].release(0)
+      end
+      Thread.current[:db_txn_pin] = false
+    elsif !in_lease?
+      @pools[0].reserve(0)
+      Thread.current[:db_conn] = conn
+      Thread.current[:db_txn_pin] = true
+    end
+    nil
+  end
+
+  # A write that returns rows (`INSERT … RETURNING`, roundhouse#91): it
+  # runs under exec's discipline (query cache cleared, snapshot ended,
+  # write permit), every row is read before the permit goes back, and
+  # the handle replays them like a query-cache hit. `changes` is the
+  # write's row count. Finalize the handle as for a read.
+  def self.exec_returning(sql)
+    v = SQL.sqlite3_libversion_number
+    if !returning_supported?(v)
+      raise "Db.exec_returning: RETURNING needs SQLite 3.35 or newer; this process links " + v.to_s
+    end
+    record_query(sql)
+    conn = current_conn
+    e = write(conn, sql, true)
+    raise "Db.exec_returning: no result for " + sql if e.nil?
+    conn.qc_adopt(e)
+  end
+
+  # Test-only hook: the current connection's live query-cache cursor
+  # count (see `DbConn#qc_cursors_count`). Lets a shared test script
+  # (tests/param_binds_runtime.rb) assert captures do not accumulate
+  # without pulling in connection internals.
+  def self.qc_cursor_count
+    current_conn.qc_cursors_count
+  end
+
+  # RETURNING arrived in SQLite 3.35.0 (3035000). An older library gets
+  # a clear error rather than a syntax error, as #91 agreed.
+  def self.returning_supported?(version_number)
+    version_number >= 3035000
+  end
+
+  # exec's write path. `returning` reads the rows into a QcEntry and
+  # returns it; otherwise nil.
+  def self.write(conn, sql, returning)
+    out = nil
     # Any exec is (per the Db contract) DDL or a write — Rails
     # invalidates the whole query cache on write; so do we.
     conn.qc_clear
@@ -1489,7 +1729,7 @@ module Db
     if conn.holds_permit
       # Inside this connection's own transaction: already permitted.
       begin
-        exec_raw(conn, sql)
+        out = run_write(conn, sql, returning)
       ensure
         if sql == "ROLLBACK" || (sql == "COMMIT" && !conn.in_txn?)
           conn.holds_permit = false
@@ -1499,7 +1739,7 @@ module Db
     elsif conn.in_txn?
       # A transaction begun WITHOUT the permit (its wait timed out):
       # SQLite's lock is already held, nothing to queue for.
-      exec_raw(conn, sql)
+      out = run_write(conn, sql, returning)
     elsif sql == "BEGIN"
       # IMMEDIATE, as Rails 8's SQLite adapter begins: the write lock is
       # taken at BEGIN, never by upgrading a stale read part way through.
@@ -1518,17 +1758,38 @@ module Db
     else
       got = acquire_permit
       begin
-        exec_raw(conn, sql)
+        out = run_write(conn, sql, returning)
       ensure
         release_permit if got
       end
     end
-    # A value, not `nil`: spinel compiles a method ending in a bare nil
-    # as void, and `Db.with_connection { Db.exec(...) }` assigns the
-    # block's value (`result = yield`), which cannot hold a void.
-    true
+    out
   end
 
+  def self.run_write(conn, sql, returning)
+    return returning_raw(conn, sql) if returning
+    exec_raw(conn, sql)
+    nil
+  end
+
+  def self.returning_raw(conn, sql)
+    ptr = conn.prepare_uncached(sql)
+    e = conn.qc_entry_for(ptr, sql)
+    begin
+      begin
+        while conn.step_checked(ptr)
+          e.record_row(ptr)
+        end
+      rescue RuntimeError => err
+        raise ActiveRecord::RecordNotUnique, err.message if Db.unique_violation?(err.message)
+        raise err
+      end
+      e.mark_eof
+    ensure
+      conn.release(ptr)
+    end
+    e
+  end
   def self.exec_raw(conn, sql)
     h = conn.dbh
     rc = SQL.sqlite3_exec(h, sql, nil, nil, nil)

@@ -133,14 +133,17 @@ fn article_lowers_with_schema_methods() {
     );
 
     // The non-attr scaffold: table_name, schema_columns,
-    // schema_time_columns, schema_date_columns, instantiate, initialize,
-    // attributes, [], []=, update.
+    // schema_time_columns, schema_date_columns, schema_boolean_columns,
+    // schema_decimal_columns,
+    // instantiate, initialize, attributes, [], []=, update.
     for expected in [
         "table_name",
         "_table_sql",
         "schema_columns",
         "schema_time_columns",
         "schema_date_columns",
+        "schema_boolean_columns",
+        "schema_decimal_columns",
         "instantiate",
         "initialize",
         "attributes",
@@ -163,6 +166,8 @@ fn article_lowers_with_schema_methods() {
         "schema_columns",
         "schema_time_columns",
         "schema_date_columns",
+        "schema_boolean_columns",
+        "schema_decimal_columns",
         "instantiate",
         "from_row",
         "from_stmt",
@@ -1246,6 +1251,12 @@ fn collect_untyped_lowered(
         | ExprNode::ForwardKeywords
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_untyped_lowered(key, path, out);
+                collect_untyped_lowered(value, path, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped_lowered(cond, &format!("{path}/if.cond"), out);
             collect_untyped_lowered(then_branch, &format!("{path}/if.then"), out);

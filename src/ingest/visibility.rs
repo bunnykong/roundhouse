@@ -23,6 +23,7 @@ pub(super) struct Visibility {
     known: HashMap<(bool, String), Vec<usize>>,
     changed: HashSet<(bool, String)>,
     accessors: HashSet<(bool, String)>,
+    defaults: HashMap<usize, MethodVisibility>,
 }
 
 pub(super) fn marker(call: &CallNode<'_>) -> bool {
@@ -49,6 +50,44 @@ pub(super) fn definition<'pr>(node: &Node<'pr>) -> Option<ruby_prism::DefNode<'p
 }
 
 impl Visibility {
+    /// Recover lexical defaults for source declarations that a later pass
+    /// synthesizes into methods. Parse and walk each class body once per file.
+    pub(super) fn declaration_defaults(
+        source: &str,
+        file: &str,
+    ) -> HashMap<usize, MethodVisibility> {
+        let parsed = ruby_prism::parse(source.as_bytes());
+        let root = parsed.node();
+        let mut defaults = HashMap::new();
+        let bodies = super::util::find_all_classes_with_scope(&root)
+            .into_iter()
+            .filter_map(|(_, class)| class.body())
+            .chain(
+                super::util::find_all_module_declarations_with_scope(&root)
+                    .into_iter()
+                    .filter_map(|(_, module)| module.body()),
+            );
+        for body in bodies {
+            if let Ok(visibility) = Self::resolve(Some(&body), file, None) {
+                defaults.extend(visibility.defaults);
+            }
+            for statement in flatten_statements(body) {
+                let Some(call) = statement.as_call_node() else { continue };
+                if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
+                    continue;
+                }
+                let block_body = call
+                    .block()
+                    .and_then(|block| block.as_block_node())
+                    .and_then(|block| block.body());
+                if let Ok(visibility) = Self::resolve(block_body.as_ref(), file, None) {
+                    defaults.extend(visibility.defaults);
+                }
+            }
+        }
+        defaults
+    }
+
     pub(super) fn resolve(
         body: Option<&Node<'_>>,
         file: &str,
@@ -268,9 +307,18 @@ impl Visibility {
                 self.invalid |= self.reject_defs;
             }
         }
+        // A def inside a call's block belongs to that block's owner, not
+        // to this class: a DSL block (has_many extensions), or the class
+        // a constant is assigned from — `ContentKey = Data.define(:digest)
+        // do def cache_key … end end` (campfire's FragmentCache),
+        // `Struct.new(…) do … end`.
+        let owns_defs = node.as_call_node().is_some()
+            || node
+                .as_constant_write_node()
+                .is_some_and(|w| w.value().as_call_node().is_some_and(|c| c.block().is_some()));
         let mut declarations = Declarations {
             invalid: false,
-            reject_defs: node.as_call_node().is_none(),
+            reject_defs: !owns_defs,
         };
         ruby_prism::Visit::visit(&mut declarations, node);
         if declarations.invalid {
@@ -296,6 +344,7 @@ impl Visibility {
         let mut module_function = false;
         for statement in flatten_statements(body) {
             let offset = statement.location().start_offset();
+            self.defaults.insert(offset, default);
             let def = definition(&statement);
             let node = &statement;
             let mut inline = None;
@@ -446,6 +495,14 @@ impl Visibility {
                 continue;
             }
             let Some(call) = node.as_call_node() else {
+                // `X = Data.define(:a) do def … end` defines X's methods,
+                // not this body's; `library_class::data_block_classes`
+                // gives them a class of their own.
+                if node.as_constant_write_node().is_some_and(|cw| {
+                    super::library_class::data_define_block(&cw.value()).is_some()
+                }) {
+                    continue;
+                }
                 // A `def` is handled above. Anything else — an `if` that
                 // wraps a definition, a modifier that does not — still
                 // has to be rejected when it hides a marker or a `def`.

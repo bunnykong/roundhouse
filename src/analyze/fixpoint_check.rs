@@ -91,10 +91,8 @@ pub(super) fn verify_on() -> bool {
     *VERIFY
 }
 
-/// Whether `RH_FIXPOINT_STATS` is set.
-pub(super) fn stats_on() -> bool {
-    *STATS
-}
+/// Whether the fixpoint statistics are enabled.
+pub(super) fn stats_on() -> bool { *STATS }
 
 static BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 static BOUND_CUTS: AtomicU64 = AtomicU64::new(0);
@@ -207,8 +205,6 @@ pub(super) fn type_hash(t: &Ty) -> u64 {
             }
         }
         Ty::Relation { of } => of.0.as_str().hash(&mut h),
-        // A fold reference hashes by its slot's key, which names the slot
-        // the same way in every run.
         Ty::Rec { slot } => format!("{:?}", super::fold::key_of(*slot)).hash(&mut h),
         Ty::Fn { params, block, ret, effects } => {
             for p in params.iter() {
@@ -469,9 +465,10 @@ impl Analyzer {
         for (decl, t) in &self.typed_constants {
             put("constants", format!("decl {decl:?}"), type_hash(t));
         }
-        for ((id, m), row) in &self.inferred_params {
+        for ((id, m, side), row) in &self.inferred_params {
             let row: Vec<u64> = row.iter().map(type_hash).collect();
-            put("params", format!("{}#{}", id.0.as_str(), m.as_str()), hash_of(row));
+            let sep = if *side == crate::dialect::MethodReceiver::Class { "." } else { "#" };
+            put("params", format!("{}{sep}{}", id.0.as_str(), m.as_str()), hash_of(row));
         }
         for ((id, m), bindings) in &self.refined_action_bindings {
             put(
@@ -554,7 +551,7 @@ impl Analyzer {
         app: &mut App,
         inputs: &RoundInputs<'_>,
         which: Loop,
-        snapshot: Option<&mut HashMap<(ClassId, Symbol), Vec<Ty>>>,
+        snapshot: Option<&mut HashMap<super::ParamKey, Vec<Ty>>>,
     ) {
         let before = self.state_fp(app);
         match which {
@@ -625,7 +622,7 @@ impl Analyzer {
         }
         if *STATS {
             line["structure"] = serde_json::json!({
-                "schema": 1, "scope": "observed-cumulative-equations",
+                "schema": 2, "scope": "observed-cumulative-equations",
                 "start": self.fixpoint_checks.structure_start,
                 "end": self.fixpoint_checks.structure_end,
                 "unchanged": self.fixpoint_checks.structure_start == self.fixpoint_checks.structure_end,
@@ -666,7 +663,6 @@ impl Analyzer {
 mod tests {
     use super::*;
     use crate::ident::TyVar;
-    use std::sync::Arc;
 
     fn union(variants: Vec<Ty>) -> Ty {
         Ty::Union { variants: variants.into() }
@@ -786,20 +782,20 @@ end
 
     #[test]
     fn type_hash_tells_containers_apart() {
-        let arr = Ty::Array { elem: Arc::new(Ty::Int) };
-        let hash = Ty::Hash { key: Arc::new(Ty::Int), value: Arc::new(Ty::Int) };
+        let arr = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Int), value: std::sync::Arc::new(Ty::Int) };
         assert_ne!(type_hash(&arr), type_hash(&hash));
-        assert_ne!(type_hash(&arr), type_hash(&Ty::Array { elem: Arc::new(Ty::Str) }));
+        assert_ne!(type_hash(&arr), type_hash(&Ty::Array { elem: std::sync::Arc::new(Ty::Str) }));
     }
 
     #[test]
     fn untyped_is_found_at_any_depth() {
         let deep = Ty::Hash {
-            key: Arc::new(Ty::Str),
-            value: Arc::new(Ty::Array { elem: Arc::new(union(vec![Ty::Int, Ty::unresolved()])) }),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::unresolved()])) }),
         };
         assert!(holds_untyped(&deep));
-        assert!(!holds_untyped(&Ty::Array { elem: Arc::new(Ty::Int) }));
+        assert!(!holds_untyped(&Ty::Array { elem: std::sync::Arc::new(Ty::Int) }));
     }
 
     #[test]

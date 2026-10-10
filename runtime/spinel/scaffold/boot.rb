@@ -29,6 +29,11 @@ require_relative "runtime/db"
 # the stdlib equivalents with semantically-identical implementations
 # for the surface framework Ruby actually uses.
 require_relative "runtime/base64"
+# Module-only Shellwords — packages/shellwords reopens String/Array and
+# poisons String#split (PolyArray → C compile fail). See
+# runtime/spinel/shellwords.rb; defining the module drops BUNDLED's
+# require "shellwords".
+require_relative "runtime/shellwords"
 require_relative "runtime/json_impl"
 # JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
 # emits calls to (`Views::Articles.article_json` etc.). Separate from
@@ -40,6 +45,9 @@ require_relative "runtime/json_builder"
 # calls these instead of open-coding `is_a?` narrowing per field, so the
 # type test lives in one transpiled body rather than in generated code
 # whose shape each emitter has to recognize.
+# Mime - `Params.wrap` asks the registry whether a request body is JSON
+# (Rails' own synonyms and parameters included).
+require_relative "runtime/mime"
 require_relative "runtime/params"
 # ActionText::Content — the coder behind a `has_rich_text` attribute.
 # The RichText RECORD is an ordinary lowered model (it has a table);
@@ -59,6 +67,9 @@ require_relative "runtime/active_support_duration"
 # type to ground on. Before anything that can hold a `present?` site.
 require_relative "runtime/active_support_ext"
 require_relative "runtime/rails"
+# `ActiveSupport::Cache::MemoryStore` (a `Rails::Cache`) and
+# `ActiveSupport::Cache.expand_cache_key`.
+require_relative "runtime/active_support_cache"
 # Ruby's `Logger` + `ActiveSupport::Logger`/`TaggedLogging` — the stack
 # `config.logger =` builds, and the `Logger::Formatter` an app's own
 # formatter subclasses (a LOAD-time reference, so this must precede
@@ -103,6 +114,9 @@ require_relative "runtime/active_record_serialization"
 # Record equality (same class + same persisted id) — a reopen of
 # ActiveRecord::Base; the CRuby overlay's twin is active_record_bang.rb.
 require_relative "runtime/active_record_equality_spinel"
+# `ActiveRecord::Base.connection_db_config`, `connection_pool` and
+# `transaction_open?` over the Db shim loaded above.
+require_relative "runtime/active_record_db_config"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
 # Typed Request value object (remote_ip / referer / xhr? / env bag) —
@@ -236,6 +250,13 @@ require_relative "config/routes"
 # same-name cmeth dispatch (matz/spinel#517), so this is now a plain
 # require_relative under both CRuby and spinel.
 require_relative "config/importmap"
+# Rails' fragment caching through the controller: reopens
+# `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
+# defines them.
+require_relative "runtime/action_controller_fragment_caching"
+# Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
+# feature; strict non-Ruby targets keep the bounded shared implementation.
+require_relative "runtime/action_controller_head"
 # The app/models.rb aggregator (generated — see apply_models_aggregator)
 # loads every model/support class. Model files only require their own
 # LOAD-time deps (superclass, class-body consts); method-body references

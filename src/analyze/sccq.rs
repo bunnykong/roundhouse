@@ -378,7 +378,7 @@ fn hasher() -> std::collections::hash_map::DefaultHasher {
 
 // ─────────────────────────── engine data ───────────────────────────
 
-pub(super) type ParamKey = (ClassId, Symbol);
+pub(super) type ParamKey = super::ParamKey;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Family {
@@ -403,6 +403,7 @@ pub(super) struct Unit {
     pub class: ClassId,
     pub name: Symbol,
     pub own_key: Option<ParamKey>,
+    pub class_side: bool,
     pub names: Vec<Symbol>,
     pub ivars: Vec<Symbol>,
     pub ivar_write: bool,
@@ -653,8 +654,8 @@ pub(super) struct Engine {
     pub def_index: HashMap<Symbol, Vec<u32>>,
     pub key_units: HashMap<ParamKey, Vec<u32>>,
     pub class_idx: HashMap<ClassId, u32>,
-    pub defined: BTreeSet<(ClassId, Symbol)>,
-    pub params_by_method: HashMap<(ClassId, Symbol), ParamShape>,
+    pub defined: BTreeSet<ParamKey>,
+    pub params_by_method: HashMap<ParamKey, ParamShape>,
     // parameter rows
     pub site_index: HashMap<ParamKey, BTreeMap<(u32, u32), Vec<Ty>>>,
     pub unit_ord: Vec<u32>,
@@ -815,56 +816,24 @@ impl Engine {
     /// Fold the sites recorded for `key` the way `apply_param_sites` does.
     fn fold_sites(&self, key: &ParamKey) -> Option<Vec<Ty>> {
         let sites = self.site_index.get(key)?;
-        let mut entry: Option<Vec<Ty>> = None;
-        for args in sites.values() {
-            let arity = args.len();
-            let e = entry.get_or_insert_with(|| (0..arity).map(|_| var0()).collect());
-            if e.len() < arity {
-                e.resize(arity, var0());
-            }
-            for (slot, observed) in e.iter_mut().zip(args.iter()) {
-                let next = super::fixpoint_bound::bound(super::unify_param_ty(slot.clone(), observed.clone()));
-                super::det::note("params.unify.sccq", Some(&*slot), &next);
-                *slot = next;
-            }
-        }
-        entry
+        let mut rows = HashMap::new();
+        let observations = sites.values().map(|args| (key.clone(), args.clone())).collect();
+        super::fold_param_observations(&mut rows, observations);
+        rows.remove(key)
     }
 
-    /// The row main's unify leaves for `key`: sites, the concern fold, then
-    /// the test overlay (absorb only).
+    /// Use the same join-then-bound phases as main: sites, concerns, overlay.
     fn final_row(&self, key: &ParamKey) -> Option<Vec<Ty>> {
-        let mut entry = self.base_rows.get(key).cloned();
-        if let Some(from) = self.fold_from.get(key) {
-            for inc in from {
-                if let Some(tys) = self.base_rows.get(inc) {
-                    let e = entry.get_or_insert_with(Vec::new);
-                    if e.len() < tys.len() {
-                        e.resize(tys.len(), var0());
-                    }
-                    for (slot, observed) in e.iter_mut().zip(tys.iter()) {
-                        let next = super::fixpoint_bound::bound(super::unify_param_ty(slot.clone(), observed.clone()));
-                super::det::note("params.unify.sccq", Some(&*slot), &next);
-                *slot = next;
-                    }
-                }
-            }
-        }
-        if let Some(ov) = self.overlay.get(key) {
-            for args in ov {
-                let arity = args.len();
-                let e = entry.get_or_insert_with(|| (0..arity).map(|_| var0()).collect());
-                if e.len() < arity {
-                    e.resize(arity, var0());
-                }
-                for (slot, observed) in e.iter_mut().zip(args.iter()) {
-                    let next = super::fixpoint_bound::bound(super::unify_param_ty(slot.clone(), observed.clone()));
-                super::det::note("params.unify.sccq", Some(&*slot), &next);
-                *slot = next;
-                }
-            }
-        }
-        entry
+        let mut rows = HashMap::new();
+        if let Some(row) = self.base_rows.get(key) { rows.insert(key.clone(), row.clone()); }
+        let concern_observations = self.fold_from.get(key).into_iter().flatten()
+            .filter_map(|inc| self.base_rows.get(inc).map(|row| (key.clone(), row.clone())))
+            .collect();
+        super::fold_param_observations(&mut rows, concern_observations);
+        let overlay = self.overlay.get(key).into_iter().flatten()
+            .map(|args| (key.clone(), args.clone())).collect();
+        super::fold_param_observations(&mut rows, overlay);
+        rows.remove(key)
     }
 
     fn stats_json(&self) -> String {
@@ -1122,7 +1091,7 @@ impl Analyzer {
         };
         let sole_includer = app.sole_includer_of_modules();
         let new_unit = |eng: &mut Engine, family: Family, ci: usize, mi: usize, entry: usize,
-                        class: &ClassId, name: &Symbol, _class_side: bool, body: &Expr,
+                        class: &ClassId, name: &Symbol, class_side: bool, body: &Expr,
                         extra: &[&Expr], own_key: Option<ParamKey>| -> u32 {
             let (ivars, ivar_write) = scan_ivars(body);
             let id = eng.units.len() as u32;
@@ -1134,6 +1103,7 @@ impl Analyzer {
                 class: class.clone(),
                 name: name.clone(),
                 own_key,
+                class_side,
                 names: scan_names(body, extra, name),
                 ivars,
                 ivar_write,
@@ -1163,7 +1133,7 @@ impl Analyzer {
                 let extra: Vec<&Expr> = m.params.iter().filter_map(|p| p.default.as_ref()).collect();
                 let side = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
                 let u = new_unit(&mut eng, Family::Lib, ci, mi, entry, &lc.name, &m.name, side,
-                                 &m.body, &extra, Some((lc.name.clone(), m.name.clone())));
+                                 &m.body, &extra, Some((lc.name.clone(), m.name.clone(), m.receiver)));
                 methods.push(u);
             }
             eng.lib_units.push(methods.clone());
@@ -1194,7 +1164,7 @@ impl Analyzer {
                 let extra: Vec<&Expr> = m.params.iter().filter_map(|p| p.default.as_ref()).collect();
                 let side = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
                 let u = new_unit(&mut eng, Family::ModelMethod, ci, mi, entry, &model.name, &m.name,
-                                 side, &m.body, &extra, Some((model.name.clone(), m.name.clone())));
+                                 side, &m.body, &extra, Some((model.name.clone(), m.name.clone(), m.receiver)));
                 methods.push(u);
             }
             let mut scopes = Vec::new();
@@ -1233,7 +1203,7 @@ impl Analyzer {
                 let mut extra: Vec<&Expr> = a.opt_params.iter().map(|(_, e)| e).collect();
                 extra.extend(a.kw_params.iter().filter_map(|(_, e)| e.as_ref()));
                 let u = new_unit(&mut eng, Family::CtrlAction, ci, ai, entry, &c.name, &a.name, false,
-                                 &a.body, &extra, Some((c.name.clone(), a.name.clone())));
+                                 &a.body, &extra, Some((c.name.clone(), a.name.clone(), crate::dialect::MethodReceiver::Instance)));
                 actions.push(u);
                 members.push(u);
             }
@@ -1244,7 +1214,7 @@ impl Analyzer {
             }).enumerate() {
                 let extra: Vec<&Expr> = m.params.iter().filter_map(|p| p.default.as_ref()).collect();
                 let u = new_unit(&mut eng, Family::CtrlClassMethod, ci, mi, entry, &c.name, &m.name, true,
-                                 &m.body, &extra, Some((c.name.clone(), m.name.clone())));
+                                 &m.body, &extra, Some((c.name.clone(), m.name.clone(), m.receiver)));
                 cmethods.push(u);
                 members.push(u);
             }
@@ -1516,7 +1486,7 @@ impl Analyzer {
         &mut self,
         app: &App,
         bodies: &[(Option<u32>, usize, usize)],
-        sites: &[(ClassId, Symbol, Vec<Ty>, super::SiteKeywords)],
+        sites: &[super::SendSite],
     ) {
         let Some(mut eng) = self.sccq.take() else { return };
         let t0 = std::time::Instant::now();
@@ -1531,7 +1501,8 @@ impl Analyzer {
             let raw = &sites[*from..*to];
             let mut h = hasher();
             raw.len().hash(&mut h);
-            for (class_id, method, args, kws) in raw {
+            for (class_id, method, args, kws, recv) in raw {
+                std::mem::discriminant(recv).hash(&mut h);
                 class_id.0.as_str().hash(&mut h);
                 method.as_str().hash(&mut h);
                 args.len().hash(&mut h);
@@ -1567,14 +1538,12 @@ impl Analyzer {
                 affected.insert(k.clone());
             }
             let mut resolved: Vec<(ParamKey, Vec<Ty>)> = Vec::with_capacity(raw.len());
-            for (i, (class_id, method, args, kws)) in raw.iter().enumerate() {
-                let owner = self.inherited_param_owner(&eng.defined, class_id.clone(), method);
-                let placed = Self::place_keyword_args(
-                    eng.params_by_method.get(&(owner.clone(), method.clone())),
-                    args.clone(),
-                    kws.clone(),
-                );
-                let key = (owner, method.clone());
+            for site in raw {
+                let Some((key, placed)) = self.resolve_param_site(site.clone(), &eng.params_by_method, &eng.defined) else { continue };
+                // Side selection can discard a site (`x.class.m` beside only
+                // an instance def). Cache and removal indices address the
+                // retained sites, just as the fine-unit evaluation does.
+                let i = resolved.len();
                 eng.site_index.entry(key.clone()).or_default().insert((ord as u32, i as u32), placed.clone());
                 affected.insert(key.clone());
                 resolved.push((key, placed));
@@ -1707,10 +1676,12 @@ impl Analyzer {
                     if !spliced_from_here && owned.contains(&(id.clone(), name.clone())) {
                         continue;
                     }
-                    let inc = (id.clone(), name.clone());
-                    let module_key = (m.clone(), name.clone());
-                    from.entry(module_key.clone()).or_default().push(inc.clone());
-                    into.entry(inc).or_default().push(module_key);
+                    for side in [crate::dialect::MethodReceiver::Instance, crate::dialect::MethodReceiver::Class] {
+                        let inc = (id.clone(), name.clone(), side);
+                        let module_key = (m.clone(), name.clone(), side);
+                        from.entry(module_key.clone()).or_default().push(inc.clone());
+                        into.entry(inc).or_default().push(module_key);
+                    }
                 }
             }
         }
@@ -2006,7 +1977,7 @@ impl Analyzer {
                 Family::CtrlAction => {
                     // Main's block-value harvest reads controller actions.
                     if let Some(a) = app.controllers[wu.ci].actions().nth(wu.mi) {
-                        if self.returns_block_value(&class, &a.body, a.block_param.as_ref()) {
+                        if self.returns_block_value(&class, &a.name, &a.body, a.block_param.as_ref()) {
                             any = true;
                         }
                     }
@@ -2015,7 +1986,7 @@ impl Analyzer {
             };
             if let Some(m) = method {
                 let bp = m.block_param.as_ref().map(|p| &p.name);
-                if self.returns_block_value(&class, &m.body, bp) {
+                if self.returns_block_value(&class, &m.name, &m.body, bp) {
                     any = true;
                 }
             }
@@ -2129,6 +2100,7 @@ impl Analyzer {
                             &action.params,
                             &action.kw_params,
                             action.block_param.as_ref(),
+                            action.rest_param.as_ref(),
                         );
                         self.body_typer().analyze_expr(&mut action.body, &inner);
                     }
@@ -2253,23 +2225,15 @@ impl Analyzer {
         let mut raw = Vec::new();
         {
             let body = unit_body(app, family, ci, mi);
-            self.collect_send_sites(body, Some(&class), &app.helper_method_index, &mut raw);
+            self.collect_send_sites(body, Some(&class), eng.units[u as usize].class_side, &app.helper_method_index, &mut raw);
         }
-        let resolved: Vec<(ParamKey, Vec<Ty>)> = raw
-            .into_iter()
-            .map(|(class_id, method, args, kws)| {
-                let owner = self.inherited_param_owner(&eng.defined, class_id, &method);
-                let placed = Self::place_keyword_args(
-                    eng.params_by_method.get(&(owner.clone(), method.clone())),
-                    args,
-                    kws,
-                );
-                ((owner, method), placed)
-            })
+        let resolved: Vec<(ParamKey, Vec<Ty>)> = raw.into_iter()
+            .filter_map(|site| self.resolve_param_site(site, &eng.params_by_method, &eng.defined))
             .collect();
         for (k, args) in &resolved {
             k.0 .0.as_str().hash(&mut fp);
             k.1.as_str().hash(&mut fp);
+            k.2.hash(&mut fp);
             for a in args {
                 hash_ty(a, &mut fp);
             }
@@ -2608,7 +2572,9 @@ impl Analyzer {
             for inc in super::fold::alias_includers(&class, &method) {
                 eng.mark_slot_readers(&inc, &method);
             }
-            eng.mark_key_readers(&(class, method));
+            for side in [crate::dialect::MethodReceiver::Instance, crate::dialect::MethodReceiver::Class] {
+                eng.mark_key_readers(&(class.clone(), method.clone(), side));
+            }
         }
         let ivars = super::slots::take_new_scc_ivars();
         if ivars.is_empty() {
