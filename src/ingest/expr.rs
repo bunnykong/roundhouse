@@ -2916,15 +2916,28 @@ fn block_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
     };
     let Some(pn) = bpn.parameters() else { return vec![] };
     if *SOUND_PARAMS {
-        return pn
+        let mut names: Vec<Symbol> = pn
             .requireds()
             .iter()
             .enumerate()
             .filter_map(|(i, req)| match req.as_required_parameter_node() {
                 Some(rp) => Some(Symbol::from(constant_id_str(&rp.name()))),
-                None => destructured_names(&req).map(|_| Symbol::from(format!("__bp{i}"))),
+                // Any destructured parameter keeps its position, even a shape
+                // the desugar below can't bind (its names then stay unbound).
+                None => req.as_multi_target_node().map(|_| Symbol::from(format!("__bp{i}"))),
             })
             .collect();
+        // `|k, |` (an implicit rest) and `|k, *|` (an anonymous one)
+        // destructure a yielded Array like `|k, v|`; name the rest so the
+        // block binds `k` to the first element, not the whole Array.
+        let unnamed_rest = pn.rest().is_some_and(|r| {
+            r.as_implicit_rest_node().is_some()
+                || r.as_rest_parameter_node().is_some_and(|rp| rp.name().is_none())
+        });
+        if unnamed_rest && names.len() == 1 && pn.posts().iter().next().is_none() {
+            names.push(Symbol::from("__rest"));
+        }
+        return names;
     }
     pn.requireds()
         .iter()
@@ -2943,17 +2956,34 @@ static SOUND_PARAMS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
         && !std::env::var("RH_SOUND_ABLATE").unwrap_or_default().split(',').any(|p| p == "params")
 });
 
-/// The plain names of a one-level destructured parameter `(a, b, ...)`;
-/// `None` for any other shape (nested, splat, or not a destructure).
-fn destructured_names(req: &Node<'_>) -> Option<Vec<Symbol>> {
-    let mt = req.as_multi_target_node()?;
+
+/// `RH_SOUND`: `a, b = <tmp>` for a destructured parameter, then the same
+/// for each nested pattern through its own temporary (`<tmp>_<j>`), so
+/// `|((a, b), c), i|` binds all four. A rest or a post-rest inside a
+/// pattern leaves that pattern's names unbound.
+fn destructure_into(mt: &ruby_prism::MultiTargetNode<'_>, tmp: &str, out: &mut Vec<Expr>) {
     if mt.rest().is_some() || !mt.rights().is_empty() {
-        return None;
+        return;
     }
-    mt.lefts()
-        .iter()
-        .map(|l| l.as_required_parameter_node().map(|rp| Symbol::from(constant_id_str(&rp.name()))))
-        .collect()
+    let mut targets = Vec::new();
+    let mut nested = Vec::new();
+    for (j, l) in mt.lefts().iter().enumerate() {
+        if let Some(rp) = l.as_required_parameter_node() {
+            let name = Symbol::from(constant_id_str(&rp.name()));
+            targets.push(crate::expr::LValue::Var { id: crate::ident::VarId(0), name });
+        } else if let Some(inner) = l.as_multi_target_node() {
+            let t = format!("{tmp}_{j}");
+            targets.push(crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from(t.as_str()) });
+            nested.push((inner, t));
+        } else {
+            return;
+        }
+    }
+    let value = Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(tmp) });
+    out.push(Expr::new(Span::synthetic(), ExprNode::MultiAssign { targets, value }));
+    for (inner, t) in nested {
+        destructure_into(&inner, &t, out);
+    }
 }
 
 /// `RH_SOUND`: open a block body with `a, b = __bp<i>` for each destructured
@@ -2970,17 +3000,11 @@ fn desugar_destructured_params(params_node: Option<Node<'_>>, body: Expr) -> Exp
         .iter()
         .enumerate()
         .filter(|(_, req)| req.as_required_parameter_node().is_none())
-        .filter_map(|(i, req)| {
-            let names = destructured_names(&req)?;
-            let targets = names
-                .into_iter()
-                .map(|name| crate::expr::LValue::Var { id: crate::ident::VarId(0), name })
-                .collect();
-            let value = Expr::new(
-                Span::synthetic(),
-                ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(format!("__bp{i}")) },
-            );
-            Some(Expr::new(Span::synthetic(), ExprNode::MultiAssign { targets, value }))
+        .filter_map(|(i, req)| req.as_multi_target_node().map(|mt| (i, mt)))
+        .flat_map(|(i, mt)| {
+            let mut out = Vec::new();
+            destructure_into(&mt, &format!("__bp{i}"), &mut out);
+            out
         })
         .collect();
     if exprs.is_empty() {

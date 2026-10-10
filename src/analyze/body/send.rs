@@ -28,14 +28,14 @@ pub(crate) static SOUND: std::sync::LazyLock<bool> =
 /// together: the pair model without the splat binds `|k, v|` to the pair.
 static SOUND_ABLATE: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| std::env::var("RH_SOUND_ABLATE").unwrap_or_default());
-fn sound(part: &str) -> bool {
+pub(super) fn sound(part: &str) -> bool {
     *SOUND && !SOUND_ABLATE.split(',').any(|p| p == part)
 }
 
 /// `RH_SOUND`: what a block of `n` (two or more) parameters binds when ONE
 /// value of type `t` is yielded. An Array destructures: a tuple by
 /// position (`nil` past its end), an Array of unknown length to its
-/// element at every position (the convention `a, b = list` uses). Any
+/// element at the first position and `element | nil` past it. Any
 /// other value binds the first parameter and `nil` the rest. A union binds
 /// per arm and joins by position. `None` while `t` is pending (`Var`): the
 /// caller keeps the unsplat binding.
@@ -52,8 +52,15 @@ fn splat_yield(t: &Ty, n: usize) -> Option<Vec<Ty>> {
             // a reference nobody unfolded is `Untyped`.
             Ty::Rec { .. } => vec![Ty::Untyped; n],
             Ty::Tuple { elems } => (0..n).map(|i| elems.get(i).cloned().unwrap_or(Ty::Nil)).collect(),
-            Ty::Array { elem } => vec![(**elem).clone(); n],
-            Ty::Relation { of } => vec![Ty::Class { id: of.clone(), args: vec![].into() }; n],
+            // An Array of unknown length may be shorter than the block:
+            // every position past the first may be `nil`.
+            Ty::Array { elem } => (0..n)
+                .map(|i| if i == 0 { (**elem).clone() } else { union_of((**elem).clone(), Ty::Nil) })
+                .collect(),
+            Ty::Relation { of } => {
+                let rec = Ty::Class { id: of.clone(), args: vec![].into() };
+                (0..n).map(|i| if i == 0 { rec.clone() } else { union_of(rec.clone(), Ty::Nil) }).collect()
+            }
             other => std::iter::once(other.clone()).chain(std::iter::repeat_n(Ty::Nil, n - 1)).collect(),
         };
         out = Some(match out {
@@ -229,7 +236,7 @@ impl<'a> BodyTyper<'a> {
         block: &Expr,
     ) -> Ctx {
         let mut new_ctx = outer.clone();
-        let ExprNode::Lambda { params, .. } = &*block.node else {
+        let ExprNode::Lambda { params, rest_param, .. } = &*block.node else {
             return new_ctx;
         };
         for name in params { new_ctx.class_objects.remove(name); }
@@ -270,8 +277,37 @@ impl<'a> BodyTyper<'a> {
             }
             return new_ctx;
         }
+        // `RH_SOUND`: `merge`'s conflict block yields the key, the receiver's
+        // value and the merged-in value (`{ |key, old, new| ... }`).
+        if sound("merge") && matches!(method.as_str(), "merge" | "merge!" | "update") {
+            if let Some(Ty::Hash { key, value }) = recv_ty {
+                let mut k = (**key).clone();
+                let mut incoming: Option<Ty> = None;
+                let mut add = |t: Ty| incoming = Some(match incoming.take() { None => t, Some(x) => union_of(x, t) });
+                for a in args {
+                    match a.ty.as_ref() {
+                        Some(Ty::Hash { key: k2, value: v2 }) => {
+                            k = union_of(k, (**k2).clone());
+                            add((**v2).clone());
+                        }
+                        Some(Ty::Record { row }) => {
+                            k = union_of(k, Ty::Sym);
+                            for (_, t) in row.fields.iter() {
+                                add(t.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let tys = [k, (**value).clone(), incoming.unwrap_or(Ty::Untyped)];
+                for (name, ty) in params.iter().zip(tys.iter()) {
+                    new_ctx.local_bindings.insert(name.clone(), ty.clone());
+                }
+                return new_ctx;
+            }
+        }
         let param_tys = if sound("pairs") {
-            self.block_param_tys(recv_ty, method, params.len(), block)
+            self.block_param_tys(recv_ty, method, params.len(), rest_param.is_some(), block)
         } else {
             self.block_params_for(recv_ty, method)
         };
@@ -343,7 +379,10 @@ impl<'a> BodyTyper<'a> {
     /// binds `k: K, v: V` — not `k: [K, V]` with `v` unbound, which loses
     /// every flow out of `v`. A union receiver under the all-arms rule
     /// binds per arm, each arm splat on its own, then joins by position.
-    fn block_param_tys(&self, recv_ty: Option<&Ty>, method: &Symbol, n: usize, block: &Expr) -> Option<Vec<Ty>> {
+    /// A rest parameter destructures too (`|k, *rest|`, and the implicit
+    /// rest of `|k, |`, which ingest names), so `has_rest` counts as a
+    /// second parameter.
+    fn block_param_tys(&self, recv_ty: Option<&Ty>, method: &Symbol, n: usize, has_rest: bool, block: &Expr) -> Option<Vec<Ty>> {
         if *crate::analyze::fold::BRK_ALLARMS {
             if let Some(Ty::Union { variants }) = recv_ty {
                 let mut joined: Option<Vec<Ty>> = None;
@@ -351,7 +390,7 @@ impl<'a> BodyTyper<'a> {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    let Some(p) = self.block_param_tys(Some(v), method, n, block) else { continue };
+                    let Some(p) = self.block_param_tys(Some(v), method, n, has_rest, block) else { continue };
                     joined = Some(match joined.take() {
                         None => p,
                         Some(mut acc) => {
@@ -368,7 +407,7 @@ impl<'a> BodyTyper<'a> {
             }
         }
         let tys = self.block_params_for(recv_ty, method)?;
-        if n >= 2 && tys.len() == 1 {
+        if (n >= 2 || (n == 1 && has_rest)) && tys.len() == 1 {
             // A fold reference is unfolded one level here, as `a, b = rhs` is.
             let yielded = crate::analyze::fold::head(
                 &tys[0],
@@ -2939,7 +2978,8 @@ pub(super) fn hash_method(
         // `RH_SOUND`: the merged hashes' keys and values join the
         // receiver's (`h.merge("meta" => { "v" => 1 })` holds that Hash),
         // and a conflict block's return joins the values.
-        "merge" if sound("merge") => hash_merge_sound(key, value, block_ret, args),
+        "merge" | "merge!" | "update" | "reverse_merge" | "reverse_merge!" | "with_defaults" | "with_defaults!"
+            if sound("merge") => hash_merge_sound(key, value, block_ret, args),
         "merge" => Ty::Hash {
             key: std::sync::Arc::new(key.clone()),
             value: std::sync::Arc::new(value.clone()),
@@ -3025,6 +3065,10 @@ pub(super) fn hash_method(
         },
         // `min_by`/`max_by`/`find`/`detect` yield (k, v) and return a
         // single `[key, value]` pair, or nil on an empty hash.
+        // `RH_SOUND`: with a count, `min_by(n)`/`max_by(n)` answer an Array of pairs.
+        "min_by" | "max_by" if sound("enum") && args.len() == 1 => Ty::Array {
+            elem: std::sync::Arc::new(Ty::Tuple { elems: vec![key.clone(), value.clone()].into() }),
+        },
         "min_by" | "max_by" | "find" | "detect" => Ty::Union {
             variants: vec![
                 Ty::Tuple { elems: vec![key.clone(), value.clone()].into() },
