@@ -292,18 +292,17 @@ module ActionController
     # dropped line back to the caller, and rust emit of `[]=` is
     # `()` not `Option`.
     def []=(key, value)
-      store_value(key, value)
+      if ActionController.header_key_ok?(key) && ActionController.header_value_ok?(value)
+        store_value(key, value)
+      end
     end
 
     def store_value(key, value)
-      return unless ActionController.header_value_ok?(value)
-      return unless ActionController.header_key_ok?(key)
-
       i = index_of(key)
       if i < 0
-        @keys.push(key)
-        @lower.push(key.downcase)
-        @vals.push(value)
+        @keys << key
+        @lower << key.downcase
+        @vals << value
       else
         @vals[i] = value
       end
@@ -330,7 +329,9 @@ module ActionController
       while i < keys.length
         key = keys[i].to_s
         value = values[i]
-        store_value(key, value)
+        if ActionController.header_key_ok?(key) && ActionController.header_value_ok?(value)
+          store_value(key, value)
+        end
         i += 1
       end
       self
