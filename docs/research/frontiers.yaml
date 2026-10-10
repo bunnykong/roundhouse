@@ -104,19 +104,19 @@
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "Replay agrees with the cold shadow on six public edits, but its warm portion takes 21.55–32.01× as long as a cold check."
-  facts: [F15]
+  stands: "On condition `warm-next-F15-profile-20261010-c210f226`, all six edits match shadow and cold. Fingerprint construction dominates: Mastodon spends 131–135 s there against 6.14–6.25 s for cold analysis; these are shared-host profiles."
+  facts: [F30, F15]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Profile the parts of the warm path before optimizing any of them."
+  next: "Reduce repeated expression/context serialization and global metadata construction in input fingerprints, then re-check all six edits and measure five interleaved pairs against the cost and 100 ms gates."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "fixpoint-warm 990137f7"
-    lab: "0cc656a6"
-    runner: "fixpoint-research 389ea1e3"
+    compiler: "warm-next d9ec78c3"
+    lab: "d0b2e5dd689c04221295b9a4037dede07984c770"
+    runner: "warm-profile-2026-10-10/rerun.py at d0b2e5dd689c04221295b9a4037dede07984c770"
 
 - id: typed-recursion
   name: Typed recursion
