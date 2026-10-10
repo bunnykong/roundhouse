@@ -59,18 +59,19 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "At next `38403140`, three early Discourse initializer reads still omit an earlier String write, while the late read retains it. The refreshed error census includes hidden removals; runtime traces from the apps' own code remain missing."
-  facts: [F28, F27, F25, F20, F19, F18, F17, F14, F8]
+  stands: "On condition `sound-traces-20261010-c210f226`, three Discourse tests cover 27/28 selected `@data` reads. The first records main 24/0 and S3 17/7 accepted/rejected. Every acceptance involves uncertain or unsupported types; this is witnessed coverage, not general soundness."
+  facts: [F29, F28, F27, F25, F20, F19, F18, F17, F14, F8]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Record traces from the apps' own test suites with the oracle's `record.rb`."
+  next: "Cover the interval-tick read at 145:9 and expand app-test traces; retain the fixed denominator and uncertain/unsupported coverage while checking repairs."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "fixpoint-next 38403140 (F27–F28); main 1ce99695 (F17); fixpoint-staged 92844f68 (F8)"
-    lab: "56255dd54bed3815b4774282ae92380524b13136"
+    compiler: "main c210f226 and fixpoint-next 38403140 (F29); main 1ce99695 (F17); fixpoint-staged 92844f68 (F8)"
+    lab: "0bdc69712c69c6c200066fdbe84651d10694f8ab"
+    adapter: "sound-exporter 48c652873a88d8bc291df1d606ad1464f9168ae3"
   claims:
     - who: dai199
       scope: "parameter rows keyed by receiver side, the follow-up named in #551 (the lab's `name_collision`), in one PR against main."
