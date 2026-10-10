@@ -1591,6 +1591,16 @@ fn emit_send(
                 return "false".to_string()
             }
             "nil?" => return format!("({rs} == null)"),
+            // HeaderStore#delete's `@keys.pop()` — List has RemoveAt, not Pop.
+            // RemoveAt is void and throws on empty; Ruby returns the element or nil.
+            "pop" if recv_is_array(r) => {
+                let elem = array_elem_ty(r)
+                    .map(|t| csharp_ty(&t))
+                    .unwrap_or_else(|| "object?".to_string());
+                return format!(
+                    "((System.Func<{elem}>)(() => {{ if ({rs}.Count == 0) return default; var _last = {rs}[{rs}.Count - 1]; {rs}.RemoveAt({rs}.Count - 1); return _last; }}))()"
+                );
+            }
             "!" => return format!("!({rs})"),
             "to_s" => return format!("(Convert.ToString({rs}) ?? \"\")"),
             "to_i" => return format!("Convert.ToInt64({rs})"),
