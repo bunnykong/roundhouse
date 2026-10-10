@@ -24,7 +24,7 @@ use crate::ty::Ty;
 /// model type promised by analysis is also true with Spinel's RBS seeds.
 pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &App) {
     let templates = crate::runtime_src::parse_methods(
-        "def reload\n  super()\n  self\nend\ndef lock!(lock = nil)\n  super(lock)\n  self\nend\n",
+        "def reload\n  super()\n  self\nend\ndef lock!(lock = true)\n  super(lock)\n  self\nend\n",
     ).expect("receiver-return forwarders parse");
     let classes: HashMap<ClassId, ()> = app.models.iter().map(|m| &m.name)
         .chain(app.library_classes.iter().map(|lc| &lc.name))

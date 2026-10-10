@@ -47,6 +47,27 @@ fn reload_and_lock_keep_the_receiver_type_and_run() {
 }
 
 #[test]
+fn bare_lock_forwards_true_to_the_runtime() {
+    example().run_ruby(r#"
+observed = []
+# Observe after emission so this runtime probe does not suppress the forwarder.
+ActiveRecord::Base.prepend(Module.new do
+  define_method(:lock!) do |lock = true|
+    observed << lock
+    super(lock)
+  end
+end)
+widget = Widget.create!(name: 'locked')
+raise unless widget.lock!.equal?(widget)
+raise 'bare lock! must pass true to the runtime' unless observed == [true]
+for lock in [false, nil, 'FOR UPDATE NOWAIT']
+  raise unless widget.lock!(lock).equal?(widget)
+end
+raise unless observed == [true, false, nil, 'FOR UPDATE NOWAIT']
+"#).assert_passes();
+}
+
+#[test]
 fn reload_and_lock_sidecars_keep_the_receiver_type() {
     let (emitted, errors) = example().emit(roundhouse::project::BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:?}");
