@@ -96,6 +96,46 @@ end
 }
 
 #[test]
+fn inline_private_class_method_visibility_is_preserved_for_data_factories() {
+    let source = r#"class FactoryExamples
+  State = Data.define(:value) do
+    private_class_method def self.build(value)
+      new(value: value)
+    end
+
+    private
+
+    def self.public_builder(value)
+      new(value: value)
+    end
+  end
+end
+"#;
+    let app = ingest(source, "FactoryExamples::State.new(value: \"typed\")");
+    let factory = app
+        .library_classes
+        .iter()
+        .find(|class| class.name.0.as_str() == "FactoryExamples::State")
+        .expect("Data factory");
+    let method = |name: &str| {
+        factory
+            .methods
+            .iter()
+            .find(|method| method.name.as_str() == name)
+            .unwrap_or_else(|| panic!("missing factory method {name}"))
+    };
+
+    assert_eq!(
+        method("build").visibility,
+        roundhouse::dialect::MethodVisibility::Private
+    );
+    assert_eq!(
+        method("public_builder").visibility,
+        roundhouse::dialect::MethodVisibility::Public
+    );
+}
+
+#[test]
 fn factories_outside_the_literal_subset_are_not_admitted() {
     let other = r#"module Other
   class Data

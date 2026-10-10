@@ -112,11 +112,10 @@ pub(super) fn collect(
                     return Err(unsupported());
                 }
                 let mut method = ingest_library_method_with_keywords(&def, &id, file, true)?;
-                // Ruby's lexical visibility markers affect instance methods, not
-                // explicit singleton definitions such as `def self.build`.
-                if method.receiver == crate::dialect::MethodReceiver::Instance {
-                    visibility.apply(&statement, &mut method);
-                }
+                // Lexical defaults affect instance methods only, but explicit
+                // visibility wrappers such as `private_class_method def self.helper`
+                // also apply to singleton methods.
+                visibility.apply(&statement, &mut method);
                 methods.push(method);
             } else if !statement.as_call_node().is_some_and(|call| {
                 visibility::marker(&call)
