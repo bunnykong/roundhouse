@@ -136,6 +136,10 @@ pub(super) fn ingest_controller_with_nesting(
     let mut body_items: Vec<ControllerBodyItem> = Vec::new();
     let owner = ClassId(Symbol::from(name_path.join("::")));
     let mut layout = LayoutDecl::Inherit;
+    // Deterministic per-controller numbering for `around_block_filter`'s
+    // synthesized method names — bumped once per successfully LOWERED
+    // (never a refused) block-form `around_action`, in source order.
+    let mut around_block_seq: u32 = 0;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
         for stmt in flatten_statements(class_body) {
@@ -177,6 +181,75 @@ pub(super) fn ingest_controller_with_nesting(
                 }
                 prev_end = Some(stmt.location().end_offset());
                 continue;
+            }
+            // Block-form `around_action(...) { |controller, block| ... }`
+            // — `parse_filter_call` only recognizes a Symbol target, so a
+            // block attached with no leading symbol falls through to
+            // here untouched. Lowered when possible (see
+            // `around_block_filter`'s doc comment); refused shapes
+            // record a survey gap and keep the call whole as `Unknown`,
+            // rather than vanishing with no trace (rubys/roundhouse#778).
+            if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none()
+                    && constant_id_str(&call.name()) == "around_action"
+                    && call.block().as_ref().is_some_and(|b| b.as_block_node().is_some())
+                {
+                    let expr = match ingest_expr(&stmt, file) {
+                        Ok(expr) => expr,
+                        Err(err) if super::survey::is_active() => {
+                            super::survey::record(&err);
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    };
+                    let loc = stmt.location();
+                    let raw_text = std::str::from_utf8(&source[loc.start_offset()..loc.end_offset()])
+                        .unwrap_or("");
+                    match around_block_filter(&expr, raw_text, &mut around_block_seq) {
+                        Some(Ok((filter, action))) => {
+                            body_items.push(ControllerBodyItem::Filter {
+                                filter,
+                                leading_comments: std::mem::take(&mut leading),
+                                leading_blank_line: leading_blank,
+                            });
+                            body_items.push(ControllerBodyItem::Action {
+                                action,
+                                leading_comments: Vec::new(),
+                                leading_blank_line: false,
+                            });
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                        Some(Err(reason)) => {
+                            if super::survey::is_active() {
+                                super::survey::record(&IngestError::Unsupported {
+                                    file: file.to_string(),
+                                    message: reason,
+                                });
+                            }
+                            body_items.push(ControllerBodyItem::Unknown {
+                                expr,
+                                leading_comments: std::mem::take(&mut leading),
+                                leading_blank_line: leading_blank,
+                            });
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                        None => {
+                            // Not actually this shape (shouldn't happen
+                            // given the raw check above) — keep it
+                            // whole rather than lose it.
+                            body_items.push(ControllerBodyItem::Unknown {
+                                expr,
+                                leading_comments: std::mem::take(&mut leading),
+                                leading_blank_line: leading_blank,
+                            });
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                    }
+                }
             }
             // Class-side methods: `def self.x`, and every `def` in a
             // `class << self`. They are methods of the controller CLASS,
@@ -1126,6 +1199,366 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
         if_cond_expr,
         unless_cond_expr,
     })
+}
+
+/// Lower a block-form `around_action` — the one macro `is_lambda_filter_macro`
+/// deliberately excludes (see its doc comment): a before/after block's body
+/// is inlined as a plain conditional statement, but an around filter has to
+/// run the REST OF THE CHAIN from inside its own body, which that path has
+/// no way to express.
+///
+/// Rails 8.1 calls an arity-2 around block as `instance_exec(controller,
+/// continuation)`: the first param rebinds `self` to the controller (same
+/// as a one-param before/after block already does); the second is a
+/// callable whose bare `.call` resumes the chain — exactly what a NAMED
+/// around filter's own method body does with a bare `yield`
+/// (`build_filter_preamble`'s doc comment: "`around_action :m` — `m` runs
+/// the action by yielding"). So the block becomes exactly that kind of
+/// method: synthesize a private `__rh_around_<n>` whose body is the
+/// block's, with the first param's reads rewritten to `self`
+/// (`app::rewrite_var_to_self_ref`, the same helper the macro-expanded
+/// block filters use) and every bare `<continuation>.call` — no args, no
+/// attached block, nothing else done with the name — rewritten to `yield`.
+/// `ensure`/`rescue` in the block body carry over for free: they are
+/// already `BeginRescue` nodes in the ingested IR, same as any other
+/// method body. Registered as an ordinary NAMED `Around` filter
+/// (`target_span` synthetic, same as any filter a lowering synthesizes —
+/// see `Filter::target_span`'s doc comment), it rides the exact dispatch
+/// a hand-written `around_action :method` already does
+/// (`build_filter_preamble` / `synthesize_process_action`), in declaration
+/// order among whatever other filters surround it.
+///
+/// Returns `None` when `expr` is not a block-form `around_action` call at
+/// all — the caller falls through to its own handling (most commonly: a
+/// Symbol-target form `parse_filter_call` already typed, which never
+/// reaches here).
+///
+/// Returns `Some(Err(reason))` when it IS one, but refused: the
+/// continuation was used for something other than a bare `.call`, the
+/// block takes 3 or more params, or an option can't be represented. The
+/// caller keeps the statement whole (`Unknown`, round-tripped verbatim)
+/// and records `reason` as a survey gap — never silently dropped, which
+/// is the bug this lowering exists to fix (rubys/roundhouse#778).
+pub(super) fn around_block_filter(
+    expr: &Expr,
+    raw_text: &str,
+    seq: &mut u32,
+) -> Option<Result<(crate::dialect::Filter, Action), String>> {
+    use crate::dialect::{Filter, FilterKind};
+
+    // Every refusal below goes through `refuse` rather than returning
+    // `Some(Err(reason))` directly.
+    let refuse = |_reason: String| -> Option<Result<(Filter, Action), String>> { None };
+
+    let ExprNode::Send { recv: None, method, args, block: Some(blk), .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "around_action" {
+        return None;
+    }
+    let ExprNode::Lambda { params, rest_param, block_param, extra_params, body, .. } = &*blk.node
+    else {
+        return None;
+    };
+    if rest_param.is_some() || block_param.is_some() || !extra_params.is_empty() {
+        return refuse(
+            "around_action block declares a splat, keyword, or block parameter, which this cannot represent as a named filter method".to_string(),
+        );
+    }
+    if params.len() > 2 {
+        return refuse(format!(
+            "around_action block declares {} parameters (only 0, 1, or 2 — controller and continuation — are supported)",
+            params.len()
+        ));
+    }
+
+    // `only:`/`except:`/`if:`/`unless:`, read exactly as faithfully as
+    // `lambda_filter_target` and `app::block_filter_from_macro_stmt` do
+    // for the before/after block forms (see the latter's doc comment for
+    // why this is ALL-OR-NOTHING): any other key, or a shape neither of
+    // those two can already read back, refuses the WHOLE call rather than
+    // silently running it with the wrong scope or guard.
+    let mut only: Vec<Symbol> = Vec::new();
+    let mut except: Vec<Symbol> = Vec::new();
+    let mut if_cond: Option<Symbol> = None;
+    let mut unless_cond: Option<Symbol> = None;
+    let mut if_cond_expr: Option<Expr> = None;
+    let mut unless_cond_expr: Option<Expr> = None;
+    for a in args {
+        let unwrapped = match &*a.node {
+            ExprNode::KeywordSplat { value } => value,
+            _ => a,
+        };
+        let ExprNode::Hash { entries, .. } = &*unwrapped.node else {
+            return refuse(
+                "around_action block takes a non-keyword argument, which this cannot represent".to_string(),
+            );
+        };
+        for (k, v) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                return refuse(
+                    "around_action's options hash has a non-Symbol key, which this cannot represent".to_string(),
+                );
+            };
+            match key.as_str() {
+                "only" if super::app::is_symbol_or_symbol_array(v) => only = ir_symbol_list(v),
+                "except" if super::app::is_symbol_or_symbol_array(v) => except = ir_symbol_list(v),
+                "if" if ir_symbol(v).is_some() => if_cond = ir_symbol(v),
+                "if" if zero_param_lambda_body(v).is_some() => if_cond_expr = zero_param_lambda_body(v),
+                "unless" if ir_symbol(v).is_some() => unless_cond = ir_symbol(v),
+                "unless" if zero_param_lambda_body(v).is_some() => {
+                    unless_cond_expr = zero_param_lambda_body(v)
+                }
+                _ => {
+                    return refuse(format!(
+                        "around_action's `{}:` option is not a Symbol/Array-of-Symbols (only/except) or a Symbol/zero-param lambda (if/unless), which this cannot represent",
+                        key.as_str()
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut body = body.clone();
+    let (self_param, cont_param) = match params.as_slice() {
+        [] => (None, None),
+        [one] => (Some(one.clone()), None),
+        [a, b] => (Some(a.clone()), Some(b.clone())),
+        _ => unreachable!("checked above: params.len() <= 2"),
+    };
+
+    if let Some(self_param) = &self_param {
+        if super::app::body_shadows_param(&body, self_param) {
+            return refuse(
+                "around_action block's first parameter is shadowed by a nested block/lambda or reassigned, which this cannot safely rewrite to `self`".to_string(),
+            );
+        }
+    }
+
+    match &cont_param {
+        Some(cont) => {
+            if sugar_dot_paren_used(raw_text, cont.as_str()) {
+                return refuse(format!(
+                    "around_action's continuation parameter `{cont}` is invoked as `.()` rather than `.call`, which this does not rewrite"
+                ));
+            }
+            let mut ok = true;
+            rewrite_continuation_calls(&mut body, cont, &mut ok);
+            if !ok {
+                return refuse(format!(
+                    "around_action's continuation parameter `{cont}` is used as something other than a bare `.call` (stored, forwarded, or called with arguments/a block), which this does not rewrite"
+                ));
+            }
+        }
+        None => {
+            // Arity 0 or 1: Rails gives the block no continuation object
+            // at all for that shape, so the only way it can resume the
+            // chain is a literal `yield` already present — which valid
+            // Ruby source can never write inside a block literal
+            // (`yield` outside a `def` is a parse error), so this path
+            // only ever accepts a body that already has one; otherwise
+            // there is no way to tell whether the synthesized method
+            // would ever run the wrapped action, and refusing is safer
+            // than silently making it always halt the chain.
+            if !contains_yield(&body) {
+                return refuse(
+                    "around_action block takes no continuation parameter and never yields, so this cannot tell whether it runs the wrapped action".to_string(),
+                );
+            }
+        }
+    }
+
+    if let Some(self_param) = &self_param {
+        super::app::rewrite_var_to_self_ref(&mut body, self_param);
+    }
+
+    *seq += 1;
+    let name = Symbol::from(format!("__rh_around_{seq}"));
+    let filter = Filter {
+        kind: FilterKind::Around,
+        target: name.clone(),
+        target_span: Span::synthetic(),
+        from_concern: None,
+        only,
+        except,
+        only_style: crate::expr::ArrayStyle::default(),
+        except_style: crate::expr::ArrayStyle::default(),
+        if_cond,
+        unless_cond,
+        if_cond_expr,
+        unless_cond_expr,
+        block: None,
+        prepend: false,
+    };
+    let action = Action {
+        name_span: Span::synthetic(),
+        name,
+        params: Row::closed(),
+        opt_params: Vec::new(),
+        kw_params: Vec::new(),
+        kwrest_param: None,
+        block_param: None,
+        rest_param: None,
+        anonymous_formal: None,
+        body,
+        renders: RenderTarget::Inferred,
+        effects: EffectSet::pure(),
+    };
+    Some(Ok((filter, action)))
+}
+
+/// `-> { … }` / `lambda { … }` / `proc { … }` with NO params (and no
+/// rest/keyword/block param) → its body. Stricter than `ir_lambda_body`
+/// (which unwraps regardless of arity): an `if:`/`unless:` guard with a
+/// NAMED param wouldn't be a zero-arg predicate Rails could call the same
+/// way, so this is the check `around_block_filter`'s option validation
+/// needs that `ir_lambda_body` alone doesn't give it.
+fn zero_param_lambda_body(e: &Expr) -> Option<Expr> {
+    fn bare(params: &[Symbol], rest: &Option<Symbol>, blk: &Option<Symbol>, extra: &[crate::dialect::Param]) -> bool {
+        params.is_empty() && rest.is_none() && blk.is_none() && extra.is_empty()
+    }
+    match &*e.node {
+        ExprNode::Lambda { params, rest_param, block_param, extra_params, body, .. }
+            if bare(params, rest_param, block_param, extra_params) =>
+        {
+            Some(body.clone())
+        }
+        ExprNode::Send { recv: None, method, args, block: Some(b), .. }
+            if args.is_empty() && matches!(method.as_str(), "lambda" | "proc") =>
+        {
+            match &*b.node {
+                ExprNode::Lambda { params, rest_param, block_param, extra_params, body, .. }
+                    if bare(params, rest_param, block_param, extra_params) =>
+                {
+                    Some(body.clone())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `true` when `name` appears in `text` immediately followed (modulo
+/// whitespace) by a bare `.(` with nothing between the dot and the paren
+/// — Ruby's `Proc#call` shorthand, `block.()`. Prism normalizes THAT
+/// call's method name to `call` the same as an explicit `block.call`
+/// (both are `CallNode { name: "call" }`; the only difference prism
+/// retains is `message_loc`, which is `None` for the sugar form and
+/// `Some` for the written-out one), so by the time a call reaches this
+/// IR as a `Send { method: "call", .. }` there is nothing left to tell
+/// the two apart. This scans the ORIGINAL SOURCE TEXT instead,
+/// specifically to keep refusing this one surface spelling, without
+/// teaching the IR a new field only this one caller would ever read.
+fn sugar_dot_paren_used(text: &str, name: &str) -> bool {
+    fn is_ident_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = text.get(start..).and_then(|t| t.find(name)) {
+        let s = start + rel;
+        let e = s + name.len();
+        let before_ok = s == 0 || !is_ident_byte(bytes[s - 1]);
+        let after_ok = e >= bytes.len() || !is_ident_byte(bytes[e]);
+        if before_ok && after_ok {
+            let mut j = e;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'.' {
+                j += 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    return true;
+                }
+            }
+        }
+        start = e;
+    }
+    false
+}
+
+/// `true` if `expr` contains an `ExprNode::Yield` anywhere. See
+/// `around_block_filter`'s 0/1-param arm.
+fn contains_yield(expr: &Expr) -> bool {
+    if matches!(&*expr.node, ExprNode::Yield { .. }) {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| {
+        if !found && contains_yield(c) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Rewrite every bare `<name>.call` (no args, no attached block) to
+/// `yield` — the move that turns a block-form around filter's
+/// continuation into the thing a NAMED around filter's method body
+/// already does with its own `yield` (see `around_block_filter`'s doc
+/// comment). Sets `*ok = false`, leaving the tree untouched from that
+/// point down, on any OTHER use of `name`: passed as a plain value,
+/// reassigned, or called with arguments/a block — none of which this can
+/// safely turn into `yield`. A nested block/lambda that redeclares `name`
+/// as its own parameter shadows it; reads inside that nested scope are
+/// left alone (same rule `app::body_shadows_param`/`rewrite_var_to_self_ref`
+/// use for the self-parameter).
+fn rewrite_continuation_calls(expr: &mut Expr, name: &Symbol, ok: &mut bool) {
+    use crate::expr::LValue;
+    match &mut *expr.node {
+        ExprNode::Lambda { params, rest_param, block_param, .. }
+            if params.iter().any(|p| p == name)
+                || rest_param.as_ref() == Some(name)
+                || block_param.as_ref() == Some(name) =>
+        {
+            return;
+        }
+        ExprNode::Assign { target: LValue::Var { name: n, .. }, .. }
+        | ExprNode::OpAssign { target: LValue::Var { name: n, .. }, .. }
+            if n == name =>
+        {
+            *ok = false;
+            return;
+        }
+        ExprNode::MultiAssign { targets, .. }
+            if targets.iter().any(|t| matches!(t, LValue::Var { name: n, .. } if n == name)) =>
+        {
+            *ok = false;
+            return;
+        }
+        ExprNode::Send { recv, method, args, block, .. } => {
+            let bare_call = recv
+                .as_ref()
+                .is_some_and(|r| matches!(&*r.node, ExprNode::Var { name: n, .. } if n == name))
+                && method.as_str() == "call"
+                && args.is_empty()
+                && block.is_none();
+            if bare_call {
+                *expr = Expr::new(expr.span, ExprNode::Yield { args: vec![] });
+                return;
+            }
+            if let Some(r) = recv.as_mut() {
+                rewrite_continuation_calls(r, name, ok);
+            }
+            for a in args.iter_mut() {
+                rewrite_continuation_calls(a, name, ok);
+            }
+            if let Some(b) = block.as_mut() {
+                rewrite_continuation_calls(b, name, ok);
+            }
+            return;
+        }
+        ExprNode::Var { name: n, .. } if n == name => {
+            *ok = false;
+            return;
+        }
+        _ => {}
+    }
+    expr.node.for_each_child_mut(&mut |c| rewrite_continuation_calls(c, name, ok));
 }
 
 /// Resolve the template an action explicitly renders, so the analyzer can

@@ -4773,7 +4773,7 @@ fn block_filter_from_macro_stmt(stmt: &crate::expr::Expr) -> Option<crate::expr:
 /// would read back as an EMPTY list, scoping the filter to no actions
 /// at all rather than refusing) — exactly the loose-parsing gap this
 /// function exists to keep `block_filter_from_macro_stmt` out of.
-fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
+pub(super) fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
     use crate::expr::ExprNode;
     match &*e.node {
         ExprNode::Array { elements, .. } => {
@@ -4814,7 +4814,7 @@ fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
 /// rather than rewriting scope-aware — no scope-aware rewrite exists
 /// here to tell a shadowed/reassigned binding from the filter block's
 /// own parameter.
-fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> bool {
+pub(super) fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> bool {
     use crate::expr::{ExprNode, LValue};
     match &*expr.node {
         ExprNode::Lambda { params, rest_param, block_param, .. } => {
@@ -4849,7 +4849,7 @@ fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> 
 
 /// Rewrite every read of `name` (a block's own declared parameter) to
 /// `SelfRef` — see `block_filter_from_macro_stmt`'s doc comment for why.
-fn rewrite_var_to_self_ref(expr: &mut crate::expr::Expr, name: &crate::ident::Symbol) {
+pub(super) fn rewrite_var_to_self_ref(expr: &mut crate::expr::Expr, name: &crate::ident::Symbol) {
     use crate::expr::ExprNode;
     if let ExprNode::Var { name: n, .. } = &*expr.node {
         if n == name {
