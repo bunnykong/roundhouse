@@ -16,6 +16,11 @@
 //! (upstream #715), confirming this composes: the enclosing
 //! `constraints(...)` block's merged requirement still reaches the
 //! route and is enforced, same as without `with_options` in between.
+//!
+//! The Ruby-target recognition case lives here (a plain `unit` CI job
+//! can run it); the Spinel one needs a Spinel compiler and lives in
+//! `tests/routes_segment_pattern_spinel.rs` instead, run by the
+//! `spinel-framework` job.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
@@ -224,46 +229,9 @@ fn ruby_target_enforces_every_required_segment_pattern_shape() {
     constrained_app().run_ruby(&recognition_script()).assert_passes();
 }
 
-/// Same shapes, direct `Router.match_pattern` calls (not a full HTTP
-/// dispatch — `run_spinel`'s plain `boot` prelude doesn't load the
-/// app's `Main`/Rack entry point, only the runtime library classes,
-/// the same reason `route_path_decoding.rs`'s own Spinel byte-contract
-/// test calls `Router.match_pattern` directly rather than dispatching
-/// a request). The encoded pattern strings are the exact ones
-/// `segment_pattern.rs` produces for each shape (checked against this
-/// in its own Rust unit tests and against the Ruby target above).
-#[test]
-fn spinel_target_enforces_every_required_segment_pattern_shape() {
-    let script = r#"
-R = ActionDispatch::Router
-
-def check(pattern, path, seg_constraints, expect_match)
-  hit = R.match_pattern(pattern, path, "", seg_constraints)
-  matched = !hit.nil?
-  raise "pattern=#{pattern} path=#{path} matched=#{matched} expected=#{expect_match}" unless matched == expect_match
-end
-
-slug_pat = "4.slug9.C+103.@/."
-check("/@:slug", "/@alice", slug_pat, true)
-check("/@:slug", "/@alice@remote.example", slug_pat, false)
-
-signed_pat = "1.n24.L?001.-C+0010.0123456789"
-check("/signed/:n", "/signed/-12", signed_pat, true)
-check("/signed/:n", "/signed/12", signed_pat, true)
-check("/signed/:n", "/signed/1a", signed_pat, false)
-
-dashed_pat = "4.pair41.C+0010.0123456789L1001.-C+0010.0123456789"
-check("/dashed/:pair", "/dashed/12-34", dashed_pat, true)
-check("/dashed/:pair", "/dashed/12-", dashed_pat, false)
-
-enc_pat = "5.value15.L1003.%40C*010."
-check("/enc/:value", "/enc/%40alice", enc_pat, true)
-check("/enc/:value", "/enc/alice", enc_pat, false)
-
-dotted_pat = "5.value7.C+101./"
-check("/dotted/:value", "/dotted/a.b.c", dotted_pat, true)
-
-puts "PASS Spinel segment-pattern recognition"
-"#;
-    constrained_app().run_spinel(script).assert_passes();
-}
+// The Spinel side of this recognition suite lives in its own file,
+// `tests/routes_segment_pattern_spinel.rs` — these tests need a Spinel
+// compiler, which a plain `unit` CI job doesn't have, so they are
+// `#[ignore]`d there and run by the `spinel-framework` job with
+// `--ignored` (`scripts/ci-plan.py`'s `SPINEL_TESTS`), the same way as
+// `not_found_parity_spinel.rs` and its CRuby sibling.

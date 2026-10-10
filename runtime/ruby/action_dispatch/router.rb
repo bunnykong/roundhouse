@@ -323,7 +323,22 @@ module ActionDispatch
           if !prefixed_pattern.empty? && !segment_pattern_match(prefixed_pattern, prefixed_seg)
             return nil
           end
-          params[prefixed_name] = prefixed_seg
+          # `ap[plen, ap.length].to_s` again here (not storing the
+          # already-computed `prefixed_seg`): the same `params[name] =
+          # ap` shape above stores the plain segment's own ORIGINAL
+          # local, never `seg` (the one built for the checks). One
+          # strict emitter's whole-program Hash specialization
+          # (`sp_StrStrHash`) needs every `params[...] = ` value to be
+          # an inline expression computed at the store site — MEASURED:
+          # a bare named local standing in for that same `.to_s` value
+          # (`prefixed_seg`, with NO constraint check even added) is
+          # enough on its own to make the later `decode_captures(params)`
+          # call refuse with "a method argument given a Hash, which no
+          # conversion keeps in its sp_StrStrHash * slot"; the two
+          # constraint calls on `prefixed_seg` above are not required to
+          # trigger it. A fresh inline recompute at the store site
+          # sidesteps the whole-program unification.
+          params[prefixed_name] = ap[plen, ap.length].to_s
         end
         i += 1
       end
