@@ -23,12 +23,12 @@ module ActiveSupport
     end
   end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
-  # `untyped`, not `Array[Object]`: campfire's directs edit view calls
-  # `many?` on `@room.users`, a Relation. An Array parameter is a claim
-  # about representation; spinel then refuses the Relation at the
-  # `sp_PolyArray *` slot. The lowerer still only *routes* Array
-  # receivers here; this signature must not coerce the rest.
-  def self.many?: (untyped list) ?{ (untyped item) -> untyped } -> bool
+  # The lowerer routes Array receivers here, Relation receivers to
+  # `size > 1` (campfire `@room.users.many?`), and Array/Relation unions
+  # the same way. An Array contract cannot coerce an association into
+  # Spinel's poly-array representation because those sites never reach
+  # this helper.
+  def self.many?: (Array[Object] list) ?{ (Object item) -> Object } -> bool
   def self.to_sentence: (Array[untyped] list, String words_connector, String two_words_connector, String last_word_connector) -> String
   def self.symbolize_keys: (Hash[String, untyped] hash) -> Hash[Symbol, untyped]
   def self.stringify_keys: (Hash[Symbol, untyped] hash) -> Hash[String, untyped]

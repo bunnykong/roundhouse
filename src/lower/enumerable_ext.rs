@@ -538,7 +538,7 @@ mod tests {
 
     /// campfire `rooms/directs/edit`: `@room.users.many?` is a Relation.
     /// Grounding to `size > 1` keeps Spinel from passing it into
-    /// `ActiveSupport.many?`'s former Array slot.
+    /// `ActiveSupport.many?`'s Array slot.
     #[test]
     fn many_on_a_relation_is_a_size_test() {
         let mut e = many_on(Ty::Relation {
