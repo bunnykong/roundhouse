@@ -181,6 +181,82 @@ fn a_literal_sunset_folds_to_the_httpdate_string() {
 }
 
 // ---------------------------------------------------------------------
+// A plain new local (never a macro parameter) must bind BY NAME only —
+// `by_span` is for a local that REASSIGNS a parameter, not for one that
+// merely reads one mid-expression.
+// ---------------------------------------------------------------------
+
+/// `stamp` folds `date.to_datetime.to_i`, but never reassigns `date`
+/// itself — `date` is read again, untouched, right beside it. Before the
+/// fix, `expand_macro_filters` filled `by_span` for every folded local
+/// (not only one that reassigns a parameter), so the span `date`'s
+/// literal clone carries — shared by EVERY read of `date` in the macro
+/// body, since `substitute_params` substitutes the same parameter value
+/// everywhere — got mapped to `stamp`'s folded value. The later, direct
+/// `response.headers['X-Date'] = date` was then wrongly rewritten to
+/// `stamp`'s own value instead of keeping `date`'s.
+const STAMP_AND_DATE_READ_MACRO_BODY: &str = r#"      stamp = "@#{date.to_datetime.to_i}"
+      before_action(**kwargs) do
+        response.headers['X-Date'] = date
+        response.headers['Deprecation'] = stamp
+      end"#;
+
+#[test]
+fn a_plain_local_does_not_shadow_a_later_read_of_the_parameter_it_reads() {
+    let (app, gaps) =
+        build(STAMP_AND_DATE_READ_MACRO_BODY, "retire_endpoint '2022-11-14', only: [:index]", "");
+    assert!(!has_gap(&gaps, "retire_endpoint"), "{gaps:?}");
+    let src = emitted_widgets(app);
+    assert!(src.contains("@1668384000"), "stamp must still fold to its own literal:\n{src}");
+    assert!(
+        src.contains("2022-11-14"),
+        "a later, direct read of `date` must keep date's own literal, not stamp's:\n{src}"
+    );
+}
+
+fn build_custom(concern: &str, call: &str) -> (App, Vec<IngestError>) {
+    let widgets = format!(
+        "class WidgetsController < ApplicationController\n  {call}\n\n  def index\n    head :ok\n  end\nend\n"
+    );
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("app/controllers/concerns/sunset_concern.rb", concern.to_string()),
+        ("app/controllers/application_controller.rb", APPLICATION_CONTROLLER.to_string()),
+        ("app/controllers/widgets_controller.rb", widgets),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n".to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (PathBuf::from(p), s.into_bytes()))
+    .collect();
+    survey::activate();
+    let result = ingest_app_from_tree(tree);
+    let gaps = survey::drain();
+    (result.expect("ingest must not hard-fail; an unexpanded macro is a survey gap"), gaps)
+}
+
+/// Same shape, a DEFAULTED parameter this time: `flag` is never supplied
+/// at the call site, so it binds to its own default `'on'` — a literal
+/// clone of the SAME span wherever the macro body reads `flag`. `label`
+/// folds `"#{flag}!"` without reassigning `flag` itself; the later,
+/// direct `response.headers['X-Flag'] = flag` must still read `flag`'s
+/// own bound value, not `label`'s.
+const FLAG_LABEL_CONCERN: &str = "module SunsetConcern\n  extend ActiveSupport::Concern\n\n  class_methods do\n    def m(flag = 'on', **kw)\n      label = \"#{flag}!\"\n      before_action(**kw) do\n        response.headers['X-Flag'] = flag\n        response.headers['X-Label'] = label\n      end\n    end\n  end\nend\n";
+
+#[test]
+fn a_plain_local_does_not_shadow_a_later_read_of_a_defaulted_parameter() {
+    let (app, gaps) = build_custom(FLAG_LABEL_CONCERN, "m");
+    assert!(gaps.is_empty(), "{gaps:?}");
+    let src = emitted_widgets(app);
+    assert!(src.contains("\"on!\""), "label must still fold to its own literal:\n{src}");
+    assert!(
+        src.contains("\"on\""),
+        "a later, direct read of `flag` must keep flag's own default, not label's:\n{src}"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Refusals — the gap stays, and the macro call stays whole
 // ---------------------------------------------------------------------
 

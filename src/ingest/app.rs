@@ -3348,7 +3348,9 @@ fn expand_class_body_macros(app: &mut App) {
                 expanded.push(item);
                 continue;
             };
-            match expand_macro_filters(&body, &module) {
+            let param_names: Vec<crate::Symbol> =
+                macro_def.params.iter().map(|p| p.name.clone()).collect();
+            match expand_macro_filters(&body, &module, &param_names) {
                 Some(items) => {
                     let mut comments = leading_comments.clone();
                     let mut blank = *leading_blank_line;
@@ -4110,7 +4112,15 @@ enum MacroFilterItem {
 /// `by_span` for one that shadows a parameter (`sunset` IS one, so
 /// `substitute_params` already replaced every read of it, body-wide, with
 /// a clone of the call's value — carrying that clone's span — before this
-/// function ever ran; see `by_span`'s own doc at its declaration). The
+/// function ever ran; see `by_span`'s own doc at its declaration). Which
+/// case applies is decided by `param_names` — the macro's OWN declared
+/// parameter names, threaded in from the call site's `macro_def` — never
+/// by shape alone: a local's value can reach a parameter's literal clone
+/// mid-expression (`stamp`'s `date.to_datetime.to_i` does, for the date
+/// parameter) without the ASSIGNMENT itself reassigning that parameter,
+/// and `by_span` must stay empty for that local or a later, unrelated
+/// read sharing the same span (`date` read again in the filter body)
+/// would be wrongly rewritten to `stamp`'s value instead of its own. The
 /// first statement that is not a plain-local assignment is tried as the
 /// filter the existing two branches already read, with every local folded
 /// so far substituted in first; anything after it — another local
@@ -4129,6 +4139,7 @@ enum MacroFilterItem {
 fn expand_macro_filters(
     body: &crate::expr::Expr,
     module: &crate::ident::ClassId,
+    param_names: &[crate::Symbol],
 ) -> Option<Vec<MacroFilterItem>> {
     use crate::expr::{ExprNode, LValue};
 
@@ -4161,9 +4172,23 @@ fn expand_macro_filters(
                     Some(lit) => {
                         by_name.retain(|(n, _)| n != name);
                         by_name.push((name.clone(), lit.clone()));
-                        for span in consumed_spans {
-                            by_span.retain(|(s, _)| *s != span);
-                            by_span.push((span, lit.clone()));
+                        // Only a local that REASSIGNS a macro parameter
+                        // (its name is one of `param_names`) has anything
+                        // to find by span: `substitute_params` replaced
+                        // every read of THAT parameter, body-wide, with a
+                        // clone of its call-site value before this
+                        // function ever ran, so matching by span finds
+                        // those surviving clones. A plain new local
+                        // (`stamp`, never a parameter) binds by name only
+                        // — its value's `consumed_spans` are some OTHER
+                        // read's literal (e.g. `date`'s), and registering
+                        // them here would wrongly rewrite that other
+                        // read's later occurrences to `stamp`'s value.
+                        if param_names.contains(name) {
+                            for span in consumed_spans {
+                                by_span.retain(|(s, _)| *s != span);
+                                by_span.push((span, lit.clone()));
+                            }
                         }
                         continue;
                     }
