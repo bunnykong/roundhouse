@@ -1246,9 +1246,11 @@ pub(super) fn around_block_filter(
 ) -> Option<Result<(crate::dialect::Filter, Action), String>> {
     use crate::dialect::{Filter, FilterKind};
 
-    // Every refusal below goes through `refuse` rather than returning
-    // `Some(Err(reason))` directly.
-    let refuse = |_reason: String| -> Option<Result<(Filter, Action), String>> { None };
+    // Every refusal below goes through `refuse`: a located survey gap,
+    // with the call kept WHOLE (`Unknown`, round-tripped verbatim) —
+    // never a silent drop, which is the other half of #778's bug (the
+    // SAME shape that previously vanished with no trace at all).
+    let refuse = |reason: String| -> Option<Result<(Filter, Action), String>> { Some(Err(reason)) };
 
     let ExprNode::Send { recv: None, method, args, block: Some(blk), .. } = &*expr.node else {
         return None;

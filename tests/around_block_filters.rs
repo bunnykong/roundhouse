@@ -269,6 +269,150 @@ end
 }
 
 // ---------------------------------------------------------------------
+// Refused: Commit 2 — a survey gap, and the call stays whole
+// ---------------------------------------------------------------------
+
+fn assert_refused(widgets_body: &str) -> (App, Vec<IngestError>) {
+    let (app, gaps) = build(widgets_body);
+    assert!(has_gap(&gaps, "around_action"), "{gaps:?}");
+    let c = widgets_controller(&app);
+    assert!(
+        c.body.iter().any(|item| matches!(item, ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, ExprNode::Send { method, block: Some(_), .. } if method.as_str() == "around_action"))),
+        "a refused around_action must stay whole: {:?}",
+        c.body
+    );
+    assert!(
+        !c.body.iter().any(|item| matches!(item, ControllerBodyItem::Filter { filter, .. }
+            if filter.kind == FilterKind::Around)),
+        "a refused around_action must not half-expand: {:?}",
+        c.body
+    );
+    (app, gaps)
+}
+
+#[test]
+fn a_continuation_passed_along_is_refused() {
+    assert_refused(
+        r#"class WidgetsController < ApplicationController
+  around_action do |_controller, block|
+    somewhere_else(block)
+  end
+
+  def index
+  end
+end
+"#,
+    );
+}
+
+#[test]
+fn a_stored_continuation_is_refused() {
+    assert_refused(
+        r#"class WidgetsController < ApplicationController
+  around_action do |_controller, block|
+    stashed = block
+    stashed.call
+  end
+
+  def index
+  end
+end
+"#,
+    );
+}
+
+#[test]
+fn a_continuation_called_with_arguments_is_refused() {
+    assert_refused(
+        r#"class WidgetsController < ApplicationController
+  around_action do |_controller, block|
+    block.call(1)
+  end
+
+  def index
+  end
+end
+"#,
+    );
+}
+
+#[test]
+fn a_continuation_called_via_dot_paren_sugar_is_refused() {
+    assert_refused(
+        r#"class WidgetsController < ApplicationController
+  around_action do |_controller, block|
+    block.()
+  end
+
+  def index
+  end
+end
+"#,
+    );
+}
+
+#[test]
+fn a_forwarded_continuation_block_pass_is_refused() {
+    assert_refused(
+        r#"class WidgetsController < ApplicationController
+  around_action do |_controller, block|
+    [1].each(&block)
+  end
+
+  def index
+  end
+end
+"#,
+    );
+}
+
+#[test]
+fn three_block_parameters_are_refused() {
+    assert_refused(
+        r#"class WidgetsController < ApplicationController
+  around_action do |_controller, block, extra|
+    block.call
+  end
+
+  def index
+  end
+end
+"#,
+    );
+}
+
+#[test]
+fn an_unrepresentable_option_is_refused() {
+    assert_refused(
+        r#"class WidgetsController < ApplicationController
+  around_action(prepend: true) do |_controller, block|
+    block.call
+  end
+
+  def index
+  end
+end
+"#,
+    );
+}
+
+#[test]
+fn an_only_option_that_is_a_string_is_refused() {
+    assert_refused(
+        r#"class WidgetsController < ApplicationController
+  around_action(only: 'index') do |_controller, block|
+    block.call
+  end
+
+  def index
+  end
+end
+"#,
+    );
+}
+
+// ---------------------------------------------------------------------
 // Byte-identical: a controller with no block-form around_action is
 // unaffected by this whole lowering.
 // ---------------------------------------------------------------------
