@@ -813,6 +813,27 @@ module Db
     !Thread.current[:db_conn].nil?
   end
 
+  # `ActiveRecord::Base.transaction`'s per-thread nesting depth
+  # (connection.rb) — see the contract note in runtime/ruby/db.rbs.
+  #
+  # #693 regression on Postgres: connection.rb's self.transaction reads
+  # Db._txn_depth unconditionally, as its very first statement, even for
+  # a flat (non-nested) transaction — not just to decide whether to
+  # join one already open. db_pg.rb never defined these two methods (#693
+  # added them only to db.rb, the SQLite shim, to box the depth counter
+  # for db.rb's own zero-residual RBS probe), so ANY Model.transaction
+  # on the PostgreSQL shim raised NoMethodError. Same per-thread storage
+  # (Thread.current[:ar_txn_depth]) as db.rb, so the two shims share the
+  # same key shape even though they never share a thread.
+  def self._txn_depth
+    d = Thread.current[:ar_txn_depth]
+    d.nil? ? 0 : d
+  end
+
+  def self._txn_depth=(value)
+    Thread.current[:ar_txn_depth] = value
+  end
+
   # Request-scoped lease. Handles left open by the block are released
   # with the lease, and the release runs even when the block raises.
   def self.with_connection
