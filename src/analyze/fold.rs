@@ -60,6 +60,7 @@ fn flag(name: &str) -> bool {
 
 static ON: LazyLock<bool> = LazyLock::new(|| flag("RH_FOLD"));
 static TAIL: LazyLock<bool> = LazyLock::new(|| flag("RH_FOLD_TAIL"));
+static NOCACHE_BUDGET: LazyLock<bool> = LazyLock::new(|| flag("RH_FOLD_NOCACHE_BUDGET"));
 
 /// Node budget of one top-level expansion; past it a reference reads
 /// `untyped`.
@@ -893,6 +894,7 @@ impl<'a> Expander<'a> {
                 self.stack.push(*slot);
                 self.depth_at.push(self.ctor);
                 let cyc_before = self.cyclic.len();
+                let cuts_before = if *NOCACHE_BUDGET { budget_cuts() } else { 0 };
                 let r = self.go(&v, budget);
                 // A slot made only of unguarded back edges never returns a
                 // value; keep main's `untyped` rather than leaking `Bottom`
@@ -900,8 +902,12 @@ impl<'a> Expander<'a> {
                 let r = if matches!(r, Ty::Bottom) && !matches!(v, Ty::Bottom) { Ty::unresolved() } else { r };
                 self.stack.pop();
                 self.depth_at.pop();
-                // Only an expansion that met no back edge is context-free.
-                if self.cyclic.len() == cyc_before && !self.cyclic.contains(slot) {
+                // Back edges and budget cuts both depend on the reader's
+                // context. Reusing a budget-truncated result can hide a later
+                // small, complete expansion behind untyped.
+                if self.cyclic.len() == cyc_before && !self.cyclic.contains(slot)
+                    && (!*NOCACHE_BUDGET || budget_cuts() == cuts_before)
+                {
                     self.memo.insert(*slot, r.clone());
                 }
                 r
@@ -952,6 +958,10 @@ impl<'a> Expander<'a> {
             other => other.clone(),
         }
     }
+}
+
+fn budget_cuts() -> u64 {
+    ST.with(|s| s.borrow().expansion[2])
 }
 
 fn note_expansion(kind: usize) {
@@ -1018,5 +1028,55 @@ mod tests {
             .collect();
         comps.sort();
         assert_eq!(comps, vec![vec![0, 1], vec![2], vec![3]]);
+    }
+}
+
+#[cfg(test)]
+mod expansion_budget_cache_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    #[ignore = "opt-in regression: run with RH_FOLD_NOCACHE_BUDGET=1"]
+    fn later_small_expansion_matches_a_fresh_reader() {
+        ST.with(|s| {
+            let mut s = s.borrow_mut();
+            *s = State::default();
+            let class = ClassId(Symbol::from("PublicBudgetProbe"));
+            s.keys = vec![
+                SlotKey::Param { class: class.clone(), method: Symbol::from("leaf"), index: 0 },
+                SlotKey::Param { class, method: Symbol::from("small"), index: 0 },
+            ];
+            s.values.insert(0, Ty::Array { elem: Arc::new(Ty::Str) });
+            s.values.insert(1, Ty::Array { elem: Arc::new(Ty::Rec { slot: 0 }) });
+        });
+        let classes = HashMap::new();
+        let mut reused = Expander::new(&classes);
+        let mut elems = vec![Ty::Int; 253];
+        elems.push(Ty::Rec { slot: 1 });
+        let large = reused.expand(&Ty::Tuple { elems: elems.into() });
+        let mut still_cut = false;
+        visit(&large, &mut |t| still_cut |= matches!(t, Ty::Untyped { .. }));
+        assert!(still_cut, "the large root must retain its budget cut");
+        let later = reused.expand(&Ty::Rec { slot: 1 });
+        let fresh = Expander::new(&classes).expand(&Ty::Rec { slot: 1 });
+        assert_eq!(fresh, Ty::Array { elem: Arc::new(Ty::Array { elem: Arc::new(Ty::Str) }) });
+        assert_eq!(later, fresh, "a prior root's budget must not poison this complete expansion");
+        ST.with(|s| {
+            let mut s = s.borrow_mut();
+            let class = ClassId(Symbol::from("PublicBudgetProbe"));
+            s.keys.push(SlotKey::Param { class: class.clone(), method: Symbol::from("gradual"), index: 0 });
+            s.keys.push(SlotKey::Param { class, method: Symbol::from("guarded"), index: 0 });
+            s.values.insert(2, Ty::Array { elem: Arc::new(Ty::gradual()) });
+            s.values.insert(3, Ty::Array { elem: Arc::new(Ty::Rec { slot: 3 }) });
+        });
+        assert!(matches!(reused.expand(&Ty::Rec { slot: 2 }),
+            Ty::Array { elem } if elem.provenance() == Some(crate::ty::Provenance::Gradual)),
+            "authored gradual evidence must survive");
+        assert!(matches!(reused.expand(&Ty::Rec { slot: 3 }),
+            Ty::Array { elem } if elem.provenance() == Some(crate::ty::Provenance::Unresolved)),
+            "guarded recursion must retain its unresolved cut");
+        assert_eq!(reused.expand(&Ty::Rec { slot: 999 }), Ty::pending_untyped(),
+            "a missing slot must remain pending");
     }
 }
