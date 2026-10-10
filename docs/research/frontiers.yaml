@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "On the October 10 current-main condition (`c210f226`), S3 reports every loop settled on all five public apps, but passes any-order on 0/5; four differ in observed structure. The writer-law instrument records the remaining local violations."
-  facts: [F25, F24, F22, F16, F14, F5]
+  stands: "On condition `structure-tools-38403140-s3-public-lab-v1-verify-off`, writer and route sets differ across unset/1/2 on all five apps; slot sets differ except on Campfire. Unset repeats preserve slots/writers but routes differ on four. Complete any-order remains open."
+  facts: [F31, F25, F24, F22, F16, F14, F5]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Use the writer-law counterexamples to assess the remaining return, projection and stamp policies; declare the rest of the structure before typing, or discover it monotonically, then re-check the complete any-order gate."
+  next: "Audit source mapping and undeclared reads/writes, retaining an unset repeat; use writer laws and differing facts to declare the whole structure before typing or discover it monotonically, then re-run the complete any-order check."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "main c210f226; fixpoint-next 38403140; writer-law-harness bf2f052f"
-    lab: "56255dd54bed3815b4774282ae92380524b13136"
-    runner: "baseline-2026-10-10/probe 42a29d21aedeafd48ce89b1287851b2478242b5828e963a0bf3f71c6652d6a9e"
+    compiler: "main c210f226; fixpoint-next 38403140; structure-dump abda389c; writer-law-harness bf2f052f"
+    lab: "76cdb1ea24b0c4c88af4c42c78f567d759b7731d; baseline 56255dd54bed3815b4774282ae92380524b13136"
+    runner: "structure-dump/tools/research/probe 42a29d21aedeafd48ce89b1287851b2478242b5828e963a0bf3f71c6652d6a9e"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
