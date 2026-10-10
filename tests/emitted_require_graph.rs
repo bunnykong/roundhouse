@@ -180,7 +180,7 @@ fn bundled_class_constants_are_ledgered_only_on_targets_without_them() {
         ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
         ("app/controllers/probes_controller.rb", r#"class ProbesController < ActionController::Base
   def index
-    [URI::HTTP, URI::InvalidURIError, Net::OpenTimeout, Net::ReadTimeout,
+    [URI::HTTP, URI::HTTPS, URI::InvalidURIError, Net::OpenTimeout, Net::ReadTimeout,
      Net::HTTPRedirection, Net::HTTPOK, StringIO, OpenSSL::OpenSSLError,
      Rails::HTML5::SafeListSanitizer, JSON, JSON::ParserError, Struct, Mutex,
      Queue, SizedQueue, Thread::Queue, Thread::SizedQueue, Thread::Mutex,
@@ -221,8 +221,8 @@ end
             assert_eq!(gaps[0].severity, roundhouse::diagnostic::Severity::Error);
             assert!(!gaps[0].span.is_synthetic(), "{gaps:?}");
         } else {
-            assert_eq!(gaps.len(), 23, "{target:?}: {gaps:?}");
-            for name in ["URI::HTTP", "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
+            assert_eq!(gaps.len(), 24, "{target:?}: {gaps:?}");
+            for name in ["URI::HTTP", "URI::HTTPS", "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
                 "Net::HTTPRedirection", "Net::HTTPOK", "StringIO", "OpenSSL::OpenSSLError",
                 "Rails::HTML5::SafeListSanitizer", "JSON", "JSON::ParserError", "Struct", "Mutex",
                 "Queue", "SizedQueue", "Thread::Queue", "Thread::SizedQueue", "Thread::Mutex",
@@ -260,7 +260,7 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
   def show
     begin
       head :ok
-    rescue ActionController::UnpermittedParameters, ActionView::MissingTemplate
+    rescue ActionController::UnpermittedParameters, ActionView::MissingTemplate, AbstractController::ActionNotFound
       head :not_found
     end
   end
@@ -303,8 +303,9 @@ end
     }
 }
 
-/// Both Spinel dispatchers rescue `ActionController::RoutingError`
-/// beside `ActiveRecord::RecordNotFound` and answer 404. The CRuby
+/// Both Spinel dispatchers rescue `ActionController::RoutingError` and
+/// `AbstractController::ActionNotFound` beside
+/// `ActiveRecord::RecordNotFound` and answer 404. The CRuby
 /// overlay path is covered by
 /// `emit_and_run::an_action_that_raises_routing_error_answers_404`; this
 /// pins the native Spinel scaffold the same way without needing a
@@ -317,8 +318,10 @@ fn spinel_dispatchers_rescue_routing_error_as_404() {
     ] {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         assert!(
-            src.contains("rescue ActiveRecord::RecordNotFound, ActionController::RoutingError"),
-            "{path} must rescue RoutingError beside RecordNotFound:\n{src}"
+            src.contains(
+                "rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound\n"
+            ),
+            "{path} must rescue RoutingError and ActionNotFound beside RecordNotFound:\n{src}"
         );
     }
 }
@@ -643,4 +646,3 @@ json.body @message.body
         assert!(gaps.iter().all(|g| !g.span.is_synthetic()), "{gaps:?}");
     }
 }
-

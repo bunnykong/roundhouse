@@ -66,9 +66,10 @@ module Main
     accept.split(";", 2)[0].to_s.strip == "*/*"
   end
 
-  def self.request_params(req, path_params)
-    query = ParamBuilder.from_query_string(req.raw_query)
-    return nil if query.nil?
+  # The body's params alone - Rails' `request_parameters`, which
+  # ParamsWrapper copies from - nested by `ParamBuilder`; nil where Rails
+  # answers 400.
+  def self.request_body_params(req)
     body = {}
     if req.form?
       body = ParamBuilder.from_query_string(req.raw_body)
@@ -83,6 +84,13 @@ module Main
       end
       body = ParamBuilder.build(keys, values, present)
     end
+    body
+  end
+
+  def self.request_params(req, path_params)
+    query = ParamBuilder.from_query_string(req.raw_query)
+    return nil if query.nil?
+    body = Main.request_body_params(req)
     return nil if body.nil?
     out = body
     query.each { |k, v| out[k] = v }
@@ -363,6 +371,7 @@ module Main
     request_format = :json if path_format == "json"
     request_format = :turbo_stream if path_format == "turbo_stream"
     request_format = :rss if path_format == "rss"
+    request_format = :xml if path_format == "xml"
     # `/service-worker.js`: campfire's raw service-worker template.
     request_format = :js if path_format == "js"
     # A route-forced format (`get "/rss" => "home#index", :format => "rss"`)
@@ -384,6 +393,8 @@ module Main
       request_format = :rss
     elsif matched.req_format == :json
       request_format = :json
+    elsif matched.req_format == :xml
+      request_format = :xml
     end
 
     controller = Main.instantiate_controller(matched.controller)
@@ -415,6 +426,7 @@ module Main
     fmt_name = "rss" if request_format == :rss
     fmt_name = "turbo_stream" if request_format == :turbo_stream
     fmt_name = "js" if request_format == :js
+    fmt_name = "xml" if request_format == :xml
     request_obj.format = fmt_name
     request_obj.body = req.raw_body
     # Write straight into the RBS-pinned `@env` (Hash[String, untyped] ->
@@ -424,12 +436,17 @@ module Main
     # StrStr->StrPoly mismatch. Writing Strings into the poly field in place
     # is a valid poly-member write and never constructs the competing hash.
     user_agent = req.req_headers.fetch("user-agent", "")
-    request_obj.env["HTTP_USER_AGENT"] = user_agent
-    # The scheme a TLS-terminating proxy (Fly, a load balancer) saw;
-    # `Request#ssl?` reads it, and every absolute URL's `https://`
-    # depends on it.
-    request_obj.env["HTTP_X_FORWARDED_PROTO"] = req.req_headers.fetch("x-forwarded-proto", "")
-    # …AND the reader, which is a DIFFERENT slot. The overlay twin's
+    # `request.headers` follows Rails' HTTP-to-CGI env mapping. Copy all
+    # parsed headers, not just those the dispatcher itself reads: cache
+    # validators, `Accept-Encoding`, and `Turbo-Frame` are consumed by
+    # application code after dispatch. Write directly into the RBS-pinned
+    # env field so each value keeps its poly-hash representation. This
+    # includes `X-Forwarded-Proto`, CSRF/origin/fetch metadata, auth, and
+    # content type; keeping one mapping avoids a drifting header allowlist.
+    req.req_headers.each do |name, value|
+      request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value
+    end
+    # `user_agent` is ALSO a separate reader slot. The overlay twin's
     # `user_agent` reads `@env["HTTP_USER_AGENT"]`; the shared runtime's
     # (`runtime/ruby/action_dispatch/request.rb`) returns `@user_agent`,
     # which only `Request.for` assigns and this path does not go
@@ -442,18 +459,9 @@ module Main
     # asked. A 200 the whole time, which is why only reading the page
     # found it.
     request_obj.user_agent = user_agent
-    request_obj.env["HTTP_X_REQUESTED_WITH"] = req.req_headers.fetch("x-requested-with", "")
-    # The two headers the forgery check reads
-    # (runtime/request_forgery_protection.rb): the token JavaScript
-    # posts, and the Origin it compares with the Host.
-    request_obj.env["HTTP_X_CSRF_TOKEN"] = req.req_headers.fetch("x-csrf-token", "")
-    request_obj.env["HTTP_ORIGIN"] = req.req_headers.fetch("origin", "")
-    # The credentials the HTTP Token/Basic helpers parse
-    # (runtime/http_authentication.rb).
-    request_obj.env["HTTP_AUTHORIZATION"] = req.req_headers.fetch("authorization", "")
-    # The body's declared type, for the one route that checks it
-    # against what was promised: Active Storage's direct-upload PUT.
-    request_obj.env["CONTENT_TYPE"] = req.req_headers.fetch("content-type", "")
+    # The body's params alone, for ParamsWrapper (`Params.wrap`).
+    body_params = Main.request_body_params(req)
+    request_obj.request_parameters = body_params unless body_params.nil?
     controller.request = request_obj
     controller.query_string = request_obj.query_string
     ActionController::Current.request = request_obj
@@ -506,9 +514,15 @@ module Main
 
     begin
       controller.process_action(matched.action)
-    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError
+    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
       res.status = 404
       res.body = "<h1>404 Not Found</h1>"
+      return
+    rescue ActionController::ParameterMissing
+      # `params.expect` / `params.require` refused the request and the app
+      # did not rescue it: Rails' rescue_responses answer :bad_request.
+      res.status = 400
+      res.body = "<h1>400 Bad Request</h1>"
       return
     end
 
@@ -534,7 +548,10 @@ module Main
     # controller's type unconditionally (ruby_overlay/main.rb); this is
     # the same contract. RSS keeps its fixed feed type, matching what
     # that overlay dispatch returns for the same routes.
-    if request_format == :rss
+    if controller.content_type.empty?
+      # Head responses in Rails omit Content-Type for statuses that do
+      # not permit a body (1xx, 204, 205, and 304).
+    elsif request_format == :rss
       res.headers["Content-Type"] = "application/rss+xml; charset=utf-8"
     elsif controller.content_type != "text/html; charset=utf-8"
       res.headers["Content-Type"] = controller.content_type

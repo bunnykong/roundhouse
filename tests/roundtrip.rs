@@ -16,6 +16,7 @@ fn sp() -> Span {
     Span::synthetic()
 }
 
+/// Verifies that a representative blog app survives an IR serialization round-trip.
 #[test]
 fn tiny_blog_round_trips() {
     let mut tables = IndexMap::new();
@@ -30,6 +31,9 @@ fn tiny_blog_round_trips() {
                     nullable: false,
                     default: None,
                     primary_key: true,
+                    generated: None,
+                    generated_text_compatible: None,
+                    generated_int4_compatible: None,
                 },
                 Column {
                     name: Symbol::from("title"),
@@ -37,6 +41,9 @@ fn tiny_blog_round_trips() {
                     nullable: false,
                     default: None,
                     primary_key: false,
+                    generated: None,
+                    generated_text_compatible: None,
+                    generated_int4_compatible: None,
                 },
             ],
             indexes: vec![],
@@ -86,6 +93,8 @@ fn tiny_blog_round_trips() {
         opt_params: vec![],
         kw_params: vec![],
         kwrest_param: None,
+        rest_param: None,
+        anonymous_formal: None,
         block_param: None,
         body: action_body,
         renders: RenderTarget::Inferred,
@@ -171,6 +180,7 @@ fn tiny_blog_round_trips() {
         view_feeders: std::collections::HashMap::new(),
         controller_resolutions: std::collections::HashMap::new(),
         sources: vec![],
+        wrap_parameters_by_default: false,
         // Derived from `sources` and `serde(skip)`, like `binary_assets`.
         const_resolver: Default::default(),
         source_index_required: false,

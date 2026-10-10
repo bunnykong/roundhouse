@@ -195,6 +195,7 @@ struct Walk<'a> {
     an: &'a Analyzer,
     app: &'a App,
     defined: &'a BTreeSet<(ClassId, Symbol)>,
+    defined_sides: &'a BTreeSet<super::ParamKey>,
     /// Methods of each class (defined ones), for dynamic sends.
     methods_of: &'a HashMap<ClassId, Vec<Symbol>>,
     /// Module -> the non-module classes that include it, transitively. A
@@ -241,7 +242,7 @@ impl Walk<'_> {
         };
         let mut out = Vec::new();
         for c in classes {
-            let owner = self.an.inherited_param_owner(self.defined, c.clone(), method);
+            let owner = self.an.inherited_param_owner(self.defined_sides, c.clone(), method, None);
             let key = (owner.clone(), method.clone());
             if self.defined.contains(&key) {
                 if !out.contains(&key) {
@@ -264,7 +265,7 @@ impl Walk<'_> {
         if out.is_empty() && recv.is_none() {
             if let Some(hosts) = self.hosts.get(self_class) {
                 for h in hosts {
-                    let owner = self.an.inherited_param_owner(self.defined, h.clone(), method);
+                    let owner = self.an.inherited_param_owner(self.defined_sides, h.clone(), method, None);
                     let key = (owner, method.clone());
                     if self.defined.contains(&key) && !out.contains(&key) {
                         out.push(key);
@@ -769,7 +770,7 @@ impl Analyzer {
     /// non-trivial SCC into reference mode. Once two rebuilds in a row added
     /// no method, it is rebuilt only every fourth unify pass: reference
     /// mode only grows, and a late SCC is picked up at the next rebuild.
-    pub(super) fn fold_slot_graph(&self, app: &App, defined: &BTreeSet<(ClassId, Symbol)>) {
+    pub(super) fn fold_slot_graph(&self, app: &App, defined_sides: &BTreeSet<super::ParamKey>) {
         if !on() {
             return;
         }
@@ -781,6 +782,10 @@ impl Analyzer {
         if skip {
             return;
         }
+        // Reference-mode membership is conservatively shared by both sides;
+        // the actual parameter rows and reference slots remain side-keyed.
+        let defined: BTreeSet<_> = defined_sides.iter().map(|(c, m, _)| (c.clone(), m.clone())).collect();
+        let defined = &defined;
         let mut methods_of: HashMap<ClassId, Vec<Symbol>> = HashMap::new();
         for (c, m) in defined {
             methods_of.entry(c.clone()).or_default().push(m.clone());
@@ -813,7 +818,7 @@ impl Analyzer {
         for v in hosts.values_mut() {
             v.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         }
-        let mut w = Walk { an: self, app, defined, methods_of: &methods_of, hosts: &hosts, nodes: Vec::new(), ids: HashMap::new() };
+        let mut w = Walk { an: self, app, defined, defined_sides, methods_of: &methods_of, hosts: &hosts, nodes: Vec::new(), ids: HashMap::new() };
         let mut edges: Vec<(u32, u32, u32, u16)> = Vec::new();
         let names = |m: &crate::dialect::MethodDef| -> HashSet<Symbol> { m.params.iter().map(|p| p.name.clone()).collect() };
         for model in &app.models {

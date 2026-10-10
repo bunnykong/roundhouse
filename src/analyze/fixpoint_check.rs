@@ -15,10 +15,9 @@
 //! - `RH_FIXPOINT_DIGEST=1`: a 64-bit digest of each part of the final
 //!   carried state, to compare two runs on the same input.
 //! - `RH_FIXPOINT_STATS=1`: the loop ends; the expressions whose type holds
-//!   `untyped` at any depth; how often #584's bound cut a carried type; how
-//!   often the harvest cut a return that nests its previous round's (#528's
-//!   `harvest_untie_cut`); and, when they run, the fold's and the worklist's
-//!   counters.
+//!   `untyped` at any depth; how often #584's bound cut a carried type; and
+//!   how often the harvest cut a return that nests its previous round's
+//!   (#528's `harvest_untie_cut`), plus fold and worklist counters when active.
 //!
 //! Each prints one `rh-fixpoint:` JSON line on stderr at the end of
 //! `analyze`. It holds counts and hashes only: no names, spans or types.
@@ -66,7 +65,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::App;
 use crate::diagnostic::DiagnosticKind;
-use crate::dialect::MethodDef;
+use crate::dialect::{Filter, MethodDef};
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
@@ -87,10 +86,8 @@ pub(super) fn verify_on() -> bool {
     *VERIFY
 }
 
-/// Whether `RH_FIXPOINT_STATS` is set.
-pub(super) fn stats_on() -> bool {
-    *STATS
-}
+/// Whether the fixpoint statistics are enabled.
+pub(super) fn stats_on() -> bool { *STATS }
 
 static BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 static BOUND_CUTS: AtomicU64 = AtomicU64::new(0);
@@ -146,6 +143,23 @@ pub(super) struct RoundInputs<'a> {
 pub(super) struct Checks {
     /// Per verify round: the loop it repeated and what it moved.
     verified: Vec<(&'static str, BTreeMap<&'static str, u64>)>,
+    bound_calls: u64,
+    bound_cuts: u64,
+    untie_cuts: u64,
+}
+
+impl Checks {
+    /// Snapshot process-wide counts when `analyze` starts; never reset
+    /// the atomics, which another analyzer may still be using.
+    pub(super) fn start() -> Self {
+        let mut checks = Self::default();
+        if *STATS {
+            checks.bound_calls = BOUND_CALLS.load(Ordering::Relaxed);
+            checks.bound_cuts = BOUND_CUTS.load(Ordering::Relaxed);
+            checks.untie_cuts = UNTIE_CUTS.load(Ordering::Relaxed);
+        }
+        checks
+    }
 }
 
 /// Structural hash of a type: union arms sorted and deduplicated, record
@@ -184,8 +198,6 @@ pub(super) fn type_hash(t: &Ty) -> u64 {
             }
         }
         Ty::Relation { of } => of.0.as_str().hash(&mut h),
-        // A fold reference hashes by its slot's key, which names the slot
-        // the same way in every run.
         Ty::Rec { slot } => format!("{:?}", super::fold::key_of(*slot)).hash(&mut h),
         Ty::Fn { params, block, ret, effects } => {
             for p in params.iter() {
@@ -247,6 +259,32 @@ fn ir_rows(e: &Expr, out: &mut Vec<IrRow>) {
     let note = hash_of((e.decisions, e.diagnostic.as_ref().map(annotation_hash)));
     out.push((e.span.file.0, e.span.start, e.span.end, ty, note));
     e.node.for_each_child(&mut |c| ir_rows(c, out));
+}
+
+/// A filter's declaration fields, with typed expressions hashed like
+/// the rest of the IR rather than through `Debug`'s variable ids.
+fn filter_hash(f: &Filter) -> u64 {
+    let mut h = DefaultHasher::new();
+    std::mem::discriminant(&f.kind).hash(&mut h);
+    f.target.hash(&mut h);
+    f.target_span.hash(&mut h);
+    f.from_concern.hash(&mut h);
+    f.only.hash(&mut h);
+    f.except.hash(&mut h);
+    std::mem::discriminant(&f.only_style).hash(&mut h);
+    std::mem::discriminant(&f.except_style).hash(&mut h);
+    f.if_cond.hash(&mut h);
+    f.unless_cond.hash(&mut h);
+    f.prepend.hash(&mut h);
+    for expr in [&f.if_cond_expr, &f.unless_cond_expr, &f.block] {
+        expr.is_some().hash(&mut h);
+        if let Some(expr) = expr {
+            let mut rows = Vec::new();
+            ir_rows(expr, &mut rows);
+            rows.hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 /// The carried state, as one hash per entry.
@@ -413,9 +451,10 @@ impl Analyzer {
         for (decl, t) in &self.typed_constants {
             put("constants", format!("decl {decl:?}"), type_hash(t));
         }
-        for ((id, m), row) in &self.inferred_params {
+        for ((id, m, side), row) in &self.inferred_params {
             let row: Vec<u64> = row.iter().map(type_hash).collect();
-            put("params", format!("{}#{}", id.0.as_str(), m.as_str()), hash_of(row));
+            let sep = if *side == crate::dialect::MethodReceiver::Class { "." } else { "#" };
+            put("params", format!("{}{sep}{}", id.0.as_str(), m.as_str()), hash_of(row));
         }
         for ((id, m), bindings) in &self.refined_action_bindings {
             put(
@@ -456,16 +495,15 @@ impl Analyzer {
                 put("view_seeds", format!("feeders {}", view.as_str()), hash_of(feeders));
             }
             for (id, resolution) in &seeds.controller_resolutions {
-                let filters: Vec<(String, &str, &str, u64)> = resolution
+                let filters: Vec<(u64, &str, &str, u64)> = resolution
                     .filter_chain
                     .iter()
                     .map(|f| {
-                        let assigns: HashMap<Symbol, Ty> = f.assigns.clone();
                         (
-                            format!("{:?}", f.filter),
+                            filter_hash(&f.filter),
                             f.defined_in.0.as_str(),
                             f.included_via.0.as_str(),
-                            bindings_hash(&assigns),
+                            bindings_hash(&f.assigns),
                         )
                     })
                     .collect();
@@ -499,7 +537,7 @@ impl Analyzer {
         app: &mut App,
         inputs: &RoundInputs<'_>,
         which: Loop,
-        snapshot: Option<&mut HashMap<(ClassId, Symbol), Vec<Ty>>>,
+        snapshot: Option<&mut HashMap<super::ParamKey, Vec<Ty>>>,
     ) {
         let before = self.state_fp(app);
         match which {
@@ -583,16 +621,15 @@ impl Analyzer {
                 },
             });
             line["bound"] = serde_json::json!({
-                "calls": BOUND_CALLS.load(Ordering::Relaxed),
-                "cuts": BOUND_CUTS.load(Ordering::Relaxed),
+                "calls": BOUND_CALLS.load(Ordering::Relaxed) - self.fixpoint_checks.bound_calls,
+                "cuts": BOUND_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.bound_cuts,
             });
-            line["harvest_untie_cut"] = serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed));
-            if super::fold::on() {
-                line["fold"] = super::fold::stats();
-            }
-            if let Some(worklist) = self.sccq_stats() {
-                line["worklist"] = worklist;
-            }
+            line["harvest_untie_cut"] =
+                serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+        }
+        if *STATS {
+            if super::fold::on() { line["fold"] = super::fold::stats(); }
+            if let Some(worklist) = self.sccq_stats() { line["worklist"] = worklist; }
         }
         eprintln!("rh-fixpoint: {line}");
     }
@@ -602,7 +639,6 @@ impl Analyzer {
 mod tests {
     use super::*;
     use crate::ident::TyVar;
-    use std::sync::Arc;
 
     fn union(variants: Vec<Ty>) -> Ty {
         Ty::Union { variants: variants.into() }
@@ -617,21 +653,125 @@ mod tests {
     }
 
     #[test]
+    fn stats_are_per_analyze() {
+        const CHILD: &str = "ROUNDHOUSE_FIXPOINT_STATS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let nested = format!("{}1{}", "[".repeat(18), "]".repeat(18));
+            let source = format!(r#"
+class SamplesController < ActionController::Base
+  def index
+    @sample = wrap(1)
+    @deep = echo({nested})
+  end
+  private
+  def wrap(value)
+    [value, wrap(value)]
+  end
+  def echo(value)
+    value
+  end
+end
+"#);
+            let tree = HashMap::from([(
+                std::path::PathBuf::from("app/controllers/samples_controller.rb"),
+                source.into_bytes(),
+            )]);
+            for _ in 0..2 {
+                let mut app = crate::ingest::ingest_app_from_tree(tree.clone()).expect("ingest");
+                Analyzer::new(&app).analyze(&mut app);
+            }
+            return;
+        }
+        // Set the lazy flag in a fresh process, without changing the
+        // environment of other tests. Both analyzes run in that process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "analyze::fixpoint_check::tests::stats_are_per_analyze", "--nocapture"])
+            .env(CHILD, "1")
+            .env("RH_FIXPOINT_STATS", "1")
+            .env_remove("RH_FIXPOINT_VERIFY")
+            .env_remove("RH_FIXPOINT_DIGEST")
+            .output()
+            .expect("run stats test");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        let reports: Vec<serde_json::Value> = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("rh-fixpoint: "))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(reports.len(), 2, "{stderr}");
+        assert!(reports[0]["bound"]["calls"].as_u64().unwrap() > 0);
+        assert!(reports[0]["bound"]["cuts"].as_u64().unwrap() > 0);
+        assert!(reports[0]["harvest_untie_cut"].as_u64().unwrap() > 0);
+        assert_eq!(reports[0]["bound"], reports[1]["bound"]);
+        assert_eq!(reports[0]["harvest_untie_cut"], reports[1]["harvest_untie_cut"]);
+    }
+
+    #[test]
+    fn view_seed_filters_ignore_arm_order_and_variable_ids() {
+        use crate::app::{ControllerResolution, ResolvedFilter};
+        use crate::dialect::{Filter, FilterKind};
+        use crate::expr::{ArrayStyle, ExprNode, Literal};
+        use crate::span::Span;
+        use super::super::typing_mode::ViewSeeds;
+
+        let fingerprint = |ty: Ty| {
+            let mut child = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
+            child.ty = Some(ty);
+            let expr = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![child] });
+            let filter = Filter {
+                kind: FilterKind::Before,
+                target: Symbol::from("set_value"),
+                target_span: Span::synthetic(),
+                from_concern: None,
+                only: vec![Symbol::from("index")],
+                except: Vec::new(),
+                only_style: ArrayStyle::Brackets,
+                except_style: ArrayStyle::Brackets,
+                if_cond: None,
+                unless_cond: None,
+                if_cond_expr: Some(expr.clone()),
+                unless_cond_expr: Some(expr.clone()),
+                block: Some(expr),
+                prepend: false,
+            };
+            let id = ClassId(Symbol::from("SamplesController"));
+            let resolution = ControllerResolution {
+                filter_chain: vec![ResolvedFilter {
+                    filter, defined_in: id.clone(), included_via: id.clone(),
+                    assigns: HashMap::new(), effects: Default::default(),
+                }],
+                layout: Some(Symbol::from("layouts/application")),
+            };
+            let app = App::default();
+            let mut analyzer = Analyzer::new(&app);
+            analyzer.view_seeds = Some(ViewSeeds {
+                controller_resolutions: HashMap::from([(id, resolution)]),
+                ..ViewSeeds::default()
+            });
+            analyzer.state_fp(&app).digests()["view_seeds"].clone()
+        };
+        assert_eq!(fingerprint(Ty::Var { var: TyVar(1) }), fingerprint(Ty::Var { var: TyVar(7) }));
+        assert_eq!(fingerprint(union(vec![Ty::Int, Ty::Str])), fingerprint(union(vec![Ty::Str, Ty::Int])));
+        assert_ne!(fingerprint(Ty::Int), fingerprint(Ty::Str));
+    }
+
+    #[test]
     fn type_hash_tells_containers_apart() {
-        let arr = Ty::Array { elem: Arc::new(Ty::Int) };
-        let hash = Ty::Hash { key: Arc::new(Ty::Int), value: Arc::new(Ty::Int) };
+        let arr = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Int), value: std::sync::Arc::new(Ty::Int) };
         assert_ne!(type_hash(&arr), type_hash(&hash));
-        assert_ne!(type_hash(&arr), type_hash(&Ty::Array { elem: Arc::new(Ty::Str) }));
+        assert_ne!(type_hash(&arr), type_hash(&Ty::Array { elem: std::sync::Arc::new(Ty::Str) }));
     }
 
     #[test]
     fn untyped_is_found_at_any_depth() {
         let deep = Ty::Hash {
-            key: Arc::new(Ty::Str),
-            value: Arc::new(Ty::Array { elem: Arc::new(union(vec![Ty::Int, Ty::unresolved()])) }),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::unresolved()])) }),
         };
         assert!(holds_untyped(&deep));
-        assert!(!holds_untyped(&Ty::Array { elem: Arc::new(Ty::Int) }));
+        assert!(!holds_untyped(&Ty::Array { elem: std::sync::Arc::new(Ty::Int) }));
     }
 
     #[test]

@@ -384,6 +384,24 @@ module Rails
       "_session"
     end
 
+    # `config.action_controller.forgery_protection_verification_strategy`,
+    # as the forgery check reads it (runtime/spinel/
+    # request_forgery_protection.rb). Rails' class default; ingest lifts
+    # `load_defaults 8.2` (`:header_only`) or an app's own
+    # `protect_from_forgery using:` into an override on the app's
+    # reopen, the same shape as `session_cookie_key`.
+    def forgery_protection_verification_strategy
+      "header_or_legacy_token"
+    end
+
+    # Whether forms carry no authenticity token field at all: an app
+    # helper overriding ActionView's `token_tag` to answer "" (the shape
+    # header-only forgery protection uses) makes it true; ingest
+    # synthesizes the override on the app's reopen.
+    def token_fields_omitted
+      false
+    end
+
     # `GlobalID.app` — the first segment of every `gid://<app>/<Model>/
     # <id>` URI this runtime mints. Rails derives it from the
     # application's railtie name (`campfire_application` minus the
@@ -456,6 +474,19 @@ module Rails
     # credentials configured.
     def credentials
       {}
+    end
+
+    # The Rack env defaults every request starts from
+    # (`Rails.application.env_config`). Held in a constant because
+    # `Rails.application` answers a fresh Application each call, and a
+    # test that sets a key has to read it back. No key is consulted yet:
+    # campfire's tests set `action_dispatch.show_exceptions` to
+    # `:rescuable`, and a forgery failure here always renders the 422
+    # that setting asks for.
+    ENV_CONFIG = {}
+
+    def env_config
+      ENV_CONFIG
     end
 
     # The zone every ActiveRecord temporal value is PRESENTED in. Same

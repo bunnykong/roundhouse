@@ -311,6 +311,14 @@ module ActiveRecord
       []
     end
 
+    def self.schema_boolean_columns
+      []
+    end
+
+    def self.schema_decimal_columns
+      []
+    end
+
     def self.instantiate(_row)
       raise NotImplementedError, "#{name}.instantiate must be overridden"
     end
@@ -615,10 +623,16 @@ module ActiveRecord
 
     # Bulk DELETE without instantiating records or running callbacks —
     # ActiveRecord's `Model.delete_all` (used by seeds/tests for table
-    # resets; `Relation#delete_all` covers the scoped form).
+    # resets; `Relation#delete_all` covers the scoped form). Returns
+    # the affected-row count, as Rails does. This default is the
+    # compile surface: the strict targets' adapter contract has no
+    # `changes`, and their models carry the lowerer-emitted Db-direct
+    # override, so the count is read before the delete. The
+    # ruby-family connection.rb reopen answers with the exact count.
     def self.delete_all
+      n = _adapter_count
       ActiveRecord.adapter.delete_all(table_name)
-      nil
+      n
     end
 
     def self.destroy_all
@@ -692,18 +706,41 @@ module ActiveRecord
         @persisted = true
         __track_saved_changes(was_new)
         after_create
-        after_create_commit
       else
         before_update
         fill_timestamps(false)
         _adapter_update
         __track_saved_changes(was_new)
         after_update
-        after_update_commit
       end
       after_save
+      # The commit callbacks fire once the save's own callbacks are
+      # done, as Rails runs them after the transaction: an
+      # `after_update_commit` reads what `after_save` wrote (an
+      # attachment, a rich-text body), not the record half saved.
+      if was_new
+        after_create_commit
+      else
+        after_update_commit
+      end
       after_save_commit
       after_commit
+      true
+    end
+
+    # A row inserted raw, as Rails' fixture loader (`insert_fixtures_set`)
+    # and bulk inserts (`insert_all` / `insert_all!`) write one: no
+    # validations and NO CALLBACKS. Timestamps the attributes left out
+    # are filled, as Rails fills them. Running the save
+    # callbacks here was wrong in a way a test can see: campfire's
+    # Message `after_create_commit` marks the room's memberships unread,
+    # so loading the message fixtures left the fixture users with unread
+    # rooms Rails never gives them.
+    def _insert_row
+      fill_timestamps(true)
+      self.id = _adapter_insert
+      @persisted = true
+      _note_hydrated
       true
     end
 
@@ -848,6 +885,17 @@ module ActiveRecord
       changes.key?(name)
     end
 
+    # Rails' `changed?` / `has_changes_to_save?`: any column pending.
+    # campfire's `RecordCache` snapshots only records with none.
+    def changed?
+      changes = changes_to_save
+      !changes.empty?
+    end
+
+    def has_changes_to_save?
+      changed?
+    end
+
     def attribute_was(name)
       changes = changes_to_save
       changes[name]
@@ -956,6 +1004,21 @@ module ActiveRecord
       # success, self unchanged when the row has been deleted.
       _adapter_reload
       self
+    end
+
+    # `#lock!` (`ActiveRecord::Locking::Pessimistic#lock!`) — reloads
+    # the record with a row lock and answers self. SQLite is a single
+    # writer with no `SELECT … FOR UPDATE` support, so inside a
+    # transaction a plain `reload` already gives the guarantee Rails
+    # extracts from the row lock: the enclosing `BEGIN` serializes
+    # writers, so nothing can land between this read and a following
+    # write in the same transaction. A Postgres adapter would spell
+    # the `lock` argument as `FOR UPDATE` / `FOR SHARE` here; this
+    # runtime keeps the Rails signature — `lock` may be `true` or a
+    # String locking clause (`lock!("FOR UPDATE NOWAIT")`) — but
+    # doesn't need either under SQLite; both are accepted and ignored.
+    def lock!(lock = nil)
+      reload
     end
 
     # ---- Lifecycle hooks (no-ops; subclasses override) --------------

@@ -34,6 +34,12 @@ pub const GENERATED_CONST_REF: u64 = 1 << 4;
 /// An admitted library-class Data factory with its exact declaration identity.
 pub const RESOLVED_DATA_FACTORY: u64 = 1 << 3;
 
+/// A `permit` Send that the source wrote as `params.expect(r: [...])`.
+/// `rewrite_params` respells `expect` as `require(:r).permit(...)`, and
+/// the two refuse a malformed request differently in Rails, so the
+/// strong-params lowering reads this to know which refusal to apply.
+pub const FROM_PARAMS_EXPECT: u64 = 1 << 8;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by
@@ -323,6 +329,16 @@ pub enum ExprNode {
         /// local variable or method 'args'`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rest_param: Option<Symbol>,
+        /// The parameters `params` and `rest_param` do not hold, in
+        /// source order: optional positionals (`size = 18`, with
+        /// `default`), keywords (`key:` / `limit: 10`, `keyword`) and a
+        /// keyword rest (`**opts`, `keyword` and `rest`; empty name for
+        /// an anonymous `**`). Kept for the same reason as `rest_param`:
+        /// the body reads these names, and a signature without them
+        /// raises `NameError`. Optionals come after `params` and before
+        /// `rest_param`; keywords after it, as Ruby orders them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra_params: Vec<crate::dialect::Param>,
         block_param: Option<Symbol>,
         body: Expr,
         /// Surface form when this Lambda represents a block attached to
@@ -462,6 +478,13 @@ pub enum ExprNode {
     /// This is an opaque packet sourced from the enclosing anonymous
     /// keyword-rest formal, not a value or a synthetic local binding.
     ForwardKeywords,
+    /// Ordered literal keyword pairs followed by anonymous keyword
+    /// forwarding (`key: value, **`) in call argument position. The
+    /// forwarded packet merges after the explicit pairs, so it may
+    /// override them; each pair expression still evaluates once and in
+    /// source order. The pair values are children for typing/effects,
+    /// while the opaque forwarded packet is not a capturable value.
+    ForwardKeywordsWithPairs { entries: Vec<(Expr, Expr)> },
     /// Native Ruby syntax query. The operand is syntax, not a value child:
     /// generic typing/lowering must not resolve or rewrite it. Reachability
     /// may inspect it to retain methods whose existence is being queried.
@@ -569,6 +592,7 @@ impl ExprNode {
             ExprNode::Splat { .. } => "Splat",
             ExprNode::ForwardArgs => "ForwardArgs",
             ExprNode::ForwardKeywords => "ForwardKeywords",
+            ExprNode::ForwardKeywordsWithPairs { .. } => "ForwardKeywordsWithPairs",
             ExprNode::Defined { .. } => "Defined",
             ExprNode::KeywordSplat { .. } => "KeywordSplat",
             ExprNode::MultiAssign { .. } => "MultiAssign",
@@ -621,6 +645,12 @@ impl ExprNode {
             | ExprNode::ForwardKeywords
             | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
+            ExprNode::ForwardKeywordsWithPairs { entries } => {
+                for (k, v) in entries {
+                    f(k);
+                    f(v);
+                }
+            }
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
                     f(k);
@@ -647,7 +677,14 @@ impl ExprNode {
                 f(value);
                 f(body);
             }
-            ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::Lambda { extra_params, body, .. } => {
+                // Defaults are evaluated where the lambda is called, before
+                // the body runs; walk them first.
+                for p in extra_params.iter_mut() {
+                    if let Some(d) = &mut p.default { f(d); }
+                }
+                f(body)
+            }
             ExprNode::MethodRef { recv, .. } => {
                 if let Some(r) = recv {
                     f(r);
@@ -827,6 +864,12 @@ impl ExprNode {
             | ExprNode::ForwardKeywords
             | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
+            ExprNode::ForwardKeywordsWithPairs { entries } => {
+                for (k, v) in entries {
+                    f(k);
+                    f(v);
+                }
+            }
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
                     f(k);
@@ -853,7 +896,12 @@ impl ExprNode {
                 f(value);
                 f(body);
             }
-            ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::Lambda { extra_params, body, .. } => {
+                for p in extra_params.iter() {
+                    if let Some(d) = &p.default { f(d); }
+                }
+                f(body)
+            }
             ExprNode::MethodRef { recv, .. } => {
                 if let Some(r) = recv {
                     f(r);

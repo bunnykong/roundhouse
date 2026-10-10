@@ -75,6 +75,8 @@ module ActiveRecord
     def or: (Relation other) -> Relation
     def add_condition: (Hash[String | Symbol, untyped] | String | nil condition, Array[untyped] args, bool negate) -> bool
     def order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
+    def order_sql: (String fragment) -> Relation
+    def reorder_sql: (String fragment) -> Relation
     # In-memory sort of a LOADED relation. Records are `Base` (same
     # interim as first/take); `preloaded` stays bare for Spinel integer
     # seeds, but the loaded cache itself is a record array.
@@ -84,6 +86,8 @@ module ActiveRecord
     def reverse_order_term: (String term) -> String
     def reverse_one_order_term: (String term) -> String
     def loaded_tail: (Array[Base] loaded, Integer n) -> Array[Base]
+    def loaded_sole_rows: (Array[Base] loaded) -> Array[Base]
+    def sole_probe_limit: (Integer? limit) -> Integer
     # The keys are whatever the ordered column holds, and `<=>` on two
     # of them is an Integer or nil -- the only honest spellings.
     def compare_order_keys: (untyped a, untyped b) -> Integer?
@@ -159,6 +163,7 @@ module ActiveRecord
     def ==: (untyped other) -> bool
     def filter: () { (Base) -> bool } -> Array[Base]
     def map: () { (Base) -> untyped } -> untyped
+    def to_h: () { (Base) -> Array[untyped] } -> Hash[untyped, untyped]
     def collect: () { (Base) -> untyped } -> untyped
     # `other` is `untyped`, NOT `Array[untyped]`, on all four set
     # operators: each body only hands the argument on to Array's own
@@ -181,6 +186,7 @@ module ActiveRecord
     def index_by: () { (Base) -> untyped } -> Hash[untyped, Base]
     def find_each: () { (Base) -> void } -> Relation
     def find_in_batches: () { (Array[Base]) -> void } -> Relation
+    def in_batches: (?of: Integer, ?order: Symbol?) ?{ (Relation) -> void } -> Relation
     # `map`/`collect` return `untyped`, NOT `Array[untyped]`: the result's
     # element type is whatever the BLOCK returns, which this RBS has no
     # type variable to say. `Array[untyped]` is a seed spinel TRUSTS, so
@@ -203,6 +209,12 @@ module ActiveRecord
     def last_n: (Integer | Float | String n) -> Array[Base]
     def count: () -> Integer
     def sum: (String | Symbol expr) -> Float
+    def minimum: (String | Symbol expr) -> untyped
+    def maximum: (String | Symbol expr) -> untyped
+    private def extreme: (String | Symbol expr, String function) -> untyped
+    private def grouped_extreme: (String column, String function) -> Hash[untyped, untyped]
+    private def schema_group_column: (String group) -> Symbol?
+    private def cast_schema_value: (untyped value, Symbol column) -> untyped
     def group_count: () -> Hash[untyped, Integer]
     def empty?: () -> bool
     def any?: () -> bool
@@ -213,7 +225,7 @@ module ActiveRecord
     def one?: () -> bool
     def many?: () -> bool
     def all?: () { (Base) -> bool } -> bool
-    def exists?: (?Integer? id) -> bool
+    def exists?: (?(Integer | String | Hash[String | Symbol, untyped] | nil) id) -> bool
     def probe_existence: (Integer n) -> Integer
     def more_than?: (Integer n) -> bool
     def length: () -> Integer
@@ -246,10 +258,12 @@ module ActiveRecord
     def pluck: (String | Symbol col) -> Array[untyped]
     def pick: (String | Symbol col) -> untyped
     def ids: () -> Array[Integer]
-    def find: (Integer | Float | String | Array[Integer | Float | String] id) -> untyped
+    def find: (Integer | Float | String | Array[Integer | Float | String] | nil id) -> untyped
     def find_ids: (Array[Integer | Float | String] ids) -> Array[Base]
     def find_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base?
     def find_by!: (Hash[Symbol, untyped] | String | nil conditions) -> Base
+    def sole: () -> Base
+    def find_sole_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base
     def first_or_initialize: () -> Base
     def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
 

@@ -588,6 +588,8 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
             route_id_segments: Some(&route_ids),
             inferred_params: Some(&app.inferred_method_params),
             models: &app.models,
+            wrap_parameters_by_default: app.wrap_parameters_by_default,
+            concern_spliced_actions: Some(&app.concern_spliced_actions),
         },
     )
 }
@@ -1012,8 +1014,12 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
             .chain(model_registry)
             .collect();
+        // A test body's `_url` answers absolute, on the session's host,
+        // as the Ruby family's jbuilder `_url` does (see the pass).
+        let test_modules =
+            crate::lower::test_module_to_library::ruby_family_absolute_test_urls(&app.test_modules);
         let mut test_lowered = crate::lower::lower_test_modules_with_inner(
-            &app.test_modules,
+            &test_modules,
             &app.fixtures,
             &app.models,
             fixture_extras,
@@ -1052,6 +1058,9 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             // into a seeded Relation. See the module.
             crate::lower::records_to_relation_arg::rewrite_test_classes(&mut test_lcs, app);
             library::apply_scope_lowering(&mut test_lcs, app);
+            // `1.minute.ago` in a class a test file carries (campfire's
+            // `PushServiceTestHelper.sign`), as library classes get it.
+            library::apply_duration_lowering(&mut test_lcs, app);
             // A test class nests under the class it tests
             // (`class User … class BotTest`), which shadows exactly as
             // the model-side concern does: campfire's

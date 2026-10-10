@@ -644,6 +644,7 @@ mod tests {
     use crate::span::Span;
     use indexmap::IndexMap;
 
+    /// Creates the comments schema and class registry used by the Arel builder tests.
     fn fixture() -> (Schema, HashMap<ClassId, ClassInfo>) {
         let mut tables = IndexMap::new();
         tables.insert(
@@ -657,6 +658,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: true,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                     Column {
                         name: Symbol::from("article_id"),
@@ -664,6 +668,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: false,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                     Column {
                         name: Symbol::from("body"),
@@ -671,6 +678,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: false,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                 ],
                 indexes: vec![],

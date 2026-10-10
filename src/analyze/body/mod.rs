@@ -24,6 +24,15 @@ use crate::ty::{Row, Ty};
 
 /// A break in a bytes block can replace the method's String result. Nested
 /// lambdas/iterators and while/until loops own their breaks independently.
+// `Class[C]` is a class object that dispatch unwraps to `C`.
+fn instance_shaped(ty: &Ty) -> bool {
+    match ty {
+        Ty::Class { id, .. } => id.0.as_str() != "Class",
+        Ty::Union { variants } => variants.iter().all(|v| matches!(v, Ty::Nil) || instance_shaped(v)),
+        _ => false,
+    }
+}
+
 fn bytes_block_has_escaping_break(e: &Expr) -> bool {
     match &*e.node {
         ExprNode::Break { .. } => true,
@@ -34,6 +43,12 @@ fn bytes_block_has_escaping_break(e: &Expr) -> bool {
             found
         }
     }
+}
+
+/// A forwarded `&local` whose binding may be nil at runtime — Ruby then
+/// passes no block. Bare `Nil` is handled separately as definite absence.
+fn forwarded_block_may_be_nil(ty: &Ty) -> bool {
+    matches!(ty, Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)))
 }
 
 mod diagnostic;
@@ -149,6 +164,8 @@ pub struct Ctx {
     /// `ActiveRecord::Base … lacks a shared runtime` on the template
     /// itself is noise that hides the real ledger.
     pub claimed_macro_template: bool,
+    // `!class_side` cannot stand in: scope bodies type with it false, and their bare `active` is the scope.
+    pub instance_body: bool,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -241,6 +258,9 @@ pub struct ClassInfo {
     /// which is the same two hops the emit-time flattening reads
     /// (`room.memberships.grant_to(u)` → `room.memberships_grant_to(u)`).
     pub assoc_extensions: HashMap<(Symbol, Symbol), Ty>,
+    /// has_many readers without `through:` — the ones `lower::scope_chain`
+    /// roots onto a relation, so a relation terminal on them runs as SQL.
+    pub direct_has_many: std::collections::HashSet<Symbol>,
     /// Modules mixed in via `include` (e.g. a controller's
     /// `include IntervalHelper`). A mixed-in module's instance methods
     /// become instance methods of the includer, so dispatch consults
@@ -375,6 +395,19 @@ impl<'a> BodyTyper<'a> {
     /// stays private to this module; `send.rs` reaches it here.
     pub(super) fn classes(&self) -> Classes<'a> {
         Classes(self.classes)
+    }
+
+    fn has_unknown_ancestor(&self, id: &crate::ident::ClassId) -> bool {
+        let mut current = Some(id);
+        for step in 0..32 {
+            let Some(cid) = current else { return false };
+            let Some(cls) = self.classes.get(cid) else { return step > 0 };
+            if cls.open {
+                return true;
+            }
+            current = cls.parent.as_ref();
+        }
+        false
     }
 
     /// Whether `self`'s class, its includes or its ancestors register
@@ -634,6 +667,12 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
+    // `x.class` is not a class reference to `is_class_object`, yet types as the same flat `Ty::Class` as an instance.
+    fn is_instance(&self, expr: &Expr, ctx: &Ctx) -> bool {
+        !self.is_class_object(expr, ctx)
+            && !matches!(&*expr.node, ExprNode::Send { method, args, .. } if method.as_str() == "class" && args.is_empty())
+    }
+
     fn is_module_callback(&self, recv_ty: Option<&Ty>, method: &Symbol) -> bool {
         matches!(method.as_str(), "included" | "prepended" | "append_features" | "prepend_features")
             && matches!(recv_ty, Some(Ty::Class { id, .. }) if self.classes().get(id).is_some_and(|c| c.is_module && c.class_methods.contains_key(method)))
@@ -851,11 +890,20 @@ impl<'a> BodyTyper<'a> {
                             qualify_resolved_path(path, name);
                         }
                         super::sccq::rec_const_id(declaration);
-                        self.typed_constants
+                        let value = self.typed_constants
                             .and_then(|values| values.get(declaration))
                             .cloned()
-                            .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()))
-                            .unwrap_or_else(unknown)
+                            .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()));
+                        let id: crate::ident::ClassId = (**name).clone();
+                        match value {
+                            Some(ty) => ty,
+                            // Not left unknown: ingest turned `Result = Struct.new(…)` into the class it defines.
+                            None if self.classes().get(&id).is_some_and(|c| c.app_declared) => {
+                                expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
+                                Ty::Class { id, args: vec![].into() }
+                            }
+                            None => unknown(),
+                        }
                     }
                     // An unresolved source reference may still name an
                     // exact modeled external class (for example Time).
@@ -1198,10 +1246,29 @@ impl<'a> BodyTyper<'a> {
                 self.analyze_expr(body, &inner)
             }
 
-            ExprNode::Lambda { params, rest_param, block_param, body, .. } => {
+            ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
                 let mut inner = ctx.clone();
                 for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
                     inner.class_objects.remove(name);
+                }
+                // Optional, keyword and keyword-rest parameters bind in the
+                // body like any local: an optional as its default's type,
+                // `**opts` as a Symbol-keyed Hash, a required keyword as
+                // untyped (no caller evidence here, the same gradual answer a
+                // block parameter gets). A default is typed in the lambda's
+                // own scope as filled so far, so it reads an earlier extra
+                // parameter (`c = b`) rather than an outer local.
+                for param in extra_params.iter_mut() {
+                    let ty = match (&mut param.default, param.keyword && param.rest) {
+                        (_, true) => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::unresolved()) },
+                        (Some(default), false) => self.analyze_expr(default, &inner),
+                        (None, false) => Ty::unresolved(),
+                    };
+                    if param.name.as_str().is_empty() {
+                        continue;
+                    }
+                    inner.class_objects.remove(&param.name);
+                    inner.local_bindings.insert(param.name.clone(), ty);
                 }
                 let body_ty = self.analyze_expr(body, &inner);
                 // Synthesize a `Fn` type from the body's type. Param
@@ -1445,6 +1512,8 @@ impl<'a> BodyTyper<'a> {
                         if let Some(receiver) = recv.as_ref() {
                             block_ctx.self_ty = recv_ty.clone();
                             block_ctx.class_side = self.is_class_object(receiver, ctx);
+                            block_ctx.instance_body = matches!(method.as_str(), "instance_eval" | "instance_exec")
+                                && self.is_instance(receiver, ctx);
                         }
                     }
                     let method_ref_ty = self.analyze_expr(b, &block_ctx);
@@ -1457,6 +1526,19 @@ impl<'a> BodyTyper<'a> {
                     match &*b.node {
                         ExprNode::Lambda { body, .. } => body.ty.clone(),
                         ExprNode::MethodRef { .. } => Some(method_ref_ty),
+                        // Forwarded proc (`&callback`): Var in the block
+                        // slot, no body to type. Presence must still reach
+                        // dispatch — `PTY.spawn` with a block answers nil.
+                        // A nil local (`callback = nil; …(&callback)`) is
+                        // Ruby's no-block path, as is a literal `&nil`.
+                        // A nilable local is refined for `PTY.spawn` after
+                        // dispatch (Tuple | Nil); leave presence absent
+                        // here so `String#bytes(&maybe)` stays the array.
+                        ExprNode::Var { name, .. } => match ctx.local_bindings.get(name) {
+                            Some(Ty::Nil) => None,
+                            Some(ty) if forwarded_block_may_be_nil(ty) => None,
+                            _ => Some(Ty::unresolved()),
+                        },
                         _ => None,
                     }
                 } else {
@@ -1481,6 +1563,39 @@ impl<'a> BodyTyper<'a> {
                         target: None,
                         construct: Symbol::from("Data.new"),
                         detail: "Data is abstract; construct a class returned by Data.define".into(),
+                    });
+                    return unknown();
+                }
+                let unsupported_deep_merge = match method.as_str() {
+                    "deep_merge" if block.is_some() => Some((
+                        "Hash#deep_merge conflict block",
+                        "only the no-block Rails deep_merge form is supported",
+                    )),
+                    "deep_merge!" => Some((
+                        "Hash#deep_merge!",
+                        "the mutating deep_merge! form is unsupported",
+                    )),
+                    "deep_merge" if args.len() != 1 => Some((
+                        "Hash#deep_merge arity",
+                        "exactly one Hash argument is supported",
+                    )),
+                    "deep_merge"
+                        if !matches!(args.first().and_then(|arg| arg.ty.as_ref()), Some(Ty::Hash { .. })) =>
+                    {
+                        Some((
+                            "Hash#deep_merge argument",
+                            "the supported no-block form requires a statically typed Hash argument",
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some((construct, detail)) = unsupported_deep_merge
+                    && matches!(recv_ty, Some(Ty::Hash { .. }))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from(construct),
+                        detail: detail.into(),
                     });
                     return unknown();
                 }
@@ -1598,6 +1713,15 @@ impl<'a> BodyTyper<'a> {
                 ) {
                     return t;
                 }
+                if let Some(t) = self.relation_extreme_ty(
+                    recv.as_ref(),
+                    recv_ty.as_ref(),
+                    method,
+                    args,
+                    ctx.instance_body.then_some(ctx.self_ty.as_ref()).flatten(),
+                ) {
+                    return t;
+                }
                 if let Some(t) =
                     self.column_attribute_access_ty(recv_ty.as_ref(), method, args)
                 {
@@ -1621,7 +1745,29 @@ impl<'a> BodyTyper<'a> {
                 {
                     return t;
                 }
-                let dispatched = self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args);
+                let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
+                    && recv_ty.as_ref().is_some_and(instance_shaped);
+                let dispatched =
+                    self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // `PTY.spawn(..., &maybe)` when `maybe` is nilable: Ruby
+                // may take the block (nil) or not (tuple). Presence was
+                // left absent above so other methods keep their no-block
+                // answer; widen the spawn result here.
+                if method.as_str() == "spawn"
+                    && matches!(&recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "PTY")
+                    && let Some(b) = block.as_ref()
+                    && let ExprNode::Var { name, .. } = &*b.node
+                    && ctx
+                        .local_bindings
+                        .get(name)
+                        .is_some_and(forwarded_block_may_be_nil)
+                {
+                    let file = Ty::Class { id: ClassId(Symbol::from("File")), args: vec![].into() };
+                    return union_of(
+                        Ty::Tuple { elems: vec![file.clone(), file, Ty::Int].into() },
+                        Ty::Nil,
+                    );
+                }
                 if let Some(receiver) = recv.as_mut() {
                     receiver.decisions &= !crate::expr::RESOLVED_OPERATOR_RECEIVER;
                     if matches!(method.as_str(), "+" | "-" | "*" | "/" | "**" | "%" | "<" | "<=" | ">" | ">=")
@@ -1635,6 +1781,14 @@ impl<'a> BodyTyper<'a> {
                 // have already dispatched above and must win.
                 // RBS declares it `(untyped) -> Array[untyped]`; the
                 // argument says more.
+                // Not a Float argument: CRuby's `BigDecimal(Float)` needs a precision and spinel's package has none.
+                if recv.is_none() && method.as_str() == "BigDecimal" && args.len() == 1 && block.is_none()
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
+                    && matches!(args[0].ty.as_ref(), Some(Ty::Str | Ty::Int))
+                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                {
+                    return send::bigdecimal();
+                }
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
                     && (matches!(dispatched, Ty::Var { .. })
@@ -1696,10 +1850,22 @@ impl<'a> BodyTyper<'a> {
                         {
                             Some("Object extension")
                         }
+                        // Not refused again on a receiver the constant refusal already accounts for.
+                        _ if matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped { .. }))
+                            && recv.as_ref().is_some_and(|r| rooted_in_refused_constant(r)) => None,
                         _ if matches!(method.as_str(), "to_query" | "instance_values" | "acts_like?" | "presence_in" | "as_json" | "with_options" | "pretty_inspect") => Some("Object extension"),
                         _ => None,
                     };
-                    if let Some(owner) = gap.filter(|_| expr.diagnostic.is_none()) {
+                    // Not an Object extension under an unseen ancestor: a gem likely defines it, and only a dispatch miss keeps the receiver attribution needs.
+                    let gem_ancestry = recv_ty
+                        .clone()
+                        .filter(|ty| gap == Some("Object extension") && matches!(ty, Ty::Class { id, .. } if self.has_unknown_ancestor(id)));
+                    if let Some(recv_ty) = gem_ancestry.filter(|_| expr.diagnostic.is_none()) {
+                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::SendDispatchFailed {
+                            method: method.clone(),
+                            recv_ty,
+                        });
+                    } else if let Some(owner) = gap.filter(|_| expr.diagnostic.is_none()) {
                         expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from(owner),
@@ -2413,6 +2579,13 @@ impl<'a> BodyTyper<'a> {
             }
 
             ExprNode::ForwardArgs | ExprNode::ForwardKeywords => Ty::unresolved(),
+            ExprNode::ForwardKeywordsWithPairs { entries } => {
+                for (key, value) in entries.iter_mut() {
+                    self.analyze_expr(key, ctx);
+                    self.analyze_expr(value, ctx);
+                }
+                Ty::unresolved()
+            }
 
             ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
                 // Splat propagates the inner expression's type
@@ -2520,9 +2693,10 @@ fn forget_class_object_writes(expr: &Expr, ctx: &mut Ctx) {
                 if let LValue::Var { name, .. } = target { names.push(name.clone()); }
             }
         }
-        ExprNode::Lambda { params, rest_param, block_param, .. } => {
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } => {
             names.extend(params.iter().cloned());
             names.extend(rest_param.iter().cloned());
+            names.extend(extra_params.iter().map(|p| p.name.clone()));
             names.extend(block_param.iter().cloned());
         }
         ExprNode::Let { name, .. } => names.push(name.clone()),
@@ -2880,7 +3054,8 @@ fn union_of_raw(a: Ty, b: Ty) -> Ty {
         return a;
     }
     if a == b {
-        return a;
+        // `==` ignores record field order; keep the canonical one.
+        return Ty::canonical_min(a, b);
     }
     // Structural join for same-shape generic containers — `Hash<A,B>
     // | Hash<C,D>` is more usefully expressed as `Hash<A|C, B|D>`
@@ -2963,11 +3138,56 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
             }
             out.push(Ty::Array { elem });
         }
-        other => {
-            if !out.contains(&other) {
-                out.push(other);
+        other => match out.iter_mut().find(|v| **v == other) {
+            // An equal variant can differ in record field order; keep
+            // the canonical one so the result doesn't depend on which
+            // arrived first.
+            Some(existing) => *existing = Ty::canonical_min(existing.clone(), other),
+            None => out.push(other),
+        },
+    }
+}
+
+/// The join for an ivar slot the fixpoint carries between rounds
+/// (`extract_ivar_assignments`' repeated writes and `[]=` widening).
+///
+/// [`union_of`] with a pending `Var` as the identity: a `Var` arm
+/// drops out wherever another arm sits beside it, at the top and
+/// inside Hash and Array spines, so `{}` (`Hash[Var, Var]`) joined
+/// with a `[]=` write gives the same Hash whichever arrived first, as
+/// `widen_hash_ivar_value` always meant (it replaced a `Var` value
+/// side). `Untyped` stays an arm: gradual absorption is unchanged
+/// (#617).
+pub(crate) fn join_ivar_slot(a: Ty, b: Ty) -> Ty {
+    drop_pending_arms(union_of(a, b))
+}
+
+/// Remove `Var` arms that sit beside a non-`Var` arm, in a union and
+/// inside Hash and Array spines. A union of `Var`s alone keeps the one
+/// with the smallest id (canonical order sorts them first), so every
+/// pending value is one element of the lattice. Expects `union_of`'s
+/// canonical form and returns it.
+pub(crate) fn drop_pending_arms(t: Ty) -> Ty {
+    match t {
+        Ty::Hash { key, value } => Ty::Hash {
+            key: std::sync::Arc::new(drop_pending_arms((*key).clone())),
+            value: std::sync::Arc::new(drop_pending_arms((*value).clone())),
+        },
+        Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(drop_pending_arms((*elem).clone())) },
+        Ty::Union { variants } => {
+            let mut variants: Vec<Ty> = variants.into_iter().map(drop_pending_arms).collect();
+            if variants.iter().any(|v| !matches!(v, Ty::Var { .. })) {
+                variants.retain(|v| !matches!(v, Ty::Var { .. }));
+            } else {
+                variants.truncate(1);
+            }
+            Ty::canonicalize_variants(&mut variants);
+            match variants.len() {
+                1 => variants.pop().unwrap(),
+                _ => Ty::Union { variants: variants.into() },
             }
         }
+        other => other,
     }
 }
 
@@ -3388,7 +3608,7 @@ mod tests {
     use crate::expr::BlockStyle;
 
     fn lambda(params: Vec<&str>, body: Expr) -> Expr {
-        synth(ExprNode::Lambda { rest_param: None,
+        synth(ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: params.into_iter().map(Symbol::from).collect(),
             block_param: None,
             body,
@@ -4199,6 +4419,349 @@ mod tests {
         assert_eq!(spines, 1, "hash spines must merge, got {via_nil_first:?}");
     }
 
+    fn record(fields: &[(&str, Ty)]) -> Ty {
+        Ty::Record {
+            row: Row {
+                fields: fields.iter().map(|(k, t)| (Symbol::from(*k), t.clone())).collect(),
+                rest: None,
+            },
+        }
+    }
+
+    fn field_order(t: &Ty) -> Vec<String> {
+        match t {
+            Ty::Record { row } => row.fields.keys().map(|k| k.as_str().to_string()).collect(),
+            other => panic!("expected a record, got {other:?}"),
+        }
+    }
+
+    /// Record rows are equal regardless of field order, so a union's
+    /// canonical variant order must not depend on it either.
+    #[test]
+    fn union_of_orders_records_regardless_of_field_order() {
+        let ab_int = record(&[("a", Ty::Int), ("b", Ty::Int)]);
+        let ba_int = record(&[("b", Ty::Int), ("a", Ty::Int)]);
+        let ab_str = record(&[("a", Ty::Str), ("b", Ty::Int)]);
+        assert_eq!(
+            union_of(ab_int.clone(), ab_str.clone()),
+            union_of(ab_str.clone(), ba_int.clone()),
+        );
+        for (x, y) in [(ab_int.clone(), ab_str.clone()), (ba_int.clone(), ab_str.clone())] {
+            check_record_laws(x, y);
+        }
+    }
+
+    fn check_record_laws(x: Ty, y: Ty) {
+        let universe = [x.clone(), y.clone(), Ty::Nil, Ty::Int, union_of(x, Ty::Nil), union_of(y, Ty::Str)];
+        for a in &universe {
+            for b in &universe {
+                assert_eq!(union_of(a.clone(), b.clone()), union_of(b.clone(), a.clone()), "{a:?} ⊔ {b:?}");
+                for c in &universe {
+                    assert_eq!(
+                        union_of(union_of(a.clone(), b.clone()), c.clone()),
+                        union_of(a.clone(), union_of(b.clone(), c.clone())),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Two arrivals of one record in different field orders keep one
+    /// of the source orders, and the same one whichever came first:
+    /// some targets emit fields in that order.
+    #[test]
+    fn union_of_keeps_one_source_field_order_for_equal_records() {
+        let ab = record(&[("a", Ty::Int), ("b", Ty::Str)]);
+        let ba = record(&[("b", Ty::Str), ("a", Ty::Int)]);
+        let one = union_of(ab.clone(), ba.clone());
+        let other = union_of(ba.clone(), ab.clone());
+        assert_eq!(field_order(&one), field_order(&other));
+        let nil_first = union_of(union_of(ba.clone(), Ty::Nil), ab.clone());
+        let nil_last = union_of(union_of(ab, Ty::Nil), ba);
+        let order = |t: &Ty| match t {
+            Ty::Union { variants } => field_order(&variants[0]),
+            other => panic!("expected a union, got {other:?}"),
+        };
+        assert_eq!(order(&nil_first), order(&nil_last));
+        assert_eq!(order(&nil_first), field_order(&one));
+    }
+
+    // Lattice laws for every join that feeds a slot the fixpoint carries
+    // from one round to the next (#617, "Any order"). A worklist that
+    // visits producers in another order joins the same observations in
+    // another order and grouping, so each carried-slot join has to be
+    // commutative, associative and idempotent, with pending (`Var`) as
+    // its identity. The universe is generated from `law_universe` plus
+    // the unknown-arm shapes the joins classify, normalized through the
+    // join under test (a carried slot only ever holds a join's output),
+    // and every law is checked over every pair and triple.
+
+    fn pending() -> Ty {
+        Ty::Var { var: TyVar(0) }
+    }
+
+    fn carried_slot_universe(join: fn(Ty, Ty) -> Ty) -> Vec<Ty> {
+        let mut raw = law_universe();
+        raw.extend([
+            Ty::Var { var: TyVar(2) },
+            Ty::Union { variants: vec![Ty::Str, Ty::unresolved()].into() },
+            Ty::Union { variants: vec![Ty::Int, Ty::Var { var: TyVar(4) }].into() },
+            Ty::Union { variants: vec![Ty::unresolved(), Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Var { var: TyVar(5) }, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Var { var: TyVar(6) }, Ty::unresolved(), Ty::Nil].into() },
+            Ty::Union {
+                variants: vec![
+                    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::unresolved()) },
+                    Ty::Nil,
+                ].into(),
+            },
+        ]);
+        let mut out: Vec<Ty> = Vec::new();
+        for t in raw {
+            let t = join(pending(), t);
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
+    fn check_carried_slot_join_laws(name: &str, join: fn(Ty, Ty) -> Ty) {
+        let universe = carried_slot_universe(join);
+        for a in &universe {
+            assert_eq!(join(pending(), a.clone()), *a, "{name}: pending ⊔ {a:?}");
+            assert_eq!(join(a.clone(), pending()), *a, "{name}: {a:?} ⊔ pending");
+            assert_eq!(join(a.clone(), a.clone()), *a, "{name}: {a:?} ⊔ itself");
+            for b in &universe {
+                let ab = join(a.clone(), b.clone());
+                assert_eq!(ab, join(b.clone(), a.clone()), "{name}: {a:?} ⊔ {b:?} must commute");
+                for c in &universe {
+                    assert_eq!(
+                        join(ab.clone(), c.clone()),
+                        join(a.clone(), join(b.clone(), c.clone())),
+                        "{name}: ({a:?} ⊔ {b:?}) ⊔ {c:?} must associate",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn param_slot_join_is_a_lattice_join() {
+        check_carried_slot_join_laws("unify_param_ty", crate::analyze::unify_param_ty);
+    }
+
+    /// Two pending observations: the result must not depend on which
+    /// one arrived first (it kept the later one).
+    #[test]
+    fn param_slot_join_of_two_pending_values_commutes() {
+        let (v1, v2) = (Ty::Var { var: TyVar(1) }, Ty::Var { var: TyVar(2) });
+        let join = crate::analyze::unify_param_ty;
+        assert_eq!(join(v1.clone(), v2.clone()), join(v2, v1));
+    }
+
+    /// An `untyped` arm inside a union is classified like a bare
+    /// `untyped`, so the answer doesn't depend on whether a producer
+    /// joined `Int` and `Str` first.
+    #[test]
+    fn param_slot_join_classifies_untyped_arms_inside_unions() {
+        let join = crate::analyze::unify_param_ty;
+        let str_or_untyped = Ty::Union { variants: vec![Ty::Str, Ty::unresolved()].into() };
+        assert_eq!(
+            join(Ty::Int, str_or_untyped),
+            join(join(Ty::Int, Ty::Str), Ty::unresolved()),
+        );
+    }
+
+    /// `nil` alone doesn't absorb `untyped` (#617, rule (a)): a nil
+    /// observation beside an untyped one is no evidence the parameter
+    /// is always nil. A non-nil concrete type still absorbs it.
+    #[test]
+    fn param_slot_join_keeps_untyped_beside_nil_alone() {
+        let join = crate::analyze::unify_param_ty;
+        let nil_or_untyped = Ty::Union { variants: vec![Ty::unresolved(), Ty::Nil].into() };
+        assert_eq!(join(Ty::Nil, Ty::unresolved()), nil_or_untyped);
+        assert_eq!(join(Ty::unresolved(), Ty::Nil), nil_or_untyped);
+        let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+        assert_eq!(join(nil_or_untyped.clone(), Ty::Str), str_or_nil);
+        assert_eq!(join(Ty::Str, nil_or_untyped), str_or_nil);
+    }
+
+    /// A parameter observed as `{}` at one call site and as a filled
+    /// Hash at another is that Hash, as for an ivar.
+    #[test]
+    fn param_slot_join_drops_pending_inside_hash_spines() {
+        let filled = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) };
+        assert_eq!(crate::analyze::unify_param_ty(empty_hash(), filled.clone()), filled);
+    }
+
+    #[test]
+    fn ivar_slot_join_is_a_lattice_join() {
+        check_carried_slot_join_laws("join_ivar_slot", join_ivar_slot);
+    }
+
+    /// `@ivar = <ty>` with the value's type already stamped.
+    fn ivar_write(name: &str, ty: Ty) -> Expr {
+        let mut value = synth(ExprNode::Lit { value: Literal::Nil });
+        value.ty = Some(ty);
+        synth(ExprNode::Assign { target: LValue::Ivar { name: Symbol::from(name) }, value })
+    }
+
+    /// `@ivar[key] = <ty>`, the `[]=` Send form.
+    fn ivar_index_write(name: &str, ty: Ty) -> Expr {
+        let mut key = synth(ExprNode::Lit { value: Literal::Str { value: "k".to_string() } });
+        key.ty = Some(Ty::Str);
+        let mut value = synth(ExprNode::Lit { value: Literal::Nil });
+        value.ty = Some(ty);
+        synth(ExprNode::Send {
+            recv: Some(synth(ExprNode::Ivar { name: Symbol::from(name) })),
+            method: Symbol::from("[]="),
+            args: vec![key, value],
+            block: None,
+            parenthesized: false,
+        })
+    }
+
+    /// The ivar's harvested type after `stmts`, run in the order given.
+    fn harvested_ivar(name: &str, stmts: Vec<Expr>) -> Ty {
+        let mut out = HashMap::new();
+        crate::analyze::extract_ivar_assignments(&synth(ExprNode::Seq { exprs: stmts }), &mut out);
+        out.remove(&Symbol::from(name)).expect("ivar harvested")
+    }
+
+    fn empty_hash() -> Ty {
+        Ty::Hash { key: std::sync::Arc::new(Ty::Var { var: TyVar(0) }), value: std::sync::Arc::new(Ty::Var { var: TyVar(0) }) }
+    }
+
+    /// `@h = {}` and `@h[k] = v` give one type whichever is harvested
+    /// first: the `{}` literal's `Var`s are pending in both joins.
+    #[test]
+    fn empty_hash_seed_and_index_writes_join_in_any_order() {
+        let seed_first = harvested_ivar("h", vec![
+            ivar_write("h", empty_hash()),
+            ivar_index_write("h", Ty::Int),
+            ivar_index_write("h", Ty::Str),
+        ]);
+        let writes_first = harvested_ivar("h", vec![
+            ivar_index_write("h", Ty::Int),
+            ivar_index_write("h", Ty::Str),
+            ivar_write("h", empty_hash()),
+        ]);
+        let want = Ty::Hash {
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
+        };
+        assert_eq!(seed_first, want);
+        assert_eq!(writes_first, want);
+    }
+
+    /// A nullable Hash ivar (`@data = nil` on one path, `{}` on
+    /// another) still records its `[]=` writes. Ignoring them left
+    /// `Hash[Var, Var] | Nil` (or the first write's value type) after
+    /// a `String` and an `Integer` were stored, the shape of the
+    /// unsound `@data` typing on #617's soundness frontier.
+    #[test]
+    fn index_writes_widen_a_nullable_hash_ivar() {
+        let want = Ty::Union {
+            variants: vec![
+                Ty::Hash {
+                    key: std::sync::Arc::new(Ty::Str),
+                    value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
+                },
+                Ty::Nil,
+            ].into(),
+        };
+        let seeded = harvested_ivar("data", vec![
+            ivar_write("data", Ty::Nil),
+            ivar_write("data", empty_hash()),
+            ivar_index_write("data", Ty::Str),
+            ivar_index_write("data", Ty::Int),
+        ]);
+        assert_eq!(seeded, want);
+        let written_first = harvested_ivar("data", vec![
+            ivar_index_write("data", Ty::Str),
+            ivar_write("data", Ty::Nil),
+            ivar_index_write("data", Ty::Int),
+            ivar_write("data", empty_hash()),
+        ]);
+        assert_eq!(written_first, want);
+    }
+
+    /// The widening still leaves an ivar holding a class instance (or
+    /// a nullable one) alone: that class's own `[]=` runs, not Hash's.
+    #[test]
+    fn index_writes_leave_a_class_instance_ivar_alone() {
+        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![].into() };
+        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil].into() };
+        let got = harvested_ivar("x", vec![
+            ivar_write("x", nullable_foo.clone()),
+            ivar_index_write("x", Ty::Int),
+        ]);
+        assert_eq!(got, nullable_foo);
+    }
+
+    /// Every order of `stmts`, for the order-independence checks below.
+    fn permutations(stmts: Vec<Expr>) -> Vec<Vec<Expr>> {
+        if stmts.len() <= 1 {
+            return vec![stmts];
+        }
+        let mut out = Vec::new();
+        for i in 0..stmts.len() {
+            let mut rest = stmts.clone();
+            let first = rest.remove(i);
+            for mut tail in permutations(rest) {
+                tail.insert(0, first.clone());
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    /// A `[]=` write harvested before the `{}` seed is kept, whatever
+    /// the slot holds when it arrives (nothing, `nil` or a pending
+    /// `Var`): the harvest gives one type in every statement order.
+    #[test]
+    fn index_writes_before_the_hash_seed_are_kept_in_any_order() {
+        let want_nullable = Ty::Union {
+            variants: vec![
+                Ty::Hash {
+                    key: std::sync::Arc::new(Ty::Str),
+                    value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
+                },
+                Ty::Nil,
+            ].into(),
+        };
+        let stmts = vec![
+            ivar_write("data", Ty::Nil),
+            ivar_write("data", empty_hash()),
+            ivar_index_write("data", Ty::Str),
+            ivar_index_write("data", Ty::Int),
+        ];
+        for order in permutations(stmts) {
+            assert_eq!(harvested_ivar("data", order.clone()), want_nullable, "order {order:?}");
+        }
+        let want = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) };
+        let stmts = vec![
+            ivar_write("data", Ty::Var { var: TyVar(3) }),
+            ivar_write("data", empty_hash()),
+            ivar_index_write("data", Ty::Int),
+        ];
+        for order in permutations(stmts) {
+            assert_eq!(harvested_ivar("data", order.clone()), want, "order {order:?}");
+        }
+    }
+
+    /// A class instance's `[]=` is that class's, before or after the
+    /// instance is assigned.
+    #[test]
+    fn index_writes_leave_a_class_instance_ivar_alone_in_any_order() {
+        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![].into() };
+        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil].into() };
+        for order in permutations(vec![ivar_write("x", nullable_foo.clone()), ivar_index_write("x", Ty::Int)]) {
+            assert_eq!(harvested_ivar("x", order), nullable_foo);
+        }
+    }
+
     #[test]
     fn concrete_value_shapes_are_truthy_for_boolean_operators() {
         let values = [
@@ -4557,6 +5120,17 @@ fn is_ivar_params_rooted(e: &crate::expr::Expr, locals: &HashMap<Symbol, Ty>) ->
 /// Nil: comparing nil with a non-nil value raises, so a nil result cannot
 /// occur. A single nilable element (`[maybe].min`) or an all-nilable
 /// literal can still return nil without a comparison error.
+fn rooted_in_refused_constant(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Const { .. } => matches!(
+            &expr.diagnostic,
+            Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "constant"
+        ),
+        ExprNode::Send { recv: Some(recv), .. } => rooted_in_refused_constant(recv),
+        _ => false,
+    }
+}
+
 fn literal_extremum_ty(recv: Option<&Expr>, recv_ty: &Ty, method: &Symbol, args: &[Expr]) -> Option<Ty> {
     if !matches!(method.as_str(), "min" | "max") || !args.is_empty() {
         return None;

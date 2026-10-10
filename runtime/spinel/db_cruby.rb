@@ -240,6 +240,18 @@ module Db
     @pool.free[0]
   end
 
+  # `ActiveRecord::Base.transaction`'s per-thread nesting depth
+  # (connection.rb) — see the contract note in runtime/ruby/db.rbs.
+  # `Fiber[:k]` for the same reason `current_dbh` above uses it.
+  def self._txn_depth
+    d = Fiber[:ar_txn_depth]
+    d.nil? ? 0 : d
+  end
+
+  def self._txn_depth=(value)
+    Fiber[:ar_txn_depth] = value
+  end
+
   # Request-scoped connection lease. Checks out a handle, binds it to
   # this thread's fiber-storage so `current_dbh` resolves to it for the
   # block's duration, and returns it on completion (even on raise).
@@ -255,6 +267,24 @@ module Db
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
     !Fiber[:db_handle].nil?
+  end
+
+  # `ActiveRecord::Base.connection_db_config` answers from these
+  # (runtime/spinel/active_record_db_config.rb): the database this
+  # process configured, the adapter name Rails would report for it, and
+  # whether the holder is inside a transaction of its own — the request
+  # read snapshot is the shim's, not the app's, so it does not count.
+  def self.database_path
+    @path
+  end
+
+  def self.adapter_name
+    "sqlite3"
+  end
+
+  def self.transaction_open?
+    conn = current_dbh
+    conn.transaction_active? && conn.instance_variable_get(:@rh_snapshot) != :open
   end
 
   def self.with_connection
@@ -388,6 +418,62 @@ module Db
 
   def self.exec(sql)
     record_query(sql)
+    write(sql) { |conn, s| run_exec(conn, s) }
+  end
+
+  # A write that returns rows (`INSERT … RETURNING`, roundhouse#91). It
+  # runs under exec's discipline (query cache cleared, snapshot ended,
+  # write permit), reads every row before the permit goes back, and
+  # answers a replay handle over them: step/column_*/finalize as for a
+  # read. `changes` is the write's row count.
+  def self.exec_returning(sql)
+    v = loaded_sqlite_version
+    if !returning_supported?(v)
+      raise "Db.exec_returning: RETURNING needs SQLite 3.35 or newer; this process loads " + v.to_s
+    end
+    record_query(sql)
+    rows = nil
+    names = nil
+    write(sql) do |conn, s|
+      stmt = conn.prepare(s)
+      begin
+        names = stmt.columns
+        rows = stmt.execute.to_a
+      rescue StandardError => e
+        raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
+        raise
+      ensure
+        stmt.close
+      end
+    end
+    hit = { rows: rows, names: names, eof: true, sql: sql }
+    { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: sql }
+  end
+
+  # Test-only hook, matching the Spinel SQLite shim's (db.rb) accessor of
+  # the same name: always 0 here, since an exec_returning handle is a
+  # plain Ruby Hash — there is no persistent array of outstanding
+  # captures to leak.
+  def self.qc_cursor_count
+    0
+  end
+
+  # RETURNING arrived in SQLite 3.35.0 (3035000). An older library gets
+  # a clear error rather than a syntax error, as #91 agreed.
+  def self.returning_supported?(version_number)
+    version_number >= 3035000
+  end
+
+  # The library the gem loaded (not the one it was compiled against), as
+  # 3035000 for 3.35.0.
+  def self.loaded_sqlite_version
+    text = defined?(SQLite3::SQLITE_LOADED_VERSION) ? SQLite3::SQLITE_LOADED_VERSION : SQLite3::SQLITE_VERSION
+    major, minor, patch = text.split(".").map(&:to_i)
+    major * 1_000_000 + minor.to_i * 1000 + patch.to_i
+  end
+
+  # exec's write path; the block runs the statement on the connection.
+  def self.write(sql)
     # Any exec is (per the Db contract) DDL or a write — Rails
     # invalidates the whole query cache on write; so do we.
     qcache = Fiber[:rh_qcache]
@@ -402,7 +488,7 @@ module Db
     if permit_owned?
       # Inside this fiber's own transaction: the permit is already held.
       begin
-        run_exec(conn, sql)
+        yield(conn, sql)
       ensure
         release_permit if sql == "ROLLBACK" || (sql == "COMMIT" && !conn.transaction_active?)
       end
@@ -410,14 +496,14 @@ module Db
       # Inside a transaction that began WITHOUT the permit (its wait
       # timed out — see `acquire_permit`): SQLite's lock is already
       # held, so there is nothing to queue for.
-      run_exec(conn, sql)
+      yield(conn, sql)
     elsif sql == "BEGIN"
       # IMMEDIATE, as Rails 8's SQLite adapter begins: the write lock is
       # taken at BEGIN, not at the first write, so a transaction never
       # fails part way through upgrading a stale read.
       got = acquire_permit
       begin
-        run_exec(conn, "BEGIN IMMEDIATE")
+        yield(conn, "BEGIN IMMEDIATE")
       rescue Exception
         release_permit if got
         raise
@@ -425,7 +511,7 @@ module Db
     else
       got = acquire_permit
       begin
-        run_exec(conn, sql)
+        yield(conn, sql)
       ensure
         release_permit if got
       end
@@ -781,6 +867,11 @@ module Db
 
   def self.query_cache_end
     Fiber[:rh_qcache] = nil
+  end
+
+  # Is the replay cache on for this fiber? (`ActiveRecord::Base.uncached`)
+  def self.query_cache_enabled?
+    !Fiber[:rh_qcache].nil?
   end
 
   # Statement identity => owning handle, on the leased connection. This

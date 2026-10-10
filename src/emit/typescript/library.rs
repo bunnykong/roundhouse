@@ -1406,6 +1406,12 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
                 collect_class_refs(v, out);
             }
         }
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (k, v) in entries {
+                collect_class_refs(k, out);
+                collect_class_refs(v, out);
+            }
+        }
         ExprNode::Array { elements, .. } => {
             for el in elements {
                 collect_class_refs(el, out);
@@ -1665,7 +1671,7 @@ fn rewrite_free(e: &Expr) -> Expr {
                 InterpPart::Expr { expr } => InterpPart::Expr { expr: rewrite_free(expr) },
             }).collect(),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_free(body),
@@ -1770,6 +1776,12 @@ fn rewrite_free(e: &Expr) -> Expr {
         ExprNode::Cast { value, target_ty } => ExprNode::Cast {
             value: rewrite_free(value),
             target_ty: target_ty.clone(),
+        },
+        ExprNode::ForwardKeywordsWithPairs { entries } => ExprNode::ForwardKeywordsWithPairs {
+            entries: entries
+                .iter()
+                .map(|(key, value)| (rewrite_free(key), rewrite_free(value)))
+                .collect(),
         },
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
@@ -1924,7 +1936,7 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
                 })
                 .collect(),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite(body, super_method),
@@ -2044,6 +2056,12 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         },
         ExprNode::KeywordSplat { value } => ExprNode::KeywordSplat {
             value: rewrite(value, super_method),
+        },
+        ExprNode::ForwardKeywordsWithPairs { entries } => ExprNode::ForwardKeywordsWithPairs {
+            entries: entries
+                .iter()
+                .map(|(key, value)| (rewrite(key, super_method), rewrite(value, super_method)))
+                .collect(),
         },
         ExprNode::MultiAssign { targets, value } => ExprNode::MultiAssign {
             targets: targets.clone(),

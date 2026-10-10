@@ -48,6 +48,11 @@ require_relative "runtime/db"
 # the stdlib equivalents with semantically-identical implementations
 # for the surface framework Ruby actually uses.
 require_relative "runtime/base64"
+# Module-only Shellwords — packages/shellwords reopens String/Array and
+# poisons String#split (PolyArray → C compile fail). See
+# runtime/spinel/shellwords.rb; defining the module drops BUNDLED's
+# require "shellwords".
+require_relative "runtime/shellwords"
 require_relative "runtime/json_impl"
 # JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
 # emits calls to (`Views::Articles.article_json` etc.). Separate from
@@ -58,6 +63,9 @@ require_relative "runtime/json_builder"
 # entry points need it: the CRuby target uses this overlay, and patching
 # only the spinel one leaves `<Resource>Params.from_raw` reaching an
 # undefined constant on every request that carries params.
+# Mime - `Params.wrap` asks the registry whether a request body is JSON
+# (Rails' own synonyms and parameters included).
+require_relative "runtime/mime"
 require_relative "runtime/params"
 # ActionText::Content — see the spinel scaffold's main.rb. Both entry
 # points need it: a `has_rich_text` model's `body` reader constructs
@@ -66,6 +74,9 @@ require_relative "runtime/params"
 require_relative "runtime/action_text"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
+# `ActiveSupport::Cache::MemoryStore` (a `Rails::Cache`) and
+# `ActiveSupport::Cache.expand_cache_key`.
+require_relative "runtime/active_support_cache"
 # `GlobalID::Locator` — the READ side of the gid `runtime/rails.rb` mints
 # one line up. A channel authorizing a subscribe turns the stream name
 # back into a record through it; the two halves live apart because only
@@ -98,6 +109,9 @@ require_relative "runtime/action_view_number_helper"
 require_relative "runtime/action_view_form_builder_extras"
 require_relative "runtime/active_record"
 require_relative "runtime/active_record_bang"
+# `ActiveRecord::Base.connection_db_config`, `connection_pool` and
+# `transaction_open?` over the Db shim loaded above.
+require_relative "runtime/active_record_db_config"
 require_relative "runtime/active_record_serialization"
 require_relative "runtime/active_record_relation_ext"
 require_relative "config/schema"
@@ -279,6 +293,13 @@ else
   "UTC"
 end
 ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(tz_name, tz_name)
+# Rails' fragment caching through the controller: reopens
+# `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
+# defines them.
+require_relative "runtime/action_controller_fragment_caching"
+# Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
+# feature; strict non-Ruby targets keep the bounded shared implementation.
+require_relative "runtime/action_controller_head"
 # The app/models.rb aggregator (generated — see apply_models_aggregator)
 # loads every model/support class. Model files only require their own
 # LOAD-time deps (superclass, class-body consts); method-body references

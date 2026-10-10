@@ -328,7 +328,7 @@ fn emit_named_collection_each(
     let inner = accumulator_append_call(render_call, ctx);
     let block_lambda = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             rest_param: None,
             params: vec![var_name],
             block_param: None,
@@ -481,7 +481,7 @@ fn wrap_cached_collection(
     let append_version = send(Some(append_slash), "<<", vec![version], None, false);
     let key_lambda = Expr::new(
         span,
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             rest_param: None,
             params: vec![rec_name],
             block_param: None,
@@ -497,18 +497,15 @@ fn wrap_cached_collection(
         false,
     );
 
+    // Through the controller on the ruby family and spinel, as the
+    // single-fragment `<% cache %>` is (`ActionView::ViewHelpers.
+    // fragment_read`); the runtime's own store elsewhere.
     let store = || {
-        send(
-            Some(Expr::new(
-                span,
-                ExprNode::Const {
-                    path: vec![Symbol::from("Rails")],
-                },
-            )),
-            "cache",
-            Vec::new(),
-            None,
-            false,
+        Expr::new(
+            span,
+            ExprNode::Const {
+                path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+            },
         )
     };
     let key_ref = || var_ref(key_name.clone());
@@ -522,7 +519,7 @@ fn wrap_cached_collection(
             },
             value: send(
                 Some(store()),
-                "read_str",
+                "fragment_read",
                 vec![key_ref()],
                 None,
                 true,
@@ -547,7 +544,7 @@ fn wrap_cached_collection(
         accumulator_append_call(
             send(
                 Some(store()),
-                "write_str",
+                "fragment_write",
                 vec![
                     key_ref(),
                     super::accumulator_result_ref(&cap),
@@ -719,7 +716,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
     let inner = accumulator_append_call(render_call, ctx);
     let block_lambda = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![var_name],
             block_param: None,
             body: inner,
@@ -909,9 +906,12 @@ pub(super) fn emit_layout_block(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Option<Vec<Expr>> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return None;
     };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let cap = "_layout_body";
     let cap_ctx = ViewCtx {
         accumulator: cap.to_string(),

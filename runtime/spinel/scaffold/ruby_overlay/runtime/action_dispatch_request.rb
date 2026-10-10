@@ -14,6 +14,7 @@
 # write scratch keys into it (`exception_notifier.exception_data`),
 # which the real ENV object would reject for non-String values.
 require "stringio"
+require_relative "action_dispatch/headers"
 
 module ActionDispatch
   # `ActionDispatch::TestRequest.create(env)` — see the twin in
@@ -30,10 +31,14 @@ module ActionDispatch
   class Request
     attr_reader :env
     attr_accessor :params
+    # The body's params alone - see the twin in
+    # runtime/ruby/action_dispatch/request.rb.
+    attr_accessor :request_parameters
 
     def initialize(env, params = {})
       @env = env
       @params = params
+      @request_parameters = {}
       @session_options = {}
     end
 
@@ -44,6 +49,12 @@ module ActionDispatch
 
     def session_skip?
       @session_options[:skip] == true
+    end
+
+    # `request.headers["Accept-Encoding"]` — the shared
+    # `ActionDispatch::Http::Headers` over this request's env.
+    def headers
+      ActionDispatch::Http::Headers.new(env)
     end
 
     def [](key)
@@ -108,15 +119,34 @@ module ActionDispatch
     # X-Forwarded-Proto, which Rack honors unconfigured.
     def ssl?
       return true if @env["HTTPS"] == "on"
-      @env["HTTP_X_FORWARDED_PROTO"].to_s.split(",").first.to_s.strip.downcase == "https"
+      forwarded = @env["HTTP_X_FORWARDED_PROTO"].to_s.split(",").first.to_s.strip.downcase
+      return forwarded == "https" unless forwarded.empty?
+      @env["rack.url_scheme"].to_s.downcase == "https"
     end
 
     def protocol
       ssl? ? "https://" : "http://"
     end
 
+    # Twin of the shared class's: the port from the Host header, nil at
+    # the scheme's standard one (campfire's default_url_options).
+    def optional_port
+      h = host
+      sep = h.rindex(":")
+      return nil if sep.nil? || h.end_with?("]")
+      port = h[(sep + 1)..].to_i
+      return nil if port == 0 || port == (ssl? ? 443 : 80)
+      port
+    end
+
+    # Without the scheme's standard port, as the shared twin's: Rails'
+    # `host_with_port` writes no `:443`/`:80`, and the CSRF check
+    # compares this with an Origin a browser serializes the same way.
     def base_url
-      "#{protocol}#{host}"
+      h = host
+      default = ssl? ? ":443" : ":80"
+      h = h[0, h.length - default.length] if h.end_with?(default)
+      "#{protocol}#{h}"
     end
 
     def remote_ip

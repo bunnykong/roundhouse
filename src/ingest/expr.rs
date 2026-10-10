@@ -42,6 +42,14 @@ fn multi_write_target(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::
             id: crate::ident::VarId(0),
             name: Symbol::from(constant_id_str(&lvt.name())),
         })
+    } else if let Some(rp) = node.as_required_parameter_node() {
+        // A destructured BLOCK parameter's names (`|(host, secure), i|`)
+        // arrive as parameters, not variable targets; they bind locals
+        // all the same (`destructure_target`).
+        Ok(crate::expr::LValue::Var {
+            id: crate::ident::VarId(0),
+            name: Symbol::from(constant_id_str(&rp.name())),
+        })
     } else if let Some(ivt) = node.as_instance_variable_target_node() {
         let raw = constant_id_str(&ivt.name());
         let name = raw.strip_prefix('@').unwrap_or(raw);
@@ -84,6 +92,150 @@ fn multi_write_target(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::
     }
 }
 
+/// A parenthesized destructuring target — `(b, c)` in `a, (b, c) = x`
+/// or in a block's `|(host, secure), index|` — as statements that bind
+/// it from `source`: one flat `MultiAssign`, with any target nested
+/// further bound through a temp and destructured after it, in order.
+/// Ruby's own semantics for each level are the flat multi-write's (the
+/// value is splatted with `to_ary`), which every consumer of
+/// `MultiAssign` already implements.
+///
+/// A splat or post-splat target inside the parentheses is refused
+/// rather than dropped: the flat rest desugar in `ingest_multi_write`
+/// needs an array-literal RHS this source never has.
+fn destructure_target(
+    mt: &ruby_prism::MultiTargetNode<'_>,
+    source: Expr,
+    span: Span,
+    file: &str,
+) -> IngestResult<Vec<Expr>> {
+    if mt.rest().is_some() || !mt.rights().is_empty() {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "splat inside a nested destructuring target is not supported".into(),
+        });
+    }
+    let mut targets: Vec<crate::expr::LValue> = Vec::new();
+    let mut nested: Vec<Expr> = Vec::new();
+    for left in mt.lefts().iter() {
+        if let Some(inner) = left.as_multi_target_node() {
+            let tmp = nested_temp(&left, span);
+            targets.push(crate::expr::LValue::Var { id: crate::ident::VarId(0), name: tmp.clone() });
+            let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp });
+            nested.extend(destructure_target(&inner, read, span, file)?);
+        } else {
+            targets.push(multi_write_target(&left, file)?);
+        }
+    }
+    let mut out = vec![Expr::new(span, ExprNode::MultiAssign { targets, value: source })];
+    out.extend(nested);
+    Ok(out)
+}
+
+/// Ruby writes a nested multi-write's targets depth first, in source
+/// order; the desugar above writes one level at a time (the flat level,
+/// then each group). The two agree unless a variable is written twice
+/// and its LAST write moves — `(x, y), x = [1, 2], 3` leaves `x` at 3 in
+/// Ruby and would leave it at 1 here — so that shape is refused rather
+/// than answered wrong.
+fn reject_reordered_rewrite(mw: &ruby_prism::MultiWriteNode<'_>, file: &str) -> IngestResult<()> {
+    fn name_of(node: &Node<'_>) -> Option<String> {
+        if let Some(t) = node.as_local_variable_target_node() {
+            return Some(constant_id_str(&t.name()).to_string());
+        }
+        if let Some(t) = node.as_instance_variable_target_node() {
+            return Some(constant_id_str(&t.name()).to_string());
+        }
+        None
+    }
+    fn source_order<'pr>(
+        lefts: impl Iterator<Item = Node<'pr>>,
+        writes: &mut Vec<(String, usize)>,
+        targets: &mut Vec<usize>,
+    ) {
+        for left in lefts {
+            if let Some(group) = left.as_multi_target_node() {
+                source_order(group.lefts().iter(), writes, targets);
+            } else {
+                let at = left.location().start_offset();
+                targets.push(at);
+                if let Some(name) = name_of(&left) {
+                    writes.push((name, at));
+                }
+            }
+        }
+    }
+    // The desugar's order: this level's plain targets, then each group's
+    // (recursively, in the same shape).
+    fn desugar_order<'pr>(
+        lefts: Vec<Node<'pr>>,
+        writes: &mut Vec<(String, usize)>,
+        targets: &mut Vec<usize>,
+    ) {
+        let mut groups = Vec::new();
+        for left in lefts {
+            if let Some(group) = left.as_multi_target_node() {
+                groups.push(group);
+            } else {
+                let at = left.location().start_offset();
+                targets.push(at);
+                if let Some(name) = name_of(&left) {
+                    writes.push((name, at));
+                }
+            }
+        }
+        for group in groups {
+            desugar_order(group.lefts().iter().collect(), writes, targets);
+        }
+    }
+    fn has_setter_target<'pr>(lefts: impl Iterator<Item = Node<'pr>>) -> bool {
+        lefts.into_iter().any(|left| {
+            if let Some(group) = left.as_multi_target_node() {
+                has_setter_target(group.lefts().iter())
+            } else {
+                left.as_call_target_node().is_some()
+            }
+        })
+    }
+    let mut ruby_targets = Vec::new();
+    let mut ruby = Vec::new();
+    source_order(mw.lefts().iter(), &mut ruby, &mut ruby_targets);
+    let mut ours_targets = Vec::new();
+    let mut ours = Vec::new();
+    desugar_order(mw.lefts().iter().collect(), &mut ours, &mut ours_targets);
+    let last = |writes: &[(String, usize)], name: &str| {
+        writes.iter().rev().find(|(n, _)| n == name).map(|(_, at)| *at)
+    };
+    if ruby.iter().any(|(name, _)| last(&ruby, name) != last(&ours, name)) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "nested multi-write that writes one variable twice out of source order is not modeled".into(),
+        });
+    }
+    let has_setter = has_setter_target(mw.lefts().iter());
+    if has_setter && ruby_targets != ours_targets {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "nested multi-write with assignment-method targets would reorder setter side effects".into(),
+        });
+    }
+    Ok(())
+}
+
+/// A fresh local for one nested destructuring level, unique by the
+/// node's offset and clear of every name the source already uses.
+fn nested_temp(node: &Node<'_>, _span: Span) -> Symbol {
+    let loc = node.location();
+    let stem = format!("__mt_{}", loc.start_offset());
+    let mut name = stem.clone();
+    let mut suffix = 0;
+    while super::sources::generated_local_is_reserved(&loc, &name) {
+        suffix += 1;
+        name = format!("{stem}_{suffix}");
+    }
+    Symbol::from(name)
+}
+
 /// Ingest a `MultiWriteNode` (`a, b = …`, `a, *rest = …`). Split out of
 /// the giant `ingest_expr_strict` match so its locals live in a frame
 /// entered only for multi-writes, not on every deep recursive descent.
@@ -92,6 +244,38 @@ fn ingest_multi_write(
     span: Span,
     file: &str,
 ) -> IngestResult<ExprNode> {
+    // `a, (b, c) = x` — a nested target binds a temp here and is
+    // destructured from it after the flat assignment. The whole
+    // expression still answers the RHS, as Ruby's does.
+    if mw.rest().is_none() && mw.lefts().iter().any(|l| l.as_multi_target_node().is_some()) {
+        reject_reordered_rewrite(mw, file)?;
+        let rhs = nested_temp(&mw.as_node(), span);
+        let rhs_read =
+            || Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: rhs.clone() });
+        let mut exprs = vec![Expr::new(
+            span,
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: rhs.clone() },
+                value: ingest_expr(&mw.value(), file)?,
+            },
+        )];
+        let mut targets: Vec<crate::expr::LValue> = Vec::new();
+        let mut nested: Vec<Expr> = Vec::new();
+        for left in mw.lefts().iter() {
+            if let Some(inner) = left.as_multi_target_node() {
+                let tmp = nested_temp(&left, span);
+                targets.push(crate::expr::LValue::Var { id: crate::ident::VarId(0), name: tmp.clone() });
+                let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp });
+                nested.extend(destructure_target(&inner, read, span, file)?);
+            } else {
+                targets.push(multi_write_target(&left, file)?);
+            }
+        }
+        exprs.push(Expr::new(span, ExprNode::MultiAssign { targets, value: rhs_read() }));
+        exprs.extend(nested);
+        exprs.push(rhs_read());
+        return Ok(ExprNode::Seq { exprs });
+    }
     let mut targets: Vec<crate::expr::LValue> = Vec::new();
     for left in mw.lefts().iter() {
         targets.push(multi_write_target(&left, file)?);
@@ -543,6 +727,31 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     }
                 }
             }
+            // `params.expect(widget: :name)`: Rails wraps a non-Array
+            // filter value (`Array.wrap` in `permit_hash`), so it is
+            // `params.expect(widget: [:name])`, the spelling every
+            // consumer of the expect shape reads.
+            let mut args = args;
+            if method == "expect"
+                && block.is_none()
+                && args.len() == 1
+                && recv.as_ref().is_some_and(|r| {
+                    matches!(&*r.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+                        if method.as_str() == "params" && args.is_empty())
+                })
+            {
+                if let ExprNode::Hash { entries, .. } = &mut *args[0].node {
+                    for (_, v) in entries.iter_mut() {
+                        if matches!(&*v.node, ExprNode::Lit { value: Literal::Sym { .. } }) {
+                            let sym = v.clone();
+                            *v = Expr::new(sym.span, ExprNode::Array {
+                                elements: vec![sym],
+                                style: crate::expr::ArrayStyle::Brackets,
+                            });
+                        }
+                    }
+                }
+            }
             // `binding.local_variable_get(:class)` is how Ruby reads a
             // local named after a reserved word (a keyword param such as
             // `class:`). It is a plain local read, so ingest it as one.
@@ -582,7 +791,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 && block.is_none()
                 && recv.is_some()
                 && args.len() == 1
-                && !matches!(&*args[0].node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords)
+                && !matches!(&*args[0].node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. })
             {
                 let r = recv.unwrap();
                 let mut defaults = args.into_iter().next().unwrap();
@@ -663,19 +872,51 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // (the IR has no safe-send flag). nil receiver → the And
             // yields nil without dispatching, matching `&.`; a plain
             // Send would have silently DROPPED the guard and crashed on
-            // nil at runtime. Two documented divergences: the receiver
-            // expression evaluates twice (harmless for the ivar/local
-            // receivers real templates use), and a `false` receiver
-            // skips the call where Ruby's `&.` would dispatch (nil is
-            // the only value `&.` guards) — acceptable until a real
-            // call site cares, at which point Send grows a `safe` flag.
+            // nil at runtime. A receiver that is not a plain read is
+            // bound once first — `(__safe_nav17 = a.pop) && __safe_nav17.b`
+            // — because evaluating it twice is not harmless: campfire's
+            // `@idle[address].pop&.first` popped two connections and
+            // handed back the wrong one. One divergence stays: a `false`
+            // receiver skips the call where Ruby's `&.` would dispatch
+            // (nil is the only value `&.` guards) — acceptable until a
+            // real call site cares, at which point Send grows a `safe`
+            // flag.
             match (c.is_safe_navigation(), recv) {
-                (true, Some(r)) => ExprNode::BoolOp {
+                (true, Some(r)) if is_plain_read(&r) => ExprNode::BoolOp {
                     op: crate::expr::BoolOpKind::And,
                     surface: crate::expr::BoolOpSurface::Symbol,
                     left: r,
                     right: Expr::new(span, send),
                 },
+                (true, Some(r)) => {
+                    // One local per site: a shared name would hold a
+                    // different type at each `&.` in a method, and a
+                    // local that does is polymorphic on spinel.
+                    let temp = Symbol::from(format!("__safe_nav{}", r.span.start));
+                    let read = Expr::new(
+                        r.span,
+                        ExprNode::Var { id: crate::ident::VarId(0), name: temp.clone() },
+                    );
+                    let bound = Expr::new(
+                        r.span,
+                        ExprNode::Assign {
+                            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: temp },
+                            value: r,
+                        },
+                    );
+                    let ExprNode::Send { method, args, block, parenthesized, .. } = send else {
+                        unreachable!("built as a Send above")
+                    };
+                    ExprNode::BoolOp {
+                        op: crate::expr::BoolOpKind::And,
+                        surface: crate::expr::BoolOpSurface::Symbol,
+                        left: bound,
+                        right: Expr::new(
+                            span,
+                            ExprNode::Send { recv: Some(read), method, args, block, parenthesized },
+                        ),
+                    }
+                }
                 _ => send,
             }
         }
@@ -1005,18 +1246,20 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_lambda_node().is_some() => {
             let l = n.as_lambda_node().unwrap();
             refuse_block_capture(l.parameters(), file)?;
+            let extra_params = block_extra_params(l.parameters(), file)?;
             let params = block_param_names(l.parameters());
             let mut rest_param = block_rest_param(l.parameters());
             let body = match l.body() {
                 Some(b) => ingest_expr(&b, file)?,
                 None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
             };
+            let body = destructure_block_params(l.parameters(), body, file)?;
             let body = desugar_post_params(&mut rest_param, block_post_params(l.parameters()), body);
             // `->(x) { body }` literals always use brace form (Prism's
             // opening_loc is `{`); `->(x) do body end` exists but isn't
             // idiomatic and doesn't appear in any fixture yet.
             let block_style = block_style_from_opening(l.opening_loc().as_slice());
-            ExprNode::Lambda { rest_param, params, block_param: None, body, block_style }
+            ExprNode::Lambda { extra_params, rest_param, params, block_param: None, body, block_style }
         }
         n if n.as_yield_node().is_some() => {
             let y = n.as_yield_node().unwrap();
@@ -2577,9 +2820,14 @@ fn detect_leading_guard<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     Some(if_node.predicate())
 }
 
-/// The argument-list walk is adapted from Tim Tischler's F7 commit
-/// 013588ec. Preserve the marker instead of erasing keyword identity
-/// into a positional hash and synthesizing three user-visible bindings.
+/// Preserve packet identity for a lone anonymous `**`, or for static symbol
+/// key/value pairs followed by one trailing anonymous `**`. The latter keeps
+/// pair order and lets the packet override duplicate explicit keys. Earlier
+/// or repeated anonymous splats, named/dynamic splats in the same group, and
+/// non-static keys remain unsupported because the IR has no ordered dynamic
+/// merge form. The argument-list walk is adapted from Tim Tischler's F7 commit
+/// 013588ec; retaining the marker avoids a positional hash and synthetic
+/// user-visible bindings.
 fn ingest_forwardable_arguments(
     a: &ruby_prism::ArgumentsNode<'_>,
     file: &str,
@@ -2596,21 +2844,65 @@ fn ingest_forwardable_arguments(
         } else {
             if let Some(hash) = arg.as_keyword_hash_node() {
                 let elements: Vec<_> = hash.elements().iter().collect();
-                if elements.iter().any(|e| e.as_assoc_splat_node().is_some_and(|s| s.value().is_none())) {
-                    if elements.len() != 1 {
-                        // Mixed forwarding remains outside this slice. Keep
-                        // its existing ledger identity; only lone `**` is new.
+                let anonymous_splats: Vec<usize> = elements
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, e)| {
+                        e.as_assoc_splat_node()
+                            .is_some_and(|s| s.value().is_none())
+                            .then_some(i)
+                    })
+                    .collect();
+                if !anonymous_splats.is_empty() {
+                    if elements.len() == 1 {
+                        let loc = elements[0].location();
+                        args.push(Expr::new(Span {
+                            file: super::sources::file_id(file),
+                            start: loc.start_offset() as u32,
+                            end: loc.end_offset() as u32,
+                        }, ExprNode::ForwardKeywords));
+                        continue;
+                    }
+                    if anonymous_splats.len() != 1
+                        || anonymous_splats[0] != elements.len() - 1
+                    {
                         return Err(IngestError::Unsupported {
                             file: file.into(),
                             message: "anonymous `**` keyword forwarding not yet supported".into(),
                         });
                     }
-                    let loc = elements[0].location();
+
+                    let mut entries = Vec::with_capacity(elements.len() - 1);
+                    for element in &elements[..elements.len() - 1] {
+                        let Some(assoc) = element.as_assoc_node() else {
+                            // In particular, a named `**options` before the
+                            // anonymous packet would require a second dynamic
+                            // merge in the IR. Keep that mixed shape explicit
+                            // on the unsupported ledger until it is modeled.
+                            return Err(IngestError::Unsupported {
+                                file: file.into(),
+                                message: "anonymous `**` keyword forwarding not yet supported".into(),
+                            });
+                        };
+                        let key = ingest_expr(&assoc.key(), file)?;
+                        if !matches!(
+                            &*key.node,
+                            ExprNode::Lit { value: Literal::Sym { .. } }
+                        ) {
+                            return Err(IngestError::Unsupported {
+                                file: file.into(),
+                                message: "anonymous `**` keyword forwarding requires static symbol keys".into(),
+                            });
+                        }
+                        let value = ingest_expr(&assoc.value(), file)?;
+                        entries.push((key, value));
+                    }
+                    let loc = hash.location();
                     args.push(Expr::new(Span {
                         file: super::sources::file_id(file),
                         start: loc.start_offset() as u32,
                         end: loc.end_offset() as u32,
-                    }, ExprNode::ForwardKeywords));
+                    }, ExprNode::ForwardKeywordsWithPairs { entries }));
                     continue;
                 }
             }
@@ -2711,7 +3003,7 @@ fn ingest_call_block(
                 );
                 return Ok(Some(Expr::new(
                     sym_span,
-                    ExprNode::Lambda { rest_param: None,
+                    ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                         params,
                         block_param: None,
                         body,
@@ -2774,17 +3066,19 @@ fn ingest_call_block(
             // which is immaterial once it sits in block-argument position.
             if let Some(lam) = expr.as_lambda_node() {
                 refuse_block_capture(lam.parameters(), file)?;
+                let extra_params = block_extra_params(lam.parameters(), file)?;
                 let params = block_param_names(lam.parameters());
                 let mut rest_param = block_rest_param(lam.parameters());
                 let body = match lam.body() {
                     Some(body) => ingest_expr(&body, file)?,
                     None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
                 };
+                let body = destructure_block_params(lam.parameters(), body, file)?;
                 let body = desugar_post_params(&mut rest_param, block_post_params(lam.parameters()), body);
                 let block_style = block_style_from_opening(lam.opening_loc().as_slice());
                 return Ok(Some(Expr::new(
                     Span::synthetic(),
-                    ExprNode::Lambda { rest_param, params, block_param: None, body, block_style },
+                    ExprNode::Lambda { extra_params, rest_param, params, block_param: None, body, block_style },
                 )));
             }
             // Any other proc-valued expression is evaluated once and passed as the block.
@@ -2841,17 +3135,19 @@ fn ingest_call_block(
 /// `proc`/`lambda` call's own block).
 fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> IngestResult<Expr> {
     refuse_block_capture(b.parameters(), file)?;
+    let extra_params = block_extra_params(b.parameters(), file)?;
     let params = block_param_names(b.parameters());
     let mut rest_param = block_rest_param(b.parameters());
     let body = match b.body() {
         Some(body) => ingest_expr(&body, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
+    let body = destructure_block_params(b.parameters(), body, file)?;
     let body = desugar_post_params(&mut rest_param, block_post_params(b.parameters()), body);
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param, params, block_param: None, body, block_style },
+        ExprNode::Lambda { extra_params, rest_param, params, block_param: None, body, block_style },
     ))
 }
 
@@ -2906,6 +3202,56 @@ fn refuse_block_capture(params_node: Option<Node<'_>>, file: &str) -> IngestResu
     Ok(())
 }
 
+/// The block's optional positionals, keywords and keyword rest, in source
+/// order, for `ExprNode::Lambda.extra_params`. `params` holds only the
+/// required names, and the body reads these as well: dropping them made
+/// the emitted lambda raise `NameError`. `**nil` (no keywords accepted)
+/// has no representation here and is refused: dropped, the emitted block
+/// would accept the keywords the source rejects.
+fn block_extra_params(params_node: Option<Node<'_>>, file: &str) -> IngestResult<Vec<crate::dialect::Param>> {
+    use crate::dialect::Param;
+    let Some(pn) = params_node
+        .and_then(|node| node.as_block_parameters_node())
+        .and_then(|node| node.parameters())
+    else {
+        return Ok(vec![]);
+    };
+    let mut out = Vec::new();
+    for opt in pn.optionals().iter() {
+        if let Some(op) = opt.as_optional_parameter_node() {
+            let mut param = Param::positional(Symbol::from(constant_id_str(&op.name())));
+            param.default = Some(ingest_expr(&op.value(), file)?);
+            out.push(param);
+        }
+    }
+    for kw in pn.keywords().iter() {
+        if let Some(req) = kw.as_required_keyword_parameter_node() {
+            let mut param = Param::positional(Symbol::from(constant_id_str(&req.name())));
+            param.keyword = true;
+            out.push(param);
+        } else if let Some(opt) = kw.as_optional_keyword_parameter_node() {
+            let mut param = Param::positional(Symbol::from(constant_id_str(&opt.name())));
+            param.keyword = true;
+            param.default = Some(ingest_expr(&opt.value(), file)?);
+            out.push(param);
+        }
+    }
+    if pn.keyword_rest().is_some_and(|node| node.as_no_keywords_parameter_node().is_some()) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "a block or lambda with `**nil` (no keywords accepted) has no representation".into(),
+        });
+    }
+    if let Some(krp) = pn.keyword_rest().and_then(|node| node.as_keyword_rest_parameter_node()) {
+        let name = krp.name().map(|loc| constant_id_str(&loc).to_string()).unwrap_or_default();
+        let mut param = Param::positional(Symbol::from(name.as_str()));
+        param.keyword = true;
+        param.rest = true;
+        out.push(param);
+    }
+    Ok(out)
+}
+
 fn block_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
     let Some(params_node) = params_node else { return vec![] };
     if params_node.as_it_parameters_node().is_some() {
@@ -2917,9 +3263,51 @@ fn block_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
     let Some(pn) = bpn.parameters() else { return vec![] };
     pn.requireds()
         .iter()
-        .filter_map(|req| req.as_required_parameter_node())
-        .map(|rp| Symbol::from(constant_id_str(&rp.name())))
+        .filter_map(|req| {
+            if let Some(rp) = req.as_required_parameter_node() {
+                return Some(Symbol::from(constant_id_str(&rp.name())));
+            }
+            // `|(host, secure), index|` — the destructured slot is a
+            // temp the body unpacks first (`destructure_block_params`).
+            req.as_multi_target_node().map(|_| nested_temp(&req, Span::synthetic()))
+        })
         .collect()
+}
+
+/// The statements that unpack a block's destructured parameters
+/// (`|(host, secure, origin), index|`) from the temps
+/// `block_param_names` named for them, ahead of the body. Dropping the
+/// slot instead left the body reading `host` / `secure` with nothing
+/// bound — a NameError far from its cause.
+fn destructure_block_params(params_node: Option<Node<'_>>, body: Expr, file: &str) -> IngestResult<Expr> {
+    let Some(pn) = params_node
+        .as_ref()
+        .and_then(|n| n.as_block_parameters_node())
+        .and_then(|b| b.parameters())
+    else {
+        return Ok(body);
+    };
+    let mut prelude: Vec<Expr> = Vec::new();
+    for req in pn.requireds().iter() {
+        let Some(mt) = req.as_multi_target_node() else { continue };
+        let loc = req.location();
+        let span = Span {
+            file: super::sources::file_id(file),
+            start: loc.start_offset() as u32,
+            end: loc.end_offset() as u32,
+        };
+        let tmp = nested_temp(&req, span);
+        let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp });
+        prelude.extend(destructure_target(&mt, read, span, file)?);
+    }
+    if prelude.is_empty() {
+        return Ok(body);
+    }
+    match *body.node {
+        ExprNode::Seq { exprs } => prelude.extend(exprs),
+        other => prelude.push(Expr { node: Box::new(other), ..body }),
+    }
+    Ok(Expr::new(Span::synthetic(), ExprNode::Seq { exprs: prelude }))
 }
 
 /// The block's REST parameter (`|*args|`), without its sigil.
@@ -3182,5 +3570,18 @@ fn merge_call(recv: Expr, arg: Expr, span: Span) -> Expr {
             block: None,
             parenthesized: true,
         },
+    )
+}
+
+/// A receiver `&.` may read twice without changing what the program
+/// does: a local, an ivar, a constant, `self`, or a literal.
+fn is_plain_read(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. }
+            | ExprNode::SelfRef
+            | ExprNode::Lit { .. }
     )
 }
