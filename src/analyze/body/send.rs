@@ -17,6 +17,53 @@ use crate::ty::Ty;
 
 use super::{BodyTyper, ClassInfo, Ctx, union_many, union_of, unknown};
 
+/// prototype (`RH_SOUND=1`, off by default): base transfers that drop
+/// flows the runtime takes. Block binding splats one yielded Array across
+/// a block of two or more parameters; a Hash yields its Enumerable
+/// iterators one `[key, value]` pair, as CRuby does.
+pub(crate) static SOUND: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var("RH_SOUND").is_ok_and(|s| s == "1"));
+/// `RH_SOUND_ABLATE=pairs,toh,merge,enum,params`: ablation only, turns the named parts
+/// of `RH_SOUND` back off. `pairs` is the splat and the Hash pair model
+/// together: the pair model without the splat binds `|k, v|` to the pair.
+static SOUND_ABLATE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| std::env::var("RH_SOUND_ABLATE").unwrap_or_default());
+fn sound(part: &str) -> bool {
+    *SOUND && !SOUND_ABLATE.split(',').any(|p| p == part)
+}
+
+/// `RH_SOUND`: what a block of `n` (two or more) parameters binds when ONE
+/// value of type `t` is yielded. An Array destructures: a tuple by
+/// position (`nil` past its end), an Array of unknown length to its
+/// element at every position (the convention `a, b = list` uses). Any
+/// other value binds the first parameter and `nil` the rest. A union binds
+/// per arm and joins by position. `None` while `t` is pending (`Var`): the
+/// caller keeps the unsplat binding.
+fn splat_yield(t: &Ty, n: usize) -> Option<Vec<Ty>> {
+    let arms: Vec<&Ty> = match t {
+        Ty::Union { variants } => variants.iter().collect(),
+        _ => vec![t],
+    };
+    let mut out: Option<Vec<Ty>> = None;
+    for arm in arms {
+        let row: Vec<Ty> = match arm {
+            Ty::Var { .. } => return None,
+            Ty::Untyped => vec![Ty::Untyped; n],
+            // a reference nobody unfolded is `Untyped`.
+            Ty::Rec { .. } => vec![Ty::Untyped; n],
+            Ty::Tuple { elems } => (0..n).map(|i| elems.get(i).cloned().unwrap_or(Ty::Nil)).collect(),
+            Ty::Array { elem } => vec![(**elem).clone(); n],
+            Ty::Relation { of } => vec![Ty::Class { id: of.clone(), args: vec![].into() }; n],
+            other => std::iter::once(other.clone()).chain(std::iter::repeat_n(Ty::Nil, n - 1)).collect(),
+        };
+        out = Some(match out {
+            None => row,
+            Some(acc) => acc.into_iter().zip(row).map(|(a, b)| union_of(a, b)).collect(),
+        });
+    }
+    out
+}
+
 impl<'a> BodyTyper<'a> {
     /// `record[:column]` / `read_attribute(:column)` (and their writer
     /// twins) are schema-indexed APIs.  The generic ActiveRecord catalog
@@ -223,7 +270,12 @@ impl<'a> BodyTyper<'a> {
             }
             return new_ctx;
         }
-        let Some(param_tys) = self.block_params_for(recv_ty, method) else {
+        let param_tys = if sound("pairs") {
+            self.block_param_tys(recv_ty, method, params.len(), block)
+        } else {
+            self.block_params_for(recv_ty, method)
+        };
+        let Some(param_tys) = param_tys else {
             return new_ctx;
         };
         for (name, ty) in params.iter().zip(param_tys.iter()) {
@@ -285,7 +337,54 @@ impl<'a> BodyTyper<'a> {
     matches!(peeled, Ty::Class { .. }).then_some(peeled)
 }
 
-/// Per-param types a block yields, given the receiver type and method.
+    /// `RH_SOUND`: the types a block's `n` declared parameters bind. Ruby
+    /// destructures ("auto-splats") ONE yielded Array across a block of two
+    /// or more parameters, so `pairs.to_h { |k, v| }` over `Array[[K, V]]`
+    /// binds `k: K, v: V` — not `k: [K, V]` with `v` unbound, which loses
+    /// every flow out of `v`. A union receiver under the all-arms rule
+    /// binds per arm, each arm splat on its own, then joins by position.
+    fn block_param_tys(&self, recv_ty: Option<&Ty>, method: &Symbol, n: usize, block: &Expr) -> Option<Vec<Ty>> {
+        if *crate::analyze::fold::BRK_ALLARMS {
+            if let Some(Ty::Union { variants }) = recv_ty {
+                let mut joined: Option<Vec<Ty>> = None;
+                for v in variants.iter() {
+                    if matches!(v, Ty::Nil | Ty::Var { .. }) {
+                        continue;
+                    }
+                    let Some(p) = self.block_param_tys(Some(v), method, n, block) else { continue };
+                    joined = Some(match joined.take() {
+                        None => p,
+                        Some(mut acc) => {
+                            let m = acc.len().max(p.len());
+                            acc.resize(m, Ty::Nil);
+                            for (i, t) in p.into_iter().enumerate() {
+                                acc[i] = union_of(acc[i].clone(), t);
+                            }
+                            acc
+                        }
+                    });
+                }
+                return joined;
+            }
+        }
+        let tys = self.block_params_for(recv_ty, method)?;
+        if n >= 2 && tys.len() == 1 {
+            // A fold reference is unfolded one level here, as `a, b = rhs` is.
+            let yielded = crate::analyze::fold::head(
+                &tys[0],
+                crate::analyze::fold::Site::Destruct,
+                crate::analyze::fold::site_of(&block.span),
+                self.classes().raw(),
+            )
+            .unwrap_or_else(|| tys[0].clone());
+            if let Some(splat) = splat_yield(&yielded, n) {
+                return Some(splat);
+            }
+        }
+        Some(tys)
+    }
+
+    /// Per-param types a block yields, given the receiver type and method.
     /// `None` means "no binding info available" — params stay unknown.
     pub(super) fn block_params_for(
         &self,
@@ -345,6 +444,24 @@ impl<'a> BodyTyper<'a> {
                     elem: std::sync::Arc::new(Ty::Class { id: of.clone(), args: vec![].into() }),
                 };
                 self.block_params_for(Some(&as_array), method)
+            }
+            // `RH_SOUND`: CRuby's own pair iterators yield the key and the
+            // value as two values (`|x|` gets the key); `each` and every
+            // Enumerable iterator yield ONE `[key, value]` pair (`|x|` gets
+            // the pair, `|k, v|` destructures it by the splat above).
+            Ty::Hash { key, value } if sound("pairs") => {
+                let pair = || Ty::Tuple { elems: vec![(**key).clone(), (**value).clone()].into() };
+                match method.as_str() {
+                    "select" | "filter" | "reject" | "select!" | "filter!" | "reject!" | "keep_if"
+                    | "delete_if" | "to_h" => Some(vec![(**key).clone(), (**value).clone()]),
+                    "transform_values" | "transform_values!" | "each_value" => Some(vec![(**value).clone()]),
+                    "transform_keys" | "transform_keys!" | "each_key" => Some(vec![(**key).clone()]),
+                    "each" | "each_pair" | "map" | "collect" | "flat_map" | "collect_concat"
+                    | "any?" | "all?" | "none?" | "one?" | "count" | "find" | "detect" | "find_index"
+                    | "find_all" | "sort_by" | "min_by" | "max_by" | "sum" | "group_by" | "partition"
+                    | "filter_map" | "uniq" | "each_entry" | "index_by" | "index_with" => Some(vec![pair()]),
+                    _ => None,
+                }
             }
             Ty::Hash { key, value } => match method.as_str() {
                 "each" | "each_pair" | "map" | "collect"
@@ -2610,6 +2727,12 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "max" | "min" | "max_by" | "min_by" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil].into(),
         },
+        // `RH_SOUND`: without a block, `each_with_index` is an enumerator of
+        // `[element, index]` pairs, so `arr.each_with_index.map { |x, i| }`
+        // binds `i` to the index (it took the element).
+        "each_with_index" if sound("enum") && block_ret.is_none() => Ty::Array {
+            elem: std::sync::Arc::new(Ty::Tuple { elems: vec![elem.clone(), Ty::Int].into() }),
+        },
         // In-place / index-yielding transforms return the array itself.
         "each_with_index" | "keep_if" | "delete_if" | "select!" | "reject!" | "sort!"
         | "uniq!" | "compact!" | "reverse!" | "sort_by!" | "insert" => Ty::Array { elem: std::sync::Arc::new(elem.clone()) },
@@ -2709,6 +2832,44 @@ pub(super) fn record_method(
     }
 }
 
+/// `RH_SOUND`: `Hash#merge`'s result type. Each argument that is a Hash (or
+/// a symbol-keyed record, or `untyped`) adds its keys and values; an
+/// argument still pending adds nothing yet. A conflict block's return
+/// joins the values.
+fn hash_merge_sound(key: &Ty, value: &Ty, block_ret: Option<&Ty>, args: &[Expr]) -> Ty {
+    let (mut k, mut v) = (key.clone(), value.clone());
+    for a in args {
+        let arms: Vec<&Ty> = match a.ty.as_ref() {
+            Some(Ty::Union { variants }) => variants.iter().collect(),
+            Some(t) => vec![t],
+            None => vec![],
+        };
+        for arm in arms {
+            match arm {
+                Ty::Hash { key: k2, value: v2 } => {
+                    k = union_of(k, (**k2).clone());
+                    v = union_of(v, (**v2).clone());
+                }
+                Ty::Record { row } => {
+                    k = union_of(k, Ty::Sym);
+                    for (_, t) in row.fields.iter() {
+                        v = union_of(v, t.clone());
+                    }
+                }
+                Ty::Untyped => {
+                    k = union_of(k, Ty::Untyped);
+                    v = union_of(v, Ty::Untyped);
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(r) = block_ret {
+        v = union_of(v, r.clone());
+    }
+    Ty::Hash { key: std::sync::Arc::new(k), value: std::sync::Arc::new(v) }
+}
+
 pub(super) fn hash_method(
     method: &Symbol,
     key: &Ty,
@@ -2775,9 +2936,26 @@ pub(super) fn hash_method(
             Some(default) if !default.is_open() => union_of(value.clone(), default),
             _ => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         },
+        // `RH_SOUND`: the merged hashes' keys and values join the
+        // receiver's (`h.merge("meta" => { "v" => 1 })` holds that Hash),
+        // and a conflict block's return joins the values.
+        "merge" if sound("merge") => hash_merge_sound(key, value, block_ret, args),
         "merge" => Ty::Hash {
             key: std::sync::Arc::new(key.clone()),
             value: std::sync::Arc::new(value.clone()),
+        },
+        // `RH_SOUND`: with a block, `Hash#to_h` builds its entries from the
+        // block's `[key, value]` returns, as `Array#to_h` does.
+        "to_h" if sound("toh") && block_ret.is_some() => match block_ret {
+            Some(Ty::Tuple { elems }) if elems.len() == 2 => Ty::Hash {
+                key: std::sync::Arc::new(elems[0].clone()),
+                value: std::sync::Arc::new(elems[1].clone()),
+            },
+            Some(Ty::Array { elem: inner }) => Ty::Hash {
+                key: std::sync::Arc::new((**inner).clone()),
+                value: std::sync::Arc::new((**inner).clone()),
+            },
+            _ => Ty::Hash { key: std::sync::Arc::new(unknown()), value: std::sync::Arc::new(unknown()) },
         },
         // `Hash#to_h` is identity (returns self when called without a
         // block; with a block, transforms entries — same shape).
