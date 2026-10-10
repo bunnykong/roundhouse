@@ -10198,6 +10198,77 @@ raise "Lost" unless WebPush::ProbePool::Lost.ancestors.include?(StandardError)
         .assert_passes();
 }
 
+/// `def m(...)` that only forwards to `super`, where `super` is Net::HTTP's
+/// private `begin_transport(req)` / `connect` (campfire's
+/// `WebPush::Connections::Stages`): the overrides take those signatures
+/// (`lower::known_super_forwarding`), the spinel emit has no refusal left,
+/// and on both lanes the hooks run in CRuby's order around two requests
+/// over a connection the server closes after each.
+fn super_forwarding_transport_hooks_app() -> emit_and_run::Overlay {
+    // Top level, not nested in a compact parent: a class nested in
+    // `class A::B` is undefined on spinel (matz/spinel#8369), which is
+    // campfire's own spelling and not what this pins.
+    emit_and_run::real_blog().write("lib/probe_stages.rb", r##"module ProbeStages
+  attr_reader :stage
+
+  def trace
+    @trace ||= []
+  end
+
+  private
+    def begin_transport(...)
+      trace << "begin"
+      @stage = :checking
+      super.tap { @stage = :sent }
+    end
+
+    def connect(...)
+      trace << "connect"
+      @stage = :connecting if @stage == :checking
+      super
+    end
+end
+
+class ProbeHTTP < Net::HTTP
+  include ProbeStages
+end
+"##)
+}
+
+const SUPER_FORWARDING_SCRIPT: &str = r##"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+t = Thread.new do
+  2.times do |i|
+    c = server.accept
+    while (line = c.gets)
+      break if line.strip.empty?
+    end
+    c.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nr#{i}")
+    c.close
+  end
+end
+http = ProbeHTTP.new("127.0.0.1", port)
+http.start
+bodies = [http.get("/").body, http.get("/").body]
+http.finish
+t.join
+raise "bodies #{bodies.inspect}" unless bodies == ["r0", "r1"]
+raise "stage #{http.stage.inspect}" unless http.stage == :sent
+raise "trace #{http.trace.inspect}" unless http.trace == ["connect", "begin", "begin", "connect"]
+"##;
+
+#[test]
+fn forwarding_into_net_http_transport_hooks_runs_on_ruby() {
+    super_forwarding_transport_hooks_app().run_ruby(SUPER_FORWARDING_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn forwarding_into_net_http_transport_hooks_runs_on_spinel() {
+    super_forwarding_transport_hooks_app().run_spinel(SUPER_FORWARDING_SCRIPT).assert_passes();
+}
+
 /// A `test/test_helpers/` module that one test class includes itself
 /// (campfire's `include PushServiceTestHelper`), carried whole into the
 /// test's file: its nested class, its module methods, a constructor

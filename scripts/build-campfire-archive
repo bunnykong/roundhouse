@@ -81,8 +81,9 @@ TREE="$WORK/campfire"
 # STRICT by default: no --allow-unsupported. An unsupported construct is an
 # error and the run writes nothing. A downloadable archive is the wrong place
 # to discover that the ceiling moved, so the only allowance is the one
-# `campfire-conformance` enforces, passed in as CAMPFIRE_CEILING_ERRORS (CI
-# sets both from the same ledgered gap); more errors than that still fail.
+# `campfire-conformance` enforces, passed in as CAMPFIRE_CEILING_ERRORS when
+# that ceiling is above 0 (set it equal to CEILING_ERRORS there); more
+# errors than that still fail.
 CEILING="${CAMPFIRE_CEILING_ERRORS:-0}"
 allow=()
 [[ "$CEILING" -gt 0 ]] && allow=(--allow-unsupported)

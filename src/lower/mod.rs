@@ -170,6 +170,7 @@ pub mod generated_write_guard;
 pub mod signed_id;
 pub(crate) mod secure_token;
 pub mod rich_text;
+pub mod known_super_forwarding;
 pub mod plain_text_attr;
 pub mod capture_inline;
 pub mod partial_qualify;

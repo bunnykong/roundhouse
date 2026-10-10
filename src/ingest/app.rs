@@ -1923,6 +1923,10 @@ end
     // and reuses the prepared resolver rather than rebuilding it.
     super::concern_accessors::validate(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
 
+    // After every library class and include is known: a `...` that only
+    // reaches a stdlib method of known signature through `super` takes
+    // that signature (campfire's `WebPush::Connections::Stages`).
+    crate::lower::known_super_forwarding::restate(&mut app);
     collect_binary_assets(vfs, dir, &mut app);
     // Generated re-ingest labels never register real sources. No later
     // pass may append source-backed FileIds beyond the indexed snapshot.
