@@ -1991,6 +1991,38 @@ raise "readonly body #{body.inspect}" unless body.include?("frozen")
         .assert_passes();
 }
 
+/// `ActiveRecord::Associations::Preloader.new(records:, associations:).call`
+/// is the model's own `preload_associations`, over an Array of one model
+/// or a relation. The association reads after it answer what they
+/// would have without the preload.
+#[test]
+fn associations_preloader_call_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/comment_digest.rb",
+            r#"class CommentDigest
+  def self.titles
+    comments = Comment.order(:id).to_a
+    ActiveRecord::Associations::Preloader.new(records: comments, associations: :article).call
+    ActiveRecord::Associations::Preloader.new(records: Article.all, associations: [:comments]).call
+    comments.map { |c| c.article.title }.join(",") + " " + Article.order(:id).map { |a| a.comments.size }.join(",")
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r##"a = Article.create!(title: "First", body: "A body long enough")
+b = Article.create!(title: "Second", body: "Another body long enough")
+Comment.create!(article_id: a.id, commenter: "x", body: "one")
+Comment.create!(article_id: b.id, commenter: "y", body: "two")
+Comment.create!(article_id: b.id, commenter: "z", body: "three")
+got = CommentDigest.titles
+raise "got #{got.inspect}" unless got == "First,Second,Second 1,2"
+"##,
+        )
+        .assert_passes();
+}
+
 /// A job `perform_later` enqueues under the test adapter is held, not
 /// dropped, and a blockless `perform_enqueued_jobs only:` runs it
 /// (basecamp/once-campfire#296's tests). Its broadcast is JSON encoded

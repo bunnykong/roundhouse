@@ -1274,6 +1274,13 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
+                if method.as_str() == "call" && args.is_empty() && block.is_none()
+                    && let Some(r) = recv.as_mut()
+                    && crate::lower::preloader::preloader_new(r, |id| self.classes().get(id).is_some_and(|c| c.table.is_some())).is_some()
+                {
+                    crate::lower::preloader::clear_refusals(r);
+                    return Ty::Nil;
+                }
                 // Inside the class-side method, the instance a class-side
                 // `new` built (`Ty::SelfInstance`, see below) answers the
                 // methods of the class the `def` sits in: the receiving
