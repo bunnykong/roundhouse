@@ -1,0 +1,133 @@
+diff --git a/src/analyze/mod.rs b/src/analyze/mod.rs
+index 113fb8e9..f11724b8 100644
+--- a/src/analyze/mod.rs
++++ b/src/analyze/mod.rs
+@@ -59,6 +59,7 @@ mod handoff;
+ pub(crate) mod fold;
+ mod slots;
+ mod sccq;
++mod soundness_observer;
+ pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
+ mod dirty_retype;
+ mod typing_mode;
+@@ -1677,6 +1678,7 @@ impl Analyzer {
+         if !fold::on() {
+             return;
+         }
++        soundness_observer::capture(self, app);
+         // One expander serves every expansion, and its memo and its set of
+         // cyclic slots carry from one to the next, so what a slot expands to
+         // can depend on which reader came first. Every map is walked in key
+diff --git a/src/analyze/soundness_observer.rs b/src/analyze/soundness_observer.rs
+new file mode 100644
+index 00000000..e4a3e1aa
+--- /dev/null
++++ b/src/analyze/soundness_observer.rs
+@@ -0,0 +1,107 @@
++//! Read-only snapshot immediately before fold expansion. No writer/transfer changes.
++use super::{Analyzer, fold};
++use crate::{app::App, dialect::MethodReceiver, expr::{Expr, ExprNode}, ident::{ClassId, Symbol}, ty::Ty};
++use serde_json::{json, Value};
++use std::collections::{BTreeMap, HashSet};
++
++fn raw(t: &Ty) -> Value {
++    let mut v = serde_json::to_value(t).unwrap();
++    if let Some(p) = t.provenance() { v["provenance"] = format!("{p:?}").to_lowercase().into(); }
++    match t {
++        Ty::Array { elem } => v["elem"] = raw(elem),
++        Ty::Hash { key, value } => { v["key"] = raw(key); v["value"] = raw(value); }
++        Ty::Tuple { elems } => v["elems"] = elems.iter().map(raw).collect(),
++        Ty::Union { variants } => v["variants"] = variants.iter().map(raw).collect(),
++        Ty::Record { row } => {
++            for (k, t) in &row.fields { v["row"]["fields"][k.as_str()] = raw(t); }
++        }
++        Ty::Fn { ret, .. } => v["ret"] = raw(ret),
++        Ty::Class { args, .. } => v["args"] = args.iter().map(raw).collect(),
++        _ => {}
++    }
++    v
++}
++
++fn walk<'a>(e: &'a Expr, app: &App, s: &Value, found: &mut Vec<&'a Expr>) {
++    let file = app.sources.get(e.span.file.0.saturating_sub(1) as usize);
++    let same_file = file.is_some_and(|f| {
++        let path = s["file"].as_str().unwrap();
++        f.path == path || f.path.ends_with(&format!("/{path}"))
++    });
++    if same_file && e.span.start as u64 == s["start"].as_u64().unwrap()
++        && e.span.end as u64 == s["end"].as_u64().unwrap()
++        && matches!(&*e.node, ExprNode::Ivar { name } if name.as_str() == s["ivar"].as_str().unwrap()) {
++        found.push(e);
++    }
++    e.node.for_each_child(&mut |child| walk(child, app, s, found));
++}
++
++pub(super) fn capture(analyzer: &Analyzer, app: &App) {
++    if std::env::var("RH_FOLD_PRINT").as_deref() != Ok("1") { return; }
++    let Ok(path) = std::env::var("SOUND_SELECTION") else { return; };
++    let selected: BTreeMap<String, Value> = serde_json::from_str(
++        &std::fs::read_to_string(path).unwrap()).unwrap();
++    let mut roots = BTreeMap::new();
++    let mut pending = Vec::new();
++    let refs = |t: &Ty, pending: &mut Vec<u32>| {
++        fold::visit(t, &mut |t| if let Ty::Rec { slot } = t { pending.push(*slot) });
++    };
++    for (alias, s) in selected {
++        let ty = if s.is_array() {
++            let class = ClassId(Symbol::from(s[0].as_str().unwrap()));
++            let method = Symbol::from(s[1].as_str().unwrap());
++            if let Some(index) = s[2].as_u64() {
++                analyzer.inferred_param_types(&class, &method).and_then(|row| row.get(index as usize))
++            } else {
++                analyzer.class_registry().get(&class).and_then(|c| {
++                    if s[2] == "self_return" { c.class_methods.get(&method) }
++                    else { c.instance_methods.get(&method) }
++                })
++            }
++        } else {
++            let side = if s["side"] == "class" { MethodReceiver::Class } else { MethodReceiver::Instance };
++            let mut found = Vec::new();
++            for c in &app.library_classes {
++                if c.name.0.as_str() != s["owner"].as_str().unwrap() { continue; }
++                for m in &c.methods {
++                    if m.name.as_str() == s["method"].as_str().unwrap() && m.receiver == side {
++                        walk(&m.body, app, &s, &mut found);
++                    }
++                }
++            }
++            assert!(found.len() <= 1, "ambiguous selected graph root");
++            found.first().and_then(|e| e.ty.as_ref())
++        };
++        match ty {
++            Some(t) => {
++                refs(t, &mut pending);
++                roots.insert(alias, json!({"status":"typed", "type":raw(t), "debug":format!("{t:?}")}));
++            }
++            None => { roots.insert(alias, json!({"status":"missing", "type":null})); }
++        }
++    }
++    let mut nodes = BTreeMap::new();
++    let mut seen = HashSet::new();
++    while let Some(slot) = pending.pop() {
++        if !seen.insert(slot) { continue; }
++        let key = format!("{:?}", fold::key_of(slot));
++        if let Some(t) = fold::value_of(slot, analyzer.class_registry()) {
++            // Preserve the original stored value separately. Only top-level
++            // alias chains are resolved for a guarded oracle grammar.
++            refs(&t, &mut pending);
++            let arms = fold::resolve(slot, analyzer.class_registry(), &mut HashSet::new());
++            let resolved = match arms.len() {
++                0 => json!({"kind":"bottom"}),
++                1 => raw(&arms[0]),
++                // Shared<Vec<Ty>>::from interns; serialize the observer's
++                // union directly so it creates no type payload identities.
++                _ => json!({"kind":"union", "variants":arms.iter().map(raw).collect::<Vec<_>>()}),
++            };
++            nodes.insert(slot, json!({"status":"typed", "key":key, "type":raw(&t),
++                "debug":format!("{t:?}"), "resolved":resolved}));
++        } else {
++            nodes.insert(slot, json!({"status":"missing", "key":key, "type":null, "resolved":null}));
++        }
++    }
++    eprintln!("rh-sound-graph: {}", json!({"schema":1, "stage":"before-fold-expansion", "roots":roots, "nodes":nodes}));
++}

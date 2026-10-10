@@ -1,0 +1,20 @@
+[package]
+name = "soundness_exporter"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+s3 = []
+
+[[bin]]
+name = "sound-types"
+path = "sound_types.rs"
+
+[[bin]]
+name = "settle-probe"
+path = "../lab/reproductions/settle_sound/settle_probe.rs"
+
+[dependencies]
+roundhouse = { path = "../main" }
+serde_json = "1"
+

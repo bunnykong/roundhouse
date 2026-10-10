@@ -1,0 +1,106 @@
+{
+  "recorded_adapter_commit": "6b55749cf12a9299636b5f53957f0a2bb2ec1544",
+  "public_base": "c210f226346b462214866b5756b457ad53f647b1",
+  "changes": [
+    "Docker lock is configurable through SOUND_DOCKER_LOCK, with a portable shared default.",
+    "Container prefixes omit agent-specific names; the lock file may be created."
+  ],
+  "files": [
+    {
+      "file": ".gitignore",
+      "recorded_sha256": "fc27896797982b9b543c874b9167011cd4dac9113ea0d8d00562a188964072bd",
+      "snapshot_sha256": "fc27896797982b9b543c874b9167011cd4dac9113ea0d8d00562a188964072bd",
+      "unchanged": true
+    },
+    {
+      "file": "Cargo.lock",
+      "recorded_sha256": "cb479c924ed62749946a67ccdfd15d901944f027db353f1f4f82ef5e0bbe2589",
+      "snapshot_sha256": "cb479c924ed62749946a67ccdfd15d901944f027db353f1f4f82ef5e0bbe2589",
+      "unchanged": true
+    },
+    {
+      "file": "Cargo.toml",
+      "recorded_sha256": "992c223643546e850804d4b3e0a2860e58d80b77548e23227a5ccf3c0bce2b7f",
+      "snapshot_sha256": "992c223643546e850804d4b3e0a2860e58d80b77548e23227a5ccf3c0bce2b7f",
+      "unchanged": true
+    },
+    {
+      "file": "app_record.rb",
+      "recorded_sha256": "8b5cd53fd7c32b6e27616c5464dbc364ac2bc506bbf4cbaa01431f2299740390",
+      "snapshot_sha256": "8b5cd53fd7c32b6e27616c5464dbc364ac2bc506bbf4cbaa01431f2299740390",
+      "unchanged": true
+    },
+    {
+      "file": "build.py",
+      "recorded_sha256": "954fa232bedcbb3f39a152f84ce0f18bb5657afe146cd879650da8aec83a2c22",
+      "snapshot_sha256": "954fa232bedcbb3f39a152f84ce0f18bb5657afe146cd879650da8aec83a2c22",
+      "unchanged": true
+    },
+    {
+      "file": "compare.py",
+      "recorded_sha256": "6e9f63a745a8a690ce51c62d7ccb360ee1a6842bc9cfff2bc4efdc25894fd539",
+      "snapshot_sha256": "6e9f63a745a8a690ce51c62d7ccb360ee1a6842bc9cfff2bc4efdc25894fd539",
+      "unchanged": true
+    },
+    {
+      "file": "docker_session.py",
+      "recorded_sha256": "0de6d0482ac4746646492ccd01e5c1d916cae20f48ea1b86610d2dafed7e5156",
+      "snapshot_sha256": "7e41758ae5de939d9d43c6dc9fcb6682be8918883fcb9cabaad1bd5b5459a7dc",
+      "unchanged": false
+    },
+    {
+      "file": "export.py",
+      "recorded_sha256": "9ae3ed0c8609c20bc2ce14ee31ccd872203a293d2a44b39eafa6feb036e0c28c",
+      "snapshot_sha256": "9ae3ed0c8609c20bc2ce14ee31ccd872203a293d2a44b39eafa6feb036e0c28c",
+      "unchanged": true
+    },
+    {
+      "file": "f17-graph-observer.patch",
+      "recorded_sha256": "7d9d6820428c046903d4d01e81c3e3331b66929c2e55de1fe372a92ba8379a4e",
+      "snapshot_sha256": "7d9d6820428c046903d4d01e81c3e3331b66929c2e55de1fe372a92ba8379a4e",
+      "unchanged": true
+    },
+    {
+      "file": "oracle_ext.py",
+      "recorded_sha256": "01928a32b6c803fded3a76274331612c2a883a19bc765b5e085c1d52a7b90514",
+      "snapshot_sha256": "01928a32b6c803fded3a76274331612c2a883a19bc765b5e085c1d52a7b90514",
+      "unchanged": true
+    },
+    {
+      "file": "prepare_slots.rb",
+      "recorded_sha256": "c534bedfca36f495c062bee589e69040beae882a01548b1f944c1fecaabfc195",
+      "snapshot_sha256": "c534bedfca36f495c062bee589e69040beae882a01548b1f944c1fecaabfc195",
+      "unchanged": true
+    },
+    {
+      "file": "s3-graph-observer.patch",
+      "recorded_sha256": "e08868a1cc6c43da916e6d7be21d65ad76872f3a322e13cd4cd86275bbb78daa",
+      "snapshot_sha256": "e08868a1cc6c43da916e6d7be21d65ad76872f3a322e13cd4cd86275bbb78daa",
+      "unchanged": true
+    },
+    {
+      "file": "s3_graph_observer.rs",
+      "recorded_sha256": "a3957809464ef8939a7ede482b9e98643584a61cb65589fe2f30d5a8fe5d004f",
+      "snapshot_sha256": "a3957809464ef8939a7ede482b9e98643584a61cb65589fe2f30d5a8fe5d004f",
+      "unchanged": true
+    },
+    {
+      "file": "seed.rb",
+      "recorded_sha256": "1af9307f27e154a7f1bd3b0e0fbbef2be0e9912b715d9da3aa9c11e30747b96a",
+      "snapshot_sha256": "1af9307f27e154a7f1bd3b0e0fbbef2be0e9912b715d9da3aa9c11e30747b96a",
+      "unchanged": true
+    },
+    {
+      "file": "sound_types.rs",
+      "recorded_sha256": "751c572210dbe47bd0a2d0b6fbecb8bdb0bc3ff20f20e2265c647f4c658f49e6",
+      "snapshot_sha256": "751c572210dbe47bd0a2d0b6fbecb8bdb0bc3ff20f20e2265c647f4c658f49e6",
+      "unchanged": true
+    },
+    {
+      "file": "test_contract.py",
+      "recorded_sha256": "4bfdf17f9321a462172b4288c9a9e2ca5378ab2cf12e7140872b9f24288400d1",
+      "snapshot_sha256": "4bfdf17f9321a462172b4288c9a9e2ca5378ab2cf12e7140872b9f24288400d1",
+      "unchanged": true
+    }
+  ]
+}
