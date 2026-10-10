@@ -54,6 +54,8 @@ pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
 mod dirty_retype;
 mod typing_mode;
 mod inferred_types;
+#[cfg(test)]
+mod writer_laws;
 pub mod inquiry;
 pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;

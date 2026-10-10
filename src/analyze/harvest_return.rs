@@ -111,6 +111,37 @@ enum HarvestWrite {
     Set(Ty),
 }
 
+#[cfg(test)]
+mod writer_law_tests {
+    use super::*;
+    use crate::analyze::writer_laws::{check_binary, universe};
+
+    #[test]
+    #[ignore = "known: distinct return cores replace; same-core stabilization is not associative"]
+    fn writer_law_return_decision() {
+        check_binary(
+            "decide_harvested_return",
+            &universe(),
+            |a, b| match decide_harvested_return(&a, b) {
+                HarvestWrite::Keep => a,
+                HarvestWrite::Set(next) => next,
+            },
+        );
+    }
+
+    #[test]
+    #[ignore = "known: harvested return insertion inherits non-join replacement and stabilization"]
+    fn writer_law_return_table() {
+        let method = Symbol::from("m");
+        check_binary("insert_inferred_return", &universe(), |a, b| {
+            let mut table = std::collections::HashMap::new();
+            insert_inferred_return(&mut table, &method, a);
+            insert_inferred_return(&mut table, &method, b);
+            table.remove(&method).unwrap()
+        });
+    }
+}
+
 /// Single merge decision for an existing harvested return vs a new body type.
 fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     if matches!(existing, Ty::Fn { .. }) {

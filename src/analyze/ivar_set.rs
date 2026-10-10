@@ -383,6 +383,32 @@ fn narrow_to_named_model(
     }
 }
 
+#[cfg(test)]
+mod writer_law_tests {
+    use super::*;
+    use crate::analyze::writer_laws as laws;
+
+    #[test]
+    #[ignore = "known: conventional-model projection drops previously retained alternatives"]
+    fn writer_law_reflective_named_model_projection() {
+        let name = Symbol::from("story");
+        let models = HashMap::from([(name.clone(), ClassId(Symbol::from("Story")))]);
+        let f = |t: &Ty| narrow_to_named_model(&name, t.clone(), Some(&models));
+        laws::check_transfer(
+            &laws::universe(),
+            &f,
+            super::super::body::join_ivar_slot,
+            laws::pending(),
+            |t| {
+                let once = f(t);
+                let twice = f(&once);
+                (once, twice)
+            },
+        )
+        .finish("narrow_to_named_model");
+    }
+}
+
 /// Build `page` → `Page` for every model in the app.
 pub(crate) fn models_by_conventional_ivar<'a>(
     models: impl Iterator<Item = &'a ClassId>,

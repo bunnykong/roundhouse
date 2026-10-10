@@ -456,3 +456,202 @@ fn ty_compatible(a: &Ty, b: &Ty) -> bool {
             (Ty::Array { .. }, Ty::Array { .. }) | (Ty::Hash { .. }, Ty::Hash { .. })
         )
 }
+
+#[cfg(test)]
+mod writer_law_tests {
+    use super::*;
+    use crate::analyze::writer_laws::{Report, check_transfer, pending, universe};
+
+    fn check(name: &str, pred: NarrowPred, branch: bool) {
+        let key = Symbol::from("x");
+        let mut report = Report::default();
+        // Exercise the actual local AND ivar destination writers.
+        for ivar in [false, true] {
+            let transfer = |t: &Ty| {
+                let mut ctx = Ctx::default();
+                let bindings = if ivar {
+                    &mut ctx.ivar_bindings
+                } else {
+                    &mut ctx.local_bindings
+                };
+                bindings.insert(key.clone(), t.clone());
+                let pred = match &pred {
+                    NarrowPred::IsNil(_) => NarrowPred::IsNil(if ivar {
+                        VarKey::Ivar(key.clone())
+                    } else {
+                        VarKey::Local(key.clone())
+                    }),
+                    NarrowPred::IsNotNil(_) => NarrowPred::IsNotNil(if ivar {
+                        VarKey::Ivar(key.clone())
+                    } else {
+                        VarKey::Local(key.clone())
+                    }),
+                    NarrowPred::IsA(_, t) => NarrowPred::IsA(
+                        if ivar {
+                            VarKey::Ivar(key.clone())
+                        } else {
+                            VarKey::Local(key.clone())
+                        },
+                        t.clone(),
+                    ),
+                    NarrowPred::IsNotA(_, t) => NarrowPred::IsNotA(
+                        if ivar {
+                            VarKey::Ivar(key.clone())
+                        } else {
+                            VarKey::Local(key.clone())
+                        },
+                        t.clone(),
+                    ),
+                    _ => unreachable!(),
+                };
+                let ctx = apply_narrowing(&ctx, &pred, branch);
+                let bindings = if ivar {
+                    ctx.ivar_bindings
+                } else {
+                    ctx.local_bindings
+                };
+                bindings[&key].clone()
+            };
+            report.merge(check_transfer(
+                &universe(),
+                &transfer,
+                super::super::join_ivar_slot,
+                pending(),
+                |t| {
+                    let once = transfer(t);
+                    let twice = transfer(&once);
+                    (once, twice)
+                },
+            ));
+        }
+        report.finish(name);
+    }
+
+    #[test]
+    #[ignore = "known: narrowing fallback does not preserve pending or joined alternatives"]
+    fn writer_law_narrow_non_nil() {
+        check(
+            "apply_narrowing/non-nil",
+            NarrowPred::IsNotNil(VarKey::Local(Symbol::from("x"))),
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "known: narrowing fallback does not preserve pending or joined alternatives"]
+    fn writer_law_narrow_nil() {
+        check(
+            "apply_narrowing/nil",
+            NarrowPred::IsNil(VarKey::Local(Symbol::from("x"))),
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "known: narrowing fallback does not preserve pending or joined alternatives"]
+    fn writer_law_narrow_is_a() {
+        check(
+            "apply_narrowing/is_a(Int)",
+            NarrowPred::IsA(VarKey::Local(Symbol::from("x")), Ty::Int),
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "known: narrowing fallback does not preserve pending or joined alternatives"]
+    fn writer_law_narrow_is_not_a() {
+        check(
+            "apply_narrowing/not-is_a(Int)",
+            NarrowPred::IsNotA(VarKey::Local(Symbol::from("x")), Ty::Int),
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "known: narrowing fallback does not preserve pending or joined alternatives"]
+    fn writer_law_narrow_array() {
+        check(
+            "apply_narrowing/is_a(Array)",
+            NarrowPred::IsA(
+                VarKey::Local(Symbol::from("x")),
+                Ty::Array {
+                    elem: Box::new(Ty::Untyped),
+                },
+            ),
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "known: narrowing fallback does not preserve pending or joined alternatives"]
+    fn writer_law_narrow_hash() {
+        check(
+            "apply_narrowing/is_a(Hash)",
+            NarrowPred::IsA(
+                VarKey::Local(Symbol::from("x")),
+                Ty::Hash {
+                    key: Box::new(Ty::Untyped),
+                    value: Box::new(Ty::Untyped),
+                },
+            ),
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "known: narrowing fallback does not preserve pending or joined alternatives"]
+    fn writer_law_exclude_array() {
+        check(
+            "apply_narrowing/not-is_a(Array)",
+            NarrowPred::IsNotA(
+                VarKey::Local(Symbol::from("x")),
+                Ty::Array {
+                    elem: Box::new(Ty::Untyped),
+                },
+            ),
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "known: narrowing fallback does not preserve pending or joined alternatives"]
+    fn writer_law_exclude_hash() {
+        check(
+            "apply_narrowing/not-is_a(Hash)",
+            NarrowPred::IsNotA(
+                VarKey::Local(Symbol::from("x")),
+                Ty::Hash {
+                    key: Box::new(Ty::Untyped),
+                    value: Box::new(Ty::Untyped),
+                },
+            ),
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "known: narrowing fallback does not preserve pending or joined alternatives"]
+    fn writer_law_narrow_reader() {
+        let name = Symbol::from("x");
+        let transfer = |t: &Ty| {
+            let pred = NarrowPred::IsNotNil(VarKey::Reader(name.clone(), t.clone()));
+            let ctx = apply_narrowing(&Ctx::default(), &pred, true);
+            ctx.local_bindings
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| t.clone())
+        };
+        check_transfer(
+            &universe(),
+            &transfer,
+            super::super::join_ivar_slot,
+            pending(),
+            |t| {
+                let once = transfer(t);
+                let twice = transfer(&once);
+                (once, twice)
+            },
+        )
+        .finish("narrow_binding/reader");
+    }
+}

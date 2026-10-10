@@ -57,6 +57,8 @@ pub(crate) use const_resolution::{ConstResolver, ConstResolverTask};
 pub use const_resolution::PreparedConstResolver;
 use const_resolution::ResolvedConstant;
 mod narrowing;
+#[cfg(test)]
+mod writer_law_tests;
 mod send;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::string_answers;
@@ -2970,7 +2972,7 @@ pub(super) fn union_many(tys: Vec<Ty>) -> Ty {
 
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use super::narrowing::{apply_narrowing, extract_narrowing};
     use crate::expr::ExprNode;
@@ -4021,7 +4023,7 @@ mod tests {
     // merging, nested-union flattening, dedup) and check the laws over
     // every pair and triple exhaustively.
 
-    fn law_universe() -> Vec<Ty> {
+    pub(in crate::analyze) fn law_universe() -> Vec<Ty> {
         let class = |name: &str| Ty::Class {
             id: ClassId(Symbol::from(name)),
             args: vec![],
@@ -4266,7 +4268,7 @@ mod tests {
         Ty::Var { var: TyVar(0) }
     }
 
-    fn carried_slot_universe(join: fn(Ty, Ty) -> Ty) -> Vec<Ty> {
+    pub(in crate::analyze) fn carried_slot_universe(join: fn(Ty, Ty) -> Ty) -> Vec<Ty> {
         let mut raw = law_universe();
         raw.extend([
             Ty::Var { var: TyVar(2) },

@@ -257,3 +257,47 @@ fn stored_values(expr: &Expr, slot: &Symbol, f: &mut impl FnMut(&Ty)) {
     }
     expr.node.for_each_child(&mut |child| stored_values(child, slot, f));
 }
+
+#[cfg(test)]
+mod writer_law_tests {
+    use super::*;
+    use crate::analyze::writer_laws as laws;
+
+    #[test]
+    #[ignore = "known: filtering unknown contributions does not preserve joins"]
+    fn writer_law_class_configuration_gate() {
+        let f = |t: &Ty| {
+            if is_uninformative(t) {
+                laws::pending()
+            } else {
+                t.clone()
+            }
+        };
+        laws::check_transfer(
+            &laws::universe(),
+            &f,
+            crate::analyze::body::join_ivar_slot,
+            laws::pending(),
+            |t| {
+                let once = f(t);
+                let twice = f(&once);
+                (once, twice)
+            },
+        )
+        .finish("class_configuration/is_uninformative");
+    }
+
+    #[test]
+    #[ignore = "known: this writer replaces the destination; contribution order and replay change it"]
+    fn writer_law_class_configuration_stamp() {
+        laws::check_binary("seed_empty_hashes", &laws::universe(), |a, b| {
+            let mut literal = laws::expr(ExprNode::Hash {
+                entries: vec![],
+                kwargs: false,
+            });
+            literal.ty = Some(a);
+            seed_empty_hashes(&mut literal, &b);
+            literal.ty.unwrap()
+        });
+    }
+}
