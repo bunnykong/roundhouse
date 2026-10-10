@@ -84,25 +84,43 @@ impl ConstScope {
 
     pub fn get(&self, name: &Symbol) -> Option<&Ty> {
         super::sccq::rec_const_name(name);
-        self.own.get(name).or_else(|| self.global.get(name))
+        let value = self.own.get(name).or_else(|| self.global.get(name));
+        if super::warm::ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            super::warm::read_value(format!("const:{}", name.as_str()), value);
+        }
+        value
     }
 
     /// Only the constants this scope's class declares itself.
     pub fn get_own(&self, name: &Symbol) -> Option<&Ty> {
         super::sccq::rec_const_name(name);
-        self.own.get(name)
+        let value = self.own.get(name);
+        if super::warm::ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            super::warm::read_value(format!("own:{}", name.as_str()), value);
+        }
+        value
     }
 
     /// Only the app-wide, by-bare-name registry.
     pub fn get_global(&self, name: &Symbol) -> Option<&Ty> {
         super::sccq::rec_const_name(name);
-        self.global.get(name)
+        let value = self.global.get(name);
+        if super::warm::ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            super::warm::read_value(format!("global:{}", name.as_str()), value);
+        }
+        value
     }
 
     /// A copy of the app-wide registry (the worklist diffs it between
     /// passes).
     pub(crate) fn global_entries(&self) -> HashMap<Symbol, Ty> {
         (*self.global).clone()
+    }
+
+    /// Observe both layers without invoking the scheduler/read recorder.
+    pub(super) fn state_hashes(&self) -> (u64, u64) {
+        (super::fixpoint_check::bindings_hash(&self.own),
+         super::fixpoint_check::bindings_hash(&self.global))
     }
 }
 
@@ -366,6 +384,7 @@ impl<'a> Classes<'a> {
     #[inline]
     pub(super) fn get(&self, id: &ClassId) -> Option<&'a ClassInfo> {
         let found = self.0.get(id);
+        super::warm::read_class(id, found, false);
         if let Some(info) = found {
             super::sccq::rec_class(info.sccq_idx);
         }
@@ -374,11 +393,15 @@ impl<'a> Classes<'a> {
 
     #[inline]
     pub(super) fn contains_key(&self, id: &ClassId) -> bool {
+        super::warm::read_class(id, self.0.get(id), false);
         self.0.contains_key(id)
     }
 
     #[inline]
     pub(super) fn values(&self) -> std::collections::hash_map::Values<'a, ClassId, ClassInfo> {
+        if super::warm::extra_needed() || super::warm::ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            for (id, info) in self.0 { super::warm::read_class(id, Some(info), true); }
+        }
         self.0.values()
     }
 
@@ -487,11 +510,33 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        let extra = if super::warm::extra_needed() {
+            let _profile = super::warm::phase(super::warm::Phase::Fingerprint);
+            let mut constants: Vec<_> = self.typed_constants.into_iter().flat_map(|c| c.iter())
+                .map(|(id, ty)| (id.get().to_string(), super::warm::input_type_hash(ty))).collect();
+            constants.sort_unstable();
+            let mut inquirers: Vec<_> = self.inquirers.into_iter().flat_map(|c| c.iter()).map(Symbol::as_str).collect();
+            inquirers.sort_unstable();
+            let mut factories: Vec<_> = self.data_factories.into_iter().flat_map(|c| c.iter())
+                .map(|(s, t)| (s.file.0, s.start, s.end, super::warm::input_type_hash(t))).collect();
+            factories.sort_unstable();
+            serde_json::json!({"constants": constants, "inquirers": inquirers, "factories": factories})
+        } else { serde_json::Value::Null };
+        let evaluation = super::warm::Evaluation::begin(expr, ctx, self.classes, extra);
+        if let Some(body) = evaluation.as_ref().and_then(|e| e.replay.as_ref()) {
+            let _profile = super::warm::phase(super::warm::Phase::Replay);
+            *expr = body.clone();
+            evaluation.as_ref().unwrap().finish(expr);
+            return expr.ty.clone().unwrap_or_else(Ty::pending_untyped);
+        }
+        let _profile = evaluation.as_ref().filter(|e| e.fresh())
+            .and_then(|_| super::warm::phase(super::warm::Phase::Fresh));
         let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
         diagnostic::detect_diagnostic(expr);
+        if let Some(evaluation) = &evaluation { evaluation.finish(expr); }
         ty
     }
 
@@ -905,8 +950,9 @@ impl<'a> BodyTyper<'a> {
                             qualify_resolved_path(path, name);
                         }
                         super::sccq::rec_const_id(declaration);
-                        let value = self.typed_constants
-                            .and_then(|values| values.get(declaration))
+                        let value = self.typed_constants.and_then(|values| values.get(declaration));
+                        super::warm::read_decl(declaration, value);
+                        let value = value
                             .cloned()
                             .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()));
                         let id: crate::ident::ClassId = (**name).clone();
@@ -943,7 +989,9 @@ impl<'a> BodyTyper<'a> {
                             let name = written_class_id(path);
                             let id = declaration_id_from_lookup_name(name.0.as_str());
                             super::sccq::rec_const_id(&id);
-                            self.typed_constants.and_then(|values| values.get(&id)).cloned()
+                            let value = self.typed_constants.and_then(|values| values.get(&id));
+                            super::warm::read_decl(&id, value);
+                            value.cloned()
                         };
                         // Otherwise retain the written class path, but
                         // never guess another class by its suffix.

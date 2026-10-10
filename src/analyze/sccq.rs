@@ -168,6 +168,24 @@ fn rec_end() -> Reads {
     reads
 }
 
+// A warm evaluation isolates its actual scheduler reads from cache guards.
+// The caller's prefix is put back when the evaluation scope ends.
+pub(crate) fn warm_rec_take() -> Option<Reads> {
+    RECORDING.load(Relaxed).then(|| REC.with(|r| std::mem::take(&mut *r.borrow_mut())))
+}
+
+pub(crate) fn warm_rec_snapshot() -> Option<Reads> {
+    RECORDING.load(Relaxed).then(|| {
+        let mut reads = REC.with(|r| r.borrow().clone());
+        reads.normalize();
+        reads
+    })
+}
+
+pub(crate) fn warm_rec_restore(before: Reads) {
+    REC.with(|r| r.borrow_mut().absorb(before));
+}
+
 // ─────────────────────────── syntax ───────────────────────────
 
 /// Names dispatch reads under that the syntax does not spell.
@@ -1257,6 +1275,7 @@ impl Analyzer {
             }
         }
         eng.unit_ord = vec![u32::MAX; eng.units.len()];
+        super::warm::register(app, &eng.units);
         self.sccq = Some(Box::new(eng));
         // Main's tests loop re-harvests every body, typed or not; the worklist keeps
         // that (the harvest is not idempotent: `decide_harvested_return`).
@@ -1308,6 +1327,7 @@ impl Analyzer {
 
     /// Start recording a fine typing inside a class pass.
     pub(super) fn sccq_rec_begin(&self, unit: Option<u32>) {
+        super::warm::begin_unit(unit);
         if unit.is_some() && self.sccq.is_some() {
             rec_begin();
         }
@@ -1315,6 +1335,7 @@ impl Analyzer {
 
     /// Stop recording; `pass_a` replaces the unit's reads, otherwise they merge.
     pub(super) fn sccq_rec_end(&mut self, unit: Option<u32>, pass_a: bool, body: Option<&Expr>) {
+        super::warm::end_unit();
         let Some(u) = unit else { return };
         let Some(eng) = self.sccq.as_mut() else { return };
         let reads = rec_end();
@@ -2003,6 +2024,8 @@ impl Analyzer {
     // ── one unit ──
 
     fn sccq_eval(&mut self, eng: &mut Engine, app: &mut App, u: u32, level: u8) {
+        super::warm::begin_unit(Some(u));
+        let _warm_unit = super::warm::UnitScope;
         let cap = unit_cap();
         {
             let unit = &mut eng.units[u as usize];
@@ -2318,6 +2341,7 @@ impl Analyzer {
             eng.stats.restamps += 1;
             eng.mark(u, DIRTY_FULL);
         }
+        super::warm::end_unit();
     }
 
     /// Seed units whose read slots moved between `prev` and now.
@@ -2851,6 +2875,70 @@ impl Analyzer {
         let eng = self.sccq.as_ref()?;
         serde_json::from_str(&format!("{{{}}}", eng.stats_json())).ok()
     }
+
+    /// Read-only shadow inventory. Physical class/fold indices are replaced
+    /// by keys, and context types use S0's canonical semantic fingerprints.
+    /// Counters and append-only stale reverse-index entries are not inputs.
+    pub(super) fn sccq_shadow_rows(&self, app: &App) -> Vec<(&'static str, String, u64)> {
+        use super::fixpoint_check::{bindings_hash, hash_of, type_hash};
+        let Some(eng) = &self.sccq else { return Vec::new() };
+        let by_idx: HashMap<_, _> = eng.class_idx.iter()
+            .map(|(class, idx)| (*idx, class.0.as_str())).collect();
+        let class_keys = |indices: &[u32]| {
+            let mut names: Vec<_> = indices.iter().map(|idx| {
+                if *idx == 0 { "<unindexed>".to_string() }
+                else { by_idx.get(idx).expect("indexed scheduler class").to_string() }
+            }).collect();
+            names.sort_unstable();
+            names.dedup();
+            names
+        };
+        let ctx_hash = |ctx: &Ctx| {
+            let objects: BTreeSet<_> = ctx.class_objects.iter().map(Symbol::as_str).collect();
+            hash_of((ctx.self_ty.as_ref().map(type_hash), bindings_hash(&ctx.ivar_bindings),
+                bindings_hash(&ctx.local_bindings), objects, ctx.constants.state_hashes(),
+                [ctx.annotate_self_dispatch, ctx.in_view, ctx.class_side,
+                 ctx.claimed_macro_template, ctx.instance_body]))
+        };
+        let sites_hash = |sites: &[(ParamKey, Vec<Ty>)]| {
+            let rows: Vec<_> = sites.iter().map(|((class, method, side), row)| {
+                (class.0.as_str(), method.as_str(), *side,
+                 row.iter().map(type_hash).collect::<Vec<_>>())
+            }).collect();
+            hash_of(rows)
+        };
+        let mut out = Vec::new();
+        for unit in &eng.units {
+            let file = unit_body(app, unit.family, unit.ci, unit.mi).span.file.0;
+            let path = file.checked_sub(1).and_then(|f| app.sources.get(f as usize))
+                .map(|source| source.path.as_str()).unwrap_or("synthetic");
+            let key = format!("{:?}:{}:{}:{}:{}:{}", unit.family, unit.class.0.as_str(),
+                unit.class_side, path, unit.mi, unit.name.as_str());
+            let reads = &unit.reads;
+            let fold_keys: BTreeSet<_> = reads.fold_slots.iter().map(|slot| {
+                format!("{:?}", super::fold::key_of(*slot).expect("recorded fold slot"))
+            }).collect();
+            let const_ids: BTreeSet<_> = reads.const_ids.iter().map(|id| id.get()).collect();
+            let const_names: BTreeSet<_> = reads.const_names.iter().map(Symbol::as_str).collect();
+            out.push(("sccq_dependencies", key.clone(), hash_of((
+                class_keys(&reads.classes), class_keys(&reads.wild), const_ids, const_names, fold_keys,
+                sites_hash(&unit.sites), unit.dirty, unit.frozen))));
+            let contexts: Vec<_> = unit.ctx.iter().map(&ctx_hash).collect();
+            out.push(("sccq_contexts", key, hash_of(contexts)));
+        }
+        for (index, entry) in eng.entries.iter().enumerate() {
+            let key = format!("{:?}:{}:{index}", entry.family, entry.id.0.as_str());
+            let own: std::collections::BTreeMap<_, _> = entry.own_consts.iter()
+                .map(|(name, ty)| (name.as_str(), type_hash(ty))).collect();
+            let initialized: BTreeSet<_> = entry.initialized.iter().map(Symbol::as_str).collect();
+            let contexts = (entry.ready, entry.self_id.0.as_str(), bindings_hash(&entry.class_ivars),
+                own, entry.consts.state_hashes(), entry.concern_env.as_ref().map(bindings_hash),
+                entry.current_writes.as_ref().map(bindings_hash), entry.is_current_attributes,
+                initialized, entry.reseeded.as_ref().map(bindings_hash));
+            out.push(("sccq_entry_contexts", key, hash_of(contexts)));
+        }
+        out
+    }
 }
 
 fn global_map(c: &ConstScope) -> HashMap<Symbol, Ty> {
@@ -2879,7 +2967,7 @@ fn literal_stamps(body: &Expr) -> u64 {
     h.finish()
 }
 
-fn unit_body(app: &App, family: Family, ci: usize, mi: usize) -> &Expr {
+pub(super) fn unit_body(app: &App, family: Family, ci: usize, mi: usize) -> &Expr {
     match family {
         Family::Lib => &app.library_classes[ci].methods[mi].body,
         Family::ModelMethod => &app.models[ci].methods().nth(mi).expect("model method").body,

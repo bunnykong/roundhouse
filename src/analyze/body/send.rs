@@ -2365,6 +2365,7 @@ impl<'a> BodyTyper<'a> {
             let Some(cls) = self.classes().get(&cid) else { continue };
             // Every method of the class is read: a class-wide dependency.
             crate::analyze::sccq::rec_wild(cls.sccq_idx);
+            crate::analyze::warm::read_class(&cid, Some(cls), true);
             for (name, ty) in cls.instance_methods.iter() {
                 // `RH_FOLD`: a dynamic send reads a reference-mode return
                 // by reference, as a named one does.

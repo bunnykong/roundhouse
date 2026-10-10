@@ -59,6 +59,7 @@ mod handoff;
 pub(crate) mod fold;
 mod slots;
 mod sccq;
+pub(crate) mod warm;
 pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
 mod dirty_retype;
 mod typing_mode;
