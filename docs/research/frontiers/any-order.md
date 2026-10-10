@@ -6,7 +6,9 @@
 **Skills:** Rust; fixpoint and lattice theory; the analyzer's harvest, dispatch and fold code.
 **Claims:** none. To take this frontier, see [Claiming](../README.md#claiming).
 <!-- end generated -->
-**Background:** [notes/order-dependence.md](../notes/order-dependence.md)
+**Background:** [Order dependence](../notes/order-dependence.md),
+[structure contract](../notes/structure-contract.md), and
+[run certificate](../notes/run-certificate.md).
 
 ## Why it matters
 
@@ -25,6 +27,9 @@ done
 ```
 
 It passes when each app prints three identical lines and the last number, the total movement found by the verify round, is 0. Three schedules are a regression check, not a proof. No app passes on the recorded staged pins: four of the five differ in structure between schedules (F5), and Campfire's recorded structure equality does not establish matching values; an earlier control's return digest differs in seed 2. These measurements predate the merged join and receiver-side fixes below; their effects on the any-order gate need a new run.
+
+The [long-name dispatch attempt](../attempts.md#long-name-dispatch) retains a dependency-coverage
+fixture: compare actual dispatch lookup names with the names scanned for scheduling.
 
 ## Known
 

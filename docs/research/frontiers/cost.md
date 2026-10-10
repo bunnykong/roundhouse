@@ -7,6 +7,8 @@
 **Claims:** none. To take this frontier, see [Claiming](../README.md#claiming).
 <!-- end generated -->
 
+**Background:** [Type-ID lifetimes](../notes/type-id-lifetimes.md).
+
 ## Why it matters
 
 `check` time decides whether the analysis is usable in an editor, in CI and on large apps.

@@ -11,6 +11,9 @@ Background for [Any order](../frontiers/any-order.md). In an unpublished researc
 5. **History cuts.** A nested copy of the previous return is cut to `untyped` before storing (`untie_recursive_return`), though matching the previous value isn't evidence of recursion.
 6. **Writers.** Slots don't keep one entry per writer: some bindings count only while free of `untyped` and pending arms, and merging call sites drops `untyped` beside concrete arguments.
 
+The [writer-rule implementation attempt](../attempts.md#writer-rule-implementation-boundaries)
+records the diagnostic and representation boundaries behind the first step below.
+
 ## One proposed order
 
 Dependencies set this order; it is argued, not yet carried out or proved. Step 2 could instead discover the structure monotonically, as the brief's [leads](../frontiers/any-order.md#leads) describe.

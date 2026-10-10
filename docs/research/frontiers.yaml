@@ -59,7 +59,7 @@
   brief: frontiers/soundness.md
   status: open
   stands: "The recorded S3 types include an unsound public-app result; runtime traces from the apps' own code are still missing."
-  facts: [F18, F17, F14, F8]
+  facts: [F20, F19, F18, F17, F14, F8]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
@@ -85,7 +85,7 @@
   brief: frontiers/precision.md
   status: open
   stands: "S3 is 0.19 points behind main `194f26cf` in fully typed expressions, with the losses allocated to causes."
-  facts: [F18, F14, F7]
+  facts: [F19, F18, F14, F7]
   skills:
     - Rust
     - type inference
@@ -121,7 +121,7 @@
   brief: frontiers/typed-recursion.md
   status: open
   stands: "A Rust `enum` and a Crystal `alias` work for three of the four shapes recorded in #589, behind a flag."
-  facts: [F13]
+  facts: [F21, F13]
   skills:
     - Code generation
     - the type systems of Rust, Crystal and the other targets

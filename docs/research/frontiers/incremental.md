@@ -6,7 +6,9 @@
 **Skills:** Incremental computation; Rust performance; serialization.
 **Claims:** none. To take this frontier, see [Claiming](../README.md#claiming).
 <!-- end generated -->
-**Background:** [notes/incremental-design.md](../notes/incremental-design.md)
+**Background:** [Incremental design](../notes/incremental-design.md), including the
+[general replay proof](https://github.com/bunnykong/roundhouse-fixpoint-lab/blob/d824c4355c7faae4b9bb4a77b25daa178a3df36c/proof/ProofLean/Edit.lean) and its
+[build instructions](https://github.com/bunnykong/roundhouse-fixpoint-lab/blob/d824c4355c7faae4b9bb4a77b25daa178a3df36c/proof/run-replay.md).
 
 ## Why it matters
 

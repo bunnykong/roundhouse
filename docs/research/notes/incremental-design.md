@@ -12,6 +12,19 @@ One record per body evaluation, in the order the evaluations ran:
 
 Records name slots and units by key, not by a run's internal numbering. Provenance is just who wrote each fact, when, and from what.
 
+## Cache guards and scheduling reads
+
+Cache validity can inspect more state than a body evaluation reads for scheduling. In the historical
+`RH_WARM` v1 prototype on `92844f68`, restoring conservative cache guards as S3 dependencies caused
+five edited-input cold-shadow mismatches. V2 (`990137f7`) stores actual scheduling reads separately,
+restores only those edges,
+isolates each evaluation's read collector, and discards reads made while validating guards.
+A class-key lookup regression checks a value guard that creates no scheduler dependency. Replay
+correctness includes dependency metadata and controller contexts, not only cached type values.
+
+**Sources:** [`fixpoint-warm`](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-warm)
+at `990137f7`; [Cache guards and cold-shadow outputs](https://github.com/bunnykong/roundhouse-fixpoint-lab/blob/d824c4355c7faae4b9bb4a77b25daa178a3df36c/receipts/cache-guards/README.md).
+
 ## How replay works
 
 After an edit:
@@ -37,4 +50,13 @@ A record missing one read can silently keep a stale fact. Re-typing a sample of 
 
 ## Status
 
-The exactness argument is machine-checked in Lean for an abstract model, not for the Rust analyzer, and that Lean development isn't public. The lab's public [Lean proof](https://github.com/bunnykong/roundhouse-fixpoint-lab/tree/main/proof) covers two edge cases only: a warm start is exact when an edit only adds rules, and it can keep a self-supporting cycle after a deletion.
+`Edit.lean` provides general replay certificates and an executable solver over a finite fact universe.
+`Record.Valid` requires each cached write to follow from its reads through a monotone transfer
+contained in the edited monotone operator. `IncRun.eq_kleene` requires a justified continuation to
+saturation; `incrementalSolve_eq_kleene` proves the supplied replay-and-inflate solver equals the cold
+least fixpoint. Both quantify over arbitrary lists of valid records, without a chronology hypothesis.
+Checked deletion controls include `replayAgainst_old_keeps_cycle` and `incomplete_reads_not_least`.
+The Rust implementation still must establish these premises.
+
+**Receipt:** [Edit.lean](https://github.com/bunnykong/roundhouse-fixpoint-lab/blob/d824c4355c7faae4b9bb4a77b25daa178a3df36c/proof/ProofLean/Edit.lean), with its dependencies and
+[build instructions](https://github.com/bunnykong/roundhouse-fixpoint-lab/blob/d824c4355c7faae4b9bb4a77b25daa178a3df36c/proof/run-replay.md). The [remaining proof modules](https://github.com/bunnykong/roundhouse-fixpoint-lab/blob/d824c4355c7faae4b9bb4a77b25daa178a3df36c/proof/PROOF.md) cover additive warm starts and deletion cycles.
