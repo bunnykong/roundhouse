@@ -1315,12 +1315,29 @@ pub(super) fn emit_send(
         }
     }
 
-    // Ruby `arr.pop` — drop the last element. HeaderStore#delete
-    // shifts then pops; extra targets have no Array#pop otherwise.
+    // Ruby `arr.pop` — remove and return the last element. HeaderStore#delete
+    // uses it as a statement; an assignment would not compile in value
+    // position, and `[:len-1]` panics on empty vs Ruby's nil. The IIFE
+    // mutates the slice (Go closures capture the variable) and returns the
+    // element or the type's zero.
     if method == "pop" && args.is_empty() {
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
-            return format!("{recv_s} = {recv_s}[:len({recv_s})-1]");
+            let elem_ty = match r.ty.as_ref().and_then(union_non_nil_core) {
+                Some(Ty::Array { elem }) => super::ty::go_ty_stub(Some(elem)),
+                _ => "interface{}".to_string(),
+            };
+            let zero = super::ty::go_zero_value(&elem_ty);
+            return format!(
+                "func() {elem_ty} {{\n\
+                 \tif len({recv_s}) == 0 {{\n\
+                 \t\treturn {zero}\n\
+                 \t}}\n\
+                 \t_last := {recv_s}[len({recv_s})-1]\n\
+                 \t{recv_s} = {recv_s}[:len({recv_s})-1]\n\
+                 \treturn _last\n\
+                 }}()"
+            );
         }
     }
 

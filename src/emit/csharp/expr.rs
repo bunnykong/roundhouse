@@ -1538,10 +1538,6 @@ fn emit_send(
         if method == "delete" && recv_is_hash(r) {
             return format!("{}.Remove({})", emit_expr(r), args_s[0]);
         }
-        if method == "pop" {
-            let recv_s = emit_expr(r);
-            return format!("{recv_s}.RemoveAt({recv_s}.Count - 1)");
-        }
         if method == "merge" {
             return format!(
                 "RhRuntime.Merge({}, {})",
@@ -1595,6 +1591,10 @@ fn emit_send(
                 return "false".to_string()
             }
             "nil?" => return format!("({rs} == null)"),
+            // HeaderStore#delete's `@keys.pop()` — List has RemoveAt, not Pop.
+            "pop" if recv_is_array(r) => {
+                return format!("{rs}.RemoveAt({rs}.Count - 1)")
+            }
             "!" => return format!("!({rs})"),
             "to_s" => return format!("(Convert.ToString({rs}) ?? \"\")"),
             "to_i" => return format!("Convert.ToInt64({rs})"),
