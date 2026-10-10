@@ -61,6 +61,12 @@ pub const CUSTOM_DECLARATIONS: &str = r##"module FactoryExamples
       end
     end
 
+    NameFactory = Data.define(:name) do
+      def self.name
+        "factory class name"
+      end
+    end
+
     Alias = State
     FIRST = State.new
 

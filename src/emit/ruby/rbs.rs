@@ -10,7 +10,9 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
-use crate::dialect::{AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver};
+use crate::dialect::{
+    AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver, MethodVisibility,
+};
 use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
 use crate::ty::{Param, ParamKind, Ty};
 
@@ -118,7 +120,11 @@ fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: 
     writeln!(s, "{pad}class {name} < ::Data").unwrap();
     writeln!(s, "{pad}  def self.new: (*untyped, **untyped) -> instance").unwrap();
     for member in members {
-        if factory.is_some_and(|class| class.methods.iter().any(|m| m.name.as_str() == member)) {
+        if factory.is_some_and(|class| {
+            class.methods.iter().any(|method| {
+                method.receiver == MethodReceiver::Instance && method.name.as_str() == member
+            })
+        }) {
             continue;
         }
         writeln!(s, "{pad}  def `{member}`: () -> untyped").unwrap();
@@ -126,7 +132,18 @@ fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: 
     if let Some(factory) = factory {
         let enclosing: Vec<_> = factory.name.0.as_str().split("::").collect();
         for method in &factory.methods {
-            writeln!(s, "{pad}  {}", render_method(method, &enclosing)).unwrap();
+            // RBS has no protected visibility; private is the conservative
+            // representation for both non-public Ruby instance visibilities.
+            let visibility = match method.visibility {
+                MethodVisibility::Public => "",
+                MethodVisibility::Protected | MethodVisibility::Private => "private ",
+            };
+            writeln!(
+                s,
+                "{pad}  {visibility}{}",
+                render_method(method, &enclosing)
+            )
+            .unwrap();
         }
     }
     writeln!(s, "{pad}end").unwrap();

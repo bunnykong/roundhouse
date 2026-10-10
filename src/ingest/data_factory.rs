@@ -64,8 +64,8 @@ pub(super) fn head(call: &CallNode<'_>, file: &str) -> IngestResult<Expr> {
 }
 
 /// Lift direct custom factory constants from an owner's body into library classes.
-/// Preserve instance methods, keyword formals, and local visibility; reject block
-/// parameters, singleton methods, and other statements instead of discarding them.
+/// Preserve instance and `self` methods, keyword formals, and instance visibility;
+/// reject block parameters and other statements instead of discarding them.
 pub(super) fn collect(
     body: Option<Node<'_>>,
     owner: &ClassId,
@@ -105,11 +105,18 @@ pub(super) fn collect(
         let mut methods = Vec::new();
         for statement in flatten_statements(body) {
             if let Some(def) = visibility::definition(&statement) {
-                if def.receiver().is_some() {
+                if def
+                    .receiver()
+                    .is_some_and(|receiver| receiver.as_self_node().is_none())
+                {
                     return Err(unsupported());
                 }
                 let mut method = ingest_library_method_with_keywords(&def, &id, file, true)?;
-                visibility.apply(&statement, &mut method);
+                // Ruby's lexical visibility markers affect instance methods, not
+                // explicit singleton definitions such as `def self.build`.
+                if method.receiver == crate::dialect::MethodReceiver::Instance {
+                    visibility.apply(&statement, &mut method);
+                }
                 methods.push(method);
             } else if !statement.as_call_node().is_some_and(|call| {
                 visibility::marker(&call)

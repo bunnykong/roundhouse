@@ -602,7 +602,7 @@ fn custom_factory_blocks_are_not_silently_discarded() {
         "def label; name; end; LIMIT = 4",
         "def label; name; end; include Comparable",
         "def label; name; end; puts 'side effect'",
-        "def self.label; 1; end",
+        "def other.label; 1; end",
         "|value| def label; name; end",
     ] {
         let source = format!("class Owner; State = Data.define(:name) do {block}; end; end");
@@ -668,7 +668,7 @@ fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
             result.is_err(),
             "{target:?} silently emitted a Data factory"
         );
-        assert_eq!(diagnostics.len(), 6, "{target:?}: {diagnostics:?}");
+        assert_eq!(diagnostics.len(), 7, "{target:?}: {diagnostics:?}");
         for diagnostic in diagnostics {
             assert_eq!(diagnostic.severity, Severity::Error);
             assert!(!diagnostic.span.is_synthetic(), "{diagnostic:?}");
@@ -750,6 +750,15 @@ fn ruby_and_spinel_emit_declared_factory_types_without_data_errors() {
                 "{target:?}: {sidecar}"
             );
         }
+        assert!(
+            sidecar.contains("private def secret:"),
+            "private factory methods retain their non-public RBS visibility: {sidecar}"
+        );
+        assert!(
+            sidecar.contains("def `name`: () -> untyped")
+                && sidecar.contains("def self.name:"),
+            "a singleton method does not replace the generated instance reader: {sidecar}"
+        );
         assert_eq!(
             sidecar.matches("class State < ::Data").count(),
             1,
