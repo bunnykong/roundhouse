@@ -106,7 +106,7 @@ pub fn csharp_ty(t: &Ty) -> String {
         }
 
         // The soft-strict escape: `object?`, with no emit diagnostic.
-        Ty::Var { .. } | Ty::Untyped => "object?".to_string(),
+        Ty::Var { .. } | Ty::Untyped | Ty::Rec { .. } => "object?".to_string(),
     }
 }
 

@@ -68,17 +68,25 @@ impl ConstScope {
     }
 
     pub fn get(&self, name: &Symbol) -> Option<&Ty> {
+        super::sccq::rec_const_name(name);
         self.own.get(name).or_else(|| self.global.get(name))
     }
 
     /// Only the constants this scope's class declares itself.
     pub fn get_own(&self, name: &Symbol) -> Option<&Ty> {
+        super::sccq::rec_const_name(name);
         self.own.get(name)
     }
 
     /// Only the app-wide, by-bare-name registry.
     pub fn get_global(&self, name: &Symbol) -> Option<&Ty> {
+        super::sccq::rec_const_name(name);
         self.global.get(name)
+    }
+
+    /// A copy of the app-wide registry (DX8 arm 2 diffs it between passes).
+    pub(crate) fn global_entries(&self) -> HashMap<Symbol, Ty> {
+        (*self.global).clone()
     }
 }
 
@@ -147,6 +155,9 @@ pub struct Ctx {
 /// Rails schema + conventions; the body-typer reads it.
 #[derive(Default, Clone)]
 pub struct ClassInfo {
+    /// DX8 arm 2: this class's index in the query engine's read sets (0 =
+    /// not indexed). Never read by inference.
+    pub sccq_idx: u32,
     /// Kind of the indexed source declaration; never inferred from its name.
     pub is_module: bool,
     /// Constant values declared by external gem RBI/RBS files.
@@ -309,11 +320,44 @@ pub struct BodyTyper<'a> {
     inquirers: Option<&'a std::collections::HashSet<Symbol>>,
 }
 
+/// The dispatch table as the typer reads it. A fetched class is recorded
+/// for DX8 arm 2's read sets (one relaxed load when nothing records).
+#[derive(Clone, Copy)]
+pub(super) struct Classes<'a>(&'a HashMap<ClassId, ClassInfo>);
+
+impl<'a> Classes<'a> {
+    #[inline]
+    pub(super) fn get(&self, id: &ClassId) -> Option<&'a ClassInfo> {
+        let found = self.0.get(id);
+        if let Some(info) = found {
+            super::sccq::rec_class(info.sccq_idx);
+        }
+        found
+    }
+
+    #[inline]
+    pub(super) fn contains_key(&self, id: &ClassId) -> bool {
+        self.0.contains_key(id)
+    }
+
+    #[inline]
+    pub(super) fn values(&self) -> std::collections::hash_map::Values<'a, ClassId, ClassInfo> {
+        self.0.values()
+    }
+
+    /// The table without recording (prototype fold-aware scheduler: the fold's unfold sites
+    /// record the slots they read instead, `fold::value_of`).
+    #[inline]
+    pub(crate) fn raw(&self) -> &'a HashMap<ClassId, ClassInfo> {
+        self.0
+    }
+}
+
 impl<'a> BodyTyper<'a> {
     /// Submodule accessor for the dispatch table. `classes` itself
     /// stays private to this module; `send.rs` reaches it here.
-    pub(super) fn classes(&self) -> &'a HashMap<ClassId, ClassInfo> {
-        self.classes
+    pub(super) fn classes(&self) -> Classes<'a> {
+        Classes(self.classes)
     }
 
     /// Whether `self`'s class, its includes or its ancestors register
@@ -326,7 +370,7 @@ impl<'a> BodyTyper<'a> {
             if !seen.insert(cid) {
                 continue;
             }
-            let Some(cls) = self.classes.get(cid) else { continue };
+            let Some(cls) = self.classes().get(cid) else { continue };
             if cls.instance_methods.contains_key(method) || cls.class_methods.contains_key(method) {
                 return true;
             }
@@ -378,11 +422,13 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
-        let ty = self.compute(expr, ctx);
+        let probe = super::dyn_probe::enter(expr);
+        let ty = super::dyn_probe::maybe_bound(self.compute(expr, ctx));
         expr.ty = Some(ty.clone());
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
         diagnostic::detect_diagnostic(expr);
+        if let Some(p) = probe { p.finish(expr); }
         ty
     }
 
@@ -479,7 +525,7 @@ impl<'a> BodyTyper<'a> {
                     // need not be symbols, even though pattern keys are.
                     let rest_ty = match subject_ty {
                         Some(ty @ Ty::Hash { .. }) if constant.is_none() => ty.clone(),
-                        _ => Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) },
+                        _ => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
                     };
                     out.push((name.clone(), rest_ty));
                 }
@@ -529,7 +575,7 @@ impl<'a> BodyTyper<'a> {
         // Bounded: a parent link that cycles must not hang the typer.
         for _ in 0..16 {
             let Some(cur) = cursor else { break };
-            let Some(info) = self.classes.get(&cur) else { break };
+            let Some(info) = self.classes().get(&cur) else { break };
             if let Some(ty) = info.attributes.fields.get(name) {
                 return Some(ty.clone());
             }
@@ -575,7 +621,7 @@ impl<'a> BodyTyper<'a> {
 
     fn is_module_callback(&self, recv_ty: Option<&Ty>, method: &Symbol) -> bool {
         matches!(method.as_str(), "included" | "prepended" | "append_features" | "prepend_features")
-            && matches!(recv_ty, Some(Ty::Class { id, .. }) if self.classes.get(id).is_some_and(|c| c.is_module && c.class_methods.contains_key(method)))
+            && matches!(recv_ty, Some(Ty::Class { id, .. }) if self.classes().get(id).is_some_and(|c| c.is_module && c.class_methods.contains_key(method)))
     }
 
     fn owns_operator(&self, ty: Option<&Ty>, method: &Symbol, class_object: bool) -> bool {
@@ -586,7 +632,7 @@ impl<'a> BodyTyper<'a> {
                 let mut current = Some(id);
                 for _ in 0..32 {
                     let Some(id) = current else { break };
-                    let Some(class) = self.classes.get(id) else { break };
+                    let Some(class) = self.classes().get(id) else { break };
                     let own = if class_object { &class.class_methods } else { &class.instance_methods };
                     if own.contains_key(method) { return true; }
                     if !class_object && class.includes.iter().any(|m| self.lookup_in_module(m, method).is_some()) { return true; }
@@ -596,6 +642,100 @@ impl<'a> BodyTyper<'a> {
             }
             _ => false,
         }
+    }
+
+    /// `apply_narrowing`, except that (prototype fold, RH_FOLD) a binding
+    /// holding a slot reference is unfolded first and narrowed by
+    /// constructor head. Main's narrowing everywhere else.
+    fn narrow(&self, ctx: &Ctx, pred: &narrowing::NarrowPred, then_branch: bool, site: &crate::span::Span) -> Ctx {
+        let at = crate::analyze::fold::site_of(site);
+        match self.fold_narrow(ctx, pred, at) {
+            std::borrow::Cow::Borrowed(c) => narrowing::apply_narrowing(c, pred, then_branch),
+            std::borrow::Cow::Owned(c) => {
+                let site_on = crate::analyze::fold::site_on(crate::analyze::fold::Site::Narrow);
+                let mut out = narrowing::with_head_match(site_on, || narrowing::apply_narrowing(&c, pred, then_branch));
+                if site_on {
+                    // A binding that was exactly a reference stays one: it
+                    // becomes a reference to the narrowed slot, so later
+                    // tests (`elsif`) and reads still see a reference.
+                    let mut keys = Vec::new();
+                    narrowing::pred_keys(pred, &mut keys);
+                    for key in keys {
+                        let (name, ivar) = match &key {
+                            narrowing::VarKey::Local(n) => (n, false),
+                            narrowing::VarKey::Ivar(n) => (n, true),
+                            narrowing::VarKey::Reader(..) => continue,
+                        };
+                        let before = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) };
+                        let Some(Ty::Rec { slot }) = before else { continue };
+                        let unfolded = if ivar { c.ivar_bindings.get(name) } else { c.local_bindings.get(name) }.cloned();
+                        let bindings = if ivar { &mut out.ivar_bindings } else { &mut out.local_bindings };
+                        let Some(after) = bindings.get(name).cloned() else { continue };
+                        if matches!(after, Ty::Rec { .. }) {
+                            continue;
+                        }
+                        if unfolded.as_ref() == Some(&after) {
+                            // Nothing narrowed: keep the reference itself.
+                            bindings.insert(name.clone(), Ty::Rec { slot: *slot });
+                            continue;
+                        }
+                        let filter = format!("{}_{}", narrowing::pred_desc(pred, name, then_branch), name.as_str());
+                        let _ = slot;
+                        bindings.insert(name.clone(), crate::analyze::fold::narrowed_ref(at, filter, after));
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    /// prototype fold (RH_FOLD): the context narrowing should start from,
+    /// with every binding the predicate names unfolded one level when it
+    /// holds a slot reference (or seen as `Untyped` when the site is off).
+    fn fold_narrow<'c>(&self, ctx: &'c Ctx, pred: &narrowing::NarrowPred, at: crate::analyze::fold::SiteId) -> std::borrow::Cow<'c, Ctx> {
+        if !crate::analyze::fold::on() {
+            return std::borrow::Cow::Borrowed(ctx);
+        }
+        let mut keys = Vec::new();
+        narrowing::pred_keys(pred, &mut keys);
+        let mut out: Option<Ctx> = None;
+        for key in keys {
+            let (name, ivar) = match &key {
+                narrowing::VarKey::Local(n) => (n, false),
+                narrowing::VarKey::Ivar(n) => (n, true),
+                narrowing::VarKey::Reader(..) => continue,
+            };
+            let current = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) };
+            let Some(t) = current else { continue };
+            if let Some(u) = crate::analyze::fold::head(t, crate::analyze::fold::Site::Narrow, at, self.classes().raw()) {
+                let c = out.get_or_insert_with(|| ctx.clone());
+                if ivar { c.ivar_bindings.insert(name.clone(), u); } else { c.local_bindings.insert(name.clone(), u); }
+            }
+        }
+        match out {
+            Some(c) => std::borrow::Cow::Owned(c),
+            None => std::borrow::Cow::Borrowed(ctx),
+        }
+    }
+
+    /// prototype fold (RH_FOLD): a `case` scrutinee that is a local or ivar
+    /// bound to a slot reference, with the binding unfolded one level.
+    fn fold_case_binding(&self, scrutinee: &Expr, ctx: &Ctx) -> Option<(Symbol, bool, Ty, Option<u32>)> {
+        if !crate::analyze::fold::on() || !crate::analyze::fold::site_on(crate::analyze::fold::Site::Narrow) {
+            return None;
+        }
+        let (name, ivar) = match &*scrutinee.node {
+            ExprNode::Var { name, .. } => (name, false),
+            ExprNode::Ivar { name } => (name, true),
+            ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => (method, false),
+            _ => return None,
+        };
+        let bound = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) }?;
+        let at = crate::analyze::fold::site_of(&scrutinee.span);
+        let unfolded = crate::analyze::fold::head(bound, crate::analyze::fold::Site::Narrow, at, self.classes().raw())?;
+        crate::analyze::fold::count("case_narrowed");
+        let base = match bound { Ty::Rec { slot } => Some(*slot), _ => None };
+        Some((name.clone(), ivar, unfolded, base))
     }
 
     fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
@@ -636,7 +776,7 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if self.classes().contains_key(&id) {
-                        Ty::Class { id, args: vec![] }
+                        Ty::Class { id, args: vec![].into() }
                     } else {
                         unknown()
                     }
@@ -657,7 +797,7 @@ impl<'a> BodyTyper<'a> {
                         if self.classes().contains_key(&id) || *runtime {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
                             qualify_resolved_path(path, &id);
-                            Ty::Class { id, args: vec![] }
+                            Ty::Class { id, args: vec![].into() }
                         } else {
                             unknown()
                         }
@@ -691,6 +831,7 @@ impl<'a> BodyTyper<'a> {
                         if !keep_bare_splice {
                             qualify_resolved_path(path, name);
                         }
+                        super::sccq::rec_const_id(declaration);
                         self.typed_constants
                             .and_then(|values| values.get(declaration))
                             .cloned()
@@ -718,15 +859,15 @@ impl<'a> BodyTyper<'a> {
                                 .or_else(|| ctx.constants.get_global(name).cloned())
                         } else {
                             let name = written_class_id(path);
+                            let id = declaration_id_from_lookup_name(name.0.as_str());
+                            super::sccq::rec_const_id(&id);
                             self.typed_constants
-                                .and_then(|values| {
-                                    values.get(&declaration_id_from_lookup_name(name.0.as_str()))
-                                })
+                                .and_then(|values| values.get(&id))
                                 .cloned()
                         };
                         // Otherwise retain the written class path, but
                         // never guess another class by its suffix.
-                        value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![] })
+                        value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![].into() })
                     }
                 };
                 if indexed_source && matches!(ty, Ty::Var { .. }) {
@@ -814,7 +955,7 @@ impl<'a> BodyTyper<'a> {
                             name.clone(),
                             rescued.unwrap_or_else(|| Ty::Class {
                                 id: crate::ident::ClassId(Symbol::from("StandardError")),
-                                args: vec![],
+                                args: vec![].into(),
                             }),
                         );
                         self.analyze_expr(&mut rc.body, &inner);
@@ -896,8 +1037,8 @@ impl<'a> BodyTyper<'a> {
                     });
                 }
                 Ty::Hash {
-                    key: Box::new(key_ty.unwrap_or_else(unknown)),
-                    value: Box::new(value_ty.unwrap_or_else(unknown)),
+                    key: std::sync::Arc::new(key_ty.unwrap_or_else(unknown)),
+                    value: std::sync::Arc::new(value_ty.unwrap_or_else(unknown)),
                 }
             }
 
@@ -919,7 +1060,7 @@ impl<'a> BodyTyper<'a> {
                         None => et,
                     });
                 }
-                Ty::Array { elem: Box::new(elem_ty.unwrap_or_else(unknown)) }
+                Ty::Array { elem: std::sync::Arc::new(elem_ty.unwrap_or_else(unknown)) }
             }
 
             ExprNode::StringInterp { parts } => {
@@ -962,14 +1103,25 @@ impl<'a> BodyTyper<'a> {
                 let pred = narrowing::extract_narrowing_with(left, &|n| self.self_attribute_ty(n, ctx));
                 let right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
-                        narrowing::apply_narrowing(&seeded, p, true)
+                        self.narrow(&seeded, p, true, &left.span)
                     }
                     (Some(p), crate::expr::BoolOpKind::Or) => {
-                        narrowing::apply_narrowing(&seeded, p, false)
+                        self.narrow(&seeded, p, false, &left.span)
                     }
                     _ => seeded,
                 };
                 let rt = self.analyze_expr(right, &right_ctx);
+                // prototype fold (RH_FOLD): the left arm's truthiness reads its
+                // structure, so a reference there is unfolded (a narrowing
+                // site); a left that wins whole keeps the reference itself.
+                let lt_ref = lt.clone();
+                let lt = crate::analyze::fold::head(
+                    &lt,
+                    crate::analyze::fold::Site::Narrow,
+                    crate::analyze::fold::site_of(&left.span),
+                    self.classes().raw(),
+                )
+                .unwrap_or(lt);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
                 // of the two operand types. For `||`, Nil never wins
@@ -999,7 +1151,7 @@ impl<'a> BodyTyper<'a> {
                     //     from a union), and the union then re-added the
                     //     nil the operator had just ruled out.
                     if never_falsy(&lt) {
-                        return lt;
+                        return lt_ref;
                     }
                     if matches!(lt, Ty::Nil) {
                         return rt;
@@ -1048,9 +1200,9 @@ impl<'a> BodyTyper<'a> {
                 // Lambda node without seeing Var. Effects default to
                 // pure; full effect inference is future work.
                 Ty::Fn {
-                    params: Vec::new(),
+                    params: Vec::new().into(),
                     block: None,
-                    ret: Box::new(body_ty),
+                    ret: std::sync::Arc::new(body_ty),
                     effects: crate::effect::EffectSet::pure(),
                 }
             }
@@ -1203,6 +1355,24 @@ impl<'a> BodyTyper<'a> {
                         Some(t.subst_self(self_ty))
                     }
                     (other, _) => other,
+                };
+                // prototype fold (RH_FOLD): unfold a receiver reference one
+                // level before anything reads its structure (block params,
+                // projections, dispatch); inert without the gate.
+                let mut fold_unfolded = false;
+                let recv_ty = match recv_ty {
+                    Some(t) if crate::analyze::fold::on() => {
+                        let site = crate::analyze::fold::send_site(method.as_str(), block.is_some());
+                        let at = crate::analyze::fold::site_of(&expr_span);
+                        match crate::analyze::fold::head(&t, site, at, self.classes().raw()) {
+                            Some(u) => {
+                                fold_unfolded = crate::analyze::fold::site_on(site);
+                                Some(u)
+                            }
+                            None => Some(t),
+                        }
+                    }
+                    other => other,
                 };
                 // `Parameters` is a Hash-shaped bag: what its own class does
                 // not answer (`fetch`, `each`, `map`, `count`, ...) is the
@@ -1439,6 +1609,9 @@ impl<'a> BodyTyper<'a> {
                     return t;
                 }
                 let dispatched = self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args);
+                if crate::analyze::fold::on() {
+                    crate::analyze::fold::note_send(&expr_span, fold_unfolded && recv.is_some(), &dispatched);
+                }
                 if let Some(receiver) = recv.as_mut() {
                     receiver.decisions &= !crate::expr::RESOLVED_OPERATOR_RECEIVER;
                     if matches!(method.as_str(), "+" | "-" | "*" | "/" | "**" | "%" | "<" | "<=" | ">" | ">=")
@@ -1459,7 +1632,7 @@ impl<'a> BodyTyper<'a> {
                             && !self.app_defines(ctx.self_ty.as_ref(), method)))
                 {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
-                    return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
+                    return Ty::Array { elem: std::sync::Arc::new(elem.unwrap_or_else(unknown)) };
                 }
                 // What every object and every module answers, when the
                 // receiver's own table did not. App analyzer only.
@@ -1548,12 +1721,12 @@ impl<'a> BodyTyper<'a> {
                 }
                 self.propagate_match_bindings(cond, &mut base, true);
                 let then_ctx = match &pred {
-                    Some(p) => narrowing::apply_narrowing(&base, p, true),
+                    Some(p) => self.narrow(&base, p, true, &cond.span),
                     None => base.clone(),
                 };
                 let t = self.analyze_expr(then_branch, &then_ctx);
                 let else_ctx = match &pred {
-                    Some(p) => narrowing::apply_narrowing(&base, p, false),
+                    Some(p) => self.narrow(&base, p, false, &cond.span),
                     None => base,
                 };
                 let e = self.analyze_expr(else_branch, &else_ctx);
@@ -1562,10 +1735,47 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Case { scrutinee, arms } => {
                 self.analyze_expr(scrutinee, ctx);
+                // prototype fold (RH_FOLD): `case x when Hash …` narrows `x`
+                // by constructor head when `x` holds a slot reference
+                // (main does not narrow `case`; unchanged without one).
+                let mut fold_case = self.fold_case_binding(scrutinee, ctx);
+                let mut removed: Vec<String> = Vec::new();
                 let mut branch_tys = Vec::new();
                 for arm in arms.iter_mut() {
-                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, ctx); }
-                    branch_tys.push(self.analyze_expr(&mut arm.body, ctx));
+                    let arm_ctx = match fold_case.as_mut() {
+                        Some((name, ivar, remaining, base)) => {
+                            let (bound, filter) = match narrowing::when_class_ty(&arm.pattern) {
+                                Some(t) => {
+                                    let (this, rest) = narrowing::head_split(remaining, &t);
+                                    *remaining = rest;
+                                    let head = narrowing::head_name(&t);
+                                    let filter = format!("when_{head}{}", removed.iter().map(|r| format!("_not_{r}")).collect::<String>());
+                                    removed.push(head);
+                                    (this, filter)
+                                }
+                                None => (
+                                    remaining.clone(),
+                                    format!("case_else{}", removed.iter().map(|r| format!("_not_{r}")).collect::<String>()),
+                                ),
+                            };
+                            // A scrutinee that was exactly a reference is
+                            // bound to a reference to the narrowed slot.
+                            let bound = match base {
+                                Some(_) => crate::analyze::fold::narrowed_ref(
+                                    crate::analyze::fold::site_of(&expr_span),
+                                    format!("{filter}_{}", name.as_str()),
+                                    bound,
+                                ),
+                                None => bound,
+                            };
+                            let mut c = ctx.clone();
+                            if *ivar { c.ivar_bindings.insert(name.clone(), bound); } else { c.local_bindings.insert(name.clone(), bound); }
+                            std::borrow::Cow::Owned(c)
+                        }
+                        None => std::borrow::Cow::Borrowed(ctx),
+                    };
+                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, &arm_ctx); }
+                    branch_tys.push(self.analyze_expr(&mut arm.body, &arm_ctx));
                 }
                 union_many(branch_tys)
             }
@@ -1824,6 +2034,12 @@ impl<'a> BodyTyper<'a> {
                     // targets with no usable RHS signal are left as-is.
                     if let ExprNode::MultiAssign { targets, value } = &*e.node {
                         let rhs = value.ty.clone();
+                        let rhs = match &rhs {
+                            Some(t) => crate::analyze::fold::head(t, crate::analyze::fold::Site::Destruct, crate::analyze::fold::site_of(&e.span), self.classes().raw())
+                                .map(Some)
+                                .unwrap_or(rhs),
+                            None => rhs,
+                        };
                         for (i, target) in targets.iter().enumerate() {
                             let Some(ty) = multiassign_target_ty(&rhs, i) else {
                                 continue;
@@ -1904,7 +2120,7 @@ impl<'a> BodyTyper<'a> {
                             // keys as strings regardless.
                             let refined = Ty::Hash {
                                 key: key.clone(),
-                                value: Box::new(new_value),
+                                value: std::sync::Arc::new(new_value),
                             };
                             bindings.insert(name.clone(), refined.clone());
                             // Retro-stamp the `{}` seed, same as the
@@ -1964,7 +2180,7 @@ impl<'a> BodyTyper<'a> {
                             } else {
                                 union_of((**cur).clone(), elem)
                             };
-                            let refined = Ty::Array { elem: Box::new(new_elem) };
+                            let refined = Ty::Array { elem: std::sync::Arc::new(new_elem) };
                             bindings.insert(name.clone(), refined.clone());
                             // Retro-stamp the seed literal so decl-site
                             // emitters agree with the refined uses: the
@@ -2057,7 +2273,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         if then_diverges && else_empty {
                             if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
-                                local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
+                                local_ctx = self.narrow(&local_ctx, &pred, false, &cond.span);
                             }
                         }
                         // The mirror image is `unless`, which the ingest
@@ -2072,7 +2288,7 @@ impl<'a> BodyTyper<'a> {
                         let else_diverges = matches!(else_branch.ty.as_ref(), Some(Ty::Bottom));
                         if else_diverges && then_empty {
                             if let Some(pred) = narrowing::extract_narrowing_with(cond, &|n| self.self_attribute_ty(n, ctx)) {
-                                local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, true);
+                                local_ctx = self.narrow(&local_ctx, &pred, true, &cond.span);
                             }
                         }
                     }
@@ -2091,7 +2307,17 @@ impl<'a> BodyTyper<'a> {
                 // empty container literals already infer from their
                 // contents.
                 if let LValue::Ivar { name } = target {
-                    if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
+                    if crate::analyze::slots::ivar_cut(ctx.self_ty.as_ref(), name) {
+                        // prototype (RH_FOLD_SLOTS): an ivar on a slot-graph
+                        // cycle: no pre-stamp from its own seed, and no stale
+                        // stamp from an earlier round either.
+                        if matches!(&*value.node, ExprNode::Array { elements, .. } if elements.is_empty())
+                            || matches!(&*value.node, ExprNode::Hash { entries, .. } if entries.is_empty())
+                        {
+                            value.ty = None;
+                            crate::analyze::fold::count("ivar_stamp_cut");
+                        }
+                    } else if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
                         propagate_expected_to_empty_container(value, &expected);
                     }
                 }
@@ -2211,7 +2437,7 @@ impl<'a> BodyTyper<'a> {
                     .unwrap_or(Ty::Untyped);
                 Ty::Class {
                     id: ClassId(Symbol::from("Range")),
-                    args: vec![elem],
+                    args: vec![elem].into(),
                 }
             }
             ExprNode::Cast { value, target_ty } => {
@@ -2312,7 +2538,7 @@ pub(super) fn lit_ty(lit: &Literal) -> Ty {
         // through the ordinary class walk rather than through a
         // per-literal table.
         Literal::Regex { .. } => {
-            Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![] }
+            Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![].into() }
         }
     }
 }
@@ -2367,7 +2593,7 @@ fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
         Ty::Array { elem } => Some((**elem).clone()),
         Ty::Tuple { elems } => Some(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::Bottom)),
         // `to_a` of a relation is its records; of a range, its elements.
-        Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![] }),
+        Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Ty::Class { id, args } if id.0.as_str() == "Range" => args.first().cloned(),
         Ty::Nil => Some(Ty::Bottom),
         Ty::Union { variants } => variants
@@ -2432,9 +2658,11 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         Some(Ty::Array { elem }) => Some((**elem).clone()),
         // Destructuring a relation materializes it — each scalar
         // target gets the element model, same as `Array<of>`.
-        Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![] }),
+        Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
         Some(Ty::Untyped) => Some(Ty::Untyped),
+        // a reference nobody unfolded is `Untyped`.
+        Some(Ty::Rec { .. }) => Some(Ty::Untyped),
         _ => None,
     }
 }
@@ -2609,6 +2837,24 @@ fn collect_var_assignments_into(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 }
 
 pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
+    // prototype (shared-type build, `RH_C2_JOINMEMO=0`): skip sharing's root join memo.
+    // Its memo lives for one root call, and the fold's joins are many small
+    // independent roots, so every call paid two full hashes and copies.
+    if !crate::join_memo::enabled() {
+        return union_of_uncached(a, b);
+    }
+    crate::join_memo::join(a, b, union_of_uncached)
+}
+
+fn union_of_uncached(a: Ty, b: Ty) -> Ty {
+    if *super::dyn_probe::BOUND {
+        super::type_bound::bound(union_of_raw(super::type_bound::bound(a), super::type_bound::bound(b)))
+    } else {
+        union_of_raw(a, b)
+    }
+}
+
+fn union_of_raw(a: Ty, b: Ty) -> Ty {
     // Bottom is the divergent-expression type — the branch carrying
     // it doesn't contribute a value, so it drops out of joins.
     // Mirrors Crystal's `Type.merge` filter on `NoReturnType`.
@@ -2636,13 +2882,13 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     match (&a, &b) {
         (Ty::Hash { key: k1, value: v1 }, Ty::Hash { key: k2, value: v2 }) => {
             return Ty::Hash {
-                key: Box::new(union_of((**k1).clone(), (**k2).clone())),
-                value: Box::new(union_of((**v1).clone(), (**v2).clone())),
+                key: std::sync::Arc::new(union_of((**k1).clone(), (**k2).clone())),
+                value: std::sync::Arc::new(union_of((**v1).clone(), (**v2).clone())),
             };
         }
         (Ty::Array { elem: e1 }, Ty::Array { elem: e2 }) => {
             return Ty::Array {
-                elem: Box::new(union_of((**e1).clone(), (**e2).clone())),
+                elem: std::sync::Arc::new(union_of((**e1).clone(), (**e2).clone())),
             };
         }
         _ => {}
@@ -2668,7 +2914,7 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     match variants.len() {
         0 => Ty::Bottom,
         1 => variants.into_iter().next().unwrap(),
-        _ => Ty::Union { variants },
+        _ => Ty::Union { variants: variants.into() },
     }
 }
 
@@ -2688,8 +2934,8 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
         Ty::Hash { key, value } => {
             for existing in out.iter_mut() {
                 if let Ty::Hash { key: k0, value: v0 } = existing {
-                    *k0 = Box::new(union_of((**k0).clone(), *key));
-                    *v0 = Box::new(union_of((**v0).clone(), *value));
+                    *k0 = std::sync::Arc::new(union_of((**k0).clone(), std::sync::Arc::unwrap_or_clone(key)));
+                    *v0 = std::sync::Arc::new(union_of((**v0).clone(), std::sync::Arc::unwrap_or_clone(value)));
                     return;
                 }
             }
@@ -2698,7 +2944,7 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
         Ty::Array { elem } => {
             for existing in out.iter_mut() {
                 if let Ty::Array { elem: e0 } = existing {
-                    *e0 = Box::new(union_of((**e0).clone(), *elem));
+                    *e0 = std::sync::Arc::new(union_of((**e0).clone(), std::sync::Arc::unwrap_or_clone(elem)));
                     return;
                 }
             }
@@ -2783,7 +3029,7 @@ mod tests {
             ty,
             Ty::Class {
                 id: ClassId(Symbol::from("StandardError")),
-                args: vec![],
+                args: vec![].into(),
             }
         );
         assert_ne!(
@@ -2795,7 +3041,7 @@ mod tests {
 
     fn optional_str() -> Ty {
         Ty::Union {
-            variants: vec![Ty::Str, Ty::Nil],
+            variants: vec![Ty::Str, Ty::Nil].into(),
         }
     }
 
@@ -2817,7 +3063,7 @@ mod tests {
             }
             classes.insert(child.clone(), info);
             let mut ctx = Ctx::default();
-            ctx.self_ty = Some(Ty::Class { id: child.clone(), args: vec![] });
+            ctx.self_ty = Some(Ty::Class { id: child.clone(), args: vec![].into() });
             let mut expr = send(None, "Array", vec![nil_lit()]);
             assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), ret);
         }
@@ -2825,16 +3071,16 @@ mod tests {
 
     #[test]
     fn kernel_array_keeps_the_argument_element_type() {
-        let array_of = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let array_of = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
         for (arg, elem) in [
             (array_of(Ty::Str), Ty::Str),
-            (Ty::Tuple { elems: vec![Ty::Str, Ty::Int] }, union_of(Ty::Str, Ty::Int)),
-            (Ty::Relation { of: ClassId(Symbol::from("Story")) }, Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![] }),
-            (Ty::Class { id: ClassId(Symbol::from("Range")), args: vec![Ty::Int] }, Ty::Int),
+            (Ty::Tuple { elems: vec![Ty::Str, Ty::Int].into() }, union_of(Ty::Str, Ty::Int)),
+            (Ty::Relation { of: ClassId(Symbol::from("Story")) }, Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![].into() }),
+            (Ty::Class { id: ClassId(Symbol::from("Range")), args: vec![Ty::Int].into() }, Ty::Int),
             // Unknown elements: the class may unpack through `to_a`.
-            (Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![] }, Ty::Var { var: TyVar(0) }),
+            (Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![].into() }, Ty::Var { var: TyVar(0) }),
             (Ty::Sym, Ty::Sym),
-            (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil] }, Ty::Sym),
+            (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil].into() }, Ty::Sym),
         ] {
             let ctx = ctx_with_local("x", arg);
             let mut expr = send(None, "Array", vec![var("x")]);
@@ -2844,7 +3090,7 @@ mod tests {
 
     #[test]
     fn array_plus_onto_an_unknown_element_takes_the_argument_element() {
-        let array_of = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let array_of = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
         let mut ctx = ctx_with_local("empty", array_of(Ty::Var { var: TyVar(0) }));
         ctx.local_bindings.insert(Symbol::from("strs"), array_of(Ty::Str));
         ctx.local_bindings.insert(Symbol::from("syms"), array_of(Ty::Sym));
@@ -2944,7 +3190,7 @@ mod tests {
         let cond = send(Some(var("x")), "is_a?", vec![class_ref]);
         let pred = extract_narrowing(&cond).expect("is_a? recognized");
         let mixed = Ty::Union {
-            variants: vec![Ty::Str, Ty::Int, Ty::Nil],
+            variants: vec![Ty::Str, Ty::Int, Ty::Nil].into(),
         };
         let ctx = ctx_with_local("x", mixed);
         let then_ctx = apply_narrowing(&ctx, &pred, true);
@@ -2953,7 +3199,7 @@ mod tests {
         assert_eq!(
             else_ctx.local_bindings[&Symbol::from("x")],
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Nil],
+                variants: vec![Ty::Int, Ty::Nil].into(),
             }
         );
     }
@@ -2969,7 +3215,7 @@ mod tests {
             "x",
             Ty::Class {
                 id: ClassId(Symbol::from("Post")),
-                args: vec![],
+                args: vec![].into(),
             },
         );
         let then_ctx = apply_narrowing(&ctx, &pred, true);
@@ -2977,7 +3223,7 @@ mod tests {
             then_ctx.local_bindings[&Symbol::from("x")],
             Ty::Class {
                 id: ClassId(Symbol::from("Post")),
-                args: vec![]
+                args: vec![].into()
             }
         );
     }
@@ -3142,7 +3388,7 @@ mod tests {
         // arr.map { |x| x.to_s } on arr: Array[Int] should produce Array[Str]
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let block_body = send(Some(var("x")), "to_s", vec![]);
@@ -3161,11 +3407,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     }
 
     #[test]
@@ -3173,7 +3419,7 @@ mod tests {
         // arr.select { |x| x > 0 } on arr: Array[Int] should still be Array[Int]
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let block_body = send(Some(var("x")), ">", vec![synth(ExprNode::Lit {
@@ -3194,11 +3440,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     }
 
     #[test]
@@ -3206,7 +3452,7 @@ mod tests {
         // arr.flat_map { |x| [x.to_s] } on arr: Array[Int] should be Array[Str]
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let inner_arr = synth(ExprNode::Array {
@@ -3228,11 +3474,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     }
 
     #[test]
@@ -3256,7 +3502,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         let ctx = Ctx::default();
         let ty = typer.analyze_expr(&mut seq, &ctx);
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     }
 
     #[test]
@@ -3282,7 +3528,7 @@ mod tests {
         let ctx = Ctx::default();
         typer.analyze_expr(&mut seq, &ctx);
 
-        let expected = Ty::Array { elem: Box::new(Ty::Int) };
+        let expected = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let ExprNode::Seq { exprs } = &*seq.node else { panic!("seq") };
         assert_eq!(exprs[0].ty.as_ref(), Some(&expected));
         let ExprNode::Assign { value, .. } = &*exprs[0].node else { panic!("assign") };
@@ -3370,8 +3616,8 @@ mod tests {
         let ctx = ctx_with_local(
             "opts",
             Ty::Hash {
-                key: Box::new(Ty::Str),
-                value: Box::new(Ty::Untyped),
+                key: std::sync::Arc::new(Ty::Str),
+                value: std::sync::Arc::new(Ty::Untyped),
             },
         );
         typer.analyze_expr(&mut seq, &ctx);
@@ -3431,8 +3677,8 @@ mod tests {
         let h = {
             let mut e = var("h");
             e.ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             });
             e
         };
@@ -3453,13 +3699,13 @@ mod tests {
         ctx.local_bindings.insert(
             Symbol::from("h"),
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     }
 
     #[test]
@@ -3468,8 +3714,8 @@ mod tests {
         let h = {
             let mut e = var("h");
             e.ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             });
             e
         };
@@ -3490,8 +3736,8 @@ mod tests {
         ctx.local_bindings.insert(
             Symbol::from("h"),
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
@@ -3499,8 +3745,8 @@ mod tests {
         assert_eq!(
             ty,
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Str),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Str),
             }
         );
     }
@@ -3511,7 +3757,7 @@ mod tests {
         // should still produce a sensible Array[elem] type.
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let call = synth(ExprNode::Send {
@@ -3528,11 +3774,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     }
 
     // ── diagnostic annotation ─────────────────────────────────────
@@ -3692,8 +3938,8 @@ mod tests {
                 kwargs: false,
             });
             e.ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             });
             e
         };
@@ -3779,12 +4025,12 @@ mod tests {
     fn law_universe() -> Vec<Ty> {
         let class = |name: &str| Ty::Class {
             id: ClassId(Symbol::from(name)),
-            args: vec![],
+            args: vec![].into(),
         };
-        let arr = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let arr = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
         let hash = |k: Ty, v: Ty| Ty::Hash {
-            key: Box::new(k),
-            value: Box::new(v),
+            key: std::sync::Arc::new(k),
+            value: std::sync::Arc::new(v),
         };
         vec![
             Ty::Int,
@@ -3807,10 +4053,10 @@ mod tests {
                 Ty::Var { var: TyVar(1) },
                 Ty::Var { var: TyVar(2) },
             ),
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
-            Ty::Union { variants: vec![Ty::Int, Ty::Str] },
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Int, Ty::Str].into() },
             Ty::Union {
-                variants: vec![hash(Ty::Str, Ty::Int), Ty::Nil],
+                variants: vec![hash(Ty::Str, Ty::Int), Ty::Nil].into(),
             },
         ]
     }
@@ -3850,7 +4096,7 @@ mod tests {
         assert_eq!(
             got,
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Bool, Ty::Nil]
+                variants: vec![Ty::Int, Ty::Bool, Ty::Nil].into()
             }
         );
     }
@@ -3919,12 +4165,12 @@ mod tests {
         // out per variant — union_of's own doc names that shape as the
         // harmful one.
         let h1 = Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Int),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Int),
         };
         let h2 = Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(Ty::Str),
+            key: std::sync::Arc::new(Ty::Sym),
+            value: std::sync::Arc::new(Ty::Str),
         };
         let via_nil_first = union_of(union_of(h1.clone(), Ty::Nil), h2.clone());
         let via_hashes_first = union_of(union_of(h1.clone(), h2.clone()), Ty::Nil);
@@ -3944,10 +4190,10 @@ mod tests {
     fn concrete_value_shapes_are_truthy_for_boolean_operators() {
         let values = [
             Ty::Date,
-            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Tuple { elems: vec![Ty::Int].into() },
             Ty::Record { row: Row::default() },
             Ty::Fn {
-                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                params: Vec::new().into(), block: None, ret: std::sync::Arc::new(Ty::Str),
                 effects: crate::effect::EffectSet::pure(),
             },
         ];
@@ -3961,14 +4207,14 @@ mod tests {
     fn nil_arms_of_concrete_value_unions_remain_falsy() {
         for truthy in [
             Ty::Date,
-            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Tuple { elems: vec![Ty::Int].into() },
             Ty::Record { row: Row::default() },
             Ty::Fn {
-                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                params: Vec::new().into(), block: None, ret: std::sync::Arc::new(Ty::Str),
                 effects: crate::effect::EffectSet::pure(),
             },
         ] {
-            let left = Ty::Union { variants: vec![truthy, Ty::Nil] };
+            let left = Ty::Union { variants: vec![truthy, Ty::Nil].into() };
             assert!(!never_falsy(&left), "{left:?} must not always short-circuit `||`");
             assert_eq!(falsy_part(&left), Some(Ty::Nil), "{left:?} must retain nil for `&&`");
         }
@@ -3986,7 +4232,7 @@ mod tests {
         // `h` is statically `Hash[Sym, Str]`; the value-omission bind
         // `data:` should type as the hash's uniform value type (`Str`),
         // and so should the arm body that reads it back.
-        let h_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let h_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
         let pattern = MatchPattern::Hash {
             constant: None,
             pairs: vec![
@@ -4075,7 +4321,7 @@ fn falsy_part(ty: &Ty) -> Option<Ty> {
             match kept.len() {
                 0 => None,
                 1 => kept.into_iter().next(),
-                _ => Some(Ty::Union { variants: kept }),
+                _ => Some(Ty::Union { variants: kept.into() }),
             }
         }
         t if never_falsy(t) => None,
@@ -4127,7 +4373,7 @@ fn time_parse_ty(recv: &Expr, method: &Symbol, args: &[Expr]) -> Option<Ty> {
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if method.as_str() == "zone" && args.is_empty() && is_time_const(r) =>
         {
-            Some(Ty::Union { variants: vec![Ty::Time, Ty::Nil] })
+            Some(Ty::Union { variants: vec![Ty::Time, Ty::Nil].into() })
         }
         _ => None,
     }
@@ -4166,7 +4412,7 @@ fn expect_hash_arg_ty(recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::E
     let (key, value) = match recv_ty {
         Some(Ty::Hash { key, value }) => (key.clone(), value.clone()),
         Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionController::Parameters" => {
-            (Box::new(Ty::Str), Box::new(Ty::Untyped))
+            (std::sync::Arc::new(Ty::Str), std::sync::Arc::new(Ty::Untyped))
         }
         _ => return None,
     };
@@ -4324,7 +4570,7 @@ fn literal_extremum_ty(recv: Option<&Expr>, recv_ty: &Ty, method: &Symbol, args:
             match kept.len() {
                 0 => return None,
                 1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         other => other.clone(),

@@ -80,7 +80,7 @@ pub fn crystal_ty(t: &Ty) -> String {
                 .collect();
             format!("NamedTuple({})", parts.join(", "))
         }
-        Ty::Untyped | Ty::Var { .. } | Ty::Fn { .. } => "String".to_string(),
+        Ty::Untyped | Ty::Rec { .. } | Ty::Var { .. } | Ty::Fn { .. } => "String".to_string(),
     }
 }
 

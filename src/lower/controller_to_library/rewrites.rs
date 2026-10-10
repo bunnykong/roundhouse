@@ -2707,7 +2707,7 @@ pub(crate) fn typed_exception_const(segments: &[&str], span: Span) -> Expr {
     let mut expr = const_path(segments, span);
     expr.ty = Some(crate::ty::Ty::Class {
         id: crate::ident::ClassId(Symbol::from(name)),
-        args: vec![],
+        args: vec![].into(),
     });
     expr
 }

@@ -91,7 +91,7 @@ fn build_registry_from(lcs: &[&LibraryClass]) -> CalleeRegistry {
                     .filter(|p| {
                         !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest)
                     })
-                    .map(|p| p.ty.clone())
+                    .map(|p| (*p.ty).clone())
                     .collect(),
                 _ => continue,
             };
@@ -148,7 +148,7 @@ fn build_registry(lcs: &[LibraryClass]) -> CalleeRegistry {
                     .filter(|p| {
                         !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest)
                     })
-                    .map(|p| p.ty.clone())
+                    .map(|p| (*p.ty).clone())
                     .collect(),
                 _ => continue,
             };

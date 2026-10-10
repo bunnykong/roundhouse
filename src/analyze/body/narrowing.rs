@@ -245,7 +245,7 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
         // `Numeric` covers Int and Float in Ruby's hierarchy. Union
         // both so subsequent dispatch resolves either via int_method
         // or as Float (universal methods cover the overlap).
-        "Numeric" => Ty::Union { variants: vec![Ty::Int, Ty::Float] },
+        "Numeric" => Ty::Union { variants: vec![Ty::Int, Ty::Float].into() },
         "Float" => Ty::Float,
         "String" => Ty::Str,
         "Symbol" => Ty::Sym,
@@ -259,16 +259,83 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
         // tells us "this is a Hash of *some* shape," and downstream
         // dispatch should propagate that gradualness rather than
         // leave block params as Var.
-        "Array" => Ty::Array { elem: Box::new(Ty::Untyped) },
+        "Array" => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
         "Hash" => Ty::Hash {
-            key: Box::new(Ty::Untyped),
-            value: Box::new(Ty::Untyped),
+            key: std::sync::Arc::new(Ty::Untyped),
+            value: std::sync::Arc::new(Ty::Untyped),
         },
         other => Ty::Class {
             id: ClassId(Symbol::from(other)),
-            args: vec![],
+            args: vec![].into(),
         },
     })
+}
+
+/// a stable text for what `pred` (on its `then_branch`
+/// side) says about binding `name`, the key of a narrowed slot.
+pub(super) fn pred_desc(pred: &NarrowPred, name: &Symbol, then_branch: bool) -> String {
+    fn leaf(p: &NarrowPred, name: &Symbol, truth: bool, out: &mut Vec<String>) {
+        let (k, what) = match p {
+            NarrowPred::Compound { if_true, if_false } => {
+                for q in if truth { if_true } else { if_false } {
+                    leaf(q, name, true, out);
+                }
+                return;
+            }
+            NarrowPred::IsNil(k) => (k, "nil".to_string()),
+            NarrowPred::IsNotNil(k) => (k, "notnil".to_string()),
+            NarrowPred::IsA(k, t) => (k, format!("is_{}", head_name(t))),
+            NarrowPred::IsNotA(k, t) => (k, format!("not_{}", head_name(t))),
+            NarrowPred::IsTruthy(k) => (k, "truthy".to_string()),
+            NarrowPred::IsFalsy(k) => (k, "falsy".to_string()),
+            NarrowPred::IsPresent(k) => (k, "present".to_string()),
+            NarrowPred::IsBlank(k) => (k, "blank".to_string()),
+        };
+        let key_name = match k {
+            VarKey::Local(n) | VarKey::Ivar(n) | VarKey::Reader(n, _) => n,
+        };
+        if key_name == name {
+            out.push(format!("{}{}", if truth { "" } else { "!" }, what));
+        }
+    }
+    let mut out = Vec::new();
+    leaf(pred, name, then_branch, &mut out);
+    out.join("_")
+}
+
+/// a short name for the class a narrowing names.
+pub(super) fn head_name(t: &Ty) -> String {
+    match t {
+        Ty::Hash { .. } => "hash".into(),
+        Ty::Array { .. } => "array".into(),
+        Ty::Int => "integer".into(),
+        Ty::Float => "float".into(),
+        Ty::Str => "string".into(),
+        Ty::Sym => "symbol".into(),
+        Ty::Nil => "nil".into(),
+        Ty::Bool => "bool".into(),
+        Ty::Union { variants } => variants.iter().map(head_name).collect::<Vec<_>>().join("_or_"),
+        Ty::Class { id, .. } => id.0.as_str().replace("::", "_").to_lowercase(),
+        _ => "other".into(),
+    }
+}
+
+/// The bindings a predicate narrows (they are unfolded
+/// before narrowing so a reference narrows like the tree it names).
+pub(super) fn pred_keys(pred: &NarrowPred, out: &mut Vec<VarKey>) {
+    match pred {
+        NarrowPred::Compound { if_true, if_false } => {
+            if_true.iter().chain(if_false.iter()).for_each(|p| pred_keys(p, out));
+        }
+        NarrowPred::IsNil(k)
+        | NarrowPred::IsNotNil(k)
+        | NarrowPred::IsA(k, _)
+        | NarrowPred::IsNotA(k, _)
+        | NarrowPred::IsTruthy(k)
+        | NarrowPred::IsFalsy(k)
+        | NarrowPred::IsPresent(k)
+        | NarrowPred::IsBlank(k) => out.push(k.clone()),
+    }
 }
 
 pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -> Ctx {
@@ -361,7 +428,7 @@ pub(crate) fn remove_nil(ty: &Ty) -> Ty {
             match kept.len() {
                 0 => Ty::Nil,
                 1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         // Not a union — if the type is bare Nil, the "non-nil" branch
@@ -376,6 +443,9 @@ pub(crate) fn remove_nil(ty: &Ty) -> Ty {
 /// else returns the narrower type on the assumption the check would
 /// have succeeded (matches Ruby's `is_a?` semantics at run time).
 fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
+    if HEAD_MATCH.with(|h| h.get()) {
+        return head_split(current, narrower).0;
+    }
     match current {
         Ty::Union { variants } => {
             // Keep only variants compatible with the narrower type.
@@ -387,7 +457,7 @@ fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
             match kept.len() {
                 0 => narrower.clone(),
                 1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         _ => narrower.clone(),
@@ -396,6 +466,9 @@ fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
 
 /// Remove variants matching `ty` from a union (for `is_a?` else-branch).
 fn remove_variant(current: &Ty, ty: &Ty) -> Ty {
+    if HEAD_MATCH.with(|h| h.get()) {
+        return head_split(current, ty).1;
+    }
     match current {
         Ty::Union { variants } => {
             let kept: Vec<Ty> = variants
@@ -406,7 +479,7 @@ fn remove_variant(current: &Ty, ty: &Ty) -> Ty {
             match kept.len() {
                 0 => current.clone(),
                 1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         _ => current.clone(),
@@ -417,5 +490,81 @@ fn remove_variant(current: &Ty, ty: &Ty) -> Ty {
 /// Used only by narrowing today; full subtype checks can replace it
 /// when polymorphism lands.
 fn ty_compatible(a: &Ty, b: &Ty) -> bool {
-    a == b
+    a == b || (HEAD_MATCH.with(|h| h.get()) && same_head(a, b))
+}
+
+thread_local! {
+    /// prototype fold (RH_FOLD): while set, narrowing matches union arms by
+    /// constructor head (`Hash[String, R]` is a `Hash`), not by equality.
+    /// Set only around the narrowing of a binding that held a slot
+    /// reference, so main's rule is untouched everywhere else.
+    static HEAD_MATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with head matching on (prototype fold).
+pub(super) fn with_head_match<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    if !on {
+        return f();
+    }
+    let prev = HEAD_MATCH.with(|h| h.replace(true));
+    let out = f();
+    HEAD_MATCH.with(|h| h.set(prev));
+    out
+}
+
+/// Whether `arm` is an instance of the class a narrowing names (`t`, as
+/// [`const_to_ty`] spells it).
+fn same_head(arm: &Ty, t: &Ty) -> bool {
+    match (arm, t) {
+        (_, Ty::Union { variants }) => variants.iter().any(|v| same_head(arm, v)),
+        (Ty::Hash { .. }, Ty::Hash { .. }) => true,
+        (Ty::Array { .. } | Ty::Tuple { .. }, Ty::Array { .. }) => true,
+        (Ty::Class { id: a, .. }, Ty::Class { id: b, .. }) => a == b,
+        (Ty::Int, Ty::Int)
+        | (Ty::Float, Ty::Float)
+        | (Ty::Str, Ty::Str)
+        | (Ty::Sym, Ty::Sym)
+        | (Ty::Nil, Ty::Nil)
+        | (Ty::Bool, Ty::Bool) => true,
+        _ => false,
+    }
+}
+
+/// the class a `case` arm's `when <Const>` names.
+pub(super) fn when_class_ty(pattern: &crate::expr::Pattern) -> Option<Ty> {
+    match pattern {
+        crate::expr::Pattern::Expr { expr } => const_to_ty(expr),
+        _ => None,
+    }
+}
+
+/// `current` narrowed to the arms `when <t>` admits, and
+/// what remains for the arms after it, both by constructor head. A
+/// non-union is a one-arm union. Unknown arms go both ways; an empty
+/// admitted side is `t` itself (as `is_a?` narrowing answers), an empty
+/// remainder is unreachable (`Bottom`).
+pub(super) fn head_split(current: &Ty, t: &Ty) -> (Ty, Ty) {
+    let arms: Vec<&Ty> = match current {
+        Ty::Union { variants } => variants.iter().collect(),
+        other => vec![other],
+    };
+    let (mut this, mut rest) = (Vec::new(), Vec::new());
+    for a in arms {
+        if a.is_unknown() {
+            this.push(a.clone());
+            rest.push(a.clone());
+        } else if same_head(a, t) {
+            this.push(a.clone());
+        } else {
+            rest.push(a.clone());
+        }
+    }
+    if this.is_empty() {
+        // Transfer-risk count: no arm reaches the tested class, and the
+        // branch is typed against the class itself (main's rule).
+        crate::analyze::fold::count("narrow_fallback");
+    }
+    let this = if this.is_empty() { t.clone() } else { super::union_many(this) };
+    let rest = if rest.is_empty() { Ty::Bottom } else { super::union_many(rest) };
+    (this, rest)
 }

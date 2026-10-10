@@ -205,7 +205,7 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
                 then_branch: Expr::new(span, ExprNode::Seq { exprs: stmts }),
                 else_branch: Expr::new(span, ExprNode::Seq { exprs: vec![] }),
             };
-            expr.ty = Some(Ty::Union { variants: vec![Ty::Bool, Ty::Nil] });
+            expr.ty = Some(Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() });
         }
     }
     expr.node.for_each_child_mut(&mut |c| rewrite(c, models, diags));

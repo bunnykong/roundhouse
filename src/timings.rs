@@ -59,6 +59,7 @@ pub struct Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        crate::ty_ops::report();
         match peak_rss_mb() {
             Some(mb) => eprintln!(
                 "roundhouse-timing: {}: {:.2}s (peak rss {mb} MB)",

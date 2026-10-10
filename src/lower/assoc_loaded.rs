@@ -243,7 +243,7 @@ pub(crate) fn rewrite_node(
             let mut s = Expr::new(inner.span, ExprNode::SelfRef);
             s.ty = Some(Ty::Class {
                 id: owner_model,
-                args: vec![],
+                args: vec![].into(),
             });
             Some(s)
         }
@@ -316,7 +316,7 @@ fn rewrite_association_target(
             let mut s = Expr::new(inner.span, ExprNode::SelfRef);
             s.ty = Some(Ty::Class {
                 id: owner_model,
-                args: vec![],
+                args: vec![].into(),
             });
             Some(s)
         }

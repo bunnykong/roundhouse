@@ -332,9 +332,16 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         ExprNode::Ivar { name } => {
             if is_unknown_ty(expr.ty.as_ref()) {
                 let kind = DiagnosticKind::IvarUnresolved { name: name.clone() };
+                // prototype (RH_FOLD_EXPOSED_WARN): a precision-exposed
+                // follow-on is a warning.
+                let severity = if super::fold::exposed_as_warning(&expr.span, Some(name)) {
+                    crate::diagnostic::Severity::Warning
+                } else {
+                    Diagnostic::default_severity(&kind)
+                };
                 out.push(Diagnostic {
                     span: expr.span,
-                    severity: Diagnostic::default_severity(&kind),
+                    severity,
                     kind,
                     message: format!("@{} has no known type", name.as_str()),
                 });
@@ -347,9 +354,15 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                     method: method.clone(),
                     recv_ty: recv_ty.clone(),
                 };
+                // prototype (RH_FOLD_EXPOSED_WARN): precision exposed.
+                let severity = if super::fold::exposed_as_warning(&expr.span, None) {
+                    crate::diagnostic::Severity::Warning
+                } else {
+                    Diagnostic::default_severity(&kind)
+                };
                 out.push(Diagnostic {
                     span: expr.span,
-                    severity: Diagnostic::default_severity(&kind),
+                    severity,
                     kind,
                     message: format!(
                         "no known method `{}` on {}",

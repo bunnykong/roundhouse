@@ -141,7 +141,7 @@ pub(super) fn push_association_methods(
                     owner,
                     Symbol::from(format!("{}_target", name.as_str())),
                     cache_ivar(name),
-                    Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) },
+                    Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: target.clone(), args: vec![].into() }) },
                 ));
                 {
                     // A model that writes its own `<singular>_ids`
@@ -527,7 +527,7 @@ fn synth_has_many_reader(
     let ret = if through {
         Ty::Relation { of: target.clone() }
     } else {
-        Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) }
+        Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: target.clone(), args: vec![].into() }) }
     };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -632,7 +632,7 @@ fn synth_has_many_id_reader(owner: &ClassId, name: &Symbol) -> MethodDef {
         // `id` is `Integer` on every model, so unlike `pluck` (whose
         // own RBS hands back `Array[untyped]`) this projection can name
         // the element type it actually produces.
-        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Int) })),
+        signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Int) })),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -906,7 +906,7 @@ fn synth_has_one_reader(
         signature: Some(fn_sig(
             vec![],
             Ty::Union {
-                variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
+                variants: vec![Ty::Class { id: target.clone(), args: vec![].into() }, Ty::Nil].into(),
             },
         )),
         effects: EffectSet::default(),
@@ -923,7 +923,7 @@ fn synth_has_one_reader(
 fn synth_has_one_preload_setter(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
     let rec = Symbol::from("rec");
     let rec_ty = Ty::Union {
-        variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
+        variants: vec![Ty::Class { id: target.clone(), args: vec![].into() }, Ty::Nil].into(),
     };
     synth_assoc_cache_seed(
         owner,
@@ -939,7 +939,7 @@ fn synth_has_one_preload_setter(owner: &ClassId, name: &Symbol, target: &ClassId
 fn synth_has_one_writer(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
     let value = Symbol::from("value");
     let value_ty = Ty::Union {
-        variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
+        variants: vec![Ty::Class { id: target.clone(), args: vec![].into() }, Ty::Nil].into(),
     };
     synth_assoc_cache_seed(
         owner,
@@ -1154,7 +1154,7 @@ pub(in crate::lower::model_to_library) fn assoc_cache_ivar_bindings(
             Association::HasMany { name, target, .. } => {
                 out.push((
                     cache_ivar(name),
-                    Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) },
+                    Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: target.clone(), args: vec![].into() }) },
                 ));
                 out.push((loaded_ivar(name), Ty::Bool));
             }
@@ -1163,9 +1163,9 @@ pub(in crate::lower::model_to_library) fn assoc_cache_ivar_bindings(
                     cache_ivar(name),
                     Ty::Union {
                         variants: vec![
-                            Ty::Class { id: target.clone(), args: vec![] },
+                            Ty::Class { id: target.clone(), args: vec![].into() },
                             Ty::Nil,
-                        ],
+                        ].into(),
                     },
                 ));
                 out.push((loaded_ivar(name), Ty::Bool));
@@ -1189,7 +1189,7 @@ fn lit_bool(value: bool) -> Expr {
 /// the controller side depends on is the `_preload_<assoc>` method name.
 fn synth_preload_setter(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
     let list = Symbol::from("list");
-    let list_ty = Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) };
+    let list_ty = Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: target.clone(), args: vec![].into() }) };
     synth_assoc_cache_seed(
         owner,
         Symbol::from(format!("_preload_{}", name.as_str())),
@@ -1271,9 +1271,9 @@ fn synth_belongs_to_reader(
             vec![],
             Ty::Union {
                 variants: vec![
-                    Ty::Class { id: target.clone(), args: vec![] },
+                    Ty::Class { id: target.clone(), args: vec![].into() },
                     Ty::Nil,
-                ],
+                ].into(),
             },
         )),
         effects: EffectSet::default(),
@@ -1352,7 +1352,7 @@ fn synth_polymorphic_reader(
 
     let mut variants: Vec<Ty> = targets
         .iter()
-        .map(|t| Ty::Class { id: t.clone(), args: vec![] })
+        .map(|t| Ty::Class { id: t.clone(), args: vec![].into() })
         .collect();
     variants.push(Ty::Nil);
     MethodDef {
@@ -1364,7 +1364,7 @@ fn synth_polymorphic_reader(
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: Some(fn_sig(vec![], Ty::Union { variants })),
+        signature: Some(fn_sig(vec![], Ty::Union { variants: variants.into() })),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -1463,7 +1463,7 @@ fn synth_polymorphic_writer(
 
     let mut variants: Vec<Ty> = targets
         .iter()
-        .map(|t| Ty::Class { id: t.clone(), args: vec![] })
+        .map(|t| Ty::Class { id: t.clone(), args: vec![].into() })
         .collect();
     variants.push(Ty::Nil);
     MethodDef {
@@ -1475,7 +1475,7 @@ fn synth_polymorphic_writer(
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(value.clone())],
         body,
-        signature: Some(fn_sig(vec![(value, Ty::Union { variants })], Ty::Nil)),
+        signature: Some(fn_sig(vec![(value, Ty::Union { variants: variants.into() })], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -1560,7 +1560,7 @@ fn synth_belongs_to_writer(
     // targets from having to thread the assign's value out of an
     // if/else statement position.
     let value_ty = Ty::Union {
-        variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
+        variants: vec![Ty::Class { id: target.clone(), args: vec![].into() }, Ty::Nil].into(),
     };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -1615,7 +1615,7 @@ fn synth_belongs_to_writer(
 /// target loaded). `_sync_<name>` consumes the stale flag at save.
 fn synth_through_collection_writer(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
     let values = Symbol::from("values");
-    let values_ty = Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) };
+    let values_ty = Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: target.clone(), args: vec![].into() }) };
     let ivar_assign = |ivar: String, value: Expr| {
         Expr::new(
             Span::synthetic(),

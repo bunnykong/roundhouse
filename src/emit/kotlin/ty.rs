@@ -92,7 +92,7 @@ pub fn kotlin_ty(t: &Ty) -> String {
         }
 
         // The soft-strict escape: `Any?`, with no emit diagnostic.
-        Ty::Var { .. } | Ty::Untyped => "Any?".to_string(),
+        Ty::Var { .. } | Ty::Untyped | Ty::Rec { .. } => "Any?".to_string(),
     }
 }
 
