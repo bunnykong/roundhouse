@@ -406,15 +406,40 @@ fn emit_stmts(stmts: &[Expr]) -> String {
             target: LValue::Var { name, .. },
             value,
         } if name.as_str() == "record"
-            && !rest
-                .iter()
-                .any(|e| super::library::references_var(e, "record")) =>
+            && !rest.iter().any(later_statement_uses_record) =>
         {
             format!("_record = {}", emit_expr(value))
         }
         _ => emit_stmt(head),
     };
     format!("{}\n{}", head, emit_stmts(rest))
+}
+
+/// Later statements use `record` either by reading the local or by an
+/// implicit-self / `self.record` send that `emit_send` will thread as
+/// a leading `record` argument (`save()` → `save(record)`).
+fn later_statement_uses_record(e: &Expr) -> bool {
+    super::library::references_var(e, "record") || implicit_record_send(e)
+}
+
+fn implicit_record_send(e: &Expr) -> bool {
+    if let ExprNode::Send { recv, method, .. } = &*e.node {
+        let fname = super::library::elixir_fn_name(method.as_str());
+        if threads_record(&fname)
+            && recv
+                .as_ref()
+                .is_none_or(|r| is_record_var(r) || matches!(&*r.node, ExprNode::SelfRef))
+        {
+            return true;
+        }
+    }
+    let mut hit = false;
+    e.node.for_each_child(&mut |c| {
+        if !hit {
+            hit = implicit_record_send(c);
+        }
+    });
+    hit
 }
 
 /// String-accumulator hint consumer — the view/jbuilder lowerer's
@@ -3187,6 +3212,32 @@ mod tests {
             },
         );
         assert_eq!(emit_method_body(&used), "record = updated_record\nrecord");
+    }
+
+    #[test]
+    fn unused_final_record_rebind_keeps_binding_for_implicit_save() {
+        set_record_methods(["save".to_string()].into_iter().collect());
+        let save = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("save"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let body = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![record_assign(var_t("updated_record", Ty::Untyped)), save, nil_lit()],
+            },
+        );
+        assert_eq!(
+            emit_method_body(&body),
+            "record = updated_record\nsave(record)\nnil"
+        );
+        set_record_methods(Default::default());
     }
 }
 

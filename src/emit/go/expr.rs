@@ -1322,22 +1322,26 @@ pub(super) fn emit_send(
     // element or the type's zero.
     if method == "pop" && args.is_empty() {
         if let Some(r) = recv {
-            let recv_s = emit_expr(ctx, r);
-            let elem_ty = match r.ty.as_ref().and_then(union_non_nil_core) {
-                Some(Ty::Array { elem }) => super::ty::go_ty_stub(Some(elem)),
-                _ => "interface{}".to_string(),
-            };
-            let zero = super::ty::go_zero_value(&elem_ty);
-            return format!(
-                "func() {elem_ty} {{\n\
-                 \tif len({recv_s}) == 0 {{\n\
-                 \t\treturn {zero}\n\
-                 \t}}\n\
-                 \t_last := {recv_s}[len({recv_s})-1]\n\
-                 \t{recv_s} = {recv_s}[:len({recv_s})-1]\n\
-                 \treturn _last\n\
-                 }}()"
-            );
+            // Only a variable or ivar can be resliced. `get_items().pop`
+            // is not an addressable Go location.
+            if matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+                let recv_s = emit_expr(ctx, r);
+                let elem_ty = match r.ty.as_ref().and_then(union_non_nil_core) {
+                    Some(Ty::Array { elem }) => super::ty::go_ty_stub(Some(elem)),
+                    _ => "interface{}".to_string(),
+                };
+                let zero = super::ty::go_zero_value(&elem_ty);
+                return format!(
+                    "func() {elem_ty} {{\n\
+                     \tif len({recv_s}) == 0 {{\n\
+                     \t\treturn {zero}\n\
+                     \t}}\n\
+                     \t_last := {recv_s}[len({recv_s})-1]\n\
+                     \t{recv_s} = {recv_s}[:len({recv_s})-1]\n\
+                     \treturn _last\n\
+                     }}()"
+                );
+            }
         }
     }
 
