@@ -56,6 +56,7 @@ pub(super) fn bound(ty: Ty) -> Ty {
         return ty;
     }
     super::fixpoint_check::note_bound(true);
+    super::det::note_cap("bound.firings");
     let mut limit = measure(&ty).0.min(MAX_DEPTH);
     loop {
         let cut = cut(&ty, limit);

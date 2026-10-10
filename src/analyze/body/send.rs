@@ -525,6 +525,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         joined = Some(match joined.take() {
                             None => p,
+                            Some(acc) if super::super::shape::on() => join_block_shapes(acc, p),
                             Some(mut acc) => {
                                 let n = acc.len().max(p.len());
                                 acc.resize(n, Ty::Nil);
@@ -2164,6 +2165,45 @@ fn conversion_fallback(method: &Symbol) -> Option<Ty> {
         "to_sym" => Ty::Sym,
         _ => return None,
     })
+}
+
+/// Missing yielded positions are nil in either operand, including when
+/// the shorter yield arrives second. This is a pointwise may-flow union.
+fn join_block_shapes(mut a: Vec<Ty>, mut b: Vec<Ty>) -> Vec<Ty> {
+    let n = a.len().max(b.len());
+    a.resize(n, Ty::Nil);
+    b.resize(n, Ty::Nil);
+    a.into_iter().zip(b).map(|(a, b)| union_of(a, b)).collect()
+}
+
+#[cfg(test)]
+mod shape_transfer_tests {
+    use super::*;
+
+    #[test]
+    fn shape_yield_shape_join_pads_both_operands() {
+        let a = vec![Ty::Int, Ty::Str];
+        let b = vec![Ty::Bool];
+        let expected = vec![union_of(Ty::Int, Ty::Bool), union_of(Ty::Str, Ty::Nil)];
+        assert_eq!(join_block_shapes(a.clone(), b.clone()), expected);
+        assert_eq!(join_block_shapes(b, a), expected);
+    }
+
+    #[test]
+    fn shape_yield_shape_join_obeys_semilattice_laws() {
+        let shapes = [vec![], vec![Ty::Int], vec![Ty::Str, Ty::Bool], vec![Ty::Nil, Ty::Int, Ty::Str]];
+        for a in &shapes {
+            assert_eq!(join_block_shapes(a.clone(), a.clone()), *a);
+            for b in &shapes {
+                assert_eq!(join_block_shapes(a.clone(), b.clone()), join_block_shapes(b.clone(), a.clone()));
+                for c in &shapes {
+                    assert_eq!(join_block_shapes(join_block_shapes(a.clone(), b.clone()), c.clone()),
+                        join_block_shapes(a.clone(), join_block_shapes(b.clone(), c.clone())));
+                }
+            }
+        }
+    }
+
 }
 
 // Primitive method tables --------------------------------------------

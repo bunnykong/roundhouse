@@ -49,6 +49,11 @@ pub mod graphql;
 mod harvest_return;
 mod fixpoint_bound;
 mod fixpoint_check;
+mod det;
+pub(crate) mod shape;
+mod detfp;
+mod structure;
+pub(crate) mod errgate;
 mod fixpoint_rounds;
 mod handoff;
 pub(crate) mod fold;
@@ -1108,9 +1113,15 @@ impl Analyzer {
     /// the refined registry. Iterates to a fixed point (capped; see
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
+        det::reset();
+        errgate::reset();
         handoff::reset();
         fold::reset();
         slots::reset();
+        structure::reset(|| (Self::defined_methods(app), Self::param_shapes(app)));
+        if fixpoint_check::stats_on() {
+            self.fixpoint_checks.structure_start = Some(self.structure_snapshot(app).summary());
+        }
         // An unresolvable include is a load-time error, not an open method
         // surface. Keep it in the class-body ledger even when no method is called.
         for class in &mut app.library_classes {
@@ -1187,6 +1198,7 @@ impl Analyzer {
             .map(|c| (c.name.clone(), c.parent.clone()))
             .collect();
 
+        shape::capture_literals(app);
         if sccq::sched_sccq() {
             self.sccq_init(app);
             // The state before any typing: the initial pass harvests each
@@ -1550,12 +1562,26 @@ impl Analyzer {
         self.type_rails_application_body(app);
         // `RH_FOLD`: expand every reference before anything downstream of
         // analysis sees a type.
+        if fixpoint_check::stats_on() {
+            self.fixpoint_checks.structure_end = Some(self.structure_snapshot(app).summary());
+        }
+        if detfp::on() {
+            let fp = self.c1_state_fp(app);
+            eprintln!("rh-det-pre: {}", fp.det_line());
+        }
         self.fold_finish(app);
 
         self.settle_pending(app);
 
         self.stamp_inferred_method_signatures(app);
         self.report_fixpoint_checks(app);
+        if detfp::on() {
+            let fp = self.c1_state_fp(app);
+            eprintln!("rh-det: {}", fp.det_line());
+            fp.dump();
+        }
+        det::report();
+        self.report_errgate(app);
     }
 
     /// With the add-only rules or the fold, what is still pending when
@@ -4684,6 +4710,8 @@ impl Analyzer {
     /// dispatch resolves to via `unwrap_fn_ret`). Skip methods whose
     /// body is `Ty::Var` (no information gained).
     fn harvest_returns_to_registry(&mut self, app: &App, harvest_tests: bool) {
+        det::next_round();
+        let before = det::registry_snapshot(&self.classes);
         self.harvest_method_returns(app, harvest_tests);
         // `RH_FOLD_JOIN`: returns join with the value they held after the
         // previous harvest, after the registry copies too.
@@ -4705,8 +4733,13 @@ impl Analyzer {
                 .filter_map(|cid| self.classes.get(cid))
                 .find_map(|c| c.instance_methods.get(name).cloned());
             if let Some(ty) = ty {
-                self.classes.entry(view_ctx.clone()).or_default().instance_methods.insert(name.clone(), ty);
+                let table = &mut self.classes.entry(view_ctx.clone()).or_default().instance_methods;
+                det::note_named("copy.view_ctx", name.as_str(), table.get(name), &ty);
+                table.insert(name.clone(), ty);
             }
+        }
+        if let Some(before) = before {
+            det::note_registry("round.registry", &before, &self.classes);
         }
     }
 
@@ -4728,7 +4761,8 @@ impl Analyzer {
         method: &crate::dialect::MethodDef,
     ) {
         {
-            let ret = self.method_return_ty(class_id, method);
+            let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
+        let ret = self.method_return_ty(class_id, method);
             let target = match method.receiver {
                 crate::dialect::MethodReceiver::Instance => {
                     &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -4791,6 +4825,7 @@ impl Analyzer {
 
     /// One library method's harvest (see [`Self::harvest_method_returns`]).
     fn harvest_lib_method(&mut self, class_id: &ClassId, method: &crate::dialect::MethodDef) {
+        let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
         let ret = self.method_return_ty(class_id, method);
         let target = match method.receiver {
             crate::dialect::MethodReceiver::Instance => {
@@ -4859,11 +4894,13 @@ impl Analyzer {
             // call to it resolves to the inferred return or to Untyped
             // rather than "no known method".
             for method in controller.class_methods() {
+                let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
                 let ret = self.method_return_ty(class_id, method);
                 let target = &mut self.classes.entry(class_id.clone()).or_default().class_methods;
                 Self::register_method_return(target, &method.name, ret.as_ref());
             }
             for action in controller.actions() {
+                let _writer = errgate::writer(class_id, &action.name, false);
                 let Some(body_ty) =
                     tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
                 else {
@@ -5126,6 +5163,7 @@ impl Analyzer {
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
                         continue; // own/catalog entry wins
                     }
+                    det::note_named("copy.concern_inst", name.as_str(), cls.instance_methods.get(name), ty);
                     cls.instance_methods.insert(name.clone(), ty.clone());
                     folded.0.insert(name.clone());
                     // `RH_FOLD`: the copy reads the module's slot.
@@ -5135,6 +5173,7 @@ impl Analyzer {
                     if cls.class_methods.contains_key(name) && !folded.1.contains(name) {
                         continue;
                     }
+                    det::note_named("copy.concern_class", name.as_str(), cls.class_methods.get(name), ty);
                     cls.class_methods.insert(name.clone(), ty.clone());
                     folded.1.insert(name.clone());
                     fold::note_alias(&id, name, &m);
@@ -5229,6 +5268,7 @@ impl Analyzer {
                 cls.instance_methods.remove(name);
             }
             for (name, ty) in agreed {
+                det::note_named("copy.host_lend", name.as_str(), cls.instance_methods.get(&name), &ty);
                 cls.instance_methods.insert(name.clone(), ty);
                 lent.insert(name);
             }
@@ -5415,6 +5455,7 @@ impl Analyzer {
     /// than string fingerprints, so unification is direct: same type →
     /// keep; nil + T → T?; otherwise → union widen.
     fn unify_params_from_call_sites(&mut self, app: &App, scope: UnifyScope) {
+        let before = det::descent_on().then(|| self.inferred_params.clone());
         // Rebuilt from scratch every fixpoint round. The table is pure
         // derived state — a function of the types the last typing pass
         // wrote onto the call-site argument expressions — and carrying
@@ -5536,6 +5577,11 @@ impl Analyzer {
         // `RH_FOLD_JOIN`: rows join with last round's (with `RH_FOLD`, the
         // reference-mode rows).
         handoff::join_params(&mut self.inferred_params);
+        if let Some(before) = before {
+            for (key, row) in &self.inferred_params {
+                det::note_row("round.params", before.get(key).map(Vec::as_slice), row);
+            }
+        }
     }
 
     /// `RH_FOLD`: call-graph edges from one method body's call sites, keyed
@@ -5639,7 +5685,9 @@ impl Analyzer {
                 entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
             }
             for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
-                *slot = fixpoint_bound::bound(unify_param_ty(slot.clone(), observed));
+                let next = fixpoint_bound::bound(unify_param_ty(slot.clone(), observed));
+                det::note("params.unify", Some(&*slot), &next);
+                *slot = next;
             }
         }
     }
@@ -5853,7 +5901,9 @@ impl Analyzer {
                 entry.resize(tys.len(), Ty::Var { var: crate::ident::TyVar(0) });
             }
             for (slot, observed) in entry.iter_mut().zip(tys.into_iter()) {
-                *slot = fixpoint_bound::bound(unify_param_ty(slot.clone(), observed));
+                let next = fixpoint_bound::bound(unify_param_ty(slot.clone(), observed));
+                det::note("params.unify", Some(&*slot), &next);
+                *slot = next;
             }
         }
     }
@@ -6272,6 +6322,13 @@ impl Analyzer {
                     let record_initialize = method.as_str() == "new"
                         && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
                     for class_id in recv_classes {
+                        if fixpoint_check::stats_on() {
+                            let dest = structure::owner(|defined| self.inherited_param_owner(defined, class_id.clone(), method));
+                            let placed = structure::placed_arity(|shapes| Self::place_keyword_args(
+                                shapes.get(&(dest.clone(), method.clone())), arg_tys.clone(), kw_tys.clone()).len());
+                            structure::param_site(&dest, method, placed, &expr.span, self_class);
+                            if record_initialize { structure::param_site(&class_id, &Symbol::from("initialize"), placed, &expr.span, self_class); }
+                        }
                         if record_initialize {
                             out.push((
                                 class_id.clone(),
@@ -9033,6 +9090,22 @@ pub(crate) fn return_leaves(body: &Expr) -> Vec<&Expr> {
     }
     fn returns<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
         match &*e.node {
+            ExprNode::Send { recv, args, block, method, .. } if shape::on() => {
+                if let Some(r) = recv { returns(r, out); }
+                for a in args { returns(a, out); }
+                if !matches!(method.as_str(), "lambda" | "define_method") {
+                    if let Some(b) = block {
+                        if let ExprNode::Lambda { body, .. } = &*b.node { returns(body, out); }
+                    }
+                }
+            }
+            ExprNode::Apply { fun, args, block } if shape::on() => {
+                returns(fun, out);
+                for a in args { returns(a, out); }
+                if let Some(b) = block {
+                    if let ExprNode::Lambda { body, .. } = &*b.node { returns(body, out); }
+                }
+            }
             // A block's `return`/`next` is not the method's.
             ExprNode::Lambda { .. } => {}
             ExprNode::Return { value } => {
@@ -9071,7 +9144,7 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
             return None;
         }
         let tys: Vec<Ty> = elements.iter().map(|e| e.ty.clone()).collect::<Option<_>>()?;
-        if tys.iter().any(|t| matches!(t, Ty::Var { .. })) {
+        if !shape::on() && tys.iter().any(|t| matches!(t, Ty::Var { .. })) {
             return None;
         }
         positions = Some(match positions {
@@ -9084,10 +9157,34 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
     }
     let elems = positions?;
     let first = &elems[0];
-    if elems.iter().all(|t| t == first) {
+    if !shape::on() && elems.iter().all(|t| t == first) {
         return None;
     }
     Some(Ty::Tuple { elems: elems.into() })
+}
+
+#[cfg(test)]
+mod shape_tuple_tests {
+    use super::*;
+
+    fn literal(tys: Vec<Ty>) -> Expr {
+        let elements = tys.into_iter().map(|t| {
+            let mut e = Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil });
+            e.ty = Some(t);
+            e
+        }).collect();
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Array { elements, style: Default::default() })
+    }
+
+    #[test]
+    fn shape_tuple_shape_is_independent_of_pending_and_uniform_elements() {
+        for types in [vec![body::unknown(), Ty::Int], vec![Ty::Int, Ty::Int]] {
+            let expected = shape::on().then(|| Ty::Tuple { elems: types.clone().into() });
+            assert_eq!(tuple_return_ty(&literal(types)), expected);
+        }
+        let mixed = vec![Ty::Int, Ty::Str];
+        assert_eq!(tuple_return_ty(&literal(mixed.clone())), Some(Ty::Tuple { elems: mixed.into() }));
+    }
 }
 
 #[cfg(test)]

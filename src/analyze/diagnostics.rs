@@ -213,6 +213,14 @@ fn unresolved_name(expr: &Expr) -> Option<crate::ident::Symbol> {
     }
 }
 
+pub(super) fn send_result_is_unknown(expr: &Expr) -> bool {
+    if expr.decisions & crate::expr::SETTER_DISPATCH_CHECKED != 0 {
+        expr.decisions & crate::expr::SETTER_DISPATCH_FAILED != 0
+    } else {
+        is_unknown_ty(expr.ty.as_ref())
+    }
+}
+
 fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
     diagnose_expr_in(expr, out, true)
 }
@@ -341,7 +349,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             }
         }
         ExprNode::Send { recv: Some(r), method, .. } => {
-            if !is_unknown_ty(r.ty.as_ref()) && is_unknown_ty(expr.ty.as_ref()) {
+            if !is_unknown_ty(r.ty.as_ref()) && send_result_is_unknown(expr) {
                 let recv_ty = r.ty.clone().unwrap_or_else(|| Ty::Var { var: crate::ident::TyVar(0) });
                 let kind = DiagnosticKind::SendDispatchFailed {
                     method: method.clone(),

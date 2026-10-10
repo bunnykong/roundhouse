@@ -146,6 +146,8 @@ pub(super) struct RoundInputs<'a> {
 pub(super) struct Checks {
     /// Per verify round: the loop it repeated and what it moved.
     verified: Vec<(&'static str, BTreeMap<&'static str, u64>)>,
+    pub(super) structure_start: Option<serde_json::Value>,
+    pub(super) structure_end: Option<serde_json::Value>,
 }
 
 /// Structural hash of a type: union arms sorted and deduplicated, record
@@ -299,6 +301,13 @@ impl StateFp {
             self.parts.iter().map(|(name, part)| (*name, format!("{:016x}", hash_of(part)))).collect();
         out.insert("ir", format!("{:016x}", hash_of(&self.ir)));
         out
+    }
+
+    pub(super) fn context_slot_keys(&self) -> Vec<String> {
+        self.parts.iter().filter(|(part, _)| matches!(**part,
+            "controller_bindings" | "controller_cache" | "view_seeds" | "copies"))
+            .flat_map(|(part, entries)| entries.keys().map(move |key| format!("{part}:{key}")))
+            .collect()
     }
 
     fn sizes(&self) -> BTreeMap<&'static str, u64> {
@@ -569,6 +578,12 @@ impl Analyzer {
             line["entries"] = serde_json::json!(fp.sizes());
         }
         if *STATS {
+            line["structure"] = serde_json::json!({
+                "schema": 1, "scope": "observed-cumulative-equations",
+                "start": self.fixpoint_checks.structure_start,
+                "end": self.fixpoint_checks.structure_end,
+                "unchanged": self.fixpoint_checks.structure_start == self.fixpoint_checks.structure_end,
+            });
             let mut census = Census::default();
             crate::lower::for_each_emit_body_ref(app, &mut |e| census.expr(e));
             line["census"] = serde_json::json!({

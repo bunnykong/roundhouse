@@ -65,6 +65,20 @@ static TAIL: LazyLock<bool> = LazyLock::new(|| flag("RH_FOLD_TAIL"));
 /// `untyped`.
 const EXPAND_NODES: usize = 256;
 
+/// The published S2c already walks maps by key. This opt-in completes the
+/// canonical expansion by ordering direct reference arms by slot key too.
+static CANON_EXPAND: LazyLock<bool> = LazyLock::new(|| flag("RH_CANON_EXPAND"));
+
+fn reference_arm_order(variants: &[Ty]) -> Vec<usize> {
+    let mut order: Vec<(u8, String, usize)> = variants.iter().enumerate().map(|(i, v)| match v {
+        Ty::Rec { slot } => (1, format!("{:?}", key_of(*slot)), i),
+        _ => (0, String::new(), i),
+    }).collect();
+    order.sort();
+    order.into_iter().map(|(_, _, i)| i).collect()
+}
+
+
 /// A syntax site: the span of the expression at which a reference was
 /// unfolded or narrowed.
 pub(crate) type SiteId = (u32, u32, u32);
@@ -165,6 +179,7 @@ fn intern(key: SlotKey) -> u32 {
             return *id;
         }
         let id = s.keys.len() as u32;
+        super::det::note_slot_key(id, &key);
         s.keys.push(key.clone());
         s.ids.insert(key, id);
         id
@@ -242,7 +257,9 @@ pub(crate) fn param_ref(class: &ClassId, method: &Symbol, index: usize, value: T
     if !active() || !is_rec_method(class, method) {
         return value;
     }
-    let slot = intern(SlotKey::Param { class: class.clone(), method: method.clone(), index });
+    let key = SlotKey::Param { class: class.clone(), method: method.clone(), index };
+    super::structure::fold_write(&key, "parameter-seed");
+    let slot = intern(key);
     // A slot's own top-level reference contributes nothing (X = X | A is A).
     let value = strip_self(value, slot);
     ST.with(|s| {
@@ -258,6 +275,7 @@ pub(crate) fn param_ref(class: &ClassId, method: &Symbol, index: usize, value: T
             note_moved(slot, s.values.get(&slot));
         }
         s.joined.remove(&slot);
+        super::det::note("fold.param_seed", s.values.get(&slot), &value);
         s.values.insert(slot, value);
     });
     Ty::Rec { slot }
@@ -314,6 +332,7 @@ fn fingerprint(t: &Ty) -> u64 {
 /// `RH_FOLD_JOIN` they also join across passes; without it, the first
 /// write in a new pass replaces the last pass's value.
 fn accumulate(key: SlotKey, value: Ty) -> Ty {
+    if super::fixpoint_check::stats_on() { super::structure::fold_write(&key, "site-transfer"); }
     let slot = intern(key);
     let value = strip_self(value, slot);
     let print = fingerprint(&value);
@@ -345,6 +364,7 @@ fn accumulate(key: SlotKey, value: Ty) -> Ty {
         if s.values.get(&slot) != Some(&joined) {
             note_moved(slot, s.values.get(&slot));
         }
+        super::det::note("fold.site_slot", s.values.get(&slot), &joined);
         s.values.insert(slot, joined);
     });
     Ty::Rec { slot }
@@ -907,6 +927,11 @@ impl<'a> Expander<'a> {
                 r
             }
             Ty::Union { variants } => {
+                if *CANON_EXPAND && variants.iter().filter(|v| matches!(v, Ty::Rec { .. })).count() > 1 {
+                    let order = reference_arm_order(variants);
+                    let vs: Vec<Ty> = order.iter().map(|i| self.go(&variants[*i], budget)).collect();
+                    return super::body::union_many(vs);
+                }
                 let vs: Vec<Ty> = variants.iter().map(|v| self.go(v, budget)).collect();
                 super::body::union_many(vs)
             }
@@ -1007,6 +1032,26 @@ mod tests {
     }
 
     #[test]
+    fn reference_arm_order_uses_keys_across_opposite_allocations() {
+        let key = |name: &str| SlotKey::Ret { class: ClassId(Symbol::from("Order")), method: Symbol::from(name), class_side: false };
+        ST.with(|s| *s.borrow_mut() = State::default());
+        let z = intern(key("z")); let a = intern(key("a"));
+        let first = vec![Ty::Rec { slot:z }, Ty::Int, Ty::Rec { slot:a }];
+        let keys1: Vec<_> = reference_arm_order(&first).iter().map(|i| match &first[*i] {
+            Ty::Rec { slot } => format!("{:?}", key_of(*slot)), _ => "value".into(),
+        }).collect();
+        ST.with(|s| *s.borrow_mut() = State::default());
+        let a = intern(key("a")); let z = intern(key("z"));
+        let second = vec![Ty::Rec { slot:a }, Ty::Rec { slot:z }, Ty::Int];
+        let keys2: Vec<_> = reference_arm_order(&second).iter().map(|i| match &second[*i] {
+            Ty::Rec { slot } => format!("{:?}", key_of(*slot)), _ => "value".into(),
+        }).collect();
+        assert_eq!(keys1, keys2);
+        assert_eq!(keys1[0], "value");
+        ST.with(|s| *s.borrow_mut() = State::default());
+    }
+
+    #[test]
     fn tarjan_finds_cycles_and_self_loops() {
         let succ = vec![vec![1], vec![0], vec![2], vec![]];
         let mut comps: Vec<Vec<usize>> = scc(&succ)
@@ -1019,4 +1064,18 @@ mod tests {
         comps.sort();
         assert_eq!(comps, vec![vec![0, 1], vec![2], vec![3]]);
     }
+}
+
+/// Canonical structure records; inferred values and allocation ids are absent.
+pub(super) fn structure_parts() -> (Vec<SlotKey>, Vec<String>, Vec<String>) {
+    ST.with(|s| {
+        let s = s.borrow();
+        let refs = s.rec_methods.iter().map(|(c, m)| format!("{}#{m}", c.0)).collect();
+        let mut routing = Vec::new();
+        for ((c, m), module) in &s.aliases { routing.push(format!("alias:{}#{m}->{}#{m}", c.0, module.0)); }
+        for ((c, m), targets) in &s.edges {
+            for (t, n) in targets { routing.push(format!("edge:{}#{m}->{}#{n}", c.0, t.0)); }
+        }
+        (s.keys.clone(), refs, routing)
+    })
 }

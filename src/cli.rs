@@ -200,6 +200,7 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     // Likewise a dispatch on a gem the analyzer does not model — the
     // census below names the gems, this labels the diagnostics.
     crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
+    crate::analyze::errgate::diagnostics(&diags, &app);
     let census = app.gem_lock.as_ref().map(crate::gems::GemCensus::of);
 
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();

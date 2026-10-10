@@ -327,6 +327,9 @@ pub(crate) fn lexical_class(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    /// Authored inputs for standalone runtime-library typing. Inferred ivar
+    /// flow is deliberately kept out of this map.
+    literal_declarations: Option<&'a HashMap<Symbol, Ty>>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
     data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
@@ -398,7 +401,27 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None }
+        Self { classes, literal_declarations: None, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None }
+    }
+
+    pub(crate) fn with_literal_declarations(mut self, declarations: &'a HashMap<Symbol, Ty>) -> Self {
+        self.literal_declarations = Some(declarations);
+        self
+    }
+
+    /// Catalog answers for the final-IR error census; never retypes a body.
+    pub(crate) fn errgate_answer(&self, recv: &Ty, method: &Symbol, block: Option<&Ty>, args: &[Expr]) -> bool {
+        !matches!(self.dispatch(Some(recv), method, block, args), Ty::Var { .. })
+    }
+
+    pub(crate) fn errgate_compatible(&self, op: &Symbol, left: &Expr, right: &Expr, a: &Ty, b: &Ty) -> bool {
+        let mut left = left.clone(); left.ty = Some(a.clone());
+        let mut right = right.clone(); right.ty = Some(b.clone());
+        let mut e = Expr::new(left.span, ExprNode::Send {
+            recv: Some(left), method: op.clone(), args: vec![right], block: None, parenthesized: true,
+        });
+        diagnostic::detect_diagnostic(&mut e);
+        !matches!(e.diagnostic, Some(crate::diagnostic::DiagnosticKind::IncompatibleBinop { .. }))
     }
 
     /// Share the analyzer's immutable source index across typing passes.
@@ -439,7 +462,27 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
-        let ty = self.compute(expr, ctx);
+        self.analyze_with_literal_input(expr, ctx, None)
+    }
+
+    fn analyze_with_literal_input(&self, expr: &mut Expr, ctx: &Ctx, literal_input: Option<&Ty>) -> Ty {
+        let mut ty = self.compute(expr, ctx, literal_input);
+        if super::shape::on()
+            && let ExprNode::Send { recv: Some(_), method, args, .. } = &*expr.node
+            && args.len() == 1 && crate::analyze::is_setter_name(method)
+        {
+            let rhs = args[0].ty.clone().unwrap_or_else(unknown);
+            // Finish the ordinary dispatch and its diagnostic annotations
+            // before selecting Ruby's assignment value. Returning earlier
+            // would silently discard framework/runtime refusals.
+            if matches!(rhs, Ty::Var { .. } | Ty::Untyped { .. }) {
+                expr.decisions |= crate::expr::SETTER_DISPATCH_CHECKED;
+                if matches!(ty, Ty::Var { .. }) {
+                    expr.decisions |= crate::expr::SETTER_DISPATCH_FAILED;
+                }
+            }
+            ty = rhs;
+        }
         expr.ty = Some(ty.clone());
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
@@ -757,8 +800,16 @@ impl<'a> BodyTyper<'a> {
         Some((name.clone(), ivar, unfolded, base))
     }
 
-    fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+    fn compute(&self, expr: &mut Expr, ctx: &Ctx, declared_literal: Option<&Ty>) -> Ty {
         let expr_span = expr.span;
+        if super::shape::on() {
+            expr.decisions &= !(crate::expr::SETTER_DISPATCH_CHECKED | crate::expr::SETTER_DISPATCH_FAILED);
+        }
+        let literal_input = if super::shape::on()
+            && (matches!(&*expr.node, ExprNode::Hash { entries, .. } if entries.is_empty())
+                || matches!(&*expr.node, ExprNode::Array { elements, .. } if elements.is_empty())) {
+            declared_literal.map(|t| t.peel_nilable().clone()).or_else(|| super::shape::literal_seed(expr))
+        } else { None };
         match &mut *expr.node {
             ExprNode::Lit { value } => lit_ty(value),
 
@@ -1035,7 +1086,7 @@ impl<'a> BodyTyper<'a> {
                 // — strict targets need the concrete shape, and the
                 // surrounding declaration already constrains the type.
                 if entries.is_empty() {
-                    if let Some(t @ Ty::Hash { .. }) = expr.ty.as_ref() {
+                    if let Some(t @ Ty::Hash { .. }) = if super::shape::on() { literal_input.as_ref() } else { expr.ty.as_ref() } {
                         return t.clone();
                     }
                 }
@@ -1065,7 +1116,7 @@ impl<'a> BodyTyper<'a> {
                 // `propagate_expected_to_empty_container`) takes
                 // precedence over the `Var`-defaulted inference.
                 if elements.is_empty() {
-                    if let Some(t @ Ty::Array { .. }) = expr.ty.as_ref() {
+                    if let Some(t @ Ty::Array { .. }) = if super::shape::on() { literal_input.as_ref() } else { expr.ty.as_ref() } {
                         return t.clone();
                     }
                 }
@@ -1620,6 +1671,18 @@ impl<'a> BodyTyper<'a> {
                     .and_then(|t| literal_extremum_ty(recv.as_ref(), t, method, args))
                 {
                     return t;
+                }
+                if super::errgate::on() {
+                    let mut slots = std::collections::BTreeSet::new();
+                    let side = recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }))
+                        || (recv.is_none() && ctx.class_side);
+                    if let Some(Ty::Class { id, .. }) = recv_ty.as_ref() {
+                        if let Some(ci) = self.classes().raw().get(id) {
+                            let table = if side { &ci.class_methods } else { &ci.instance_methods };
+                            if table.contains_key(method) { slots.insert(super::errgate::ret_slot(id, method, side)); }
+                        }
+                    }
+                    super::errgate::origin(&expr_span, slots);
                 }
                 let dispatched = self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args);
                 if let Some(receiver) = recv.as_mut() {
@@ -2343,7 +2406,13 @@ impl<'a> BodyTyper<'a> {
                         propagate_expected_to_empty_container(value, &expected);
                     }
                 }
-                let value_ty = self.analyze_expr(value, ctx);
+                let declaration = if super::shape::on() {
+                    match target {
+                        LValue::Ivar { name } => self.literal_declarations.and_then(|d| d.get(name)),
+                        _ => None,
+                    }
+                } else { None };
+                let value_ty = self.analyze_with_literal_input(value, ctx, declaration);
                 if let LValue::Attr { recv, .. } = target {
                     self.analyze_expr(recv, ctx);
                 }
@@ -3050,6 +3119,42 @@ mod tests {
             0,
             "Const class ref must remain a class object without a registry entry"
         );
+    }
+
+    #[test]
+    fn shape_attribute_assignment_returns_even_a_pending_rhs() {
+        let owner = ClassId(Symbol::from("Owner"));
+        let mut classes = empty_classes();
+        let mut info = ClassInfo::default();
+        info.instance_methods.insert(Symbol::from("value="), Ty::Str);
+        classes.insert(owner.clone(), info);
+        for rhs in [unknown(), Ty::unresolved(), Ty::Int] {
+            let mut ctx = ctx_with_local("x", rhs.clone());
+            ctx.local_bindings.insert(Symbol::from("obj"), Ty::Class {
+                id: owner.clone(), args: vec![].into(),
+            });
+            let mut expr = send(Some(var("obj")), "value=", vec![var("x")]);
+            let expected = if super::super::shape::on() || matches!(rhs, Ty::Int) { rhs } else { Ty::Str };
+            assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), expected);
+        }
+    }
+
+    #[test]
+    fn shape_assignment_keeps_framework_runtime_refusals() {
+        let classes = empty_classes();
+        let inquirers = std::collections::HashSet::new();
+        for rhs in [unknown(), Ty::unresolved()] {
+            let mut ctx = ctx_with_local("rhs", rhs.clone());
+            ctx.local_bindings.insert(Symbol::from("rails"), Ty::Class {
+                id: ClassId(Symbol::from("Rails")), args: vec![].into(),
+            });
+            let mut expr = send(Some(var("rails")), "cache=", vec![var("rhs")]);
+            let ty = BodyTyper::new(&classes).with_inquirers(&inquirers).analyze_expr(&mut expr, &ctx);
+            assert!(matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                construct, detail, ..
+            }) if construct.as_str() == "Rails" && detail.contains("cache=")));
+            if super::super::shape::on() { assert_eq!(ty, rhs); }
+        }
     }
 
     fn optional_str() -> Ty {
