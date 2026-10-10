@@ -864,6 +864,56 @@ def case_25(s, schema)
   nil
 end
 
+def case_26(s, schema)
+  # ── A COMMIT (or ROLLBACK) that itself raises still releases the pin ──
+  #
+  # Db.exec called pin_transaction only AFTER conn.exec(sql) returned.
+  # If COMMIT or ROLLBACK itself raised — here, because the backend's
+  # own session ended from under it — pin_transaction was skipped
+  # entirely: the pin this thread took at BEGIN leaked, and
+  # Db.current_conn stayed wedged on the dead connection for the rest
+  # of the thread's life (roundhouse#693 fixed the same shape in
+  # db.rb's Db.exec). A BEGIN outside a lease pins Db.pool.first (the
+  # same connection Db.current_conn falls back to unleased), so
+  # terminating ITS backend and then trying to COMMIT reproduces the
+  # raise without ever taking a second lease on the pinned connection.
+  #
+  # `Db.with_connection` is re-entrant: once BEGIN has pinned this
+  # thread, it would not lease a second connection at all, just hand
+  # back the SAME pinned one (its own re-entrancy rule — see its
+  # comment) — so sending the termination through it would kill the
+  # connection out from under its OWN statement instead of the pinned
+  # one. `Db.pool.conn(1)`, the shard's other connection, used directly
+  # (as case_23 uses `Db.pool.first.exec` from inside a real lease), is
+  # a genuinely separate session.
+  Db.exec("BEGIN")
+  check("BEGIN pins Db.pool.first", Db.current_conn.equal?(Db.pool.first) && Db.in_lease?)
+  h = Db.prepare_uncached("SELECT pg_backend_pid()")
+  Db.step?(h)
+  pid = Db.column_int(h, 0)
+  Db.finalize(h)
+  Db.pool.conn(1).exec("SELECT pg_terminate_backend(" + pid.to_s + ")")
+  raised = nil
+  begin
+    Db.exec("COMMIT")
+  rescue StandardError => e
+    raised = e
+  end
+  check("COMMIT on a terminated backend raises", !raised.nil?)
+  check("the pin is released even though COMMIT raised", !Db.in_lease?)
+  # pin_transaction also drops the dead connection on PQTRANS_UNKNOWN
+  # (CodeRabbit, #766): Db.current_conn's unleased fallback is this
+  # SAME Db.pool.first object, and PgConn#client only reopens when
+  # @client is nil — releasing just the pin would leave every LATER
+  # unleased Db.exec on this thread hitting the same dead socket
+  # ("pg: connection lost") instead of reconnecting. No manual
+  # Db.pool.first.drop here: that would hide a regression in the drop
+  # above. A plain read on the unleased connection is the proof.
+  check("an unleased read reconnects after the dead connection is dropped",
+        cached_read(s, 1))
+  nil
+end
+
 begin
   case_01(s, schema)
   case_02(s, schema)
@@ -890,6 +940,7 @@ begin
   case_23(s, schema)
   case_24(s, schema)
   case_25(s, schema)
+  case_26(s, schema)
 ensure
   # Close every session first: a failed case can leave one holding locks
   # the DROP would otherwise wait on forever.
