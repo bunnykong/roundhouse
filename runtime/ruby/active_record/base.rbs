@@ -40,6 +40,8 @@ module ActiveRecord
     def changes: () -> Integer
     %a{abstract}
     def escape_value: (untyped value) -> String
+    %a{abstract}
+    def quote_column_name: (String | Symbol name) -> String
   end
 
   # The global adapter slot. Set once during boot; read everywhere
@@ -116,6 +118,8 @@ module ActiveRecord
     def self.schema_columns: () -> Array[Symbol]
     def self.schema_time_columns: () -> Array[Symbol]
     def self.schema_date_columns: () -> Array[Symbol]
+    def self.schema_boolean_columns: () -> Array[Symbol]
+    def self.schema_decimal_columns: () -> Array[Symbol]
     def self.instantiate: (Hash[String, untyped] _row) -> Base
 
     # Eager-load hook consumed by `Relation#to_a`; the Ruby emit path
@@ -137,6 +141,8 @@ module ActiveRecord
     def saved_change_to_attribute: (Symbol name) -> untyped
     def changes_to_save: () -> Hash[String, untyped]
     def attribute_changed?: (String name) -> bool
+    def changed?: () -> bool
+    def has_changes_to_save?: () -> bool
     def attribute_was: (String name) -> untyped
     def id_previously_changed?: () -> bool
     def previously_new_record?: () -> bool
@@ -202,6 +208,7 @@ module ActiveRecord
     def self._hydrate_all: (String sql) -> Array[Base]
     def _adapter_insert: () -> Integer
     def _adapter_update: () -> void
+    def _adapter_touch: () -> void
     def _adapter_delete: () -> void
     def self._adapter_count: () -> Integer
     def self._adapter_any?: () -> bool
@@ -226,6 +233,7 @@ module ActiveRecord
     # self either way (idempotent on already-destroyed records).
     def save: () -> bool
     def save_after_validation: () -> bool
+    def _insert_row: () -> bool
     def save!: () -> Base
     def destroy: () -> Base
     def destroy!: () -> Base
@@ -239,6 +247,7 @@ module ActiveRecord
     def lock!: (?(bool | String)? lock) -> Base
     # `touch` is no-arg on purpose; see the note on the body.
     def touch: () -> bool
+    def touch_written: () -> bool
 
     # Lifecycle hooks — no-op defaults. Subclasses override.
     def after_initialize: () -> void

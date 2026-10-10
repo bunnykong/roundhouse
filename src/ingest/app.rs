@@ -872,6 +872,19 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 methods.append(&mut synth);
             }
         }
+        // A helper that overrides ActionView's `token_tag` to answer ""
+        // (campfire's ApplicationHelper: "Header-only forgery protection
+        // needs no secret in forms or cached HTML"). Rails' form helpers
+        // build their token field through it, so every form then has
+        // none; synthesized as the runtime's switch for that. Another
+        // body is not read.
+        if app_helpers_blank_token_tag(vfs, dir) {
+            if let Ok(mut synth) =
+                crate::runtime_src::parse_methods("def token_fields_omitted\n  true\nend\n")
+            {
+                methods.append(&mut synth);
+            }
+        }
         // `GlobalID.app` — the first segment of every `gid://<app>/
         // <Model>/<id>` this runtime mints, and half of every turbo
         // stream name that names a record. Rails takes it from the
@@ -1451,6 +1464,11 @@ end
     // the mixin means, and it needs nothing from a target's mixin
     // semantics.
     let shared_test_helpers = ingest_test_helper_modules(vfs, dir)?;
+    // The rest of `test/test_helpers/`: modules one test class includes
+    // itself (campfire's `include PushServiceTestHelper` in two web push
+    // tests). Kept whole — nested classes and module methods too — and
+    // carried into each including test's file as inner classes.
+    let included_test_helpers = ingest_included_test_helper_files(vfs, dir, &shared_test_helpers)?;
     // The app-wide `setup` the same file declares — see
     // `ingest_test_case_setup`. Prepended to every test module's own.
     let test_case_setup: Option<crate::expr::Expr> = {
@@ -1502,6 +1520,7 @@ end
         {
             for mut tm in tms {
                 splice_test_helpers(&mut tm, &shared_test_helpers);
+                carry_included_test_helpers(&mut tm, &included_test_helpers);
                 if let Some(case_setup) = &test_case_setup {
                     splice_test_case_setup(&mut tm, case_setup);
                 }
@@ -1855,7 +1874,7 @@ end
     // class-side methods, and its expansion joins the same filter chain.
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
-    expand_class_body_macros(&mut app);
+    expand_class_body_macros(&mut app)?;
     // The same idea one base over: `const` / `prop` under a class
     // whose ancestry a sidecar says reaches `T::Props` IS the
     // `T::Struct` macro, and gets expanded rather than replayed. It
@@ -1904,6 +1923,10 @@ end
     // and reuses the prepared resolver rather than rebuilding it.
     super::concern_accessors::validate(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
 
+    // After every library class and include is known: a `...` that only
+    // reaches a stdlib method of known signature through `super` takes
+    // that signature (campfire's `WebPush::Connections::Stages`).
+    crate::lower::known_super_forwarding::restate(&mut app);
     collect_binary_assets(vfs, dir, &mut app);
     // Generated re-ingest labels never register real sources. No later
     // pass may append source-backed FileIds beyond the indexed snapshot.
@@ -2605,7 +2628,11 @@ fn splice_concerns_into_controllers(app: &mut App) {
                         kwrest_param = Some(p.name.clone());
                         continue;
                     }
-                    if p.keyword {
+                    // An optional keyword the library ingest flattened to
+                    // a positional (`from_keyword`, when no required
+                    // keyword or rest kept the group) is a keyword in the
+                    // source too: the includer's callers pass it by name.
+                    if p.keyword || p.from_keyword {
                         kw_params.push((p.name.clone(), p.default.clone()));
                         continue;
                     }
@@ -3055,10 +3082,62 @@ fn report_unrecognized_controller_macros(app: &App) {
         };
         for item in &controller.body {
             let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
                 continue;
             };
             if CONSUMED_CONTROLLER_MACROS.contains(&method.as_str()) {
+                continue;
+            }
+            // A class-body call carrying a BLOCK that no lowering
+            // claims — the same "vanished with no trace" shape #778
+            // was: `around_block_filter` already claims a block-form
+            // `around_action` (successfully lowered, so it is no
+            // longer `Unknown` at all by the time this runs; or
+            // refused, which records its OWN specific gap already —
+            // either way this generic bucket must not ALSO flag it).
+            // `rescue_from`/`helper_method`/`layout` (with or without a
+            // block) are already excluded above via
+            // `CONSUMED_CONTROLLER_MACROS`, since that list is keyed on
+            // the method name alone. `respond_to` at class-body level
+            // writes no block in any fixture here, but is excluded on
+            // the same reasoning in case one ever does. Concern-only
+            // shapes (`included do`, `class_methods do`) never reach
+            // this loop at all — it walks `app.controllers`, and
+            // those two live on the CONCERN module, consumed before
+            // the splice ever copies anything controller-side.
+            //
+            // `before_action`/`after_action`/`prepend_before_action` are
+            // NOT skipped by name alone: unlike `around_action` (whose
+            // every refusal already records its own gap via
+            // `around_block_filter`), `lambda_filter_target` can decline
+            // one of these silently — e.g. a `before_action(&callback)`
+            // forwarding an existing Proc, which `ir_lambda_body` does
+            // not read (that slot holds a `Var`, not a `Lambda`) — and
+            // #778 exists to stop exactly that kind of silent drop, not
+            // just around_action's. So these three are claimed only
+            // when `lambda_filter_target` actually recognizes the call,
+            // or when it declined it for the ONE reason that already has
+            // its own gap: a `next` the body can't restructure (#779,
+            // `next_restructure_refusal`) — recording this generic gap
+            // too would double it for the one statement.
+            if block.is_some() {
+                const NAMED_CLAIMED_CONTROLLER_BLOCKS: &[&str] = &["around_action", "respond_to"];
+                let claimed = NAMED_CLAIMED_CONTROLLER_BLOCKS.contains(&method.as_str())
+                    || (matches!(
+                        method.as_str(),
+                        "before_action" | "after_action" | "prepend_before_action"
+                    ) && (super::controller::lambda_filter_target(expr).is_some()
+                        || super::controller::next_restructure_refusal(expr)));
+                if claimed {
+                    continue;
+                }
+                survey::record(&IngestError::Unsupported {
+                    file: file_of(expr.span.file),
+                    message: format!(
+                        "controller class-body block not recognized: `{}` (its effect is dropped from the output)",
+                        method.as_str()
+                    ),
+                });
                 continue;
             }
             // `const` / `prop` belong to a lowered `T::Struct` (or a
@@ -3161,7 +3240,7 @@ fn report_unrecognized_controller_macros(app: &App) {
 /// :redirect_signed_in_user_to_root` behind it — fails OPEN. So a macro
 /// whose body holds one statement this can't read stays Unknown, whole,
 /// and is recorded as a gap.
-fn expand_class_body_macros(app: &mut App) {
+fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
     use crate::dialect::{ControllerBodyItem, MethodReceiver};
     use crate::expr::ExprNode;
 
@@ -3186,16 +3265,53 @@ fn expand_class_body_macros(app: &mut App) {
         }
     }
     if macros.is_empty() {
-        return;
+        return Ok(());
     }
 
     let surfaces = controller_concern_surfaces(app);
+    let inherited_class_methods: HashMap<_, std::collections::HashSet<_>> = app
+        .controllers
+        .iter()
+        .map(|controller| {
+            let mut methods = std::collections::HashSet::new();
+            let mut current = Some(controller);
+            let mut seen = std::collections::HashSet::new();
+            while let Some(ancestor) = current {
+                if !seen.insert(&ancestor.name) {
+                    break;
+                }
+                methods.extend(ancestor.body.iter().filter_map(|item| match item {
+                    ControllerBodyItem::ClassMethod { method, .. } => Some(method.name.clone()),
+                    _ => None,
+                }));
+                current = ancestor
+                    .parent
+                    .as_ref()
+                    .and_then(|parent| app.controllers.iter().find(|candidate| &candidate.name == parent));
+            }
+            (controller.name.clone(), methods)
+        })
+        .collect();
 
     for controller in &mut app.controllers {
         let includes = &surfaces.controllers[&controller.name].direct_includes;
         if includes.is_empty() {
             continue;
         }
+        let surface = &surfaces.controllers[&controller.name];
+        let mut macro_definitions = HashMap::<crate::ident::Symbol, usize>::new();
+        for included in &surface.includes {
+            if let Some(methods) = macros.get(included) {
+                for method in methods {
+                    *macro_definitions.entry(method.name.clone()).or_default() += 1;
+                }
+            }
+        }
+        let mut shadowed_macros: std::collections::HashSet<_> = macro_definitions
+            .into_iter()
+            .filter_map(|(name, definitions)| (definitions > 1).then_some(name))
+            .collect();
+        shadowed_macros.extend(inherited_class_methods[&controller.name].iter().cloned());
         let mut expanded: Vec<ControllerBodyItem> = Vec::new();
         for item in std::mem::take(&mut controller.body) {
             let ControllerBodyItem::Unknown { expr, leading_comments, leading_blank_line } = &item
@@ -3255,9 +3371,43 @@ fn expand_class_body_macros(app: &mut App) {
                     continue;
                 }
             }
-            let body = substitute_params(&macro_def, args);
-            match expand_macro_filters(&body, &module) {
-                Some(items) => {
+            // A keyword shape that can't be bound (see `substitute_params`) refuses the macro, like any other
+            // statement that isn't filter DSL.
+            let Some(body) = substitute_params(&macro_def, args) else {
+                survey::record(&IngestError::Unsupported {
+                    file: format!("{}", controller.name.0.as_str()),
+                    message: format!(
+                        "class-body macro not expanded: `{}` from {} holds a statement that is not filter DSL",
+                        method.as_str(),
+                        module.0.as_str()
+                    ),
+                });
+                expanded.push(item);
+                continue;
+            };
+            let Some(body) = expand_nested_filter_macros(
+                &body,
+                &module,
+                &macros,
+                &shadowed_macros,
+                &mut Vec::new(),
+            )
+            else {
+                survey::record(&IngestError::Unsupported {
+                    file: format!("{}", controller.name.0.as_str()),
+                    message: format!(
+                        "class-body macro not expanded: `{}` from {} holds a statement that is not filter DSL",
+                        method.as_str(),
+                        module.0.as_str()
+                    ),
+                });
+                expanded.push(item);
+                continue;
+            };
+            let param_names: Vec<crate::Symbol> =
+                macro_def.params.iter().map(|p| p.name.clone()).collect();
+            match expand_macro_filters(&body, &module, &param_names) {
+                Ok(items) => {
                     let mut comments = leading_comments.clone();
                     let mut blank = *leading_blank_line;
                     for macro_item in items {
@@ -3289,7 +3439,35 @@ fn expand_class_body_macros(app: &mut App) {
                         }
                     }
                 }
-                None => {
+                // A block-form filter's `next` that `restructure_next_in_
+                // block` can't lower — narrow enough to name the actual
+                // reason, and important enough to hard-fail strict mode
+                // rather than silently accept an app whose filter never
+                // actually runs: unlike `NotFilterDsl` just below,
+                // `block_filter_from_macro_stmt` already accepted this
+                // shape as a successfully expanded filter (the refusal
+                // used to surface only much later, at lowering time, as
+                // a silent drop with no gap at all). Survey mode keeps
+                // the same shape every other refusal here has — record
+                // and keep the macro call whole.
+                Err(MacroExpansionRefusal::NextRestructure { method: blocked_method }) => {
+                    let err = IngestError::Unsupported {
+                        file: format!("{}", controller.name.0.as_str()),
+                        message: format!(
+                            "class-body macro not expanded: `{}` from {} holds a `{}` block whose `next` can't be restructured to an if/unless",
+                            method.as_str(),
+                            module.0.as_str(),
+                            blocked_method.as_str()
+                        ),
+                    };
+                    if survey::is_active() {
+                        survey::record(&err);
+                        expanded.push(item);
+                    } else {
+                        return Err(err);
+                    }
+                }
+                Err(MacroExpansionRefusal::NotFilterDsl) => {
                     survey::record(&IngestError::Unsupported {
                         file: format!("{}", controller.name.0.as_str()),
                         message: format!(
@@ -3304,6 +3482,80 @@ fn expand_class_body_macros(app: &mut App) {
         }
         controller.body = expanded;
     }
+    Ok(())
+}
+
+/// Inline same-concern class-method calls inside a filter macro before
+/// interpreting its body. Rails concerns commonly compose a macro from
+/// another macro (`require_unauthenticated_access` calls
+/// `allow_unauthenticated_access`, then adds its own redirect filter).
+/// Each nested call is substituted with the same literal-argument rules as
+/// the outer call; unknown calls, cycles, or non-filter statements remain a
+/// fail-closed refusal in `expand_macro_filters`.
+fn expand_nested_filter_macros(
+    body: &crate::expr::Expr,
+    module: &crate::ident::ClassId,
+    macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+    shadowed: &std::collections::HashSet<crate::ident::Symbol>,
+    stack: &mut Vec<crate::ident::Symbol>,
+) -> Option<crate::expr::Expr> {
+    use crate::expr::{Expr, ExprNode};
+
+    const MAX_EXPANSION_STATEMENTS: usize = 4096;
+
+    fn expand_statements(
+        body: &Expr,
+        module: &crate::ident::ClassId,
+        macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+        shadowed: &std::collections::HashSet<crate::ident::Symbol>,
+        stack: &mut Vec<crate::ident::Symbol>,
+        remaining: &mut usize,
+    ) -> Option<Vec<Expr>> {
+        let statements: Vec<&Expr> = match &*body.node {
+            ExprNode::Seq { exprs } => exprs.iter().collect(),
+            _ => vec![body],
+        };
+        let mut out = Vec::new();
+        for statement in statements {
+            if *remaining == 0 {
+                return None;
+            }
+            *remaining -= 1;
+            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*statement.node
+            else {
+                out.push(statement.clone());
+                continue;
+            };
+            let Some(def) = macros
+                .get(module)
+                .and_then(|methods| methods.iter().find(|candidate| &candidate.name == method))
+            else {
+                out.push(statement.clone());
+                continue;
+            };
+            // A call in a class method runs with the including controller
+            // as `self`; another concern or the controller itself may
+            // override this name. Inlining the lexical concern's version
+            // would change Ruby's lookup result, so refuse the whole macro.
+            if shadowed.contains(method) || stack.len() >= 32 || stack.contains(method) {
+                return None;
+            }
+            stack.push(method.clone());
+            let Some(nested) = substitute_params(def, args) else {
+                stack.pop();
+                return None;
+            };
+            let expanded =
+                expand_statements(&nested, module, macros, shadowed, stack, remaining);
+            stack.pop();
+            out.extend(expanded?);
+        }
+        Some(out)
+    }
+
+    let mut remaining = MAX_EXPANSION_STATEMENTS;
+    let exprs = expand_statements(body, module, macros, shadowed, stack, &mut remaining)?;
+    Some(Expr::new(body.span, ExprNode::Seq { exprs }))
 }
 
 /// The macro's body with its parameters replaced by the call's
@@ -3394,7 +3646,7 @@ fn method_stores_keyword_rest(method: &crate::dialect::MethodDef) -> bool {
 fn substitute_params(
     macro_def: &crate::dialect::MethodDef,
     args: &[crate::expr::Expr],
-) -> crate::expr::Expr {
+) -> Option<crate::expr::Expr> {
     use crate::expr::ExprNode;
 
     fn replace(expr: &mut crate::expr::Expr, bindings: &[(crate::ident::Symbol, crate::expr::Expr)]) {
@@ -3476,46 +3728,67 @@ fn substitute_params(
             ));
         }
     }
-    let bindings: Vec<(crate::ident::Symbol, crate::expr::Expr)> = macro_def
-        .params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            if let Some((_, v)) = extracted.iter().find(|(n, _)| n == &p.name) {
-                return (p.name.clone(), v.clone());
-            }
-            let value = match args.get(i) {
-                Some(a) => match &*a.node {
-                    ExprNode::KeywordSplat { value } => value.clone(),
-                    _ => a.clone(),
-                },
-                None if p.default.is_some() => p.default.clone().expect("checked"),
-                // `p.rest` alone doesn't say which: `library_class`'s
-                // `body_forwards_rest` keeps a literally-forwarded
-                // `**kwrest` as `Param::keyword(name, None); p.rest =
-                // true` (NOT flattened to the `from_kwrest`
-                // positional-with-`{}`-default this match's `None =>`
-                // arm below exists for) when the def's own source calls
-                // `(**name)`/`, **name)` — exactly the
-                // `before_action(**kwargs) { ... }` shape a block-form
-                // filter macro forwards through. `p.keyword` is what
-                // tells the two apart: only a plain `*rest` (`keyword:
-                // false`) binds an empty Array when the caller omits
-                // it; a kept `**kwrest` (`keyword: true`) means `{}`,
-                // same as the flattened/defaulted shape just below.
-                None if p.rest && !p.keyword => crate::expr::Expr::new(
-                    span,
-                    ExprNode::Array { elements: vec![], style: Default::default() },
-                ),
-                None => crate::expr::Expr::new(
-                    span,
-                    ExprNode::Hash { entries: vec![], kwargs: false },
-                ),
-            };
-            (p.name.clone(), value)
-        })
-        .collect();
-    let mut bindings = bindings;
+    // A NAMED keyword param — one the source declared `name:`/`name:
+    // default`, whether or not `library_class` kept it honest
+    // (`p.keyword`) or flattened it to a positional-with-default
+    // (`p.from_keyword`, see that flag's doc) — has to bind BY NAME from
+    // the call's trailing keyword producer, not by position: positional
+    // binding alone is what let `retire_endpoint '2022-11-14', only:
+    // [:index]` (a `sunset: nil` keyword beside a forwarded `**kwargs`)
+    // bind `sunset` to the whole `{only: [:index]}` options Hash and
+    // `kwargs` to `{}`, losing the filter's scope and emitting Ruby that
+    // does not even parse (`headers['Sunset'] = only: [:index] if
+    // only: [:index]`). Every shape below this check still has zero or
+    // one keyword-ish param (bare `**options`/`**kwargs`, no named
+    // keyword beside it), where positional binding already does the
+    // right thing — that branch is untouched so those shapes keep
+    // emitting byte-for-byte what they did before.
+    let has_named_keyword = macro_def.params.iter().any(|p| {
+        !extracted.iter().any(|(n, _)| n == &p.name) && ((p.keyword && !p.rest) || p.from_keyword)
+    });
+    let mut bindings: Vec<(crate::ident::Symbol, crate::expr::Expr)> = if has_named_keyword {
+        bind_params_by_name(macro_def, args, &extracted, span)?
+    } else {
+        macro_def
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if let Some((_, v)) = extracted.iter().find(|(n, _)| n == &p.name) {
+                    return (p.name.clone(), v.clone());
+                }
+                let value = match args.get(i) {
+                    Some(a) => match &*a.node {
+                        ExprNode::KeywordSplat { value } => value.clone(),
+                        _ => a.clone(),
+                    },
+                    None if p.default.is_some() => p.default.clone().expect("checked"),
+                    // `p.rest` alone doesn't say which: `library_class`'s
+                    // `body_forwards_rest` keeps a literally-forwarded
+                    // `**kwrest` as `Param::keyword(name, None); p.rest =
+                    // true` (NOT flattened to the `from_kwrest`
+                    // positional-with-`{}`-default this match's `None =>`
+                    // arm below exists for) when the def's own source calls
+                    // `(**name)`/`, **name)` — exactly the
+                    // `before_action(**kwargs) { ... }` shape a block-form
+                    // filter macro forwards through. `p.keyword` is what
+                    // tells the two apart: only a plain `*rest` (`keyword:
+                    // false`) binds an empty Array when the caller omits
+                    // it; a kept `**kwrest` (`keyword: true`) means `{}`,
+                    // same as the flattened/defaulted shape just below.
+                    None if p.rest && !p.keyword => crate::expr::Expr::new(
+                        span,
+                        ExprNode::Array { elements: vec![], style: Default::default() },
+                    ),
+                    None => crate::expr::Expr::new(
+                        span,
+                        ExprNode::Hash { entries: vec![], kwargs: false },
+                    ),
+                };
+                (p.name.clone(), value)
+            })
+            .collect()
+    };
     let extra: Vec<_> = extracted
         .into_iter()
         .filter(|(n, _)| !bindings.iter().any(|(b, _)| b == n))
@@ -3523,7 +3796,223 @@ fn substitute_params(
     bindings.extend(extra);
     replace(&mut body, &bindings);
     fold_literal_hash_reads(&mut body);
-    body
+    Some(body)
+}
+
+/// True for the call-site expression that supplies keyword arguments —
+/// a trailing bare-kwargs Hash (`only: [:index]`, `KeywordHashNode` in
+/// the Ruby parser) or an explicit `**`-splat. An explicit `{...} =>`
+/// Hash literal (`kwargs: false`) is a plain positional argument, not
+/// this — see `ExprNode::Hash`'s doc.
+fn is_keyword_producer(e: &crate::expr::Expr) -> bool {
+    matches!(
+        &*e.node,
+        crate::expr::ExprNode::Hash { kwargs: true, .. } | crate::expr::ExprNode::KeywordSplat { .. }
+    )
+}
+
+/// `substitute_params`'s binding when the macro declares at least one
+/// NAMED keyword parameter (kept honest or flattened — see
+/// `has_named_keyword`'s comment at the call site). Binds the way Ruby
+/// does: positionals from the call's positional args (required,
+/// optional-with-default, and at most one `*rest` gathering the
+/// middle); named keywords from the call's trailing keyword producer BY
+/// NAME, applying defaults when the caller omits one; a trailing
+/// `**rest` (kept honest or flattened to `from_kwrest`) collects
+/// whatever keys the named params didn't consume.
+///
+/// Returns `None` — refuse the macro, caller keeps the gap — the moment
+/// a shape can't be read back statically: a required keyword the call
+/// omits, an unknown keyword with no `**rest` to catch it, a keyword
+/// producer that isn't a literal Hash (names unreadable), a computed
+/// key (might be any name), or too many/few positional arguments. Never
+/// guesses.
+fn bind_params_by_name(
+    macro_def: &crate::dialect::MethodDef,
+    args: &[crate::expr::Expr],
+    extracted: &[(crate::ident::Symbol, crate::expr::Expr)],
+    span: crate::span::Span,
+) -> Option<Vec<(crate::ident::Symbol, crate::expr::Expr)>> {
+    use crate::expr::{Expr, ExprNode, Literal};
+
+    let remaining: Vec<&crate::dialect::Param> = macro_def
+        .params
+        .iter()
+        .filter(|p| !extracted.iter().any(|(n, _)| n == &p.name))
+        .collect();
+
+    // A real `**kwrest` (`p.keyword && p.rest`) or one `library_class`
+    // flattened to a positional default of `{}` (`p.from_kwrest`) — same
+    // binding either way, only the emitted shape differs.
+    let is_kwrest = |p: &crate::dialect::Param| (p.keyword && p.rest) || p.from_kwrest;
+    // A named keyword (`sunset: nil`, required `at:`), kept honest or
+    // flattened to a positional default — see `has_named_keyword`.
+    let is_named_keyword = |p: &crate::dialect::Param| (p.keyword && !p.rest) || p.from_keyword;
+
+    let positional_params: Vec<&crate::dialect::Param> = remaining
+        .iter()
+        .copied()
+        .filter(|p| !is_kwrest(p) && !is_named_keyword(p))
+        .collect();
+    let named_keyword_params: Vec<&crate::dialect::Param> =
+        remaining.iter().copied().filter(|p| is_named_keyword(p)).collect();
+    let kwrest_param: Option<&crate::dialect::Param> = remaining.iter().copied().find(|p| is_kwrest(p));
+
+    // The call's trailing keyword producer, split off the positional
+    // args it does not belong to.
+    let (positional_args, kw_source): (&[Expr], Option<&Expr>) = match args.last() {
+        Some(last) if is_keyword_producer(last) => (&args[..args.len() - 1], Some(last)),
+        _ => (args, None),
+    };
+
+    // A positional `*splat` at the call site (`retire_endpoint *dates,
+    // only: [:index]`) has an element count that isn't known here —
+    // binding it to a single param slot would guess (and the resulting
+    // body would read `headers['Deprecation'] = *dates`, which isn't
+    // what Ruby assigns). Refuse rather than guess; the only splat this
+    // function spreads is the literal-array one `substitute_params`
+    // already handles for the `extract_options!` rest, above.
+    if positional_args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. })) {
+        return None;
+    }
+
+    // --- positional: required / optional-with-default / one `*rest` ---
+    let rest_pos = positional_params.iter().position(|p| p.rest && !p.keyword);
+    let mut positional_bindings: Vec<(crate::ident::Symbol, Expr)> = Vec::new();
+    if let Some(rest_pos) = rest_pos {
+        let leading = &positional_params[..rest_pos];
+        let rest_param = positional_params[rest_pos];
+        let posts = &positional_params[rest_pos + 1..];
+        if positional_args.len() < posts.len() {
+            return None; // not enough args left for the required posts
+        }
+        let split = positional_args.len() - posts.len();
+        let (for_leading_and_rest, for_posts) = positional_args.split_at(split);
+        let mut cursor = 0;
+        for p in leading {
+            if cursor < for_leading_and_rest.len() {
+                positional_bindings.push((p.name.clone(), for_leading_and_rest[cursor].clone()));
+                cursor += 1;
+            } else if let Some(default) = &p.default {
+                positional_bindings.push((p.name.clone(), default.clone()));
+            } else {
+                return None; // a required positional the call doesn't supply
+            }
+        }
+        let rest_elements: Vec<Expr> = for_leading_and_rest[cursor..].to_vec();
+        positional_bindings.push((
+            rest_param.name.clone(),
+            Expr::new(span, ExprNode::Array { elements: rest_elements, style: Default::default() }),
+        ));
+        for (p, a) in posts.iter().zip(for_posts.iter()) {
+            positional_bindings.push((p.name.clone(), a.clone()));
+        }
+    } else {
+        if positional_args.len() > positional_params.len() {
+            return None; // too many positional arguments
+        }
+        let mut cursor = 0;
+        for p in &positional_params {
+            if cursor < positional_args.len() {
+                positional_bindings.push((p.name.clone(), positional_args[cursor].clone()));
+                cursor += 1;
+            } else if let Some(default) = &p.default {
+                positional_bindings.push((p.name.clone(), default.clone()));
+            } else {
+                return None; // a required positional the call doesn't supply
+            }
+        }
+    }
+
+    // --- keyword: named params by name, `**rest` gets the leftovers ---
+    let entries: Vec<(Expr, Expr)> = match kw_source {
+        None => Vec::new(),
+        Some(src) => {
+            let hash_entries = match &*src.node {
+                ExprNode::Hash { entries, .. } => Some(entries),
+                ExprNode::KeywordSplat { value } => match &*value.node {
+                    ExprNode::Hash { entries, .. } => Some(entries),
+                    // A forwarded, non-literal keyword bundle (`**var`):
+                    // the names it carries aren't known here, and a
+                    // named param needs its name — refuse rather than
+                    // guess which key is which.
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(hash_entries) = hash_entries else { return None };
+            // A computed key might be any name — same reason.
+            if hash_entries
+                .iter()
+                .any(|(k, _)| !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } }))
+            {
+                return None;
+            }
+            hash_entries.clone()
+        }
+    };
+    let key_name = |e: &Expr| match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let mut consumed = vec![false; entries.len()];
+    let mut keyword_bindings: Vec<(crate::ident::Symbol, Expr)> = Vec::new();
+    for p in &named_keyword_params {
+        // A repeated key's LAST entry wins, as Ruby's own Hash literal
+        // construction already collapsed it by the time the call runs.
+        let found = entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(i, (k, _))| !consumed[*i] && key_name(k).as_ref() == Some(&p.name));
+        match found {
+            Some((_, (_, v))) => {
+                // Every entry sharing this name is spent, not just the
+                // last one: Ruby's own Hash literal construction already
+                // collapsed the earlier duplicates by the time the call
+                // runs, so none of them is real data left over for
+                // `**rest` — only the bound value is.
+                for (j, (k, _)) in entries.iter().enumerate() {
+                    if key_name(k).as_ref() == Some(&p.name) {
+                        consumed[j] = true;
+                    }
+                }
+                keyword_bindings.push((p.name.clone(), v.clone()));
+            }
+            None => match &p.default {
+                Some(default) => keyword_bindings.push((p.name.clone(), default.clone())),
+                None => return None, // a required keyword the call omits
+            },
+        }
+    }
+    let leftover: Vec<(Expr, Expr)> = entries
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !consumed[*i])
+        .map(|(_, kv)| kv.clone())
+        .collect();
+    match kwrest_param {
+        Some(p) => {
+            // An empty leftover still needs a value bound to the kwrest
+            // param, but `kwargs: true` (bare trailing-kwargs form) on
+            // zero entries emits nothing at all — wrapped in a `**`
+            // splat at the call site, that's `before_action(**)`, which
+            // `ruby -c` refuses to parse. `kwargs: false` emits the
+            // explicit `{}` a double-splat can actually take.
+            let kwargs = !leftover.is_empty();
+            keyword_bindings
+                .push((p.name.clone(), Expr::new(span, ExprNode::Hash { entries: leftover, kwargs })));
+        }
+        // A keyword the call passes that no named param claims, and
+        // nothing left to catch it — the macro's `**rest` is gone, the
+        // keyword wouldn't go anywhere real Ruby wouldn't error on too.
+        None if !leftover.is_empty() => return None,
+        None => {}
+    }
+
+    let mut bindings = positional_bindings;
+    bindings.extend(keyword_bindings);
+    Some(bindings)
 }
 
 /// `{only: [:a]}[:if]` → the value, or nil for an absent key — what the
@@ -3693,29 +4182,465 @@ enum MacroFilterItem {
 /// filter nor a recognized block-form one — the all-or-nothing contract
 /// `expand_class_body_macros` relies on to decide whether to expand the
 /// whole macro or keep it whole and ledgered.
+///
+/// A PREFIX of plain-local assignments (`stamp = "@#{date.to_datetime.to_i}"`,
+/// `sunset = sunset&.to_date&.httpdate` — the latter reassigning, and so
+/// shadowing, a bound parameter of the same name) is folded away before any
+/// statement is tried as a filter: each is evaluated with
+/// `fold_local_value` against the locals already folded, and the result —
+/// always a LITERAL, never executed at runtime (this crate's Spinel target
+/// has no `to_datetime`/`httpdate` to call) — both drops the statement and
+/// extends the environment later statements (including the filter's own
+/// block body, via `substitute_locals`) read it back from. Two
+/// environments, not one: `by_name` for a genuinely new local (`stamp` is
+/// never a parameter, so its `Var` reads survive substitution untouched);
+/// `by_span` for one that shadows a parameter (`sunset` IS one, so
+/// `substitute_params` already replaced every read of it, body-wide, with
+/// a clone of the call's value — carrying that clone's span — before this
+/// function ever ran; see `by_span`'s own doc at its declaration). Which
+/// case applies is decided by `param_names` — the macro's OWN declared
+/// parameter names, threaded in from the call site's `macro_def` — never
+/// by shape alone: a local's value can reach a parameter's literal clone
+/// mid-expression (`stamp`'s `date.to_datetime.to_i` does, for the date
+/// parameter) without the ASSIGNMENT itself reassigning that parameter,
+/// and `by_span` must stay empty for that local or a later, unrelated
+/// read sharing the same span (`date` read again in the filter body)
+/// would be wrongly rewritten to `stamp`'s value instead of its own. The
+/// first statement that is not a plain-local assignment is tried as the
+/// filter the existing two branches already read, with every local folded
+/// so far substituted in first; anything after it — another local
+/// assignment or not — hits the same `return None` an unrecognized
+/// statement always has, since neither branch accepts an `Assign`. A
+/// local whose value cannot be reduced to a literal (an unknown method, a
+/// non-literal date) refuses the whole macro the same way, rather than
+/// leave the free variable for
+/// `filter_from_send`/`block_filter_from_macro_stmt` to choke on.
+///
+/// A macro with no such prefix (every macro this crate recognized before
+/// this environment existed) never populates either environment, so every
+/// statement is tried exactly as before — `substitute_locals` is not even
+/// called — which is what keeps #680's and afc2462f's expansions
+/// byte-identical.
+/// Why `expand_macro_filters` refused a macro body. `expand_class_body_
+/// macros` reads this to pick the right message: `NextRestructure` is
+/// narrow enough to name the actual reason (and, unlike every other
+/// refusal here, to hard-fail strict mode — see its call site), while
+/// `NotFilterDsl` keeps the generic message and always-keep-whole
+/// behavior every other refusal already had.
+enum MacroExpansionRefusal {
+    /// A block-form filter statement whose body holds a `next`
+    /// `restructure_next_in_block` can't lower to an if/unless — the
+    /// same cause `ingest::controller::next_restructure_refusal` names
+    /// for a hand-written block, here reached through a concern macro's
+    /// own `before_action`/`after_action`/`prepend_before_action`
+    /// (`method`) instead. Narrow: never raised for any OTHER reason
+    /// `block_filter_from_macro_stmt` refuses a block (an unreadable
+    /// `only:`/`except:`/`if:`/`unless:` entry, a shadowed block
+    /// parameter, …) — those stay `NotFilterDsl`, same as before this
+    /// variant existed.
+    NextRestructure { method: crate::Symbol },
+    /// Every other refusal this function already had: an unreducible
+    /// local, a statement that's neither Symbol-target nor block-form
+    /// filter DSL, one after the filter, or no filter at all.
+    NotFilterDsl,
+}
+
 fn expand_macro_filters(
     body: &crate::expr::Expr,
     module: &crate::ident::ClassId,
-) -> Option<Vec<MacroFilterItem>> {
-    use crate::expr::ExprNode;
+    param_names: &[crate::Symbol],
+) -> Result<Vec<MacroFilterItem>, MacroExpansionRefusal> {
+    use crate::expr::{ExprNode, LValue};
 
     let mut out = Vec::new();
     let statements: Vec<&crate::expr::Expr> = match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
     };
+    let mut by_name: Vec<(crate::Symbol, crate::expr::Expr)> = Vec::new();
+    // A local that REASSIGNS a macro parameter (`sunset = sunset&.…`)
+    // shadows the bound value — but `substitute_params` already replaced
+    // every read of that parameter, body-wide, with a CLONE of its
+    // call-site value, before this function ever runs (and must keep
+    // doing so unmodified — see this function's own doc). A clone keeps
+    // its original's span, and two DISTINCT source literals never share
+    // one, so every surviving occurrence of "a read of the shadowed
+    // parameter" in a LATER statement is identifiable by span alone:
+    // `const_fold_expr` records the span of every `Lit` leaf it folds
+    // through, and the ones gathered while folding a reassignment's
+    // value are exactly the parameter's pre-fold occurrences, wherever
+    // they still appear. `by_name` alone (a `Var` named `sunset`) finds
+    // nothing there, because there is no `Var` left to find.
+    let mut by_span: Vec<(crate::span::Span, crate::expr::Expr)> = Vec::new();
+    let mut seen_filter = false;
     for stmt in statements {
-        if let Some(filters) = filter_from_send(stmt, module) {
+        if !seen_filter {
+            if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*stmt.node {
+                let mut consumed_spans = Vec::new();
+                match fold_local_value(value, &by_name, &mut consumed_spans) {
+                    Some(lit) => {
+                        by_name.retain(|(n, _)| n != name);
+                        by_name.push((name.clone(), lit.clone()));
+                        // Only a local that REASSIGNS a macro parameter
+                        // (its name is one of `param_names`) has anything
+                        // to find by span: `substitute_params` replaced
+                        // every read of THAT parameter, body-wide, with a
+                        // clone of its call-site value before this
+                        // function ever ran, so matching by span finds
+                        // those surviving clones. A plain new local
+                        // (`stamp`, never a parameter) binds by name only
+                        // — its value's `consumed_spans` are some OTHER
+                        // read's literal (e.g. `date`'s), and registering
+                        // them here would wrongly rewrite that other
+                        // read's later occurrences to `stamp`'s value.
+                        if param_names.contains(name) {
+                            for span in consumed_spans {
+                                by_span.retain(|(s, _)| *s != span);
+                                by_span.push((span, lit.clone()));
+                            }
+                        }
+                        continue;
+                    }
+                    // A local that doesn't reduce to a literal is a gap,
+                    // same as any other statement that isn't filter DSL:
+                    // refuse the whole macro rather than leave it a free
+                    // variable downstream.
+                    None => return Err(MacroExpansionRefusal::NotFilterDsl),
+                }
+            }
+        }
+        let substituted;
+        let candidate: &crate::expr::Expr = if by_name.is_empty() && by_span.is_empty() {
+            stmt
+        } else {
+            substituted = {
+                let mut s = stmt.clone();
+                substitute_locals(&mut s, &by_name, &by_span);
+                s
+            };
+            &substituted
+        };
+        if let Some(filters) = filter_from_send(candidate, module) {
             out.extend(filters.into_iter().map(MacroFilterItem::Filter));
+            seen_filter = true;
             continue;
         }
-        if let Some(block) = block_filter_from_macro_stmt(stmt) {
+        // `block_filter_from_macro_stmt` doesn't itself check whether the
+        // block's `next` (if any) can be restructured — that's
+        // `lambda_filter_target`'s job, reached only later at lowering
+        // time, by which point `block_filter_from_macro_stmt` has
+        // already succeeded at reconstructing the block and this macro
+        // would otherwise be accepted as expanded with no gap recorded
+        // at all. Catch that one cause here, BEFORE accepting the
+        // block, narrowly, so it refuses with a located message instead
+        // of silently riding through as a successfully expanded filter.
+        if let ExprNode::Send { recv: None, method, block: Some(_), .. } = &*candidate.node {
+            if super::controller::is_lambda_filter_macro(method.as_str())
+                && super::controller::next_restructure_refusal(candidate)
+            {
+                return Err(MacroExpansionRefusal::NextRestructure { method: method.clone() });
+            }
+        }
+        if let Some(block) = block_filter_from_macro_stmt(candidate) {
             out.push(MacroFilterItem::Block(block));
+            seen_filter = true;
             continue;
         }
+        return Err(MacroExpansionRefusal::NotFilterDsl);
+    }
+    if out.is_empty() { Err(MacroExpansionRefusal::NotFilterDsl) } else { Ok(out) }
+}
+
+/// Replace every `Var` read in `expr` naming one of `by_name`'s locals,
+/// and every `Lit` whose span is one of `by_span`'s, with the literal it
+/// folded to — the same blind, scope-unaware full-tree rewrite
+/// `substitute_params::replace` already does for macro parameters, run a
+/// second time for the locals `expand_macro_filters` folds on top of
+/// that substitution. Safe for the same reason `replace` is: `by_name`'s
+/// names are the macro body's own locals, not ones a nested block could
+/// re-declare out from under it in any of the shapes this crate expands
+/// (a reused block-param name would shadow correctly in real Ruby and
+/// wrongly here, same pre-existing caveat `rewrite_var_to_self_ref`
+/// documents); `by_span`'s spans each identify one SOURCE location — two
+/// distinct ones never collide, and two clones of the same one (which is
+/// exactly what a shadowed parameter's surviving occurrences are) always
+/// do.
+fn substitute_locals(
+    expr: &mut crate::expr::Expr,
+    by_name: &[(crate::Symbol, crate::expr::Expr)],
+    by_span: &[(crate::span::Span, crate::expr::Expr)],
+) {
+    use crate::expr::ExprNode;
+    match &*expr.node {
+        ExprNode::Var { name, .. } => {
+            if let Some((_, value)) = by_name.iter().rev().find(|(n, _)| n == name) {
+                *expr = value.clone();
+                return;
+            }
+        }
+        ExprNode::Lit { .. } => {
+            if let Some((_, value)) = by_span.iter().rev().find(|(s, _)| *s == expr.span) {
+                *expr = value.clone();
+                return;
+            }
+        }
+        _ => {}
+    }
+    expr.node.for_each_child_mut(&mut |c| substitute_locals(c, by_name, by_span));
+}
+
+/// A local assignment's value, folded to a literal against the locals
+/// already bound in `by_name` — `None` if any part of it cannot be
+/// reduced, which `expand_macro_filters` reads as "refuse the macro".
+/// Every `Lit` leaf the fold passes through (its own value, or one
+/// reached via a chained method call) is appended to `consumed_spans` —
+/// see `by_span`'s doc at its declaration in `expand_macro_filters` for
+/// why that identifies a shadowed parameter's other occurrences.
+fn fold_local_value(
+    value: &crate::expr::Expr,
+    by_name: &[(crate::Symbol, crate::expr::Expr)],
+    consumed_spans: &mut Vec<crate::span::Span>,
+) -> Option<crate::expr::Expr> {
+    let mut scratch: Vec<(crate::Symbol, FoldedValue)> =
+        by_name.iter().map(|(n, e)| (n.clone(), FoldedValue::Lit(e.clone()))).collect();
+    match const_fold_expr(value, &mut scratch, consumed_spans)? {
+        FoldedValue::Lit(e) => Some(e),
+        // `.to_datetime`/`.to_date` with no following `.to_i`/`.httpdate`
+        // to finish the chain: not a value this macro-folding DSL
+        // understands as terminal, so the local can't be bound.
+        FoldedValue::DateTimeStr(_) | FoldedValue::DateStr(_) => None,
+    }
+}
+
+/// An intermediate result of folding a macro-local's value at compile
+/// time. `Lit` is a real, emittable Ruby literal; the other two variants
+/// exist only to carry a validated `YYYY-MM-DD` string between the two
+/// links of the one two-call chain each models (`.to_datetime.to_i`,
+/// `.to_date.httpdate`) — see `fold_date_method`. Neither survives past
+/// `fold_local_value`: a local whose value is still one of them (the
+/// chain's second call never came) refuses the macro rather than bind a
+/// value this crate has no literal shape for.
+#[derive(Clone)]
+enum FoldedValue {
+    Lit(crate::expr::Expr),
+    DateTimeStr(String),
+    DateStr(String),
+}
+
+impl FoldedValue {
+    /// Ruby truthiness: `nil` and `false` are the only falsy values,
+    /// which only `Lit` can ever hold (the date-chain intermediates are
+    /// always truthy, same as any other real object).
+    fn is_truthy(&self) -> bool {
+        use crate::expr::{ExprNode, Literal};
+        match self {
+            FoldedValue::Lit(e) => !matches!(
+                &*e.node,
+                ExprNode::Lit { value: Literal::Nil } | ExprNode::Lit { value: Literal::Bool { value: false } }
+            ),
+            FoldedValue::DateTimeStr(_) | FoldedValue::DateStr(_) => true,
+        }
+    }
+}
+
+/// Reduce `expr` to a `FoldedValue` at compile time, reading `env` (both
+/// the macro's folded locals and, mid-expression, the safe-navigation
+/// temps `&.` desugars to — see `ingest::expr`'s `__safe_nav<pos>`
+/// locals) for `Var` reads, and pushing new ones for `Assign`. Only the
+/// shapes `fold_local_value`'s two callers actually need are modeled —
+/// everything else is a refusal, never a guess, so a date-folding mistake
+/// is a missed expansion rather than a wrong `Deprecation`/`Sunset`
+/// header value.
+///
+/// Every `Lit` leaf reached — whether written directly in the macro
+/// source or substituted in for a parameter read — appends its span to
+/// `consumed_spans`; see `by_span`'s doc at its declaration in
+/// `expand_macro_filters` for why.
+fn const_fold_expr(
+    expr: &crate::expr::Expr,
+    env: &mut Vec<(crate::Symbol, FoldedValue)>,
+    consumed_spans: &mut Vec<crate::span::Span>,
+) -> Option<FoldedValue> {
+    use crate::expr::{BoolOpKind, ExprNode, LValue};
+
+    match &*expr.node {
+        ExprNode::Lit { .. } => {
+            consumed_spans.push(expr.span);
+            Some(FoldedValue::Lit(expr.clone()))
+        }
+        ExprNode::Var { name, .. } => {
+            env.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v.clone())
+        }
+        ExprNode::StringInterp { parts } => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    crate::expr::InterpPart::Text { value } => out.push_str(value),
+                    crate::expr::InterpPart::Expr { expr } => {
+                        let FoldedValue::Lit(lit) = const_fold_expr(expr, env, consumed_spans)? else {
+                            // An interpolated `.to_date`/`.to_datetime`
+                            // with no finishing call — not a string this
+                            // DSL can render.
+                            return None;
+                        };
+                        out.push_str(&literal_to_s(&lit)?);
+                    }
+                }
+            }
+            Some(FoldedValue::Lit(crate::expr::Expr::new(
+                expr.span,
+                ExprNode::Lit { value: crate::expr::Literal::Str { value: out } },
+            )))
+        }
+        // `nil&.x` / `false&.x` (Ruby's only safe-nav-guarded values) —
+        // `ingest::expr` desugars `a&.b` to `a && a.b` (or
+        // `(tmp = a) && tmp.b` for a non-plain-read receiver), so a
+        // literal-nil/false left operand already means the right-hand
+        // call never ran; short-circuit the same way here rather than
+        // fold into a call on nil.
+        ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
+            let l = const_fold_expr(left, env, consumed_spans)?;
+            if !l.is_truthy() {
+                return Some(l);
+            }
+            const_fold_expr(right, env, consumed_spans)
+        }
+        // The safe-nav temp's own binding (`__safe_nav17 = <recv>`):
+        // fold the value and extend the SCRATCH env the same way a
+        // macro local extends the persistent one, so the paired read a
+        // few nodes over resolves.
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            let v = const_fold_expr(value, env, consumed_spans)?;
+            env.push((name.clone(), v.clone()));
+            Some(v)
+        }
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. } if args.is_empty() => {
+            let recv = const_fold_expr(recv, env, consumed_spans)?;
+            fold_date_method(&recv, method.as_str(), expr.span)
+        }
+        _ => None,
+    }
+}
+
+/// The one method pair each of `FoldedValue::DateTimeStr`/`DateStr`
+/// exists for: `'YYYY-MM-DD'.to_datetime.to_i` (Integer Unix seconds at
+/// UTC midnight — what `String#to_datetime` parses a date-only string
+/// to, offset-less so UTC, per Rails 8.1/ActiveSupport) and
+/// `'YYYY-MM-DD'.to_date.httpdate` (`Date#httpdate`'s RFC 2822 string,
+/// always `00:00:00 GMT` — a `Date` carries no time of day). Both calls
+/// on anything else — a non-literal receiver, extra args, a method this
+/// chain doesn't use — refuse rather than guess.
+fn fold_date_method(recv: &FoldedValue, method: &str, span: crate::span::Span) -> Option<FoldedValue> {
+    use crate::expr::{ExprNode, Literal};
+
+    match (recv, method) {
+        (FoldedValue::Lit(e), "to_datetime") => {
+            let ExprNode::Lit { value: Literal::Str { value } } = &*e.node else { return None };
+            parse_ymd(value)?;
+            Some(FoldedValue::DateTimeStr(value.clone()))
+        }
+        (FoldedValue::Lit(e), "to_date") => {
+            let ExprNode::Lit { value: Literal::Str { value } } = &*e.node else { return None };
+            parse_ymd(value)?;
+            Some(FoldedValue::DateStr(value.clone()))
+        }
+        (FoldedValue::DateTimeStr(date), "to_i") => {
+            let (y, m, d) = parse_ymd(date)?;
+            let seconds = days_from_civil(y, m, d) * 86_400;
+            Some(FoldedValue::Lit(crate::expr::Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Int { value: seconds } },
+            )))
+        }
+        (FoldedValue::DateStr(date), "httpdate") => {
+            let (y, m, d) = parse_ymd(date)?;
+            Some(FoldedValue::Lit(crate::expr::Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Str { value: format_httpdate(y, m, d) } },
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// A Ruby literal's `to_s` — what a `#{}` interpolation actually renders.
+/// Only the shapes `fold_date_method`'s own results (and a literal
+/// already in the body) can produce: `Integer#to_s` and (vacuously)
+/// `String#to_s`. Not a general `Object#to_s`: a receiver this crate
+/// cannot fold has already refused the macro higher up.
+fn literal_to_s(e: &crate::expr::Expr) -> Option<String> {
+    use crate::expr::{ExprNode, Literal};
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Int { value } } => Some(value.to_string()),
+        ExprNode::Lit { value: Literal::Nil } => Some(String::new()),
+        ExprNode::Lit { value: Literal::Bool { value } } => Some(value.to_string()),
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    }
+}
+
+/// Strict `YYYY-MM-DD` parse (four digits, `-`, two digits, `-`, two
+/// digits — nothing else, no the loose leading-digits `String#to_i`
+/// would accept) plus calendar validity (real month, real day for that
+/// month/year, leap years included). `retire_endpoint`'s date arrives as
+/// a string literal from the controller's call site; a value this loose
+/// about its own shape is exactly where "fold a wrong header value"
+/// would come from; refusing is always the safe alternative.
+fn parse_ymd(s: &str) -> Option<(i64, u32, u32)> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
         return None;
     }
-    if out.is_empty() { None } else { Some(out) }
+    let digits = |r: std::ops::Range<usize>| -> Option<u32> {
+        if s[r.clone()].bytes().all(|b| b.is_ascii_digit()) { s[r].parse().ok() } else { None }
+    };
+    let year = digits(0..4)? as i64;
+    let month = digits(5..7)?;
+    let day = digits(8..10)?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    if day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    const DAYS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if month == 2 && is_leap_year(year) { 29 } else { DAYS[(month - 1) as usize] }
+}
+
+/// Days since the Unix epoch (1970-01-01) for a proleptic-Gregorian
+/// civil date — Howard Hinnant's `days_from_civil`
+/// (<https://howardhinnant.github.io/date_algorithms.html>, public
+/// domain), the standard exact algorithm so this doesn't quietly drift
+/// from ActiveSupport on some year this crate's test dates don't cover.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (i64::from(m) + 9) % 12; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// `Date#httpdate`'s RFC 2822 rendering — `Thu, 01 Oct 2026 00:00:00
+/// GMT` — always midnight: a `Date` has no time component to carry.
+fn format_httpdate(y: i64, m: u32, d: u32) -> String {
+    const MONTHS: [&str; 12] =
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    // 1970-01-01 (day 0 of `days_from_civil`) was a Thursday.
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    let days = days_from_civil(y, m, d);
+    let weekday = WEEKDAYS[(days.rem_euclid(7)) as usize];
+    format!("{weekday}, {d:02} {month} {y:04} 00:00:00 GMT", month = MONTHS[(m - 1) as usize])
 }
 
 /// Try a macro-body statement (already parameter-substituted) as a
@@ -3904,7 +4829,7 @@ fn block_filter_from_macro_stmt(stmt: &crate::expr::Expr) -> Option<crate::expr:
 /// would read back as an EMPTY list, scoping the filter to no actions
 /// at all rather than refusing) — exactly the loose-parsing gap this
 /// function exists to keep `block_filter_from_macro_stmt` out of.
-fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
+pub(super) fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
     use crate::expr::ExprNode;
     match &*e.node {
         ExprNode::Array { elements, .. } => {
@@ -3945,7 +4870,7 @@ fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
 /// rather than rewriting scope-aware — no scope-aware rewrite exists
 /// here to tell a shadowed/reassigned binding from the filter block's
 /// own parameter.
-fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> bool {
+pub(super) fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> bool {
     use crate::expr::{ExprNode, LValue};
     match &*expr.node {
         ExprNode::Lambda { params, rest_param, block_param, .. } => {
@@ -3980,7 +4905,7 @@ fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> 
 
 /// Rewrite every read of `name` (a block's own declared parameter) to
 /// `SelfRef` — see `block_filter_from_macro_stmt`'s doc comment for why.
-fn rewrite_var_to_self_ref(expr: &mut crate::expr::Expr, name: &crate::ident::Symbol) {
+pub(super) fn rewrite_var_to_self_ref(expr: &mut crate::expr::Expr, name: &crate::ident::Symbol) {
     use crate::expr::ExprNode;
     if let ExprNode::Var { name: n, .. } = &*expr.node {
         if n == name {
@@ -4033,10 +4958,16 @@ fn fold_literal_if(expr: &mut crate::expr::Expr) {
     let ExprNode::If { cond, then_branch, else_branch } = &*expr.node else {
         return;
     };
-    let ExprNode::Lit { value: Literal::Bool { value } } = &*cond.node else {
-        return;
+    // Ruby's only two falsy values: `nil` is what a folded-away `sunset:`
+    // local leaves behind in `… if sunset` once `expand_macro_filters`
+    // has substituted the literal in — a guard that never had an `unless`
+    // counterpart to confuse it with.
+    let truthy = match &*cond.node {
+        ExprNode::Lit { value: Literal::Bool { value } } => *value,
+        ExprNode::Lit { value: Literal::Nil } => false,
+        _ => return,
     };
-    *expr = if *value { then_branch.clone() } else { else_branch.clone() };
+    *expr = if truthy { then_branch.clone() } else { else_branch.clone() };
 }
 
 /// `self.instance_exec(&<lambda>)` (receiver `SelfRef`, or implicit self)
@@ -7575,6 +8506,49 @@ fn extract_default_per_page(source: &[u8], file: &str) -> Option<u64> {
 /// controllers and are not read.
 ///
 /// `None` = Rails' class default (`header_or_legacy_token`).
+/// Does a module under `app/helpers` define `token_tag` as exactly `""`?
+fn app_helpers_blank_token_tag<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
+    fn blank_token_tag(node: &ruby_prism::Node<'_>) -> bool {
+        if let Some(def) = node.as_def_node() {
+            if def.name().as_slice() == b"token_tag" {
+                let Some(body) = def.body() else { return false };
+                let stmts: Vec<_> = match body.as_statements_node() {
+                    Some(s) => s.body().iter().collect(),
+                    None => vec![body],
+                };
+                return stmts.len() == 1
+                    && stmts[0].as_string_node().is_some_and(|s| s.unescaped().is_empty());
+            }
+            return false;
+        }
+        let mut found = false;
+        if let Some(m) = node.as_module_node() {
+            if let Some(b) = m.body() {
+                found = blank_token_tag(&b);
+            }
+        } else if let Some(c) = node.as_class_node() {
+            if let Some(b) = c.body() {
+                found = blank_token_tag(&b);
+            }
+        } else if let Some(s) = node.as_statements_node() {
+            found = s.body().iter().any(|n| blank_token_tag(&n));
+        } else if let Some(p) = node.as_program_node() {
+            found = blank_token_tag(&p.statements().as_node());
+        }
+        found
+    }
+    let helpers = dir.join("app/helpers");
+    if !vfs.is_dir(&helpers) {
+        return false;
+    }
+    let Ok(files) = read_rb_files(vfs, &helpers) else { return false };
+    files.iter().any(|file| {
+        let Ok(source) = vfs.read(file) else { return false };
+        let result = super::prism::parse(&source, &file.display().to_string());
+        blank_token_tag(&result.node())
+    })
+}
+
 fn read_forgery_verification_strategy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
     fn strategy_value(text: &str) -> Option<String> {
         let v = text.trim().trim_start_matches(':');
@@ -7846,6 +8820,80 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
             .unwrap_or(usize::MAX)
     });
     Ok(out)
+}
+
+/// Each `test/test_helpers/` file that is not spliced into every test
+/// case, as (its top-level module, every class the file defines). The
+/// file is read whole because a helper module can carry what a method
+/// splice cannot: campfire's `PushServiceTestHelper` defines a nested
+/// `Server` class and module methods with their own state.
+fn ingest_included_test_helper_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    shared: &[LibraryClass],
+) -> IngestResult<Vec<(crate::ident::ClassId, Vec<LibraryClass>)>> {
+    let helpers_dir = dir.join("test/test_helpers");
+    if !vfs.is_dir(&helpers_dir) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in read_rb_files(vfs, &helpers_dir)? {
+        let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
+        let Some(classes) =
+            unwrap_or_record(ingest_library_classes(&source, &entry.display().to_string()))?
+        else {
+            continue;
+        };
+        let Some(top) = classes.iter().find(|c| c.is_module && !c.name.0.as_str().contains("::")) else {
+            continue;
+        };
+        if shared.iter().any(|lc| lc.name == top.name) {
+            continue;
+        }
+        let top = top.name.clone();
+        let mut classes = classes;
+        for lc in &mut classes {
+            for m in &mut lc.methods {
+                restore_source_keywords(&mut m.params);
+            }
+        }
+        out.push((top, classes));
+    }
+    Ok(out)
+}
+
+/// Undo the library-class flattening of keyword parameters: this code
+/// runs only as the test-side Ruby it was written as, called with the
+/// keywords its own source passes (`Server.new(**options)`,
+/// `server.hung_up?(within: 1)`), so the parameters stay keywords.
+fn restore_source_keywords(params: &mut [crate::dialect::Param]) {
+    for p in params {
+        if p.from_keyword {
+            p.from_keyword = false;
+            p.keyword = true;
+        } else if p.from_kwrest {
+            p.from_kwrest = false;
+            p.keyword = true;
+            p.rest = true;
+            p.default = None;
+        }
+    }
+}
+
+/// A test class that `include`s one of those modules gets the module's
+/// file as inner classes, so the include resolves in the test's own
+/// emitted file.
+fn carry_included_test_helpers(tm: &mut TestModule, helpers: &[(crate::ident::ClassId, Vec<LibraryClass>)]) {
+    for (module, classes) in helpers {
+        if !tm.includes.contains(module) {
+            continue;
+        }
+        for lc in classes {
+            if !tm.inner_classes.iter().any(|c| c.name == lc.name) {
+                tm.inner_classes.push(lc.clone());
+            }
+        }
+    }
 }
 
 /// Modules a file mixes into the test cases through a top-level

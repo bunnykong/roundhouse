@@ -944,6 +944,12 @@ impl LibraryClass {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "template", rename_all = "snake_case")]
 pub enum LibraryClassOrigin {
+    /// Methods lifted from a constant-assigned `Data.define` block. The call span
+    /// links this class to its owner's constant so emission restores the block
+    /// without changing its declaration order or lexical scope.
+    DataFactory {
+        declaration_span: Span,
+    },
     /// Validated Alba source declarations expanded to ordinary methods before
     /// inference. Analysis checks each constructor site, not a joined type
     /// alone. This remains a source library class, not a model/params sibling.
@@ -974,6 +980,12 @@ pub enum LibraryClassOrigin {
     StructSuperclass {
         owner: Symbol,
         members: Vec<Symbol>,
+    },
+    /// The class a `X = Struct.new(:a, :b)` constant in a class or
+    /// module body defines, named `<owner>::X`.
+    StructConstant {
+        members: Vec<Symbol>,
+        keyword_init: bool,
     },
 }
 
@@ -1728,6 +1740,17 @@ pub enum RouteSpec {
         /// (`PartsController`) still come from `name`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// Per-param regex restrictions inherited from an enclosing
+        /// `constraints(id: /.../) do … end` block (propagated at
+        /// ingest; see `merge_outer_constraints`). Applies to whichever
+        /// standard action's path carries the matching param name — in
+        /// practice `id`, so `show`/`edit`/`update`/`destroy` but not
+        /// `index`/`new`/`create`. Rails also accepts a `resources
+        /// :x, constraints: { id: /.../ }` kwarg directly; that inline
+        /// spelling is not parsed yet (a separate, pre-existing gap),
+        /// only the block form this field carries.
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        constraints: IndexMap<Symbol, String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with

@@ -40,6 +40,7 @@ pub mod library_extras;
 pub mod model_to_library;
 pub mod routes;
 pub mod routes_to_library;
+pub mod segment_pattern;
 pub mod scope_chain;
 pub mod schema_to_library;
 pub mod seeds_to_library;
@@ -77,6 +78,7 @@ pub mod class_body_new;
 pub mod mocha;
 pub mod webmock;
 pub mod global_id_locate;
+pub mod record_snapshot;
 pub mod array_ordinal;
 pub mod each_with_index;
 pub mod sti_is_a;
@@ -94,6 +96,9 @@ pub mod as_json_writer;
 pub mod as_json_super;
 pub mod parameterize;
 pub mod random_formatter;
+pub mod bigdecimal;
+pub mod range_enumerable;
+pub mod preloader;
 pub mod to_json;
 pub mod number_to_fs;
 pub mod string_inflections;
@@ -167,6 +172,7 @@ pub mod generated_write_guard;
 pub mod signed_id;
 pub(crate) mod secure_token;
 pub mod rich_text;
+pub mod known_super_forwarding;
 pub mod plain_text_attr;
 pub mod capture_inline;
 pub mod partial_qualify;
@@ -317,6 +323,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("number_to_fs", &[]),
     ("string_inflections", &[]),
     ("to_json", &[]),
+    ("preloader", &[]),
+    ("bigdecimal", &[]),
+    ("range_enumerable", &[]),
     ("csv_generate", &[]),
     ("presence_in", &[]),
     ("enumerable_ext", &[]),
@@ -376,6 +385,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // (`attribute_aliases` keys on `read_attribute`). Extra test
     // constant / inner-class surfaces stay try_guard-only.
     ("try_guard", &[]),
+    // `Model.instantiate(attrs)` / `name.constantize.instantiate(attrs)` —
+    // Rails' raw-attribute rebuild. Keys on `instantiate` and nothing
+    // another pass produces.
+    ("record_snapshot", &[]),
     // After time_calendar (fused earlier): `t.all_month` becomes the Range literal this splits out.
     // Stays sequential: rewrite plus a diagnostic walk that tracks
     // `where`/`find_by` condition position. Fusing the rewrite would
@@ -776,6 +789,9 @@ pub fn apply_post_analyze_lowerings(
     ran!("number_to_fs");
     ran!("string_inflections");
     ran!("to_json");
+    ran!("preloader");
+    ran!("bigdecimal");
+    ran!("range_enumerable");
     ran!("csv_generate");
     ran!("presence_in");
     ran!("enumerable_ext");
@@ -820,6 +836,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("global_id_locate");
     ran!("assoc_pluck");
     ran!("try_guard");
+    record_snapshot::apply_record_snapshot_lowering(app);
+    ran!("record_snapshot");
     diags.extend(where_range_split::apply_where_range_split(app));
     ran!("where_range_split");
     sti_scope::apply_sti_scope_lowering(app);

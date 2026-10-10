@@ -23,6 +23,7 @@
 # TS: better-sqlite3 / libsql; Rust: rusqlite; Go: modernc.org/sqlite).
 
 require "minitest/autorun"
+require "i18n"
 
 # Base64 / JSON are CRuby stdlib here (the framework tests run under
 # stock CRuby with no transpile step). Required up-front so
@@ -60,6 +61,7 @@ $LOAD_PATH.unshift(File.expand_path("..", FRAMEWORK_RUBY))
 end
 
 require "active_record"
+require "active_support_number_helper"
 require "action_view/slots"
 require "action_view/view_helpers"
 # The ruby-family ViewHelpers reopen (date_helper_test.rb). Same
@@ -89,6 +91,11 @@ require "action_controller/authenticity_token"
 # strict tables. Required from the helper rather than inline in the test
 # because the test-file emit drops inline requires.
 require "action_controller/cookies"
+# `response.cache_control`'s Hash-like surface (cache_control_test.rb).
+# Same reasoning as the CookieJar require above: a reopen outside the
+# strict-target tables, read by the ruby-family lanes alone, required
+# from the helper rather than inline in the test.
+require "action_controller/cache_control"
 # What `cookies.signed` signs WITH. cookies.rb names it but does not
 # require it — the production aggregator (runtime/ruby/action_controller
 # .rb) supplies it, and this helper is a second list of the same thing.

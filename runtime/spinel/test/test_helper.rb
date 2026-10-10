@@ -218,6 +218,59 @@ end
 # returns opaque tree/node handles — the contract is the surface, not
 # the handle shape.
 module Dom
+  # Markup as a list of tokens two equivalent documents share: each tag
+  # with its name downcased and its attributes sorted, each text run
+  # trimmed, whitespace-only runs dropped. `assert_dom_equal` compares
+  # these.
+  def self.equivalence_tokens(html)
+    out = []
+    html.scan(/<[^>]*>|[^<]+/).each do |tok|
+      if tok.start_with?("<")
+        out << tag_token(tok)
+      else
+        text = tok.strip
+        out << text unless text.empty?
+      end
+    end
+    out
+  end
+
+  # `<td  class="a" id=b>` -> `<td class="a" id="b">`; `</TD >` -> `</td>`.
+  def self.tag_token(tok)
+    inner = tok[1, tok.length - 2].to_s.strip
+    return "</#{inner[1, inner.length].to_s.strip.downcase}>" if inner.start_with?("/")
+    inner = inner[0, inner.length - 1].to_s.strip if inner.end_with?("/")
+    i = 0
+    i += 1 while i < inner.length && !" \t\n\r".include?(inner[i])
+    name = inner[0, i].to_s.downcase
+    attrs = []
+    while i < inner.length
+      i += 1 while i < inner.length && " \t\n\r".include?(inner[i])
+      break if i >= inner.length
+      start = i
+      i += 1 while i < inner.length && !" \t\n\r=".include?(inner[i])
+      key = inner[start, i - start].to_s.downcase
+      i += 1 while i < inner.length && " \t\n\r".include?(inner[i])
+      value = nil
+      if i < inner.length && inner[i] == "="
+        i += 1
+        i += 1 while i < inner.length && " \t\n\r".include?(inner[i])
+        quote = inner[i]
+        if quote == "\"" || quote == "'"
+          close = inner.index(quote, i + 1) || inner.length
+          value = inner[i + 1, close - i - 1].to_s
+          i = close + 1
+        else
+          start = i
+          i += 1 while i < inner.length && !" \t\n\r".include?(inner[i])
+          value = inner[start, i - start].to_s
+        end
+      end
+      attrs << (value.nil? ? key : "#{key}=\"#{value}\"")
+    end
+    attrs.empty? ? "<#{name}>" : "<#{name} #{attrs.sort.join(" ")}>"
+  end
+
   # Parse an HTML document. Stub: the document *is* its html string.
   def self.parse(html)
     html
@@ -582,6 +635,14 @@ module ActiveJob
       assert_enqueued_jobs(0, only: only, &block)
     end
 
+    # Rails' `clear_enqueued_jobs`: the `:test` adapter forgets what it
+    # holds, and a blockless assertion afterwards counts from here.
+    def clear_enqueued_jobs
+      ActiveJob.clear_held
+      @__jobs_from = ActiveJob.performed.length
+      nil
+    end
+
     # The suite runs under the `:test` adapter (see the block comment
     # above), so a job enqueued outside one of these blocks has NOT
     # run. Rails drains its queue here; we hold no arguments to replay,
@@ -721,7 +782,7 @@ class ActionResponse
   attr_reader :status, :body, :location, :flash, :cookies, :content_type
 
   def initialize(status:, body:, location:, flash:, cookies:, content_type: "text/html; charset=utf-8",
-                 cache_control_max_age: 0, cache_control_public: false, headers: {})
+                 cache_control_max_age: 0, cache_control_public: false, cache_control_store: nil, headers: {})
     @status   = status
     @body     = body
     @location = location
@@ -730,6 +791,11 @@ class ActionResponse
     @content_type = content_type
     @cache_control_max_age = cache_control_max_age
     @cache_control_public = cache_control_public
+    # The full typed store, when the caller has one — `cache_control`
+    # below reads EVERY field off it (no_store/private included), not
+    # just the two legacy ones. nil for `relation_find_test.rb`'s
+    # bare `ParsedBodyTest` responses, which never touch Cache-Control.
+    @cache_control_store = cache_control_store
     @extra_headers = headers
   end
 
@@ -757,20 +823,40 @@ class ActionResponse
     out
   end
 
-  # Rails' `response.cache_control` — the one place the two TYPED
-  # controller readers (see ActionController::Base) are re-assembled
-  # into the mixed Hash Rails hands back, because the subscript
-  # spelling is what a test writes:
+  # Rails' `response.cache_control` — the mixed Hash Rails hands back,
+  # because the subscript spelling is what a test writes:
   #
   #   assert_equal 1.year, response.cache_control[:max_age].to_i
   #   assert response.cache_control[:public]
+  #   assert response.cache_control[:no_store]
   #
-  # `:public` is ABSENT rather than false when the response is private,
-  # which is Rails' own shape and what makes the bare truthiness
-  # assertion above mean what it says.
+  # Reads every field off the full typed store when the response
+  # carries one — `:private` / `:no_store` included, not just the two
+  # legacy readers below. `:public` (and every other bool key) is
+  # ABSENT rather than false when unset, which is Rails' own shape and
+  # what makes a bare truthiness assertion like the ones above mean
+  # what it says.
+  #
+  # Falls back to the two legacy TYPED controller readers
+  # (ActionController::Base#cache_control_max_age / _public) when no
+  # store was given — `relation_find_test.rb`'s bare `ParsedBodyTest`
+  # responses construct one directly with neither.
   def cache_control
-    out = { max_age: @cache_control_max_age }
-    out[:public] = true if @cache_control_public
+    return { max_age: @cache_control_max_age, **(@cache_control_public ? { public: true } : {}) } if @cache_control_store.nil?
+
+    store = @cache_control_store
+    out = {}
+    out[:max_age] = store[:max_age] unless store[:max_age].nil?
+    out[:public] = true if store[:public]
+    out[:private] = true if store[:private]
+    out[:no_store] = true if store[:no_store]
+    out[:no_cache] = true if store[:no_cache]
+    out[:must_revalidate] = true if store[:must_revalidate]
+    out[:must_understand] = true if store[:must_understand]
+    out[:immutable] = true if store[:immutable]
+    out[:stale_while_revalidate] = store[:stale_while_revalidate] unless store[:stale_while_revalidate].nil?
+    out[:stale_if_error] = store[:stale_if_error] unless store[:stale_if_error].nil?
+    out[:extras] = store[:extras] unless store[:extras].empty?
     out
   end
 
@@ -829,21 +915,12 @@ end
 # a memory store and turns caching on around one block, through Rails'
 # four knobs, then asserts a cached page runs no presentation queries.
 # The runtime fragment-caches message partials in its own store; these
-# give the test the settings it reads and restores. `MemoryStore` is the
-# store class `Rails.cache` already answers with on this tree.
+# give the test the settings it reads and restores. A fresh
+# `ActiveSupport::Cache::MemoryStore` (runtime/active_support_cache.rb) is
+# a `Rails::Cache`, so it can stand in for `Rails.cache` here.
 module Rails
   def self.cache=(store)
     @cache_store = store
-  end
-end
-
-module ActiveSupport
-  module Cache
-    class MemoryStore
-      def self.new
-        Rails.cache.class.new
-      end
-    end
   end
 end
 
@@ -859,25 +936,11 @@ module ActionView
   end
 end
 
-module ActionController
-  class Base
-    def self.cache_store
-      @cache_store
-    end
-
-    def self.cache_store=(store)
-      @cache_store = store
-    end
-
-    def self.perform_caching
-      @perform_caching
-    end
-
-    def self.perform_caching=(value)
-      @perform_caching = value
-    end
-  end
-end
+# Rails' test environment does not cache fragments
+# (`config.action_controller.perform_caching = false` in a generated
+# `config/environments/test.rb`); a test turns it on around a block. The
+# knob itself is runtime/action_controller_fragment_caching.rb's.
+ActionController::Base.perform_caching = false
 
 # ---- Query assertions ------------------------------------------------
 #
@@ -1104,6 +1167,26 @@ class TestBase
     ensure
       travel_back
     end
+  end
+
+  # Minitest's `assert_nothing_raised`: the block runs, and an exception
+  # from it fails the test by propagating, as any error does here.
+  def assert_nothing_raised(*_exceptions)
+    yield
+  end
+
+  # rails-dom-testing's `assert_dom_equal`: the same markup up to
+  # attribute order and the whitespace between tags. Compared as tokens
+  # (`Dom.equivalence_tokens`), since this harness has no DOM to walk;
+  # entities are compared as written, not decoded.
+  def assert_dom_equal(expected, actual, msg = nil)
+    return if Dom.equivalence_tokens(expected.to_s) == Dom.equivalence_tokens(actual.to_s)
+    raise(msg || "assert_dom_equal failed: expected #{expected.inspect}, got #{actual.inspect}")
+  end
+
+  def assert_dom_not_equal(expected, actual, msg = nil)
+    return unless Dom.equivalence_tokens(expected.to_s) == Dom.equivalence_tokens(actual.to_s)
+    raise(msg || "assert_dom_not_equal failed: #{actual.inspect} is the same markup")
   end
 
   # `assert_match` left as a method — nilable value handling differs
@@ -1340,13 +1423,19 @@ module ActionDispatch
 end
 
 # The other three test-case parents a Rails app writes against.
-# `ActionView::TestCase` LOADS and nothing more so far: every test under
-# it fails on its first `view` — a per-test NoMethodError in the tally,
-# which is the honest reading of "the harness has no such thing yet",
-# and a better one than a NameError taking the file whole. The two
-# cable parents carry their harness below.
+# `ActionView::TestCase`: `view.<helper>` is bound at compile time
+# (`lower::view_test_case`); what the harness supplies is the controller
+# a helper reads (`controller.perform_caching`, campfire's
+# `MessagesHelper`). Rails builds an `ActionView::TestCase::TestController`
+# per test, an ActionController::Base, so a fresh Base is installed as
+# the current controller before each one. The two cable parents carry
+# their harness below.
 module ActionView
   class TestCase < TestBase
+    def setup
+      super
+      ActionController::Current.controller = ActionController::Base.new
+    end
   end
 end
 
@@ -1688,6 +1777,21 @@ module RequestDispatch
     @__https == true
   end
 
+  # Rails' integration `reset!`: a fresh session — no cookies, session or
+  # flash carried over, the default host, plain http — as a new browser
+  # would bring (campfire's fetch-metadata test signs in once per
+  # `Sec-Fetch-Site` value).
+  def reset!
+    @__session = nil
+    @__flash = nil
+    @__cookies = nil
+    @__response = nil
+    @__host = nil
+    @__https = false
+    sync_url_origin
+    nil
+  end
+
   def dispatch_request(method, path, params, headers = {}, as = nil)
     path = integration_request_path(path)
     require_relative "../config/routes"
@@ -1718,6 +1822,15 @@ module RequestDispatch
     # a query string reaches a test path at all: a route helper renders
     # its non-segment options into one.
     match_path, _, query = path.partition("?")
+    # A form's hidden `_method` carries the real verb (Rack's
+    # MethodOverride), exactly as both production dispatchers apply it
+    # after the body parse. campfire's fetch-metadata test posts
+    # `_method: "delete"` cross-site and expects the DELETE route's
+    # forgery refusal, not "No route matches POST".
+    if method == "POST" && params.is_a?(Hash)
+      override = (params[:_method] || params["_method"]).to_s.upcase
+      method = override if override == "PUT" || override == "PATCH" || override == "DELETE"
+    end
     matched = ActionDispatch::Router.match(
       method, match_path, [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table
     )
@@ -1867,21 +1980,35 @@ module RequestDispatch
     #
     # A GET/HEAD reads through one snapshot, as the dispatcher serves it,
     # so the suite exercises the same transaction shape production does.
+    #
+    # And under the query cache, as both production dispatchers and
+    # Rails' executor run a request: an identical SELECT inside one
+    # request replays (Rails logs it as CACHE, and its query counters
+    # skip it), so campfire's "looks up the boosters of all boosts at
+    # once" counts the same queries for two boosts as for three.
+    # Restored to what it found, so a request inside a test's own cached
+    # block leaves that block cached.
     snapshot = method == "GET" || method == "HEAD"
     if Db.in_lease?
+      cached = Db.query_cache_enabled?
+      Db.query_cache_begin unless cached
       Db.read_snapshot_begin if snapshot
       begin
         controller.process_action(matched.action)
       ensure
         Db.read_snapshot_end if snapshot
+        Db.query_cache_end unless cached
       end
     else
       Db.with_connection do
+        cached = Db.query_cache_enabled?
+        Db.query_cache_begin unless cached
         Db.read_snapshot_begin if snapshot
         begin
           controller.process_action(matched.action)
         ensure
           Db.read_snapshot_end if snapshot
+          Db.query_cache_end unless cached
         end
       end
     end
@@ -1890,6 +2017,10 @@ module RequestDispatch
     @__cookies = ActionController::CookieJar.new(
       accept_cookies(cookies.to_h, controller.cookies.pending)
     )
+    # Compose `Cache-Control` from whatever `response.cache_control`
+    # holds onto the buffered header store, right before the copy
+    # below — same contract as the two production wire paths.
+    controller.commit_cache_control!
     copied_headers = {}
     hi = 0
     hn = controller.headers.size
@@ -1906,6 +2037,7 @@ module RequestDispatch
       content_type: controller.content_type,
       cache_control_max_age: controller.cache_control_max_age,
       cache_control_public: controller.cache_control_public,
+      cache_control_store: controller.cache_control,
       headers:  copied_headers,
     )
     # Rails' OWN names, alongside the `__`-prefixed ones the harness
