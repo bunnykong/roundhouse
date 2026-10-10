@@ -745,3 +745,22 @@ end
         c.body
     );
 }
+
+#[test]
+fn a_positional_splat_this_binder_cannot_model_is_refused() {
+    // `*dates`'s element count is unknown here; binding it to the
+    // single `date` slot would be a guess (and would emit
+    // `headers['Deprecation'] = *dates`, which isn't what Ruby assigns).
+    let (app, gaps) = sunset_build("retire_endpoint(*dates, sunset: '2023-01-01')");
+    assert!(
+        has_gap(&gaps, "retire_endpoint"),
+        "a positional splat of unknown arity must not be guessed into one param: {gaps:?}"
+    );
+    let c = widgets_controller(&app);
+    assert!(
+        c.body.iter().any(|item| matches!(item, ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "retire_endpoint"))),
+        "a refused macro call must stay whole: {:?}",
+        c.body
+    );
+}

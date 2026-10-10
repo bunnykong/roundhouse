@@ -3774,6 +3774,17 @@ fn bind_params_by_name(
         _ => (args, None),
     };
 
+    // A positional `*splat` at the call site (`retire_endpoint *dates,
+    // only: [:index]`) has an element count that isn't known here —
+    // binding it to a single param slot would guess (and the resulting
+    // body would read `headers['Deprecation'] = *dates`, which isn't
+    // what Ruby assigns). Refuse rather than guess; the only splat this
+    // function spreads is the literal-array one `substitute_params`
+    // already handles for the `extract_options!` rest, above.
+    if positional_args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. })) {
+        return None;
+    }
+
     // --- positional: required / optional-with-default / one `*rest` ---
     let rest_pos = positional_params.iter().position(|p| p.rest && !p.keyword);
     let mut positional_bindings: Vec<(crate::ident::Symbol, Expr)> = Vec::new();
