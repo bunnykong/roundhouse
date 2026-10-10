@@ -6845,7 +6845,7 @@ fn names_constant(src: &str, konst: &str) -> bool {
                 || (matches!(b.get(tail), None | Some(b',' | b' ')) && {
                     let before = line[..at].trim_start();
                     before == "rescue " || before == "raise "
-                        || (before.starts_with("rescue ") && before.ends_with(", "))
+                        || (before.starts_with("rescue ") && before.trim_end().ends_with(','))
                 });
             if head_ok && tail_ok {
                 return true;
@@ -8154,6 +8154,7 @@ mod tests {
     fn a_bare_exception_class_is_named_only_in_rescue_or_raise_position() {
         assert!(names_constant("  rescue SocketError => e\n", "SocketError"));
         assert!(names_constant("  rescue Timeout::Error, SocketError\n", "SocketError"));
+        assert!(names_constant("  rescue Timeout::Error,SocketError\n", "SocketError"));
         assert!(names_constant("  raise SocketError, \"down\"\n", "SocketError"));
         assert!(names_constant("  raise SocketError\n", "SocketError"));
         assert!(!names_constant("  raise \"Timeout waiting for pool tasks\"\n", "Timeout"));
