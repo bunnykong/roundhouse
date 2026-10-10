@@ -26,6 +26,9 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+/// Ingest the first class declaration, or return `None` if there is none.
+/// Custom Data blocks require plural ingestion because their lifted methods
+/// belong to additional library classes; reject them rather than lose that IR.
 pub fn ingest_library_class(
     source: &[u8],
     file: &str,
@@ -1488,6 +1491,9 @@ fn walk_decl_body<'pr>(
     walk_decl_body_with_visibility(body, owner, file, mode, &visibility)
 }
 
+/// Collect a declaration's methods, constants, and supported DSL expansions
+/// using its resolved visibility. Custom Data constants retain only their call
+/// heads here; the factory collector owns lifting and validating their blocks.
 fn walk_decl_body_with_visibility<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
@@ -2470,6 +2476,8 @@ pub(crate) fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: Method
     }
 }
 
+/// Ingest a method with the ordinary library keyword-flattening policy.
+/// Callers that need to retain the keyword contract use the explicit variant.
 pub(super) fn ingest_library_method(
     def: &ruby_prism::DefNode<'_>,
     owner: &ClassId,
@@ -2478,6 +2486,9 @@ pub(super) fn ingest_library_method(
     ingest_library_method_with_keywords(def, owner, file, false)
 }
 
+/// Ingest a library method, optionally retaining keyword parameters even where
+/// ordinary library ingestion would flatten them. Data initializers require this
+/// to preserve Ruby's keyword binding and forwarding through `super`.
 pub(super) fn ingest_library_method_with_keywords(
     def: &ruby_prism::DefNode<'_>,
     owner: &ClassId,

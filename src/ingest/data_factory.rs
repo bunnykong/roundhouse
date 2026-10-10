@@ -9,6 +9,9 @@ use super::util::{constant_id_str, constant_path_of, flatten_statements, node_sp
 use super::visibility::{self, Visibility};
 use super::{IngestError, IngestResult, ingest_expr};
 
+/// Recognize a constant-assigned `Data.define` block containing definitions or
+/// visibility markers. This identifies a lifting candidate, not a validated
+/// built-in factory; block-shape and constant-identity checks happen separately.
 pub(super) fn declaration<'pr>(node: &Node<'pr>) -> Option<CallNode<'pr>> {
     let write = node.as_constant_write_node()?;
     let call = write.value().as_call_node()?;
@@ -30,6 +33,9 @@ pub(super) fn declaration<'pr>(node: &Node<'pr>) -> Option<CallNode<'pr>> {
         .then_some(call)
 }
 
+/// Ingest the factory receiver and arguments without its lifted block. Retain
+/// the call's source span so emission can reunite it with the collected methods
+/// at the original constant declaration rather than hoisting a separate class.
 pub(super) fn head(call: &CallNode<'_>, file: &str) -> IngestResult<Expr> {
     let recv = call
         .receiver()
@@ -57,6 +63,9 @@ pub(super) fn head(call: &CallNode<'_>, file: &str) -> IngestResult<Expr> {
     ))
 }
 
+/// Lift direct custom factory constants from an owner's body into library classes.
+/// Preserve instance methods, keyword formals, and local visibility; reject block
+/// parameters, singleton methods, and other statements instead of discarding them.
 pub(super) fn collect(
     body: Option<Node<'_>>,
     owner: &ClassId,

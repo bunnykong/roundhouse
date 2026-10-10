@@ -13,6 +13,9 @@ use crate::ty::Ty;
 use super::ClassInfo;
 use super::body::ConstResolver;
 
+/// Register class identities for built-in `Data.define` constants with distinct
+/// literal members, retaining any lifted custom methods. Generated readers stay
+/// untyped; rejected declarations are absent from the returned span-to-type map.
 pub(super) fn register(
     app: &App,
     resolver: &ConstResolver,
@@ -90,6 +93,9 @@ pub(super) fn register(
     factories
 }
 
+/// Report lifted custom factories whose declaration was not admitted by analysis
+/// or whose generated class is subclassed. Lifting methods alone does not establish
+/// that the original factory belongs to the supported subset.
 pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     if !app.library_classes.iter().any(|class| matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. }))) {
         return Vec::new();

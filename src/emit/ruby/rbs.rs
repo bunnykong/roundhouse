@@ -21,6 +21,8 @@ pub(super) fn emit_library_class_rbs(lc: &LibraryClass, rb_path: &Path) -> Emitt
     emit_library_class_rbs_with_factories(lc, rb_path, &[])
 }
 
+/// Emit the `sig/` sidecar for an owner and its Data factory constants. `classes`
+/// supplies lifted custom methods, matched to declarations by their source spans.
 pub(super) fn emit_library_class_rbs_with_factories(
     lc: &LibraryClass,
     rb_path: &Path,
@@ -44,6 +46,8 @@ fn sig_path_for(rb_path: &Path) -> PathBuf {
     }
 }
 
+/// Render a library class or module with enclosing namespaces, includes, method
+/// signatures, and admitted Data factories nested under their constant owner.
 fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
     let mut s = String::new();
     let name = lc.name.0.as_str();
@@ -95,6 +99,9 @@ fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
     s
 }
 
+/// Render an admitted factory as a nested Data subclass; leave unrelated or
+/// unresolved constants alone. Keep generated constructor/readers untyped and
+/// omit a generated reader when the custom block supplies that method.
 fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: &Expr, pad: &str, factory: Option<&LibraryClass>) {
     if value.decisions & RESOLVED_DATA_FACTORY == 0 {
         return;

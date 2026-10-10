@@ -1123,6 +1123,10 @@ impl<'a> SourceContractIndex<'a> {
             .and_then(|parent| self.declaration(parent, name, receiver, seen))
     }
 
+    /// Find the source declaration governing a call, falling back from class-side
+    /// `new` to instance-side `initialize` for ordinary constructors. Data factories
+    /// are excluded from that fallback because their constructor normalizes arguments
+    /// before invoking the initializer; the two call contracts are not interchangeable.
     fn effective_call(
         &self,
         owner: &ClassId,

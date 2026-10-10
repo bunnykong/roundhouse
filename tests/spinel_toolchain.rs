@@ -62,6 +62,8 @@ mod io_process_constants_contract;
 #[path = "spinel_toolchain/io_process_constants.rs"]
 mod io_process_constants;
 
+/// Compile and execute the shared custom Data factory contract with Spinel;
+/// successful Ruby emission alone does not establish native target support.
 #[test]
 #[ignore = "requires Spinel; run in its CI lane"]
 fn custom_data_factories_run_natively() {

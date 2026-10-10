@@ -569,6 +569,8 @@ fn core_data_new_remains_unsupported() {
     );
 }
 
+/// Reject ingestion paths and block statements that cannot retain the custom
+/// factory contract, rather than accepting the constant while dropping its body.
 #[test]
 fn custom_factory_blocks_are_not_silently_discarded() {
     let source = b"class Owner; State = Data.define(:name) do; def label; name; end; end; end";
@@ -585,6 +587,8 @@ fn custom_factory_blocks_are_not_silently_discarded() {
     }
 }
 
+/// Keep error diagnostics for dynamic/invalid members, shadowed Data, and
+/// reopened or subclassed factories even when their method bodies can be lifted.
 #[test]
 fn custom_factories_outside_the_literal_subset_report_errors() {
     use roundhouse::diagnostic::{DiagnosticKind, Severity};
@@ -606,6 +610,8 @@ fn custom_factories_outside_the_literal_subset_report_errors() {
     }
 }
 
+/// Analyzer admission is not support on every target: non-Ruby/Spinel emitters
+/// must return source-located errors instead of silently emitting a factory.
 #[test]
 fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
     use roundhouse::diagnostic::{DiagnosticKind, Severity};
@@ -645,6 +651,8 @@ fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
     }
 }
 
+/// Check both supported targets produce parseable factory sidecars with custom
+/// methods and one class declaration, while differing only in sidecar placement.
 #[test]
 fn ruby_and_spinel_emit_declared_factory_types_without_data_errors() {
     use roundhouse::diagnostic::Severity;

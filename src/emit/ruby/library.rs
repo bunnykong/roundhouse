@@ -19,6 +19,10 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
+/// Lower library classes for Ruby and emit their source/RBS file pairs, grouping
+/// nested declarations with their owners where possible. Lifted Data factories
+/// participate in lowering but emit inside their owner's constant declaration,
+/// never as standalone class files.
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
     // A block-taking tag helper gains a `<name>_into(io, …)` variant
@@ -5585,6 +5589,9 @@ pub(crate) enum RootingScope {
     RuntimeOnly,
 }
 
+/// Root method-body constant references that emission would otherwise shadow,
+/// restricting candidate namespaces according to `scope`. A Data factory block
+/// retains its enclosing owner's lexical scope, not the generated class's scope.
 pub(crate) fn apply_constant_rooting(
     lcs: &mut [LibraryClass],
     app: &App,
@@ -6198,6 +6205,9 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     })
 }
 
+/// Render an indented method with named visibility directives that cannot leak
+/// to neighboring definitions. Explicitly public constructor/copy hooks need a
+/// directive too, because Ruby makes those instance methods private by default.
 fn render_library_method(s: &mut String, m: &MethodDef, body_pad: &str) {
     for line in super::emit_method(m).lines() {
         if line.is_empty() {
@@ -6227,6 +6237,9 @@ fn render_library_method(s: &mut String, m: &MethodDef, body_pad: &str) {
     }
 }
 
+/// Assemble a library class's Ruby file with its requires and declarations.
+/// Reattach lifted Data methods by declaration span, preserving the factory's
+/// position and including dependencies from its methods and parameter defaults.
 fn emit_library_class_decl_inner(
     lc: &LibraryClass,
     app: &App,
