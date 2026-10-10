@@ -1507,6 +1507,10 @@ fn emit_send(
         if method == "delete" && recv_is_hash(r) {
             return format!("{}.Remove({})", emit_expr(r), args_s[0]);
         }
+        if method == "pop" {
+            let recv_s = emit_expr(r);
+            return format!("{recv_s}.RemoveAt({recv_s}.Count - 1)");
+        }
         if method == "merge" {
             return format!(
                 "RhRuntime.Merge({}, {})",

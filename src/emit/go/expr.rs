@@ -1309,6 +1309,15 @@ pub(super) fn emit_send(
         }
     }
 
+    // Ruby `arr.pop` — drop the last element. HeaderStore#delete
+    // shifts then pops; extra targets have no Array#pop otherwise.
+    if method == "pop" && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(ctx, r);
+            return format!("{recv_s} = {recv_s}[:len({recv_s})-1]");
+        }
+    }
+
     // Ruby `.freeze` / `.to_h` — both pass through the receiver
     // unchanged in Go (no immutability marker; `.to_h` is a no-op
     // on Ruby Hash and would convert NamedTuple → Hash under

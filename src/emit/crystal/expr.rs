@@ -1257,6 +1257,12 @@ pub(super) fn emit_send_base(
     // default arg is the literal `nil` so the source intent is
     // unambiguous; other defaults flow through the standard
     // `recv.fetch(K, default)` emit.
+    if method.as_str() == "pop" && args.is_empty() {
+        if let Some(r) = recv {
+            let recv_s = emit_expr(r);
+            return format!("{recv_s}.pop");
+        }
+    }
     if method.as_str() == "fetch" && args.len() == 2 {
         if let ExprNode::Lit { value: Literal::Nil } = &*args[1].node {
             if let Some(r) = recv {
