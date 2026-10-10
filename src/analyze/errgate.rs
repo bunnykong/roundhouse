@@ -253,10 +253,13 @@ thread_local! {
     static INVALID_ORIGINS: std::cell::RefCell<BTreeSet<(u32,u32,u32)>> = std::cell::RefCell::new(BTreeSet::new());
     static ORIGINS: std::cell::RefCell<std::collections::BTreeMap<(u32,u32,u32), BTreeSet<String>>> = std::cell::RefCell::new(std::collections::BTreeMap::new());
 }
-pub(super) struct WriterGuard(Option<Option<String>>);
+pub(super) struct WriterGuard {
+    prior: Option<Option<String>>,
+    _structure: super::structure_dump::HarvestFrame,
+}
 impl Drop for WriterGuard {
     fn drop(&mut self) {
-        if let Some(prior) = self.0.take() {
+        if let Some(prior) = self.prior.take() {
             WRITER.with(|w| *w.borrow_mut() = prior);
         }
     }
@@ -273,12 +276,14 @@ pub(super) fn writer(
     method: &crate::ident::Symbol,
     side: bool,
 ) -> WriterGuard {
+    let structure = super::structure_dump::harvest_frame(class, method, side);
     if !on() {
-        return WriterGuard(None);
+        return WriterGuard { prior: None, _structure: structure };
     }
-    WriterGuard(Some(
-        WRITER.with(|w| w.replace(Some(ret_slot(class, method, side)))),
-    ))
+    WriterGuard {
+        prior: Some(WRITER.with(|w| w.replace(Some(ret_slot(class, method, side))))),
+        _structure: structure,
+    }
 }
 pub(super) fn reset() {
     if on() {

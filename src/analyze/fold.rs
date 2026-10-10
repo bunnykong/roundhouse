@@ -173,6 +173,7 @@ pub(crate) fn active() -> bool {
 }
 
 fn intern(key: SlotKey) -> u32 {
+    super::structure_dump::fold_allocate(&key);
     ST.with(|s| {
         let mut s = s.borrow_mut();
         if let Some(id) = s.ids.get(&key) {
@@ -254,12 +255,16 @@ pub(crate) fn ret_ref(class: &ClassId, method: &Symbol, class_side: bool) -> Opt
 /// A read of a parameter slot, when it is in reference mode. `value` is
 /// what the body would otherwise have been seeded with.
 pub(crate) fn param_ref(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver, index: usize, value: Ty) -> Ty {
+    if super::structure_dump::on() {
+        super::structure_dump::parameter_seed(class, method, side, index, active() && is_rec_method(class, method));
+    }
     if !active() || !is_rec_method(class, method) {
         return value;
     }
     let key = SlotKey::Param { class: class.clone(), method: method.clone(), side, index };
     super::structure::fold_write(&key, "parameter-seed");
-    let slot = intern(key);
+    let slot = intern(key.clone());
+    super::structure_dump::fold_access(&key, "write");
     // A slot's own top-level reference contributes nothing (X = X | A is A).
     let value = strip_self(value, slot);
     ST.with(|s| {
@@ -303,6 +308,7 @@ pub(crate) fn value_of(slot: u32, classes: &HashMap<ClassId, ClassInfo>) -> Opti
     // A typing that reads a slot's value depends on it: the worklist
     // re-types the reader when the value moves.
     super::sccq::rec_fold_slot(slot);
+    if super::structure_dump::on() && let Some(key) = key_of(slot) { super::structure_dump::fold_access(&key, "read"); }
     match key_of(slot)? {
         SlotKey::Ret { class, method, class_side } => {
             let cls = classes.get(&class)?;
@@ -333,7 +339,8 @@ fn fingerprint(t: &Ty) -> u64 {
 /// write in a new pass replaces the last pass's value.
 fn accumulate(key: SlotKey, value: Ty) -> Ty {
     if super::fixpoint_check::stats_on() { super::structure::fold_write(&key, "site-transfer"); }
-    let slot = intern(key);
+    let slot = intern(key.clone());
+    super::structure_dump::fold_access(&key, "write");
     let value = strip_self(value, slot);
     let print = fingerprint(&value);
     ST.with(|s| {

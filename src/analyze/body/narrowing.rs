@@ -405,6 +405,14 @@ pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -
 }
 
 fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {
+    if super::super::structure_dump::on() {
+        let (name, ivar, value) = match key {
+            VarKey::Local(n) => (n, false, ctx.local_bindings.get(n)),
+            VarKey::Ivar(n) => (n, true, ctx.ivar_bindings.get(n)),
+            VarKey::Reader(n, ty) => (n, false, ctx.local_bindings.get(n).or(Some(ty))),
+        };
+        if let Some(value) = value { super::super::structure_dump::binding_access(ctx, ivar, name, "read", value); }
+    }
     let (name, bindings) = match key {
         VarKey::Local(n) => (n, &mut ctx.local_bindings),
         VarKey::Ivar(n) => (n, &mut ctx.ivar_bindings),
@@ -417,6 +425,11 @@ fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {
                 let narrowed = f(ty);
                 if narrowed != Ty::Nil && &narrowed != ty {
                     ctx.local_bindings.insert(n.clone(), narrowed);
+                    if super::super::structure_dump::on() {
+                        if let Some(value) = ctx.local_bindings.get(n) {
+                            super::super::structure_dump::binding_access(ctx, false, n, "write", value);
+                        }
+                    }
                 }
                 return;
             }
@@ -426,6 +439,13 @@ fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {
     if let Some(current) = bindings.get(name).cloned() {
         let narrowed = f(&current);
         bindings.insert(name.clone(), narrowed);
+        if super::super::structure_dump::on() {
+            let name = name.clone();
+            let ivar = matches!(key, VarKey::Ivar(_));
+            if let Some(value) = if ivar { ctx.ivar_bindings.get(&name) } else { ctx.local_bindings.get(&name) } {
+                super::super::structure_dump::binding_access(ctx, ivar, &name, "write", value);
+            }
+        }
     }
 }
 

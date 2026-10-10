@@ -39,9 +39,9 @@ impl<'a> BodyTyper<'a> {
         };
         let methods = &self.classes().get(model)?.instance_methods;
         let entry = match &*key_arg.node {
-            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => methods.get(value),
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => crate::analyze::structure_dump::inline_lookup(model, value, false, methods.get(value)),
             ExprNode::Lit { value: crate::expr::Literal::Str { value } } => {
-                methods.get(&Symbol::from(value.as_str()))
+                crate::analyze::structure_dump::inline_lookup(model, &Symbol::from(value.as_str()), false, methods.get(&Symbol::from(value.as_str())))
             }
             _ => None,
         }?;
@@ -88,7 +88,7 @@ impl<'a> BodyTyper<'a> {
             return None;
         };
         let cls = self.classes().get(model)?;
-        let col_ty = cls.instance_methods.get(col)?.clone();
+        let col_ty = crate::analyze::structure_dump::inline_lookup(model, col, false, cls.instance_methods.get(col))?.clone();
         Some(match method.as_str() {
             // `pick` is `pluck(...).first` — the column value, or nil
             // when the relation is empty.
@@ -201,7 +201,7 @@ impl<'a> BodyTyper<'a> {
         let ExprNode::Lit { value: crate::expr::Literal::Sym { value: col } } = &*arg.node else {
             return None;
         };
-        self.classes().get(model)?.instance_methods.get(col).cloned()
+        crate::analyze::structure_dump::inline_lookup(model, col, false, self.classes().get(model)?.instance_methods.get(col)).cloned()
     }
 
     /// Schema-indexed type for `minimum(:column)` / `maximum(:column)`.
@@ -235,7 +235,7 @@ impl<'a> BodyTyper<'a> {
             }
             _ => return None,
         };
-        let value_ty = self.classes().get(model)?.attributes.fields.get(&column)?.clone();
+        let value_ty = crate::analyze::structure_dump::attribute_lookup(model, &column, self.classes().get(model)?.attributes.fields.get(&column))?.clone();
         if let Some(group_args) = recv.and_then(Self::group_args_in_count_chain) {
             let key_ty = self.schema_grouped_key_ty(model, group_args).unwrap_or(Ty::unresolved());
             return Some(Ty::Hash { key: Box::new(key_ty).into(), value: Box::new(value_ty).into() });
@@ -254,7 +254,7 @@ impl<'a> BodyTyper<'a> {
         let ExprNode::Lit { value: crate::expr::Literal::Sym { value: col } } = &*arg.node else {
             return None;
         };
-        self.classes().get(model)?.attributes.fields.get(col).cloned()
+        crate::analyze::structure_dump::attribute_lookup(model, col, self.classes().get(model)?.attributes.fields.get(col)).cloned()
     }
 
     fn direct_relation_chain(&self, expr: &Expr, model: &ClassId, instance_self: Option<&Ty>) -> bool {
@@ -1120,6 +1120,7 @@ impl<'a> BodyTyper<'a> {
                     while let Some(cid) = cur {
                         let Some(cls) = self.classes().get(&cid) else { break };
                         if let Some(ty) = cls.instance_methods.get(m).or_else(|| cls.class_methods.get(m)) {
+                            if crate::analyze::structure_dump::on() { crate::analyze::structure_dump::return_read(id, &cid, m, !cls.instance_methods.contains_key(m), false); }
                             // Same substitution as dispatch, against the
                             // receiver's class: `try(:instance)` on a
                             // subclass answers the subclass.
@@ -1590,13 +1591,13 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
-                    if !instance_side && let Some(ty) = cls.class_methods.get(method) {
+                    if !instance_side && let Some(ty) = crate::analyze::structure_dump::pending_lookup(cid, method, true, cls.class_methods.get(method)) {
                         if let Some(r) = self.fold_ret_ref(id, cid, cls, method, ty, true) {
                             return r;
                         }
                         return unwrap_fn_ret(&subst(ty));
                     }
-                    if let Some(ty) = cls.instance_methods.get(method) {
+                    if let Some(ty) = crate::analyze::structure_dump::pending_lookup(cid, method, false, cls.instance_methods.get(method)) {
                         if let Some(r) = self.fold_ret_ref(id, cid, cls, method, ty, false) {
                             return r;
                         }
@@ -1864,7 +1865,7 @@ impl<'a> BodyTyper<'a> {
                         return self.dispatch(Some(&base), method, block_ret, args).rebind_class(&anc, id);
                     }
                     if let Some(cls) = self.classes().get(id) {
-                        match cls.class_methods.get(method) {
+                        match crate::analyze::structure_dump::inline_lookup(id, method, true, cls.class_methods.get(method)) {
                             Some(scope_ret @ Ty::Array { .. }) => {
                                 return scope_ret.clone();
                             }
@@ -2025,7 +2026,7 @@ impl<'a> BodyTyper<'a> {
                     return t.rebind_class(&anc, of);
                 }
                 if let Some(cls) = self.classes().get(of) {
-                    match cls.class_methods.get(method) {
+                    match crate::analyze::structure_dump::inline_lookup(of, method, true, cls.class_methods.get(method)) {
                         Some(ret @ Ty::Relation { .. }) => return ret.clone(),
                         // A class-side entry that answers with a
                         // COLLECTION. Chain methods preserve the
@@ -2215,7 +2216,7 @@ impl<'a> BodyTyper<'a> {
         for _ in 0..16 {
             let cur = cursor?;
             let info = self.classes().get(&cur)?;
-            if let Some(ty) = info.attributes.fields.get(&key) {
+            if let Some(ty) = crate::analyze::structure_dump::attribute_lookup(&cur, &key, info.attributes.fields.get(&key)) {
                 return Some(ty.clone());
             }
             cursor = info.parent.clone();
@@ -2281,6 +2282,7 @@ impl<'a> BodyTyper<'a> {
         ty: &Ty,
         class_side: bool,
     ) -> Option<Ty> {
+        let mut structure_route = crate::analyze::structure_dump::return_route(receiver, cid, method, class_side);
         if !crate::analyze::fold::active()
             || matches!(ty, Ty::Fn { .. })
             || !crate::analyze::fold::is_rec_method(cid, method)
@@ -2296,7 +2298,9 @@ impl<'a> BodyTyper<'a> {
         if mentions_self {
             return None;
         }
-        crate::analyze::fold::ret_ref(cid, method, class_side)
+        let result = crate::analyze::fold::ret_ref(cid, method, class_side);
+        structure_route.reference = result.is_some();
+        result
     }
 
     /// A method the app adds by reopening `String`, or by including a
@@ -2309,7 +2313,7 @@ impl<'a> BodyTyper<'a> {
                 continue;
             }
             let Some(m) = self.classes().get(&id) else { continue };
-            if let Some(ty) = m.instance_methods.get(method) {
+            if let Some(ty) = crate::analyze::structure_dump::inline_lookup(&id, method, false, m.instance_methods.get(method)) {
                 return Some(unwrap_fn_ret(ty));
             }
             stack.extend(m.includes.iter().cloned());
@@ -2325,13 +2329,13 @@ impl<'a> BodyTyper<'a> {
                 continue;
             }
             let Some(m) = self.classes().get(&id) else { continue };
-            if let Some(ty) = m.instance_methods.get(method) {
+            if let Some(ty) = crate::analyze::structure_dump::pending_lookup(&id, method, false, m.instance_methods.get(method)) {
                 if let Some(r) = self.fold_ret_ref(&id, &id, m, method, ty, false) {
                     return Some(r);
                 }
                 return Some(unwrap_fn_ret(ty));
             }
-            if let Some(ty) = m.class_methods.get(method) {
+            if let Some(ty) = crate::analyze::structure_dump::pending_lookup(&id, method, true, m.class_methods.get(method)) {
                 if let Some(r) = self.fold_ret_ref(&id, &id, m, method, ty, true) {
                     return Some(r);
                 }

@@ -34,7 +34,7 @@ pub(super) fn reset(
         HashMap<super::ParamKey, super::ParamShape>,
     ),
 ) {
-    if super::fixpoint_check::stats_on() {
+    if super::fixpoint_check::stats_on() || super::structure_dump::on() {
         let (defined, shapes) = inputs();
         OBS.with(|o| {
             *o.borrow_mut() = Observed {
@@ -69,6 +69,9 @@ pub(super) fn param_site(
     span: &crate::span::Span,
     context: Option<&ClassId>,
 ) {
+    if super::structure_dump::on() {
+        super::structure_dump::parameter_site(&(class.clone(), method.clone(), *side), n, span, context);
+    }
     if !super::fixpoint_check::stats_on() {
         return;
     }

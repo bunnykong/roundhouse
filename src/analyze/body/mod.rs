@@ -84,18 +84,21 @@ impl ConstScope {
 
     pub fn get(&self, name: &Symbol) -> Option<&Ty> {
         super::sccq::rec_const_name(name);
+        super::structure_dump::constant_read(name.as_str());
         self.own.get(name).or_else(|| self.global.get(name))
     }
 
     /// Only the constants this scope's class declares itself.
     pub fn get_own(&self, name: &Symbol) -> Option<&Ty> {
         super::sccq::rec_const_name(name);
+        super::structure_dump::constant_read(name.as_str());
         self.own.get(name)
     }
 
     /// Only the app-wide, by-bare-name registry.
     pub fn get_global(&self, name: &Symbol) -> Option<&Ty> {
         super::sccq::rec_const_name(name);
+        super::structure_dump::constant_read(name.as_str());
         self.global.get(name)
     }
 
@@ -365,6 +368,7 @@ pub(super) struct Classes<'a>(&'a HashMap<ClassId, ClassInfo>);
 impl<'a> Classes<'a> {
     #[inline]
     pub(super) fn get(&self, id: &ClassId) -> Option<&'a ClassInfo> {
+        super::structure_dump::registry_read(id);
         let found = self.0.get(id);
         if let Some(info) = found {
             super::sccq::rec_class(info.sccq_idx);
@@ -487,8 +491,10 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        let _structure = super::structure_dump::enter(expr, ctx);
         let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
+        super::structure_dump::computed(expr, ctx);
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
         diagnostic::detect_diagnostic(expr);
@@ -905,6 +911,7 @@ impl<'a> BodyTyper<'a> {
                             qualify_resolved_path(path, name);
                         }
                         super::sccq::rec_const_id(declaration);
+                        super::structure_dump::constant_read(name.0.as_str());
                         let value = self.typed_constants
                             .and_then(|values| values.get(declaration))
                             .cloned()
@@ -943,6 +950,7 @@ impl<'a> BodyTyper<'a> {
                             let name = written_class_id(path);
                             let id = declaration_id_from_lookup_name(name.0.as_str());
                             super::sccq::rec_const_id(&id);
+                            super::structure_dump::constant_read(name.0.as_str());
                             self.typed_constants.and_then(|values| values.get(&id)).cloned()
                         };
                         // Otherwise retain the written class path, but

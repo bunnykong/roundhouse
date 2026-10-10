@@ -1931,6 +1931,7 @@ impl Analyzer {
                     let body_ty = super::tuple_return_ty(&action.body)
                         .or_else(|| super::effective_return_ty(&action.body));
                     if let Some(body_ty) = body_ty.filter(|t| !matches!(t, Ty::Var { .. })) {
+                        let _writer = super::errgate::writer(&controller.name, &action.name, false);
                         let target = &mut self.classes.entry(controller.name.clone()).or_default().instance_methods;
                         Self::insert_inferred_return(target, &action.name, body_ty);
                     }
@@ -1941,6 +1942,7 @@ impl Analyzer {
                         crate::dialect::ControllerBodyItem::ClassMethod { method, configuration_slot: None, .. } => Some(method),
                         _ => None,
                     }).nth(unit.mi) else { return reapplied };
+                    let _writer = super::errgate::writer(&controller.name, &method.name, true);
                     let ret = self.method_return_ty(&controller.name, method);
                     let target = &mut self.classes.entry(controller.name.clone()).or_default().class_methods;
                     Self::register_method_return(target, &method.name, ret.as_ref());

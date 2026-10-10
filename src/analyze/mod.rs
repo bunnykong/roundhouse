@@ -53,6 +53,7 @@ mod precision;
 mod det;
 mod detfp;
 mod structure;
+mod structure_dump;
 pub(crate) mod errgate;
 mod fixpoint_rounds;
 mod handoff;
@@ -1164,6 +1165,7 @@ impl Analyzer {
         fold::reset();
         slots::reset();
         structure::reset(|| (Self::defined_methods(app), Self::param_shapes(app)));
+        structure_dump::start(self, app);
         if fixpoint_check::stats_on() {
             self.fixpoint_checks.structure_start = Some(self.structure_snapshot(app).summary());
         }
@@ -1618,6 +1620,7 @@ impl Analyzer {
             let fp = self.c1_state_fp(app);
             eprintln!("rh-det-pre: {}", fp.det_line());
         }
+        structure_dump::finish(self, app);
         self.fold_finish(app);
 
         self.settle_pending(app);
@@ -2123,6 +2126,11 @@ impl Analyzer {
                 }
                 if let Some(id) = id {
                     next_resolved.insert(*id, ty.clone());
+                    if structure_dump::on() {
+                        if let Some(full) = self.const_resolver.constant_class(value.span, name.as_str()) {
+                            structure_dump::constant_write(full.0.as_str(), value.span, self_ty);
+                        }
+                    }
                 }
                 if !*production || ambiguous.contains(name) {
                     continue;
@@ -2133,6 +2141,7 @@ impl Analyzer {
                     }
                     _ => {
                         next.insert(name.clone(), ty);
+                        structure_dump::constant_write(name.as_str(), value.span, self_ty);
                     }
                 }
             }
@@ -4834,12 +4843,13 @@ impl Analyzer {
                 .map(|c| &c.name)
                 .chain(app.library_classes.iter().map(|lc| &lc.name));
             let ty = owners
-                .filter_map(|cid| self.classes.get(cid))
-                .find_map(|c| c.instance_methods.get(name).cloned());
-            if let Some(ty) = ty {
+                .filter_map(|cid| self.classes.get(cid).map(|c| (cid, c)))
+                .find_map(|(cid, c)| c.instance_methods.get(name).cloned().map(|ty| (cid, ty)));
+            if let Some((owner, ty)) = ty {
                 let table = &mut self.classes.entry(view_ctx.clone()).or_default().instance_methods;
                 det::note_named("copy.view_ctx", name.as_str(), table.get(name), &ty);
                 table.insert(name.clone(), ty);
+                structure_dump::return_copy("copy.view", owner, &view_ctx, name, false);
             }
         }
         if let Some(before) = before {
@@ -4969,6 +4979,7 @@ impl Analyzer {
         if harvest_tests {
             for module in &app.test_modules {
                 for method in &module.helpers {
+                    let _writer = errgate::writer(&module.name, &method.name, method.receiver == MethodReceiver::Class);
                     let ret = self.method_return_ty(&module.name, method);
                     let class = self.classes.entry(module.name.clone()).or_default();
                     let table = match method.receiver {
@@ -5277,6 +5288,7 @@ impl Analyzer {
                     }
                     det::note_named("copy.concern_inst", name.as_str(), cls.instance_methods.get(name), ty);
                     cls.instance_methods.insert(name.clone(), ty.clone());
+                    structure_dump::return_copy("copy.concern", &m, &id, name, false);
                     folded.0.insert(name.clone());
                     // `RH_FOLD`: the copy reads the module's slot.
                     fold::note_alias(&id, name, &m);
@@ -5287,6 +5299,7 @@ impl Analyzer {
                     }
                     det::note_named("copy.concern_class", name.as_str(), cls.class_methods.get(name), ty);
                     cls.class_methods.insert(name.clone(), ty.clone());
+                    structure_dump::return_copy("copy.concern", &m, &id, name, true);
                     folded.1.insert(name.clone());
                     fold::note_alias(&id, name, &m);
                 }
@@ -5366,7 +5379,7 @@ impl Analyzer {
                         continue; // the module's own answer
                     }
                     let mut answers = hosts.iter().map(|h| {
-                        self.classes.get(h).and_then(|c| c.instance_methods.get(&name))
+                        self.classes.get(h).and_then(|c| structure_dump::inline_lookup(h, &name, false, c.instance_methods.get(&name)))
                     });
                     let Some(Some(first)) = answers.next() else { continue };
                     if first.is_unknown() || !answers.all(|a| a == Some(first)) {
@@ -5382,6 +5395,9 @@ impl Analyzer {
             for (name, ty) in agreed {
                 det::note_named("copy.host_lend", name.as_str(), cls.instance_methods.get(&name), &ty);
                 cls.instance_methods.insert(name.clone(), ty);
+                if let Some(owners) = hosts.get(&lc.name) {
+                    for owner in owners { structure_dump::return_copy("copy.host", owner, &lc.name, &name, false); }
+                }
                 lent.insert(name);
             }
             if !lent.is_empty() {
@@ -5408,6 +5424,7 @@ impl Analyzer {
     /// the call-site fact, the harvest the function's, and a compiled
     /// target (spinel) returns what the function returns.
     fn method_return_ty(&self, _class_id: &ClassId, method: &crate::dialect::MethodDef) -> Option<Ty> {
+        structure_dump::harvest_body(_class_id, method);
         // A declared signature (ingest-expanded DSL, RBS, …) wins over
         // body harvest: `delegated_type`'s `def page; leafable if page?;
         // end` body types as the full polymorphic union, but the useful
@@ -5586,6 +5603,7 @@ impl Analyzer {
             _ => {
                 if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })) {
                     table.insert(method.clone(), Ty::unresolved());
+                    structure_dump::harvest_access(method, "write");
                 }
             }
         }
@@ -6501,7 +6519,7 @@ impl Analyzer {
                         }
                         out.push((class_id, method.clone(), arg_tys.clone(), kw_tys.clone(), site_recv));
                     }
-                    if fixpoint_check::stats_on() {
+                    if fixpoint_check::stats_on() || structure_dump::on() {
                         for site in &out[observed_from..] {
                             if let Some((key, args)) = structure::with_params(|defined, shapes| {
                                 self.resolve_param_site(site.clone(), shapes, defined)
@@ -7517,6 +7535,7 @@ pub(crate) fn fold_param_observations(
     let mut touched: BTreeSet<ParamKey> = BTreeSet::new();
     for (key, tys) in observations {
         let entry = rows.entry(key.clone()).or_default();
+        structure_dump::parameter_row("parameter-join", &key, entry.len(), "read", false);
         if entry.len() < tys.len() {
             entry.resize(tys.len(), Ty::Var { var: crate::ident::TyVar(0) });
         }
@@ -7526,16 +7545,19 @@ pub(crate) fn fold_param_observations(
             det::note("params.unify", old.as_ref(), &next);
             *slot = next;
         }
+        structure_dump::parameter_row("parameter-join", &key, entry.len(), "write", false);
         touched.insert(key);
     }
     for key in touched {
         if let Some(row) = rows.get_mut(&key) {
+            structure_dump::parameter_row("parameter-bound", &key, row.len(), "read", false);
             for slot in row.iter_mut() {
                 let old = det::descent_on().then(|| slot.clone());
                 let next = fixpoint_bound::bound(std::mem::replace(slot, Ty::Bottom));
                 det::note("params.bound", old.as_ref(), &next);
                 *slot = next;
             }
+            structure_dump::parameter_row("parameter-bound", &key, row.len(), "write", false);
         }
     }
 }

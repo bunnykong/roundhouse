@@ -89,15 +89,19 @@ pub(crate) fn join_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
                     if matches!(cur, Ty::Fn { .. }) {
                         continue;
                     }
+                    super::structure_dump::return_state(class, method, class_side, "read", false);
+                    super::structure_dump::return_state(class, method, class_side, "read", true);
                     let key = (class.clone(), method.clone(), class_side);
                     if let Some(old) = s.prev_rets.get(&key) {
                         let joined = bound(join_slot(old.clone(), cur.clone()));
                         super::det::note("fold.join_rets", s.prev_rets.get(&key), &joined);
                         if &joined != cur {
                             *cur = joined;
+                            super::structure_dump::return_state(class, method, class_side, "write", false);
                         }
                     }
                     s.prev_rets.insert(key, cur.clone());
+                    super::structure_dump::return_state(class, method, class_side, "write", true);
                 }
             }
         }
@@ -118,6 +122,8 @@ fn join_reference_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
                     if matches!(cur, Ty::Fn { .. }) || !super::fold::in_reference_mode(class, method) {
                         continue;
                     }
+                    super::structure_dump::return_state(class, method, class_side, "read", false);
+                    super::structure_dump::return_state(class, method, class_side, "read", true);
                     let key = (class.clone(), method.clone(), class_side);
                     let joined = match s.prev_rets.get(&key) {
                         Some(old) => join_slot(old.clone(), cur.clone()),
@@ -126,8 +132,10 @@ fn join_reference_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
                     super::det::note("fold.join_ret_one", s.prev_rets.get(&key), &joined);
             if &joined != cur {
                         *cur = joined.clone();
+                        super::structure_dump::return_state(class, method, class_side, "write", false);
                     }
                     s.prev_rets.insert(key, joined);
+                    super::structure_dump::return_state(class, method, class_side, "write", true);
                 }
             }
         }
@@ -147,7 +155,10 @@ pub(crate) fn join_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
         let keys: Vec<MethodKey> = s.prev_params.keys().cloned().collect();
         for key in keys {
             let prev = s.prev_params[&key].clone();
+            super::structure_dump::parameter_row("handoff-parameter", &key, prev.len(), "read", true);
+            let observed_key = super::structure_dump::on().then(|| key.clone());
             let row = params.entry(key).or_default();
+            if let Some(key) = &observed_key { super::structure_dump::parameter_row("handoff-parameter", key, row.len(), "read", false); }
             if row.len() < prev.len() {
                 row.resize(prev.len(), Ty::Var { var: TyVar(0) });
             }
@@ -156,9 +167,11 @@ pub(crate) fn join_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
                 super::det::note("fold.join_params", Some(&old), &next);
                 *slot = next;
             }
+            if let Some(key) = &observed_key { super::structure_dump::parameter_row("handoff-parameter", key, row.len(), "write", false); }
         }
         params.retain(|_, row| !row.is_empty());
         s.prev_params.clone_from(params);
+        for (key, row) in &s.prev_params { super::structure_dump::parameter_row("handoff-parameter", key, row.len(), "write", true); }
     });
 }
 
@@ -175,7 +188,9 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
         for key in keys.into_iter().filter(|k| super::fold::in_reference_mode(&k.0, &k.1)) {
             let prev = s.prev_params.get(&key).cloned();
             let row = params.entry(key.clone()).or_default();
+            super::structure_dump::parameter_row("handoff-parameter", &key, row.len(), "read", false);
             if let Some(prev) = prev {
+                super::structure_dump::parameter_row("handoff-parameter", &key, prev.len(), "read", true);
                 if row.len() < prev.len() {
                     row.resize(prev.len(), Ty::Var { var: TyVar(0) });
                 }
@@ -184,10 +199,12 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
                     super::det::note("fold.join_param_row", Some(&old), &next);
                     *slot = next;
                 }
+                super::structure_dump::parameter_row("handoff-parameter", &key, row.len(), "write", false);
             }
             if row.is_empty() {
                 params.remove(&key);
             } else {
+                super::structure_dump::parameter_row("handoff-parameter", &key, row.len(), "write", true);
                 s.prev_params.insert(key, row.clone());
             }
         }
@@ -209,6 +226,8 @@ pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &Cl
             if matches!(cur, Ty::Fn { .. }) {
                 continue;
             }
+            super::structure_dump::return_state(class, method, class_side, "read", false);
+            super::structure_dump::return_state(class, method, class_side, "read", true);
             let key = (class.clone(), method.clone(), class_side);
             let joined = match s.prev_rets.get(&key) {
                 Some(old) => join_slot(old.clone(), cur.clone()),
@@ -217,8 +236,10 @@ pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &Cl
             super::det::note("fold.join_ret_one", s.prev_rets.get(&key), &joined);
             if &joined != cur {
                 table.insert(method.clone(), joined.clone());
+                super::structure_dump::return_state(class, method, class_side, "write", false);
             }
             s.prev_rets.insert(key, joined);
+            super::structure_dump::return_state(class, method, class_side, "write", true);
         }
     });
 }
@@ -233,6 +254,7 @@ pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool
         let mut s = s.borrow_mut();
         let mut row = raw.unwrap_or_default();
         if let Some(prev) = s.prev_params.get(key).cloned() {
+            super::structure_dump::parameter_row("handoff-parameter", key, prev.len(), "read", true);
             if row.len() < prev.len() {
                 row.resize(prev.len(), Ty::Var { var: TyVar(0) });
             }
@@ -246,6 +268,7 @@ pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool
             None
         } else {
             if commit {
+                super::structure_dump::parameter_row("handoff-parameter", key, row.len(), "write", true);
                 s.prev_params.insert(key.clone(), row.clone());
             }
             Some(row)
