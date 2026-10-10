@@ -397,7 +397,24 @@ fn emit_stmts(stmts: &[Expr]) -> String {
         }
     }
 
-    format!("{}\n{}", emit_stmt(head), emit_stmts(rest))
+    // The final threaded record update can be discarded by a later Ruby
+    // return (`expires_in` ends in `nil`). Keep evaluating the update,
+    // but underscore the unused Elixir binding so warnings-as-errors
+    // stays clean.
+    let head = match &*head.node {
+        ExprNode::Assign {
+            target: LValue::Var { name, .. },
+            value,
+        } if name.as_str() == "record"
+            && !rest
+                .iter()
+                .any(|e| super::library::references_var(e, "record")) =>
+        {
+            format!("_record = {}", emit_expr(value))
+        }
+        _ => emit_stmt(head),
+    };
+    format!("{}\n{}", head, emit_stmts(rest))
 }
 
 /// String-accumulator hint consumer — the view/jbuilder lowerer's
@@ -3122,6 +3139,54 @@ mod tests {
         assert_eq!(emit_expr(&outer), "\"SELECT \" <> col <> tail");
         // A genuinely numeric `+` (no string root) stays `+`.
         assert_eq!(emit_expr(&call(var_t("m", Ty::Int), "+", vec![var_t("n", Ty::Int)])), "m + n");
+    }
+
+    fn record_assign(value: Expr) -> Expr {
+        Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var {
+                    id: VarId(0),
+                    name: Symbol::from("record"),
+                },
+                value,
+            },
+        )
+    }
+
+    fn nil_lit() -> Expr {
+        Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Nil,
+            },
+        )
+    }
+
+    #[test]
+    fn unused_final_record_rebind_uses_underscore_binding() {
+        let updated = var_t("updated_record", Ty::Untyped);
+        let unused = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![record_assign(updated.clone()), nil_lit()],
+            },
+        );
+        assert_eq!(
+            emit_method_body(&unused),
+            "_record = updated_record\nnil"
+        );
+
+        let used = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![
+                    record_assign(updated),
+                    var_t("record", Ty::Untyped),
+                ],
+            },
+        );
+        assert_eq!(emit_method_body(&used), "record = updated_record\nrecord");
     }
 }
 
