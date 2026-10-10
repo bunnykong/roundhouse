@@ -734,7 +734,7 @@ pub(crate) fn head(t: &Ty, site: Site, at: SiteId, classes: &HashMap<ClassId, Cl
     let mut seen: HashSet<u32> = HashSet::new();
     push_head(t, on, at, classes, &mut seen, &mut out);
     Some(match out.len() {
-        0 => Ty::Untyped,
+        0 => empty_unfold(),
         _ => super::body::union_many(out),
     })
 }
@@ -747,7 +747,7 @@ fn push_head(t: &Ty, on: bool, at: SiteId, classes: &HashMap<ClassId, ClassInfo>
             let arms = resolve(*slot, classes, &mut HashSet::new());
             if arms.is_empty() {
                 count("unfold_empty");
-                out.push(Ty::Untyped);
+                out.push(empty_unfold());
             }
             for arm in arms {
                 out.push(shallow(arm, at));
@@ -761,7 +761,7 @@ fn push_head(t: &Ty, on: bool, at: SiteId, classes: &HashMap<ClassId, ClassInfo>
                     Some(v) => push_head(&v, on, at, classes, seen, out),
                     None => {
                         count("unfold_empty");
-                        out.push(Ty::Untyped)
+                        out.push(empty_unfold())
                     }
                 }
             }
@@ -1083,6 +1083,19 @@ static FIXJOIN: LazyLock<bool> = LazyLock::new(|| !std::env::var("RH_FOLD_JOIN_V
 /// receiver is ⊥ types as ⊥ instead of failing dispatch.
 pub(crate) static PENDBOT: LazyLock<bool> =
     LazyLock::new(|| std::env::var("RH_PREC_PENDBOT").is_ok_and(|s| s == "1"));
+/// prototype (`RH_PREC_PENDUNFOLD=1`, with `RH_PREC_PENDBOT=1`): unfolding a
+/// reference whose slot holds no arm yet (⊥, or no value) gives ⊥, not
+/// `untyped`, so a pending return read through a reference stays pending.
+pub(crate) static PENDUNFOLD: LazyLock<bool> =
+    LazyLock::new(|| *PENDBOT && std::env::var("RH_PREC_PENDUNFOLD").is_ok_and(|s| s == "1"));
+/// prototype (`RH_PREC_PENDVAR=1`, off by default): a still-pending method
+/// return is stored as `Var` (pending), not `untyped`; the emitters print
+/// `Var` as `untyped`, so unreached methods are not claimed `bot`.
+pub(crate) static PENDVAR: LazyLock<bool> =
+    LazyLock::new(|| !*PENDBOT && std::env::var("RH_PREC_PENDVAR").is_ok_and(|s| s == "1"));
+fn empty_unfold() -> Ty {
+    if *PENDUNFOLD { Ty::Bottom } else { Ty::Untyped }
+}
 /// `RH_FOLD_GRADUAL=1`, the handoff join keeps gradual arms.
 pub(crate) static GRADUAL: LazyLock<bool> =
     LazyLock::new(|| std::env::var("RH_FOLD_GRADUAL").is_ok_and(|s| s == "1"));

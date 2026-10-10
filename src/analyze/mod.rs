@@ -1133,7 +1133,7 @@ impl Analyzer {
             .collect();
 
         if sccq::sched_sccq() {
-            self.sccq_init(app);
+            crate::timings::phase("sccq init", || self.sccq_init(app));
             // The state before any typing: the initial pass harvests each
             // model as it goes, so later slots differ from what earlier
             // typings in the same pass read.
@@ -1561,16 +1561,19 @@ impl Analyzer {
         // Direct-helper bodies last: they are the one app-authored
         // expression the fixpoint above never touches, and typing them
         // needs the registry it produces.
-        self.type_direct_helper_bodies(app);
-        self.type_rails_application_body(app);
+        crate::timings::phase("direct helpers and application body", || {
+            self.type_direct_helper_bodies(app);
+            self.type_rails_application_body(app);
+        });
 
         // prototype fold (RH_FOLD): expand every slot reference before
         // anything downstream of analysis sees a type.
-        self.fold_finish(app);
+        crate::timings::phase("fold finish", || self.fold_finish(app));
 
         // prototype (fold-aware scheduler, `RH_C1_DIGEST=1`): digests of the final state, after
         // every reference is expanded, to compare repeated runs (numbers only).
         if std::env::var("RH_C1_DIGEST").is_ok_and(|v| v == "1") {
+            let _t = crate::timings::begin("c1 digest");
             let fp = self.c1_state_fp(app);
             let (sig, ir, side) = fp.digest();
             eprintln!(
@@ -1591,7 +1594,7 @@ impl Analyzer {
             }
         }
 
-        self.stamp_inferred_method_signatures(app);
+        crate::timings::phase("stamp signatures", || self.stamp_inferred_method_signatures(app));
     }
 
     /// prototype fold (RH_FOLD): count precision-exposed sends, expand
@@ -5554,7 +5557,13 @@ impl Analyzer {
             }
             _ => {
                 if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })) {
-                    let pending = if *fold::PENDBOT { Ty::Bottom } else { Ty::Untyped };
+                    let pending = if *fold::PENDBOT {
+                        Ty::Bottom
+                    } else if *fold::PENDVAR {
+                        Ty::Var { var: crate::ident::TyVar(0) }
+                    } else {
+                        Ty::Untyped
+                    };
                     table.insert(method.clone(), pending);
                 }
             }
@@ -5609,6 +5618,7 @@ impl Analyzer {
         fold::begin_calls();
         // DX8 arm 2 keeps each body's slice of sites (canonical order).
         let mut bodies: Vec<(Option<u32>, usize, usize)> = Vec::new();
+        let walk_t = crate::timings::begin("unify: walk");
         for (ci, model) in app.models.iter().enumerate() {
             for (mi, method) in model.methods().enumerate() {
                 let from = sites.len();
@@ -5680,25 +5690,28 @@ impl Analyzer {
             }
         }
 
+        drop(walk_t);
         if self.sccq.is_some() {
             // Controllers, views and seeds are walked bodies the engine does
             // not own: one slice each, in walk order.
             bodies.push((None, static_from, sites.len()));
-            self.sccq_rebuild_sites(app, &bodies, &sites);
+            crate::timings::phase("unify: engine index", || self.sccq_rebuild_sites(app, &bodies, &sites));
         }
-        self.apply_param_sites(sites, &params_by_method, &defined);
+        crate::timings::phase("unify: apply", || self.apply_param_sites(sites, &params_by_method, &defined));
         // Production signatures keep their production callers' shape.
         // Fold before adding test-owned observations: a same-named test
         // helper must not feed an included production concern either.
-        self.fold_concern_param_sites(app);
+        crate::timings::phase("unify: concern fold", || self.fold_concern_param_sites(app));
         // prototype fold (RH_FOLD): close the call graph (methods in a
         // non-trivial SCC enter reference mode) and, under RH_FOLD_JOIN,
         // join reference-mode parameter rows with last round's.
         // prototype (RH_FOLD_SLOTS): the slot-read graph adds every method
         // owning a slot in one of its non-trivial SCCs.
-        self.fold_slot_graph(app, &defined);
-        fold::end_calls();
-        fold::join_params(&mut self.inferred_params);
+        crate::timings::phase("unify: slot graph", || self.fold_slot_graph(app, &defined));
+        crate::timings::phase("unify: fold calls and joins", || {
+            fold::end_calls();
+            fold::join_params(&mut self.inferred_params);
+        });
     }
 
     /// prototype fold (RH_FOLD): call-graph edges from one method body's

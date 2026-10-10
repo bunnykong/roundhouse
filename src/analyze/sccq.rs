@@ -2894,7 +2894,10 @@ impl Analyzer {
             if stats_on() {
                 self.sccq_check_rows();
             }
-            self.fold_residue(app, label, round);
+            crate::timings::phase(format_args!("sccq {label} {round}: fold residue"), || {
+                self.fold_residue(app, label, round)
+            });
+            let converge_t = crate::timings::begin(format_args!("sccq {label} {round}: converge test"));
             // the fold's side table is part of the state the
             // loop must hold still (prototype); one check per round.
             let side_stable = super::fold::side_stable();
@@ -2923,6 +2926,8 @@ impl Analyzer {
                     break;
                 }
             }
+            drop(converge_t);
+            let seed_t = crate::timings::begin(format_args!("sccq {label} {round}: seed and order"));
             let mut eng = self.sccq.take().expect("engine");
             self.sccq_refresh_registry_folds(&mut eng);
             self.sccq_fold_structure(&mut eng);
@@ -2969,6 +2974,7 @@ impl Analyzer {
                 2 => round == 0,
                 _ => true,
             };
+            drop(seed_t);
             crate::timings::phase(format_args!("sccq {label} {round}: engine"), || {
                 self.sccq_drain(&mut eng, app)
             });
@@ -2977,6 +2983,7 @@ impl Analyzer {
             // sweep start another sweep over just their readers, until the
             // component holds still (or 64 sweeps), instead of costing a
             // global round each.
+            let sweeps_t = crate::timings::begin(format_args!("sccq {label} {round}: sweeps"));
             if fold_defer_mode() == 3 && !subround_off() {
                 let mut sweeps = 0;
                 while !eng.deferred_fold.is_empty() && sweeps < 64 {
@@ -2993,6 +3000,8 @@ impl Analyzer {
                 }
                 eng.stats.sweeps += sweeps;
             }
+            drop(sweeps_t);
+            let prep_t = crate::timings::begin(format_args!("sccq {label} {round}: class prep"));
             if stats_on() {
                 // state size at the end of each drain (type nodes,
                 // each type capped at 1M): registry, rows, side table.
@@ -3038,6 +3047,7 @@ impl Analyzer {
                 self.typed_constants.iter().map(|(k, v)| (*k, v.clone())).collect();
             let before_global = self.sccq.as_ref().and_then(|e| e.global_consts.clone());
             self.sccq_skip_fine = true;
+            drop(prep_t);
             let t0 = std::time::Instant::now();
             crate::timings::phase(format_args!("sccq {label} {round}: class passes"), || {
                 self.run_typing_passes(
@@ -3054,6 +3064,7 @@ impl Analyzer {
                 e.stats.class_pass_secs += t0.elapsed().as_secs_f64();
             }
             self.sccq_skip_fine = false;
+            let post_t = crate::timings::begin(format_args!("sccq {label} {round}: class post"));
             self.sccq_ctrl_pending = dirty.clone();
             if let Some(eng) = self.sccq.as_mut() {
                 Self::sccq_fold_moves(eng);
@@ -3062,6 +3073,7 @@ impl Analyzer {
             if let Some(g) = global {
                 self.sccq_constants_moved(&before_ids, before_global.as_ref(), &g);
             }
+            drop(post_t);
             // The fine units were typed against the state before the class
             // pass, which itself writes registry entries (mailer `params`).
             prev = class_hints.clone();
@@ -3098,7 +3110,8 @@ impl Analyzer {
         }
         super::fold::note_loop(if absorb { "absorb" } else { "production" }, rounds as usize, converged);
         if std::env::var("RH_SCCQ_VERIFY").is_ok_and(|v| v == "1") || *super::fold::VERIFY {
-            self.sccq_verify(app, pa, absorb);
+            let label = if absorb { "absorb" } else { "production" };
+            crate::timings::phase(format_args!("sccq {label}: verify"), || self.sccq_verify(app, pa, absorb));
         }
         if absorb {
             super::fold::track_moves(false);
