@@ -511,6 +511,67 @@ raise "loud=1 must set the header: #{get("/widgets", "loud=1").inspect}" unless 
 }
 
 // ---------------------------------------------------------------------
+// A `next` that `restructure_next_in_block` genuinely refuses — a
+// located diagnostic now, not a silent drop. `next 1 if admin?` carries
+// a VALUE, so it is not the bare `next` `next_guard_cond` recognizes;
+// the whole block filter is refused rather than copy the `next` verbatim
+// into `process_action` (invalid there) or drop the filter with no
+// trace.
+// ---------------------------------------------------------------------
+
+const UNRESTRUCTURABLE_NEXT_WIDGETS_CONTROLLER: &str = r#"class WidgetsController < ApplicationController
+  before_action only: [:index] do
+    next 1 if admin?
+    response.headers['X-Flag'] = '1'
+  end
+
+  def index
+    head :ok
+  end
+end
+"#;
+
+fn next_refusal_tree(widgets: &str) -> HashMap<PathBuf, Vec<u8>> {
+    [
+        ("app/controllers/application_controller.rb", NEXT_APPLICATION_CONTROLLER.to_string()),
+        ("app/controllers/widgets_controller.rb", widgets.to_string()),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n".to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (PathBuf::from(p), s.into_bytes()))
+    .collect()
+}
+
+#[test]
+fn a_next_carrying_a_value_refuses_the_block_filter_in_strict_mode() {
+    let tree = next_refusal_tree(UNRESTRUCTURABLE_NEXT_WIDGETS_CONTROLLER);
+    let err =
+        ingest_app_from_tree(tree).expect_err("strict mode must refuse a next it can't restructure");
+    assert!(
+        matches!(&err, IngestError::Unsupported { message, .. }
+            if message.contains("next") && message.contains("before_action")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_next_carrying_a_value_is_a_survey_gap_not_a_silent_drop() {
+    let tree = next_refusal_tree(UNRESTRUCTURABLE_NEXT_WIDGETS_CONTROLLER);
+    survey::activate();
+    let result = ingest_app_from_tree(tree);
+    let gaps = survey::drain();
+    result.expect("survey mode must not hard-fail; a refused next is a gap, not an abort");
+    assert!(
+        gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. }
+            if message.contains("next") && message.contains("before_action"))),
+        "{gaps:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
 // The OTel stub, standalone — no macro, no next, just the constant.
 // ---------------------------------------------------------------------
 
