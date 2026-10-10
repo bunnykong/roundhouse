@@ -7129,7 +7129,7 @@ pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     let mut kept: Vec<Ty> = variants.into_iter().filter(|v| !matches!(v, Ty::Untyped)).collect();
     match kept.len() {
         1 => kept.pop().unwrap(),
-        _ => Ty::Union { variants: kept },
+        _ => Ty::Union { variants: kept.into() },
     }
 }
 

@@ -115,13 +115,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .entry(Symbol::from("connection_db_config"))
             .or_insert(Ty::Class {
                 id: ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig")),
-                args: vec![],
+                args: vec![].into(),
             });
         base.class_methods
             .entry(Symbol::from("connection_pool"))
             .or_insert(Ty::Class {
                 id: ClassId(Symbol::from("ActiveRecord::ConnectionAdapters::DbPool")),
-                args: vec![],
+                args: vec![].into(),
             });
         base.class_methods
             .entry(Symbol::from("connection"))
