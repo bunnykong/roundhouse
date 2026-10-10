@@ -2579,6 +2579,18 @@ module HttpStub
     WebMock.reset! if defined?(WebMock)
     nil
   end
+
+  def self.disable
+    require "webmock"
+    WebMock.disable!
+    nil
+  end
+
+  def self.enable
+    require "webmock"
+    WebMock.enable!
+    nil
+  end
 end
 "##;
 
