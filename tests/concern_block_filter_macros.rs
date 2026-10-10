@@ -817,3 +817,32 @@ end
          `kwargs[:sunset]` read could fold back to it:\n{src}"
     );
 }
+
+#[test]
+fn an_empty_keyword_rest_does_not_emit_a_bare_double_splat() {
+    // No trailing keyword args at the call site means `kwargs`'s
+    // leftover is empty: `before_action(**kwargs)` must not become
+    // `before_action(**)`, which `ruby -c` refuses to parse. Checked on
+    // the substituted macro body itself (the `Unknown` item ingest
+    // leaves pre-lowering, same shape a hand-written block-form filter
+    // would ingest as) — once `analyze_and_lower` consumes it into
+    // `process_action`, the raw options Hash is gone from the final
+    // source regardless of this bug, so that final text can't see it.
+    let (app, gaps) = sunset_build("retire_endpoint '2022-11-14'");
+    assert!(!has_gap(&gaps, "retire_endpoint"), "{gaps:?}");
+    let c = widgets_controller(&app);
+    let unknown = c
+        .body
+        .iter()
+        .find_map(|item| match item {
+            ControllerBodyItem::Unknown { expr, .. } => Some(expr),
+            _ => None,
+        })
+        .expect("the block-form before_action must stay Unknown pre-lowering");
+    let src = roundhouse::emit::ruby::emit_expr(unknown);
+    assert_parses(&src);
+    assert!(
+        !src.contains("(**)"),
+        "an empty keyword rest must not emit a bare, valueless double splat:\n{src}"
+    );
+}

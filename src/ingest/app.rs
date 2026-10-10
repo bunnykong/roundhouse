@@ -3901,8 +3901,17 @@ fn bind_params_by_name(
         .map(|(_, kv)| kv.clone())
         .collect();
     match kwrest_param {
-        Some(p) => keyword_bindings
-            .push((p.name.clone(), Expr::new(span, ExprNode::Hash { entries: leftover, kwargs: true }))),
+        Some(p) => {
+            // An empty leftover still needs a value bound to the kwrest
+            // param, but `kwargs: true` (bare trailing-kwargs form) on
+            // zero entries emits nothing at all — wrapped in a `**`
+            // splat at the call site, that's `before_action(**)`, which
+            // `ruby -c` refuses to parse. `kwargs: false` emits the
+            // explicit `{}` a double-splat can actually take.
+            let kwargs = !leftover.is_empty();
+            keyword_bindings
+                .push((p.name.clone(), Expr::new(span, ExprNode::Hash { entries: leftover, kwargs })));
+        }
         // A keyword the call passes that no named param claims, and
         // nothing left to catch it — the macro's `**rest` is gone, the
         // keyword wouldn't go anywhere real Ruby wouldn't error on too.
