@@ -978,7 +978,9 @@ fn every_runtime_method_body_concretely_typed() {
     // parameter_missing.rb 4 -> 6): each new class's `super(message)` into
     // StandardError, and RecordNotSaved's `@record` write, as the classes
     // beside them already count.
-    const CEILING: usize = 426;
+    // The date-column cast hook adds 2 measured sites: its raw adapter value
+    // is as column-dependent as `cast_schema_value`'s; the merged tree measures 428.
+    const CEILING: usize = 428;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
