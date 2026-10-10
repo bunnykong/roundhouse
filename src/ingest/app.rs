@@ -3078,10 +3078,62 @@ fn report_unrecognized_controller_macros(app: &App) {
         };
         for item in &controller.body {
             let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
                 continue;
             };
             if CONSUMED_CONTROLLER_MACROS.contains(&method.as_str()) {
+                continue;
+            }
+            // A class-body call carrying a BLOCK that no lowering
+            // claims — the same "vanished with no trace" shape #778
+            // was: `around_block_filter` already claims a block-form
+            // `around_action` (successfully lowered, so it is no
+            // longer `Unknown` at all by the time this runs; or
+            // refused, which records its OWN specific gap already —
+            // either way this generic bucket must not ALSO flag it).
+            // `rescue_from`/`helper_method`/`layout` (with or without a
+            // block) are already excluded above via
+            // `CONSUMED_CONTROLLER_MACROS`, since that list is keyed on
+            // the method name alone. `respond_to` at class-body level
+            // writes no block in any fixture here, but is excluded on
+            // the same reasoning in case one ever does. Concern-only
+            // shapes (`included do`, `class_methods do`) never reach
+            // this loop at all — it walks `app.controllers`, and
+            // those two live on the CONCERN module, consumed before
+            // the splice ever copies anything controller-side.
+            //
+            // `before_action`/`after_action`/`prepend_before_action` are
+            // NOT skipped by name alone: unlike `around_action` (whose
+            // every refusal already records its own gap via
+            // `around_block_filter`), `lambda_filter_target` can decline
+            // one of these silently — e.g. a `before_action(&callback)`
+            // forwarding an existing Proc, which `ir_lambda_body` does
+            // not read (that slot holds a `Var`, not a `Lambda`) — and
+            // #778 exists to stop exactly that kind of silent drop, not
+            // just around_action's. So these three are claimed only
+            // when `lambda_filter_target` actually recognizes the call,
+            // or when it declined it for the ONE reason that already has
+            // its own gap: a `next` the body can't restructure (#779,
+            // `next_restructure_refusal`) — recording this generic gap
+            // too would double it for the one statement.
+            if block.is_some() {
+                const NAMED_CLAIMED_CONTROLLER_BLOCKS: &[&str] = &["around_action", "respond_to"];
+                let claimed = NAMED_CLAIMED_CONTROLLER_BLOCKS.contains(&method.as_str())
+                    || (matches!(
+                        method.as_str(),
+                        "before_action" | "after_action" | "prepend_before_action"
+                    ) && (super::controller::lambda_filter_target(expr).is_some()
+                        || super::controller::next_restructure_refusal(expr)));
+                if claimed {
+                    continue;
+                }
+                survey::record(&IngestError::Unsupported {
+                    file: file_of(expr.span.file),
+                    message: format!(
+                        "controller class-body block not recognized: `{}` (its effect is dropped from the output)",
+                        method.as_str()
+                    ),
+                });
                 continue;
             }
             // `const` / `prop` belong to a lowered `T::Struct` (or a
@@ -4773,7 +4825,7 @@ fn block_filter_from_macro_stmt(stmt: &crate::expr::Expr) -> Option<crate::expr:
 /// would read back as an EMPTY list, scoping the filter to no actions
 /// at all rather than refusing) — exactly the loose-parsing gap this
 /// function exists to keep `block_filter_from_macro_stmt` out of.
-fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
+pub(super) fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
     use crate::expr::ExprNode;
     match &*e.node {
         ExprNode::Array { elements, .. } => {
@@ -4814,7 +4866,7 @@ fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
 /// rather than rewriting scope-aware — no scope-aware rewrite exists
 /// here to tell a shadowed/reassigned binding from the filter block's
 /// own parameter.
-fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> bool {
+pub(super) fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> bool {
     use crate::expr::{ExprNode, LValue};
     match &*expr.node {
         ExprNode::Lambda { params, rest_param, block_param, .. } => {
@@ -4849,7 +4901,7 @@ fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> 
 
 /// Rewrite every read of `name` (a block's own declared parameter) to
 /// `SelfRef` — see `block_filter_from_macro_stmt`'s doc comment for why.
-fn rewrite_var_to_self_ref(expr: &mut crate::expr::Expr, name: &crate::ident::Symbol) {
+pub(super) fn rewrite_var_to_self_ref(expr: &mut crate::expr::Expr, name: &crate::ident::Symbol) {
     use crate::expr::ExprNode;
     if let ExprNode::Var { name: n, .. } = &*expr.node {
         if n == name {
