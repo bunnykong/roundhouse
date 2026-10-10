@@ -7970,6 +7970,19 @@ puts "Data factory identity, aliases, constructors, values and immutability pass
     }
 }
 
+/// Execute emitted Ruby to check keyword/positional construction, `with`, method
+/// visibility, aliases, and lexical constants. A preceding `defined?` also catches
+/// factory declarations hoisted ahead of their original source position.
+#[test]
+fn custom_data_factories_preserve_methods_initializers_and_scope() {
+    let run = emit_and_run::real_blog()
+        .write("app/lib/factory_examples.rb", data_factory::CUSTOM_DECLARATIONS)
+        .edit("app/lib/factory_examples.rb", "    PREFIX = \"order\"", "    PREFIX = \"order\"\n    BEFORE = defined?(State)")
+        .run_ruby(&format!("{}\nraise 'declaration was hoisted' unless FactoryExamples::Stateful::BEFORE.nil?", data_factory::CUSTOM_ASSERTIONS));
+    run.assert_passes();
+    assert!(run.stdout.contains("custom Data factory contract passed"));
+}
+
 /// A file in `app/models/<model>/` often reopens the model only to
 /// hold a nested class. That reopen is a namespace, so the model keeps
 /// its own file. Before, the reopen became a library class whose file
