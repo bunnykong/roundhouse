@@ -578,6 +578,9 @@ impl Analyzer {
             line["entries"] = serde_json::json!(fp.sizes());
         }
         if *STATS {
+            if super::equations::on() {
+                line["site_identity"] = super::equations::summary();
+            }
             line["structure"] = serde_json::json!({
                 "schema": 1, "scope": "observed-cumulative-equations",
                 "start": self.fixpoint_checks.structure_start,

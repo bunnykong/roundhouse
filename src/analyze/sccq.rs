@@ -756,8 +756,7 @@ impl Engine {
         // unfolded a reference to it, named or not.
         if super::fold::active() {
             for class_side in [false, true] {
-                let key = super::fold::SlotKey::Ret { class: class.clone(), method: name.clone(), class_side };
-                if let Some(slot) = super::fold::slot_id(&key) {
+                for slot in super::fold::return_slot_ids(class, name, class_side) {
                     self.mark_fold_slot(slot);
                 }
             }

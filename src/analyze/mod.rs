@@ -51,6 +51,7 @@ mod fixpoint_bound;
 mod fixpoint_check;
 mod det;
 pub(crate) mod shape;
+mod equations;
 mod detfp;
 mod structure;
 pub(crate) mod errgate;
@@ -1117,6 +1118,7 @@ impl Analyzer {
         errgate::reset();
         handoff::reset();
         fold::reset();
+        equations::reset();
         slots::reset();
         structure::reset(|| (Self::defined_methods(app), Self::param_shapes(app)));
         if fixpoint_check::stats_on() {
@@ -1180,6 +1182,7 @@ impl Analyzer {
         // Module method tables and controller parent links are invariant
         // across fixpoint rounds — clone once instead of rebuilding them
         // on every `run_typing_passes` (Campfire: 1 initial + 8 rounds).
+        equations::capture_sites(app);
         let module_methods: HashMap<ClassId, Vec<MethodDef>> = app
             .library_classes
             .iter()
@@ -1199,6 +1202,17 @@ impl Analyzer {
             .collect();
 
         shape::capture_literals(app);
+        if equations::on() {
+            // Copy identities and recursive components are established before
+            // any inferred receiver can influence them.
+            self.fold_concern_surfaces(app);
+            equations::capture_contracts(&self.classes);
+            self.fold_slot_graph(app, &Self::defined_methods(app));
+            fold::freeze_structure();
+            if fixpoint_check::stats_on() {
+                self.fixpoint_checks.structure_start = Some(self.structure_snapshot(app).summary());
+            }
+        }
         if sccq::sched_sccq() {
             self.sccq_init(app);
             // The state before any typing: the initial pass harvests each
@@ -4483,7 +4497,7 @@ impl Analyzer {
             if let Some(ty) = ty {
                 // `RH_FOLD`: a parameter of a recursive component is read
                 // by reference.
-                let ty = if is_declared { ty } else { fold::param_ref(class_id, &method.name, i, ty) };
+                let ty = if is_declared { ty } else { fold::param_ref(class_id, &method.name, ctx.class_side, i, ty) };
                 ctx.local_bindings.insert(param.name.clone(), ty);
             }
         }
@@ -4541,7 +4555,7 @@ impl Analyzer {
             if let Some(ty) = ty {
                 // `RH_FOLD`: a parameter of a recursive component is read
                 // by reference.
-                let ty = if is_declared { ty } else { fold::param_ref(class_id, action_name, i, ty) };
+                let ty = if is_declared { ty } else { fold::param_ref(class_id, action_name, false, i, ty) };
                 ctx.local_bindings.insert(name.clone(), ty);
             }
         }
@@ -5167,7 +5181,7 @@ impl Analyzer {
                     cls.instance_methods.insert(name.clone(), ty.clone());
                     folded.0.insert(name.clone());
                     // `RH_FOLD`: the copy reads the module's slot.
-                    fold::note_alias(&id, name, &m);
+                    fold::note_alias(&id, name, &m, false);
                 }
                 for (name, ty) in class_side {
                     if cls.class_methods.contains_key(name) && !folded.1.contains(name) {
@@ -5176,7 +5190,7 @@ impl Analyzer {
                     det::note_named("copy.concern_class", name.as_str(), cls.class_methods.get(name), ty);
                     cls.class_methods.insert(name.clone(), ty.clone());
                     folded.1.insert(name.clone());
-                    fold::note_alias(&id, name, &m);
+                    fold::note_alias(&id, name, &m, true);
                 }
             }
         }

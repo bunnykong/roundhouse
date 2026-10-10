@@ -1791,6 +1791,7 @@ fn rewrite_free(e: &Expr) -> Expr {
         diagnostic: e.diagnostic.clone(),
         hint: e.hint,
         decisions: e.decisions,
+        inference_id: e.inference_id,
     }
 }
 
@@ -2085,5 +2086,6 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         diagnostic: e.diagnostic.clone(),
         hint: e.hint,
         decisions: e.decisions,
+        inference_id: e.inference_id,
     }
 }

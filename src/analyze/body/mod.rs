@@ -466,6 +466,7 @@ impl<'a> BodyTyper<'a> {
     }
 
     fn analyze_with_literal_input(&self, expr: &mut Expr, ctx: &Ctx, literal_input: Option<&Ty>) -> Ty {
+        let _site = super::equations::enter(expr, ctx);
         let mut ty = self.compute(expr, ctx, literal_input);
         if super::shape::on()
             && let ExprNode::Send { recv: Some(_), method, args, .. } = &*expr.node
@@ -708,6 +709,30 @@ impl<'a> BodyTyper<'a> {
     /// site's narrowed slot.
     fn narrow(&self, ctx: &Ctx, pred: &narrowing::NarrowPred, then_branch: bool, site: &crate::span::Span) -> Ctx {
         let at = crate::analyze::fold::site_of(site);
+        if super::equations::on() && crate::analyze::fold::active() {
+            let unfolded = self.fold_narrow(ctx, pred, at);
+            let mut out = narrowing::with_head_match(|| narrowing::apply_narrowing(&unfolded, pred, then_branch));
+            let mut keys = Vec::new();
+            narrowing::pred_keys(pred, &mut keys);
+            for key in keys {
+                let (name, bindings) = match &key {
+                    narrowing::VarKey::Local(n) | narrowing::VarKey::Reader(n, _) => (n, &mut out.local_bindings),
+                    narrowing::VarKey::Ivar(n) => (n, &mut out.ivar_bindings),
+                };
+                // A bareword predicate may name a method rather than a
+                // lexical binding. Its site still has an identity; allocating
+                // that site must not introduce a local that shadows dispatch.
+                let after = bindings.get(name).cloned().or_else(|| match &key {
+                    narrowing::VarKey::Reader(_, ty) => Some(ty.clone()),
+                    _ => None,
+                });
+                let filter = format!("{}_{}", narrowing::pred_desc(pred, name, then_branch), name.as_str());
+                let reference = crate::analyze::fold::narrowed_ref(at, filter,
+                    after.clone().unwrap_or_else(unknown));
+                if after.is_some() { bindings.insert(name.clone(), reference); }
+            }
+            return out;
+        }
         let unfolded = match self.fold_narrow(ctx, pred, at) {
             std::borrow::Cow::Borrowed(c) => return narrowing::apply_narrowing(c, pred, then_branch),
             std::borrow::Cow::Owned(c) => c,
@@ -792,9 +817,11 @@ impl<'a> BodyTyper<'a> {
         };
         let bound = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) }?;
         let at = crate::analyze::fold::site_of(&scrutinee.span);
-        let unfolded = crate::analyze::fold::head(bound, at, self.classes().raw())?;
+        let unfolded = crate::analyze::fold::head(bound, at, self.classes().raw())
+            .or_else(|| super::equations::on().then(|| bound.clone()))?;
         let base = match bound {
             Ty::Rec { slot } => Some(*slot),
+            _ if super::equations::on() => Some(0), // only presence is used
             _ => None,
         };
         Some((name.clone(), ivar, unfolded, base))
@@ -1251,10 +1278,16 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Lambda { params, rest_param, block_param, body, .. } => {
                 let mut inner = ctx.clone();
-                for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
+                for (i,name) in params.iter().chain(rest_param.iter()).chain(block_param.iter()).enumerate() {
                     inner.class_objects.remove(name);
+                    if super::equations::on() {
+                        let value = inner.local_bindings.get(name).cloned().unwrap_or_else(unknown);
+                        inner.local_bindings.insert(name.clone(), super::fold::closure_param(
+                            super::fold::site_of(&expr_span), i, value));
+                    }
                 }
                 let body_ty = self.analyze_expr(body, &inner);
+                let body_ty = super::fold::closure_result(super::fold::site_of(&expr_span), body_ty);
                 // Synthesize a `Fn` type from the body's type. Param
                 // types aren't tracked here (they were seeded into the
                 // outer Ctx by block_ctx_for from the receiver
@@ -1399,6 +1432,7 @@ impl<'a> BodyTyper<'a> {
                         diagnostic: None,
                         hint: None,
                         decisions: 0,
+                        inference_id: super::equations::derived_receiver_id(expr.inference_id),
                     });
                 }
 
@@ -1506,7 +1540,11 @@ impl<'a> BodyTyper<'a> {
                     // read from — its own computed type already IS
                     // the referenced method's return type.
                     match &*b.node {
-                        ExprNode::Lambda { body, .. } => body.ty.clone(),
+                        ExprNode::Lambda { body, .. } => {
+                            if super::equations::on() {
+                                match b.ty.as_ref() { Some(Ty::Fn { ret, .. }) => Some((**ret).clone()), _ => body.ty.clone() }
+                            } else { body.ty.clone() }
+                        },
                         ExprNode::MethodRef { .. } => Some(method_ref_ty),
                         _ => None,
                     }

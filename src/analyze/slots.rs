@@ -128,7 +128,7 @@ type Carry = BTreeMap<u32, (u32, u16)>;
 fn add_into(into: &mut Carry, from: &Carry) {
     for (k, (n, f)) in from {
         let e = into.entry(*k).or_insert((0, 0));
-        e.0 = (e.0 + n).min(CAP);
+        e.0 = (e.0 + n).min(if super::equations::on() { 1 } else { CAP });
         e.1 |= f;
     }
 }
@@ -226,6 +226,9 @@ impl Walk<'_> {
     /// The defined methods a send reaches, by the class each receiver
     /// class inherits the `def` from.
     fn targets(&self, recv: Option<&Expr>, self_class: &ClassId, method: &Symbol) -> Vec<(ClassId, Symbol)> {
+        if super::equations::on() {
+            return self.defined.iter().filter(|(_, m)| m == method).cloned().collect();
+        }
         let classes: Vec<ClassId> = match recv {
             Some(r) => match r.ty.as_ref() {
                 Some(t) => match fold::receiver_classes(t, &self.an.classes) {
@@ -277,7 +280,7 @@ impl Walk<'_> {
 
     fn carry(&mut self, e: &Expr, b: &mut Body) -> Carry {
         let c = self.carry_node(e, b);
-        if e.ty.as_ref().is_some_and(inert) { Carry::new() } else { c }
+        if !super::equations::on() && e.ty.as_ref().is_some_and(inert) { Carry::new() } else { c }
     }
 
     fn walk_all(&mut self, e: &Expr, b: &mut Body) {
@@ -632,7 +635,9 @@ impl Walk<'_> {
         };
         let dynamic = reflective && literal.is_none();
         let is_new = method.as_str() == "new" && recv.is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
-        let mut targets = if dynamic { Vec::new() } else { self.targets(recv, b.class, &name) };
+        let mut targets = if dynamic && super::equations::on() {
+            self.defined.iter().cloned().collect()
+        } else if dynamic { Vec::new() } else { self.targets(recv, b.class, &name) };
         if is_new {
             for t in self.targets(recv, b.class, &Symbol::from("initialize")) {
                 if !targets.contains(&t) {
@@ -640,12 +645,15 @@ impl Walk<'_> {
                 }
             }
         }
+        if super::equations::on() {
+            for target in &targets { fold::record_call(b.class, b.method, target.clone()); }
+        }
         // Block: its parameters read the receiver of a library iterator,
         // plus an accumulator argument.
         let mut block_c = Carry::new();
         if let Some(bl) = block {
             let mut param_c = Carry::new();
-            if targets.is_empty() {
+            if targets.is_empty() || super::equations::on() {
                 add_into(&mut param_c, &recv_c);
                 add_into(&mut param_c, &args_c);
             }
@@ -665,7 +673,7 @@ impl Walk<'_> {
             b.write(to_id, &call_args_c, kind);
         }
         // Mutating sends on a local or ivar receiver.
-        if MUTATORS.contains(&method.as_str()) && targets.is_empty() {
+        if MUTATORS.contains(&method.as_str()) && (targets.is_empty() || super::equations::on()) {
             if let Some(r) = recv {
                 let mut v = args_c.clone();
                 add_into(&mut v, &block_c);
@@ -673,7 +681,7 @@ impl Walk<'_> {
             }
         }
         // The value.
-        if dynamic {
+        if dynamic && !super::equations::on() {
             let classes: Vec<ClassId> = match recv {
                 Some(r) => r.ty.as_ref().map(super::class_ids_for_call_receiver).unwrap_or_default(),
                 None => vec![b.class.clone()],
@@ -707,6 +715,10 @@ impl Walk<'_> {
                 max_into(&mut c, &r);
             }
             add_into(&mut c, &block_c);
+            if super::equations::on() {
+                add_into(&mut c, &recv_c);
+                add_into(&mut c, &args_c);
+            }
             return c;
         }
         // A library method: its value may embed the receiver, the
@@ -734,17 +746,18 @@ impl Walk<'_> {
         // Flow-insensitive locals: walk until they stop growing, recording
         // each walk's edges; the last walk (no growth) saw the final locals,
         // so its edges are the complete set.
-        let mut v = Carry::new();
-        for _ in 0..4 {
+        let mut v;
+        let mut walks = 0;
+        loop {
             b.grew = false;
             b.edges.clear();
             for d in defaults {
                 let _ = self.carry(d, &mut b);
             }
             v = self.carry(body, &mut b);
-            if !b.grew {
-                break;
-            }
+            if !b.grew { break; }
+            walks += 1;
+            if !super::equations::on() && walks >= 4 { break; }
         }
         if b.grew {
             // Still growing after four walks: one more with the locals as
@@ -773,6 +786,7 @@ impl Analyzer {
         if !on() {
             return;
         }
+        if super::equations::on() && ST.with(|s| s.borrow().calls > 0) { return; }
         let skip = ST.with(|s| {
             let mut s = s.borrow_mut();
             s.calls += 1;

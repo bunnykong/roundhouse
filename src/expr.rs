@@ -135,6 +135,10 @@ pub struct Expr {
     /// that don't run a decide pass see no behavioral change.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub decisions: u64,
+    /// Analysis-local syntax identity. Assigned before typing and retained by
+    /// concern copies; never part of emitted/wire IR or structural equality.
+    #[serde(skip)]
+    pub inference_id: u64,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -168,6 +172,7 @@ impl Expr {
             diagnostic: None,
             hint: None,
             decisions: 0,
+            inference_id: 0,
         }
     }
 

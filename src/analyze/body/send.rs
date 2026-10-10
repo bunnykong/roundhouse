@@ -801,6 +801,15 @@ impl<'a> BodyTyper<'a> {
         block_ret: Option<&Ty>,
         args: &[crate::expr::Expr],
     ) -> Ty {
+        // A closure result has an equation identity, but the existing block
+        // transfer still inspects its head (for example, transaction's
+        // pending fallback and flat_map's array projection). Give referenced
+        // and inline results the same transfer without discarding the slot.
+        let block_head = if crate::analyze::equations::on() {
+            block_ret.and_then(|t| crate::analyze::fold::head(t,
+                crate::analyze::fold::pseudo_site(&format!("block-return:{method}")), self.classes().raw()))
+        } else { None };
+        let block_ret = block_head.as_ref().or(block_ret);
         // `RH_FOLD`: a receiver that is (or carries) a slot reference is
         // unfolded one level here.
         if crate::analyze::fold::on() {
@@ -2030,7 +2039,8 @@ impl<'a> BodyTyper<'a> {
         class_side: bool,
     ) -> Option<Ty> {
         if !crate::analyze::fold::active()
-            || matches!(ty, Ty::Fn { .. })
+            || (!crate::analyze::equations::on() && matches!(ty, Ty::Fn { .. }))
+            || (crate::analyze::equations::on() && !crate::analyze::equations::return_reference(cid, method, class_side))
             || !crate::analyze::fold::is_rec_method(cid, method)
         {
             return None;
@@ -2041,7 +2051,7 @@ impl<'a> BodyTyper<'a> {
         }
         let mut mentions_self = false;
         crate::analyze::fold::visit(ty, &mut |t| mentions_self |= matches!(t, Ty::SelfInstance));
-        if mentions_self {
+        if mentions_self && !crate::analyze::equations::on() {
             return None;
         }
         crate::analyze::fold::ret_ref(cid, method, class_side)
