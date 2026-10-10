@@ -24,6 +24,19 @@
 //! `if`/`unless` wrapping the rest of the block, in
 //! `ingest::controller::lambda_filter_target` — the one resolver a
 //! macro-expanded block filter and a hand-written one both go through.
+//!
+//! And the OTel tail: `OpenTelemetry::Trace.current_span`. Without a
+//! stub, that constant simply does not exist on either target, so a
+//! deprecated endpoint 500s the moment its filter reaches it.
+//! `runtime/ruby/open_telemetry_facade.rb` gives it a non-recording
+//! span — exactly `opentelemetry-api`'s own behavior with no SDK
+//! installed — permanently, on every target, since nothing here ever
+//! stands aside for a real gem.
+//!
+//! The full `retire_endpoint` shape at the bottom of this file —
+//! locals, the `next unless` OTel guard, and the stub together — is the
+//! brief's actual macro; everything above builds up to it one feature
+//! at a time.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -416,6 +429,142 @@ end
 
 raise "no loud query must not set the header: #{get("/widgets").inspect}" unless get("/widgets") == [200, nil]
 raise "loud=1 must set the header: #{get("/widgets", "loud=1").inspect}" unless get("/widgets", "loud=1") == [200, "1"]
+"#,
+        )
+        .assert_passes();
+}
+
+// ---------------------------------------------------------------------
+// The OTel stub, standalone — no macro, no next, just the constant.
+// ---------------------------------------------------------------------
+
+const OTEL_APPLICATION_CONTROLLER: &str = "class ApplicationController < ActionController::Base\nend\n";
+
+const OTEL_WIDGETS_CONTROLLER: &str = r#"class WidgetsController < ApplicationController
+  before_action do
+    span = OpenTelemetry::Trace.current_span
+    response.headers['X-Recording'] = span.recording?.to_s
+    span.set_attribute('probe', true)
+  end
+
+  def index
+    head :ok
+  end
+end
+"#;
+
+/// Without the stub this body's `before_action` would 500 every
+/// request on `undefined constant OpenTelemetry` — a bare `NameError`,
+/// not something a `rescue StandardError` in the app could even catch.
+#[test]
+fn open_telemetry_current_span_is_non_recording_and_does_not_raise() {
+    let overlay = emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", OTEL_APPLICATION_CONTROLLER)
+        .write("app/controllers/widgets_controller.rb", OTEL_WIDGETS_CONTROLLER)
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n",
+        )
+        .write("db/schema.rb", RUNTIME_SCHEMA);
+    overlay
+        .run_ruby(
+            r#"env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => "/widgets", "QUERY_STRING" => "", "rack.input" => StringIO.new("") }
+status, headers, _body = Main.run_rack(env)
+raise "GET /widgets answered #{[status, headers["x-recording"]].inspect}" unless [status, headers["x-recording"]] == [200, "false"]
+"#,
+        )
+        .assert_passes();
+}
+
+// ---------------------------------------------------------------------
+// End to end: locals, the next-unless OTel guard, and the stub together
+// — the brief's actual `retire_endpoint` macro, unreduced.
+// ---------------------------------------------------------------------
+
+const FULL_MACRO_BODY: &str = r#"      stamp = "@#{date.to_datetime.to_i}"
+      sunset = sunset&.to_date&.httpdate
+      before_action(**kwargs) do
+        response.headers['Deprecation'] = stamp
+        response.headers['Sunset'] = sunset if sunset
+        span = OpenTelemetry::Trace.current_span
+        next unless span&.recording?
+        span.set_attribute('app.endpoint.deprecated', true)
+      end"#;
+
+#[test]
+fn the_full_macro_folds_locals_restructures_next_and_reaches_the_otel_tail() {
+    let (app, gaps) = build(FULL_MACRO_BODY, "retire_endpoint '2022-11-14', only: [:index]", "");
+    assert!(!has_gap(&gaps, "retire_endpoint"), "{gaps:?}");
+    let src = emitted_widgets(app);
+    assert!(src.contains("@1668384000"), "{src}");
+    assert!(!src.contains("next"), "the next-unless guard must be restructured to an if:\n{src}");
+    assert!(src.contains("recording?"), "{src}");
+}
+
+const FULL_RUNTIME_SUNSET_CONCERN: &str = r#"module SunsetConcern
+  extend ActiveSupport::Concern
+
+  class_methods do
+    def retire_endpoint(date, sunset: nil, **kwargs)
+      stamp = "@#{date.to_datetime.to_i}"
+      sunset = sunset&.to_date&.httpdate
+      before_action(**kwargs) do
+        response.headers['Deprecation'] = stamp
+        response.headers['Sunset'] = sunset if sunset
+        span = OpenTelemetry::Trace.current_span
+        next unless span&.recording?
+        span.set_attribute('app.endpoint.deprecated', true)
+      end
+    end
+  end
+end
+"#;
+
+const FULL_RUNTIME_WIDGETS_CONTROLLER: &str = r#"class WidgetsController < ApplicationController
+  retire_endpoint '2022-11-14', sunset: '2026-10-01', only: [:index]
+
+  def index
+    head :ok
+  end
+
+  def show
+    head :ok
+  end
+end
+"#;
+
+const FULL_RUNTIME_ROUTES: &str = r#"Rails.application.routes.draw do
+  resources :widgets, only: [:index, :show]
+end
+"#;
+
+/// `GET /widgets` (scoped `only: [:index]`) answers 200 with both the
+/// folded `Deprecation` stamp and the folded `Sunset` httpdate; `GET
+/// /widgets/1` (`show`, not in `only:`) carries neither. Either
+/// response at all — rather than a 500 — is also the OTel-tail claim: a
+/// non-recording `current_span` that raised would 500 every request
+/// the filter runs on.
+#[test]
+fn the_full_macro_runs_under_cruby() {
+    let overlay = emit_and_run::empty_app()
+        .write("app/controllers/concerns/sunset_concern.rb", FULL_RUNTIME_SUNSET_CONCERN)
+        .write("app/controllers/application_controller.rb", RUNTIME_APPLICATION_CONTROLLER)
+        .write("app/controllers/widgets_controller.rb", FULL_RUNTIME_WIDGETS_CONTROLLER)
+        .write("config/routes.rb", FULL_RUNTIME_ROUTES)
+        .write("db/schema.rb", RUNTIME_SCHEMA);
+    overlay
+        .run_ruby(
+            r#"def get(path)
+  env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new("") }
+  status, headers, _body = Main.run_rack(env)
+  [status, headers["deprecation"], headers["sunset"]]
+end
+
+index = get("/widgets")
+raise "GET /widgets answered #{index.inspect}" unless index == [200, "@1668384000", "Thu, 01 Oct 2026 00:00:00 GMT"]
+
+show = get("/widgets/1")
+raise "GET /widgets/1 answered #{show.inspect}, want no Deprecation/Sunset" unless show == [200, nil, nil]
 "#,
         )
         .assert_passes();
