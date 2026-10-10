@@ -591,8 +591,13 @@ was spelled, so an untouched node is still the source bytes), and
 write-through — the two shapes campfire's mutating filters use
 (`fragment.replace("div") { |n| n.tap { |x| x.inner_html = … } }`,
 `fragment.update { |s| s.at_css("div")["class"] = … }`). `find_all`
-stays a read. Every expectation in `runtime/ruby/test/action_text_test.rb`
-for these was measured against Rails' Nokogiri-backed Fragment.
+stays a read. An update block can also scan `css("*")` and call
+`Node#remove`; that removes each disallowed element with its contents while
+leaving allowed nodes in the copied fragment. This is a removal primitive,
+not a general sanitizer: the caller supplies the allowlist, and allowed-node
+attributes are not filtered. Every expectation in
+`runtime/ruby/test/action_text_test.rb` for these was measured against Rails'
+Nokogiri-backed Fragment.
 
 **What always worked.** The PARSE: `#attachments` returns every node
 with every attribute it carried (`sgid`, `content_type`, `caption`,
@@ -711,18 +716,21 @@ Analyze additionally types the column reader `untyped` where the emitted
 reader returns `String`: that is the source-shaped accessor object, and
 it exists only between the two hops the lowering erases.
 
-### `insert_all` runs save callbacks and issues one INSERT per row
+### `insert_all` / `insert_all!` issue one INSERT per row
 
 `Model.insert_all(rows)` is INLINED at the call site (Ruby family,
-`scope_chain.rs`) as `rows.each { |a| Model.new(a)
-.save_after_validation }`. Rails issues ONE multi-row INSERT and skips
-validations *and* callbacks; this skips validations and their callbacks,
-fills timestamps, and runs the save callbacks.
+`scope_chain.rs`) as `rows.each { |a| Model.new(a)._insert_row }`, and
+`Model.insert_all!(rows, returning: cols)` as
+`ActiveRecord::Result.new(rows.map { |a| r = Model.new(a); r._insert_row;
+{ "id" => r.id, … } })`. Rails issues ONE multi-row INSERT; this issues
+one per row. Like Rails, neither runs validations or callbacks, and both
+fill timestamps.
 
-**Why `save_after_validation`.** It is the seam Rails' own
-validation-skipping writes (`update_attribute`) already enter at, so
-this reuses one definition of "write without validating" rather than
-adding a second path that has to be kept in step.
+**Why `_insert_row`.** It is the raw insert the fixture loader uses too
+(Rails' `insert_fixtures_set` is the same kind of write): timestamps the
+attributes left out, then the INSERT, nothing else. Until 2026-10-09 both
+bulk inserts entered at `save_after_validation` and so ran the save
+callbacks Rails skips.
 
 **Why inlined, not a synthesized method.** A per-model `insert_all`
 would land on every model of every app to serve the handful that call
@@ -756,13 +764,16 @@ as a conflict. The check reads the existing row, not the new one, so a
 new row the predicate does not cover is still skipped when a covered row
 shares its key; Rails inserts it.
 
-**What it costs.** N statements instead of one, plus one SELECT per row
-for the conflict check, and callbacks Rails would not run — visible on
-any model whose `after_create` has side effects. The corpus caller
-(campfire's `Room has_many :memberships do def grant_to … end end`)
-inserts Membership rows whose callbacks are inert.
+**`insert_all!` has no guard.** A duplicate raises, as Rails'
+`RecordNotUnique` does. Its value is Rails': an `ActiveRecord::Result`
+of the RETURNING columns (the primary key when `returning:` is left
+out, SQLite's default), whose `rows` are Arrays of values. Only a
+literal column list lowers; anything else declines.
 
-**And it answers a different value.** Rails returns an
+**What it costs.** N statements instead of one, plus, for `insert_all`,
+one SELECT per row for the conflict check.
+
+**And `insert_all` answers a different value.** Rails returns an
 `ActiveRecord::Result`; the inlined `rows.each { … }` returns `rows`,
 the Array of attribute hashes it was given. The catalog says
 `ArrayOfUntyped` for that reason — the type of what this pipeline
@@ -948,10 +959,21 @@ previewer here. ffmpeg is a runtime prerequisite the way libvips is:
 campfire's Dockerfile installs it, so does the archive's, and the
 conformance job. Without it the previewer raises, as Rails does. The
 image DIMENSIONS are read from the file header at upload
-(`ImageAnalyzer`, ruby family: PNG/GIF/JPEG/BMP/WebP), so
-`metadata[:width]` answers what Rails' analyzer would.
+(`ImageAnalyzer`, ruby family: PNG/GIF/JPEG/BMP/WebP), and a video's
+from ffprobe on its first stream (Rails' `VideoAnalyzer`; no ffprobe
+leaves them empty, as a failed analyzer does), so `metadata[:width]`
+answers what Rails' analyzer would. A named preview (`preview(:poster)`)
+resolves the variant the `has_one_attached` block declares, and
+`processed` draws the frame and then makes that variant, as Rails'
+`variant.processed if variant?` does. `processed?` and a variant's
+`image` look the record up and make nothing, so a view that asks "was it
+made?" never makes one.
 
-**Where the preview still differs.** `representation(...)` answers the
+**Where the preview still differs.** The poster is drawn by
+`Previewer.poster`, not through the app's previewer class: an app
+subclass that overrides Rails' private `capture` (campfire's
+`TimeLimitedVideoPreviewer`, which kills ffmpeg past a time limit) is
+not what runs, and `ActiveStorage.paths[:ffmpeg]` is not modeled. `representation(...)` answers the
 variant whatever the blob is, where Rails answers a `Preview` for a
 previewable one — kept so the reader has one type (a union would box
 every image on the room page); campfire only asks for a representation
@@ -1559,51 +1581,43 @@ EMPTY rather than a bare `nil` — a lone `nil` gives Rust an `Option`
 with nothing to infer from (`E0282` on `None;`), where an empty body is
 a plain `void`.
 
-### `expires_in` records Cache-Control but emits no header
+### `expires_in` records Cache-Control but emits no header — FIXED
 
-`expires_in 1.year, public: true` records the max-age and the
-public/private flag on the controller and stops there. No
-`Cache-Control` header is produced, so a real client is told nothing
-about caching and re-fetches every time.
+**FIXED 2026-10-09** (rubys/roundhouse#679). `expires_in 1.year, public:
+true` — and `response.cache_control.replace(private: true, no_store:
+true)`, the shape a `before_action :set_cache_control_defaults` filter
+actually writes — now both reach the wire. The two TYPED
+`cache_control_max_age` / `cache_control_public` readers remain, now
+delegating to `ActionController::CacheControlStore`
+(`action_controller/base.rb`): one bool/Integer field per Rails option
+(`public`, `private`, `no_store`, `no_cache`, `must_revalidate`,
+`must_understand`, `immutable`, `max_age`, `stale_while_revalidate`,
+`stale_if_error`, `extras`) rather than Rails' one mixed Hash, so no
+strict target pays for an `untyped cache_control`. `to_header` composes
+the `Cache-Control` string in Rails 8.1.4's own branch order (pinned
+against the gem in `cache_control_test.rb`); `commit_cache_control!` (a
+ruby-family reopen, `action_controller/cache_control.rb`, beside
+`cookies.rb`) writes it onto the buffered header store right before
+each wire path's existing header copy — the CRuby overlay's `main.rb`,
+the spinel scaffold's `main.rb`, and the spinel test harness all call
+it. That reopen is also where `response.cache_control`'s Hash-like
+`[]`/`[]=`/`delete`/`merge!`/`replace` surface lives, over the typed
+store.
 
-**Why.** The same unsent extra-header seam the conditional-GET entry
-above describes, approached from the writing side rather than the
-reading side: the CGI harness emits status, body and content type, and
-nothing else. Composing the header string into the buffered `headers`
-hash ahead of that would be work nothing reads — and `@headers[k] = v`
-does not survive the Rust emitter, which renders a Hash index-assign as
-`self.headers[k] = v` where `HashMap` wants `.insert()` (E0594:
-`IndexMut` is not implemented for `HashMap`). That emitter gap is worth
-closing on its own; it is not worth carrying dead code to reach.
+Before this, the previously-described emitter gap (`@headers[k] = v`
+not surviving the Rust emitter as a Hash index-assign) was the blocker
+for EVERY strict target having a header-writing seam at all, not just
+Cache-Control; it stands as a separate gap for those targets, which
+`expires_in` still records into the typed store (reachable from
+`cache_control_max_age` / `cache_control_public`) without writing a
+header, same as before.
 
-**What it costs.** Bandwidth, and only bandwidth — an uncached response
-is a correct response. Nothing an app does depends on the client
-honoring it.
-
-**Where a test differs from a client.** `response.cache_control` reads
-the controller's recorded values directly, not a parsed header, so a
-test asserting `cache_control[:max_age]` sees the right answer while an
-HTTP client sees no header at all. That is the honest reading of what is
-implemented: the VALUE is computed, the TRANSPORT is not.
-
-`stale_while_revalidate:` is accepted and recorded nowhere for the same
-reason — it exists so that campfire's logos and avatars actions, two of
-its three call sites, do not raise ArgumentError on an option this
-method would otherwise not know.
-
-**Shape.** Rails' `response.cache_control` is `{public: true, max_age:
-31556952}` — an Integer and a boolean in one Hash, the type bag every
-strict target pays for. The controller keeps the two facts apart as
-`cache_control_max_age` (Integer) and `cache_control_public` (bool), and
-only the TEST harness reassembles Rails' Hash, since the subscript
-spelling is what a test writes and the harness ships to the Ruby family
-alone. The rest of Rails' options (`must_revalidate:`,
-`stale_if_error:`) join `stale_while_revalidate:` when a call site asks,
-rather than as a splat nothing can type. The seconds argument is
-grounded at the CALL SITE by `lower::duration::rewrite_expires_in` —
-the same `.to_i` unwrap `signed_id(expires_in:)` gets — so the runtime
-signature stays `Integer` and no strict target pays for an `untyped`
-parameter.
+`stale_if_error:` reaches the runtime the same way
+`stale_while_revalidate:` and the seconds argument itself do: grounded
+to seconds at the CALL SITE by `lower::duration::rewrite_expires_in`
+(`1.day` → `86400`), the same `.to_i` unwrap `signed_id(expires_in:)`
+gets, so the runtime signature stays `Integer` and no strict target
+pays for an `untyped` parameter.
 
 ### `Relation#find` raises `RecordNotFound` — as Rails does
 
@@ -2355,6 +2369,85 @@ arrived at the tail of a session that had already changed the escape
 surface twice. Do it with the golden dumps regenerated in the same
 commit, and check `compare-*` on every target rather than assuming a
 DOM comparison cannot see it.
+
+### Pooled web push connections on spinel wait on a compact-class fix — not yet
+
+campfire's `WebPush::Connections` (upstream since #351) opens pooled push
+connections as `class HTTP < Net::HTTP; include Stages; end`, where
+`Stages` overrides two private methods of CRuby's net/http to learn how
+far a request got before it failed:
+
+```ruby
+def begin_transport(...); @stage = :checking; super.tap { @stage = :sent }; end
+def connect(...);        @stage = :connecting if @stage == :checking; super;  end
+```
+
+On the ruby family this runs as written, against Ruby's own net/http
+(19 of campfire's 20 push tests pass against the TLS server its own
+test helper starts; the twentieth mixes a module into one connection
+with `extend`, the per-object mixin no compiled target has).
+
+For spinel, the forwarding and the hooks are done:
+
+- **The forwarding.** `lower::known_super_forwarding` gives a `(...)`
+  override that only reaches `super` the destination's own
+  parameters when the destination is a stdlib method of known
+  signature. For these two that is CRuby's: `begin_transport(req)` and
+  `connect()`. The strict spinel emit has no errors left.
+- **The hooks.** `runtime/spinel/net_http.rb` routes its transport
+  through `connect` and `begin_transport(req)` in CRuby's order and
+  holds `keep_alive_timeout` and `proxy?`, so an override of either
+  hook runs. It works against the net package before and after
+  matz/spinel#8361, which adds the same methods upstream.
+  `tests/emit_and_run.rs` runs the pattern natively
+  (`forwarding_into_net_http_transport_hooks_runs_on_spinel`).
+
+Three gaps remain, all on spinel's side:
+
+- **The class itself (matz/spinel#8369).** A class nested in a compact
+  `class A::B` body is undefined at run time when it is named like its
+  superclass. campfire's `class WebPush::Connections` + nested
+  `class HTTP < Net::HTTP` is exactly that, and the emit writes nested
+  modules in the compact form too. Until it is fixed, a pooled push
+  delivery on the spinel binary raises NameError where it reaches
+  `WebPush::Connections::HTTP`.
+- **The tests' TLS server.** campfire's push-service test helper serves
+  TLS itself (`OpenSSL::SSL::SSLContext#key=`, a server-side context).
+  spinel's openssl package is a client, so those tests cannot handshake
+  even with the class defined.
+- **Proxies.** One test constructs `Net::HTTP.new(host, port, proxy)`.
+  The net package refuses a proxy at construction.
+
+### Smaller shapes campfire main reaches, each narrower than Rails
+
+- **`I18n.locale` / `default_locale` answer `:en`** (`runtime/ruby/i18n_locale.rb`),
+  Rails' default when nothing sets one. Setting a locale (`I18n.locale =`,
+  `with_locale`, `config.i18n.default_locale`) and translation (`I18n.t`)
+  are not modeled.
+- **`fragment_name_with_digest(name, digest_path)` adds no template
+  digest**: templates carry none here (see
+  `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted
+  `digest_path` adds nothing and an explicit one is kept in front.
+- **Token-free forms are read from one shape only**: an app helper whose
+  `token_tag` body is exactly `""` (campfire's header-only forgery
+  protection) synthesizes `token_fields_omitted`. Another `token_tag`
+  body is not read, and the forms keep their token field.
+- **`config.after_initialize` blocks do not run at boot.** campfire has
+  two: `Room::MessagesCount.ensure!` (its counter triggers, which
+  `schema.rb` cannot dump) and starting the WAL checkpointer outside
+  tests. The test suite gets the first through its `load_fixtures`
+  override, which is read; a served tree gets neither.
+- **`Rails.application.env_config` holds what is set and is consulted
+  for nothing**: a forgery failure always renders the 422 that
+  `action_dispatch.show_exceptions = :rescuable` asks for.
+- **`save` writes the whole row; only `touch` writes what changed.**
+  Rails' partial writes UPDATE the changed columns; this runtime's
+  `_adapter_update` writes every column the record loaded. A bare
+  `touch` (and so `belongs_to … touch: true`) UPDATEs `updated_at`
+  alone (`_adapter_touch`), which is what keeps campfire's
+  trigger-maintained `rooms.messages_count` correct when a message
+  touches its room. A `save`/`update` of a record loaded before a
+  trigger moved one of its columns still writes the stale value back.
 
 ## Related docs
 

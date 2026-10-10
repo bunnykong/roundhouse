@@ -139,6 +139,7 @@ module Main
     request_format = :json if path_format == "json"
     request_format = :turbo_stream if path_format == "turbo_stream"
     request_format = :rss if path_format == "rss"
+    request_format = :xml if path_format == "xml"
     # `/service-worker.js`: campfire's raw service-worker template.
     request_format = :js if path_format == "js"
     # A route-forced format (`get "/rss" => "home#index", :format =>
@@ -228,10 +229,13 @@ module Main
       controller.process_action(matched.action)
     rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
       return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
-    rescue ActionController::ParameterMissing
+    rescue ActionController::ParameterMissing, ActionController::BadRequest
       # `params.expect` / `params.require` refused the request and the app
       # did not rescue it: Rails' rescue_responses answer :bad_request.
       return [400, "<h1>400 Bad Request</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+    rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
+      # Not a 500: Rails' rescue_responses answer these with 422.
+      return [422, "<h1>422 Unprocessable Content</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     end
 
     # Dispatch on status, not on @location nil-ness: redirect_to
@@ -283,7 +287,12 @@ module Main
       out_cookies[session_cookie] =
         session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
     end
-    is_redirect = controller.status >= 300 && controller.status < 400
+    is_redirect = controller.status >= 300 && controller.status < 400 && !controller.head_response?
+    # Compose `Cache-Control` from whatever `response.cache_control`
+    # holds (`expires_in`, `replace`/`merge!`/`[]=`) onto the buffered
+    # header store, right before it is copied below — a no-op unless
+    # the action or one of its filters touched the store.
+    controller.commit_cache_control!
     # Headers the action set beyond Content-Type/Location — a
     # `Content-Disposition` on a download, the Cache-Control a blob
     # route asks for — ride as the tuple's sixth element.
@@ -355,7 +364,8 @@ module Main
   def self.run_rack(env)
     status, body, content_type, location, set_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies =
       dispatch_core(env, env["rack.input"] || StringIO.new(""))
-    headers = { "content-type" => content_type }
+    headers = {}
+    headers["content-type"] = content_type unless content_type.empty?
     headers["location"] = location unless location.nil?
     # A nil value is a header the app unset (`X-Rev` outside a deploy
     # with GIT_REVISION) — Rack 3 refuses a nil, so it is not written.
@@ -441,6 +451,10 @@ if __FILE__ == $PROGRAM_NAME
     # whole env; this one-shot CGI path builds an allowlist, so a header
     # dispatch depends on has to be named here.
     "HTTP_ACCEPT"    => ENV["HTTP_ACCEPT"],
+    "HTTP_ACCEPT_ENCODING" => ENV["HTTP_ACCEPT_ENCODING"],
+    "HTTP_IF_NONE_MATCH" => ENV["HTTP_IF_NONE_MATCH"],
+    "HTTP_IF_MODIFIED_SINCE" => ENV["HTTP_IF_MODIFIED_SINCE"],
+    "HTTP_TURBO_FRAME" => ENV["HTTP_TURBO_FRAME"],
     # The forgery check's two headers (runtime/request_forgery_protection.rb).
     "HTTP_X_CSRF_TOKEN" => ENV["HTTP_X_CSRF_TOKEN"],
     "HTTP_ORIGIN"       => ENV["HTTP_ORIGIN"],

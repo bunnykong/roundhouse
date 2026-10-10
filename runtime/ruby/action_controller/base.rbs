@@ -1,5 +1,11 @@
+module AbstractController
+  class DoubleRenderError < StandardError
+  end
+end
+
 module ActionController
   def self.header_key_ok?: (String? k) -> bool
+  def self.header_key_byte_ok?: (Integer byte) -> bool
   def self.header_value_ok?: (String? v) -> bool
   def self.header_control?: (String c) -> bool
   def self.sanitize_location: (String path) -> String
@@ -14,19 +20,83 @@ module ActionController
   def self.find_last: (String hay, String needle) -> Integer
   def self.forgery_flag: () -> bool
   def self.set_forgery_flag: (bool value) -> void
+  def self.forgery_switched_off: () -> bool
+  def self.set_forgery_switched_off: (bool value) -> void
   def self.masked_authenticity_token: () -> String
   def self.csrf_token_valid?: (String given, String expected) -> bool
 
   class HeaderStore
     @keys: Array[String]
+    @lower: Array[String]
     @vals: Array[String]
     def initialize: () -> void
     def []: (String key) -> String?
     def []=: (String key, String? value) -> void
+    def store_value: (String key, String? value) -> void
+    def slice: (*String names) -> Hash[String, String]
+    def merge!: (Hash[String, String?] other) -> HeaderStore
+    def delete: (String key) -> String?
     def size: () -> Integer
     def key_at: (Integer i) -> String
     def val_at: (Integer i) -> String
+    def index_of: (String key) -> Integer
   end
+
+  # Typed store backing `response.cache_control`. See the .rb for the
+  # Rails 8.1.4 field/branch/order contract `to_header` follows. The
+  # Hash-like `[]`/`[]=`/`delete`/`merge!`/`replace` surface is a
+  # ruby-family reopen (`cache_control.rb`'s own .rbs), not declared
+  # here.
+  class CacheControlStore
+    @public: bool
+    @private: bool
+    @no_store: bool
+    @no_cache: bool
+    @must_revalidate: bool
+    @must_understand: bool
+    @immutable: bool
+    @max_age: Integer
+    @has_max_age: bool
+    @stale_while_revalidate: Integer
+    @has_stale_while_revalidate: bool
+    @stale_if_error: Integer
+    @has_stale_if_error: bool
+    @extras: Array[String]
+
+    def initialize: () -> void
+    def public?: () -> bool
+    def public=: (bool) -> void
+    def private?: () -> bool
+    def private=: (bool) -> void
+    def no_store?: () -> bool
+    def no_store=: (bool) -> void
+    def no_cache?: () -> bool
+    def no_cache=: (bool) -> void
+    def must_revalidate?: () -> bool
+    def must_revalidate=: (bool) -> void
+    def must_understand?: () -> bool
+    def must_understand=: (bool) -> void
+    def immutable?: () -> bool
+    def immutable=: (bool) -> void
+    def max_age: () -> Integer
+    def max_age?: () -> bool
+    def max_age=: (Integer) -> void
+    def clear_max_age: () -> void
+    def stale_while_revalidate: () -> Integer
+    def stale_while_revalidate?: () -> bool
+    def stale_while_revalidate=: (Integer) -> void
+    def clear_stale_while_revalidate: () -> void
+    def stale_if_error: () -> Integer
+    def stale_if_error?: () -> bool
+    def stale_if_error=: (Integer) -> void
+    def clear_stale_if_error: () -> void
+    def extras: () -> Array[String]
+    def extras=: (Array[String]) -> void
+    def clear: () -> void
+    def empty?: () -> bool
+    def to_header: () -> String
+  end
+
   # Symbolic-status to integer-code mapping (`STATUS_CODES`) is a
   # Ruby-level frozen Hash literal — module-level constant, not a
   # method. RBS doesn't require declaring constants for the strict
@@ -71,6 +141,9 @@ module ActionController
     def path_parameters: () -> Hash[String, String]
     def path_parameters=: (Hash[String, String]) -> Hash[String, String]
     @headers: ActionController::HeaderStore
+    @content_type_explicit: bool
+    @head_response: bool
+    @cache_control: ActionController::CacheControlStore
     def action_name: () -> String
     def assign_action_name: (Symbol name) -> String
 
@@ -96,6 +169,7 @@ module ActionController
     # each filter that can render or redirect (Rails: a filter that
     # responds halts the chain and skips the action).
     def performed?: () -> bool
+    def head_response?: () -> bool
 
     def initialize: () -> void
 
@@ -128,15 +202,22 @@ module ActionController
       ?status: Symbol
     ) -> void
 
-    # `head(:no_content, content_type: "application/json")` — empty
-    # body, status only; content_type optional.
+    # The shared strict-target implementation supports the bounded
+    # keyword form. The Ruby/Spinel options-hash extension has its own
+    # signature in runtime/spinel/action_controller_head.rbs.
     def head: (Symbol status, ?content_type: String?, ?location: String?) -> void
     def response: () -> Base
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
-    # Integer SECONDS — `lower::duration::rewrite_expires_in` grounds the
-    # corpus' `1.year` / `1.week` before the call reaches here.
-    def expires_in: (Integer seconds, ?public: bool, ?stale_while_revalidate: Integer) -> void
+    # Integer SECONDS on every duration-shaped keyword —
+    # `lower::duration::rewrite_expires_in` grounds the corpus' `1.year`
+    # / `1.week` / `stale_while_revalidate: 30.seconds` /
+    # `stale_if_error: 1.day` before the call reaches here. -1 on
+    # `stale_while_revalidate:` / `stale_if_error:` means "not stated"
+    # (see the .rb).
+    def expires_in: (Integer seconds, ?public: bool, ?must_revalidate: bool,
+                      ?stale_while_revalidate: Integer, ?stale_if_error: Integer,
+                      ?immutable: bool) -> void
     def cache_control_max_age: () -> Integer
     def cache_control_public: () -> bool
     def headers: () -> ActionController::HeaderStore

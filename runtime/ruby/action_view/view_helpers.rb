@@ -234,6 +234,22 @@ module ActionView
     # for the two lanes that can use it. A poly walk over untyped values
     # and an `Array#sort` are not shapes every strict target's emit
     # answers, and this seam keeps them off those trees.
+    # A view's `<% cache key do %>` reads and writes its fragment through
+    # these two (`lower::view_to_library::walker`, `emit_cached_fragment`):
+    # `nil` from the read is a miss, and the write answers what it stored.
+    # The non-Ruby targets have no shared cache runtime, so this fallback
+    # always misses and lets the rendered fragment recompute. The ruby
+    # family and spinel reopen both (runtime/spinel/action_controller_fragment_caching.rb)
+    # to go through the controller as Rails' CacheHelper does —
+    # `perform_caching`, `combined_fragment_cache_key`, `cache_store`.
+    def self.fragment_read(_key)
+      nil
+    end
+
+    def self.fragment_write(_key, value, _ttl)
+      value
+    end
+
     def self.to_query(params)
       to_query_pairs(params, "")
     end
@@ -585,6 +601,7 @@ module ActionView
     # `authenticity_token` value is the form-field name; the token value
     # is empty here because spinel-blog doesn't sign sessions.
     def self.csrf_meta_tags
+      return "" if ActionController.forgery_switched_off
       %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="#{html_escape(form_authenticity_token)}" />)
     end
 
@@ -863,7 +880,15 @@ module ActionView
       # on that lane). The explicit comparison is false for every
       # target's unset shape and for `false` alike.
       return "" if @broadcast_rendering == true
+      return "" if ActionController.forgery_switched_off
+      return "" if token_fields_omitted?
       %(<input type="hidden" name="authenticity_token" value="#{html_escape(form_authenticity_token)}">)
+    end
+
+    # Strict non-Ruby targets do not emit Rails::Application. The Ruby
+    # family and Spinel override this with the app-specific test setting.
+    def self.token_fields_omitted?
+      false
     end
 
     # Bracket a broadcast partial render (the lowered

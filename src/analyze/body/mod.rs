@@ -246,6 +246,9 @@ pub struct ClassInfo {
     /// which is the same two hops the emit-time flattening reads
     /// (`room.memberships.grant_to(u)` → `room.memberships_grant_to(u)`).
     pub assoc_extensions: HashMap<(Symbol, Symbol), Ty>,
+    /// has_many readers without `through:` — the ones `lower::scope_chain`
+    /// roots onto a relation, so a relation terminal on them runs as SQL.
+    pub direct_has_many: std::collections::HashSet<Symbol>,
     /// Modules mixed in via `include` (e.g. a controller's
     /// `include IntervalHelper`). A mixed-in module's instance methods
     /// become instance methods of the includer, so dispatch consults
@@ -269,6 +272,7 @@ pub struct ClassInfo {
     /// lookup (the lexical scope, then the ancestors), never by its last
     /// segment alone.
     pub app_declared: bool,
+    pub positional_struct: bool,
 }
 
 impl ClassInfo {
@@ -742,11 +746,20 @@ impl<'a> BodyTyper<'a> {
                         if !keep_bare_splice {
                             qualify_resolved_path(path, name);
                         }
-                        self.typed_constants
+                        let value = self.typed_constants
                             .and_then(|values| values.get(declaration))
                             .cloned()
-                            .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()))
-                            .unwrap_or_else(unknown)
+                            .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()));
+                        let id: crate::ident::ClassId = (**name).clone();
+                        match value {
+                            Some(ty) => ty,
+                            // Not left unknown: ingest turned `Result = Struct.new(…)` into the class it defines.
+                            None if self.classes().get(&id).is_some_and(|c| c.app_declared) => {
+                                expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
+                                Ty::Class { id, args: vec![] }
+                            }
+                            None => unknown(),
+                        }
                     }
                     // An unresolved source reference may still name an
                     // exact modeled external class (for example Time).
@@ -1261,6 +1274,16 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
+                // Not a value: Rails' `call` answers the loaders, which `preload_associations` does not.
+                if method.as_str() == "call" && args.is_empty() && block.is_none()
+                    && expr.decisions & crate::expr::DISCARDED_VALUE != 0
+                    && let Some(r) = recv.as_mut()
+                    && crate::lower::preloader::preloader_new(r, |id| self.classes().get(id).is_some_and(|c| c.table.is_some())).is_some()
+                {
+                    crate::lower::preloader::clear_refusals(r);
+                    expr.decisions |= crate::expr::ADMITTED_PRELOADER_CALL;
+                    return Ty::Nil;
+                }
                 // Inside the class-side method, the instance a class-side
                 // `new` built (`Ty::SelfInstance`, see below) answers the
                 // methods of the class the `def` sits in: the receiving
@@ -1395,6 +1418,39 @@ impl<'a> BodyTyper<'a> {
                     });
                     return unknown();
                 }
+                let unsupported_deep_merge = match method.as_str() {
+                    "deep_merge" if block.is_some() => Some((
+                        "Hash#deep_merge conflict block",
+                        "only the no-block Rails deep_merge form is supported",
+                    )),
+                    "deep_merge!" => Some((
+                        "Hash#deep_merge!",
+                        "the mutating deep_merge! form is unsupported",
+                    )),
+                    "deep_merge" if args.len() != 1 => Some((
+                        "Hash#deep_merge arity",
+                        "exactly one Hash argument is supported",
+                    )),
+                    "deep_merge"
+                        if !matches!(args.first().and_then(|arg| arg.ty.as_ref()), Some(Ty::Hash { .. })) =>
+                    {
+                        Some((
+                            "Hash#deep_merge argument",
+                            "the supported no-block form requires a statically typed Hash argument",
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some((construct, detail)) = unsupported_deep_merge
+                    && matches!(recv_ty, Some(Ty::Hash { .. }))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from(construct),
+                        detail: detail.into(),
+                    });
+                    return unknown();
+                }
                 // Force `parenthesized: true` when dispatch resolves
                 // to a `Method`-kind on a registered class. The TS
                 // emitter's bare-recv-Send fallback omits parens when
@@ -1509,6 +1565,15 @@ impl<'a> BodyTyper<'a> {
                 ) {
                     return t;
                 }
+                if let Some(t) = self.relation_extreme_ty(
+                    recv.as_ref(),
+                    recv_ty.as_ref(),
+                    method,
+                    args,
+                    ctx.instance_body.then_some(ctx.self_ty.as_ref()).flatten(),
+                ) {
+                    return t;
+                }
                 if let Some(t) =
                     self.column_attribute_access_ty(recv_ty.as_ref(), method, args)
                 {
@@ -1536,6 +1601,18 @@ impl<'a> BodyTyper<'a> {
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too, which it would bind to its first member.
+                if method.as_str() == "new"
+                    && expr.diagnostic.is_none()
+                    && matches!(args.last().map(|a| &*a.node), Some(ExprNode::Hash { kwargs: true, .. }))
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if self.classes.get(id).is_some_and(|c| c.positional_struct))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("Struct keyword construction"),
+                        detail: "a `Struct.new(...)` superclass is built positionally; keyword arguments would land in its first member".to_string(),
+                    });
+                }
                 // `PTY.spawn(..., &maybe)` when `maybe` is nilable: Ruby
                 // may take the block (nil) or not (tuple). Presence was
                 // left absent above so other methods keep their no-block
@@ -1568,6 +1645,14 @@ impl<'a> BodyTyper<'a> {
                 // have already dispatched above and must win.
                 // RBS declares it `(untyped) -> Array[untyped]`; the
                 // argument says more.
+                // Not a Float argument: CRuby's `BigDecimal(Float)` needs a precision and spinel's package has none.
+                if recv.is_none() && method.as_str() == "BigDecimal" && args.len() == 1 && block.is_none()
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(args[0].ty.as_ref(), Some(Ty::Str | Ty::Int))
+                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                {
+                    return send::bigdecimal();
+                }
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
                     && (matches!(dispatched, Ty::Var { .. })
@@ -1797,7 +1882,11 @@ impl<'a> BodyTyper<'a> {
                         }
                         _ => false,
                     };
+                    let tail = i + 1 == exprs.len();
                     let e = &mut exprs[i];
+                    if !tail {
+                        e.decisions |= crate::expr::DISCARDED_VALUE;
+                    }
                     if !matches!(&*e.node, ExprNode::Assign { target: LValue::Var { .. }, .. }) {
                         forget_class_object_writes(e, &mut local_ctx);
                     }
@@ -4212,6 +4301,13 @@ mod tests {
             Ty::Union { variants: vec![Ty::Int, Ty::Var { var: TyVar(4) }] },
             Ty::Union { variants: vec![Ty::Untyped, Ty::Nil] },
             Ty::Union { variants: vec![Ty::Var { var: TyVar(5) }, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Var { var: TyVar(6) }, Ty::Untyped, Ty::Nil] },
+            Ty::Union {
+                variants: vec![
+                    Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                    Ty::Nil,
+                ],
+            },
         ]);
         let mut out: Vec<Ty> = Vec::new();
         for t in raw {
@@ -4241,6 +4337,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn param_slot_join_is_a_lattice_join() {
+        check_carried_slot_join_laws("unify_param_ty", crate::analyze::unify_param_ty);
+    }
+
+    /// Two pending observations: the result must not depend on which
+    /// one arrived first (it kept the later one).
+    #[test]
+    fn param_slot_join_of_two_pending_values_commutes() {
+        let (v1, v2) = (Ty::Var { var: TyVar(1) }, Ty::Var { var: TyVar(2) });
+        let join = crate::analyze::unify_param_ty;
+        assert_eq!(join(v1.clone(), v2.clone()), join(v2, v1));
+    }
+
+    /// An `untyped` arm inside a union is classified like a bare
+    /// `untyped`, so the answer doesn't depend on whether a producer
+    /// joined `Int` and `Str` first.
+    #[test]
+    fn param_slot_join_classifies_untyped_arms_inside_unions() {
+        let join = crate::analyze::unify_param_ty;
+        let str_or_untyped = Ty::Union { variants: vec![Ty::Str, Ty::Untyped] };
+        assert_eq!(
+            join(Ty::Int, str_or_untyped),
+            join(join(Ty::Int, Ty::Str), Ty::Untyped),
+        );
+    }
+
+    /// `nil` alone doesn't absorb `untyped` (#617, rule (a)): a nil
+    /// observation beside an untyped one is no evidence the parameter
+    /// is always nil. A non-nil concrete type still absorbs it.
+    #[test]
+    fn param_slot_join_keeps_untyped_beside_nil_alone() {
+        let join = crate::analyze::unify_param_ty;
+        let nil_or_untyped = Ty::Union { variants: vec![Ty::Untyped, Ty::Nil] };
+        assert_eq!(join(Ty::Nil, Ty::Untyped), nil_or_untyped);
+        assert_eq!(join(Ty::Untyped, Ty::Nil), nil_or_untyped);
+        let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        assert_eq!(join(nil_or_untyped.clone(), Ty::Str), str_or_nil);
+        assert_eq!(join(Ty::Str, nil_or_untyped), str_or_nil);
+    }
+
+    /// A parameter observed as `{}` at one call site and as a filled
+    /// Hash at another is that Hash, as for an ivar.
+    #[test]
+    fn param_slot_join_drops_pending_inside_hash_spines() {
+        let filled = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Int) };
+        assert_eq!(crate::analyze::unify_param_ty(empty_hash(), filled.clone()), filled);
     }
 
     #[test]

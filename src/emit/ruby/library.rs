@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
 use crate::App;
-use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, MethodVisibility};
+use crate::dialect::{AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver, MethodVisibility};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
@@ -97,6 +97,10 @@ fn record_return_overridden(app: &App, classes: &HashMap<ClassId, ()>, class: &C
     false
 }
 
+/// Lower library classes for Ruby and emit their source/RBS file pairs, grouping
+/// nested declarations with their owners where possible. Lifted Data factories
+/// participate in lowering but emit inside their owner's constant declaration,
+/// never as standalone class files.
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
     // A block-taking tag helper gains a `<name>_into(io, …)` variant
@@ -153,6 +157,13 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // head is skipped), so running it in both pipelines is safe.
 
     apply_constant_rooting(&mut lcs, app, RootingScope::RuntimeOnly);
+    let context;
+    let app = if lcs.iter().any(|lc| matches!(lc.origin, Some(LibraryClassOrigin::DataFactory { .. }))) {
+        context = App { library_classes: lcs.clone(), ..app.clone() };
+        &context
+    } else {
+        app
+    };
     // A nested class goes in its parent's file, as the source wrote
     // it. Given its own, each part-file re-opened the outer class and
     // CLOSED it again, and `TracePoint(:end)` — how a gem implements
@@ -168,6 +179,24 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // tree entirely, which the broadcast tests caught at once. Those
     // keep their own file and the extra body-end with it; moving them
     // is a change to the model emit, not to this one.
+    // `X = Data.define(:a) do def … end` — the block's methods travel as
+    // a library class of X's name (`ingest::library_class::
+    // data_block_classes`) and render back into the block, the one place
+    // they run before anything reads the class.
+    let (data_blocks, lcs): (Vec<LibraryClass>, Vec<LibraryClass>) = {
+        let all = std::mem::take(&mut lcs);
+        let factories: std::collections::HashSet<String> = all
+            .iter()
+            .flat_map(|lc| {
+                lc.constants.iter().filter(|(_, value)| is_data_factory(value)).map(move |(name, _)| {
+                    format!("{}::{}", lc.name.0.as_str(), name.as_str())
+                })
+            })
+            .collect();
+        all.into_iter().partition(|lc| {
+            !lc.is_module && lc.parent.is_none() && factories.contains(lc.name.0.as_str())
+        })
+    };
     let emitted_here: std::collections::HashSet<&str> =
         lcs.iter().map(|lc| lc.name.0.as_str()).collect();
     let owner_in_this_tree = |lc: &LibraryClass| -> Option<String> {
@@ -178,12 +207,16 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let mut children: std::collections::HashMap<String, Vec<&LibraryClass>> =
         std::collections::HashMap::new();
     for lc in &lcs {
+        if matches!(lc.origin, Some(LibraryClassOrigin::DataFactory { .. })) {
+            continue;
+        }
         if let Some(owner) = owner_in_this_tree(lc) {
             children.entry(owner).or_default().push(lc);
         }
     }
 
     lcs.iter()
+        .filter(|lc| !matches!(lc.origin, Some(LibraryClassOrigin::DataFactory { .. })))
         .filter(|lc| owner_in_this_tree(lc).is_none())
         .flat_map(|lc| {
             // `underscore`, not `snake_case`: a namespaced reopen
@@ -197,9 +230,123 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             if let Some(kids) = children.get(lc.name.0.as_str()) {
                 splice_nested(&mut files, lc, kids, app);
             }
+            for block in &data_blocks {
+                splice_data_block(&mut files, block, app);
+            }
             files
         })
         .collect()
+}
+
+/// `Data.define(<symbols>)` — the factory `analyze::data` models.
+fn is_data_factory(value: &crate::expr::Expr) -> bool {
+    matches!(
+        &*value.node,
+        ExprNode::Send { recv: Some(recv), method, block: None, .. }
+            if method.as_str() == "define"
+                && matches!(&*recv.node, ExprNode::Const { path }
+                    if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Data"]))
+    )
+}
+
+/// Render `block`'s methods into the `X = Data.define(…)` line that
+/// declares it, as the `do … end` the source wrote, and into the
+/// sidecar's `class X < ::Data` declaration. The line is the one
+/// `emit_library_class_decl` wrote for the owner, at the owner's body
+/// indentation; a file that does not hold it is not the owner's.
+fn splice_data_block(files: &mut [EmittedFile], block: &LibraryClass, app: &App) {
+    let name = block.name.0.as_str();
+    let owner = file_owner(name, app);
+    let owner_stem = crate::naming::underscore(&owner);
+    let owner_rb_path = PathBuf::from(format!("app/models/{owner_stem}.rb"));
+    let owner_rbs_path = PathBuf::from(format!("app/models/{owner_stem}.rbs"));
+    let depth = name.split("::").count();
+    let last = name.rsplit("::").next().unwrap_or(name);
+    let indent = "  ".repeat(depth - 1);
+    let stem = crate::naming::underscore(name);
+    let rb_path = PathBuf::from(format!("app/models/{stem}.rb"));
+    let rendered = emit_library_class_decl(block, app, rb_path.clone());
+    let lines: Vec<&str> = rendered.content.lines().collect();
+    let mut hoisted = Vec::new();
+    for line in lines.iter().filter(|line| line.starts_with("require_relative ")) {
+        let target = line.trim_start_matches("require_relative ").trim().trim_matches('"');
+        let rebased = rebase_relative(&stem, &owner, target, app);
+        hoisted.push(format!("require_relative {rebased:?}"));
+    }
+    hoisted.extend(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("require \""))
+            .map(|line| line.to_string()),
+    );
+    let body_lines: Vec<&str> = lines.iter().copied().filter(|line| !line.starts_with("require")).collect();
+    let Some(body) = unwrapped(&body_lines, depth) else {
+        assert!(
+            block.methods.is_empty() && hoisted.is_empty(),
+            "Data.define methods or requires were not emitted for {name}"
+        );
+        return;
+    };
+    let sidecar = super::rbs::emit_library_class_rbs(block, &rb_path);
+    let sidecar_lines: Vec<&str> = sidecar.content.lines().collect();
+    let sidecar_body = unwrapped(&sidecar_lines, depth);
+    assert!(
+        block.methods.is_empty() || sidecar_body.is_some(),
+        "Data.define methods were not emitted to the RBS sidecar for {name}"
+    );
+    for file in files.iter_mut() {
+        let is_rb = file.path.extension().is_some_and(|e| e == "rb");
+        if (is_rb && file.path != owner_rb_path) || (!is_rb && file.path != owner_rbs_path) {
+            continue;
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut spliced = false;
+        let mut lines = file.content.lines().peekable();
+        while let Some(line) = lines.next() {
+            if spliced {
+                out.push(line.to_string());
+                continue;
+            }
+            if is_rb {
+                let factory = line
+                    .strip_prefix(&indent)
+                    .and_then(|rest| rest.strip_prefix(&format!("{last} = Data.define")))
+                    .is_some_and(|rest| !rest.contains(" do") && (rest.is_empty() || rest.ends_with(')')));
+                out.push(if factory { format!("{line} do") } else { line.to_string() });
+                if factory {
+                    out.push(body.clone());
+                    out.push(format!("{indent}end"));
+                    spliced = true;
+                }
+            } else {
+                out.push(line.to_string());
+                if line == format!("{indent}class {last} < ::Data") {
+                    // The members' readers follow up to the class's `end`.
+                    while let Some(next) = lines.peek() {
+                        if *next == format!("{indent}end") {
+                            break;
+                        }
+                        out.push(lines.next().unwrap().to_string());
+                    }
+                    if let Some(methods) = &sidecar_body {
+                        out.push(methods.clone());
+                    }
+                    spliced = true;
+                }
+            }
+        }
+        if spliced {
+            let trailing = if file.content.ends_with('\n') { "\n" } else { "" };
+            let mut content = out.join("\n");
+            if is_rb && !hoisted.is_empty() {
+                content = format!("{}\n\n{content}", hoisted.join("\n"));
+            }
+            file.content = format!("{content}{trailing}");
+        }
+        if !block.methods.is_empty() {
+            assert!(spliced, "Data.define methods were not spliced into {file:?} for {name}");
+        }
+    }
 }
 
 /// A child's `require_relative` target, expressed from its parent's
@@ -316,12 +463,17 @@ fn splice_nested(
         while !pending.is_empty() {
             let before = pending.len();
             pending.retain(|k| {
+                // A superclass, and a module the class body `include`s:
+                // both are read the moment the body runs. (campfire's
+                // `class HTTP < Net::HTTP; include Stages; end` beside
+                // its `module Stages`.)
                 let waits_for = k
                     .parent
-                    .as_ref()
+                    .iter()
+                    .chain(k.includes.iter())
                     .map(|p| p.0.as_str())
-                    .filter(|p| names.contains(p) && !placed.contains(*p));
-                if waits_for.is_some() {
+                    .any(|p| names.contains(p) && !placed.contains(p));
+                if waits_for {
                     return true;
                 }
                 placed.insert(k.name.0.as_str().to_string());
@@ -366,22 +518,30 @@ fn splice_nested(
             if own_dir.is_some_and(|d| rebased.starts_with(&d)) {
                 continue;
             }
-            hoisted.push(format!("require_relative {rebased:?}"));
+            // The child requiring its parent names THIS file.
+            let own_file = crate::naming::underscore(parent.name.0.as_str());
+            let own_file = own_file.rsplit('/').next().unwrap_or(&own_file);
+            if rebased == own_file {
+                continue;
+            }
+            let line = format!("require_relative {rebased:?}");
+            if !hoisted.contains(&line) {
+                hoisted.push(line);
+            }
         }
         // A plain `require "x"` names a library, not a path, and is
         // carried as written.
-        hoisted.extend(
-            lines
-                .iter()
-                .filter(|l| l.starts_with("require \""))
-                .map(|l| l.to_string()),
-        );
+        for l in lines.iter().filter(|l| l.starts_with("require \"")) {
+            if !hoisted.iter().any(|h| h == l) {
+                hoisted.push(l.to_string());
+            }
+        }
         let body: Vec<&str> = lines
             .iter()
             .copied()
             .filter(|l| !l.starts_with("require"))
             .collect();
-        let Some(block) = unwrapped(&body, depth) else { continue };
+        let Some(block) = child_block(&body, depth, kid.name.0.as_str()) else { continue };
         blocks.push(block);
         // The sidecar `emit_library_class_pair` would have written for
         // the child's own file, minus the same wrapper. Its type names
@@ -390,7 +550,7 @@ fn splice_nested(
         // it is spliced into.
         let sidecar = super::rbs::emit_library_class_rbs(kid, &rb_path);
         let lines: Vec<&str> = sidecar.content.lines().collect();
-        if let Some(block) = unwrapped(&lines, depth) {
+        if let Some(block) = child_block(&lines, depth, kid.name.0.as_str()) {
             sidecar_blocks.push(block);
         }
     }
@@ -401,9 +561,35 @@ fn splice_nested(
     let Some(rb) = files.iter_mut().find(|f| f.path.extension().is_some_and(|e| e == "rb")) else {
         return;
     };
-    let Some(spliced) = spliced_after_header(&rb.content, &own_header_indent, &blocks) else {
-        return;
+    // The parent opens either nested (`module WebPush` / `  class
+    // Connections`), its header `depth - 1` levels in, or compact
+    // (`class WebPush::Connections`) at the margin with a body one level
+    // in. The blocks are cut at the nested body's indentation, so the
+    // compact form takes them `depth - 1` levels shallower. Without this
+    // arm the splice found no header and the children, already left out
+    // of the tree as files of their own, were silently gone.
+    // The blocks are cut at column 0 (`child_block`); each header form
+    // wants them at its own body's indentation.
+    let compact = |blocks: &[String]| -> Vec<String> {
+        blocks.iter().map(|b| indent_lines(b, 1)).collect()
     };
+    let blocks: Vec<String> = blocks.iter().map(|b| indent_lines(b, depth)).collect();
+    let sidecar_blocks: Vec<String> = sidecar_blocks.iter().map(|b| indent_lines(b, depth)).collect();
+    let raw_blocks: Vec<String> = blocks.iter().map(|b| dedent_lines(b, depth)).collect();
+    let raw_sidecar: Vec<String> = sidecar_blocks.iter().map(|b| dedent_lines(b, depth)).collect();
+    let compact_header = format!("class {}", parent.name.0.as_str());
+    let (spliced, compact_form) = match spliced_after_header(&rb.content, &own_header_indent, &blocks) {
+        Some(spliced) => (spliced, false),
+        None if rb.content.lines().any(|l| l == compact_header || l.starts_with(&format!("{compact_header} "))) => {
+            match spliced_after_header(&rb.content, "", &compact(&raw_blocks)) {
+                Some(spliced) => (spliced, true),
+                None => return,
+            }
+        }
+        None => return,
+    };
+    // A require the parent's own file already carries is not repeated.
+    hoisted.retain(|r| !rb.content.lines().any(|l| l == r));
     let mut content = String::new();
     for r in &hoisted {
         content.push_str(r);
@@ -423,9 +609,58 @@ fn splice_nested(
     else {
         return;
     };
-    if let Some(spliced) = spliced_after_header(&rbs.content, &own_header_indent, &sidecar_blocks) {
+    let (indent, sidecar_blocks) = if compact_form {
+        (String::new(), compact(&raw_sidecar))
+    } else {
+        (own_header_indent, sidecar_blocks)
+    };
+    if let Some(spliced) = spliced_after_header(&rbs.content, &indent, &sidecar_blocks) {
         rbs.content = format!("{spliced}\n");
     }
+}
+
+/// A nested class's own declaration out of its standalone render, at
+/// column 0: `module Stages` … `end`. The render opens either with the
+/// parent's `depth` wrapper lines (`module WebPush` / `class
+/// Connections`) around the child's own header, or — when an outer
+/// segment is the runtime's — with ONE compact header naming the whole
+/// path (`module WebPush::Connections::Stages`), which is renamed to
+/// its last segment.
+fn child_block(body: &[&str], depth: usize, full_name: &str) -> Option<String> {
+    let first = body.iter().position(|l| !l.trim().is_empty())?;
+    let header = body[first];
+    for keyword in ["class ", "module "] {
+        let compact = format!("{keyword}{full_name}");
+        if header == compact || header.starts_with(&format!("{compact} ")) {
+            let last = body.iter().rposition(|l| l.trim() == "end")?;
+            let simple = full_name.rsplit("::").next().unwrap_or(full_name);
+            let renamed = format!("{keyword}{simple}{}", &header[compact.len()..]);
+            let mut out = vec![renamed];
+            out.extend(body[first + 1..=last].iter().map(|l| l.to_string()));
+            return Some(out.join("\n"));
+        }
+    }
+    unwrapped(body, depth).map(|b| dedent_lines(&b, depth))
+}
+
+fn indent_lines(block: &str, levels: usize) -> String {
+    let pad = "  ".repeat(levels);
+    block
+        .lines()
+        .map(|l| if l.is_empty() { String::new() } else { format!("{pad}{l}") })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `block` with `levels` two-space indents taken off each line that has
+/// them.
+fn dedent_lines(block: &str, levels: usize) -> String {
+    let cut = "  ".repeat(levels);
+    block
+        .lines()
+        .map(|l| l.strip_prefix(cut.as_str()).unwrap_or(l.trim_start()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 use crate::facades::{Facade, EXTRAS_FACADES};
@@ -2858,7 +3093,12 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "javascript_include_tag"
             | "number_with_precision"
             | "number_with_delimiter"
+            | "number_to_currency"
             | "number_to_human"
+            | "number_to_human_size"
+            | "number_to_percentage"
+            | "number_to_phone"
+            | "fragment_name_with_digest"
             | "content_security_policy_nonce"
             | "class_names"
             | "label_tag"
@@ -3662,62 +3902,16 @@ fn rewrite_helper_calls(
         return;
     }
 
-    // Bare `<x>_url` whose `<x>_path` sibling is generated — the
-    // absolute variant grounds to protocol + configured domain + the
-    // path helper (same convention as `rewrite_url_helpers_absolute`'s
-    // host-kwarg form): `"#{Rails.application.protocol}#{
-    // Rails.application.domain}#{RouteHelpers.<x>_path(args)}"`. Lobsters' hats page links
-    // `request_hat_url` bare.
+    // Bare `<x>_url` whose `<x>_path` sibling is generated — use the
+    // shared view URL seam so request-derived origins get the same port
+    // normalization as jbuilder. It still resolves Rails.application.domain,
+    // preserving apps' canonical-domain overrides. Lobsters' hats page
+    // links `request_hat_url` bare.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));
             if route_helpers.contains(&path_name) {
-                let span = expr.span;
-                let args = args.clone();
-                let domain = Expr::new(
-                    span,
-                    ExprNode::Send {
-                        recv: Some(Expr::new(
-                            span,
-                            ExprNode::Send {
-                                recv: Some(Expr::new(
-                                    span,
-                                    ExprNode::Const { path: vec![Symbol::from("Rails")] },
-                                )),
-                                method: Symbol::from("application"),
-                                args: vec![],
-                                block: None,
-                                parenthesized: false,
-                            },
-                        )),
-                        method: Symbol::from("domain"),
-                        args: vec![],
-                        block: None,
-                        parenthesized: false,
-                    },
-                );
-                let path_call = Expr::new(
-                    span,
-                    ExprNode::Send {
-                        recv: Some(Expr::new(
-                            span,
-                            ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
-                        )),
-                        method: path_name,
-                        args,
-                        block: None,
-                        parenthesized: true,
-                    },
-                );
-                *expr.node = ExprNode::StringInterp {
-                    parts: vec![
-                        crate::expr::InterpPart::Expr {
-                            expr: crate::lower::view_to_library::rails_application_call("protocol"),
-                        },
-                        crate::expr::InterpPart::Expr { expr: domain },
-                        crate::expr::InterpPart::Expr { expr: path_call },
-                    ],
-                };
+                *expr = crate::lower::view_to_library::absolute_url_interp(stem, args.clone());
                 return;
             }
         }
@@ -5652,6 +5846,9 @@ pub(crate) enum RootingScope {
     RuntimeOnly,
 }
 
+/// Root method-body constant references that emission would otherwise shadow,
+/// restricting candidate namespaces according to `scope`. A Data factory block
+/// retains its enclosing owner's lexical scope, not the generated class's scope.
 pub(crate) fn apply_constant_rooting(
     lcs: &mut [LibraryClass],
     app: &App,
@@ -5707,7 +5904,11 @@ pub(crate) fn apply_constant_rooting(
         .collect();
     let known = |n: &str| class_names.contains(n);
     for lc in lcs.iter_mut() {
-        let name = lc.name.0.as_str();
+        let name = if matches!(lc.origin, Some(LibraryClassOrigin::DataFactory { .. })) {
+            lc.name.0.as_str().rsplit_once("::").unwrap().0
+        } else {
+            lc.name.0.as_str()
+        };
         let mut shadowing: Vec<String> = name
             .split("::")
             .filter(|seg| shadows(seg))
@@ -6016,7 +6217,7 @@ pub(super) fn emit_library_class_pair(
     out_path: PathBuf,
 ) -> Vec<EmittedFile> {
     let rb = emit_library_class_decl(lc, app, out_path.clone());
-    let rbs = super::rbs::emit_library_class_rbs(lc, &out_path);
+    let rbs = super::rbs::emit_library_class_rbs_with_factories(lc, &out_path, &app.library_classes);
     vec![rb, rbs]
 }
 
@@ -6033,7 +6234,7 @@ pub(super) fn emit_library_class_pair_with_synthesized(
         out_path.clone(),
         synthesized_siblings,
     );
-    let rbs = super::rbs::emit_library_class_rbs(lc, &out_path);
+    let rbs = super::rbs::emit_library_class_rbs_with_factories(lc, &out_path, &app.library_classes);
     vec![rb, rbs]
 }
 
@@ -6261,6 +6462,41 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     })
 }
 
+/// Render an indented method with named visibility directives that cannot leak
+/// to neighboring definitions. Explicitly public constructor/copy hooks need a
+/// directive too, because Ruby makes those instance methods private by default.
+fn render_library_method(s: &mut String, m: &MethodDef, body_pad: &str) {
+    for line in super::emit_method(m).lines() {
+        if line.is_empty() {
+            writeln!(s).unwrap();
+        } else {
+            writeln!(s, "{body_pad}{line}").unwrap();
+        }
+    }
+    let implicit_private = m.receiver == MethodReceiver::Instance
+        && matches!(m.name.as_str(), "initialize" | "initialize_copy" | "initialize_dup" | "initialize_clone");
+    let directive = match (m.receiver, m.visibility) {
+        (_, MethodVisibility::Public) if !implicit_private => None,
+        (MethodReceiver::Instance, MethodVisibility::Public) => Some("public"),
+        (MethodReceiver::Instance, MethodVisibility::Protected) => Some("protected"),
+        (MethodReceiver::Instance, MethodVisibility::Private) => Some("private"),
+        (MethodReceiver::Class, MethodVisibility::Private) => Some("private_class_method"),
+        (MethodReceiver::Class, MethodVisibility::Public) => None,
+        (MethodReceiver::Class, MethodVisibility::Protected) => {
+            writeln!(s, "{body_pad}class << self").unwrap();
+            writeln!(s, "{body_pad}  protected :{}", m.name).unwrap();
+            writeln!(s, "{body_pad}end").unwrap();
+            None
+        }
+    };
+    if let Some(directive) = directive {
+        writeln!(s, "{body_pad}{directive} :{}", m.name).unwrap();
+    }
+}
+
+/// Assemble a library class's Ruby file with its requires and declarations.
+/// Reattach lifted Data methods by declaration span, preserving the factory's
+/// position and including dependencies from its methods and parameter defaults.
 fn emit_library_class_decl_inner(
     lc: &LibraryClass,
     app: &App,
@@ -6354,6 +6590,7 @@ fn emit_library_class_decl_inner(
     // class-definition time — unlike body const-refs (request-time), so we
     // require them even when they're same-dir siblings (plain Ruby has no
     // Rails autoload). Resolve through the same model/library_class anchor.
+    let mut nested_include_requires = BTreeSet::new();
     for inc in &lc.includes {
         // SPLIT on `::` — an include's ClassId is one Symbol holding the
         // whole path, and the const resolver keys on the ROOT segment.
@@ -6363,7 +6600,15 @@ fn emit_library_class_decl_inner(
         let path: Vec<String> = inc.0.as_str().split("::").map(str::to_string).collect();
         if let Some(anchor) = require_path_for_body_const(&path, app, name) {
             if anchor != self_anchor {
-                requires.push(relpath(&out_dir, &anchor));
+                let nested_prefix = format!("{self_anchor}/");
+                if anchor.starts_with(&nested_prefix) {
+                    // Nested constants such as `Account::Joinable` reopen
+                    // their containing class. Load them after that class is
+                    // declared, otherwise the nested file runs too early.
+                    nested_include_requires.insert(relpath(&out_dir, &anchor));
+                } else {
+                    requires.push(relpath(&out_dir, &anchor));
+                }
             }
         }
     }
@@ -6467,8 +6712,18 @@ fn emit_library_class_decl_inner(
     for &i in &deferred {
         body_requires.extend(resolve_all(&lc.constants[i].1, true));
     }
+    let factory_methods = app.library_classes.iter().filter(|class| {
+        matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
+            if lc.constants.iter().any(|(_, value)| value.span == declaration_span))
+    }).flat_map(|class| &class.methods);
     for m in &lc.methods {
         body_requires.extend(resolve_all(&m.body, false));
+    }
+    for m in factory_methods {
+        body_requires.extend(resolve_all(&m.body, false));
+        for default in m.params.iter().filter_map(|param| param.default.as_ref()) {
+            body_requires.extend(resolve_all(default, false));
+        }
     }
     // …and each eager initializer's own, in order, because WHERE those go
     // matters. A class body runs top to bottom, and a required file can
@@ -6616,6 +6871,13 @@ fn emit_library_class_decl_inner(
     };
     open_header(&mut s);
 
+    for require in &nested_include_requires {
+        writeln!(s, "{body_pad}require_relative {require:?}").unwrap();
+    }
+    if !nested_include_requires.is_empty() {
+        writeln!(s).unwrap();
+    }
+
     for inc in &lc.includes {
         writeln!(s, "{body_pad}include {}", inc.0.as_str()).unwrap();
     }
@@ -6637,6 +6899,17 @@ fn emit_library_class_decl_inner(
         for &i in which {
             let (cname, value) = &lc.constants[i];
             let rendered = super::emit_expr(value);
+            if let Some(factory) = app.library_classes.iter().find(|class| {
+                matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
+                    if declaration_span == value.span)
+            }) {
+                writeln!(s, "{body_pad}{} = {rendered} do", cname.as_str()).unwrap();
+                for method in &factory.methods {
+                    render_library_method(s, method, &format!("{body_pad}  "));
+                }
+                writeln!(s, "{body_pad}end").unwrap();
+                continue;
+            }
             let mut lines = rendered.lines();
             match lines.next() {
                 Some(first_line) => {
@@ -6654,37 +6927,7 @@ fn emit_library_class_decl_inner(
         }
     };
     let render_method = |s: &mut String, m: &MethodDef| {
-        let body = super::emit_method(m);
-        for line in body.lines() {
-            if line.is_empty() {
-                writeln!(s).unwrap();
-            } else {
-                writeln!(s, "{body_pad}{line}").unwrap();
-            }
-        }
-        // Named, immediately after its own def: a sticky `private` section
-        // would privatize unrelated methods once source bodies are flattened.
-        // Public needs no annotation, except for Ruby's implicitly private
-        // constructor/copy hooks when the source explicitly made one public.
-        let implicit_private = m.receiver == MethodReceiver::Instance
-            && matches!(m.name.as_str(), "initialize" | "initialize_copy" | "initialize_dup" | "initialize_clone");
-        let directive = match (m.receiver, m.visibility) {
-            (_, MethodVisibility::Public) if !implicit_private => None,
-            (MethodReceiver::Instance, MethodVisibility::Public) => Some("public"),
-            (MethodReceiver::Instance, MethodVisibility::Protected) => Some("protected"),
-            (MethodReceiver::Instance, MethodVisibility::Private) => Some("private"),
-            (MethodReceiver::Class, MethodVisibility::Private) => Some("private_class_method"),
-            (MethodReceiver::Class, MethodVisibility::Public) => None,
-            (MethodReceiver::Class, MethodVisibility::Protected) => {
-                writeln!(s, "{body_pad}class << self").unwrap();
-                writeln!(s, "{body_pad}  protected :{}", m.name).unwrap();
-                writeln!(s, "{body_pad}end").unwrap();
-                None
-            }
-        };
-        if let Some(directive) = directive {
-            writeln!(s, "{body_pad}{directive} :{}", m.name).unwrap();
-        }
+        render_library_method(s, m, &body_pad);
     };
     let render_body = |s: &mut String, items: &[(u32, BodyItem<'_>)]| {
         for (_, item) in items {
@@ -7098,6 +7341,11 @@ fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
 /// `A::B::C` classes belongs in `A::B`'s file, because that is the
 /// body whose end must happen once.
 pub(super) fn file_owner(name: &str, app: &App) -> String {
+    if app.library_classes.iter().any(|class| class.name.0.as_str() == name
+        && matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. })))
+    {
+        return file_owner(name.rsplit_once("::").unwrap().0, app);
+    }
     let segments: Vec<&str> = name.split("::").collect();
     for i in 0..segments.len().saturating_sub(1) {
         let prefix = segments[..=i].join("::");
@@ -7229,6 +7477,13 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
 /// stands in for every stubbed gem, so all their roots anchor there.
 /// On a ruby-family tree `project.rs` rewrites that file into the
 /// guarded-require block, and the same anchor loads the real gems.
+///
+/// `OpenTelemetry` is the one name here that is not a stubbed GEM — its
+/// façade never stands aside for a real `opentelemetry-api`/`-sdk` (see
+/// `runtime/ruby/open_telemetry_facade.rb`) — but it is still hosted off
+/// this same anchor file (`gem_facades.rb`'s own `require_relative`, and
+/// the per-flavor rewrite's matching one), so a body naming it resolves
+/// the same way.
 fn is_gem_facade_root(root: &str) -> bool {
     matches!(
         root,
@@ -7239,6 +7494,7 @@ fn is_gem_facade_root(root: &str) -> bool {
             | "BCrypt"
             | "RQRCode"
             | "SVG"
+            | "OpenTelemetry"
     )
 }
 
@@ -7419,6 +7675,15 @@ fn require_path_for_body_const(
         // (`project::IPADDR_STDLIB`) — so runtime code reads octets
         // everywhere and never `to_i`.
         "IPAddr" => Some("runtime/ipaddr".to_string()),
+        // `Rack::Utils` — rack's encoding negotiation, ported into
+        // `runtime/ruby/rack_utils.rb` for spinel and the rack gem's own
+        // on the ruby family (`project::ruby_runtime_files`). Anchored so
+        // a file that names it loads the one its tree has.
+        "Rack" => Some("runtime/rack_utils".to_string()),
+        // `SQLite3::Database` — the gem on the ruby family, the FFI port
+        // (`runtime/spinel/sqlite3_database.rb`) on spinel; one require
+        // path either way.
+        "SQLite3" => Some("runtime/sqlite3_database".to_string()),
         // `Resolv` — Ruby's resolver, ported into
         // `runtime/ruby/resolv.rb` for the targets that have none and
         // swapped for the stdlib on the ruby family. Anchored for the
@@ -7469,6 +7734,12 @@ fn require_path_for_body_const(
         // `project::BUNDLED`, so nothing writes a bare `require "zlib"`
         // and the constant would resolve to nothing at all.
         "Zlib" => Some("runtime/zlib".to_string()),
+        // `Timeout` — ported into `runtime/ruby/timeout.rb` for spinel,
+        // swapped for Ruby's own on the ruby family (`require
+        // "timeout"`). Anchored for the same reason Zlib is: on spinel
+        // nothing else loads the port, and campfire's unfurl controller
+        // names the constant without a require.
+        "Timeout" => Some("runtime/timeout".to_string()),
         // `TypeID` — ported into `runtime/ruby/typeid.rb`, swapped for the
         // gem on the ruby family. Anchored so the model that names it
         // (lobsters' Token concern, spliced into 18 models) loads it.
@@ -7483,6 +7754,11 @@ fn require_path_for_body_const(
         // constant is actionpack's, not the stdlib's, so no bare
         // `require` reaches it on the ruby family either.
         "Mime" => Some("runtime/mime".to_string()),
+        // `I18n` — the i18n gem's locale accessors, in
+        // `runtime/ruby/i18n_locale.rb` (not `i18n.rb`, which would shadow the
+        // gem wherever `runtime/ruby` is on the load path). No Rails is
+        // loaded on these trees, so nothing else defines the constant.
+        "I18n" => Some("runtime/i18n_locale".to_string()),
         // `useragent` + `platform_agent`, PORTED into
         // `runtime/ruby/user_agent.rb` — they were façades that raised
         // until campfire's room page turned out to render all three PWA
