@@ -1036,7 +1036,13 @@ fn contains_next_outside_loop_or_block(expr: &Expr) -> bool {
 /// one cause is what lets the caller report it specifically, rather than
 /// claim every unclaimed block shape as a gap — a wider ledger entry is
 /// #778's, not this one's.
-fn next_restructure_refusal(expr: &Expr) -> bool {
+///
+/// `pub(super)` (not private): `ingest::app`'s `expand_class_body_macros`
+/// reuses this exact check for the MACRO-expanded path — a concern
+/// macro's own block filter (`block_filter_from_macro_stmt`) refuses the
+/// same shape the same way, and the two call sites agree on what counts
+/// by sharing this one function rather than drifting apart.
+pub(super) fn next_restructure_refusal(expr: &Expr) -> bool {
     let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
         return false;
     };

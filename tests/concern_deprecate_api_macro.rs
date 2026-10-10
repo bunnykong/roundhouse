@@ -572,6 +572,59 @@ fn a_next_carrying_a_value_is_a_survey_gap_not_a_silent_drop() {
 }
 
 // ---------------------------------------------------------------------
+// The same refusal, MACRO-EXPANDED: a concern macro whose own block
+// filter holds the same unrestructurable `next` — `block_filter_from_
+// macro_stmt` (`src/ingest/app.rs`), not `lambda_filter_target`
+// directly, reconstructs this shape during `expand_class_body_macros`.
+// ---------------------------------------------------------------------
+
+const MACRO_NEXT_REFUSAL_CONCERN: &str = "module SunsetConcern\n  extend ActiveSupport::Concern\n\n  class_methods do\n    def retire(**kw)\n      before_action(**kw) do\n        next 1 if admin?\n        response.headers['X'] = '1'\n      end\n    end\n  end\nend\n";
+
+fn macro_next_refusal_tree(call: &str) -> HashMap<PathBuf, Vec<u8>> {
+    let widgets = format!(
+        "class WidgetsController < ApplicationController\n  {call}\n\n  def index\n    head :ok\n  end\nend\n"
+    );
+    [
+        ("app/controllers/concerns/sunset_concern.rb", MACRO_NEXT_REFUSAL_CONCERN.to_string()),
+        ("app/controllers/application_controller.rb", APPLICATION_CONTROLLER.to_string()),
+        ("app/controllers/widgets_controller.rb", widgets),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n".to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (PathBuf::from(p), s.into_bytes()))
+    .collect()
+}
+
+#[test]
+fn a_macro_expanded_next_carrying_a_value_refuses_in_strict_mode() {
+    let tree = macro_next_refusal_tree("retire only: [:index]");
+    let err = ingest_app_from_tree(tree)
+        .expect_err("strict mode must refuse a macro-expanded next it can't restructure");
+    assert!(
+        matches!(&err, IngestError::Unsupported { message, .. }
+            if message.contains("next") && message.contains("retire")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_macro_expanded_next_carrying_a_value_is_a_survey_gap_not_a_silent_drop() {
+    let tree = macro_next_refusal_tree("retire only: [:index]");
+    survey::activate();
+    let result = ingest_app_from_tree(tree);
+    let gaps = survey::drain();
+    result.expect("survey mode must not hard-fail; a refused next is a gap, not an abort");
+    assert!(
+        gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. }
+            if message.contains("next") && message.contains("retire"))),
+        "{gaps:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
 // The OTel stub, standalone — no macro, no next, just the constant.
 // ---------------------------------------------------------------------
 

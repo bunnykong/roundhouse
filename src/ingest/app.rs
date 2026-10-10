@@ -1874,7 +1874,7 @@ end
     // class-side methods, and its expansion joins the same filter chain.
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
-    expand_class_body_macros(&mut app);
+    expand_class_body_macros(&mut app)?;
     // The same idea one base over: `const` / `prop` under a class
     // whose ancestry a sidecar says reaches `T::Props` IS the
     // `T::Struct` macro, and gets expanded rather than replayed. It
@@ -3184,7 +3184,7 @@ fn report_unrecognized_controller_macros(app: &App) {
 /// :redirect_signed_in_user_to_root` behind it — fails OPEN. So a macro
 /// whose body holds one statement this can't read stays Unknown, whole,
 /// and is recorded as a gap.
-fn expand_class_body_macros(app: &mut App) {
+fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
     use crate::dialect::{ControllerBodyItem, MethodReceiver};
     use crate::expr::ExprNode;
 
@@ -3209,7 +3209,7 @@ fn expand_class_body_macros(app: &mut App) {
         }
     }
     if macros.is_empty() {
-        return;
+        return Ok(());
     }
 
     let surfaces = controller_concern_surfaces(app);
@@ -3351,7 +3351,7 @@ fn expand_class_body_macros(app: &mut App) {
             let param_names: Vec<crate::Symbol> =
                 macro_def.params.iter().map(|p| p.name.clone()).collect();
             match expand_macro_filters(&body, &module, &param_names) {
-                Some(items) => {
+                Ok(items) => {
                     let mut comments = leading_comments.clone();
                     let mut blank = *leading_blank_line;
                     for macro_item in items {
@@ -3383,7 +3383,35 @@ fn expand_class_body_macros(app: &mut App) {
                         }
                     }
                 }
-                None => {
+                // A block-form filter's `next` that `restructure_next_in_
+                // block` can't lower — narrow enough to name the actual
+                // reason, and important enough to hard-fail strict mode
+                // rather than silently accept an app whose filter never
+                // actually runs: unlike `NotFilterDsl` just below,
+                // `block_filter_from_macro_stmt` already accepted this
+                // shape as a successfully expanded filter (the refusal
+                // used to surface only much later, at lowering time, as
+                // a silent drop with no gap at all). Survey mode keeps
+                // the same shape every other refusal here has — record
+                // and keep the macro call whole.
+                Err(MacroExpansionRefusal::NextRestructure { method: blocked_method }) => {
+                    let err = IngestError::Unsupported {
+                        file: format!("{}", controller.name.0.as_str()),
+                        message: format!(
+                            "class-body macro not expanded: `{}` from {} holds a `{}` block whose `next` can't be restructured to an if/unless",
+                            method.as_str(),
+                            module.0.as_str(),
+                            blocked_method.as_str()
+                        ),
+                    };
+                    if survey::is_active() {
+                        survey::record(&err);
+                        expanded.push(item);
+                    } else {
+                        return Err(err);
+                    }
+                }
+                Err(MacroExpansionRefusal::NotFilterDsl) => {
                     survey::record(&IngestError::Unsupported {
                         file: format!("{}", controller.name.0.as_str()),
                         message: format!(
@@ -3398,6 +3426,7 @@ fn expand_class_body_macros(app: &mut App) {
         }
         controller.body = expanded;
     }
+    Ok(())
 }
 
 /// Inline same-concern class-method calls inside a filter macro before
@@ -4136,11 +4165,35 @@ enum MacroFilterItem {
 /// statement is tried exactly as before — `substitute_locals` is not even
 /// called — which is what keeps #680's and afc2462f's expansions
 /// byte-identical.
+/// Why `expand_macro_filters` refused a macro body. `expand_class_body_
+/// macros` reads this to pick the right message: `NextRestructure` is
+/// narrow enough to name the actual reason (and, unlike every other
+/// refusal here, to hard-fail strict mode — see its call site), while
+/// `NotFilterDsl` keeps the generic message and always-keep-whole
+/// behavior every other refusal already had.
+enum MacroExpansionRefusal {
+    /// A block-form filter statement whose body holds a `next`
+    /// `restructure_next_in_block` can't lower to an if/unless — the
+    /// same cause `ingest::controller::next_restructure_refusal` names
+    /// for a hand-written block, here reached through a concern macro's
+    /// own `before_action`/`after_action`/`prepend_before_action`
+    /// (`method`) instead. Narrow: never raised for any OTHER reason
+    /// `block_filter_from_macro_stmt` refuses a block (an unreadable
+    /// `only:`/`except:`/`if:`/`unless:` entry, a shadowed block
+    /// parameter, …) — those stay `NotFilterDsl`, same as before this
+    /// variant existed.
+    NextRestructure { method: crate::Symbol },
+    /// Every other refusal this function already had: an unreducible
+    /// local, a statement that's neither Symbol-target nor block-form
+    /// filter DSL, one after the filter, or no filter at all.
+    NotFilterDsl,
+}
+
 fn expand_macro_filters(
     body: &crate::expr::Expr,
     module: &crate::ident::ClassId,
     param_names: &[crate::Symbol],
-) -> Option<Vec<MacroFilterItem>> {
+) -> Result<Vec<MacroFilterItem>, MacroExpansionRefusal> {
     use crate::expr::{ExprNode, LValue};
 
     let mut out = Vec::new();
@@ -4196,7 +4249,7 @@ fn expand_macro_filters(
                     // same as any other statement that isn't filter DSL:
                     // refuse the whole macro rather than leave it a free
                     // variable downstream.
-                    None => return None,
+                    None => return Err(MacroExpansionRefusal::NotFilterDsl),
                 }
             }
         }
@@ -4216,14 +4269,30 @@ fn expand_macro_filters(
             seen_filter = true;
             continue;
         }
+        // `block_filter_from_macro_stmt` doesn't itself check whether the
+        // block's `next` (if any) can be restructured — that's
+        // `lambda_filter_target`'s job, reached only later at lowering
+        // time, by which point `block_filter_from_macro_stmt` has
+        // already succeeded at reconstructing the block and this macro
+        // would otherwise be accepted as expanded with no gap recorded
+        // at all. Catch that one cause here, BEFORE accepting the
+        // block, narrowly, so it refuses with a located message instead
+        // of silently riding through as a successfully expanded filter.
+        if let ExprNode::Send { recv: None, method, block: Some(_), .. } = &*candidate.node {
+            if super::controller::is_lambda_filter_macro(method.as_str())
+                && super::controller::next_restructure_refusal(candidate)
+            {
+                return Err(MacroExpansionRefusal::NextRestructure { method: method.clone() });
+            }
+        }
         if let Some(block) = block_filter_from_macro_stmt(candidate) {
             out.push(MacroFilterItem::Block(block));
             seen_filter = true;
             continue;
         }
-        return None;
+        return Err(MacroExpansionRefusal::NotFilterDsl);
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() { Err(MacroExpansionRefusal::NotFilterDsl) } else { Ok(out) }
 }
 
 /// Replace every `Var` read in `expr` naming one of `by_name`'s locals,
