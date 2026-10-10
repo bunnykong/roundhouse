@@ -487,12 +487,26 @@ fn uri_and_socket_errors_app() -> emit_and_run::Overlay {
     e.message
   end
 ",
+    ).edit(
+        "app/models/comment.rb",
+        "  validates :body, presence: true\n",
+        "  validates :body, presence: true
+
+  def self.contained?
+    yield
+    false
+  rescue ArgumentError,SocketError
+    true
+  end
+",
     )
 }
 
 const URI_AND_SOCKET_ASSERTIONS: &str = r#"raise "parsed good" unless Article.parsed?("https://example.com/a")
 raise "parsed bad" if Article.parsed?("http://bad uri")
 raise "socket: #{Article.socket_failure}" unless Article.socket_failure == "unreachable"
+raise "contained" unless Comment.contained? { raise ArgumentError, "x" }
+raise "uncontained" if Comment.contained? { 1 }
 puts "uri and socket errors passed"
 "#;
 
@@ -513,6 +527,8 @@ fn rescued_socket_and_uri_errors_bring_their_requires() {
     for line in ["require \"socket\"", "require \"uri\""] {
         assert!(model.lines().any(|l| l.trim() == line), "missing {line}:\n{model}");
     }
+    let comment = std::fs::read_to_string(emitted.join("app/models/comment.rb")).expect("emitted model");
+    assert!(comment.lines().any(|l| l.trim() == "require \"socket\""), "rescue A,SocketError:\n{comment}");
 }
 
 #[test]
