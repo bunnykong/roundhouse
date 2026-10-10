@@ -83,6 +83,7 @@ SPINEL_TESTS = [
     "postgres_json_types_spinel",
     "pessimistic_locking",
     "not_found_parity_spinel",
+    "routes_segment_pattern_spinel",
 ]
 # Inputs of the PostgreSQL Db gate (tests/spinel_pg_db.rs): the shim, its
 # RBS, the contract and time parsing it compiles with, and the cases.
