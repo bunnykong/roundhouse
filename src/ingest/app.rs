@@ -2628,7 +2628,11 @@ fn splice_concerns_into_controllers(app: &mut App) {
                         kwrest_param = Some(p.name.clone());
                         continue;
                     }
-                    if p.keyword {
+                    // An optional keyword the library ingest flattened to
+                    // a positional (`from_keyword`, when no required
+                    // keyword or rest kept the group) is a keyword in the
+                    // source too: the includer's callers pass it by name.
+                    if p.keyword || p.from_keyword {
                         kw_params.push((p.name.clone(), p.default.clone()));
                         continue;
                     }
