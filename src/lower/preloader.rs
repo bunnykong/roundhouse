@@ -59,10 +59,9 @@ pub(crate) fn clear_refusals(new: &mut Expr) {
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
     let ExprNode::Send { recv: Some(new), method, args, block: None, .. } = &*expr.node else { return };
-    if method.as_str() != "call" || !args.is_empty() {
+    if method.as_str() != "call" || !args.is_empty() || expr.decisions & crate::expr::ADMITTED_PRELOADER_CALL == 0 {
         return;
     }
-    // Not checked against the registry here: typing kept the call refused unless its records are one model's.
     let Some(call) = preloader_new(new, |_| true) else { return };
     let span = expr.span;
     let mut records = call.records.clone();
