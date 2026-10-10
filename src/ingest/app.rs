@@ -3090,11 +3090,9 @@ fn report_unrecognized_controller_macros(app: &App) {
             // `around_action` (successfully lowered, so it is no
             // longer `Unknown` at all by the time this runs; or
             // refused, which records its OWN specific gap already —
-            // either way this generic bucket must not ALSO flag it),
-            // and `lambda_filter_target` claims the `before_action`/
-            // `after_action`/`prepend_before_action` block forms the
-            // same way. `rescue_from`/`helper_method`/`layout` (with or
-            // without a block) are already excluded above via
+            // either way this generic bucket must not ALSO flag it).
+            // `rescue_from`/`helper_method`/`layout` (with or without a
+            // block) are already excluded above via
             // `CONSUMED_CONTROLLER_MACROS`, since that list is keyed on
             // the method name alone. `respond_to` at class-body level
             // writes no block in any fixture here, but is excluded on
@@ -3103,15 +3101,30 @@ fn report_unrecognized_controller_macros(app: &App) {
             // this loop at all — it walks `app.controllers`, and
             // those two live on the CONCERN module, consumed before
             // the splice ever copies anything controller-side.
+            //
+            // `before_action`/`after_action`/`prepend_before_action` are
+            // NOT skipped by name alone: unlike `around_action` (whose
+            // every refusal already records its own gap via
+            // `around_block_filter`), `lambda_filter_target` can decline
+            // one of these silently — e.g. a `before_action(&callback)`
+            // forwarding an existing Proc, which `ir_lambda_body` does
+            // not read (that slot holds a `Var`, not a `Lambda`) — and
+            // #778 exists to stop exactly that kind of silent drop, not
+            // just around_action's. So these three are claimed only
+            // when `lambda_filter_target` actually recognizes the call,
+            // or when it declined it for the ONE reason that already has
+            // its own gap: a `next` the body can't restructure (#779,
+            // `next_restructure_refusal`) — recording this generic gap
+            // too would double it for the one statement.
             if block.is_some() {
-                const CLAIMED_CONTROLLER_BLOCKS: &[&str] = &[
-                    "before_action",
-                    "after_action",
-                    "prepend_before_action",
-                    "around_action",
-                    "respond_to",
-                ];
-                if CLAIMED_CONTROLLER_BLOCKS.contains(&method.as_str()) {
+                const NAMED_CLAIMED_CONTROLLER_BLOCKS: &[&str] = &["around_action", "respond_to"];
+                let claimed = NAMED_CLAIMED_CONTROLLER_BLOCKS.contains(&method.as_str())
+                    || (matches!(
+                        method.as_str(),
+                        "before_action" | "after_action" | "prepend_before_action"
+                    ) && (super::controller::lambda_filter_target(expr).is_some()
+                        || super::controller::next_restructure_refusal(expr)));
+                if claimed {
                     continue;
                 }
                 survey::record(&IngestError::Unsupported {

@@ -209,3 +209,92 @@ end
         "{gaps:?}"
     );
 }
+
+#[test]
+fn a_prepend_before_action_block_form_records_no_generic_gap() {
+    let gaps = gaps_for(
+        r#"class WidgetsController < ApplicationController
+  prepend_before_action do
+    @seen = true
+  end
+
+  def index
+  end
+end
+"#,
+    );
+    assert!(
+        !gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. }
+            if message.contains("class-body block not recognized") && message.contains("prepend_before_action"))),
+        "{gaps:?}"
+    );
+}
+
+/// `before_action`/`after_action`/`prepend_before_action` are NOT
+/// skipped by NAME alone (unlike `around_action`, whose every refusal
+/// already records its own gap via `around_block_filter`):
+/// `lambda_filter_target` can decline one of these silently.
+/// `before_action(&callback)` forwards an existing Proc bound to a
+/// local — `ir_lambda_body` reads a literal `-> { }`/`{ }`/`lambda { }`/
+/// `proc { }`, never a forwarded `&var` (that slot holds a bare `Var`,
+/// not a `Lambda`) — so `lambda_filter_target` returns `None` for it,
+/// and before this fix the call simply vanished with no gap at all
+/// (caught declining it today: this assertion fails without the fix).
+#[test]
+fn a_before_action_block_lambda_filter_target_declines_records_the_generic_gap() {
+    let gaps = gaps_for(
+        r#"class WidgetsController < ApplicationController
+  callback = proc { @seen = true }
+  before_action(&callback)
+
+  def index
+  end
+end
+"#,
+    );
+    assert!(
+        has_gap(&gaps, "controller class-body block not recognized: `before_action`"),
+        "{gaps:?}"
+    );
+}
+
+/// A hand-written block filter whose body holds a `next` that can't be
+/// restructured to an if/unless (#779, `next_restructure_refusal`)
+/// already earns its OWN located gap at ingest time — and the
+/// statement never becomes a body item at all (ingest returns `Err`,
+/// which the caller records and drops, pushing nothing to the
+/// controller's body). So this generic pass's widened before_action/
+/// after_action/prepend_before_action handling must not find — and
+/// must not double — a gap for it: exactly one gap, worded for the
+/// `next` cause, not the generic one.
+#[test]
+fn a_before_action_block_with_an_unrestructurable_next_records_exactly_one_gap() {
+    let gaps = gaps_for(
+        r#"class WidgetsController < ApplicationController
+  before_action do
+    next 1 if admin?
+    @seen = true
+  end
+
+  def index
+  end
+
+  private
+
+  def admin?
+    true
+  end
+end
+"#,
+    );
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(
+        has_gap(&gaps, "`before_action` block holds a `next` that can't be restructured"),
+        "{gaps:?}"
+    );
+    assert!(
+        !gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. }
+            if message.contains("class-body block not recognized"))),
+        "must not ALSO earn the generic gap: {gaps:?}"
+    );
+}
