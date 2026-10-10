@@ -229,7 +229,7 @@ def linked(value):
 def stands(f, up):
     out = f['stands'].rstrip('.')
     if f['facts']:
-        out += ' (' + ', '.join('[{}]({}facts.md)'.format(x, up) for x in f['facts']) + ')'
+        out += ' (' + ', '.join('[{}]({}facts.md#{})'.format(x, up, x.lower()) for x in f['facts']) + ')'
     return linked(out + '.')
 
 
