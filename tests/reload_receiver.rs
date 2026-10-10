@@ -70,6 +70,56 @@ fn source_reload_override_is_not_wrapped() {
 }
 
 #[test]
+fn relative_concern_reload_override_is_not_wrapped() {
+    let source = r#"
+module Admin
+  class Widget < ApplicationRecord
+    include Concerns::Reloading
+  end
+end
+"#;
+    let (emitted, mut app, errors) = example()
+        .write("app/models/admin/concerns/reloading.rb", r#"
+module Admin
+  module Concerns
+    module Reloading
+      def reload
+        ::Widget.create!(name: 'concern override')
+      end
+    end
+  end
+end
+"#)
+        .write("app/models/admin/widget.rb", source)
+        .emit_with_app(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    // Whole-app ingest qualifies includes. The per-file API retains the
+    // written path: emit that model too, without relying on normalization.
+    let model = roundhouse::ingest::ingest_model(
+        source.as_bytes(), "app/models/admin/widget.rb", &app.schema, &Default::default(),
+    ).unwrap().unwrap();
+    let destination = app.models.iter_mut().find(|m| m.name == model.name).unwrap();
+    *destination = model;
+    for file in roundhouse::emit::ruby::emit_lowered_models(&app) {
+        std::fs::write(emitted.join(file.path), file.content).unwrap();
+    }
+    let output = emit_and_run::ruby()
+        .args(["-e", r#"
+require File.expand_path('main', Dir.pwd)
+Main.configure_default_adapter!
+widget = Admin::Widget.create!(name: 'original')
+reloaded = widget.reload
+raise 'concern reload result was discarded' unless reloaded.name == 'concern override'
+raise if reloaded.equal?(widget)
+raise 'concern lock result was discarded' unless widget.lock!.name == 'concern override'
+"#])
+        .current_dir(&emitted)
+        .env("BLOG_DB", ":memory:")
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
 #[ignore = "requires the native Spinel compiler"]
 fn reload_and_lock_keep_the_receiver_type_natively() {
     let script = format!("Db.configure(\":memory:\")\nDb.exec(\"CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT)\")\n{ASSERTIONS}");
