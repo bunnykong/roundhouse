@@ -313,6 +313,40 @@ fn extrema_run_on_a_model_and_its_has_many_reader() {
     assert!(run.stdout.contains("extrema passed"));
 }
 
+/// With a date column the Date package loads and an aggregate over it
+/// answers a Date, on Spinel as on CRuby.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn date_extrema_answer_a_date_on_spinel() {
+    let overlay = emit_and_run::real_blog()
+        .edit("db/schema.rb", "t.string \"commenter\"", "t.string \"commenter\"\n    t.date \"archived_on\"")
+        .edit(
+            "app/models/comment.rb",
+            "  belongs_to :article\n",
+            "  belongs_to :article\n\n  def self.first_archived_on\n    Comment.minimum(:archived_on)\n  end\n",
+        );
+    let script = r#"Db.configure(":memory:")
+Schema.statements.each { |sql| Db.exec(sql) }
+ActiveRecord.adapter = SqliteAdapter
+raise "empty: #{Comment.first_archived_on.inspect}" unless Comment.first_archived_on.nil?
+a = Article.create!(title: "One", body: "A sufficiently long body.")
+Comment.create!(article_id: a.id, commenter: "Ann", body: "later", archived_on: Date.iso8601("2024-03-04"))
+Comment.create!(article_id: a.id, commenter: "Bob", body: "earlier", archived_on: Date.iso8601("2024-03-02"))
+raise "first_archived_on: #{Comment.first_archived_on.iso8601}" unless Comment.first_archived_on.iso8601 == "2024-03-02"
+puts "date extrema passed"
+"#;
+    overlay.run_spinel(script).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn extrema_run_on_spinel_without_date_columns() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{EXTREMA_ASSERTIONS}"
+    );
+    extrema_app().run_spinel(&script).assert_passes();
+}
+
 /// The has_many readers `lower::scope_chain` does not seed — one off a
 /// call with arguments, or off a local holding the reader — stay
 /// unresolved: their Array has no `maximum`.
