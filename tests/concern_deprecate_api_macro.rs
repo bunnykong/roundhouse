@@ -16,6 +16,14 @@
 //! (`fold_local_value`/`const_fold_expr`) before trying the remaining
 //! statement as a filter — refusing, same as any other statement that
 //! isn't filter DSL, the moment a local can't be reduced to a literal.
+//!
+//! Also here: `next` inside a block filter's body. Unmodified, it is
+//! copied verbatim into `process_action` — a plain method, not a block
+//! or a loop — which `ruby -c` rejects ("Invalid next"). A `next
+//! unless`/`next if` guard is now restructured into the equivalent
+//! `if`/`unless` wrapping the rest of the block, in
+//! `ingest::controller::lambda_filter_target` — the one resolver a
+//! macro-expanded block filter and a hand-written one both go through.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -283,6 +291,131 @@ raise "GET /widgets answered #{index.inspect}" unless index == [200, "@166838400
 
 show = get("/widgets/1")
 raise "GET /widgets/1 answered #{show.inspect}, want no Deprecation/Sunset" unless show == [200, nil, nil]
+"#,
+        )
+        .assert_passes();
+}
+
+// ---------------------------------------------------------------------
+// `next` inside a block filter — restructured, not left verbatim.
+// ---------------------------------------------------------------------
+
+/// A macro body whose block filter holds a `next unless` AFTER the
+/// locals this file's first commit already folds — proves the two
+/// features compose: `stamp` is still folded, and the guard is still
+/// restructured.
+const NEXT_GUARD_MACRO_BODY: &str = r#"      stamp = "@#{date.to_datetime.to_i}"
+      before_action(**kwargs) do
+        response.headers['Deprecation'] = stamp
+        next unless stamp
+        response.headers['X-Extra'] = '1'
+      end"#;
+
+#[test]
+fn a_macro_expanded_next_unless_guard_is_restructured_to_an_if() {
+    let (app, gaps) = build(NEXT_GUARD_MACRO_BODY, "retire_endpoint '2022-11-14', only: [:index]", "");
+    assert!(!has_gap(&gaps, "retire_endpoint"), "{gaps:?}");
+    let src = emitted_widgets(app);
+    assert!(!src.contains("next"), "the next-unless guard must be restructured to an if:\n{src}");
+    assert!(src.contains("X-Extra"), "{src}");
+}
+
+const NEXT_GUARD_RUNTIME_CONCERN: &str = r#"module SunsetConcern
+  extend ActiveSupport::Concern
+
+  class_methods do
+    def retire_endpoint(date, sunset: nil, **kwargs)
+      stamp = "@#{date.to_datetime.to_i}"
+      before_action(**kwargs) do
+        response.headers['Deprecation'] = stamp
+        next unless query_string.include?('extra')
+        response.headers['X-Extra'] = '1'
+      end
+    end
+  end
+end
+"#;
+
+const NEXT_GUARD_RUNTIME_WIDGETS_CONTROLLER: &str = r#"class WidgetsController < ApplicationController
+  retire_endpoint '2022-11-14', only: [:index]
+
+  def index
+    head :ok
+  end
+end
+"#;
+
+const NEXT_GUARD_RUNTIME_ROUTES: &str = r#"Rails.application.routes.draw do
+  resources :widgets, only: [:index]
+end
+"#;
+
+#[test]
+fn a_macro_expanded_next_unless_guard_runs_under_cruby() {
+    let overlay = emit_and_run::empty_app()
+        .write("app/controllers/concerns/sunset_concern.rb", NEXT_GUARD_RUNTIME_CONCERN)
+        .write("app/controllers/application_controller.rb", RUNTIME_APPLICATION_CONTROLLER)
+        .write("app/controllers/widgets_controller.rb", NEXT_GUARD_RUNTIME_WIDGETS_CONTROLLER)
+        .write("config/routes.rb", NEXT_GUARD_RUNTIME_ROUTES)
+        .write("db/schema.rb", RUNTIME_SCHEMA);
+    overlay
+        .run_ruby(
+            r#"def get(path, query = "")
+  env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => query, "rack.input" => StringIO.new("") }
+  status, headers, _body = Main.run_rack(env)
+  [status, headers["deprecation"], headers["x-extra"]]
+end
+
+plain = get("/widgets")
+raise "no extra query must not set X-Extra: #{plain.inspect}" unless plain == [200, "@1668384000", nil]
+
+extra = get("/widgets", "extra=1")
+raise "extra=1 must set X-Extra: #{extra.inspect}" unless extra == [200, "@1668384000", "1"]
+"#,
+        )
+        .assert_passes();
+}
+
+const NEXT_APPLICATION_CONTROLLER: &str = "class ApplicationController < ActionController::Base\nend\n";
+
+/// A HAND-WRITTEN block filter (no concern macro involved) whose body
+/// holds `next unless` — `ingest::controller::lambda_filter_target`
+/// restructures this the same way it does a macro-expanded one.
+/// `run_ruby` requiring `main.rb` is itself the `ruby -c` claim: a bare
+/// `next` left in `process_action` would be a `SyntaxError` there,
+/// which `assert_passes` reports as a failed run, not a clean 200.
+const NEXT_WIDGETS_CONTROLLER: &str = r#"class WidgetsController < ApplicationController
+  before_action only: [:index] do
+    next unless query_string.include?('loud')
+    response.headers['X-Loud'] = '1'
+  end
+
+  def index
+    head :ok
+  end
+end
+"#;
+
+#[test]
+fn a_hand_written_next_unless_guard_emits_valid_ruby_and_runs_under_cruby() {
+    let overlay = emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", NEXT_APPLICATION_CONTROLLER)
+        .write("app/controllers/widgets_controller.rb", NEXT_WIDGETS_CONTROLLER)
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n",
+        )
+        .write("db/schema.rb", RUNTIME_SCHEMA);
+    overlay
+        .run_ruby(
+            r#"def get(path, query = "")
+  env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => query, "rack.input" => StringIO.new("") }
+  status, headers, _body = Main.run_rack(env)
+  [status, headers["x-loud"]]
+end
+
+raise "no loud query must not set the header: #{get("/widgets").inspect}" unless get("/widgets") == [200, nil]
+raise "loud=1 must set the header: #{get("/widgets", "loud=1").inspect}" unless get("/widgets", "loud=1") == [200, "1"]
 "#,
         )
         .assert_passes();
