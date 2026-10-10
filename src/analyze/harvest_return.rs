@@ -131,6 +131,9 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     if existing == &new {
         return HarvestWrite::Keep;
     }
+    if *super::fold::PENDBOT && matches!(existing, Ty::Bottom) {
+        return HarvestWrite::Set(new);
+    }
     if let Some(untied) = untie_recursive_return(existing, &new) {
         super::dyn_probe::count("harvest_untie_cut");
         if existing == &untied {

@@ -1608,6 +1608,9 @@ impl<'a> BodyTyper<'a> {
                 {
                     return t;
                 }
+                if *crate::analyze::fold::PENDBOT && recv.is_some() && matches!(recv_ty, Some(Ty::Bottom)) {
+                    return Ty::Bottom;
+                }
                 let dispatched = self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args);
                 if crate::analyze::fold::on() {
                     crate::analyze::fold::note_send(&expr_span, fold_unfolded && recv.is_some(), &dispatched);

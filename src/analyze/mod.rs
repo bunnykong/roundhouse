@@ -5554,7 +5554,8 @@ impl Analyzer {
             }
             _ => {
                 if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })) {
-                    table.insert(method.clone(), Ty::Untyped);
+                    let pending = if *fold::PENDBOT { Ty::Bottom } else { Ty::Untyped };
+                    table.insert(method.clone(), pending);
                 }
             }
         }

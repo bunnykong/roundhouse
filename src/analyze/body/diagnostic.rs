@@ -31,6 +31,14 @@ pub(super) fn detect_diagnostic(expr: &mut Expr) {
             return;
         }
         let rhs = &args[0];
+        // prototype (`RH_PREC_PENDBOT=1`): a ⊥ operand carries no value, so
+        // the operator cannot raise; the emitters' classifiers read ⊥ as a
+        // foreign type and would report it.
+        if *crate::analyze::fold::PENDBOT
+            && (matches!(r.ty, Some(Ty::Bottom)) || matches!(rhs.ty, Some(Ty::Bottom)))
+        {
+            return;
+        }
         let incompatible = match method.as_str() {
             "+" => {
                 use crate::emit::shared::add::{AddCase, classify_add};

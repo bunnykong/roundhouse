@@ -1075,6 +1075,14 @@ pub(crate) fn join(old: Ty, new: Ty) -> Ty {
 
 /// `RH_FOLD_JOIN_V1=1` restores round 1's join (ablation).
 static FIXJOIN: LazyLock<bool> = LazyLock::new(|| !std::env::var("RH_FOLD_JOIN_V1").is_ok_and(|s| s == "1"));
+/// prototype (`RH_PREC_PENDBOT=1`, off by default): S2's producer split
+/// for method returns. A body whose type is still pending (`Var`, or none)
+/// stores ⊥ (`Ty::Bottom`) in the return table instead of minting
+/// `untyped`; ⊥ is the identity of `union_of` and is not informative, so
+/// the first concrete or gradual write replaces it, and a send whose
+/// receiver is ⊥ types as ⊥ instead of failing dispatch.
+pub(crate) static PENDBOT: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("RH_PREC_PENDBOT").is_ok_and(|s| s == "1"));
 /// `RH_FOLD_GRADUAL=1`, the handoff join keeps gradual arms.
 pub(crate) static GRADUAL: LazyLock<bool> =
     LazyLock::new(|| std::env::var("RH_FOLD_GRADUAL").is_ok_and(|s| s == "1"));
