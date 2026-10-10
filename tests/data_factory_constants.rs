@@ -606,7 +606,10 @@ fn custom_factory_blocks_are_not_silently_discarded() {
         "|value| def label; name; end",
     ] {
         let source = format!("class Owner; State = Data.define(:name) do {block}; end; end");
-        assert!(roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb").is_err(), "{source}");
+        assert!(
+            roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb").is_err(),
+            "{source}"
+        );
     }
 }
 
@@ -641,7 +644,11 @@ fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
     use roundhouse::project::{BuildTarget, target_files};
 
     let mut app = ingest(
-        &format!("{}\n{}", data_factory::DECLARATIONS, data_factory::CUSTOM_DECLARATIONS),
+        &format!(
+            "{}\n{}",
+            data_factory::DECLARATIONS,
+            data_factory::CUSTOM_DECLARATIONS
+        ),
         "FactoryExamples::Stateful::State.new(10, true)",
     );
     roundhouse::session::analyze_and_lower(&mut app);
@@ -682,7 +689,11 @@ fn ruby_and_spinel_emit_declared_factory_types_without_data_errors() {
     use roundhouse::project::{BuildTarget, target_files};
 
     let mut app = ingest(
-        &format!("{}\n{}", data_factory::DECLARATIONS, data_factory::CUSTOM_DECLARATIONS),
+        &format!(
+            "{}\n{}",
+            data_factory::DECLARATIONS,
+            data_factory::CUSTOM_DECLARATIONS
+        ),
         "FactoryExamples::First::Result.new(\"first\", 1.0, false)",
     );
     roundhouse::session::analyze_and_lower(&mut app);
@@ -718,12 +729,31 @@ fn ruby_and_spinel_emit_declared_factory_types_without_data_errors() {
             "{target:?}: {sidecar}"
         );
         let path = format!("{prefix}app/models/factory_examples/stateful.rbs");
-        let sidecar = &files.iter().find(|(name, _)| name == &path).expect("custom factory sidecar").1;
-        let signatures = roundhouse::rbs::parse_app_signatures(sidecar).expect("custom factory RBS parses");
+        let sidecar = &files
+            .iter()
+            .find(|(name, _)| name == &path)
+            .expect("custom factory sidecar")
+            .1;
+        let signatures =
+            roundhouse::rbs::parse_app_signatures(sidecar).expect("custom factory RBS parses");
         let methods = &signatures[&ClassId(Symbol::from("FactoryExamples::Stateful::State"))];
-        for name in ["new", "initialize", "quantity", "enabled", "label", "secret"] {
-            assert!(methods.contains_key(&Symbol::from(name)), "{target:?}: {sidecar}");
+        for name in [
+            "new",
+            "initialize",
+            "quantity",
+            "enabled",
+            "label",
+            "secret",
+        ] {
+            assert!(
+                methods.contains_key(&Symbol::from(name)),
+                "{target:?}: {sidecar}"
+            );
         }
-        assert_eq!(sidecar.matches("class State < ::Data").count(), 1, "{sidecar}");
+        assert_eq!(
+            sidecar.matches("class State < ::Data").count(),
+            1,
+            "{sidecar}"
+        );
     }
 }
