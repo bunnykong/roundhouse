@@ -12,7 +12,7 @@
 
 ## Why it matters
 
-Editors and agents re-check after every change. A full check of Discourse takes about 20 seconds, and the answer matters most while someone is typing.
+Editors and agents re-check after every change. The pinned Discourse cold analyses take tens of seconds (F30), and the answer matters most while someone is typing.
 
 ## The check
 
@@ -46,7 +46,7 @@ they are distinct from F15's wall-time ratios and F30's phase profiles.
 
 ## Known
 
-- By design, replay is exact when every read is recorded, transfers are monotone and writes are justified: replaying the stored records, then running the worklist to saturation, reaches the same fixpoint as a cold start. All six edits agree with the mandatory cold shadow; the hypotheses aren't proved for the Rust analyzer.
+- By design, replay is exact when every read is recorded, transfers are monotone and writes are justified: replaying the stored records, then running the worklist to saturation, reaches the same fixpoint as a cold start. All six F30 body edits agree with the mandatory cold shadow and separate cold result; deleting support around a cycle remains a separate coverage obligation. The hypotheses aren't proved for the Rust analyzer.
 - In F30, the unedited seeds load 60,698 records in 440.9 MiB of JSON on Mastodon and 136,952 records in 1,917.5 MiB on Discourse. F15’s older counts remain attached to its older compiler pin.
 - Boolean edits replay over 98% of the surviving records.
 

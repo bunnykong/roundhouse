@@ -43,7 +43,7 @@ to the four recorded programs. Both comparisons are [recorded attempts](../attem
 
 ## Leads
 
-- Bring [#705](https://github.com/rubys/roundhouse/pull/705)'s preservation of prior `[]=` contents onto the staged branch and re-run F8's check.
+- The October 10 staged and next pins already include [#705](https://github.com/rubys/roundhouse/pull/705), yet F28/F29 still witness the earlier String omission on next `38403140`. Isolate the remaining cause and check a repair against the pinned app trace; the receipt does not attribute it to one rule.
 - Until S2a's tag can tell producers apart, keeping a `Var` that survives to quiescence as unresolved avoids the recorded `nil`-only receivers ([proposed here](https://github.com/rubys/roundhouse/issues/617#issuecomment-6077674666)). The producer investigation and opt-in measurement are complete (F18): all 59 disappear, but fully typed falls to 64.01%, and 97 of 147 vanished errors are hidden. Model the missing dispatch behavior before claiming a precision or soundness gain. These producer witnesses are static analysis records, not app-runtime traces.
 - Cover the interval-tick read at `app/jobs/base.rb:145:9`, then expand traces beyond this selected class and to other apps' own tests. Keep the fixed denominator and uncertain/unsupported census alongside membership while checking repairs (F29).
 

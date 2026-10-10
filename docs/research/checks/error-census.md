@@ -34,6 +34,6 @@ Anything else is undetermined. Rows exist only for calls with an explicit receiv
 
 ## Reading it
 
-- **Fewer can mean hidden.** On Discourse, most of the errors S3 no longer reports are hidden, not fixed ([F6](../facts.md)).
+- **Fewer can mean hidden.** On the October 10 condition, eight of Discourse's twelve removed errors are hidden, not fixed ([F27](../facts.md)). F6's ten of thirteen remains the historical result on its older pin.
 - **Exposed means absorption used to hide the error, not that the error is real.** The verdict trusts the catalog: it shows neither that the failing arm reaches the call nor that the app lacks the method. In the `RH_DET` trial, source review confirmed none of the new dispatch errors as real ([F14](../facts.md)). Check exposed errors against the source or the runtime oracle before counting them as bugs. The corrected change is accounting, not a count of real regressions.
 - **Zero regressed is not soundness.** A receiver that was pending in the baseline has no answering arm to lose.

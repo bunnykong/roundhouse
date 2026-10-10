@@ -65,7 +65,7 @@
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Cover the interval-tick read at 145:9 and expand app-test traces; retain the fixed denominator and uncertain/unsupported coverage while checking repairs."
+  next: "Isolate F29's remaining String omission and nil job_id rejections, cover the interval-tick read at 145:9, and expand app-test traces; retain the fixed denominator and uncertain/unsupported coverage while checking repairs."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
@@ -86,18 +86,18 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "On the October 10 current-main condition, S3 is 69.8135% fully typed against the main-compatible base's 70.1619%, a gap of 0.3484 percentage points. A new paired loss attribution remains separate work."
-  facts: [F27, F23, F19, F18, F14, F7]
+  stands: "On condition `fixpoint-current-main-20261010-c210f226`, S3 is 69.8135% fully typed against the base's 70.1619%, a gap of 0.3484 percentage points. Paired loss attribution remains open; F29's later Discourse trace witnesses S3 runtime omissions."
+  facts: [F29, F27, F23, F19, F18, F14, F7]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Model the methods behind the dispatch fallbacks (classes missing a method, unmodeled receivers; F18), as agreed on #617, and fix the class-guard and `Array(…)` losses; measure each with the check."
+  next: "Repeat paired loss attribution on the October 10 pins; test F18's missing dispatch models and the historical class-guard and `Array(…)` candidates there, with the error census and runtime oracle beside each precision result."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
     compiler: "main c210f226; fixpoint-next 38403140"
-    lab: "56255dd54bed3815b4774282ae92380524b13136"
+    lab: "baseline 56255dd54bed3815b4774282ae92380524b13136; F29 trace 0bdc69712c69c6c200066fdbe84651d10694f8ab"
     runner: "baseline-2026-10-10/probe 42a29d21aedeafd48ce89b1287851b2478242b5828e963a0bf3f71c6652d6a9e"
 
 - id: incremental
@@ -122,12 +122,12 @@
   name: Typed recursion
   brief: frontiers/typed-recursion.md
   status: open
-  stands: "A Rust `enum` and a Crystal `alias` work for three of the four shapes recorded in #589, behind a flag."
+  stands: "The historical Rust `enum` and Crystal `alias` demo covers three of #589's four shapes, behind a flag. F21's separate Spinel probe loses a required recursive-alias signature; alias consumption remains open."
   facts: [F21, F13]
   skills:
     - Code generation
     - the type systems of Rust, Crystal and the other targets
-  next: "Cover the fourth shape: mutual recursion between two class methods."
+  next: "Cover the fourth emitted-code shape, mutual recursion between two class methods; check recursive-alias signature extraction before claiming Spinel alias support."
   check: frontiers/typed-recursion.md#the-check
   check_public: public
   pins:
@@ -138,7 +138,7 @@
   name: Cost
   brief: frontiers/cost.md
   status: open
-  stands: "Exact type identities and a union memo make the large app faster than main; earlier profiles point at unification and expression walks."
+  stands: "In F11's October 8 condition, exact type identities and a union memo at `96519abf` make the large app faster than main `194f26cf`; the pre-identity profiles point at unification and expression walks. This is historical, not a current-main timing."
   facts: [F12, F11, F10]
   skills:
     - Rust performance and profiling

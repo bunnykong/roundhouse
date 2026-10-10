@@ -13,6 +13,8 @@ On main the loops often reach the cap. Recursive data grows one level deeper eac
 3. **Monotone rules from ⊥ (S2b) and recursive types by origin (S2c).** A value only ever grows, a pending value counts as nothing (⊥) rather than as `untyped`, and a recursive type is stored as a reference to the slot it came from instead of being unrolled.
 4. **Re-type only what changed, in dependency order (S3).**
 
+Here ⊥ denotes pending inference with no evidence. It is distinct from language-level `Bottom`, meaning a computation never returns; the historical pending-as-bottom prototype fails the runtime witnesses ([F19](facts.md)). These are the design's stages, not properties already established for every Rust rule.
+
 ## When order can't matter
 
 A classical result, chaotic iteration: on a lattice of finite height, starting from ⊥ (nothing known), every fair order of applying a fixed, finite set of monotone equations, joining what they contribute, reaches the same least solution. For the analyzer that takes two conditions:
@@ -36,6 +38,8 @@ Against main at a named commit, on the inputs each check specifies, most often t
 | Cost | `check --continue` wall time and peak memory, interleaved runs |
 
 The flags live on the [follow-up branch](https://github.com/bunnykong/roundhouse/compare/fixpoint-staged...fixpoint-next); the canaries (`RH_FIXPOINT_VERIFY`, `RH_FIXPOINT_DIGEST`, `RH_FIXPOINT_STATS`) are on main since [#657](https://github.com/rubys/roundhouse/pull/657).
+
+On the October 10 baseline, flags-off suite parity includes three inherited failures ([F26](facts.md)); it is not a green suite. The later [F29](facts.md) trace supplies app-runtime evidence alongside the earlier static counts.
 
 ## Terms
 

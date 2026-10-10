@@ -4,17 +4,21 @@
 
 Roundhouse infers types for a whole Rails app without annotations, by re-typing methods until nothing changes. On real apps that loop often stops at a round cap instead of settling, and its answer then depends on where it stopped. [#617](https://github.com/rubys/roundhouse/issues/617) proposes making it settle, and small stage PRs land the changes one at a time. The problems below are still open. Anyone is welcome to take one on.
 
+The briefs call the combined flagged inference configuration **S3**; [Foundations](foundations.md#the-proposal-in-four-ideas) explains its stages. `PROBE_BASE=1` switches those flags off in the same binary for a main-compatible control. A **cold shadow** is a full check after an edit that validates the cached replay. Every result belongs to its named condition and pins, rather than to a moving branch tip.
+
 ## Start here
 
 | You want… | Read |
 | --- | --- |
+| Run a check, or validate saved evidence without a build | [Running a check](#running-a-check) |
 | The ideas, the theory and the terms, in one read | [foundations.md](foundations.md) |
 | The open problems, each with the check that would settle it | [open-problems.md](open-problems.md) |
 | What is established, each with its receipt | [facts.md](facts.md) |
 | What has been tried, including what failed | [attempts.md](attempts.md) |
 | Each frontier's status, claims and pins, machine-readable: the source of the table below | [frontiers.yaml](frontiers.yaml) |
 | How to run and read the error census | [checks/error-census.md](checks/error-census.md) |
-| Background: order dependence and the incremental design | [notes/](notes/) |
+| Why schedules change answers | [Order dependence](notes/order-dependence.md) |
+| How cached replay works and when it is exact | [Incremental design](notes/incremental-design.md) |
 | How the analyzer works today | [docs/pipeline/analyze.md](../pipeline/analyze.md) |
 
 ## Open problems
@@ -23,30 +27,35 @@ Roundhouse infers types for a whole Rails app without annotations, by re-typing 
 | Frontier | Skills | Where it stands | Next |
 | --- | --- | --- | --- |
 | [Any order](frontiers/any-order.md) | Rust; fixpoint and lattice theory; the analyzer's harvest, dispatch and fold code | On condition `structure-tools-38403140-s3-public-lab-v1-verify-off`, writer and route sets differ across unset/1/2 on all five apps; slot sets differ except on Campfire. Unset repeats preserve slots/writers but routes differ on four. Complete any-order remains open ([F31](facts.md), [F25](facts.md), [F24](facts.md), [F22](facts.md), [F16](facts.md), [F14](facts.md), [F5](facts.md)). | Audit source mapping and undeclared reads/writes, retaining an unset repeat; use writer laws and differing facts to declare the whole structure before typing or discover it monotonically, then re-run the complete any-order check. |
-| [Soundness](frontiers/soundness.md) | Ruby and Rails semantics; Runtime tracing on CRuby 4.0.7; Type systems | On condition `sound-traces-20261010-c210f226`, three Discourse tests cover 27/28 selected `@data` reads. The first records main 24/0 and S3 17/7 accepted/rejected. Every acceptance involves uncertain or unsupported types; this is witnessed coverage, not general soundness ([F29](facts.md), [F28](facts.md), [F27](facts.md), [F25](facts.md), [F20](facts.md), [F19](facts.md), [F18](facts.md), [F17](facts.md), [F14](facts.md), [F8](facts.md)). | Cover the interval-tick read at 145:9 and expand app-test traces; retain the fixed denominator and uncertain/unsupported coverage while checking repairs. |
-| [Precision](frontiers/precision.md) | Rust; type inference; Rails idioms such as guards, memoization and `Array(…)` | On the October 10 current-main condition, S3 is 69.8135% fully typed against the main-compatible base's 70.1619%, a gap of 0.3484 percentage points. A new paired loss attribution remains separate work ([F27](facts.md), [F23](facts.md), [F19](facts.md), [F18](facts.md), [F14](facts.md), [F7](facts.md)). | Model the methods behind the dispatch fallbacks (classes missing a method, unmodeled receivers; F18), as agreed on [#617](https://github.com/rubys/roundhouse/issues/617), and fix the class-guard and `Array(…)` losses; measure each with the check. |
+| [Soundness](frontiers/soundness.md) | Ruby and Rails semantics; Runtime tracing on CRuby 4.0.7; Type systems | On condition `sound-traces-20261010-c210f226`, three Discourse tests cover 27/28 selected `@data` reads. The first records main 24/0 and S3 17/7 accepted/rejected. Every acceptance involves uncertain or unsupported types; this is witnessed coverage, not general soundness ([F29](facts.md), [F28](facts.md), [F27](facts.md), [F25](facts.md), [F20](facts.md), [F19](facts.md), [F18](facts.md), [F17](facts.md), [F14](facts.md), [F8](facts.md)). | Isolate F29's remaining String omission and nil job_id rejections, cover the interval-tick read at 145:9, and expand app-test traces; retain the fixed denominator and uncertain/unsupported coverage while checking repairs. |
+| [Precision](frontiers/precision.md) | Rust; type inference; Rails idioms such as guards, memoization and `Array(…)` | On condition `fixpoint-current-main-20261010-c210f226`, S3 is 69.8135% fully typed against the base's 70.1619%, a gap of 0.3484 percentage points. Paired loss attribution remains open; F29's later Discourse trace witnesses S3 runtime omissions ([F29](facts.md), [F27](facts.md), [F23](facts.md), [F19](facts.md), [F18](facts.md), [F14](facts.md), [F7](facts.md)). | Repeat paired loss attribution on the October 10 pins; test F18's missing dispatch models and the historical class-guard and `Array(…)` candidates there, with the error census and runtime oracle beside each precision result. |
 | [Incremental](frontiers/incremental.md) | Incremental computation; Rust performance; serialization | On condition `warm-next-F15-profile-20261010-c210f226`, all six edits match shadow and cold. Fingerprint construction dominates: Mastodon spends 131–135 s there against 6.14–6.25 s for cold analysis; these are shared-host profiles ([F30](facts.md), [F15](facts.md)). | Reduce repeated expression/context serialization and global metadata construction in input fingerprints, then re-check all six edits and measure five interleaved pairs against the cost and 100 ms gates. |
-| [Typed recursion](frontiers/typed-recursion.md) | Code generation; the type systems of Rust, Crystal and the other targets | A Rust `enum` and a Crystal `alias` work for three of the four shapes recorded in [#589](https://github.com/rubys/roundhouse/issues/589), behind a flag ([F21](facts.md), [F13](facts.md)). | Cover the fourth shape: mutual recursion between two class methods. |
-| [Cost](frontiers/cost.md) | Rust performance and profiling; hash-consing; data-structure design | Exact type identities and a union memo make the large app faster than main; earlier profiles point at unification and expression walks ([F12](facts.md), [F11](facts.md), [F10](facts.md)). | Re-profile with type identities on, then choose the next target. |
+| [Typed recursion](frontiers/typed-recursion.md) | Code generation; the type systems of Rust, Crystal and the other targets | The historical Rust `enum` and Crystal `alias` demo covers three of [#589](https://github.com/rubys/roundhouse/issues/589)'s four shapes, behind a flag. F21's separate Spinel probe loses a required recursive-alias signature; alias consumption remains open ([F21](facts.md), [F13](facts.md)). | Cover the fourth emitted-code shape, mutual recursion between two class methods; check recursive-alias signature extraction before claiming Spinel alias support. |
+| [Cost](frontiers/cost.md) | Rust performance and profiling; hash-consing; data-structure design | In F11's October 8 condition, exact type identities and a union memo at `96519abf` make the large app faster than main `194f26cf`; the pre-identity profiles point at unification and expression walks. This is historical, not a current-main timing ([F12](facts.md), [F11](facts.md), [F10](facts.md)). | Re-profile with type identities on, then choose the next target. |
 
 No claims are in force; [claim](#claiming) a frontier before starting work on it.
 <!-- end generated -->
 
 ## Running a check
 
-With Git, Rust (rustup), a native build toolchain, Python 3.9+, Bash, curl and jq installed, run this from an empty directory:
+With Git, Rust (rustup), a native build toolchain, Python 3.9+, CRuby 4.0.7 with Prism, Bash, curl and jq installed, run this from an empty directory. Use a fresh shell with experimental `RH_` variables unset. Select CRuby 4.0.7 for app checks; rbenv users can set `RBENV_VERSION=4.0.7`.
 
 ```sh
 git clone -b fixpoint-next https://github.com/bunnykong/roundhouse rh
-(cd rh && cargo build --release --locked)
+git -C rh checkout --detach 38403140379cd69759b0fe6247c6a8c4a48a37a9
+(cd rh && CARGO_BUILD_JOBS=4 cargo build --release --locked --bin roundhouse)
 git clone https://github.com/bunnykong/roundhouse-fixpoint-lab lab
+git -C lab checkout --detach 76cdb1ea24b0c4c88af4c42c78f567d759b7731d
 sh lab/corpus/fetch.sh
-curl -sO https://raw.githubusercontent.com/bunnykong/roundhouse/fixpoint-research/tools/research/probe
+curl -fsSLo probe \
+  https://raw.githubusercontent.com/bunnykong/roundhouse/33fdd67effcf/tools/research/probe
 chmod +x probe
 ./probe campfire
 ```
 
-[`probe`](../../tools/research/probe) runs `check --continue` on one app with every fixpoint flag on and prints one JSON line: digests of the carried state, the structure, how each loop ended, and the counters. It looks for the binary at `rh/target/release/roundhouse` and the apps under `lab/corpus/apps`; set `RH_BIN` or `APPS` if yours are elsewhere. The run's diagnostics go to `probe-APP.stderr`. For a brief whose code is on another branch, check that branch out in `rh` and rebuild. The lab's demos have their own recipes.
+[`probe`](../../tools/research/probe) runs `check --continue` on one app with every fixpoint flag on and prints one JSON line: digests of the carried state, the structure, how each loop ended, and the counters. It looks for the binary at `rh/target/release/roundhouse` and the apps under `lab/corpus/apps`; set `RH_BIN` or `APPS` if yours are elsewhere. The run's diagnostics go to `probe-APP.stderr`. This setup pins the October 10 baseline used by F22–F28; it does not build the separate F29–F31 instruments. For another brief's recipe, check out its exact compiler pin in `rh` and rebuild. The lab's demos have their own recipes.
+
+To start without a compiler build, replay F29's saved runtime observations with the [soundness recipe](frontiers/soundness.md#the-check), or reduce F30's saved profiles with `python3 -B lab/receipts/warm-profile-2026-10-10/recompute.py`. These offline checks validate the saved evidence; native reruns record new observations.
 
 ## Contributing
 

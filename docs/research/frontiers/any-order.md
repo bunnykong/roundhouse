@@ -26,7 +26,7 @@ for app in campfire mastodon chatwoot forem discourse; do
 done
 ```
 
-It passes when each app prints three identical lines and the last number, the total movement found by the verify round, is 0. Three schedules are a regression check, not a proof. No app passes on the recorded staged pins: four of the five differ in structure between schedules (F5), and Campfire's recorded structure equality does not establish matching values; an earlier control's return digest differs in seed 2. These measurements predate the merged join and receiver-side fixes below; their effects on the any-order gate need a new run.
+It passes when each app prints three identical lines and the last number, the total movement found by the verify round, is 0. Three schedules are a regression check, not a proof. On October 10 condition `fixpoint-current-main-20261010-c210f226`, S3 at `38403140` passes on 0/5 apps: four differ in the aggregate structure, all five in carried values, and four have nonzero verification movement ([F24](../facts.md)). That pin includes the merged join and receiver-side fixes below. F31's broader logical dump, with verification off, also finds writers and routes differing on all five; its unset repeat and coverage limits prevent attributing every route difference solely to the shuffle. Keep these observer conditions separate.
 
 The [long-name dispatch attempt](../attempts.md#long-name-dispatch) retains a dependency-coverage
 fixture: compare actual dispatch lookup names with the names scanned for scheduling.
@@ -66,7 +66,7 @@ these observation limits; this dump supplies no complete equation declaration or
 
 - Monotone rules alone can't fix it. The slots, the writers of each and the set of recursive references are discovered during typing, and the discovery depends on the schedule ([foundations](../foundations.md#when-order-cant-matter)).
 - Freezing the call graph and the recursive set before typing makes those two parts schedule-independent. The rest is still discovered during typing, and freezing only part of it changes answers (F16).
-- Seven join/merge defects were reported on main `d4f40761` with scratch tests: [the list](https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589), from @eddygarcas. Items 3–6 landed in [#705](https://github.com/rubys/roundhouse/pull/705), and items 1–2 in [#724](https://github.com/rubys/roundhouse/pull/724), after [#674](https://github.com/rubys/roundhouse/pull/674) separated receiver-side parameter rows. Item 7, `decide_harvested_return`, remains outside those fixes. The recorded `fixpoint-next` pin predates all three merges.
+- Seven join/merge defects were reported on main `d4f40761` with scratch tests: [the list](https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589), from @eddygarcas. Items 3–6 landed in [#705](https://github.com/rubys/roundhouse/pull/705), and items 1–2 in [#724](https://github.com/rubys/roundhouse/pull/724), after [#674](https://github.com/rubys/roundhouse/pull/674) separated receiver-side parameter rows. Item 7, `decide_harvested_return`, remains outside those fixes. The October 10 `fixpoint-next` pin includes all three; F25 records remaining finite writer-law counterexamples without certifying the whole carried state.
 - The `RH_DET` bundle, which makes `decide_harvested_return` the one merge per slot and normalizes joins, improves several order-dependent components but still fails on four apps (F14).
 
 ## Leads
