@@ -96,6 +96,7 @@ check("/signed/:n", "/signed/1a", signed_pat, false)
 dashed_pat = "4.pair41.C+0010.0123456789L1001.-C+0010.0123456789"
 check("/dashed/:pair", "/dashed/12-34", dashed_pat, true)
 check("/dashed/:pair", "/dashed/12-", dashed_pat, false)
+check("/dashed/:pair", "/dashed/-34", dashed_pat, false)
 
 enc_pat = "5.value15.L1003.%40C*010."
 check("/enc/:value", "/enc/%40alice", enc_pat, true)

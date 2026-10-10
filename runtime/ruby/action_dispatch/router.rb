@@ -745,6 +745,10 @@ module ActionDispatch
         return 1 if start < value.length && value[start, 1].to_s == ch
         return 0
       end
+      # `+` needs at least one character. The loop below returns its
+      # count as soon as a character fails, so check the first one here:
+      # a 0 from the loop would read as a match.
+      return -1 if quant == "+" && !(start < value.length && value[start, 1].to_s == ch)
       i = start
       # A single-comparison header (`i < value.length`), not a compound
       # `&&` one — the Elixir while→recursion lowering only takes a
@@ -777,6 +781,8 @@ module ActionDispatch
         return 1 if start < value.length && segment_pattern_char_in_class(value[start, 1].to_s, neg, any, set)
         return 0
       end
+      # `+` needs at least one character; see `segment_pattern_literal_match`.
+      return -1 if quant == "+" && !(start < value.length && segment_pattern_char_in_class(value[start, 1].to_s, neg, any, set))
       i = start
       # Same reason as `segment_pattern_literal_match`: `i - start` at
       # each exit, rather than a second accumulator alongside `i`'s own

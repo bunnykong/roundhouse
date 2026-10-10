@@ -202,6 +202,8 @@ got = req("/dashed/12-34")
 raise "dashed 12-34: #{got}" unless got == "200|dashed:12-34"
 got = req("/dashed/12-")
 raise "dashed 12- should 404: #{got}" unless got.start_with?("404")
+got = req("/dashed/-34")
+raise "dashed -34 should 404: #{got}" unless got.start_with?("404")
 
 # `%40.*` — literal prefix then any-char star. The constraint runs on
 # the RAW (not yet percent-decoded) segment, so `%40` must be literal
