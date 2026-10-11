@@ -1,5 +1,6 @@
 """Semantic checks for the recorder/exporter boundary, separate from inference."""
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from compare import compare, new_uncertainty
 from export import empty_census, render
 from oracle_ext import load
 
-LAB=Path(__file__).resolve().parent.parent/'lab'
+LAB=Path(os.environ.get('SOUND_LAB', str(Path(__file__).resolve().parents[3] / 'lab')))
 
 
 class Contract(unittest.TestCase):

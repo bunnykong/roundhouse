@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 from oracle_ext import load
+from component_gate import paired_components
 
 OPAQUE_KEYS = ('var', 'pending', 'unresolved', 'untagged', 'unsupported', 'record_rest_var')
 
@@ -78,7 +79,7 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--baseline-export',type=Path,help='paired export for the unresolved-coverage gate')
     p.add_argument('--require-membership','--require-sound',dest='require_membership',action='store_true',
-        help='exit 1 for counterexamples, missing/no-slot or increased unknown coverage; settlement/verification are separate')
+        help='exit 1 for counterexamples, missing/no-slot or new opaque components (including gradual); settlement/verification are separate')
     a=p.parse_args()
     result=compare(a.lab,a.trace,a.exported,json.loads(a.slots.read_text()))
     if a.baseline_export:
@@ -96,13 +97,23 @@ def main():
                 baseline['arms'][stage]['unresolved_or_unsupported_aliases'])
             row['paired_new_uncertainty']=added
             row['paired_unknown_increase']=len(set().union(*map(set,added.values())))
+        candidate_raw=json.loads((a.exported/'raw.json').read_text())
+        control_raw=json.loads((a.baseline_export/'raw.json').read_text())
+        if set(candidate_raw)!=set(json.loads((a.exported/'selection.json').read_text())):
+            raise ValueError('raw types and fixed selection differ')
+        result['paired_components']=paired_components(candidate_raw,control_raw)
     a.output.write_text(json.dumps(result,indent=2)+'\n')
-    print(json.dumps({k:v for k,v in result.items() if k not in ('coverage','arms','no_slot_observations')},indent=2))
+    print(json.dumps({k:v for k,v in result.items() if k not in
+        ('coverage','arms','no_slot_observations','paired_components')},indent=2))
     for stage,r in result['arms'].items():
         print(stage,json.dumps({k:v for k,v in r.items() if k not in
             ('violations','observations','unresolved_or_unsupported_aliases','paired_new_uncertainty')}))
+    if 'paired_components' in result:
+        print('components',json.dumps({k:v for k,v in result['paired_components'].items()
+                                      if k not in ('control','candidate','added')}))
     if a.require_membership and (result['no_slot'] or any(r['rejected'] or r['category_slots']['missing']
-            or r.get('paired_unknown_increase',0) for r in result['arms'].values())):
+            or r.get('paired_unknown_increase',0) for r in result['arms'].values())
+            or result.get('paired_components',{}).get('new_unknown_paths',0)):
         return 1
     return 0
 
