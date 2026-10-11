@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "On condition `structure-tools-38403140-s3-public-lab-v1-verify-off`, writer and route sets differ across unset/1/2 on all five apps; slot sets differ except on Campfire. Unset repeats preserve slots/writers but routes differ on four. Complete any-order remains open."
-  facts: [F31, F25, F24, F22, F16, F14, F5]
+  stands: "On `declaration-attempt-mutation-20261011-v2`, the fixture envelope is killed by 18 missing memberships and incomplete raw coverage. Campfire declaration/attempt sets agree while four controller mutation identities differ. The local return model passes, but producer conservation and partition/replay widening laws still fail in their separate conditions. Complete any-order remains open."
+  facts: [F36, F34, F33, F31, F25, F24, F22, F16, F14, F5]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Audit source mapping and undeclared reads/writes, retaining an unset repeat; use writer laws and differing facts to declare the whole structure before typing or discover it monotonically, then re-run the complete any-order check."
+  next: "Repair closure/parameter identities and the registry inventory, complete raw access hooks and justified routing, then integrate conserved per-writer evidence and retest partition/replay cuts. Retain the unset repeat and the complete five-app any-order check."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "main c210f226; fixpoint-next 38403140; structure-dump abda389c; writer-law-harness bf2f052f"
-    lab: "76cdb1ea24b0c4c88af4c42c78f567d759b7731d; baseline 56255dd54bed3815b4774282ae92380524b13136"
-    runner: "structure-dump/tools/research/probe 42a29d21aedeafd48ce89b1287851b2478242b5828e963a0bf3f71c6652d6a9e"
+    compiler: "structure shadow 7972f4c on abda389c; producer audit f9be715d on 38403140; reflective bound c91d4324 on bf2f052f"
+    lab: "509fdb324b451c73e7adc261693cb7298d550f52; existing frozen inputs 76cdb1ea"
+    runner: "October 11 receipt rerun.py at lab 509fdb324b451c73e7adc261693cb7298d550f52"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -54,24 +54,23 @@
       pr: "https://github.com/rubys/roundhouse/pull/724"
       source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
       note: "Merged on 2026-10-09 as 736dff85. Uses option (a): only a non-nil concrete type absorbs `untyped`, so `Nil | untyped` stays. Also bounds each parameter row once after its fold. Emitted output byte-identical on three apps × 12 targets; with #705 on `fixpoint-next`, fully typed 69.01% → 69.45% (S3) and 69.22% → 69.84% (`PROBE_BASE=1`), base verify moved 652 → 475."
-
 - id: soundness
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "On condition `sound-traces-20261010-c210f226`, three Discourse tests cover 27/28 selected `@data` reads. The first records main 24/0 and S3 17/7 accepted/rejected. Every acceptance involves uncertain or unsupported types; this is witnessed coverage, not general soundness."
-  facts: [F29, F28, F27, F25, F20, F19, F18, F17, F14, F8]
+  stands: "On `component-opacity-gate-f29-20261011-v1`, the checker blocks eight erased value components without changing saved F29 decisions or 27/28 observed-read coverage, but the complete control is inconclusive because its prescribed widening rejects two Time values. The separate reflective bound has bounded finite membership and opacity parity; app soundness remains open."
+  facts: [F36, F34, F32, F29, F28, F27, F25, F20, F19, F18, F17, F14, F8]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Isolate F29's remaining String omission and nil job_id rejections, cover the interval-tick read at 145:9, and expand app-test traces; retain the fixed denominator and uncertain/unsupported coverage while checking repairs."
+  next: "Keep the failed Time positive control explicit or define a separately labeled control admitting Time. Apply the paired component guard to fresh candidate exports, isolate the remaining F29 String and nil job_id omissions, and cover the interval-tick read and broader app traces."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "main c210f226 and fixpoint-next 38403140 (F29); main 1ce99695 (F17); fixpoint-staged 92844f68 (F8)"
-    lab: "0bdc69712c69c6c200066fdbe84651d10694f8ab"
-    adapter: "sound-exporter 48c652873a88d8bc291df1d606ad1464f9168ae3"
+    compiler: "F29 main c210f226 / next 38403140; checker 8f7c1af7 on 48c65287; reflective main-harness repair c91d4324"
+    lab: "509fdb324b451c73e7adc261693cb7298d550f52; existing frozen inputs 76cdb1ea"
+    adapter: "component-opacity-gate 8f7c1af7bcaa6e5376d465d5f5ffda03702522fd; frozen exporter base 48c65287"
   claims:
     - who: dai199
       scope: "parameter rows keyed by receiver side, the follow-up named in #551 (the lab's `name_collision`), in one PR against main."
@@ -81,43 +80,40 @@
       pr: "https://github.com/rubys/roundhouse/pull/674"
       source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6077674666"
       note: "Merged on 2026-10-09 as c19524c7, with the owner walk looking on the call's side first (https://github.com/rubys/roundhouse/issues/617#issuecomment-6081357575)."
-
 - id: precision
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "On condition `fixpoint-current-main-20261010-c210f226`, S3 is 69.8135% fully typed against the base's 70.1619%, a gap of 0.3484 percentage points. Paired loss attribution remains open; F29's later Discourse trace witnesses S3 runtime omissions."
-  facts: [F29, F27, F23, F19, F18, F14, F7]
+  stands: "On `producer-reason-audit-next38403140-20261011-shared-host`, local reason/return tests pass but complete conservation is killed by unjustified native parameter reason loss. Campfire ordinary types and opacity counts stay unchanged; F19 retains five missing selections. The separate October 10 five-app fully-typed gap in F23 is not replaced by a new precision gain."
+  facts: [F34, F32, F29, F27, F23, F19, F18, F14, F7]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Repeat paired loss attribution on the October 10 pins; test F18's missing dispatch models and the historical class-guard and `Array(…)` candidates there, with the error census and runtime oracle beside each precision result."
+  next: "Give permanent uncertainty removal a producer-specific premise or repair it, complete origin/dependency mapping, and preserve reason sets through storage and invalidation. Repeat paired loss attribution and error/runtime checks on fresh candidate exports with the F32 component guard."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "main c210f226; fixpoint-next 38403140"
-    lab: "baseline 56255dd54bed3815b4774282ae92380524b13136; F29 trace 0bdc69712c69c6c200066fdbe84651d10694f8ab"
-    runner: "baseline-2026-10-10/probe 42a29d21aedeafd48ce89b1287851b2478242b5828e963a0bf3f71c6652d6a9e"
-
+    compiler: "producer audit f9be715d (recorded d83849d tree) on next 38403140"
+    lab: "509fdb324b451c73e7adc261693cb7298d550f52; existing frozen inputs 76cdb1ea"
+    runner: "October 11 receipt rerun.py at lab 509fdb324b451c73e7adc261693cb7298d550f52"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "On condition `warm-next-F15-profile-20261010-c210f226`, all six edits match shadow and cold. Fingerprint construction dominates: Mastodon spends 131–135 s there against 6.14–6.25 s for cold analysis; these are shared-host profiles."
-  facts: [F30, F15]
+  stands: "On `warm-fingerprint-components-20261011-boolean`, the Mastodon edit confirms bounded reuse: fingerprint work falls 132.653 to 10.759 s, but fast warm excluding shadow is 23.901 s versus 7.349 s whole cold. On `replay-storage-support-20261011-storage-support`, 24 support rows pass while five of eight native storage cases lose reasons/order. These are one-pair shared-host profiles; exact fast replay remains open."
+  facts: [F37, F35, F34, F33, F30, F15]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Reduce repeated expression/context serialization and global metadata construction in input fingerprints, then re-check all six edits and measure five interleaved pairs against the cost and 100 ms gates."
+  next: "Preserve reason sets and ordered fields in the codec and its guards, and complete structure/producer coverage before selective reuse. Keep full replay and shadow; run all six fingerprint edits and five alternating pairs against warm≤cold and 100 ms gates."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "warm-next d9ec78c3"
-    lab: "d0b2e5dd689c04221295b9a4037dede07984c770"
-    runner: "warm-profile-2026-10-10/rerun.py at d0b2e5dd689c04221295b9a4037dede07984c770"
-
+    compiler: "warm-next d9ec78c3; fingerprints 1fbfee1; storage/support tests 2717deed"
+    lab: "509fdb324b451c73e7adc261693cb7298d550f52; existing frozen inputs 76cdb1ea"
+    runner: "October 11 receipt rerun.py at lab 509fdb324b451c73e7adc261693cb7298d550f52"
 - id: typed-recursion
   name: Typed recursion
   brief: frontiers/typed-recursion.md
@@ -138,15 +134,15 @@
   name: Cost
   brief: frontiers/cost.md
   status: open
-  stands: "In F11's October 8 condition, exact type identities and a union memo at `96519abf` make the large app faster than main `194f26cf`; the pre-identity profiles point at unification and expression walks. This is historical, not a current-main timing."
-  facts: [F12, F11, F10]
+  stands: "On `warm-fingerprint-components-20261011-boolean` at 1fbfee1 over d9ec78c3, repeated canonical metadata reuse cuts fingerprint work 132.653 to 10.759 s with byte/hash/guard parity. Final hashing and class-guard hashing dominate the remaining fingerprint work. This one-pair shared-host profile does not meet the replicated cost or useful latency gates; F11 remains a separate historical condition."
+  facts: [F35, F30, F12, F11, F10]
   skills:
     - Rust performance and profiling
     - hash-consing
     - data-structure design
-  next: "Re-profile with type identities on, then choose the next target."
+  next: "Replicate all six edits and parent/candidate cold runs before broader speed claims. Profile final input and class-guard hashing next, preserving exact byte membership, generation changes and the mandatory shadow; keep native storage fidelity as a separate gate."
   check: frontiers/cost.md#the-check
   check_public: public
   pins:
-    compiler: "fixpoint-arena 96519abf"
-    lab: "0cc656a6"
+    compiler: "warm-next d9ec78c3; fingerprint components 1fbfee1; historical fixpoint-arena 96519abf"
+    lab: "509fdb324b451c73e7adc261693cb7298d550f52; existing frozen inputs 76cdb1ea"
