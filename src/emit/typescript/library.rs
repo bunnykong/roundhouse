@@ -1796,6 +1796,7 @@ fn rewrite_free(e: &Expr) -> Expr {
     };
     Expr {
         span: e.span,
+        declaration_source: e.declaration_source.clone(),
         node: Box::new(new_node),
         ty: e.ty.clone(),
         effects: e.effects.clone(),
@@ -2096,6 +2097,7 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
 
     Expr {
         span: e.span,
+        declaration_source: e.declaration_source.clone(),
         node: Box::new(new_node),
         ty: e.ty.clone(),
         effects: e.effects.clone(),

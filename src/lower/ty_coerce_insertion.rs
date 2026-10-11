@@ -394,6 +394,7 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
     };
     Expr {
         span: expr.span,
+        declaration_source: expr.declaration_source.clone(),
         node: Box::new(new_node),
         ty: expr.ty.clone(),
         effects: expr.effects.clone(),
@@ -626,6 +627,7 @@ fn peel_option(ty: &Ty) -> Option<&Ty> {
 fn wrap_in_cast(arg: &Expr, target_ty: &Ty) -> Expr {
     Expr {
         span: arg.span,
+        declaration_source: arg.declaration_source.clone(),
         node: Box::new(ExprNode::Cast {
             value: arg.clone(),
             target_ty: target_ty.clone(),

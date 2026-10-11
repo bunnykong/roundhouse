@@ -1930,6 +1930,7 @@ impl Analyzer {
                     let Some(action) = controller.actions().nth(unit.mi) else { return reapplied };
                     let body_ty = super::tuple_return_ty(&action.body)
                         .or_else(|| super::effective_return_ty(&action.body));
+                    super::structure_dump::harvest_attempt(&action.name, "controller-sccq", body_ty.as_ref());
                     if let Some(body_ty) = body_ty.filter(|t| !matches!(t, Ty::Var { .. })) {
                         let _writer = super::errgate::writer(&controller.name, &action.name, false);
                         let target = &mut self.classes.entry(controller.name.clone()).or_default().instance_methods;

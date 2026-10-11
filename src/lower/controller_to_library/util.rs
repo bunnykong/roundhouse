@@ -377,6 +377,7 @@ where
     };
     Expr {
         span: expr.span,
+        declaration_source: expr.declaration_source.clone(),
         node: Box::new(new_node),
         ty: expr.ty.clone(),
         effects: expr.effects.clone(),

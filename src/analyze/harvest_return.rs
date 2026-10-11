@@ -170,6 +170,7 @@ pub(super) fn insert_inferred_return(
     method: &Symbol,
     ty: Ty,
 ) {
+    super::structure_dump::harvest_attempt(method, "insert", Some(&ty));
     let ty = super::fixpoint_bound::bound(ty);
     super::structure_dump::harvest_access(method, "read");
     match table.get(method) {
@@ -179,7 +180,7 @@ pub(super) fn insert_inferred_return(
             super::structure_dump::harvest_access(method, "write");
         }
         Some(existing) => match decide_harvested_return(existing, ty) {
-            HarvestWrite::Keep => {}
+            HarvestWrite::Keep => { super::structure_dump::harvest_keep(method); }
             HarvestWrite::Set(rule, next) => {
                 super::det::note_named(rule, method.as_str(), Some(existing), &next);
                 table.insert(method.clone(), next);

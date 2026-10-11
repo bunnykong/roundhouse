@@ -24,10 +24,15 @@ static PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
 });
+static DECL_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    if !std::env::var("RH_FOLD").is_ok_and(|v| v == "1")
+        || !std::env::var("RH_SCHED").is_ok_and(|v| v == "sccq") { return None; }
+    std::env::var_os("RH_DECL_DUMP").filter(|p| !p.is_empty()).map(PathBuf::from)
+});
 
 #[inline]
 pub(super) fn on() -> bool {
-    PATH.is_some()
+    PATH.is_some() || DECL_PATH.is_some()
 }
 
 type Fact = Vec<String>;
@@ -39,6 +44,11 @@ fn side(class_side: bool) -> &'static str {
 }
 fn ret(class: &ClassId, method: &Symbol, class_side: bool) -> String {
     key(&[class.0.as_str(), side(class_side), method.as_str()])
+}
+pub(super) fn implicit_self_source(source: Option<&str>) -> Option<std::sync::Arc<str>> {
+    let parts: Vec<String> = serde_json::from_str(source?).ok()?;
+    if parts.len() != 2 { return None; }
+    Some(std::sync::Arc::from(key(&[&parts[0], &format!("{}/implicit-self", parts[1])])) )
 }
 const KINDS: [&str; 16] = [
     "expression",
@@ -73,6 +83,7 @@ struct Site {
     class: String,
     path: String,
     tag: &'static str,
+    shadow_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -95,6 +106,12 @@ struct Observer {
     reads_before_return_write: u64,
     harvest_writer: Option<(ClassId, Symbol, bool)>,
     harvest_body: Option<String>,
+    source_nodes: HashMap<usize, String>,
+    harvest_sources: BTreeMap<String, String>,
+    shadow: Option<super::declaration_shadow::Ledger>,
+    snapshotting: bool,
+    synthetic_sources: BTreeSet<String>,
+    suppress_shadow: bool,
 }
 thread_local! { static OBS: RefCell<Observer> = RefCell::new(Observer::default()); }
 
@@ -113,6 +130,37 @@ impl Observer {
         *self.declarations.entry(source.into()).or_default() |= capability(operation, kind);
     }
     fn access(&mut self, source: &str, operation: &str, kind: &str, target: &str, mode: &str) {
+        if !self.suppress_shadow && self.shadow.is_some() {
+            let stable = self.stack.iter().rev().find(|s| s.key == source)
+                .and_then(|s| s.shadow_key.as_deref()).unwrap_or(source);
+            let mut stable_target = if kind == "expression" || kind == "closure-result" {
+                self.stack.iter().rev().find(|s| s.key == target)
+                    .and_then(|s| s.shadow_key.as_deref()).unwrap_or(target)
+            } else { target }.to_string();
+            // Logical lexical ownership comes from the clone-carried identity,
+            // even when the legacy span observer resolves several candidates.
+            if let Ok(parts) = serde_json::from_str::<Vec<String>>(stable) {
+                if parts.len() == 2 {
+                    if let Ok(mut to) = serde_json::from_str::<Vec<String>>(target) {
+                        if kind == "local" && to.len() == 2 { to[0] = parts[0].clone(); }
+                        if kind == "context" && to.len() == 6 && to[0] == "binding" { to[1] = parts[0].clone(); }
+                        if kind == "closure-parameter" && to.len() == 3 {
+                            if let Some(lambda) = self.stack.iter().rev().find(|s| s.tag == "Lambda")
+                                .and_then(|s| s.shadow_key.as_deref())
+                                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()) {
+                                if lambda.len() == 2 { to[0] = lambda[0].clone(); to[1] = lambda[1].clone(); }
+                            }
+                        }
+                        if matches!(kind, "local" | "context" | "closure-parameter") {
+                            stable_target = serde_json::to_string(&to).expect("logical target");
+                        }
+                    }
+                }
+            }
+            let shadow = self.shadow.as_mut().expect("shadow enabled");
+            if self.snapshotting { shadow.snapshot(stable, operation, kind, &stable_target); }
+            else { shadow.access(stable, operation, kind, &stable_target, mode); }
+        }
         *self.accesses.entry(operation.into()).or_default() += 1;
         let declared = self
             .declarations
@@ -222,7 +270,16 @@ impl Observer {
             class: class.into(),
             path: path.clone(),
             tag: e.node.kind_str(),
+            shadow_key: None,
         };
+        if DECL_PATH.is_some() {
+            self.source_nodes.entry(e as *const Expr as usize).or_insert(logical.clone());
+            if matches!(&*e.node, ExprNode::Send { recv: None, .. }) {
+                if let Some(source) = implicit_self_source(Some(&logical)) {
+                    self.synthetic_sources.insert(source.to_string());
+                }
+            }
+        }
         let entries = self.sites.entry(e.span).or_default();
         if !entries.iter().any(|s| s.key == logical) {
             entries.push(site);
@@ -350,9 +407,10 @@ impl Observer {
         self.facts.insert(vec![
             "writer".into(),
             "return".into(),
-            target,
+            target.clone(),
             owner.clone(),
         ]);
+        self.harvest_sources.insert(target, owner.clone());
         for (i, p) in m.params.iter().enumerate() {
             self.parameter(class, &m.name, class_side, i, &p.name);
             if let Some(d) = &p.default {
@@ -548,9 +606,161 @@ impl Observer {
             key(&keys.iter().map(String::as_str).collect::<Vec<_>>())
         }
     }
+
+    fn seed_shadow(&mut self, analyzer: &Analyzer, app: &App) {
+        if DECL_PATH.is_none() { return; }
+        let mut slots = self.slots.clone();
+        // Move 2 asks for the expanded envelope on the small fixture only.
+        // Campfire keeps a bootstrap coverage audit plus the exact harvest
+        // split; a slots x fields product for the whole app is a later pilot.
+        if !std::env::var("RH_DECL_FIXTURE").is_ok_and(|v| v == "1") {
+            self.freeze_shadow(slots);
+            return;
+        }
+        let add = |slots: &mut super::declaration_shadow::Slots, kind: &str, target: String| {
+            slots.entry(kind.into()).or_default().insert(target);
+        };
+        let mut names = BTreeSet::new();
+        let mut steps: BTreeSet<String> = ["Elem", "Key", "Val"].map(str::to_string).into();
+        let mut width = 0;
+        fn shapes(e: &Expr, names: &mut BTreeSet<String>, fields: &mut BTreeSet<String>, width: &mut usize) {
+            match &*e.node {
+                ExprNode::Send { method, .. } => { names.insert(method.to_string()); }
+                ExprNode::MethodRef { name, .. } => { names.insert(name.to_string()); }
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value: s } } => {
+                    fields.insert(format!("{:?}", fold::Step::Field(s.clone())));
+                }
+                _ => {}
+            }
+            let mut n = 0;
+            e.node.for_each_child(&mut |c| { n += 1; shapes(c, names, fields, width); });
+            *width = (*width).max(n);
+        }
+        crate::lower::for_each_emit_body_ref(app, &mut |root| shapes(root, &mut names, &mut steps, &mut width));
+        names.extend(["new", "initialize", "call", "to_s", "to_a", "to_ary", "to_h", "each",
+            "[]", "[]=", "==", "inspect", "method_missing", "respond_to?"].map(str::to_string));
+        for logical in self.slots.get("return").into_iter().flatten() {
+            let parts: Vec<String> = serde_json::from_str(logical).expect("return key");
+            if parts.len() == 3 { names.insert(parts[2].clone()); }
+        }
+        for i in 0..width {
+            steps.insert(format!("Idx({i})")); steps.insert(format!("Arg({i})"));
+        }
+        let receivers: BTreeSet<String> = analyzer.classes.keys().map(|c| c.0.to_string())
+            .chain(["external".to_string()]).collect();
+        // Missing dispatch entries are declared unresolved lookup channels;
+        // naming a candidate never supplies arguments or a return to it.
+        for class in &receivers {
+            for name in &names {
+                for side in ["instance", "class"] { add(&mut slots, "return", key(&[class, side, name])); }
+            }
+        }
+        let mut bindings: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+        for logical in self.slots.get("local").into_iter().flatten() {
+            if let Ok(parts) = serde_json::from_str::<Vec<String>>(logical) {
+                if parts.len() == 2 { bindings.entry(parts[0].clone()).or_default().insert(("local".into(), parts[1].clone())); }
+            }
+        }
+        for ((class, method, side, _), logical) in &self.params {
+            let target = key(&[class, if *side { "class" } else { "instance" }, method]);
+            if let Some(owner) = self.harvest_sources.get(&target) {
+                let parts: Vec<String> = serde_json::from_str(logical).expect("parameter key");
+                bindings.entry(owner.clone()).or_default().insert(("local".into(), parts[3].clone()));
+                add(&mut slots, "local", key(&[owner, &parts[3]]));
+            }
+        }
+        for sites in self.sites.values() {
+            for site in sites {
+                for logical in self.slots.get("ivar").into_iter().flatten() {
+                    let parts: Vec<String> = serde_json::from_str(logical).expect("ivar key");
+                    let inherited = analyzer.classes.get(&ClassId(Symbol::from(site.class.as_str())))
+                        .is_some_and(|ci| ci.includes.iter().any(|id| id.0.as_str() == parts[0])
+                            || ci.parent.as_ref().is_some_and(|id| id.0.as_str() == parts[0]));
+                    if parts.first() == Some(&site.class) || inherited {
+                        bindings.entry(site.owner.clone()).or_default().insert(("ivar".into(), parts[1].clone()));
+                    }
+                }
+            }
+        }
+        for (owner, names) in &bindings {
+            let class = self.sites.values().flatten().find(|s| &s.owner == owner).map(|s| s.class.as_str()).unwrap_or("external");
+            let related: BTreeSet<String> = analyzer.classes.iter().filter(|(id, info)| {
+                id.0.as_str() == class || info.includes.iter().any(|i| i.0.as_str() == class)
+                    || info.parent.as_ref().is_some_and(|p| p.0.as_str() == class)
+            }).map(|(id, _)| id.0.to_string()).chain([class.into(), "external".into()]).collect();
+            for receiver in &related {
+                for (channel, name) in names {
+                    if channel == "ivar" { add(&mut slots, "ivar", key(&[receiver, name])); }
+                    for side in ["instance", "class"] {
+                        add(&mut slots, "context", key(&["binding", owner, receiver, side, channel, name]));
+                    }
+                }
+            }
+        }
+        for logical in self.slots.get("parameter").into_iter().flatten() {
+            add(&mut slots, "fold-parameter", logical.clone());
+            add(&mut slots, "context", key(&["handoff-parameter", logical]));
+        }
+        for logical in slots.get("return").cloned().into_iter().flatten() {
+            add(&mut slots, "context", key(&["handoff-return", &logical]));
+        }
+        for (span, sites) in &self.sites {
+            let site = self.logical_fold_site(fold::site_of(span));
+            for step in &steps { add(&mut slots, "position", key(&[&site, step])); }
+            for names in sites.iter().filter_map(|s| bindings.get(&s.owner)) {
+                for (_, name) in names {
+                    for filter in ["nil", "!nil", "notnil", "!notnil", "truthy", "!truthy", "falsy", "!falsy"] {
+                        add(&mut slots, "narrowing", key(&[&site, &format!("{filter}_{name}")]));
+                    }
+                }
+            }
+        }
+        for name in &names {
+            let site = self.logical_fold_site(fold::pseudo_site(name));
+            for step in &steps { add(&mut slots, "position", key(&[&site, step])); }
+        }
+        for c in &app.controllers {
+            for action in c.actions() {
+                for logical in slots.get("ivar").cloned().into_iter().flatten() {
+                    let parts: Vec<String> = serde_json::from_str(&logical).expect("ivar key");
+                    if parts[0] == c.name.0.as_str() {
+                        add(&mut slots, "controller", key(&[c.name.0.as_str(), action.name.as_str(), &parts[1]]));
+                    }
+                }
+            }
+        }
+        self.freeze_shadow(slots);
+    }
+
+    fn freeze_shadow(&mut self, mut slots: super::declaration_shadow::Slots) {
+        let mut rules = BTreeSet::new();
+        for (source, bits) in &self.declarations {
+            for kind in KINDS {
+                for operation in ["read", "write"] {
+                    if bits & capability(operation, kind) != 0 {
+                        rules.insert((source.clone(), operation.into(), kind.into()));
+                    }
+                }
+            }
+        }
+        let mut writers: BTreeSet<_> = self.facts.iter().filter(|f| f[0] == "writer")
+            .map(|f| vec![f[1].clone(), f[3].clone(), f[2].clone(), "write".into()]).collect();
+        for source in &self.synthetic_sources {
+            slots.entry("expression".into()).or_default().insert(source.clone());
+            writers.insert(vec!["expression".into(), source.clone(), source.clone(), "write".into()]);
+            for kind in KINDS {
+                for operation in ["read", "write"] { rules.insert((source.clone(), operation.into(), kind.into())); }
+            }
+        }
+        for (target, source) in &self.harvest_sources {
+            for operation in ["read", "write"] { rules.insert((source.clone(), operation.into(), "return".into())); }
+            let _ = target;
+        }
+        self.shadow = Some(super::declaration_shadow::Ledger::new(slots, rules, writers, self.harvest_sources.clone()));
+    }
 }
 
-pub(super) fn start(analyzer: &Analyzer, app: &App) {
+pub(super) fn start(analyzer: &Analyzer, app: &mut App) {
     if !on() {
         return;
     }
@@ -669,6 +879,7 @@ pub(super) fn start(analyzer: &Analyzer, app: &App) {
                 owner.clone(),
                 key(&["action", &owner, &o.source_site(a.body.span)]),
             ]);
+            o.harvest_sources.insert(owner.clone(), key(&["action", &owner, &o.source_site(a.body.span)]));
             for (i, p) in a.formal_params().iter().enumerate() {
                 o.parameter(&c.name, &a.name, false, i, &p.name);
             }
@@ -802,6 +1013,14 @@ pub(super) fn start(analyzer: &Analyzer, app: &App) {
     sources.hash(&mut hasher);
     o.input_digest = format!("{:016x}", hasher.finish());
     o.start_slots = o.slot_count();
+    o.seed_shadow(analyzer, app);
+    if o.shadow.is_some() {
+        fn tag(e: &mut Expr, nodes: &HashMap<usize, String>) {
+            e.declaration_source = nodes.get(&(e as *const Expr as usize)).map(|s| std::sync::Arc::from(s.as_str()));
+            e.node.for_each_child_mut(&mut |c| tag(c, nodes));
+        }
+        crate::lower::for_each_forwarding_body(app, &mut |root| tag(root, &o.source_nodes));
+    }
     OBS.with(|s| *s.borrow_mut() = o);
 }
 
@@ -822,7 +1041,7 @@ pub(super) fn enter(e: &Expr, ctx: &Ctx) -> Frame {
             _ => None,
         };
         let mut candidates = o.resolve(e, class);
-        let site = match candidates.len() {
+        let mut site = match candidates.len() {
             0 => {
                 o.unmapped_sites += 1;
                 Site {
@@ -831,6 +1050,7 @@ pub(super) fn enter(e: &Expr, ctx: &Ctx) -> Frame {
                     class: class.unwrap_or("external").into(),
                     path: "unmapped".into(),
                     tag: e.node.kind_str(),
+                    shadow_key: None,
                 }
             }
             1 => candidates.pop().unwrap(),
@@ -853,9 +1073,17 @@ pub(super) fn enter(e: &Expr, ctx: &Ctx) -> Frame {
                     class: class.unwrap_or("external").into(),
                     path: "ambiguous".into(),
                     tag: e.node.kind_str(),
+                    shadow_key: None,
                 }
             }
         };
+        if let Some(shadow) = &mut o.shadow {
+            site.shadow_key = e.declaration_source.as_ref().map(|s| s.to_string());
+            if site.shadow_key.is_none() {
+                shadow.unmapped += 1;
+                if site.path == "ambiguous" { shadow.ambiguous += 1; }
+            }
+        }
         o.slot("expression", site.key.clone());
         // Reads of lexical bindings and closure parameters are distinct from
         // a lookup of the method's parameter row. Preserve both channels.
@@ -965,11 +1193,23 @@ impl Drop for Frame {
         }
         OBS.with(|cell| {
             let mut o = cell.borrow_mut();
-            let s = o.stack.pop().expect("structure frame");
+            let s = o.stack.last().cloned().expect("structure frame");
+            let parent = o.stack.iter().rev().nth(1).cloned();
+            if let Some(shadow) = &mut o.shadow {
+                let source = s.shadow_key.as_deref().unwrap_or(&s.key);
+                shadow.access(source, "write", "expression", source, "inline");
+                if let Some(parent) = &parent {
+                    shadow.access(parent.shadow_key.as_deref().unwrap_or(&parent.key),
+                        "read", "expression", source, "inline");
+                }
+            }
+            o.suppress_shadow = true;
             o.access(&s.key, "write", "expression", &s.key, "inline");
-            if let Some(parent) = o.stack.last().cloned() {
+            if let Some(parent) = parent {
                 o.access(&parent.key, "read", "expression", &s.key, "inline");
             }
+            o.suppress_shadow = false;
+            o.stack.pop();
         });
     }
 }
@@ -1257,6 +1497,9 @@ pub(super) fn harvest_access(method: &Symbol, operation: &str) {
         } else {
             "phase:unattributed-harvest".to_string()
         };
+        if operation == "write" {
+            if let Some(shadow) = &mut o.shadow { shadow.harvest(&target, "storage", "set", true); }
+        }
         if operation == "write" && o.harvest_writer.is_some() {
             // This hook follows an actual successful table insertion.
             o.slot("return", target.clone());
@@ -1274,6 +1517,29 @@ pub(super) fn harvest_access(method: &Symbol, operation: &str) {
                 ]),
             ]);
         }
+    });
+}
+/// Before caller None/Var gates and before insertion's Keep decision.
+pub(super) fn harvest_attempt(method: &Symbol, stage: &str, value: Option<&Ty>) {
+    observe(|o| {
+        let Some(shadow) = &mut o.shadow else { return; };
+        let target = if let Some((class, _, class_side)) = &o.harvest_writer {
+            ret(class, method, *class_side)
+        } else { key(&["unattributed-harvest", method.as_str()]) };
+        let gate = match value {
+            None => "none", Some(Ty::Var { .. }) => "var", Some(Ty::Untyped { .. }) => "untyped",
+            Some(Ty::Rec { .. }) => "reference", Some(_) => "concrete",
+        };
+        shadow.harvest(&target, stage, gate, false);
+    });
+}
+pub(super) fn harvest_keep(method: &Symbol) {
+    observe(|o| {
+        let Some(shadow) = &mut o.shadow else { return; };
+        let target = if let Some((class, _, class_side)) = &o.harvest_writer {
+            ret(class, method, *class_side)
+        } else { key(&["unattributed-harvest", method.as_str()]) };
+        shadow.harvest(&target, "decision", "keep", false);
     });
 }
 pub(super) struct ReturnRoute<'a> {
@@ -1445,11 +1711,12 @@ pub(super) fn parameter_row(
 /// The context tables have distinct logical channels in the complete-state
 /// observer. Retain those names, rather than formatting a HashMap or Ty.
 pub(super) fn finish(analyzer: &Analyzer, app: &App) {
-    let Some(path) = PATH.as_ref() else { return };
+    if !on() { return; }
     OBS.with(|cell| {
         let mut o = cell.borrow_mut();
         if !o.recording { return; }
         o.registry(analyzer, false);
+        o.snapshotting = true;
         for ((class, action), bindings) in &analyzer.refined_action_bindings {
             for name in bindings.keys() {
                 let target = key(&[class.0.as_str(), action.as_str(), name.as_str()]);
@@ -1462,6 +1729,7 @@ pub(super) fn finish(analyzer: &Analyzer, app: &App) {
             o.slot("context", logical.clone());
             o.access("phase:analysis", "write", "context", &logical, "inline");
         }
+        o.snapshotting = false;
         for (source, bits) in o.declarations.clone() {
             o.facts.insert(vec!["declaration".into(), "capabilities".into(), source, format!("{bits:08x}")]);
         }
@@ -1469,6 +1737,13 @@ pub(super) fn finish(analyzer: &Analyzer, app: &App) {
         for r in refs { o.facts.insert(vec!["route".into(), "reference-mode".into(), r]); }
         for r in routing { o.facts.insert(vec!["route".into(), "call-graph".into(), r]); }
         o.recording = false;
+        if let (Some(shadow), Some(path)) = (&o.shadow, DECL_PATH.as_ref()) {
+            match shadow.write(path, &o.input_digest) {
+                Ok(header) => eprintln!("rh-declaration-audit: {}", header),
+                Err(e) => eprintln!("rh-declaration-dump-error: {e}"),
+            }
+        }
+        let Some(path) = PATH.as_ref() else { return; };
         let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
         for f in &o.facts { *counts.entry(f[0].clone()).or_default().entry(f[1].clone()).or_default() += 1; }
         let header = serde_json::json!({"schema":"rh-structure-v1", "phase":"before-final-expansion",
@@ -1512,7 +1787,7 @@ fn inference_flags() -> BTreeMap<String, String> {
             name.starts_with("RH_")
                 && !matches!(
                     name.as_str(),
-                    "RH_SHUFFLE" | "RH_STRUCT_DUMP" | "RH_FIXPOINT_STATS" | "RH_FIXPOINT_DIGEST"
+                    "RH_SHUFFLE" | "RH_STRUCT_DUMP" | "RH_DECL_DUMP" | "RH_DECL_FIXTURE" | "RH_FIXPOINT_STATS" | "RH_FIXPOINT_DIGEST"
                 )
         })
         .collect()

@@ -92,9 +92,13 @@ pub enum IrHint {
 /// `ty` is populated by the analyzer; ingest leaves it `None`. Inline for
 /// simplicity; migrate to a salsa-indexed side table when incrementality
 /// becomes load-bearing.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Expr {
     pub span: Span,
+    /// Observer-only source owner/syntax path, assigned before typing and
+    /// carried by clones. Excluded from IR serialization and semantic equality.
+    #[serde(skip)]
+    pub(crate) declaration_source: Option<std::sync::Arc<str>>,
     pub node: Box<ExprNode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ty: Option<Ty>,
@@ -143,6 +147,17 @@ fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
+// Keep observation metadata out of the existing Debug representation too.
+impl std::fmt::Debug for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Expr")
+            .field("span", &self.span).field("node", &self.node).field("ty", &self.ty)
+            .field("effects", &self.effects).field("leading_blank_line", &self.leading_blank_line)
+            .field("diagnostic", &self.diagnostic).field("hint", &self.hint)
+            .field("decisions", &self.decisions).finish()
+    }
+}
+
 /// Structural equality ignores `span`: it's provenance metadata, not
 /// semantics. The round-trip tests compare IR re-ingested from emitted
 /// Ruby against the original ingest, and those two parses legitimately
@@ -163,6 +178,7 @@ impl Expr {
     pub fn new(span: Span, node: ExprNode) -> Self {
         Self {
             span,
+            declaration_source: None,
             node: Box::new(node),
             ty: None,
             effects: EffectSet::pure(),

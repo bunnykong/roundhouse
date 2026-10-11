@@ -1431,6 +1431,7 @@ impl<'a> BodyTyper<'a> {
                 if resolves_through_self {
                     *recv = Some(crate::expr::Expr {
                         span: expr_span,
+                        declaration_source: super::structure_dump::implicit_self_source(expr.declaration_source.as_deref()),
                         node: Box::new(ExprNode::SelfRef),
                         ty: ctx.self_ty.clone(),
                         effects: crate::effect::EffectSet::default(),

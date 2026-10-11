@@ -1289,6 +1289,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
                     target: LValue::Ivar { name: provided_field(field) },
                     value: Expr {
                         span: Span::synthetic(),
+                        declaration_source: None,
                         node: Box::new(ExprNode::Lit { value: Literal::Bool { value: false } }),
                         ty: Some(Ty::Bool),
                         effects: EffectSet::default(),
@@ -1310,6 +1311,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
         };
         stmts.push(Expr {
             span: Span::synthetic(),
+            declaration_source: None,
             node: Box::new(ExprNode::Assign {
                 target: LValue::Ivar { name: field.clone() },
                 value: rhs,
@@ -1324,6 +1326,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
     }
     let body = Expr {
         span: Span::synthetic(),
+        declaration_source: None,
         node: Box::new(ExprNode::Seq { exprs: stmts }),
         ty: Some(Ty::Nil),
         effects: EffectSet::default(),
@@ -1359,6 +1362,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
     let field_ty = ty;
     let body = Expr {
         span: Span::synthetic(),
+        declaration_source: None,
         node: Box::new(ExprNode::Ivar { name: field.clone() }),
         ty: Some(field_ty.clone()),
         effects: EffectSet::default(),
@@ -1466,6 +1470,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
     let field_ty = ty;
     let rhs = Expr {
         span: Span::synthetic(),
+        declaration_source: None,
         node: Box::new(ExprNode::Var { id: VarId(0), name: value.clone() }),
         ty: Some(field_ty.clone()),
         effects: EffectSet::default(),
@@ -1476,6 +1481,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
     };
     let body = Expr {
         span: Span::synthetic(),
+        declaration_source: None,
         node: Box::new(ExprNode::Assign {
             target: LValue::Ivar { name: field.clone() },
             value: rhs,
@@ -1866,6 +1872,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
 fn expr(node: ExprNode, ty: Option<Ty>) -> Expr {
     Expr {
         span: Span::synthetic(),
+        declaration_source: None,
         node: Box::new(node),
         ty,
         effects: EffectSet::default(),
@@ -1922,6 +1929,7 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
     };
     let hash = Expr {
         span: Span::synthetic(),
+        declaration_source: None,
         node: Box::new(ExprNode::Hash { entries, kwargs: false }),
         ty: Some(hash_ty.clone()),
         effects: EffectSet::default(),
@@ -2374,6 +2382,7 @@ fn try_rewrite_typed_bracket(
     let slot_ty = fields.get(&key)?;
     Some(Expr {
         span: e.span,
+        declaration_source: e.declaration_source.clone(),
         node: Box::new(ExprNode::Send {
             recv: Some(recv.clone()),
             method: Symbol::from(key),

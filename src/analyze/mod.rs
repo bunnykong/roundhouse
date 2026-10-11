@@ -54,6 +54,7 @@ mod det;
 mod detfp;
 mod structure;
 mod structure_dump;
+mod declaration_shadow;
 pub(crate) mod errgate;
 mod fixpoint_rounds;
 mod handoff;
@@ -5016,8 +5017,9 @@ impl Analyzer {
             }
             for action in controller.actions() {
                 let _writer = errgate::writer(class_id, &action.name, false);
-                let Some(body_ty) =
-                    tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
+                let observed_body_ty = tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body));
+                structure_dump::harvest_attempt(&action.name, "controller-round", observed_body_ty.as_ref());
+                let Some(body_ty) = observed_body_ty
                 else {
                     continue;
                 };
@@ -5596,6 +5598,7 @@ impl Analyzer {
         method: &Symbol,
         body_ty: Option<&Ty>,
     ) {
+        structure_dump::harvest_attempt(method, "register", body_ty);
         match body_ty {
             Some(t) if !matches!(t, Ty::Var { .. }) => {
                 Self::insert_inferred_return(table, method, t.clone());
