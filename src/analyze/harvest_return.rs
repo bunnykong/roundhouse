@@ -158,6 +158,13 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     HarvestWrite::Set("harvest.lastwrite", new)
 }
 
+#[cfg(test)]
+pub(super) fn evidence_control_decision(existing: Ty, new: Ty) -> Ty {
+    match decide_harvested_return(&existing, new) {
+        HarvestWrite::Keep => existing, HarvestWrite::Set(_, t) => t,
+    }
+}
+
 /// Conservative insertion into the harvested-return table.
 ///
 /// RBS-sourced `Ty::Fn` stays authoritative. Same-core returns that

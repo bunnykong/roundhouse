@@ -5202,3 +5202,12 @@ pub(super) const RUBY_TOP_LEVEL: &[&str] = &[
     "Socket", "StringIO", "Struct", "Tempfile", "Thread", "Time", "Timeout", "URI", "YAML",
     "Zlib",
 ];
+
+#[cfg(test)]
+mod producer_reason_provenance_probe;
+
+#[cfg(test)]
+pub(super) fn evidence_control_dispatch(receiver: &Ty, method: &Symbol) -> Ty {
+    let classes = HashMap::new();
+    BodyTyper::new(&classes).dispatch(Some(receiver), method, None, &[])
+}

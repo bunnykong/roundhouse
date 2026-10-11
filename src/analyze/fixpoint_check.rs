@@ -378,7 +378,7 @@ fn untyped_kinds(t: &Ty) -> u8 {
     let mut bits = 0u8;
     let mut each = |c: &Ty| bits |= untyped_kinds(c);
     match t {
-        Ty::Untyped { why } => return 1 << (*why as u8),
+        Ty::Untyped { why } => return why.reporting_bits(),
         Ty::Array { elem } => each(elem),
         Ty::Hash { key, value } => {
             each(key);

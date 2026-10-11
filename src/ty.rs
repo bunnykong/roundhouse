@@ -166,21 +166,40 @@ pub enum Ty {
 /// every rule that meets it has to keep or drop it, which is right for one
 /// meaning and wrong for another. The producers now say which they mean.
 ///
-/// The tag is carried, not consulted: no rule reads it yet, and it never
-/// changes how a type compares, orders, hashes or serializes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Provenance {
+/// A finite set of input reasons, with gradual winning the effective tag.
+/// RH_PROVENANCE_AUDIT conserves the set at equal merges; ordinary type equality,
+/// ordering, hashing and serialization remain provenance-insensitive.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Provenance(u8);
+
+#[allow(non_upper_case_globals)]
+impl Provenance {
     /// Not computed yet: an inference gap that a later round may fill. It
     /// carries no evidence about the value.
-    Pending,
+    pub const Pending: Self = Self(1);
     /// The author opted out: RBS `untyped`, Sorbet `T.untyped`, or a
     /// declared or modeled signature (the catalog, the framework runtime)
     /// that says any value is accepted.
-    #[default]
-    Gradual,
+    pub const Gradual: Self = Self(2);
     /// Nothing answers it: an unsupported construct, an unknown or external
     /// surface, or a position the analysis cut or widened.
-    Unresolved,
+    pub const Unresolved: Self = Self(4);
+
+    pub fn union(self, other: Self) -> Self { Self(self.0 | other.0) }
+    pub(crate) fn reporting_bits(self) -> u8 { self.0 }
+    pub fn effective(self) -> Self {
+        if self.0 & 2 != 0 { Self::Gradual } else if self.0 & 4 != 0 { Self::Unresolved } else { Self::Pending }
+    }
+    pub fn reasons(self) -> Vec<&'static str> {
+        [(1,"Pending"),(4,"Unresolved"),(2,"Gradual")].into_iter()
+            .filter_map(|(bit,name)| (self.0 & bit != 0).then_some(name)).collect()
+    }
+}
+impl Default for Provenance { fn default() -> Self { Self::Gradual } }
+impl std::fmt::Debug for Provenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reasons().join("+"))
+    }
 }
 
 impl Ty {
@@ -207,7 +226,7 @@ impl Ty {
     /// The provenance of an `untyped`, `None` for any other type.
     pub fn provenance(&self) -> Option<Provenance> {
         match self {
-            Ty::Untyped { why } => Some(*why),
+            Ty::Untyped { why } => Some(why.effective()),
             _ => None,
         }
     }
@@ -560,11 +579,16 @@ impl Ty {
     /// picking by order instead of by arrival keeps a join's stored
     /// form independent of the order its inputs came in.
     pub(crate) fn canonical_min(a: Ty, b: Ty) -> Ty {
-        if !a.holds_record() || cmp_ty(&b, &a) != std::cmp::Ordering::Less {
-            a
+        let (chosen, other) = if !a.holds_record() || cmp_ty(&b, &a) != std::cmp::Ordering::Less {
+            (a, b)
         } else {
-            b
-        }
+            (b, a)
+        };
+        if crate::analyze::producer_evidence::on() {
+            let result = crate::analyze::producer_evidence::merge_equal(chosen.clone(), &other);
+            crate::analyze::producer_evidence::equal_merge(&chosen, &other, &result);
+            result
+        } else { chosen }
     }
 
     fn holds_record(&self) -> bool {

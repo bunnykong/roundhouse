@@ -47,6 +47,7 @@ pub(crate) mod forwarding;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
+pub mod producer_evidence;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod precision;
@@ -1157,6 +1158,7 @@ impl Analyzer {
     /// the refined registry. Iterates to a fixed point (capped; see
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
+        producer_evidence::reset(&app.sources);
         self.fixpoint_checks = fixpoint_check::Checks::start();
         det::reset();
         errgate::reset();
@@ -1631,6 +1633,7 @@ impl Analyzer {
         }
         det::report();
         self.report_errgate(app);
+        producer_evidence::report();
     }
 
     /// With the add-only rules or the fold, what is still pending when
@@ -4866,7 +4869,9 @@ impl Analyzer {
     ) {
         {
             let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
+        let _evidence = producer_evidence::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class, method.body.span);
         let ret = self.method_return_ty(class_id, method);
+        producer_evidence::input(ret.as_ref());
             let target = match method.receiver {
                 crate::dialect::MethodReceiver::Instance => {
                     &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -4930,7 +4935,9 @@ impl Analyzer {
     /// One library method's harvest (see [`Self::harvest_method_returns`]).
     fn harvest_lib_method(&mut self, class_id: &ClassId, method: &crate::dialect::MethodDef) {
         let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
+        let _evidence = producer_evidence::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class, method.body.span);
         let ret = self.method_return_ty(class_id, method);
+        producer_evidence::input(ret.as_ref());
         let target = match method.receiver {
             crate::dialect::MethodReceiver::Instance => {
                 &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -4969,6 +4976,7 @@ impl Analyzer {
         if harvest_tests {
             for module in &app.test_modules {
                 for method in &module.helpers {
+                    let _evidence = producer_evidence::writer(&module.name, &method.name, method.receiver == crate::dialect::MethodReceiver::Class, method.body.span);
                     let ret = self.method_return_ty(&module.name, method);
                     let class = self.classes.entry(module.name.clone()).or_default();
                     let table = match method.receiver {
@@ -4999,12 +5007,16 @@ impl Analyzer {
             // rather than "no known method".
             for method in controller.class_methods() {
                 let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
+        let _evidence = producer_evidence::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class, method.body.span);
                 let ret = self.method_return_ty(class_id, method);
+        producer_evidence::input(ret.as_ref());
                 let target = &mut self.classes.entry(class_id.clone()).or_default().class_methods;
                 Self::register_method_return(target, &method.name, ret.as_ref());
             }
             for action in controller.actions() {
                 let _writer = errgate::writer(class_id, &action.name, false);
+                let _evidence = producer_evidence::writer(class_id, &action.name, false, action.body.span);
+                producer_evidence::input(action.body.ty.as_ref());
                 let Some(body_ty) =
                     tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
                 else {
@@ -5579,6 +5591,7 @@ impl Analyzer {
         method: &Symbol,
         body_ty: Option<&Ty>,
     ) {
+        producer_evidence::input(body_ty);
         match body_ty {
             Some(t) if !matches!(t, Ty::Var { .. }) => {
                 Self::insert_inferred_return(table, method, t.clone());
@@ -6380,6 +6393,9 @@ impl Analyzer {
                     }
                     _ => SiteRecv::Instance,
                 };
+                if producer_evidence::on() {
+                    producer_evidence::parameter_call(self_class, &recv_classes, method, &format!("{site_recv:?}"), expr.span, args);
+                }
                 if !recv_classes.is_empty() {
                     let arg_tys: Vec<Ty> = args
                         .iter()
@@ -7575,6 +7591,12 @@ pub(crate) fn fold_param_observations(
 /// arm, merging them must keep gradual (gradual wins), or the result
 /// depends on the grouping again and the join stops being associative.
 pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
+    if !producer_evidence::on() { return unify_param_ty_raw(stored, observed); }
+    let result=unify_param_ty_raw(stored.clone(), observed.clone());
+    producer_evidence::parameter_merge(&stored,&observed,&result);
+    result
+}
+fn unify_param_ty_raw(stored: Ty, observed: Ty) -> Ty {
     let joined = crate::analyze::body::drop_pending_arms(crate::analyze::body::union_of(stored, observed));
     let Ty::Union { variants } = joined else {
         return joined;
