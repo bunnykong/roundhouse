@@ -315,34 +315,36 @@ pub(crate) fn controller_name_of(class: &ClassId) -> String {
 }
 
 /// Record a folded `instance_variable_set` write into `out` when the
-/// assigned value already carries a type.
+/// assigned value already carries a type. Return the written destination so
+/// the body walk can include it in the complete-batch size bound.
 pub(crate) fn harvest_ivar_set(
     recv: &Option<Expr>,
     method: &Symbol,
     args: &[Expr],
     env: &IvarNameEnv<'_>,
     out: &mut HashMap<Symbol, Ty>,
-) {
+) -> Option<Symbol> {
     if !is_self_ivar_reflection(recv, method.as_str()) || method.as_str() != "instance_variable_set"
     {
-        return;
+        return None;
     }
     // Exact arity — see `binding_from_send`.
     if args.len() != 2 {
-        return;
+        return None;
     }
     let Some(name) = fold_ivar_name(&args[0], env) else {
-        return;
+        return None;
     };
     let Some(ty) = args[1].ty.clone().filter(|t| !t.is_open()) else {
-        return;
+        return None;
     };
     let ty = narrow_to_named_model(&name, ty, env.models_by_ivar);
     let merged = match out.remove(&name) {
         Some(prev) => super::body::join_ivar_slot(prev, ty),
         None => ty,
     };
-    out.insert(name, merged);
+    out.insert(name.clone(), merged);
+    Some(name)
 }
 
 /// When the folded ivar name is exactly one model's conventional

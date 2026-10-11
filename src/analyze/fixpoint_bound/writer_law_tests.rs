@@ -20,7 +20,7 @@ fn wide(prefix: &str, count: usize) -> Ty {
     }
 }
 
-fn boundary_universe() -> Vec<Ty> {
+pub(super) fn boundary_universe() -> Vec<Ty> {
     let mut samples = laws::universe();
     for depth in [MAX_DEPTH - 1, MAX_DEPTH, MAX_DEPTH + 1] {
         samples.push(nested(depth));
@@ -63,7 +63,7 @@ fn writer_law_bound_idempotence_and_pending() {
 /// Tuples avoid making this check spend its time repeatedly sorting hundreds
 /// of distinct leaves inside `cut`. The original #705/#724 class-union
 /// regressions remain in the default suite. Minimize across every triple.
-fn writer_triples() -> Vec<[Ty; 3]> {
+pub(super) fn writer_triples() -> Vec<[Ty; 3]> {
     let mut triples = vec![];
     for depth in [0, 1, 2, 10, MAX_DEPTH - 1, MAX_DEPTH, MAX_DEPTH + 1] {
         for n in [1, 2, 254, 255, 256, 257, 300] {
@@ -216,7 +216,6 @@ fn writer_law_param_batch_bound() {
 }
 
 #[test]
-#[ignore = "known: reflective ivar writes do not mark the slot touched for the batch bound"]
 fn writer_law_reflective_ivar_bound() {
     let name = Symbol::from("x");
     let mut report = laws::Report::default();

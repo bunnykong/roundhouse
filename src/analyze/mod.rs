@@ -7990,7 +7990,9 @@ fn walk_ivar_assignments(
         // Assign arm never sees it. Fold a statically resolvable name
         // here so the controller→view channel harvests the write.
         ExprNode::Send { recv, method, args, block, .. } => {
-            ivar_set::harvest_ivar_set(recv, method, args, env, out);
+            if let Some(name) = ivar_set::harvest_ivar_set(recv, method, args, env, out) {
+                walk.touched.insert(name);
+            }
             if let Some(r) = recv {
                 walk_ivar_assignments(r, out, env, walk);
             }
