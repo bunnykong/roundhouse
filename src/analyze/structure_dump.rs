@@ -108,6 +108,7 @@ struct Observer {
     harvest_body: Option<String>,
     source_nodes: HashMap<usize, String>,
     harvest_sources: BTreeMap<String, String>,
+    harvest_bodies: BTreeMap<String, BTreeSet<String>>,
     shadow: Option<super::declaration_shadow::Ledger>,
     snapshotting: bool,
     synthetic_sources: BTreeSet<String>,
@@ -410,6 +411,7 @@ impl Observer {
             target.clone(),
             owner.clone(),
         ]);
+        self.harvest_bodies.entry(target.clone()).or_default().insert(owner.clone());
         self.harvest_sources.insert(target, owner.clone());
         for (i, p) in m.params.iter().enumerate() {
             self.parameter(class, &m.name, class_side, i, &p.name);
@@ -752,11 +754,19 @@ impl Observer {
                 for operation in ["read", "write"] { rules.insert((source.clone(), operation.into(), kind.into())); }
             }
         }
-        for (target, source) in &self.harvest_sources {
-            for operation in ["read", "write"] { rules.insert((source.clone(), operation.into(), "return".into())); }
-            let _ = target;
+        let mut harvest_targets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (target, bodies) in &self.harvest_bodies {
+            // No-body controller/cache harvest and a definition-body harvest
+            // are distinct producers even when they update the same return.
+            // Their finite identities are all declared before either gate runs.
+            for body in bodies.iter().map(String::as_str).chain(["no-body"]) {
+                let source = key(&["harvest", target, body]);
+                for operation in ["read", "write"] { rules.insert((source.clone(), operation.into(), "return".into())); }
+                writers.insert(vec!["return".into(), source.clone(), target.clone(), "write".into()]);
+                harvest_targets.entry(source).or_default().insert(target.clone());
+            }
         }
-        self.shadow = Some(super::declaration_shadow::Ledger::new(slots, rules, writers, self.harvest_sources.clone()));
+        self.shadow = Some(super::declaration_shadow::Ledger::new(slots, rules, writers, harvest_targets));
     }
 }
 
@@ -811,6 +821,7 @@ pub(super) fn start(analyzer: &Analyzer, app: &mut App) {
         }
         for scope in model.scopes() {
             let owner = ret(&model.name, &scope.name, true);
+            o.harvest_bodies.entry(owner.clone()).or_default().insert(owner.clone());
             o.slot("return", owner.clone());
             o.declare(&owner, "read", "expression");
             o.facts.insert(vec![
@@ -871,6 +882,7 @@ pub(super) fn start(analyzer: &Analyzer, app: &mut App) {
         }
         for a in c.actions() {
             let owner = ret(&c.name, &a.name, false);
+            o.harvest_bodies.entry(owner.clone()).or_default().insert(owner.clone());
             o.slot("return", owner.clone());
             o.declare(&owner, "read", "expression");
             o.facts.insert(vec![
@@ -1498,7 +1510,8 @@ pub(super) fn harvest_access(method: &Symbol, operation: &str) {
             "phase:unattributed-harvest".to_string()
         };
         if operation == "write" {
-            if let Some(shadow) = &mut o.shadow { shadow.harvest(&target, "storage", "set", true); }
+            let producer = key(&["harvest", &target, o.harvest_body.as_deref().unwrap_or("no-body")]);
+            if let Some(shadow) = &mut o.shadow { shadow.harvest(&producer, &target, "storage", "set", true); }
         }
         if operation == "write" && o.harvest_writer.is_some() {
             // This hook follows an actual successful table insertion.
@@ -1522,24 +1535,26 @@ pub(super) fn harvest_access(method: &Symbol, operation: &str) {
 /// Before caller None/Var gates and before insertion's Keep decision.
 pub(super) fn harvest_attempt(method: &Symbol, stage: &str, value: Option<&Ty>) {
     observe(|o| {
-        let Some(shadow) = &mut o.shadow else { return; };
         let target = if let Some((class, _, class_side)) = &o.harvest_writer {
             ret(class, method, *class_side)
         } else { key(&["unattributed-harvest", method.as_str()]) };
+        let producer = key(&["harvest", &target, o.harvest_body.as_deref().unwrap_or("no-body")]);
+        let Some(shadow) = &mut o.shadow else { return; };
         let gate = match value {
             None => "none", Some(Ty::Var { .. }) => "var", Some(Ty::Untyped { .. }) => "untyped",
             Some(Ty::Rec { .. }) => "reference", Some(_) => "concrete",
         };
-        shadow.harvest(&target, stage, gate, false);
+        shadow.harvest(&producer, &target, stage, gate, false);
     });
 }
 pub(super) fn harvest_keep(method: &Symbol) {
     observe(|o| {
-        let Some(shadow) = &mut o.shadow else { return; };
         let target = if let Some((class, _, class_side)) = &o.harvest_writer {
             ret(class, method, *class_side)
         } else { key(&["unattributed-harvest", method.as_str()]) };
-        shadow.harvest(&target, "decision", "keep", false);
+        let producer = key(&["harvest", &target, o.harvest_body.as_deref().unwrap_or("no-body")]);
+        let Some(shadow) = &mut o.shadow else { return; };
+        shadow.harvest(&producer, &target, "decision", "keep", false);
     });
 }
 pub(super) struct ReturnRoute<'a> {

@@ -31,7 +31,6 @@ pub(super) struct Ledger {
     pub(super) unmapped: u64,
     pub(super) ambiguous: u64,
     pub(super) access_count: u64,
-    pub(super) harvest_sources: BTreeMap<String, String>,
     harvest_targets: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -46,14 +45,10 @@ impl Ledger {
         slots: Slots,
         rules: BTreeSet<(String, String, String)>,
         writers: BTreeSet<Fact>,
-        harvest_sources: BTreeMap<String, String>,
+        harvest_targets: BTreeMap<String, BTreeSet<String>>,
     ) -> Self {
-        let mut harvest_targets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (target, source) in &harvest_sources {
-            harvest_targets.entry(source.clone()).or_default().insert(target.clone());
-        }
         let start_digest = digest((&slots, &rules, &writers, &harvest_targets));
-        Self { slots, rules, writers, start_digest, harvest_sources, harvest_targets, ..Self::default() }
+        Self { slots, rules, writers, start_digest, harvest_targets, ..Self::default() }
     }
 
     fn targets(&self, source: &str, kind: &str) -> Option<&BTreeSet<String>> {
@@ -79,16 +74,15 @@ impl Ledger {
         self.snapshots.insert(vec![kind.into(), source.into(), target.into(), operation.into()]);
     }
 
-    pub(super) fn harvest(&mut self, target: &str, stage: &str, gate: &str, mutation: bool) {
-        let source = if let Some(source) = self.harvest_sources.get(target) { source.clone() }
-            else { self.unmapped_harvests += 1; format!("unmapped-harvest:{target}") };
+    pub(super) fn harvest(&mut self, source: &str, target: &str, stage: &str, gate: &str, mutation: bool) {
+        if !self.harvest_targets.contains_key(source) { self.unmapped_harvests += 1; }
         *self.gates.entry(format!("{stage}:{gate}")).or_default() += 1;
-        *self.harvest_events.entry((source.clone(), target.into(), stage.into(), gate.into())).or_default() += 1;
-        let fact = vec!["return".into(), source.clone(), target.into(), "write".into()];
+        *self.harvest_events.entry((source.into(), target.into(), stage.into(), gate.into())).or_default() += 1;
+        let fact = vec!["return".into(), source.into(), target.into(), "write".into()];
         if mutation { self.mutations.insert(fact); }
         else { self.attempts.insert(fact); }
         // Attempt membership is checked even when None/Var/Keep prevents a write.
-        self.access(&source, "write", "return", target, if mutation { "mutation" } else { "attempt" });
+        self.access(source, "write", "return", target, if mutation { "mutation" } else { "attempt" });
     }
 
     pub(super) fn write(&self, path: &Path, input_digest: &str) -> std::io::Result<serde_json::Value> {
@@ -187,10 +181,12 @@ mod tests {
         let mut ledger = Ledger::new(
             [("return".into(), ["callee".into()].into())].into(),
             [("action".into(), "write".into(), "return".into())].into(),
-            BTreeSet::new(), [("callee".into(), "action".into())].into());
-        ledger.harvest("callee", "controller", "none", false);
-        ledger.harvest("callee", "insert", "keep", false);
+            [vec!["return".into(), "action".into(), "callee".into(), "write".into()]].into(),
+            [("action".into(), ["callee".into()].into())].into());
+        ledger.harvest("action", "callee", "controller", "none", false);
+        ledger.harvest("action", "callee", "decision", "keep", false);
         assert_eq!(ledger.attempts.len(), 1);
+        assert_eq!(ledger.writers, ledger.attempts);
         assert!(ledger.mutations.is_empty());
         assert!(ledger.missing.is_empty());
     }
@@ -210,9 +206,25 @@ mod tests {
         let mut ledger = Ledger::new(
             [("return".into(), ["callee".into(), "other".into()].into())].into(),
             [("action".into(), "write".into(), "return".into())].into(),
-            BTreeSet::new(), [("callee".into(), "action".into()), ("other".into(), "other-action".into())].into());
+            BTreeSet::new(), [("action".into(), ["callee".into()].into()),
+                ("other-action".into(), ["other".into()].into())].into());
         ledger.access("action", "write", "return", "other", "mutation");
         assert_eq!(ledger.missing.len(), 1);
         assert_eq!(ledger.missing_targets.len(), 1);
+    }
+    #[test]
+    fn body_and_controller_producers_do_not_collapse_at_one_target() {
+        let sources = ["definition-body", "controller-body"];
+        let mut ledger = Ledger::new(
+            [("return".into(), ["callee".into()].into())].into(),
+            sources.iter().map(|s| (s.to_string(), "write".into(), "return".into())).collect(),
+            sources.iter().map(|s| vec!["return".into(), s.to_string(), "callee".into(), "write".into()]).collect(),
+            sources.iter().map(|s| (s.to_string(), ["callee".into()].into())).collect());
+        ledger.harvest("definition-body", "callee", "register", "concrete", false);
+        ledger.harvest("definition-body", "callee", "storage", "set", true);
+        ledger.harvest("controller-body", "callee", "controller", "var", false);
+        assert_eq!(ledger.attempts.len(), 2);
+        assert_eq!(ledger.mutations.len(), 1);
+        assert!(ledger.missing.is_empty());
     }
 }
