@@ -152,6 +152,9 @@ pub struct Analyzer {
     source_indexed: bool,
     /// Inferred values keyed by Rubydex declaration IDs, not by names.
     typed_constants: IdentityHashMap<DeclarationId, Ty>,
+    /// Advances at the sole replacement of typed_constants. Factories and
+    /// inquirers are immutable for this Analyzer's source snapshot.
+    warm_extra_generation: u64,
     /// Literal Data constants on library classes, keyed by source span.
     data_factories: HashMap<crate::span::Span, Ty>,
     /// The controller/mailer→view channel as the last production
@@ -1090,6 +1093,7 @@ impl Analyzer {
             const_resolver,
             source_indexed: !app.sources.is_empty(),
             typed_constants: IdentityHashMap::default(),
+            warm_extra_generation: 0,
             data_factories,
             view_seeds: None,
             callers_by_target: HashMap::new(),
@@ -1111,8 +1115,15 @@ impl Analyzer {
         let typer = BodyTyper::new(&self.classes)
             .with_inquirers(&self.inquirers)
             .with_typed_constants(&self.typed_constants)
-            .with_data_factories(&self.data_factories);
+            .with_data_factories(&self.data_factories)
+            .with_warm_extra_generation(self.warm_extra_generation);
         if self.source_indexed { typer.with_const_resolver(self.const_resolver.clone()) } else { typer }
+    }
+
+    fn replace_typed_constants(&mut self, values: IdentityHashMap<DeclarationId, Ty>) {
+        self.typed_constants = values;
+        self.warm_extra_generation = self.warm_extra_generation.checked_add(1)
+            .expect("warm extra generation overflow");
     }
 
     /// The per-class member registry — schema columns, catalog-sourced
@@ -2182,7 +2193,7 @@ impl Analyzer {
         let (fallback, resolved_values) = crate::timings::phase("typing: constants", || {
             self.build_constant_registry(app)
         });
-        self.typed_constants = resolved_values;
+        self.replace_typed_constants(resolved_values);
         let global_constants = body::ConstScope::global(fallback);
         if self.sccq.is_some() {
             self.sccq_last_global = Some(global_constants.clone());

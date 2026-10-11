@@ -221,7 +221,8 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
         warm_shadow_seconds = shadow_start.map_or(0.0, |t| t.elapsed().as_secs_f64());
         let mut report = serde_json::json!({"shadow": if first.is_none() { "pass" } else { "fail" },
             "warm_digest": warm.digests(), "cold_digest": cold.digests(),
-            "first_difference": first, "evaluations": pending.stats});
+            "first_difference": first, "evaluations": pending.stats,
+            "fingerprint_components": pending.fingerprints});
         if timing {
             report["phases"] = serde_json::json!(pending.profile);
             report["ingest_seconds"] = serde_json::json!(ingest_seconds);

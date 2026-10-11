@@ -22,21 +22,32 @@ pub(crate) enum Phase {
     ClassFingerprint,
     InputFingerprint,
     Cleanup,
+    FpExpression,
+    FpContext,
+    FpKeys,
+    FpMetadata,
+    FpExtra,
+    FpFinalEncode,
+    FpFinalHash,
+    FpAudit,
 }
 
-const NAMES: [&str; 12] = [
+const NAMES: [&str; 20] = [
     "other", "load_decode", "fingerprints", "guards", "replay", "fresh_typing", "recording",
     "shadow_clone",
     "value_fingerprints", "class_fingerprints", "input_fingerprints",
     "old_trace_cleanup",
+    "fp_expression_encoding", "fp_context_encoding", "fp_class_keys",
+    "fp_recursive_metadata", "fp_extra_construction", "fp_final_encoding",
+    "fp_final_hashing", "fp_audit",
 ];
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 struct Timeline {
     active: Phase,
     since: Instant,
-    seconds: [Duration; 12],
-    scopes: [u64; 12],
+    seconds: [Duration; 20],
+    scopes: [u64; 20],
 }
 
 impl Timeline {
@@ -58,8 +69,8 @@ pub(super) fn start() {
         *t.borrow_mut() = enabled.then(|| Timeline {
             active: Phase::Other,
             since: Instant::now(),
-            seconds: [Duration::ZERO; 12],
-            scopes: [0; 12],
+            seconds: [Duration::ZERO; 20],
+            scopes: [0; 20],
         });
     });
     ENABLED.store(enabled, Ordering::Relaxed);
@@ -99,7 +110,7 @@ pub(super) fn stop() -> Option<serde_json::Value> {
         let scopes: std::collections::BTreeMap<_, _> = NAMES.iter().copied()
             .zip(t.scopes).collect();
         Some(serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "scope": "warm-start-through-stop-exclusive-wall",
             "seconds": seconds,
             "scope_counts": scopes,

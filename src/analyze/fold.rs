@@ -157,6 +157,15 @@ struct State {
 
 thread_local! {
     static ST: RefCell<State> = RefCell::new(State::default());
+    static WARM_STRUCTURE_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn warm_structure_changed() {
+    WARM_STRUCTURE_GENERATION.with(|g| g.set(g.get().checked_add(1).expect("warm fold generation overflow")));
+}
+
+pub(crate) fn warm_structure_generation() -> u64 {
+    WARM_STRUCTURE_GENERATION.with(std::cell::Cell::get)
 }
 
 /// Whether `RH_FOLD` is set.
@@ -194,6 +203,7 @@ pub(crate) fn key_of(slot: u32) -> Option<SlotKey> {
 pub(crate) fn reset() {
     if *ON {
         ST.with(|s| *s.borrow_mut() = State::default());
+        warm_structure_changed();
     }
 }
 
@@ -223,7 +233,12 @@ pub(crate) fn note_alias(class: &ClassId, method: &Symbol, module: &ClassId) {
         return;
     }
     ST.with(|s| {
-        s.borrow_mut().aliases.insert((class.clone(), method.clone()), module.clone());
+        let mut s = s.borrow_mut();
+        let key = (class.clone(), method.clone());
+        if s.aliases.get(&key) != Some(module) {
+            s.aliases.insert(key, module.clone());
+            warm_structure_changed();
+        }
     });
 }
 
@@ -743,6 +758,7 @@ pub(crate) fn add_rec_methods(methods: Vec<MethodKey>) {
         for m in methods {
             if s.rec_methods.insert(m.clone()) {
                 s.active = true;
+                warm_structure_changed();
                 note_new_rec(m);
             }
         }
@@ -1034,7 +1050,13 @@ fn note_expansion(kind: usize) {
 
 /// Stop producing references: the final expansion has run.
 pub(crate) fn deactivate() {
-    ST.with(|s| s.borrow_mut().active = false);
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.active {
+            s.active = false;
+            warm_structure_changed();
+        }
+    });
 }
 
 /// Aggregates for the fixpoint canaries' stats line.

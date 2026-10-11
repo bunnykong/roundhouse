@@ -367,6 +367,7 @@ pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
+    warm_extra_generation: Option<u64>,
     data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
     /// Methods whose value is an ActiveSupport inquirer (see
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
@@ -454,7 +455,7 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None }
+        Self { classes, const_resolver: None, typed_constants: None, warm_extra_generation: None, data_factories: None, inquirers: None }
     }
 
     /// Catalog answers for the final-IR error census; never retypes a body.
@@ -484,11 +485,18 @@ impl<'a> BodyTyper<'a> {
         values: &'a IdentityHashMap<DeclarationId, Ty>,
     ) -> Self {
         self.typed_constants = Some(values);
+        self.warm_extra_generation = None;
         self
     }
 
     pub(super) fn with_data_factories(mut self, factories: &'a HashMap<crate::span::Span, Ty>) -> Self {
         self.data_factories = Some(factories);
+        self.warm_extra_generation = None;
+        self
+    }
+
+    pub(super) fn with_warm_extra_generation(mut self, generation: u64) -> Self {
+        self.warm_extra_generation = Some(generation);
         self
     }
 
@@ -499,6 +507,7 @@ impl<'a> BodyTyper<'a> {
         inquirers: &'a std::collections::HashSet<Symbol>,
     ) -> Self {
         self.inquirers = Some(inquirers);
+        self.warm_extra_generation = None;
         self
     }
 
@@ -511,7 +520,7 @@ impl<'a> BodyTyper<'a> {
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let extra = if super::warm::extra_needed() {
-            let _profile = super::warm::phase(super::warm::Phase::Fingerprint);
+            Some(super::warm::extra(self.warm_extra_generation, || {
             let mut constants: Vec<_> = self.typed_constants.into_iter().flat_map(|c| c.iter())
                 .map(|(id, ty)| (id.get().to_string(), super::warm::input_type_hash(ty))).collect();
             constants.sort_unstable();
@@ -521,7 +530,8 @@ impl<'a> BodyTyper<'a> {
                 .map(|(s, t)| (s.file.0, s.start, s.end, super::warm::input_type_hash(t))).collect();
             factories.sort_unstable();
             serde_json::json!({"constants": constants, "inquirers": inquirers, "factories": factories})
-        } else { serde_json::Value::Null };
+            }))
+        } else { None };
         let evaluation = super::warm::Evaluation::begin(expr, ctx, self.classes, extra);
         if let Some(body) = evaluation.as_ref().and_then(|e| e.replay.as_ref()) {
             let _profile = super::warm::phase(super::warm::Phase::Replay);

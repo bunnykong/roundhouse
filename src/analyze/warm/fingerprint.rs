@@ -147,16 +147,88 @@ pub(super) fn inputs(
     expr: &Expr,
     ctx: &Ctx,
     classes: &HashMap<ClassId, ClassInfo>,
-    extra: &Value,
-) -> u64 {
+    extra: &components::Extra,
+) -> (u64, Option<u64>) {
     let _profile = phase(Phase::InputFingerprint);
+    components::count("input_calls", 1);
+    let stamps = {
+        let _profile = phase(Phase::FpExpression);
+        let mut stamps = serde_json::to_value(expr).unwrap();
+        strip(&mut stamps, false);
+        let bytes = serde_json::to_vec(&encode(stamps)).unwrap();
+        components::bytes("expression_bytes", &bytes);
+        bytes
+    };
+    let context = {
+        let _profile = phase(Phase::FpContext);
+        let mut objects: Vec<_> = ctx.class_objects.iter().map(Symbol::as_str).collect();
+        objects.sort_unstable();
+        let context = [
+            serde_json::to_vec(&[ctx.annotate_self_dispatch, ctx.in_view, ctx.class_side,
+                ctx.claimed_macro_template, ctx.instance_body]).unwrap(),
+            serde_json::to_vec(&encode(serde_json::to_value(&ctx.ivar_bindings).unwrap())).unwrap(),
+            serde_json::to_vec(&encode(serde_json::to_value(&ctx.local_bindings).unwrap())).unwrap(),
+            serde_json::to_vec(&objects).unwrap(),
+            serde_json::to_vec(&encode(serde_json::to_value(&ctx.self_ty).unwrap())).unwrap(),
+        ];
+        for bytes in &context { components::bytes("context_bytes", bytes); }
+        context
+    };
+    let keys = components::keys(classes);
+    let mode = components::mode();
+    // serde_json's pinned map representation sorts these fields lexically.
+    // Copy canonical fragments; never substitute a body/syntax hash for stamps.
+    let bytes = {
+        let _profile = phase(Phase::FpFinalEncode);
+        let parts: [(&str, &[u8]); 9] = [
+            ("extra", &extra.bytes), ("flags", &context[0]), ("ivars", &context[1]),
+            ("keys", &keys), ("locals", &context[2]), ("mode", &mode),
+            ("objects", &context[3]), ("self", &context[4]), ("stamps", &stamps),
+        ];
+        let mut bytes = Vec::with_capacity(parts.iter().map(|(k, b)| k.len() + b.len() + 4).sum::<usize>() + 2);
+        bytes.push(b'{');
+        for (i, (key, value)) in parts.iter().enumerate() {
+            if i != 0 { bytes.push(b','); }
+            bytes.push(b'"'); bytes.extend_from_slice(key.as_bytes());
+            bytes.extend_from_slice(b"\":"); bytes.extend_from_slice(value);
+        }
+        bytes.push(b'}');
+        components::bytes("final_bytes", &bytes);
+        bytes
+    };
+    let current = {
+        let _profile = phase(Phase::FpFinalHash);
+        hash_bytes(&bytes)
+    };
+    let original = components::audit().then(|| {
+        let _profile = phase(Phase::FpAudit);
+        let old_value = original_inputs(expr, ctx, classes, extra.original.as_ref().unwrap());
+        let old = serde_json::to_vec(&old_value).unwrap();
+        assert_eq!(bytes, old, "RH_WARM_FP_AUDIT: canonical input bytes");
+        let old_hash = hash(&old_value);
+        assert_eq!(current, old_hash, "RH_WARM_FP_AUDIT: input hash");
+        components::count("input_audit_comparisons", 1);
+        components::bytes("audit_bytes", &old);
+        old_hash
+    });
+    (current, original)
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
+// Retained verbatim input construction, for the fail-hard dual computation.
+fn original_inputs(expr: &Expr, ctx: &Ctx, classes: &HashMap<ClassId, ClassInfo>, extra: &Value) -> Value {
     let mut stamps = serde_json::to_value(expr).unwrap();
     strip(&mut stamps, false);
     let mut keys: Vec<_> = classes.keys().map(|c| c.0.as_str()).collect();
     keys.sort_unstable();
     let mut objects: Vec<_> = ctx.class_objects.iter().map(Symbol::as_str).collect();
     objects.sort_unstable();
-    hash(&serde_json::json!({
+    serde_json::json!({
         "stamps": encode(stamps), "self": encode(serde_json::to_value(&ctx.self_ty).unwrap()),
         "ivars": encode(serde_json::to_value(&ctx.ivar_bindings).unwrap()),
         "locals": encode(serde_json::to_value(&ctx.local_bindings).unwrap()),
@@ -164,7 +236,7 @@ pub(super) fn inputs(
         "mode": super::super::fold::warm_structure(),
         "flags": [ctx.annotate_self_dispatch, ctx.in_view, ctx.class_side,
             ctx.claimed_macro_template, ctx.instance_body],
-    }))
+    })
 }
 
 pub(super) fn covered(
@@ -211,4 +283,133 @@ pub(super) fn covered(
         };
         current == *expected
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::{ExprNode, Literal};
+
+    fn expr() -> Expr {
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: 1 } })
+    }
+
+    fn input(expr: &Expr, ctx: &Ctx, classes: &HashMap<ClassId, ClassInfo>, generation: u64, value: Value) -> u64 {
+        let extra = components::extra(Some(generation), || value);
+        let (current, original) = inputs(expr, ctx, classes, &extra);
+        assert_eq!(original, Some(current), "the canary must exercise dual computation");
+        current
+    }
+
+    #[test]
+    fn warm_fp_receiver_side_and_instance_body_are_never_memoized() {
+        components::start_audit_for_test();
+        let expr = expr();
+        let mut ctx = Ctx::default();
+        let classes = HashMap::new();
+        let a = input(&expr, &ctx, &classes, 1, Value::Null);
+        ctx.class_side = true;
+        let b = input(&expr, &ctx, &classes, 1, Value::Null);
+        ctx.instance_body = true;
+        let c = input(&expr, &ctx, &classes, 1, Value::Null);
+        assert_ne!(a, b); assert_ne!(b, c);
+        let stats = components::stop();
+        assert_eq!(stats["counters"]["extra_generation_hits"], 2);
+        assert_eq!(stats["counters"]["input_audit_comparisons"], 3);
+    }
+
+    #[test]
+    fn warm_fp_constant_generation_and_scope_guards_follow_mutation() {
+        components::start_audit_for_test();
+        let classes = HashMap::new();
+        let mut ctx = Ctx::default();
+        let before = serde_json::json!({"constants": [["1", value_hash(Some(&Ty::Int))]]});
+        let after = serde_json::json!({"constants": [["1", value_hash(Some(&Ty::Str))]]});
+        let a = input(&expr(), &ctx, &classes, 1, before.clone());
+        let b = input(&expr(), &ctx, &classes, 2, after.clone());
+        assert_ne!(a, b);
+        let reads = BTreeMap::from([("decl:1".into(), value_hash(Some(&Ty::Int)))]);
+        assert!(covered(&reads, &ctx, &classes, &before));
+        assert!(!covered(&reads, &ctx, &classes, &after));
+        ctx.constants = super::super::super::body::ConstScope::global(HashMap::from([(Symbol::from("VALUE"), Ty::Int)]));
+        let reads = BTreeMap::from([("global:VALUE".into(), value_hash(Some(&Ty::Int)))]);
+        assert!(covered(&reads, &ctx, &classes, &Value::Null));
+        ctx.constants = super::super::super::body::ConstScope::global(HashMap::from([(Symbol::from("VALUE"), Ty::Str)]));
+        assert!(!covered(&reads, &ctx, &classes, &Value::Null));
+        components::stop();
+    }
+
+    #[test]
+    #[ignore = "requires RH_FOLD=1; warm_tests explicitly runs this canary"]
+    fn warm_fp_alias_recursion_deactivation_and_reset_advance_generations() {
+        let fold = super::super::super::fold::warm_structure;
+        super::super::super::fold::reset();
+        components::start_audit_for_test();
+        let classes = HashMap::new();
+        let ctx = Ctx::default();
+        let module = ClassId(Symbol::from("Module"));
+        let other = ClassId(Symbol::from("Other"));
+        let class = ClassId(Symbol::from("Class"));
+        let method = Symbol::from("answer");
+        let a = input(&expr(), &ctx, &classes, 1, Value::Null);
+        super::super::super::fold::add_rec_methods(vec![(module.clone(), method.clone())]);
+        let b = input(&expr(), &ctx, &classes, 1, Value::Null);
+        assert_ne!(a, b);
+        super::super::super::fold::note_alias(&class, &method, &module);
+        let c = input(&expr(), &ctx, &classes, 1, Value::Null);
+        let generation = super::super::super::fold::warm_structure_generation();
+        super::super::super::fold::note_alias(&class, &method, &module);
+        assert_eq!(generation, super::super::super::fold::warm_structure_generation());
+        assert_eq!(c, input(&expr(), &ctx, &classes, 1, Value::Null));
+        super::super::super::fold::note_alias(&class, &method, &other);
+        let d = input(&expr(), &ctx, &classes, 1, Value::Null);
+        assert_ne!(c, d);
+        assert_ne!(b, c);
+        super::super::super::fold::deactivate();
+        let e = input(&expr(), &ctx, &classes, 1, Value::Null);
+        assert_ne!(d, e);
+        super::super::super::fold::reset();
+        assert_eq!(a, input(&expr(), &ctx, &classes, 1, Value::Null));
+        assert_eq!(fold()["active"], false);
+        components::stop();
+    }
+
+    #[test]
+    fn warm_fp_same_length_registry_key_replacement_is_a_new_generation() {
+        components::start_audit_for_test();
+        let ctx = Ctx::default();
+        let mut classes = HashMap::from([(ClassId(Symbol::from("First")), ClassInfo::default())]);
+        let a = input(&expr(), &ctx, &classes, 1, Value::Null);
+        classes.clear();
+        classes.insert(ClassId(Symbol::from("Second")), ClassInfo::default());
+        let b = input(&expr(), &ctx, &classes, 1, Value::Null);
+        assert_ne!(a, b);
+        assert_eq!(components::stop()["counters"]["class_key_generations"], 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "RH_WARM_FP_AUDIT: extra bytes")]
+    fn warm_fp_audit_fails_hard_on_a_missing_constant_generation() {
+        components::start_audit_for_test();
+        components::extra(Some(7), || serde_json::json!({"constants": [["1", 1]]}));
+        components::extra(Some(7), || serde_json::json!({"constants": [["1", 2]]}));
+    }
+
+    #[test]
+    fn warm_fp_expression_stamps_and_context_values_are_fresh() {
+        components::start_audit_for_test();
+        let classes = HashMap::new();
+        let mut ctx = Ctx::default();
+        let mut expr = expr();
+        expr.ty = Some(Ty::Int);
+        let a = input(&expr, &ctx, &classes, 1, Value::Null);
+        expr.ty = Some(Ty::Str);
+        let b = input(&expr, &ctx, &classes, 1, Value::Null);
+        ctx.local_bindings.insert(Symbol::from("local"), Ty::Int);
+        let c = input(&expr, &ctx, &classes, 1, Value::Null);
+        ctx.ivar_bindings.insert(Symbol::from("@value"), Ty::Str);
+        let d = input(&expr, &ctx, &classes, 1, Value::Null);
+        assert_ne!(a, b); assert_ne!(b, c); assert_ne!(c, d);
+        components::stop();
+    }
 }
