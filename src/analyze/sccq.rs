@@ -1994,6 +1994,7 @@ impl Analyzer {
                 }
             }
         }
+        super::structure_dump::verdict(&class, "block", "write", if any { "sccq-insert" } else { "sccq-remove" });
         let set = &mut self.classes.entry(class).or_default().block_value_methods;
         if any {
             set.insert(name);
@@ -2105,6 +2106,7 @@ impl Analyzer {
                             action.block_param.as_ref(),
                             action.rest_param.as_ref(),
                         );
+                        super::structure_dump::controller_activation(&ctrl_name, &action.name, "sccq-replay", &inner, false);
                         self.body_typer().analyze_expr(&mut action.body, &inner);
                     }
                 }

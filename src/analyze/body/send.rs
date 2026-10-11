@@ -1900,7 +1900,10 @@ impl<'a> BodyTyper<'a> {
                             // shape. Gated on `scopes` so this stays
                             // scope delegation and doesn't become
                             // method_missing over the whole class side.
-                            Some(other) if cls.relation_derived.contains(method) => {
+                            Some(other) if {
+                                super::super::structure_dump::verdict(id, "relation", "read", method.as_str());
+                                cls.relation_derived.contains(method)
+                            } => {
                                 return other.clone();
                             }
                             // Any other class method the element model
@@ -2056,7 +2059,10 @@ impl<'a> BodyTyper<'a> {
                         // `@room.messages.last_page` a relation — then
                         // `Message | nil` one hop later. Its Array is the
                         // answer, same as the terminal arm below.
-                        Some(Ty::Array { elem }) if !cls.materializing_scopes.contains(method) => {
+                        Some(Ty::Array { elem }) if {
+                            super::super::structure_dump::verdict(of, "materializing", "read", method.as_str());
+                            !cls.materializing_scopes.contains(method)
+                        } => {
                             return match &**elem {
                                 Ty::Class { id, .. } => Ty::Relation { of: id.clone() },
                                 _ => Ty::Array { elem: elem.clone() },
@@ -2067,7 +2073,10 @@ impl<'a> BodyTyper<'a> {
                         // materializes answers with its own return type,
                         // and `scopes` keeps the delegation scoped to
                         // declared scopes.
-                        Some(other) if cls.relation_derived.contains(method) => {
+                        Some(other) if {
+                            super::super::structure_dump::verdict(of, "relation", "read", method.as_str());
+                            cls.relation_derived.contains(method)
+                        } => {
                             return other.clone();
                         }
                         // Any OTHER class method the model actually
@@ -2251,9 +2260,11 @@ impl<'a> BodyTyper<'a> {
         }
         let mut current = Some(id.clone());
         for _ in 0..32 {
-            let cls = self.classes().get(current.as_ref()?)?;
-            let own = std::iter::once(cls).chain(cls.includes.iter().filter_map(|m| self.classes().get(m)));
-            for c in own {
+            let owner = current.as_ref()?;
+            let cls = self.classes().get(owner)?;
+            let own = std::iter::once((owner, cls)).chain(cls.includes.iter().filter_map(|m| self.classes().get(m).map(|c| (m, c))));
+            for (owner, c) in own {
+                super::super::structure_dump::verdict(owner, "block", "read", method.as_str());
                 if c.block_value_methods.contains(method) {
                     return Some(ret.clone());
                 }

@@ -172,16 +172,22 @@ pub(super) fn insert_inferred_return(
 ) {
     super::structure_dump::harvest_attempt(method, "insert", Some(&ty));
     let ty = super::fixpoint_bound::bound(ty);
+    super::structure_dump::harvest_evidence(method, "bounded-decision-input", table.get(method), Some(&ty));
     super::structure_dump::harvest_access(method, "read");
     match table.get(method) {
         None => {
+            super::structure_dump::harvest_evidence(method, "first-write", None, Some(&ty));
             super::det::note_named("harvest.first", method.as_str(), None, &ty);
             table.insert(method.clone(), ty);
             super::structure_dump::harvest_access(method, "write");
         }
         Some(existing) => match decide_harvested_return(existing, ty) {
-            HarvestWrite::Keep => { super::structure_dump::harvest_keep(method); }
+            HarvestWrite::Keep => {
+                super::structure_dump::harvest_evidence(method, "keep", Some(existing), Some(existing));
+                super::structure_dump::harvest_keep(method);
+            }
             HarvestWrite::Set(rule, next) => {
+                super::structure_dump::harvest_evidence(method, rule, Some(existing), Some(&next));
                 super::det::note_named(rule, method.as_str(), Some(existing), &next);
                 table.insert(method.clone(), next);
                 super::structure_dump::harvest_access(method, "write");

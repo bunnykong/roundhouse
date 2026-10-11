@@ -493,7 +493,7 @@ impl<'a> BodyTyper<'a> {
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         let _structure = super::structure_dump::enter(expr, ctx);
         let ty = self.compute(expr, ctx);
-        expr.ty = Some(ty.clone());
+        stamp_type("C18", expr, Some(ty.clone()), "compute-overwrite");
         super::structure_dump::computed(expr, ctx);
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
@@ -912,6 +912,7 @@ impl<'a> BodyTyper<'a> {
                         }
                         super::sccq::rec_const_id(declaration);
                         super::structure_dump::constant_read(name.0.as_str());
+                        super::structure_dump::typed_constant(Some(declaration), "read", "indexed-value-lookup");
                         let value = self.typed_constants
                             .and_then(|values| values.get(declaration))
                             .cloned()
@@ -951,6 +952,7 @@ impl<'a> BodyTyper<'a> {
                             let id = declaration_id_from_lookup_name(name.0.as_str());
                             super::sccq::rec_const_id(&id);
                             super::structure_dump::constant_read(name.0.as_str());
+                            super::structure_dump::typed_constant(Some(&id), "read", "generated-qualified-value-lookup");
                             self.typed_constants.and_then(|values| values.get(&id)).cloned()
                         };
                         // Otherwise retain the written class path, but
@@ -1505,7 +1507,7 @@ impl<'a> BodyTyper<'a> {
                 }
                 if let Some(r) = recv.as_mut() {
                     if promotes_to_param_value(r, recv_ty.as_ref(), method, args, &ctx.local_bindings) {
-                        r.ty = Some(send::param_value_ty());
+                        stamp_type("C18", r, Some(send::param_value_ty()), "parameter-value-override");
                         recv_ty = r.ty.clone();
                     }
                 }
@@ -1548,7 +1550,10 @@ impl<'a> BodyTyper<'a> {
                     // read from — its own computed type already IS
                     // the referenced method's return type.
                     match &*b.node {
-                        ExprNode::Lambda { body, .. } => body.ty.clone(),
+                        ExprNode::Lambda { body, .. } => {
+                            super::structure_dump::ir_stamp("C17", body, "read", "closure-result-readback");
+                            body.ty.clone()
+                        }
                         ExprNode::MethodRef { .. } => Some(method_ref_ty),
                         // Forwarded proc (`&callback`): Var in the block
                         // slot, no body to type. Presence must still reach
@@ -2385,9 +2390,9 @@ impl<'a> BodyTyper<'a> {
                                 if !nilable {
                                     let seed = &mut exprs[si];
                                     if let ExprNode::Assign { value, .. } = &mut *seed.node {
-                                        value.ty = Some(refined.clone());
+                                        stamp_type("C17", value, Some(refined.clone()), "hash-seed-retrostamp");
                                     }
-                                    seed.ty = Some(refined);
+                                    stamp_type("C17", seed, Some(refined), "hash-assignment-retrostamp");
                                 }
                             }
                         }
@@ -2416,9 +2421,9 @@ impl<'a> BodyTyper<'a> {
                             if let Some(&si) = array_seed_idx.get(&(is_ivar, name)) {
                                 let seed = &mut exprs[si];
                                 if let ExprNode::Assign { value, .. } = &mut *seed.node {
-                                    value.ty = Some(refined.clone());
+                                    stamp_type("C17", value, Some(refined.clone()), "array-seed-retrostamp");
                                 }
-                                seed.ty = Some(refined);
+                                stamp_type("C17", seed, Some(refined), "array-assignment-retrostamp");
                             }
                         }
                     }
@@ -2448,9 +2453,9 @@ impl<'a> BodyTyper<'a> {
                                 .insert(name.clone(), merged.clone());
                             let seed = &mut exprs[si];
                             if let ExprNode::Assign { value, .. } = &mut *seed.node {
-                                value.ty = Some(merged.clone());
+                                stamp_type("C17", value, Some(merged.clone()), "nil-seed-retrostamp");
                             }
-                            seed.ty = Some(merged);
+                            stamp_type("C17", seed, Some(merged), "nil-assignment-retrostamp");
                         }
                     }
                     let e = &exprs[i];
@@ -2539,7 +2544,7 @@ impl<'a> BodyTyper<'a> {
                         if matches!(&*value.node, ExprNode::Array { elements, .. } if elements.is_empty())
                             || matches!(&*value.node, ExprNode::Hash { entries, .. } if entries.is_empty())
                         {
-                            value.ty = None;
+                            stamp_type("C18", value, None, "clear-cyclic-empty-container");
                         }
                     } else if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
                         propagate_expected_to_empty_container(value, &expected);
@@ -2861,16 +2866,21 @@ fn propagate_expected_to_empty_container(value: &mut Expr, expected: &Ty) {
     match &mut *value.node {
         ExprNode::Hash { entries, .. } if entries.is_empty() => {
             if matches!(peeled, Ty::Hash { .. }) {
-                value.ty = Some(peeled.clone());
+                stamp_type("C18", value, Some(peeled.clone()), "expected-empty-hash");
             }
         }
         ExprNode::Array { elements, .. } if elements.is_empty() => {
             if matches!(peeled, Ty::Array { .. }) {
-                value.ty = Some(peeled.clone());
+                stamp_type("C18", value, Some(peeled.clone()), "expected-empty-array");
             }
         }
         _ => {}
     }
+}
+
+fn stamp_type(channel: &str, expr: &mut Expr, ty: Option<Ty>, detail: &str) {
+    super::structure_dump::ir_stamp(channel, expr, "write", detail);
+    expr.ty = ty;
 }
 
 /// Type a single destructuring target of `a, b, ... = rhs` at
@@ -2929,6 +2939,7 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
             if let Some((is_ivar, name)) = slot {
                 let mut pushed: Option<Ty> = None;
                 for a in args {
+                    super::structure_dump::ir_stamp("C17", a, "read", "array-push-collection");
                     let Some(t) = a.ty.clone() else { continue };
                     if t.is_open() {
                         continue;
@@ -2958,6 +2969,7 @@ fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
     let write = match &*expr.node {
         ExprNode::Assign { target: LValue::Index { recv, .. }, value }
         | ExprNode::OpAssign { target: LValue::Index { recv, .. }, value, .. } => {
+            super::structure_dump::ir_stamp("C17", value, "read", "hash-write-collection");
             value.ty.clone().map(|t| (recv, t))
         }
         // `h[k] = v` reaches the analyzer as a two-arg `[]=` send, NOT
@@ -2968,6 +2980,7 @@ fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
         ExprNode::Send { recv: Some(r), method, args, .. }
             if matches!(method.as_str(), "[]=" | "store") && args.len() == 2 =>
         {
+            super::structure_dump::ir_stamp("C17", &args[1], "read", "hash-send-write-collection");
             args[1].ty.clone().map(|t| (r, t))
         }
         _ => None,
@@ -3006,6 +3019,7 @@ fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
 /// the accumulator must widen the seed rather than leave it narrow.
 fn collect_local_assignment_tys(expr: &Expr, out: &mut Vec<(Symbol, Ty)>) {
     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*expr.node {
+        super::structure_dump::ir_stamp("C17", value, "read", "local-write-collection");
         if let Some(t) = value.ty.clone() {
             if !t.is_open() {
                 out.push((name.clone(), t));

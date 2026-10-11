@@ -178,6 +178,7 @@ impl Analyzer {
                 seed_empty_hashes(&mut method.body, &ty);
                 self.body_typer().analyze_expr(&mut method.body, &ctx);
                 method.effects = self.collect_effects(&mut method.body, &ctx);
+                super::structure_dump::native_signature(&controller.name, method, "write");
                 method.signature = Some(Ty::Fn {
                     params: method
                         .params
@@ -240,6 +241,7 @@ fn empty_hash() -> Ty {
 
 fn seed_empty_hashes(expr: &mut Expr, ty: &Ty) {
     if matches!(&*expr.node, ExprNode::Hash { entries, .. } if entries.is_empty()) {
+        super::structure_dump::ir_stamp("C18", expr, "write", "configuration-empty-hash");
         expr.ty = Some(ty.clone());
     }
     expr.node

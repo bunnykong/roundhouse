@@ -50,7 +50,7 @@ pub(super) fn implicit_self_source(source: Option<&str>) -> Option<std::sync::Ar
     if parts.len() != 2 { return None; }
     Some(std::sync::Arc::from(key(&[&parts[0], &format!("{}/implicit-self", parts[1])])) )
 }
-const KINDS: [&str; 16] = [
+const KINDS: [&str; 22] = [
     "expression",
     "return",
     "parameter",
@@ -67,8 +67,9 @@ const KINDS: [&str; 16] = [
     "controller",
     "context",
     "signature",
+    "typed-constant", "ivar-projection", "controller-cache", "native-signature", "verdict", "copy-marker",
 ];
-fn capability(operation: &str, kind: &str) -> u32 {
+fn capability(operation: &str, kind: &str) -> u64 {
     let k = KINDS
         .iter()
         .position(|k| *k == kind)
@@ -91,7 +92,7 @@ struct Observer {
     recording: bool,
     facts: BTreeSet<Fact>,
     slots: BTreeMap<String, BTreeSet<String>>,
-    declarations: BTreeMap<String, u32>,
+    declarations: BTreeMap<String, u64>,
     input_digest: String,
     sites: HashMap<Span, Vec<Site>>,
     files: HashMap<u32, String>,
@@ -113,6 +114,11 @@ struct Observer {
     snapshotting: bool,
     synthetic_sources: BTreeSet<String>,
     suppress_shadow: bool,
+    call_names: BTreeMap<String, String>,
+    call_widths: BTreeMap<String, usize>,
+    constant_names: HashMap<rubydex::model::ids::DeclarationId, String>,
+    projection_targets: BTreeSet<String>,
+    controller_owners: BTreeSet<String>,
 }
 thread_local! { static OBS: RefCell<Observer> = RefCell::new(Observer::default()); }
 
@@ -146,7 +152,8 @@ impl Observer {
                         if kind == "local" && to.len() == 2 { to[0] = parts[0].clone(); }
                         if kind == "context" && to.len() == 6 && to[0] == "binding" { to[1] = parts[0].clone(); }
                         if kind == "closure-parameter" && to.len() == 3 {
-                            if let Some(lambda) = self.stack.iter().rev().find(|s| s.tag == "Lambda")
+                            if let Some(lambda) = self.stack.iter().rev().find(|s| s.tag == "Lambda"
+                                && s.owner == to[0] && s.path == to[1])
                                 .and_then(|s| s.shadow_key.as_deref())
                                 .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()) {
                                 if lambda.len() == 2 { to[0] = lambda[0].clone(); to[1] = lambda[1].clone(); }
@@ -314,11 +321,17 @@ impl Observer {
             logical.clone(),
         ]);
         match &*e.node {
+            ExprNode::Send { method, args, .. } => {
+                self.call_names.insert(logical.clone(), method.to_string());
+                let width = self.call_widths.entry(method.to_string()).or_default();
+                *width = (*width).max(args.len());
+            }
             ExprNode::Var { name, .. } | ExprNode::Let { name, .. } => {
                 self.slot("local", key(&[owner, name.as_str()]));
             }
             ExprNode::Ivar { name } => {
                 self.slot("ivar", key(&[class, name.as_str()]));
+                self.projection_targets.insert(key(&[owner, name.as_str()]));
             }
             ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => {
                 self.lvalue(target, owner, class, &logical);
@@ -368,6 +381,9 @@ impl Observer {
         });
     }
     fn lvalue(&mut self, target: &LValue, owner: &str, class: &str, writer: &str) {
+        if let LValue::Ivar { name } = target {
+            self.projection_targets.insert(key(&[owner, name.as_str()]));
+        }
         let (kind, logical) = match target {
             LValue::Ivar { name } => ("ivar", key(&[class, name.as_str()])),
             LValue::Const { path } => (
@@ -530,6 +546,14 @@ impl Observer {
             .const_resolver
             .constant_class(value.span, name.as_str())
         {
+            // A value constant can be used as a registry lookup even though
+            // it has no ClassInfo (the constant's value is typed later).
+            self.slot("registry", key(&[full.0.as_str()]));
+            let logical = constant_key(full.0.as_str());
+            self.slot("typed-constant", logical.clone());
+            if let Some(id) = analyzer.const_resolver.constant_declaration(value.span, name.as_str()) {
+                self.constant_names.insert(id, logical);
+            }
             let target = constant_key(full.0.as_str());
             self.slot("constant", target.clone());
             let source = key(&[
@@ -657,6 +681,18 @@ impl Observer {
                 for side in ["instance", "class"] { add(&mut slots, "return", key(&[class, side, name])); }
             }
         }
+        // Call collection stores rows by positional index even when a
+        // generated/inherited method has no inventoried formal name. Derive
+        // the finite width from syntax, never from observed parameter rows.
+        for logical in slots.get("return").cloned().into_iter().flatten() {
+            let parts: Vec<String> = serde_json::from_str(&logical).expect("return key");
+            let width = self.call_widths.get(&parts[2]).copied().unwrap_or(0);
+            for i in 0..width {
+                if !self.params.contains_key(&(parts[0].clone(), parts[2].clone(), parts[1] == "class", i)) {
+                    add(&mut slots, "parameter", key(&[&parts[0], &parts[1], &parts[2], &format!("index:{i}")]));
+                }
+            }
+        }
         let mut bindings: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
         for logical in self.slots.get("local").into_iter().flatten() {
             if let Ok(parts) = serde_json::from_str::<Vec<String>>(logical) {
@@ -699,9 +735,9 @@ impl Observer {
                 }
             }
         }
-        for logical in self.slots.get("parameter").into_iter().flatten() {
+        for logical in slots.get("parameter").cloned().into_iter().flatten() {
             add(&mut slots, "fold-parameter", logical.clone());
-            add(&mut slots, "context", key(&["handoff-parameter", logical]));
+            add(&mut slots, "context", key(&["handoff-parameter", &logical]));
         }
         for logical in slots.get("return").cloned().into_iter().flatten() {
             add(&mut slots, "context", key(&["handoff-return", &logical]));
@@ -735,7 +771,7 @@ impl Observer {
     }
 
     fn freeze_shadow(&mut self, mut slots: super::declaration_shadow::Slots) {
-        let mut rules = BTreeSet::new();
+        let mut rules: BTreeSet<(String, String, String)> = BTreeSet::new();
         for (source, bits) in &self.declarations {
             for kind in KINDS {
                 for operation in ["read", "write"] {
@@ -766,7 +802,93 @@ impl Observer {
                 harvest_targets.entry(source).or_default().insert(target.clone());
             }
         }
-        self.shadow = Some(super::declaration_shadow::Ledger::new(slots, rules, writers, harvest_targets));
+        let mut guards = BTreeMap::new();
+        slots.entry("typed-constant".into()).or_default().insert(key(&["table"]));
+        slots.entry("native-signature".into()).or_default()
+            .extend(self.slots.get("return").into_iter().flatten().cloned());
+        // Projection maps are temporary but feed retained state. Their owner
+        // is the source body; only names in that body's syntax are declared.
+        slots.entry("ivar-projection".into()).or_default().extend(self.projection_targets.iter().cloned());
+        for logical in self.slots.get("registry").into_iter().flatten() {
+            let parts: Vec<String> = serde_json::from_str(logical).expect("registry key");
+            for set in ["block", "relation", "materializing"] {
+                slots.entry("verdict".into()).or_default().insert(key(&[&parts[0], set]));
+            }
+            for set in ["concern-instance", "concern-class", "host"] {
+                slots.entry("copy-marker".into()).or_default().insert(key(&[&parts[0], set]));
+            }
+        }
+        for owner in &self.controller_owners {
+            for field in ["bindings", "bodies"] {
+                slots.entry("controller-cache".into()).or_default().insert(key(&[owner, field]));
+            }
+        }
+        for logical in self.harvest_bodies.keys() {
+            let parts: Vec<String> = serde_json::from_str(&logical).expect("return key");
+            if self.controller_owners.contains(&parts[0]) {
+                slots.entry("controller-cache".into()).or_default().insert(key(&[&parts[0], &parts[2], "refinements"]));
+            }
+        }
+        for (channel, kind) in [("C05", "typed-constant"), ("C09", "ivar-projection"),
+            ("C11", "controller-cache"), ("C17", "expression"), ("C18", "expression"),
+            ("C19", "native-signature"), ("C20", "verdict"), ("C21", "verdict"), ("C22", "copy-marker")] {
+            for target in slots.get(kind).into_iter().flatten() {
+                if kind == "verdict" {
+                    let parts: Vec<String> = serde_json::from_str(target).expect("verdict key");
+                    if (channel == "C20") != (parts[1] == "block") { continue; }
+                }
+                let source = key(&["raw", channel, target]);
+                for operation in ["read", "write"] {
+                    let rule = (source.clone(), operation.to_string(), kind.to_string());
+                    rules.insert(rule.clone());
+                    guards.insert(rule, [target.clone()].into());
+                }
+                writers.insert(vec![kind.into(), source, target.clone(), "write".into()]);
+            }
+        }
+        // Index the frozen domains once. A global target scan at every syntax
+        // source makes the observer quadratic in the size of the corpus.
+        let mut lexical: BTreeMap<(String, String), Vec<(String, Vec<String>)>> = BTreeMap::new();
+        let mut parameters: BTreeMap<String, Vec<(String, Vec<String>)>> = BTreeMap::new();
+        for kind in ["local", "closure-parameter", "expression", "parameter"] {
+            for target in slots.get(kind).into_iter().flatten() {
+                let Ok(parts) = serde_json::from_str::<Vec<String>>(target) else { continue; };
+                if kind == "parameter" && parts.len() == 4 {
+                    parameters.entry(parts[2].clone()).or_default().push((target.clone(), parts));
+                } else if !parts.is_empty() {
+                    lexical.entry((kind.into(), parts[0].clone())).or_default().push((target.clone(), parts));
+                }
+            }
+        }
+        for (source, operation, kind) in &rules {
+            let Ok(from) = serde_json::from_str::<Vec<String>>(source) else { continue; };
+            if from.len() != 2 { continue; }
+            if !matches!(kind.as_str(), "local" | "closure-parameter" | "closure-result" | "expression" | "parameter") { continue; }
+            let mut targets = BTreeSet::new();
+            if kind == "closure-result" {
+                if slots.get(kind).is_some_and(|domain| domain.contains(source)) { targets.insert(source.clone()); }
+            } else if kind == "parameter" {
+                if let Some(name) = self.call_names.get(source) {
+                    for method in std::iter::once(name.as_str()).chain((name == "new").then_some("initialize")) {
+                        targets.extend(parameters.get(method).into_iter().flatten().map(|(target, _)| target.clone()));
+                    }
+                }
+            } else {
+                targets.extend(lexical.get(&(kind.clone(), from[0].clone())).into_iter().flatten().filter(|(_, to)| {
+                    match kind.as_str() {
+                        "local" => to.len() == 2,
+                        "closure-parameter" => to.len() == 3
+                            && (from[1] == to[1] || (operation == "read"
+                                && from[1].starts_with(&format!("{}/", to[1])))),
+                        "expression" => to.len() == 2
+                            && (to[1] == from[1] || (operation == "read" && to[1].starts_with(&format!("{}/", from[1])))),
+                        _ => false,
+                    }
+                }).map(|(target, _)| target.clone()));
+            }
+            guards.insert((source.clone(), operation.clone(), kind.clone()), targets);
+        }
+        self.shadow = Some(super::declaration_shadow::Ledger::new(slots, rules, writers, harvest_targets).guarded(guards));
     }
 }
 
@@ -877,6 +999,7 @@ pub(super) fn start(analyzer: &Analyzer, app: &mut App) {
         library(&mut o, c);
     }
     for c in &app.controllers {
+        o.controller_owners.insert(c.name.0.to_string());
         for m in c.class_methods() {
             o.method(&c.name, m);
         }
@@ -1100,6 +1223,9 @@ pub(super) fn enter(e: &Expr, ctx: &Ctx) -> Frame {
         // Reads of lexical bindings and closure parameters are distinct from
         // a lookup of the method's parameter row. Preserve both channels.
         let source = site.key.clone();
+        // The current lambda must be present while its own parameters are
+        // recorded; otherwise a nested lambda is attributed to its parent.
+        o.stack.push(site.clone());
         let mode = |t: Option<&Ty>| {
             if matches!(t, Some(Ty::Rec { .. })) {
                 "reference"
@@ -1109,7 +1235,7 @@ pub(super) fn enter(e: &Expr, ctx: &Ctx) -> Frame {
         };
         // These are real maps supplied to the body, not targets inferred from
         // a read. Preserve receiver side and the source body's identity.
-        if o.stack.is_empty() {
+        if o.stack.len() == 1 {
             for (channel, bindings) in
                 [("local", &ctx.local_bindings), ("ivar", &ctx.ivar_bindings)]
             {
@@ -1194,7 +1320,6 @@ pub(super) fn enter(e: &Expr, ctx: &Ctx) -> Frame {
             }
             _ => {}
         }
-        o.stack.push(site);
         Frame(true)
     })
 }
@@ -1235,6 +1360,85 @@ fn observe(f: impl FnOnce(&mut Observer)) {
             }
         });
     }
+}
+/// Native raw hooks use frozen procedure/site identities. They never infer a
+/// target from the accesses and remain active through final signature stamping.
+pub(super) fn raw(channel: &str, kind: &str, target: String, operation: &str, detail: &str) {
+    if !on() { return; }
+    OBS.with(|cell| {
+        let mut o = cell.borrow_mut();
+        let Some(shadow) = &mut o.shadow else { return; };
+        let source = key(&["raw", channel, &target]);
+        shadow.raw_access(channel, &source, operation, kind, &target, detail);
+    });
+}
+pub(super) fn ir_stamp(channel: &str, expr: &Expr, operation: &str, detail: &str) {
+    if !on() { return; }
+    let target = expr.declaration_source.as_deref().map(str::to_string)
+        .unwrap_or_else(|| key(&["unmapped-raw-expression", expr.node.kind_str()]));
+    raw(channel, "expression", target, operation, detail);
+}
+pub(super) fn typed_constant(id: Option<&rubydex::model::ids::DeclarationId>, operation: &str, detail: &str) {
+    if !on() { return; }
+    let target = OBS.with(|cell| {
+        let o = cell.borrow();
+        id.map(|id| o.constant_names.get(id).cloned().unwrap_or_else(|| key(&["unmapped-constant-id"])))
+            .unwrap_or_else(|| key(&["table"]))
+    });
+    raw("C05", "typed-constant", target, operation, detail);
+}
+pub(super) fn ivar_projection(expr: &Expr, name: &Symbol, operation: &str, detail: &str) {
+    if !on() { return; }
+    let owner = expr.declaration_source.as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .filter(|p| p.len() == 2).map(|p| p[0].clone()).unwrap_or_else(|| "unmapped-body".into());
+    raw("C09", "ivar-projection", key(&[&owner, name.as_str()]), operation, detail);
+}
+pub(super) fn controller_cache(class: &ClassId, method: Option<&Symbol>, field: &str, operation: &str) {
+    let target = match method {
+        Some(method) => key(&[class.0.as_str(), method.as_str(), field]),
+        None => key(&[class.0.as_str(), field]),
+    };
+    raw("C11", "controller-cache", target, operation, "native-map-access");
+}
+pub(super) fn native_signature(class: &ClassId, method: &MethodDef, operation: &str) {
+    raw("C19", "native-signature", ret(class, &method.name, method.receiver == MethodReceiver::Class), operation, "native-signature-access");
+}
+pub(super) fn verdict(class: &ClassId, set: &str, operation: &str, detail: &str) {
+    raw(if set == "block" { "C20" } else { "C21" }, "verdict", key(&[class.0.as_str(), set]), operation, detail);
+}
+pub(super) fn copy_marker(class: &ClassId, set: &str, operation: &str, detail: &str) {
+    raw("C22", "copy-marker", key(&[class.0.as_str(), set]), operation, detail);
+}
+fn focus(class: &ClassId, method: &Symbol) -> bool {
+    class.0.as_str() == "ApplicationController" && matches!(method.as_str(),
+        "require_authentication" | "terminate_current_session" | "resume_session" | "start_new_session_for")
+}
+pub(super) fn controller_activation(class: &ClassId, method: &Symbol, stage: &str, ctx: &Ctx, skipped: bool) {
+    if !on() || !focus(class, method) { return; }
+    OBS.with(|cell| {
+        let mut o = cell.borrow_mut();
+        let Some(shadow) = &mut o.shadow else { return; };
+        let bindings = |map: &HashMap<Symbol, Ty>| -> BTreeMap<String, String> {
+            map.iter().map(|(name, ty)| (name.to_string(), format!("{ty:?}"))).collect()
+        };
+        shadow.trace(serde_json::json!({"entity":"activation", "target":ret(class, method, false),
+            "stage":stage, "skipped":skipped, "self_type":format!("{:?}", ctx.self_ty),
+            "locals":bindings(&ctx.local_bindings), "ivars":bindings(&ctx.ivar_bindings)}));
+    });
+}
+pub(super) fn harvest_evidence(method: &Symbol, stage: &str, previous: Option<&Ty>, next: Option<&Ty>) {
+    if !on() { return; }
+    OBS.with(|cell| {
+        let mut o = cell.borrow_mut();
+        let Some((class, name, class_side)) = o.harvest_writer.as_ref() else { return; };
+        if !focus(class, name) { return; }
+        let target = ret(class, method, *class_side);
+        let source = key(&["harvest", &target, o.harvest_body.as_deref().unwrap_or("no-body")]);
+        let Some(shadow) = &mut o.shadow else { return; };
+        shadow.trace(serde_json::json!({"entity":"harvest-decision", "source":source, "target":target,
+            "stage":stage, "previous":format!("{previous:?}"), "next":format!("{next:?}")}));
+    });
 }
 fn context_binding(site: &Site, ctx: &Ctx, channel: &str, name: &Symbol) -> String {
     let receiver = match &ctx.self_ty {
@@ -1545,6 +1749,10 @@ pub(super) fn harvest_attempt(method: &Symbol, stage: &str, value: Option<&Ty>) 
             Some(Ty::Rec { .. }) => "reference", Some(_) => "concrete",
         };
         shadow.harvest(&producer, &target, stage, gate, false);
+        if o.harvest_writer.as_ref().is_some_and(|(class, method, _)| focus(class, method)) {
+            o.shadow.as_mut().unwrap().trace(serde_json::json!({"entity":"harvest-input", "source":producer,
+                "target":target, "stage":stage, "gate":gate, "native_type":format!("{value:?}")}));
+        }
     });
 }
 pub(super) fn harvest_keep(method: &Symbol) {
@@ -1752,12 +1960,6 @@ pub(super) fn finish(analyzer: &Analyzer, app: &App) {
         for r in refs { o.facts.insert(vec!["route".into(), "reference-mode".into(), r]); }
         for r in routing { o.facts.insert(vec!["route".into(), "call-graph".into(), r]); }
         o.recording = false;
-        if let (Some(shadow), Some(path)) = (&o.shadow, DECL_PATH.as_ref()) {
-            match shadow.write(path, &o.input_digest) {
-                Ok(header) => eprintln!("rh-declaration-audit: {}", header),
-                Err(e) => eprintln!("rh-declaration-dump-error: {e}"),
-            }
-        }
         let Some(path) = PATH.as_ref() else { return; };
         let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
         for f in &o.facts { *counts.entry(f[0].clone()).or_default().entry(f[1].clone()).or_default() += 1; }
@@ -1779,6 +1981,19 @@ pub(super) fn finish(analyzer: &Analyzer, app: &App) {
         };
         eprintln!("rh-structure-audit: {}", header["audit"]);
         if let Err(e) = write() { eprintln!("rh-structure-dump-error: {e}"); }
+    });
+}
+
+pub(super) fn finish_raw() {
+    if !on() { return; }
+    OBS.with(|cell| {
+        let o = cell.borrow();
+        if let (Some(shadow), Some(path)) = (&o.shadow, DECL_PATH.as_ref()) {
+            match shadow.write(path, &o.input_digest) {
+                Ok(header) => eprintln!("rh-declaration-audit: {}", header),
+                Err(e) => eprintln!("rh-declaration-dump-error: {e}"),
+            }
+        }
     });
 }
 
@@ -1811,6 +2026,39 @@ fn inference_flags() -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lambda_write_guard_rejects_an_enclosing_parameter_but_allows_its_read() {
+        let mut o = Observer::default();
+        let source = key(&["Owner", "body/1/0/0"]);
+        let outer = key(&["Owner", "body/1", "shared"]);
+        let inner = key(&["Owner", "body/1/0/0", "own"]);
+        o.slot("closure-parameter", outer.clone());
+        o.slot("closure-parameter", inner.clone());
+        o.declare(&source, "read", "closure-parameter");
+        o.declare(&source, "write", "closure-parameter");
+        o.freeze_shadow(o.slots.clone());
+        let ledger = o.shadow.as_mut().unwrap();
+        ledger.access(&source, "read", "closure-parameter", &outer, "capture");
+        ledger.access(&source, "write", "closure-parameter", &inner, "initialize");
+        ledger.access(&source, "write", "closure-parameter", &outer, "misroute");
+        let path = std::env::temp_dir().join(format!("rh-lambda-route-{}.jsonl", std::process::id()));
+        let header = ledger.write(&path, "syntax").unwrap();
+        assert_eq!(header["counts"]["missing_memberships"], 1);
+        assert_eq!(header["counts"]["routing_guard_failures"], 1);
+        assert_eq!(header["counts"]["missing_target_memberships"], 0);
+        assert_eq!(header["counts"]["missing_source_memberships"], 0);
+        assert_eq!(header["start_equals_end"], true);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn projection_inventory_does_not_borrow_another_bodys_names() {
+        let mut o = Observer::default();
+        let e = Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("@own") });
+        o.syntax(&e, "Owner", "C", "body".into());
+        let other = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil });
+        o.syntax(&other, "Other", "C", "body".into());
+        assert_eq!(o.projection_targets, [key(&["Owner", "@own"])].into());
+    }
     #[test]
     fn undeclared_routes_are_counted_without_becoming_declarations() {
         let mut o = Observer::default();

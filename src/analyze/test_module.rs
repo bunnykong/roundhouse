@@ -89,6 +89,7 @@ impl Analyzer {
     pub(super) fn type_tests_only(&mut self, app: &mut App) {
         super::fold::new_epoch();
         let (fallback, resolved_values) = self.build_constant_registry(app);
+        super::structure_dump::typed_constant(None, "write", "replace-test-table");
         self.typed_constants = resolved_values;
         let global_constants = ConstScope::global(fallback);
         self.type_test_modules(app, &global_constants);

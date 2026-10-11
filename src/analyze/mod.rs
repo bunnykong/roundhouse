@@ -594,8 +594,10 @@ impl Analyzer {
                     None => scope_return_seed(&scope.body, &model.name, &scope_names),
                 };
                 cls.class_methods.entry(scope.name.clone()).or_insert(seed);
+                structure_dump::verdict(&model.name, "relation", "write", scope.name.as_str());
                 cls.relation_derived.insert(scope.name.clone());
                 if materializing.contains_key(&scope.name) {
+                    structure_dump::verdict(&model.name, "materializing", "write", scope.name.as_str());
                     cls.materializing_scopes.insert(scope.name.clone());
                 }
             }
@@ -1627,6 +1629,7 @@ impl Analyzer {
         self.settle_pending(app);
 
         self.stamp_inferred_method_signatures(app);
+        structure_dump::finish_raw();
         self.report_fixpoint_checks(app);
         if detfp::on() {
             let fp = self.c1_state_fp(app);
@@ -1943,6 +1946,7 @@ impl Analyzer {
             .chain(app.test_modules.iter_mut().map(|module| (&module.name, &mut module.helpers))) {
             let registered = self.classes.get(owner);
             for method in methods {
+                structure_dump::native_signature(owner, method, "read");
                 if method.signature.is_some() {
                     continue;
                 }
@@ -2012,6 +2016,7 @@ impl Analyzer {
                         crate::ty::Param { name: p.name.clone(), ty: ty.into(), kind: p.ty_kind() }
                     })
                     .collect();
+                structure_dump::native_signature(owner, method, "write");
                 method.signature = Some(Ty::Fn {
                     params: params.into(),
                     block: None,
@@ -2103,6 +2108,7 @@ impl Analyzer {
         // unknown, and the read reports it. The bound also stops values
         // that change on each round.
         for _ in 0..=entries.len() {
+            structure_dump::typed_constant(None, "read", "constant-round-snapshot");
             let mut next: HashMap<Symbol, Ty> = HashMap::new();
             let mut next_resolved: IdentityHashMap<DeclarationId, Ty> = IdentityHashMap::default();
             let shared = body::ConstScope::global(map.clone());
@@ -2126,6 +2132,7 @@ impl Analyzer {
                     continue;
                 }
                 if let Some(id) = id {
+                    structure_dump::typed_constant(Some(id), "write", "constant-value-insert");
                     next_resolved.insert(*id, ty.clone());
                     if structure_dump::on() {
                         if let Some(full) = self.const_resolver.constant_class(value.span, name.as_str()) {
@@ -2191,6 +2198,7 @@ impl Analyzer {
         let (fallback, resolved_values) = crate::timings::phase("typing: constants", || {
             self.build_constant_registry(app)
         });
+        structure_dump::typed_constant(None, "write", "replace-production-table");
         self.typed_constants = resolved_values;
         let global_constants = body::ConstScope::global(fallback);
         if self.sccq.is_some() {
@@ -2646,6 +2654,7 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
+                    structure_dump::controller_activation(&ctrl_id, &action.name, "pass-a", &mctx, false);
                     self.body_typer().analyze_expr(&mut action.body, &mctx);
                     self.sccq_rec_end_ctx(unit, true, &ctx);
                 }
@@ -2757,6 +2766,7 @@ impl Analyzer {
                         // below once every body is registered.
                         action_bindings.entry(method.name.clone()).or_default();
                         let mut body = method.body.clone();
+                        structure_dump::controller_activation(&controller.name, &method.name, "mixed-in", &ctx, false);
                         self.body_typer().analyze_expr(&mut body, &ctx);
                         // Unconditional: a concern method with no DIRECT
                         // write of its own (`authorize`) still needs its
@@ -2765,8 +2775,11 @@ impl Analyzer {
                         action_bodies.entry(method.name.clone()).or_insert_with(|| body.clone());
                     }
                 }
-            } else if let Some((cached_bindings, cached_bodies)) =
+            } else if let Some((cached_bindings, cached_bodies)) = {
+                structure_dump::controller_cache(&controller.name, None, "bindings", "read");
+                structure_dump::controller_cache(&controller.name, None, "bodies", "read");
                 self.controller_action_meta_cache.get(&controller.name)
+            }
             {
                 for module_id in &mixed_in {
                     let Some(methods) = module_methods.get(module_id) else { continue };
@@ -2774,6 +2787,7 @@ impl Analyzer {
                         if action_bindings.contains_key(&method.name) {
                             continue;
                         }
+                        structure_dump::controller_activation(&controller.name, &method.name, "mixed-in-cache", &ctx, true);
                         if let Some(ivars) = cached_bindings.get(&method.name) {
                             if !ivars.is_empty() {
                                 action_bindings.insert(method.name.clone(), ivars.clone());
@@ -2805,6 +2819,8 @@ impl Analyzer {
                     action_bindings.insert(name.clone(), ivars);
                 }
                 if retype {
+                    structure_dump::controller_cache(&controller.name, None, "bindings", "write");
+                    structure_dump::controller_cache(&controller.name, None, "bodies", "write");
                     self.controller_action_meta_cache.insert(
                         controller.name.clone(),
                         (action_bindings.clone(), action_bodies.clone()),
@@ -2982,7 +2998,10 @@ impl Analyzer {
                 };
                 merged.extend(ivars.iter().map(|(k, v)| (k.clone(), v.clone())));
                 if let Some(refined) =
-                    self.refined_action_bindings.get(&(owner.clone(), name.clone()))
+                    {
+                        structure_dump::controller_cache(owner, Some(name), "refinements", "read");
+                        self.refined_action_bindings.get(&(owner.clone(), name.clone()))
+                    }
                 {
                     for (k, v) in refined {
                         if is_clean_binding(v) {
@@ -3174,6 +3193,7 @@ impl Analyzer {
                             seed.insert(k, v);
                         }
                         if seed.is_empty() {
+                            structure_dump::controller_activation(&ctrl_name, &action.name, "pass-b-empty-seed", &Ctx::default(), true);
                             continue;
                         }
                         let base_ctx = Ctx {
@@ -3203,6 +3223,7 @@ impl Analyzer {
                             action.block_param.as_ref(),
                             action.rest_param.as_ref(),
                         );
+                        structure_dump::controller_activation(&ctrl_name, &action.name, "pass-b", &inner_ctx, false);
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                         self.sccq_rec_end_ctx(unit, false, &base_ctx);
                     }
@@ -3629,6 +3650,7 @@ impl Analyzer {
         // fixpoint read them back through `layer` above, which is what
         // carries a parent's refined binding down to a subclass.
         for (key, ivars) in refinements {
+            structure_dump::controller_cache(&key.0, Some(&key.1), "refinements", "write");
             let entry = self.refined_action_bindings.entry(key).or_default();
             for (k, v) in ivars {
                 entry.insert(k, v);
@@ -4907,6 +4929,7 @@ impl Analyzer {
                     .or_default()
                     .relation_derived
                     .insert(method.name.clone());
+                structure_dump::verdict(class_id, "relation", "write", method.name.as_str());
                 return;
             }
             // …and the half that TERMINATES the chain rather than
@@ -4931,6 +4954,7 @@ impl Analyzer {
                         .or_default()
                         .relation_derived
                         .insert(method.name.clone());
+                    structure_dump::verdict(class_id, "relation", "write", method.name.as_str());
                     return;
                 }
             }
@@ -5077,13 +5101,15 @@ impl Analyzer {
                 }
             }
         }
-        for info in self.classes.values_mut() {
+        for (class, info) in self.classes.iter_mut() {
+            structure_dump::verdict(class, "block", "write", "clear");
             info.block_value_methods.clear();
         }
         for (class, method) in registry::stdlib::BUILTIN_BLOCK_VALUE_METHODS {
             found.push((ClassId(Symbol::from(*class)), Symbol::from(*method)));
         }
         for (class_id, method) in found {
+            structure_dump::verdict(&class_id, "block", "write", method.as_str());
             self.classes.entry(class_id).or_default().block_value_methods.insert(method);
         }
     }
@@ -5225,6 +5251,7 @@ impl Analyzer {
                         queue.push(n);
                     }
                 }
+                structure_dump::copy_marker(&id, "concern-class", "read", "extended-eligibility");
                 let folded = self.concern_folded.entry(id.clone()).or_default();
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
@@ -5232,6 +5259,7 @@ impl Analyzer {
                         continue;
                     }
                     cls.class_methods.insert(name.clone(), ty);
+                    structure_dump::copy_marker(&id, "concern-class", "write", name.as_str());
                     folded.1.insert(name);
                 }
             }
@@ -5251,6 +5279,7 @@ impl Analyzer {
                 // includer a stale answer about itself.
                 let mut inst = cls.instance_methods.clone();
                 if let Some(lent) = self.host_folded.get(&lc.name) {
+                    structure_dump::copy_marker(&lc.name, "host", "read", "exclude-loans");
                     inst.retain(|name, _| !lent.contains(name));
                 }
                 Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone())))
@@ -5282,6 +5311,8 @@ impl Analyzer {
                         queue.push(n.clone());
                     }
                 }
+                structure_dump::copy_marker(&id, "concern-instance", "read", "concern-eligibility");
+                structure_dump::copy_marker(&id, "concern-class", "read", "concern-eligibility");
                 let folded = self.concern_folded.entry(id.clone()).or_default();
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
@@ -5291,6 +5322,7 @@ impl Analyzer {
                     det::note_named("copy.concern_inst", name.as_str(), cls.instance_methods.get(name), ty);
                     cls.instance_methods.insert(name.clone(), ty.clone());
                     structure_dump::return_copy("copy.concern", &m, &id, name, false);
+                    structure_dump::copy_marker(&id, "concern-instance", "write", name.as_str());
                     folded.0.insert(name.clone());
                     // `RH_FOLD`: the copy reads the module's slot.
                     fold::note_alias(&id, name, &m);
@@ -5302,6 +5334,7 @@ impl Analyzer {
                     det::note_named("copy.concern_class", name.as_str(), cls.class_methods.get(name), ty);
                     cls.class_methods.insert(name.clone(), ty.clone());
                     structure_dump::return_copy("copy.concern", &m, &id, name, true);
+                    structure_dump::copy_marker(&id, "concern-class", "write", name.as_str());
                     folded.1.insert(name.clone());
                     fold::note_alias(&id, name, &m);
                 }
@@ -5364,6 +5397,8 @@ impl Analyzer {
         }
 
         for lc in app.library_classes.iter().filter(|lc| lc.is_module) {
+            structure_dump::copy_marker(&lc.name, "host", "read", "prior-loans");
+            structure_dump::copy_marker(&lc.name, "host", "write", "remove-prior-loans");
             let lent_before = self.host_folded.remove(&lc.name).unwrap_or_default();
             let mut lent = BTreeSet::new();
             let mut agreed: Vec<(Symbol, Ty)> = Vec::new();
@@ -5403,6 +5438,7 @@ impl Analyzer {
                 lent.insert(name);
             }
             if !lent.is_empty() {
+                structure_dump::copy_marker(&lc.name, "host", "write", "rebuild-loans");
                 self.host_folded.insert(lc.name.clone(), lent);
             }
         }
@@ -8376,6 +8412,8 @@ pub(crate) fn extract_ivar_assignments_in(
         index_writes.insert(name, joined);
     }
     for (name, value) in index_writes {
+        structure_dump::ivar_projection(expr, &name, "read", "deferred-index-widening");
+        structure_dump::ivar_projection(expr, &name, "write", "deferred-index-widening");
         widen_hash_ivar_value(out, &name, value);
         walk.touched.insert(name);
     }
@@ -8384,7 +8422,9 @@ pub(crate) fn extract_ivar_assignments_in(
     // join, so bounding after each write made the slot depend on the
     // order of its writes (#617).
     for name in walk.touched {
+        structure_dump::ivar_projection(expr, &name, "read", "complete-body-bound");
         if let Some(ty) = out.remove(&name) {
+            structure_dump::ivar_projection(expr, &name, "write", "complete-body-bound");
             out.insert(name, fixpoint_bound::bound(ty));
         }
     }
@@ -8407,14 +8447,17 @@ fn walk_ivar_assignments(
 ) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            structure_dump::ir_stamp("C18", value, "read", "ivar-projection-value");
             if let Some(ty) = value.ty.clone() {
                 // Union with existing entry so repeated assignments to
                 // the same ivar accumulate (rather than the last write
                 // winning). Mirrors the simple flow-sensitive join.
+                structure_dump::ivar_projection(expr, name, "read", "assignment-projection");
                 let merged = match out.remove(name) {
                     Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),
                     None => ty,
                 };
+                structure_dump::ivar_projection(expr, name, "write", "assignment-projection");
                 out.insert(name.clone(), merged);
                 walk.touched.insert(name.clone());
             }
@@ -8424,11 +8467,14 @@ fn walk_ivar_assignments(
         // a plain assignment so a controller's `@story ||= Story.find(..)`
         // still flows its type to before_action seeds and views.
         ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
+            structure_dump::ir_stamp("C18", value, "read", "ivar-opassign-projection-value");
             if let Some(ty) = value.ty.clone() {
+                structure_dump::ivar_projection(expr, name, "read", "opassignment-projection");
                 let merged = match out.remove(name) {
                     Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),
                     None => ty,
                 };
+                structure_dump::ivar_projection(expr, name, "write", "opassignment-projection");
                 out.insert(name.clone(), merged);
                 walk.touched.insert(name.clone());
             }
@@ -8442,13 +8488,16 @@ fn walk_ivar_assignments(
         ExprNode::MultiAssign { targets, value } => {
             for (i, target) in targets.iter().enumerate() {
                 if let LValue::Ivar { name } = target {
+                    structure_dump::ir_stamp("C18", value, "read", "ivar-destructure-projection-value");
                     if let Some(ty) =
                         crate::analyze::body::multiassign_target_ty(&value.ty, i)
                     {
+                        structure_dump::ivar_projection(expr, name, "read", "destructure-projection");
                         let merged = match out.remove(name) {
                             Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),
                             None => ty,
                         };
+                        structure_dump::ivar_projection(expr, name, "write", "destructure-projection");
                         out.insert(name.clone(), merged);
                         walk.touched.insert(name.clone());
                     }
@@ -8465,6 +8514,7 @@ fn walk_ivar_assignments(
         ExprNode::Assign { target: LValue::Index { recv, index }, value }
         | ExprNode::OpAssign { target: LValue::Index { recv, index }, value, .. } => {
             if let ExprNode::Ivar { name } = &*recv.node {
+                structure_dump::ir_stamp("C18", value, "read", "index-projection-value");
                 if let Some(v_ty) = &value.ty {
                     walk.index_writes.push((name.clone(), v_ty.clone()));
                 }
@@ -8483,6 +8533,7 @@ fn walk_ivar_assignments(
             if method.as_str() == "[]=" && args.len() == 2 =>
         {
             if let ExprNode::Ivar { name } = &*recv.node {
+                structure_dump::ir_stamp("C18", &args[1], "read", "send-index-projection-value");
                 if let Some(v_ty) = &args[1].ty {
                     walk.index_writes.push((name.clone(), v_ty.clone()));
                 }
