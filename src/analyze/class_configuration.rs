@@ -193,13 +193,13 @@ impl Analyzer {
                                     .local_bindings
                                     .get(&p.name)
                                     .cloned()
-                                    .unwrap_or(Ty::unresolved()).into(),
+                                    .unwrap_or_else(super::strict_producers::stub).into(),
                             },
                             kind: p.ty_kind(),
                         })
                         .collect(),
                     block: None,
-                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or(Ty::unresolved())),
+                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or_else(super::strict_producers::stub)),
                     effects: method.effects.clone(),
                 });
                 // Sibling class methods in this same pass call each other

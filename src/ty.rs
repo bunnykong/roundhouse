@@ -554,9 +554,11 @@ impl Ty {
     pub(crate) fn strip_unknown(self) -> Ty {
         match self {
             Ty::Union { variants } => {
+                let pending = crate::analyze::strict_producers::xfer_on()
+                    && !variants.is_empty() && variants.iter().all(crate::analyze::strict_producers::only_pending);
                 let kept: Vec<Ty> = variants.into_iter().filter(|v| !v.is_unknown()).collect();
                 match kept.len() {
-                    0 => Ty::gradual(),
+                    0 => if pending { Ty::pending_untyped() } else { Ty::gradual() },
                     1 => kept.into_iter().next().unwrap(),
                     _ => Ty::Union { variants: kept.into() },
                 }
@@ -584,6 +586,11 @@ impl Ty {
     /// picking by order instead of by arrival keeps a join's stored
     /// form independent of the order its inputs came in.
     pub(crate) fn canonical_min(a: Ty, b: Ty) -> Ty {
+        if crate::analyze::strict_producers::xfer_on() {
+            let is_p = crate::analyze::strict_producers::is_p;
+            if is_p(&a) && matches!(&b, Ty::Untyped { .. }) && !is_p(&b) { return b; }
+            if is_p(&b) && matches!(&a, Ty::Untyped { .. }) && !is_p(&a) { return a; }
+        }
         let (chosen, other) = if !a.holds_record() || cmp_ty(&b, &a) != std::cmp::Ordering::Less {
             (a, b)
         } else {

@@ -346,7 +346,7 @@ fn interpret_render_call(
             if let Some(coll) = collection_ty {
                 // Unknown/gradual collection still binds the local —
                 // gradual element beats an unresolved bare name.
-                let elem_ty = coll.collection_elem().unwrap_or(Ty::unresolved());
+                let elem_ty = coll.collection_elem().unwrap_or_else(|| super::strict_producers::unresolved_from(&coll));
                 let local = as_name.unwrap_or_else(|| {
                     let base = name.rsplit('/').next().unwrap_or(&name);
                     Symbol::from(base.trim_start_matches('_'))
