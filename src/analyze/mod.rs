@@ -63,6 +63,8 @@ pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
 mod dirty_retype;
 mod typing_mode;
 mod inferred_types;
+#[cfg(test)]
+mod writer_laws;
 pub mod inquiry;
 pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
@@ -8479,7 +8481,12 @@ fn walk_ivar_assignments(
         // Assign arm never sees it. Fold a statically resolvable name
         // here so the controller→view channel harvests the write.
         ExprNode::Send { recv, method, args, block, .. } => {
-            ivar_set::harvest_ivar_set(recv, method, args, env, out);
+            if let Some(name) = ivar_set::harvest_ivar_set(recv, method, args, env, out) {
+                // Keep the same cut policy: join the whole body before bounding.
+                if std::env::var("RH_REFLECT_BOUND").as_deref() == Ok("1") {
+                    walk.touched.insert(name);
+                }
+            }
             if let Some(r) = recv {
                 walk_ivar_assignments(r, out, env, walk);
             }

@@ -48,6 +48,15 @@ const MAX_DEPTH: usize = 16;
 /// Type nodes a carried type may hold.
 const MAX_NODES: usize = 512;
 
+#[cfg(test)]
+mod writer_law_tests;
+#[cfg(test)]
+mod writer_law_partitions;
+#[cfg(test)]
+mod writer_law_tagged;
+#[cfg(test)]
+mod writer_law_entrance_coverage;
+
 /// `ty` within [`MAX_DEPTH`] and [`MAX_NODES`]; unchanged when it already is.
 pub(super) fn bound(ty: Ty) -> Ty {
     let mut budget = MAX_NODES;
