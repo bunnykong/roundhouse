@@ -76,7 +76,8 @@ impl Fixture {
             .env("RH_FIXPOINT_DIGEST", "1")
             .env("NO_COLOR", "1");
         if let Some(cache) = cache {
-            command.env("RH_WARM", cache).env("RH_WARM_SHADOW", "1");
+            command.env("RH_WARM", cache).env("RH_WARM_SHADOW", "1")
+                .env("RH_WARM_FP_AUDIT", "1");
         }
         if timings {
             command.env("RH_WARM_TIMINGS", "1");
@@ -102,6 +103,10 @@ impl Fixture {
         if cache.is_some() {
             assert_eq!(report["shadow"], "pass", "{report}");
             assert_eq!(report["warm_digest"], report["cold_digest"], "{report}");
+            let counters = &report["fingerprint_components"]["counters"];
+            assert!(counters["input_audit_comparisons"].as_u64().unwrap() > 0, "{report}");
+            assert_eq!(counters["input_calls"], counters["input_audit_comparisons"]);
+            assert_eq!(counters["input_calls"], counters["guard_audit_comparisons"]);
         }
         report
     }
@@ -208,6 +213,24 @@ fn adding_a_method_invalidates_a_recorded_missing_lookup() {
     let f = Fixture::new("add", "class Chain\ndef link0\nadded\nend\nend\n");
     let cache = f.seed();
     f.edit("class Chain\ndef link0\nadded\nend\ndef added\n1\nend\nend\n");
+    f.compare(&cache);
+}
+
+#[test]
+fn alias_source_mutation_is_audited_and_matches_cold() {
+    let f = Fixture::new("alias-audit", "module Left\ndef answer\n1\nend\nend\nmodule Right\ndef answer\n'right'\nend\nend\nclass Chain\ninclude Left\ndef link0\nanswer\nend\nend\n");
+    let cache = f.seed();
+    f.compare(&cache);
+    f.edit("module Left\ndef answer\n1\nend\nend\nmodule Right\ndef answer\n'right'\nend\nend\nclass Chain\ninclude Right\ndef link0\nanswer\nend\nend\n");
+    f.compare(&cache);
+}
+
+#[test]
+fn receiver_side_mutation_is_audited_and_matches_cold() {
+    let f = Fixture::new("side-audit", "class Chain\ndef self.answer\n1\nend\ndef answer\n'instance'\nend\ndef link0\nChain.answer\nend\nend\n");
+    let cache = f.seed();
+    f.compare(&cache);
+    f.edit("class Chain\ndef self.answer\n1\nend\ndef answer\n'instance'\nend\ndef link0\nanswer\nend\nend\n");
     f.compare(&cache);
 }
 

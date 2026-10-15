@@ -22,9 +22,11 @@ use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
 mod fingerprint;
+mod components;
 mod profile;
 mod wire;
 pub(crate) use profile::{Phase, phase};
+pub(crate) use components::{Extra, extra};
 use fingerprint::{class_hash, inputs};
 use wire::{SiteMap, encode};
 
@@ -201,6 +203,7 @@ pub(crate) fn start(app: &App) -> Result<bool, String> {
     }
     let dir = PathBuf::from(dir);
     profile::start();
+    components::start();
     let environment = fingerprint::environment(app);
     let cache = Cache {
         schema: 2,
@@ -344,6 +347,7 @@ pub(crate) struct Pending {
     cache: Cache,
     pub(crate) stats: Stats,
     pub(crate) profile: Option<Value>,
+    pub(crate) fingerprints: Value,
 }
 
 /// Stop recording before starting the cold shadow. The previous cache is
@@ -358,8 +362,10 @@ pub(crate) fn stop() -> Option<Pending> {
             cache: s.cache,
             stats: s.stats,
             profile: None,
+            fingerprints: Value::Null,
         };
         let cleanup = phase(Phase::Cleanup);
+        pending.fingerprints = components::stop();
         drop(s.old);
         drop(s.units);
         drop(s.sites);
@@ -367,6 +373,9 @@ pub(crate) fn stop() -> Option<Pending> {
         drop(s.classes_by_idx);
         drop(cleanup);
         pending.profile = profile::stop();
+        if let Some(profile) = pending.profile.as_mut() {
+            profile["fingerprint_components"] = pending.fingerprints.clone();
+        }
         pending
     })
 }
@@ -495,7 +504,7 @@ impl Evaluation {
         expr: &Expr,
         ctx: &Ctx,
         classes: &HashMap<ClassId, ClassInfo>,
-        extra: Value,
+        extra: Option<Extra>,
     ) -> Option<Self> {
         if !ACTIVE.load(Ordering::Relaxed) {
             return None;
@@ -519,6 +528,7 @@ impl Evaluation {
         if !outer {
             return Some(eval);
         }
+        let extra = extra.expect("outer warm evaluation needs extra");
         let guard = phase(Phase::Guard);
         SESSION.with(|s| {
             let mut s = s.borrow_mut();
@@ -531,7 +541,7 @@ impl Evaluation {
                     .collect();
             }
         });
-        let input = inputs(expr, ctx, classes, &extra);
+        let (input, original_input) = inputs(expr, ctx, classes, &extra);
         let candidate = SESSION.with(|s| {
             let mut s = s.borrow_mut();
             let s = s.as_mut().unwrap();
@@ -559,8 +569,18 @@ impl Evaluation {
             candidate
         });
         let covered = candidate.as_ref().is_some_and(|r| {
-            r.input == input && fingerprint::covered(&r.reads, ctx, classes, &extra)
+            r.input == input && fingerprint::covered(&r.reads, ctx, classes, &extra.value)
         });
+        components::count(if covered { "guard_accepts" } else { "guard_rejects" }, 1);
+        if let Some(original_input) = original_input {
+            let _audit = phase(Phase::FpAudit);
+            let original_covered = candidate.as_ref().is_some_and(|r| {
+                r.input == original_input && fingerprint::covered(&r.reads, ctx, classes, extra.original.as_ref().unwrap())
+            });
+            assert_eq!(covered, original_covered, "RH_WARM_FP_AUDIT: guard decision");
+            components::count("guard_audit_comparisons", 1);
+            components::count(if covered { "audited_guard_accepts" } else { "audited_guard_rejects" }, 1);
+        }
         // ConstScope guards can call S3's recorder. They are validation,
         // not reads made by the transfer, so discard this scratch set.
         let _ = super::sccq::warm_rec_take();
