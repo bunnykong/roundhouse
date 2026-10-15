@@ -56,6 +56,10 @@ mod writer_law_partitions;
 mod writer_law_tagged;
 #[cfg(test)]
 mod writer_law_entrance_coverage;
+#[cfg(test)]
+mod writer_law_container_entrances;
+#[cfg(test)]
+mod writer_law_container_neighbours;
 
 /// `ty` within [`MAX_DEPTH`] and [`MAX_NODES`]; unchanged when it already is.
 pub(super) fn bound(ty: Ty) -> Ty {

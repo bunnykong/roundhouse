@@ -8374,6 +8374,38 @@ struct IvarWalk {
     touched: BTreeSet<Symbol>,
     /// `@ivar[k] = v` value types, joined into their slots at the end.
     index_writes: Vec<(Symbol, Ty)>,
+    /// Evaluated child entrances do not execute bare closure bodies.
+    /// Keep the inherited traversal policy outside the new entrances unchanged.
+    evaluated_children: bool,
+}
+
+fn walk_ivar_evaluated_child(
+    expr: &Expr,
+    out: &mut HashMap<Symbol, Ty>,
+    env: &ivar_set::IvarNameEnv<'_>,
+    walk: &mut IvarWalk,
+) {
+    let previous = walk.evaluated_children;
+    walk.evaluated_children = true;
+    walk_ivar_assignments(expr, out, env, walk);
+    walk.evaluated_children = previous;
+}
+
+fn walk_ivar_call_block(
+    block: &Expr,
+    out: &mut HashMap<Symbol, Ty>,
+    env: &ivar_set::IvarNameEnv<'_>,
+    walk: &mut IvarWalk,
+) {
+    // An attached block may execute: retain the existing may-write summary.
+    // A Lambda encountered as an ordinary value is only constructed.
+    if walk.evaluated_children {
+        if let ExprNode::Lambda { body, .. } = &*block.node {
+            walk_ivar_assignments(body, out, env, walk);
+            return;
+        }
+    }
+    walk_ivar_assignments(block, out, env, walk);
 }
 
 fn walk_ivar_assignments(
@@ -8384,6 +8416,9 @@ fn walk_ivar_assignments(
 ) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            if std::env::var("RH_REFLECT_BOUND").as_deref() == Ok("1") {
+                walk_ivar_evaluated_child(value, out, env, walk);
+            }
             if let Some(ty) = value.ty.clone() {
                 // Union with existing entry so repeated assignments to
                 // the same ivar accumulate (rather than the last write
@@ -8401,6 +8436,9 @@ fn walk_ivar_assignments(
         // a plain assignment so a controller's `@story ||= Story.find(..)`
         // still flows its type to before_action seeds and views.
         ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
+            if std::env::var("RH_REFLECT_BOUND").as_deref() == Ok("1") {
+                walk_ivar_evaluated_child(value, out, env, walk);
+            }
             if let Some(ty) = value.ty.clone() {
                 let merged = match out.remove(name) {
                     Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),
@@ -8469,7 +8507,7 @@ fn walk_ivar_assignments(
                 walk_ivar_assignments(a, out, env, walk);
             }
             if let Some(b) = block {
-                walk_ivar_assignments(b, out, env, walk);
+                walk_ivar_call_block(b, out, env, walk);
             }
         }
         // Walk into other Send forms so nested `[]=` writes (e.g.
@@ -8494,8 +8532,32 @@ fn walk_ivar_assignments(
                 walk_ivar_assignments(a, out, env, walk);
             }
             if let Some(b) = block {
-                walk_ivar_assignments(b, out, env, walk);
+                walk_ivar_call_block(b, out, env, walk);
             }
+        }
+        // Ruby evaluates every Array element, Hash key/value and splat operand.
+        // Recurse explicitly: generic child traversal would also include bodies
+        // or syntax-only operands that these container expressions do not run.
+        // Keep flag-off behavior and the complete-body cut boundary unchanged.
+        ExprNode::Array { elements, .. }
+            if std::env::var("RH_REFLECT_BOUND").as_deref() == Ok("1") =>
+        {
+            for element in elements {
+                walk_ivar_evaluated_child(element, out, env, walk);
+            }
+        }
+        ExprNode::Hash { entries, .. } | ExprNode::ForwardKeywordsWithPairs { entries }
+            if std::env::var("RH_REFLECT_BOUND").as_deref() == Ok("1") =>
+        {
+            for (key, value) in entries {
+                walk_ivar_evaluated_child(key, out, env, walk);
+                walk_ivar_evaluated_child(value, out, env, walk);
+            }
+        }
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value }
+            if std::env::var("RH_REFLECT_BOUND").as_deref() == Ok("1") =>
+        {
+            walk_ivar_evaluated_child(value, out, env, walk);
         }
         ExprNode::Seq { exprs } => {
             for e in exprs {
@@ -8550,7 +8612,9 @@ fn walk_ivar_assignments(
                 walk_ivar_assignments(e, out, env, walk);
             }
         }
-        ExprNode::Lambda { body, .. } => walk_ivar_assignments(body, out, env, walk),
+        ExprNode::Lambda { body, .. } if !walk.evaluated_children => {
+            walk_ivar_assignments(body, out, env, walk);
+        }
         ExprNode::Return { value } => walk_ivar_assignments(value, out, env, walk),
         // Any other assignment target (local var, constant, attribute) that
         // wasn't matched by the ivar/index arms above. We record no ivar for

@@ -16,6 +16,15 @@ const ORDERS: [[usize; 3]; 6] = [
     [2, 1, 0],
 ];
 
+pub(super) fn check_sampled_membership(input: &Ty, output: &Ty) -> usize {
+    let witnesses = values(input);
+    for value in &witnesses {
+        assert!(accepts(input, value), "invalid finite witness");
+        assert!(accepts(output, value), "container entrance lost a sampled value: {value:?}");
+    }
+    witnesses.len()
+}
+
 fn plain(t: Ty) -> Expr {
     laws::expr(ExprNode::Assign {
         target: LValue::Ivar {
