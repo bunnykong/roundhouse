@@ -6,9 +6,15 @@ use roundhouse::project::BuildTarget;
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
-        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
         .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
-        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
 }
 
 const IO: &str = r#"
@@ -120,17 +126,132 @@ rescue ArgumentError => dump_error
 end
 "#;
 
+// A destination can be absent directly or after one to_io conversion. Exercise
+// every overload with scalars, arrays, hashes and alternating nested containers.
+const FALSEY: &str = r#"
+require "json"
+class JsonFalseDestination
+  attr_reader :conversions
+  def initialize
+    @conversions = 0
+  end
+  def to_io
+    @conversions += 1
+    false
+  end
+end
+class JsonNilDestination
+  def to_io
+    nil
+  end
+end
+class JsonInheritedFalseDestination < JsonFalseDestination
+end
+module JsonFalseConversion
+  def to_io
+    false
+  end
+end
+class JsonIncludedFalseDestination
+  include JsonFalseConversion
+end
+class JsonAliasDestination
+  def absent_destination
+    false
+  end
+  alias to_io absent_destination
+end
+class JsonAliasMethodDestination
+  def absent_destination
+    nil
+  end
+  alias_method :to_io, :absent_destination
+end
+class JsonConvertedDestination
+  def initialize(io)
+    @io = io
+  end
+  def to_io
+    @io
+  end
+end
+JsonEncoder = JSON
+destinations = [false, nil, JsonFalseDestination.new, JsonNilDestination.new,
+                JsonInheritedFalseDestination.new, JsonIncludedFalseDestination.new,
+                JsonAliasDestination.new, JsonAliasMethodDestination.new]
+destinations.each do |destination|
+  [nil, false, 7, [], [1], {"a" => [1]}, [{"a" => [1]}]].each do |value|
+    p JSON.dump(value, destination)
+    p JSON.dump(value, destination, 4)
+    p JSON.dump(value, destination, 0)
+    p JSON.dump(value, destination, false)
+    p JSON.dump(value, destination, {max_nesting: 4})
+    p JSON.dump(value, destination, nil, {max_nesting: 4})
+    p JSON.dump(value, destination, 1, {max_nesting: false})
+  end
+  begin
+    JSON.dump([{"a" => [1]}], destination, 1)
+  rescue ArgumentError => dump_error
+    puts dump_error.class.to_s + ":" + dump_error.message
+  end
+end
+adapter = JsonFalseDestination.new
+destination_alias = adapter
+p ::JSON.dump([1], destination_alias, 2)
+p adapter.conversions
+p JsonEncoder.dump([1], false, 2)
+p JSON.dump(JSON.dump([1], false, 2), false, 2)
+# Truthy non-writers still fail, including after exactly one conversion.
+[true, 0, "", JsonFalseDestination.new].each do |value|
+  begin
+    JSON.dump([1], JsonConvertedDestination.new(value), 2)
+  rescue NoMethodError => dump_error
+    puts dump_error.class.to_s
+  end
+end
+[true, 0, ""].each do |destination|
+  begin
+    JSON.dump([1], destination, 2)
+  rescue NoMethodError => dump_error
+    puts dump_error.class.to_s
+  end
+end
+"#;
+
+// These limits used to gain unintended coercions: Float#to_i raises for
+// Infinity/NaN, and Rational#to_i invents a limit the oracle does not enforce.
+// Fractional Float limits remain an existing bundled-encoder limitation.
+const NUMERIC_BOUNDARIES: &str = r#"
+require "json"
+require "stringio"
+[Float::INFINITY, -Float::INFINITY, Float::NAN, Rational(1, 1), Rational(-1, 1)].each do |limit|
+  value = [{"a" => [1]}]
+  p JSON.dump(value, limit)
+  p JSON.dump(value, nil, limit)
+  p JSON.dump(value, {max_nesting: limit})
+  p JSON.dump(value, nil, {max_nesting: limit})
+  p JSON.dump(value, nil, nil, {max_nesting: limit})
+  stream = StringIO.new
+  p JSON.dump(value, stream, limit).equal?(stream)
+  p stream.string
+  p JSON.dump(value, nil, 1, {max_nesting: limit})
+end
+"#;
+
 fn compare_native(script: &str) {
     let oracle = app().run_ruby(script);
     oracle.assert_passes();
     let native = app().run_spinel_with_rbs(script);
     native.assert_passes();
-    assert_eq!(native.stdout, oracle.stdout, "native JSON.dump differs from CRuby");
+    assert_eq!(
+        native.stdout, oracle.stdout,
+        "native JSON.dump differs from CRuby"
+    );
 }
 
 #[test]
 fn cruby_dump_contracts() {
-    for script in [IO, LIMIT, OPTIONS] {
+    for script in [IO, LIMIT, OPTIONS, FALSEY, NUMERIC_BOUNDARIES] {
         app().run_ruby(script).assert_passes();
     }
 }
@@ -154,8 +275,18 @@ fn dump_distinguishes_options_from_invalid_nesting_and_arity() {
 }
 
 #[test]
-fn dump_return_types_follow_the_destination() {
-    let (emitted, errors) = app().write("app/services/json_probe.rb", r#"
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_treats_falsey_destinations_as_absent() {
+    compare_native(FALSEY);
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_does_not_coerce_noninteger_limits() {
+    compare_native(NUMERIC_BOUNDARIES);
+}
+
+const RETURN_TYPES: &str = r#"
 require "json"
 require "stringio"
 class JsonDestination
@@ -168,7 +299,48 @@ class JsonAbsentDestination
     nil
   end
 end
+class JsonFalseDestination
+  def to_io
+    false
+  end
+end
+class JsonInheritedFalseDestination < JsonFalseDestination
+end
+module JsonFalseConversion
+  def to_io
+    false
+  end
+end
+class JsonIncludedFalseDestination
+  include JsonFalseConversion
+end
+class JsonMaybeDestination
+  def initialize(flag)
+    @flag = flag
+  end
+  def to_io
+    @flag ? StringIO.new : false
+  end
+end
+class JsonThreeWayDestination
+  def initialize(writer, absent)
+    @writer = writer
+    @absent = absent
+  end
+  def to_io
+    @writer ? StringIO.new : (@absent ? false : nil)
+  end
+end
+class JsonFalseOrNilDestination
+  def initialize(flag)
+    @flag = flag
+  end
+  def to_io
+    @flag ? false : nil
+  end
+end
 class JsonProbe
+  JsonEncoder = JSON
   def self.text
     JSON.dump({"a" => 1})
   end
@@ -193,22 +365,155 @@ class JsonProbe
   def self.write_count
     JSON.dump({}, StringIO.new).write("more")
   end
+  def self.false_destination
+    JSON.dump([1], false, 2)
+  end
+  def self.false_options
+    JSON.dump({"a" => [1]}, false, {max_nesting: 2})
+  end
+  def self.false_fourth
+    JSON.dump([1], false, nil, {max_nesting: 2})
+  end
+  def self.false_alias
+    destination = false
+    ::JSON.dump([1], destination, 2)
+  end
+  def self.receiver_alias
+    JsonEncoder.dump([1], false, 2)
+  end
+  def self.false_adapter
+    JSON.dump([1], JsonFalseDestination.new, 2)
+  end
+  def self.false_inherited
+    JSON.dump([1], JsonInheritedFalseDestination.new, 2)
+  end
+  def self.false_included
+    JSON.dump([1], JsonIncludedFalseDestination.new, 2)
+  end
+  def self.false_nested
+    JSON.dump(JSON.dump([1], false, 2), false, 2)
+  end
+  def self.false_count
+    JSON.dump([1], JsonFalseDestination.new, 2).bytesize
+  end
+  def self.false_or_nil_adapter(flag)
+    JSON.dump([1], JsonFalseOrNilDestination.new(flag), 2)
+  end
+  def self.maybe_false_stream(flag)
+    JSON.dump([1], flag ? StringIO.new : false, 2)
+  end
+  def self.maybe_converted(flag)
+    JSON.dump([1], JsonMaybeDestination.new(flag), 2)
+  end
+  def self.three_way_converted(writer, absent)
+    JSON.dump([1], JsonThreeWayDestination.new(writer, absent), 2)
+  end
   def self.unknown(io)
     JSON.dump({}, io)
   end
 end
-"#).emit(BuildTarget::Spinel);
+"#;
+
+#[test]
+fn dump_return_types_follow_the_destination() {
+    let (emitted, errors) = app()
+        .write("app/services/json_probe.rb", RETURN_TYPES)
+        .emit(BuildTarget::Spinel);
     assert!(errors.is_empty(), "{}", errors.join("\n"));
     assert!(emitted.join("runtime/json_impl.rbs").is_file());
     let rbs = std::fs::read_to_string(emitted.join("app/models/json_probe.rbs")).unwrap();
-    for name in ["text", "limit", "options", "absent"] {
-        assert!(rbs.contains(&format!("def self.{name}: () -> String\n")), "{rbs}");
+    for name in [
+        "text",
+        "limit",
+        "options",
+        "absent",
+        "false_destination",
+        "false_options",
+        "false_fourth",
+        "false_alias",
+        "receiver_alias",
+        "false_adapter",
+        "false_inherited",
+        "false_included",
+        "false_nested",
+    ] {
+        assert!(
+            rbs.contains(&format!("def self.{name}: () -> String\n")),
+            "{rbs}"
+        );
     }
     for name in ["stream", "converted"] {
-        assert!(rbs.contains(&format!("def self.{name}: () -> StringIO\n")), "{rbs}");
+        assert!(
+            rbs.contains(&format!("def self.{name}: () -> StringIO\n")),
+            "{rbs}"
+        );
     }
-    assert!(rbs.contains("def self.write_count: () -> Integer\n"), "{rbs}");
-    assert!(rbs.contains("def self.unknown: (untyped io) -> untyped\n"), "{rbs}");
-    let optional = rbs.lines().find(|line| line.contains("def self.maybe_stream:")).unwrap();
-    assert!(optional.contains("String | StringIO") || optional.contains("StringIO | String"), "{rbs}");
+    assert!(
+        rbs.contains("def self.write_count: () -> Integer\n"),
+        "{rbs}"
+    );
+    assert!(
+        rbs.contains("def self.false_count: () -> Integer\n"),
+        "{rbs}"
+    );
+    let absent = rbs
+        .lines()
+        .find(|line| line.contains("def self.false_or_nil_adapter:"))
+        .unwrap();
+    assert!(absent.ends_with(" -> String"), "{rbs}");
+    assert!(
+        rbs.contains("def self.unknown: (untyped io) -> untyped\n"),
+        "{rbs}"
+    );
+    for name in [
+        "maybe_stream",
+        "maybe_false_stream",
+        "maybe_converted",
+        "three_way_converted",
+    ] {
+        let optional = rbs
+            .lines()
+            .find(|line| line.contains(&format!("def self.{name}:")))
+            .unwrap();
+        assert!(
+            optional.contains("String | StringIO") || optional.contains("StringIO | String"),
+            "{rbs}"
+        );
+        assert!(
+            !optional.contains("bool") && !optional.contains("nil"),
+            "{rbs}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_falsey_returns_execute_with_application_sidecars() {
+    let script = r#"
+p JsonProbe.false_destination
+p JsonProbe.false_options
+p JsonProbe.false_fourth
+p JsonProbe.false_alias
+p JsonProbe.receiver_alias
+p JsonProbe.false_adapter
+p JsonProbe.false_inherited
+p JsonProbe.false_included
+p JsonProbe.false_nested
+p JsonProbe.false_count
+p JsonProbe.false_or_nil_adapter(true)
+p JsonProbe.false_or_nil_adapter(false)
+p JsonProbe.maybe_false_stream(false)
+p JsonProbe.maybe_false_stream(true).string
+p JsonProbe.maybe_converted(false)
+p JsonProbe.maybe_converted(true).string
+p JsonProbe.three_way_converted(false, true)
+p JsonProbe.three_way_converted(false, false)
+p JsonProbe.three_way_converted(true, false).string
+"#;
+    let overlay = || app().write("app/services/json_probe.rb", RETURN_TYPES);
+    let oracle = overlay().run_ruby(script);
+    oracle.assert_passes();
+    let native = overlay().run_spinel_with_rbs(script);
+    native.assert_passes();
+    assert_eq!(native.stdout, oracle.stdout);
 }

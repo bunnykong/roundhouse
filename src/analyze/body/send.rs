@@ -989,9 +989,11 @@ impl<'a> BodyTyper<'a> {
             Ty::Class { id, .. } if self.defines_instance_method(id, &Symbol::from("to_io")) => {
                 let converted = self.dispatch_on(Some(io), &Symbol::from("to_io"), None, &[], true);
                 match converted {
-                    Ty::Nil => Ty::Str,
+                    // Both nil and false select the generator's no-IO mode.
+                    // Bool also admits true, which raises rather than returning.
+                    Ty::Nil | Ty::Bool => Ty::Str,
                     Ty::Union { variants } => super::union_many(variants.iter().map(|ty| {
-                        if matches!(ty, Ty::Nil) { Ty::Str } else { ty.clone() }
+                        if matches!(ty, Ty::Nil | Ty::Bool) { Ty::Str } else { ty.clone() }
                     }).collect()),
                     ty => ty,
                 }

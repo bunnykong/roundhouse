@@ -66,11 +66,13 @@ if RUBY_ENGINE == "spinel"
       opts = opts.merge(max_nesting: limit) if limit
       opts = opts.merge(options) if options
       nesting = opts[:max_nesting]
-      # json's generator accepts numeric limits; other values disable it.
-      nesting = nesting.is_a?(Numeric) ? nesting.to_i : 0
+      # Enforce integer limits without coercing other Numeric values: to_i
+      # would reject Infinity/NaN and impose a new limit on Rational values.
+      # Fractional Float limits still follow the bundled encoder's behavior.
+      nesting = nesting.is_a?(Integer) ? nesting : 0
       check_dump_nesting(obj, nesting, 0) unless nesting == 0
       json = generate(obj, opts)
-      return json if anIO.nil?
+      return json unless anIO
       anIO.write(json)
       anIO.flush
       anIO
