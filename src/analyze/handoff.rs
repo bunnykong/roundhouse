@@ -346,7 +346,9 @@ pub(crate) fn settle_pending(t: &Ty, memo: &mut HashMap<usize, Option<Ty>>) -> O
         return done.clone();
     }
     let out = match t {
-        Ty::Untyped { why: Provenance::Pending } => Some(Ty::gradual()),
+        Ty::Untyped { why: Provenance::Pending } => Some(if super::producer_evidence::on() {
+            Ty::untyped(Provenance::Pending.union(Provenance::Gradual))
+        } else { Ty::gradual() }),
         Ty::Array { elem } => settle_pending(elem, memo).map(|e| Ty::Array { elem: Arc::new(e) }),
         Ty::Hash { key, value } => {
             let (k, v) = (settle_pending(key, memo), settle_pending(value, memo));

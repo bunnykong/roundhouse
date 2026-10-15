@@ -47,6 +47,8 @@ pub(crate) mod forwarding;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
+pub mod producer_evidence;
+mod parameter_conservation;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod precision;
@@ -1157,6 +1159,7 @@ impl Analyzer {
     /// the refined registry. Iterates to a fixed point (capped; see
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
+        producer_evidence::reset(&app.sources);
         self.fixpoint_checks = fixpoint_check::Checks::start();
         det::reset();
         errgate::reset();
@@ -1631,6 +1634,7 @@ impl Analyzer {
         }
         det::report();
         self.report_errgate(app);
+        producer_evidence::report();
     }
 
     /// With the add-only rules or the fold, what is still pending when
@@ -4866,7 +4870,9 @@ impl Analyzer {
     ) {
         {
             let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
+        let _evidence = producer_evidence::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class, method.body.span);
         let ret = self.method_return_ty(class_id, method);
+        producer_evidence::input(ret.as_ref());
             let target = match method.receiver {
                 crate::dialect::MethodReceiver::Instance => {
                     &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -4930,7 +4936,9 @@ impl Analyzer {
     /// One library method's harvest (see [`Self::harvest_method_returns`]).
     fn harvest_lib_method(&mut self, class_id: &ClassId, method: &crate::dialect::MethodDef) {
         let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
+        let _evidence = producer_evidence::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class, method.body.span);
         let ret = self.method_return_ty(class_id, method);
+        producer_evidence::input(ret.as_ref());
         let target = match method.receiver {
             crate::dialect::MethodReceiver::Instance => {
                 &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -4969,6 +4977,7 @@ impl Analyzer {
         if harvest_tests {
             for module in &app.test_modules {
                 for method in &module.helpers {
+                    let _evidence = producer_evidence::writer(&module.name, &method.name, method.receiver == crate::dialect::MethodReceiver::Class, method.body.span);
                     let ret = self.method_return_ty(&module.name, method);
                     let class = self.classes.entry(module.name.clone()).or_default();
                     let table = match method.receiver {
@@ -4999,12 +5008,16 @@ impl Analyzer {
             // rather than "no known method".
             for method in controller.class_methods() {
                 let _writer = errgate::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class);
+        let _evidence = producer_evidence::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class, method.body.span);
                 let ret = self.method_return_ty(class_id, method);
+        producer_evidence::input(ret.as_ref());
                 let target = &mut self.classes.entry(class_id.clone()).or_default().class_methods;
                 Self::register_method_return(target, &method.name, ret.as_ref());
             }
             for action in controller.actions() {
                 let _writer = errgate::writer(class_id, &action.name, false);
+                let _evidence = producer_evidence::writer(class_id, &action.name, false, action.body.span);
+                producer_evidence::input(action.body.ty.as_ref());
                 let Some(body_ty) =
                     tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
                 else {
@@ -5579,6 +5592,7 @@ impl Analyzer {
         method: &Symbol,
         body_ty: Option<&Ty>,
     ) {
+        producer_evidence::input(body_ty);
         match body_ty {
             Some(t) if !matches!(t, Ty::Var { .. }) => {
                 Self::insert_inferred_return(table, method, t.clone());
@@ -5827,7 +5841,10 @@ impl Analyzer {
         defined: &BTreeSet<ParamKey>,
     ) -> Option<(ParamKey, Vec<Ty>)> {
         let key = self.resolve_param_key(class_id, method, recv, defined)?;
+        let sources = kw_tys.sources.clone();
+        let positional = !kw_tys.group;
         let arg_tys = Self::place_keyword_args(params_by_method.get(&key), arg_tys, kw_tys);
+        producer_evidence::parameter_destination(&key, &sources, positional, &arg_tys);
         Some((key, arg_tys))
     }
 
@@ -6380,6 +6397,9 @@ impl Analyzer {
                     }
                     _ => SiteRecv::Instance,
                 };
+                let sources = producer_evidence::parameter_call(
+                    self_class, &recv_classes, method, &format!("{site_recv:?}"), expr.span, args,
+                );
                 if !recv_classes.is_empty() {
                     let arg_tys: Vec<Ty> = args
                         .iter()
@@ -6395,7 +6415,7 @@ impl Analyzer {
                             // the typed sites' information. Scoped to
                             // the helper channel; explicit-receiver and
                             // own-class channels keep their semantics.
-                            if via_helper_index && matches!(t, Ty::Untyped { .. }) {
+                            if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
                                 Ty::Var { var: crate::ident::TyVar(0) }
                             } else {
                                 t
@@ -6419,7 +6439,7 @@ impl Analyzer {
                                             .ty
                                             .clone()
                                             .unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
-                                        let t = if via_helper_index && matches!(t, Ty::Untyped { .. }) {
+                                        let t = if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
                                             Ty::Var { var: crate::ident::TyVar(0) }
                                         } else {
                                             t
@@ -6474,7 +6494,7 @@ impl Analyzer {
                         args.last().map(|a| &*a.node),
                         Some(ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. })
                     );
-                    let kw_tys = SiteKeywords { group, keys, splat, anonymous_forward };
+                    let kw_tys = SiteKeywords { group, keys, splat, anonymous_forward, sources };
                     // `Klass.new(a, b)` hands its arguments to
                     // `initialize` — that is all `Class#new` does with
                     // them — so the site is evidence for the
@@ -7517,12 +7537,22 @@ pub(crate) fn fold_param_observations(
     let mut touched: BTreeSet<ParamKey> = BTreeSet::new();
     for (key, tys) in observations {
         let entry = rows.entry(key.clone()).or_default();
+        let previous_len = entry.len();
         if entry.len() < tys.len() {
             entry.resize(tys.len(), Ty::Var { var: crate::ident::TyVar(0) });
         }
-        for (slot, observed) in entry.iter_mut().zip(tys.into_iter()) {
+        for (position, (slot, observed)) in entry.iter_mut().zip(tys.into_iter()).enumerate() {
+            let _audit = producer_evidence::parameter_context(&key, position, "join");
             let old = det::descent_on().then(|| slot.clone());
-            let next = unify_param_ty(std::mem::replace(slot, Ty::Bottom), observed);
+            let next = if parameter_conservation::on() && position >= previous_len {
+                // This Var was just allocated by resize, never observed from Ruby.
+                // Discharge only that empty seed, not a caller's ambiguous Var.
+                let next = parameter_conservation::initialize(observed.clone());
+                producer_evidence::parameter_seed(&observed, &next);
+                next
+            } else {
+                unify_param_ty(std::mem::replace(slot, Ty::Bottom), observed)
+            };
             det::note("params.unify", old.as_ref(), &next);
             *slot = next;
         }
@@ -7530,9 +7560,14 @@ pub(crate) fn fold_param_observations(
     }
     for key in touched {
         if let Some(row) = rows.get_mut(&key) {
-            for slot in row.iter_mut() {
+            for (position, slot) in row.iter_mut().enumerate() {
+                let _audit = producer_evidence::parameter_context(&key, position, "bound");
+                let before = producer_evidence::on().then(|| slot.clone());
                 let old = det::descent_on().then(|| slot.clone());
                 let next = fixpoint_bound::bound(std::mem::replace(slot, Ty::Bottom));
+                if let Some(before) = before {
+                    producer_evidence::parameter_merge(&before, &Ty::Bottom, &next);
+                }
                 det::note("params.bound", old.as_ref(), &next);
                 *slot = next;
             }
@@ -7575,6 +7610,17 @@ pub(crate) fn fold_param_observations(
 /// arm, merging them must keep gradual (gradual wins), or the result
 /// depends on the grouping again and the join stops being associative.
 pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
+    let join = if parameter_conservation::on() {
+        parameter_conservation::join
+    } else {
+        unify_param_ty_raw
+    };
+    if !producer_evidence::on() { return join(stored, observed); }
+    let result=join(stored.clone(), observed.clone());
+    producer_evidence::parameter_merge(&stored,&observed,&result);
+    result
+}
+fn unify_param_ty_raw(stored: Ty, observed: Ty) -> Ty {
     let joined = crate::analyze::body::drop_pending_arms(crate::analyze::body::union_of(stored, observed));
     let Ty::Union { variants } = joined else {
         return joined;
@@ -7901,6 +7947,8 @@ type SendSite = (ClassId, Symbol, Vec<Ty>, SiteKeywords, SiteRecv);
 /// A call's trailing keyword arguments as `collect_send_sites` saw them.
 #[derive(Clone, Debug)]
 struct SiteKeywords {
+    /// Raw source writer candidates for audit only; never affects routing.
+    sources: Vec<String>,
     /// The last argument is the keyword group (`k: v` or `**splat`).
     group: bool,
     /// Its `key: value` pairs, by name; empty when any key is not a
