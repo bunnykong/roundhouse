@@ -49,8 +49,10 @@ fn main() -> ExitCode {
             for (alias, spec) in selections {
                 let class = ClassId(Symbol::from(spec[0].as_str().unwrap()));
                 let method = Symbol::from(spec[1].as_str().unwrap());
+                let param_row;
                 let ty = if let Some(index) = spec[2].as_u64() {
-                    analyzer.inferred_param_types(&class, &method).and_then(|row| row.get(index as usize))
+                    param_row = analyzer.inferred_param_types(&class, &method);
+                    param_row.as_deref().and_then(|row| row.get(index as usize))
                 } else if spec[2].as_str() == Some("self_return") {
                     analyzer.class_registry().get(&class).and_then(|c| c.class_methods.get(&method))
                 } else {
@@ -99,7 +101,7 @@ fn main() -> ExitCode {
             let mut methods: Vec<_> = info.instance_methods.iter().collect();
             methods.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
             for (m, ret) in methods {
-                let row = analyzer.inferred_param_types(&class, m).unwrap_or(&[]);
+                let row = analyzer.inferred_param_types(&class, m).unwrap_or_default();
                 let ps = row.iter().map(|t| render(t, var)).collect::<Vec<_>>().join("; ");
                 println!("{}#{}({}) -> {}", cname, m.as_str(), ps, render(ret, var));
             }

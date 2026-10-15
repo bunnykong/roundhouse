@@ -71,11 +71,13 @@ fn main() {
         let mut slots = BTreeMap::new();
         for (alias, s) in selected {
             let mut match_count = 0;
+            let param_row;
             let ty = if s.is_array() {
                 let class = ClassId(Symbol::from(s[0].as_str().unwrap()));
                 let method = Symbol::from(s[1].as_str().unwrap());
                 if let Some(index) = s[2].as_u64() {
-                    analyzer.inferred_param_types(&class, &method).and_then(|r| r.get(index as usize))
+                    param_row = analyzer.inferred_param_types(&class, &method);
+                    param_row.as_deref().and_then(|r| r.get(index as usize))
                 } else {
                     assert!(s[2] == "return" || s[2] == "self_return", "unknown legacy selector");
                     analyzer.class_registry().get(&class).and_then(|c| {

@@ -3066,7 +3066,7 @@ pub fn candidate_signature(
         .enumerate()
         .map(|(i, name)| crate::ty::Param {
             name: name.clone(),
-            ty: inferred.and_then(|ts| ts.get(i)).cloned().unwrap_or(Ty::gradual()).into(),
+            ty: inferred.as_ref().and_then(|ts| ts.get(i)).cloned().unwrap_or(Ty::gradual()).into(),
             kind: crate::ty::ParamKind::Required,
         })
         .collect();

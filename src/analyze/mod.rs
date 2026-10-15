@@ -1132,15 +1132,16 @@ impl Analyzer {
     /// site contributed. Read-only companion to [`Self::class_registry`]
     /// for consumers assembling full candidate signatures (the gap
     /// footers' pre-filled RBS).
-    pub fn inferred_param_types(&self, class: &ClassId, method: &Symbol) -> Option<&[Ty]> {
-        self.params_row(class, method).map(|v| v.as_slice())
+    pub fn inferred_param_types(&self, class: &ClassId, method: &Symbol) -> Option<std::borrow::Cow<'_, [Ty]>> {
+        self.params_row(class, method)
     }
 
     // Instance side first: a caller asking by name alone reads the `def` an instance runs, as it did before rows were keyed by side.
-    fn params_row(&self, class: &ClassId, method: &Symbol) -> Option<&Vec<Ty>> {
+    fn params_row(&self, class: &ClassId, method: &Symbol) -> Option<std::borrow::Cow<'_, [Ty]>> {
         [MethodReceiver::Instance, MethodReceiver::Class]
             .into_iter()
             .find_map(|side| self.inferred_params.get(&(class.clone(), method.clone(), side)))
+            .map(|row| provenance_reader_row(row))
     }
 
     /// How the fixpoint loops of the last [`Self::analyze`] ended; all
@@ -1561,7 +1562,7 @@ impl Analyzer {
         app.inferred_method_params = self
             .inferred_params
             .keys()
-            .filter_map(|(c, m, _)| Some(((c.clone(), m.clone()), self.params_row(c, m)?.clone())))
+            .filter_map(|(c, m, _)| Some(((c.clone(), m.clone()), self.params_row(c, m)?.into_owned())))
             .collect();
 
         // Render sites inside `app/helpers` modules seed partial locals
@@ -1623,6 +1624,18 @@ impl Analyzer {
         }
         self.fold_finish(app);
 
+        if std::env::var("RH_PROVENANCE_ROWDUMP").as_deref() == Ok("1")
+            && std::env::var("RH_PUBLIC_INPUT").as_deref() == Ok("1")
+        {
+            let rows: std::collections::BTreeMap<String, serde_json::Value> = self.inferred_params.iter()
+                .map(|(k, row)| (format!("{}|{}|{:?}", k.0.0.as_str(), k.1.as_str(), k.2), serde_json::json!({
+                    "ref": fold::in_reference_mode(&k.0, &k.1),
+                    "full": row.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>(),
+                    "known": row.iter().map(|t| format!("{:?}", t.clone().strip_unknown())).collect::<Vec<_>>(),
+                })))
+                .collect();
+            eprintln!("rh-parameter-rows: {}", serde_json::json!(rows));
+        }
         self.settle_pending(app);
 
         self.stamp_inferred_method_signatures(app);
@@ -1950,8 +1963,8 @@ impl Analyzer {
                     continue;
                 }
                 let key = (owner.clone(), method.name.clone(), method.receiver);
-                let inferred = self.inferred_params.get(&key);
-                let has_params = inferred
+                let inferred = self.inferred_params.get(&key).map(|row| provenance_reader_row(row));
+                let has_params = inferred.as_ref()
                     .is_some_and(|v| !v.iter().all(|t| matches!(t, Ty::Var { .. })));
 
                 // The registry first: `harvest_returns_to_registry`
@@ -2000,7 +2013,7 @@ impl Analyzer {
                         let ty = if p.rest {
                             Ty::unresolved()
                         } else {
-                            param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p)
+                            param_ty_with_default(inferred.as_ref().and_then(|v| v.get(i)).cloned(), p)
                                 .unwrap_or(Ty::unresolved())
                                 .subst_self(&owner_ty)
                         };
@@ -4540,7 +4553,7 @@ impl Analyzer {
         dsl_macro_host: bool,
     ) -> Ctx {
         let key = (class_id.clone(), method.name.clone(), method.receiver);
-        let observed = self.inferred_params.get(&key);
+        let observed = self.inferred_params.get(&key).map(|row| provenance_reader_row(row));
         let mut ctx = base.clone();
         ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
         ctx.instance_body = !ctx.class_side;
@@ -4574,7 +4587,7 @@ impl Analyzer {
                 ctx.local_bindings.insert(param.name.clone(), Ty::unresolved());
                 continue;
             }
-            let from_sites = observed.and_then(|v| v.get(i)).cloned();
+            let from_sites = observed.as_ref().and_then(|v| v.get(i)).cloned();
             let seeded = param_ty_with_default(from_sites, param);
             let declared = self.declared_param_ty(class_id, &method.name, positional, &param.name);
             let is_declared = declared.is_some();
@@ -4620,9 +4633,11 @@ impl Analyzer {
         block_param: Option<&Symbol>,
         rest_param: Option<&Symbol>,
     ) -> Ctx {
-        let own = self.inferred_params.get(&(class_id.clone(), action_name.clone(), MethodReceiver::Instance));
+        let own = self.inferred_params.get(&(class_id.clone(), action_name.clone(), MethodReceiver::Instance))
+            .map(|row| provenance_reader_row(row));
         let from_origin = origin
-            .and_then(|m| self.inferred_params.get(&(m.clone(), action_name.clone(), MethodReceiver::Instance)));
+            .and_then(|m| self.inferred_params.get(&(m.clone(), action_name.clone(), MethodReceiver::Instance)))
+            .map(|row| provenance_reader_row(row));
         let mut ctx = base.clone();
         ctx.instance_body = true;
         for (i, name) in params.fields.keys().enumerate() {
@@ -4630,7 +4645,7 @@ impl Analyzer {
                 ctx.local_bindings.insert(name.clone(), Ty::unresolved());
                 continue;
             }
-            let observed = [own, from_origin]
+            let observed = [own.as_deref(), from_origin.as_deref()]
                 .into_iter()
                 .flatten()
                 .filter_map(|v| v.get(i).cloned())
@@ -7620,6 +7635,16 @@ pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     producer_evidence::parameter_merge(&stored,&observed,&result);
     result
 }
+// The stored row retains contributions; only designated typing reads use this view.
+fn provenance_reader_row(row: &[Ty]) -> std::borrow::Cow<'_, [Ty]> {
+    static VIEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *VIEW.get_or_init(|| std::env::var("RH_PROVENANCE_READER_VIEW").as_deref() == Ok("1")) {
+        std::borrow::Cow::Owned(row.iter().map(|t| unify_param_ty_raw(t.clone(), t.clone())).collect())
+    } else {
+        std::borrow::Cow::Borrowed(row)
+    }
+}
+
 fn unify_param_ty_raw(stored: Ty, observed: Ty) -> Ty {
     let joined = crate::analyze::body::drop_pending_arms(crate::analyze::body::union_of(stored, observed));
     let Ty::Union { variants } = joined else {

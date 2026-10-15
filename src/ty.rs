@@ -185,7 +185,12 @@ impl Provenance {
     /// surface, or a position the analysis cut or widened.
     pub const Unresolved: Self = Self(4);
 
-    pub fn union(self, other: Self) -> Self { Self(self.0 | other.0) }
+    pub fn union(self, other: Self) -> Self {
+        static LIFT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let b = self.0 | other.0;
+        let lift = *LIFT.get_or_init(|| std::env::var("RH_PROVENANCE_LIFT").as_deref() == Ok("1"));
+        Self(if lift && b & 6 != 0 { b & !1 } else { b })
+    }
     pub(crate) fn reporting_bits(self) -> u8 { self.0 }
     pub fn effective(self) -> Self {
         if self.0 & 2 != 0 { Self::Gradual } else if self.0 & 4 != 0 { Self::Unresolved } else { Self::Pending }
