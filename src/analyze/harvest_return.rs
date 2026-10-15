@@ -19,6 +19,11 @@ use crate::ty::Ty;
 
 use super::body;
 
+fn no_stabilize_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_SKIP_RETURN_STABILIZE").is_ok_and(|v| v == "1"))
+}
+
 fn gradual_nil() -> Ty {
     body::union_of(Ty::Nil, Ty::unresolved())
 }
@@ -142,7 +147,9 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
         }
         return HarvestWrite::Set("harvest.untie_result", untied);
     }
-    if let Some(stable) = stabilize_untyped_return_oscillation(existing, &new) {
+    if !no_stabilize_on()
+        && let Some(stable) = stabilize_untyped_return_oscillation(existing, &new)
+    {
         if existing == &stable {
             return HarvestWrite::Keep;
         }

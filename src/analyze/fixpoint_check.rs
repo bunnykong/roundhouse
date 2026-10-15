@@ -423,6 +423,67 @@ impl Census {
     }
 }
 
+/// Read-only ownership/provenance diagnostic, at exactly the census's emit-bound roots.
+/// Source tags, spans and per-root occurrences distinguish cloned bodies
+/// without depending on unrelated roots' iteration order.
+fn dump_census(app: &App, path: std::ffi::OsString) -> std::io::Result<()> {
+    use std::io::Write;
+
+    fn visit(
+        e: &Expr,
+        body: &serde_json::Value,
+        site: &mut Vec<usize>,
+        out: &mut impl Write,
+    ) -> std::io::Result<()> {
+        if let Some(t) = &e.ty {
+            let kinds = untyped_kinds(t);
+            if kinds != 0 {
+                let row = serde_json::json!({
+                    "emit_body": body,
+                    "site": {
+                        "path": site,
+                        "source": e.declaration_source.as_deref(),
+                        "span": e.span,
+                    },
+                    "untyped_kinds": kinds,
+                    "type_hash": format!("{:016x}", type_hash(t)),
+                });
+                writeln!(out, "{row}")?;
+            }
+        }
+        let mut result = Ok(());
+        let mut child = 0;
+        e.node.for_each_child(&mut |c| {
+            if result.is_ok() {
+                site.push(child);
+                result = visit(c, body, site, out);
+                site.pop();
+            }
+            child += 1;
+        });
+        result
+    }
+
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut occurrences = BTreeMap::<String, usize>::new();
+    let mut result = Ok(());
+    crate::lower::for_each_emit_body_ref(app, &mut |root| {
+        if result.is_ok() {
+            let mut body = serde_json::json!({
+                "source": root.declaration_source.as_deref(),
+                "span": root.span,
+                "kind": root.node.kind_str(),
+            });
+            let occurrence = occurrences.entry(body.to_string()).or_default();
+            body["occurrence"] = serde_json::json!(*occurrence);
+            *occurrence += 1;
+            result = visit(root, &body, &mut Vec::new(), &mut out);
+        }
+    });
+    result?;
+    out.flush()
+}
+
 fn loop_end(end: LoopEnd) -> serde_json::Value {
     match end {
         LoopEnd::Settled(round) => serde_json::json!({"end": "settled", "round": round}),
@@ -629,6 +690,9 @@ impl Analyzer {
             });
             let mut census = Census::default();
             crate::lower::for_each_emit_body_ref(app, &mut |e| census.expr(e));
+            if let Some(path) = std::env::var_os("RH_REASON_SITE_CENSUS") {
+                dump_census(app, path).expect("write RH_REASON_SITE_CENSUS");
+            }
             line["census"] = serde_json::json!({
                 "typed": census.typed,
                 "missing": census.missing,

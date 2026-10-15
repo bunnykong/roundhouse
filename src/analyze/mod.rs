@@ -95,6 +95,11 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::{ParamKind, Row, Ty};
 
+fn spliced_own_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_SPLICED_WRITER_OWNERSHIP").is_ok_and(|v| v == "1"))
+}
+
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
     /// Inferred parameter types per (class, method). Empty after
@@ -5316,6 +5321,14 @@ impl Analyzer {
                 let folded = self.concern_folded.entry(id.clone()).or_default();
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
+                    if spliced_own_on()
+                        && app.concern_spliced_actions.get(&id).is_some_and(|m| m.contains_key(name))
+                    {
+                        // The includer harvest types this spliced body itself.
+                        // The copy only declares existence, never a value writer.
+                        cls.instance_methods.entry(name.clone()).or_insert(Ty::unresolved());
+                        continue;
+                    }
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
                         continue; // own/catalog entry wins
                     }
