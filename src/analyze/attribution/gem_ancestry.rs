@@ -356,6 +356,7 @@ impl GemAncestry {
     }
 
     pub(super) fn receiver_gem<'a>(&self, ty: &Ty, census: &'a GemCensus, declares: &dyn Fn(&str, &str) -> Option<bool>) -> GemClaim<'a> {
+        let ty = ty.class_object_instance().unwrap_or(ty);
         match ty {
             Ty::Class { id, .. } => self.class_gem(id, census, declares),
             Ty::Union { variants } => {
@@ -448,6 +449,7 @@ impl GemAncestry {
         method: &str,
         lock: &crate::gems::Lockfile,
     ) -> Option<(&'static str, ClassId)> {
+        let ty = ty.class_object_instance().unwrap_or(ty);
         match ty {
             Ty::Class { id, .. } => self.class_generating_dsl(id, method, lock),
             Ty::Union { variants } => {

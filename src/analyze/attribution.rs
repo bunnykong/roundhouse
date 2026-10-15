@@ -448,6 +448,7 @@ impl<'a> AttributionCtx<'a> {
     /// any arm) defined in a gap file, including a class survey mode
     /// dropped and so never registered.
     fn recv_taint(&self, ty: &Ty) -> Option<&&str> {
+        let ty = ty.class_object_instance().unwrap_or(ty);
         match ty {
             Ty::Class { id, .. } => self
                 .tainted_classes
@@ -725,6 +726,7 @@ fn mark(d: &mut Diagnostic, gem: &str, via_ivar: Option<&str>) {
 /// already owns that surface — missing methods are intentional refusals,
 /// not unknown-gem notes (invariant 6).
 fn catalogued_class_receiver(ty: &crate::ty::Ty) -> bool {
+    let ty = ty.class_object_instance().unwrap_or(ty);
     match ty {
         crate::ty::Ty::Class { id, .. } => crate::catalog::GEM_CATALOG
             .iter()

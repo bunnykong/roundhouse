@@ -260,6 +260,7 @@ fn recv_is_known_sync_at_emit(recv: Option<&Expr>) -> bool {
     let Some(ty) = &recv.ty else {
         return false;
     };
+    let ty = ty.class_object_instance().unwrap_or(ty);
     match ty {
         Ty::Array { .. } | Ty::Hash { .. } | Ty::Str => true,
         Ty::Class { id, .. } => {

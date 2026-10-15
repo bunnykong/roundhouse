@@ -269,8 +269,9 @@ pub fn unknown_receiver_sends(app: &App, classes: &HashMap<ClassId, ClassInfo>) 
     fn visit(expr: &Expr, classes: &HashMap<ClassId, ClassInfo>, out: &mut Vec<UnknownReceiverSend>) {
         if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
             let gradual = matches!(r.ty, Some(Ty::Untyped));
-            let unknown = is_unknown_ty(r.ty.as_ref())
-                || matches!(&r.ty, Some(Ty::Class { id, .. }) if !classes.contains_key(id));
+            let receiver_ty = r.ty.as_ref().map(|ty| ty.class_object_instance().unwrap_or(ty));
+            let unknown = is_unknown_ty(receiver_ty)
+                || matches!(receiver_ty, Some(Ty::Class { id, .. }) if !classes.contains_key(id));
             // Dispatch evidence, not return shape: a known method that
             // answers `Ty::Var` is still checked.
             let known_receiver = !gradual
