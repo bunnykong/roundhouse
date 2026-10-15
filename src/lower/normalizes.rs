@@ -189,7 +189,7 @@ fn rewrite(e: &mut Expr, normalized: &HashMap<ClassId, Vec<Symbol>>) {
     if !FINDERS.contains(&method.as_str()) {
         return;
     }
-    let class = match r.ty.as_ref() {
+    let class = match r.ty.as_ref().map(|ty| ty.class_object_instance().unwrap_or(ty)) {
         Some(Ty::Class { id, .. }) => id.clone(),
         Some(Ty::Relation { of }) => of.clone(),
         _ => match &*r.node {

@@ -880,15 +880,12 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
                 .cloned()
                 .ok_or_else(|| format!("unresolved RBS type alias: {written}"))
         }
-        // `singleton(Foo)` is the class OBJECT. `Ty` has no class-object
-        // type: a constant read types as the class itself and dispatch
-        // consults both sides, so the class stands for it. Read by name
-        // rather than through `map_class_instance`, since
-        // `singleton(String)` is the class String, not a string.
-        Node::ClassSingletonType(class_type) => Ok(Ty::Class {
+        // Read class values into the same encoding used by inference and
+        // the RBS emitter. Builtins stay nominal here: String, not Str.
+        Node::ClassSingletonType(class_type) => Ok(Ty::class_object(Ty::Class {
             id: ClassId(Symbol::new(&qualify_class_ref(&class_type.name(), ctx.scope))),
             args: Vec::new().into(),
-        }),
+        })),
         // `bot` is what `raise` and `exit` return: no value at all.
         Node::BottomType(_) => Ok(Ty::Bottom),
         // `top` is the supertype of everything, on which RBS lets you
@@ -1012,12 +1009,8 @@ pub(crate) fn sorbet_generic_ty(name: &str, args: &[Ty]) -> Option<Ty> {
         ("T::Range", [_]) => plain("Range"),
         ("T::Enumerable", [_]) => plain("Enumerable"),
         ("T::Enumerator", [_]) => plain("Enumerator"),
-        // `T::Class[Foo]` is the class object whose instances are Foo.
-        // `Ty` has no class-object type — a constant read types as the
-        // class itself (`Ty::Class`), and dispatch consults both sides
-        // — so the argument's class stands for it, the same reading
-        // `singleton(Foo)` gets.
-        ("T::Class", [Ty::Class { .. }]) => args[0].clone(),
+        // Sorbet's generic class-object spelling has the same value type.
+        ("T::Class", [Ty::Class { .. }]) => Ty::class_object(args[0].clone()),
         ("T::Class", [_]) => plain("Class"),
         ("T::Module", [_]) => plain("Module"),
         _ => return None,

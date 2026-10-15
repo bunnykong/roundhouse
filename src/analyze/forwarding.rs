@@ -364,12 +364,13 @@ fn destination<'a>(
             let receiver = match recv.as_ref().map(|r| &*r.node) {
                 None | Some(ExprNode::SelfRef) => context?.1.receiver,
                 Some(ExprNode::Const { .. }) => MethodReceiver::Class,
+                _ if recv.as_ref().and_then(|r| r.ty.as_ref()).is_some_and(Ty::is_class_object) => MethodReceiver::Class,
                 _ => MethodReceiver::Instance,
             };
             let class = match recv {
                 None => context.map(|(owner, _)| owner),
                 Some(r) if matches!(&*r.node, ExprNode::SelfRef) => context.map(|(owner, _)| owner),
-                Some(r) => match (&*r.node, r.ty.as_ref()) {
+                Some(r) => match (&*r.node, r.ty.as_ref().map(|t| t.class_object_instance().unwrap_or(t))) {
                     (ExprNode::Const { .. }, Some(Ty::Class { id, .. })) => {
                         // Constructor monomorphization can retain the base's
                         // inferred type on a newly named subclass receiver.
@@ -381,11 +382,12 @@ fn destination<'a>(
                 },
             };
             class.and_then(|c| {
-                // Ty::Class conflates class objects with instances. Do
-                // not trust an instance or a copied constructor-result type
-                // without matching source-side receiver provenance.
+                // A known class value identifies the class-side contract.
+                // Instances still need source-side constructor provenance;
+                // a copied nominal instance type alone is insufficient.
                 let ambiguous = recv.as_ref().is_some_and(|r| {
                     !matches!(&*r.node, ExprNode::Const { .. } | ExprNode::SelfRef)
+                        && !r.ty.as_ref().is_some_and(Ty::is_class_object)
                 });
                 if ambiguous
                     && !constructed_instance(
@@ -776,7 +778,7 @@ fn constructed_instance(
         };
         constant_names_class(r, class)
             && method.as_str() == "new"
-            && matches!(r.ty.as_ref(), Some(Ty::Class { id, .. }) if id == class)
+            && matches!(r.ty.as_ref().map(|t| t.class_object_instance().unwrap_or(t)), Some(Ty::Class { id, .. }) if id == class)
             && contracts
                 .declaration(
                     class,

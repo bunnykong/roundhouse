@@ -35,9 +35,9 @@ fn class_of_is_the_class_it_names_even_for_a_builtin() {
         "def m(a, b); end",
     );
     let (params, ret) = signature(&ty);
-    assert_eq!(params[0], class("Cart"));
-    assert_eq!(params[1], Ty::Union { variants: vec![class("String"), Ty::Nil].into() });
-    assert_eq!(ret, class("Cart"));
+    assert_eq!(params[0], Ty::class_object(class("Cart")));
+    assert_eq!(params[1], Ty::Union { variants: vec![Ty::class_object(class("String")), Ty::Nil].into() });
+    assert_eq!(ret, Ty::class_object(class("Cart")));
 }
 
 #[test]

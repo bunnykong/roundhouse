@@ -148,6 +148,46 @@ pub enum Ty {
 }
 
 impl Ty {
+    /// A class value, distinct from an instance of that class. RBS spells
+    /// the existing `Class[T]` encoding as `singleton(T)`.
+    pub fn class_object(instance: Ty) -> Ty {
+        Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![instance].into() }
+    }
+
+    /// The instances constructed by a known class value. Unwrap only at
+    /// receiver lookup; stored values keep the class-object distinction.
+    pub fn class_object_instance(&self) -> Option<&Ty> {
+        match self {
+            Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => Some(&args[0]),
+            _ => None,
+        }
+    }
+
+    pub fn is_class_object(&self) -> bool {
+        self.class_object_instance().is_some()
+            || matches!(self, Ty::Union { variants } if !variants.is_empty() && variants.iter().all(Ty::is_class_object))
+    }
+
+    /// Whether a stored type contains a class value, including containers
+    /// and mixed joins whose other arms are instances.
+    pub fn contains_class_object(&self) -> bool {
+        if self.class_object_instance().is_some() { return true; }
+        match self {
+            Ty::Array { elem } => elem.contains_class_object(),
+            Ty::Hash { key, value } => key.contains_class_object() || value.contains_class_object(),
+            Ty::Tuple { elems } => elems.iter().any(Ty::contains_class_object),
+            Ty::Union { variants } => variants.iter().any(Ty::contains_class_object),
+            Ty::Record { row } => row.fields.values().any(Ty::contains_class_object),
+            Ty::Class { args, .. } => args.iter().any(Ty::contains_class_object),
+            Ty::Fn { params, block, ret, .. } => {
+                params.iter().any(|p| p.ty.contains_class_object())
+                    || block.as_ref().is_some_and(|b| b.contains_class_object())
+                    || ret.contains_class_object()
+            }
+            _ => false,
+        }
+    }
+
     /// Replace every [`Ty::SelfInstance`] in this type with `with`.
     ///
     /// The one place the substitution lives. `dispatch` applies it as

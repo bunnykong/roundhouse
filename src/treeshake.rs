@@ -342,6 +342,7 @@ fn resolve_targets(
     method: &Symbol,
     registry: &HashMap<ClassId, Vec<&LibraryClass>>,
 ) -> Vec<MethodId> {
+    let recv_ty = recv_ty.map(|ty| ty.class_object_instance().unwrap_or(ty));
     match recv_ty {
         Some(Ty::Class { id, .. }) => {
             // Walk parent chain to find the owning class. The

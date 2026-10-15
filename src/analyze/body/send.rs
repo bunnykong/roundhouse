@@ -990,7 +990,8 @@ impl<'a> BodyTyper<'a> {
         self.dispatch_on(recv_ty, method, block_ret, args, false)
     }
 
-    // The class object and its instances are the same `Ty::Class`, so only the caller, which sees the receiver expression, can tell the side.
+    // Class[T] carries class-object identity; the lexical context still
+    // distinguishes implicit self and legacy nominal receiver types.
     pub(super) fn dispatch_on(
         &self,
         recv_ty: Option<&Ty>,
@@ -1054,27 +1055,24 @@ impl<'a> BodyTyper<'a> {
             };
             return self.dispatch(Some(&as_array), method, block_ret, args);
         }
-        // `Class[C]` — a method that returns the class object itself
-        // (see `class_object_return_ty`). Dispatch reads it back as
-        // `C`, the flattened type a bare `C` constant already has, so
-        // a call on the returned class resolves exactly as one written
-        // on the constant does.
-        if let Some(Ty::Class { id, args: of }) = recv_ty {
-            if id.0.as_str() == "Class" && of.len() == 1 {
-                return self.dispatch(Some(&of[0]), method, block_ret, args);
+        // A class value uses its represented class for lookup, but identity
+        // methods must return the class value, and `new` its instance.
+        if let Some(instance) = recv_ty.and_then(Ty::class_object_instance) {
+            if matches!(method.as_str(), "freeze" | "itself" | "tap")
+                || (matches!(method.as_str(), "dup" | "clone") && !self.owns_operator(Some(instance), method, true))
+            {
+                return recv_ty.unwrap().clone();
             }
+            if method.as_str() == "class" {
+                return Ty::class_object(Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![].into() });
+            }
+            return self.dispatch_on(Some(instance), method, block_ret, args, false);
+        }
+        if let Some(Ty::Class { id, .. }) = recv_ty {
             if id.0.as_str() == PARAM_VALUE {
                 return param_value_method(method, block_ret).unwrap_or_else(|| str_method(method));
             }
         }
-        // `obj.class` is receiver-aware: our type system flattens the
-        // class object and instances onto the same `Ty::Class { id }`,
-        // so `instance_of_Base.class` returns `Ty::Class { Base }`
-        // (not the generic `Ty::Class { Class }`). Keeps the type
-        // available for chained dispatch like `self.class.table_name`.
-        // For non-class receivers (`1.class`, `"x".class`) we still
-        // hand back generic `Class` since the per-primitive metaclass
-        // isn't represented in the registry.
         // `record.becomes!(Rooms::Closed)` — Rails' STI recast. The
         // answer is named by the ARGUMENT, not the receiver, which no
         // class table can express, so it is resolved here rather than
@@ -1134,10 +1132,7 @@ impl<'a> BodyTyper<'a> {
         }
         if method.as_str() == "class" {
             return match recv_ty {
-                Some(Ty::Class { id, args }) => Ty::Class {
-                    id: id.clone(),
-                    args: args.clone(),
-                },
+                Some(ty @ Ty::Class { .. }) => Ty::class_object(ty.clone()),
                 _ => Ty::Class {
                     id: ClassId(Symbol::from("Class")),
                     args: vec![].into(),
@@ -1593,8 +1588,8 @@ impl<'a> BodyTyper<'a> {
                         let receiver_is_model = self.classes().get(id).is_some_and(|c| c.table.is_some());
                         if cid != id && cls.table.is_some() && receiver_is_model { ty.rebind_class(cid, id) } else { ty }
                     };
-                    // The class object and its instances share this one type, so a
-                    // name both sides define is ambiguous. The catalog gives every model
+                    // Receiver lookup uses the same nominal class on both sides;
+                    // a name both sides define can be ambiguous. The catalog gives every model
                     // the relation builders (`order`, `group`, `limit`, `page`, …)
                     // class-side; an instance may own the same name as a reader
                     // (`belongs_to :order`, `delegated_type` singular `page`, …).

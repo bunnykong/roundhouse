@@ -529,6 +529,7 @@ fn recv_is_known_sync(recv: Option<&Expr>, _method: &str) -> bool {
         return false;
     };
     use crate::ty::Ty;
+    let ty = ty.class_object_instance().unwrap_or(ty);
     match ty {
         Ty::Array { .. } | Ty::Hash { .. } | Ty::Str => true,
         Ty::Class { id, .. } => {
@@ -722,6 +723,21 @@ mod tests {
     use crate::expr::{Expr, ExprNode, Literal};
     use crate::ident::{ClassId, Symbol};
     use crate::span::Span;
+
+    #[test]
+    fn class_values_keep_receiver_aware_async_exclusions() {
+        use crate::ty::Ty;
+        for (name, is_async) in [("Session", false), ("Post", true)] {
+            let mut recv = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from(name)] });
+            recv.ty = Some(Ty::class_object(Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() }));
+            let call = Expr::new(Span::synthetic(), ExprNode::Send {
+                recv: Some(recv), method: Symbol::from("find"), args: vec![], block: None, parenthesized: true,
+            });
+            let mut classes = vec![synth_class("Caller", vec![synth_method_with_body("call", call)])];
+            propagate_with_externs(&mut classes, &["find"]);
+            assert_eq!(classes[0].methods[0].is_async, is_async);
+        }
+    }
 
     fn synth_method(name: &str) -> MethodDef {
         MethodDef {

@@ -144,7 +144,7 @@ fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: 
     if value.decisions & RESOLVED_DATA_FACTORY == 0 {
         return;
     }
-    let Some(Ty::Class { id, args: type_args }) = &value.ty else { return };
+    let Some(Ty::Class { id, args: type_args }) = value.ty.as_ref().and_then(Ty::class_object_instance) else { return };
     if !type_args.is_empty() || id.0.as_str() != format!("{}::{name}", owner.name.0.as_str()) {
         return;
     }
@@ -402,7 +402,7 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
             format!("{{ {} }}", inner.join(", "))
         }
         Ty::Union { variants } => render_union(variants, enclosing),
-        // The class object itself (`class_object_return_ty`), which RBS
+        // A class-object value carried as Class[T], which RBS
         // spells `singleton(C)`; `Class[C]` is not an RBS type.
         Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => {
             format!("singleton({})", rbs(&args[0]))

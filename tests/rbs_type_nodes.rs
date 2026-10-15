@@ -21,10 +21,10 @@ fn class(id: &str) -> Ty {
 #[test]
 fn singleton_is_the_class_it_names_even_for_a_builtin() {
     let (params, ret) = read("(singleton(Cart)) -> singleton(String)");
-    assert_eq!(params[0], class("Cart"));
-    assert_eq!(ret, class("String"), "the class String, not an instance of it");
+    assert_eq!(params[0], Ty::class_object(class("Cart")));
+    assert_eq!(ret, Ty::class_object(class("String")), "the class String, not an instance of it");
     let (_, ret) = read("() -> Array[singleton(Cart)]");
-    assert_eq!(ret, Ty::Array { elem: std::sync::Arc::new(class("Cart")) });
+    assert_eq!(ret, Ty::Array { elem: std::sync::Arc::new(Ty::class_object(class("Cart"))) });
 }
 
 #[test]
@@ -54,4 +54,14 @@ fn a_literal_type_is_a_value_of_its_class() {
     let (params, ret) = read("(:draft, \"x\", 1) -> true");
     assert_eq!(params, vec![Ty::Sym, Ty::Str, Ty::Int]);
     assert_eq!(ret, Ty::Bool);
+}
+
+#[test]
+fn nested_singletons_and_instances_remain_distinct() {
+    let (params, ret) = read("(singleton(Cart) | Cart) -> Hash[singleton(String), String]");
+    assert_eq!(params[0], Ty::Union { variants: vec![Ty::class_object(class("Cart")), class("Cart")].into() });
+    assert_eq!(ret, Ty::Hash {
+        key: std::sync::Arc::new(Ty::class_object(class("String"))),
+        value: std::sync::Arc::new(Ty::Str),
+    });
 }

@@ -131,7 +131,7 @@ fn constructor_sites(
     } = &*expr.node
     {
         if method.as_str() == "new" {
-            if let Some(Ty::Class { id, .. }) = &recv.ty {
+            if let Some(Ty::Class { id, .. }) = recv.ty.as_ref().map(|ty| ty.class_object_instance().unwrap_or(ty)) {
                 if resources.contains_key(id) {
                     if instantiated.insert(id.clone()) {
                         pending.push(id.clone());

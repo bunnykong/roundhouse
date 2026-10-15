@@ -88,6 +88,7 @@ SPINEL_TESTS = [
     "open_telemetry_stub_spinel",
     "around_block_filter_spinel",
     "plain_class_optional_keywords_spinel",
+    "class_object_values_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
 ]

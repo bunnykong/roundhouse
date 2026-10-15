@@ -717,14 +717,11 @@ pub(super) fn sorbet_ty(
             // it. `dispatch` substitutes it there.
             "attached_class" => Some(Ty::SelfInstance),
             "self_type" if self_is_instance => Some(Ty::SelfInstance),
-            // A class object. `Ty` has no class-object type — a
-            // constant read types as the class itself and dispatch
-            // consults both sides — so the class stands for it, named
-            // as written (`T.class_of(String)` is the class String).
+            // A class object, using the same encoding as RBS singleton(T).
             "class_of" => {
                 let argument = index.arguments()?.arguments().iter().next()?;
                 let id = constant_path_name(&argument);
-                (!id.is_empty()).then(|| Ty::Class { id: ClassId(Symbol::new(&id)), args: Vec::new().into() })
+                (!id.is_empty()).then(|| Ty::class_object(Ty::Class { id: ClassId(Symbol::new(&id)), args: Vec::new().into() }))
             }
             // What `raise` returns: no value.
             "noreturn" => Some(Ty::Bottom),

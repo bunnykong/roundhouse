@@ -706,6 +706,7 @@ impl<'a> BodyTyper<'a> {
 
     /// Identity evidence for Module protocol, independent of nominal instance type.
     fn is_class_object(&self, expr: &Expr, ctx: &Ctx) -> bool {
+        if expr.ty.as_ref().is_some_and(Ty::is_class_object) { return true; }
         match &*expr.node {
             ExprNode::SelfRef => ctx.class_side,
             ExprNode::Var { name, .. } => ctx.class_objects.contains(name),
@@ -763,7 +764,7 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
-    // `x.class` is not a class reference to `is_class_object`, yet types as the same flat `Ty::Class` as an instance.
+    // An unknown receiver's `class` may still answer generic Class, without a known T.
     fn is_instance(&self, expr: &Expr, ctx: &Ctx) -> bool {
         !self.is_class_object(expr, ctx)
             && !matches!(&*expr.node, ExprNode::Send { method, args, .. } if method.as_str() == "class" && args.is_empty())
@@ -791,6 +792,7 @@ impl<'a> BodyTyper<'a> {
     }
 
     fn owns_operator(&self, ty: Option<&Ty>, method: &Symbol, class_object: bool) -> bool {
+        let ty = ty.map(|t| t.class_object_instance().unwrap_or(t));
         match ty {
             Some(Ty::Union { variants }) => !variants.is_empty()
                 && variants.iter().all(|ty| self.owns_operator(Some(ty), method, class_object)),
@@ -853,7 +855,7 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if self.classes().contains_key(&id) {
-                        Ty::Class { id, args: vec![].into() }
+                        Ty::class_object(Ty::Class { id, args: vec![].into() })
                     } else {
                         unknown()
                     }
@@ -874,7 +876,7 @@ impl<'a> BodyTyper<'a> {
                         if self.classes().contains_key(&id) || *runtime {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
                             qualify_resolved_path(path, &id);
-                            Ty::Class { id, args: vec![].into() }
+                            Ty::class_object(Ty::Class { id, args: vec![].into() })
                         } else {
                             unknown()
                         }
@@ -918,13 +920,13 @@ impl<'a> BodyTyper<'a> {
                             // Not left unknown: ingest turned `Result = Struct.new(…)` into the class it defines.
                             None if self.classes().get(&id).is_some_and(|c| c.app_declared) => {
                                 expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
-                                Ty::Class { id, args: vec![].into() }
+                                Ty::class_object(Ty::Class { id, args: vec![].into() })
                             }
                             // A runtime façade's alias (`OpenSSL::Random =
                             // RandomSource`) of a class the registry models
                             // by that exact name: the registry's answer.
                             None if *runtime_decl && self.classes().contains_key(&id) => {
-                                Ty::Class { id, args: vec![].into() }
+                                Ty::class_object(Ty::Class { id, args: vec![].into() })
                             }
                             None => unknown(),
                         }
@@ -962,11 +964,11 @@ impl<'a> BodyTyper<'a> {
                         };
                         // Otherwise retain the written class path, but
                         // never guess another class by its suffix.
-                        value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![].into() })
+                        value.unwrap_or_else(|| Ty::class_object(Ty::Class { id: written_class_id(path), args: vec![].into() }))
                     }
                 };
                 // Not a class the emitted program has: the indifferent hash is a plain Hash there, so only its `new` is supported.
-                if matches!(&ty, Ty::Class { id, args } if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS) {
+                if matches!(ty.class_object_instance().unwrap_or(&ty), Ty::Class { id, args } if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS) {
                     expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("constant"),
@@ -993,7 +995,10 @@ impl<'a> BodyTyper<'a> {
                 ctx.ivar_bindings.get(name).cloned().unwrap_or_else(unknown)
             }
 
-            ExprNode::SelfRef => ctx.self_ty.clone().unwrap_or_else(unknown),
+            ExprNode::SelfRef => {
+                let ty = ctx.self_ty.clone().unwrap_or_else(unknown);
+                if ctx.class_side { Ty::class_object(ty) } else { ty }
+            },
 
             ExprNode::Return { value } => {
                 self.analyze_expr(value, ctx);
@@ -1039,7 +1044,7 @@ impl<'a> BodyTyper<'a> {
                         // errors and hides the original resolution failure in cascades.
                         let mut rescued: Option<Ty> = None;
                         for c in rc.classes.iter() {
-                            match &c.ty {
+                            match c.ty.as_ref().map(|ty| ty.class_object_instance().unwrap_or(ty)) {
                                 Some(ty @ Ty::Class { .. }) => {
                                     rescued = Some(match rescued.take() {
                                         Some(prev) => union_of(prev, ty.clone()),
@@ -1388,7 +1393,7 @@ impl<'a> BodyTyper<'a> {
                     expr.diagnostic = None;
                     if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
                     for arg in args.iter_mut() { self.analyze_expr(arg, ctx); }
-                    return ty.clone();
+                    return Ty::class_object(ty.clone());
                 }
                 // Bare-name implicit-self Send (no receiver, no args, no
                 // block) resolves to a local binding when one exists. Ruby
@@ -1480,6 +1485,14 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
+                // Keep the value type for dispatch/identity returns. The
+                // receiver-aware helpers below look up the represented class.
+                let class_value_recv_ty = recv_ty.as_ref()
+                    .filter(|ty| ty.class_object_instance().is_some()).cloned();
+                let recv_ty = recv_ty.map(|ty| match ty.class_object_instance() {
+                    Some(instance) => instance.clone(),
+                    None => ty,
+                });
                 // Not by name alone: an application `tap`/`each` may answer its block's value.
                 if matches!(method.as_str(), "tap" | "each")
                     && let Some(b) = block.as_mut()
@@ -1493,7 +1506,7 @@ impl<'a> BodyTyper<'a> {
                     && crate::analyze::indifferent::constructor_args(args)
                     && let Some(r) = recv.as_mut()
                     && matches!(&*r.node, ExprNode::Const { .. })
-                    && matches!(&r.ty, Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS)
+                    && matches!(r.ty.as_ref().map(|t| t.class_object_instance().unwrap_or(t)), Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS)
                 {
                     r.diagnostic = None;
                 }
@@ -1845,7 +1858,7 @@ impl<'a> BodyTyper<'a> {
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let dispatched =
-                    self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                    self.dispatch_on(class_value_recv_ty.as_ref().or(recv_ty.as_ref()), method, block_ret.as_ref(), args, instance_receiver);
                 // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too, which it would bind to its first member.
                 if method.as_str() == "new"
                     && expr.diagnostic.is_none()
@@ -2288,7 +2301,7 @@ impl<'a> BodyTyper<'a> {
                         if local_ctx.lexical_self.is_none() {
                             local_ctx.lexical_self = local_ctx.self_ty.clone();
                         }
-                        local_ctx.self_ty = e.ty.clone();
+                        local_ctx.self_ty = e.ty.as_ref().map(|t| t.class_object_instance().unwrap_or(t).clone());
                         local_ctx.class_side = e.decisions & crate::expr::SELF_BINDING_CLASS_OBJECT != 0;
                     }
                     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
@@ -3473,10 +3486,10 @@ mod tests {
         let ty = typer.analyze_expr(&mut expr, &ctx);
         assert_eq!(
             ty,
-            Ty::Class {
+            Ty::class_object(Ty::Class {
                 id: ClassId(Symbol::from("StandardError")),
                 args: vec![].into(),
-            }
+            })
         );
         assert_ne!(
             expr.decisions & crate::expr::CLASS_OBJECT_VALUE,

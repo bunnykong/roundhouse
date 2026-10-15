@@ -1863,9 +1863,9 @@ impl Analyzer {
     ///
     /// * **Clobber an existing signature** (RBS-derived, façade, or
     ///   author-written). Hand-written wins, as everywhere else.
-    /// * **Stamp `initialize`.** Its body type is whatever the last
-    ///   assignment happened to be; `new` answers the class. Leaving it
-    ///   unstamped renders the untyped fallback, which is true.
+    /// * **Declare a constructor's tail as its return.** `initialize`
+    ///   stays untyped on return. Its parameters are stamped when they
+    ///   contain class values, so defaults/arguments carry singleton(T).
     /// * **Stamp when it learned nothing.** All-`Var` params and a
     ///   `Var`/`Untyped`/absent return render exactly what the untyped
     ///   fallback renders, so skipping keeps the output byte-identical
@@ -1878,12 +1878,16 @@ impl Analyzer {
                 if method.signature.is_some() {
                     continue;
                 }
-                if method.name.as_str() == "initialize" {
-                    continue;
-                }
                 let key = (owner.clone(), method.name.clone(), method.receiver);
                 let inferred = self.inferred_params.get(&key);
-                let has_params = inferred
+                let class_parameter = method.params.iter().enumerate().any(|(i, p)| {
+                    param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p)
+                        .or_else(|| self.declared_param_ty(owner, &method.name, Some(i), &p.name))
+                        .is_some_and(|ty| ty.contains_class_object())
+                });
+                let initialize = method.name.as_str() == "initialize";
+                if initialize && !class_parameter { continue; }
+                let has_params = class_parameter || inferred
                     .is_some_and(|v| !v.iter().all(|t| matches!(t, Ty::Var { .. })));
 
                 // The registry first: `harvest_returns_to_registry`
@@ -1923,11 +1927,14 @@ impl Analyzer {
                     }
                 };
 
+                let mut positional_seen = 0usize;
                 let params: Vec<crate::ty::Param> = method
                     .params
                     .iter()
                     .enumerate()
                     .map(|(i, p)| {
+                        let positional = (!p.keyword && !p.rest && !p.from_keyword).then_some(positional_seen);
+                        positional_seen += usize::from(positional.is_some());
                         // A rest slot stays untyped. `collect_send_sites`
                         // records argument types BY POSITION, so the
                         // slot under a `*streams` sees only whatever
@@ -1937,12 +1944,13 @@ impl Analyzer {
                         // `Utils.silence_stream(STDOUT, STDERR)` unified
                         // to `*STDERR streams`, a declaration about
                         // every vararg made from one of them.
-                        let ty = if p.rest {
+                        let ty = if p.rest || self.declared_untyped_param(owner, &method.name, positional, &p.name) {
                             Ty::Untyped
                         } else {
-                            param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p)
-                                .unwrap_or(Ty::Untyped)
-                                .subst_self(&owner_ty)
+                            prefer_declared(
+                                self.declared_param_ty(owner, &method.name, positional, &p.name),
+                                param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p),
+                            ).unwrap_or(Ty::Untyped).subst_self(&owner_ty)
                         };
                         // Kind must survive verbatim: the untyped
                         // fallback this replaces is kind-aware, and a
@@ -1952,7 +1960,7 @@ impl Analyzer {
                         crate::ty::Param { name: p.name.clone(), ty: ty.into(), kind: p.ty_kind() }
                     })
                     .collect();
-                let mut ret = ret.unwrap_or(Ty::Untyped).subst_self(&owner_ty);
+                let mut ret = if initialize { Ty::Untyped } else { ret.unwrap_or(Ty::Untyped).subst_self(&owner_ty) };
                 // A factory that answers both `new` (receiver-dependent)
                 // and the owner by name (`Probe.config` reading back the
                 // same class) names the owner twice: `instance | Owner`.
@@ -5324,84 +5332,7 @@ impl Analyzer {
         if let Some(Ty::Fn { ret, .. }) = &method.signature {
             return Some((**ret).clone());
         }
-        self.class_object_return_ty(&method.body)
-            .or_else(|| tuple_return_ty(&method.body))
-            .or_else(|| effective_return_ty(&method.body))
-    }
-
-    /// A method whose every return value is a class constant returns
-    /// the CLASS, not an instance of it: lobsters'
-    /// `Search#searched_model` is `what == :stories ? Story : Comment`.
-    /// The body typer gives a class constant the same `Ty::Class { C }`
-    /// an instance has (deliberately, so `Story.where` dispatches), and
-    /// harvesting that as the return declared `-> (Comment | Story)` in
-    /// the emitted RBS — a lie spinel trusted, which hid a
-    /// `searched_model.none` NoMethodError (#132). The boundary is where
-    /// the distinction is recoverable, so it is drawn here, the way
-    /// `Relation` is: `Class[C]`, which RBS spells `singleton(C)` and
-    /// `dispatch` reads back as `C` for callers.
-    ///
-    /// All or nothing: a tail mixing a class with any other value, or a
-    /// `return` off the tail, keeps the ordinary harvest.
-    fn class_object_return_ty(&self, body: &Expr) -> Option<Ty> {
-        fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>, returns: &mut usize) {
-            match &*e.node {
-                ExprNode::If { then_branch, else_branch, .. } => {
-                    tails(then_branch, out, returns);
-                    tails(else_branch, out, returns);
-                }
-                ExprNode::Case { arms, .. } => {
-                    arms.iter().for_each(|a| tails(&a.body, out, returns))
-                }
-                ExprNode::Seq { exprs } if !exprs.is_empty() => {
-                    tails(exprs.last().unwrap(), out, returns)
-                }
-                ExprNode::Return { value } => {
-                    *returns += 1;
-                    tails(value, out, returns);
-                }
-                // A raising arm returns nothing.
-                ExprNode::Raise { .. } => {}
-                _ => out.push(e),
-            }
-        }
-        fn count_returns(e: &Expr) -> usize {
-            let mut n = usize::from(matches!(&*e.node, ExprNode::Return { .. }));
-            e.node.for_each_child(&mut |c| n += count_returns(c));
-            n
-        }
-        let mut out = Vec::new();
-        let mut tail_returns = 0;
-        tails(body, &mut out, &mut tail_returns);
-        // A `return` off the tail is a value this walk did not see.
-        if out.is_empty() || count_returns(body) != tail_returns {
-            return None;
-        }
-        let mut classes: Vec<Ty> = Vec::new();
-        for t in out {
-            let ExprNode::Const { path } = &*t.node else { return None };
-            let Some(Ty::Class { id, args }) = &t.ty else { return None };
-            // The constant must NAME the class it is typed as. A value
-            // constant (`DEFAULT = Foo.new`) is typed by its value,
-            // whose class is not its own name.
-            let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            let named = id.0.as_str() == written
-                || id.0.as_str().ends_with(&format!("::{written}"));
-            if !args.is_empty() || !named || !self.classes.contains_key(id) {
-                return None;
-            }
-            let singleton = Ty::Class {
-                id: ClassId(Symbol::from("Class")),
-                args: vec![Ty::Class { id: id.clone(), args: vec![].into() }].into(),
-            };
-            if !classes.contains(&singleton) {
-                classes.push(singleton);
-            }
-        }
-        Some(match classes.len() {
-            1 => classes.pop().unwrap(),
-            _ => Ty::Union { variants: classes.into() },
-        })
+        tuple_return_ty(&method.body).or_else(|| effective_return_ty(&method.body))
     }
 
     /// True when every value `body` can return is the value of the
@@ -5992,8 +5923,10 @@ impl Analyzer {
     /// Place a call's trailing keyword arguments on the parameter slots
     /// they bind to, replacing the single slot the kwargs hash occupies.
     ///
-    /// The gate is that EVERY key names a declared parameter — keyword
-    /// OR positional. Positional too because `ingest::library_class`
+    /// Declared keywords and keyword-rest bind by kind first, so a
+    /// keyword group cannot occupy an omitted optional positional slot.
+    /// For historical erased keywords, EVERY key must name a declared
+    /// parameter — keyword OR positional. Positional too because `ingest::library_class`
     /// lowers a helper's optional keyword to a positional-with-default
     /// (`room_display_name(room, for_user = Current.user)`) and
     /// `lower::helper_kwargs` moves the call sites to match only AFTER
@@ -6015,7 +5948,7 @@ impl Analyzer {
         mut arg_tys: Vec<Ty>,
         kw: SiteKeywords,
     ) -> Vec<Ty> {
-        if let Some(shape) = shape.filter(|s| s.keywords_by_kind || kw.anonymous_forward) {
+        if let Some(shape) = shape {
             if kw.group {
                 if let Some(placed) =
                     Self::bind_keyword_group(shape, &arg_tys, &kw.keys, kw.splat.as_ref())
@@ -6209,6 +6142,7 @@ impl Analyzer {
                     Some(ExprNode::Send { method: m, args, .. }) if m.as_str() == "class" && args.is_empty() => {
                         SiteRecv::DotClass
                     }
+                    _ if recv.as_ref().and_then(|r| r.ty.as_ref()).is_some_and(Ty::is_class_object) => SiteRecv::Class,
                     _ => SiteRecv::Instance,
                 };
                 if !recv_classes.is_empty() {
@@ -6301,11 +6235,7 @@ impl Analyzer {
                         }
                         _ => (keys, None),
                     };
-                    let anonymous_forward = matches!(
-                        args.last().map(|a| &*a.node),
-                        Some(ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. })
-                    );
-                    let kw_tys = SiteKeywords { group, keys, splat, anonymous_forward };
+                    let kw_tys = SiteKeywords { group, keys, splat };
                     // `Klass.new(a, b)` hands its arguments to
                     // `initialize` — that is all `Class#new` does with
                     // them — so the site is evidence for the
@@ -6315,10 +6245,11 @@ impl Analyzer {
                     // `StoriesPaginator.new(scope, …)` passed a typed
                     // `Relation[Story]` and the paginator's `@scope`
                     // still answered `Array[untyped]` to every caller.
-                    // Only a CONSTANT receiver: an instance answering
-                    // `new` is some other method entirely.
+                    // A constant or another proven class value constructs
+                    // instances; an instance answering `new` is a different method.
                     let record_initialize = method.as_str() == "new"
-                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
+                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. })
+                            || r.ty.as_ref().is_some_and(Ty::is_class_object));
                     for class_id in recv_classes {
                         if record_initialize
                             && !self.data_factories_without_custom_initialize.contains(&class_id)
@@ -7590,6 +7521,9 @@ fn association_builder_members(assoc: &crate::dialect::Association) -> Vec<(Symb
 /// reverse call graph. Mirrors the receivers dispatch actually chases:
 /// bare Class, Relation→model, Array elem, and Class arms of a Union.
 fn class_ids_for_call_receiver(ty: &Ty) -> Vec<ClassId> {
+    if let Some(instance) = ty.class_object_instance() {
+        return class_ids_for_call_receiver(instance);
+    }
     match ty {
         Ty::Class { id, .. } => vec![id.clone()],
         Ty::Relation { of } => vec![of.clone()],
@@ -7793,9 +7727,6 @@ struct SiteKeywords {
     /// keyword the literal does not name can receive. `keys` then holds
     /// the literal's pairs.
     splat: Option<Ty>,
-    /// The opaque final `**` can override the explicit pairs, so they are
-    /// not type evidence for the receiving named parameters.
-    anonymous_forward: bool,
 }
 
 /// A method's declared parameter slots, in declaration order, as

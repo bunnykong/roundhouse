@@ -229,6 +229,7 @@ fn method_registered_on(
     ty: Option<&Ty>,
     method: &Symbol,
 ) -> bool {
+    let ty = ty.map(|ty| ty.class_object_instance().unwrap_or(ty));
     match ty {
         Some(Ty::Union { variants }) => {
             !variants.is_empty()

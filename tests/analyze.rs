@@ -77,17 +77,17 @@ fn literals_get_primitive_types() {
 }
 
 #[test]
-fn const_ref_has_class_type() {
+fn const_ref_has_class_object_type() {
     let app = analyzed_app();
     let index = app.controllers[0]
         .actions()
         .find(|a| a.name.as_str() == "index")
         .unwrap();
-    // RHS is Send(Some(Const(Post)), all, []). Inner Const should have ty Class(Post).
+    // RHS is Send(Some(Const(Post)), all, []). The constant is Class[Post], not a Post instance.
     let ExprNode::Assign { value, .. } = &*index.body.node else { panic!() };
     let ExprNode::Send { recv, .. } = &*value.node else { panic!() };
     let recv = recv.as_ref().expect("explicit receiver");
-    match recv.ty.as_ref().expect("ty populated") {
+    match recv.ty.as_ref().expect("ty populated").class_object_instance().expect("class object") {
         Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "Post"),
         other => panic!("expected Class(Post), got {other:?}"),
     }

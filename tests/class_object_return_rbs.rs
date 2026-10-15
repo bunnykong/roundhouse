@@ -3,7 +3,7 @@
 //! `Comment`; the sidecar declared `-> (Comment | Story)`, spinel
 //! trusted it, and `searched_model.none` compiled to a run-time
 //! NoMethodError. The sidecar must say `singleton(...)`, and only for a
-//! tail made entirely of class constants.
+//! values that are classes, including an arm mixed with an instance.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -80,17 +80,17 @@ fn search_rbs() -> String {
 fn class_constant_tail_is_a_singleton() {
     let rbs = search_rbs();
     assert!(
-        rbs.contains("def searched_model: () -> (singleton(Story) | singleton(Comment))"),
+        rbs.contains("def searched_model: () -> (singleton(Comment) | singleton(Story))"),
         "{rbs}"
     );
     assert!(rbs.contains("def only_stories: () -> singleton(Story)"), "{rbs}");
 }
 
 #[test]
-fn value_constants_and_mixed_tails_keep_their_types() {
+fn value_constants_and_mixed_tails_keep_their_distinct_types() {
     let rbs = search_rbs();
     assert!(rbs.contains("def limit: () -> Integer"), "{rbs}");
-    assert!(!rbs.contains("model_or_record: () -> singleton"), "{rbs}");
+    assert!(rbs.contains("def model_or_record: () -> (singleton(Story) | Comment)"), "{rbs}");
 }
 
 #[test]

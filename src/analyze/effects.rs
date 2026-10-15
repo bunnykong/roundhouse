@@ -362,6 +362,11 @@ impl super::Analyzer {
     }
 
     fn contribute_send_effect(&self, recv_ty: &Ty, method: &Symbol, out: &mut BTreeSet<Effect>) {
+        if let Ty::Union { variants } = recv_ty {
+            for ty in variants { self.contribute_send_effect(ty, method, out); }
+            return;
+        }
+        let recv_ty = recv_ty.class_object_instance().unwrap_or(recv_ty);
         let Ty::Class { id, .. } = recv_ty else { return };
         let Some(cls) = self.classes.get(id) else { return };
 

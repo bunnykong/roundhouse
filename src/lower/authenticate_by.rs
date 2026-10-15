@@ -164,7 +164,8 @@ fn claims(e: &Expr, secure: &HashMap<ClassId, Vec<Symbol>>) -> Option<Plan> {
     if method.as_str() != "authenticate_by" || args.len() != 1 {
         return None;
     }
-    let class = match r.ty.as_ref()? {
+    let recv_ty = r.ty.as_ref()?;
+    let class = match recv_ty.class_object_instance().unwrap_or(recv_ty) {
         Ty::Class { id, .. } => id.clone(),
         Ty::Relation { of } => of.clone(),
         _ => return None,
@@ -385,7 +386,7 @@ fn residue_reason(e: &Expr, secure: &HashMap<ClassId, Vec<Symbol>>) -> &'static 
     if block.is_some() {
         return "call takes a block";
     }
-    let class = match r.ty.as_ref() {
+    let class = match r.ty.as_ref().map(|ty| ty.class_object_instance().unwrap_or(ty)) {
         Some(Ty::Class { id, .. }) => id.clone(),
         Some(Ty::Relation { of }) => of.clone(),
         _ => return "receiver does not resolve to a model or a relation over one",
