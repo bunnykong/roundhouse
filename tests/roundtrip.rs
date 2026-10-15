@@ -140,6 +140,8 @@ fn tiny_blog_round_trips() {
         binary_assets: Vec::new(),
         i18n: Default::default(),
         i18n_table: Default::default(),
+        i18n_runtime_sites: Default::default(),
+        i18n_table_sites: Default::default(),
         inferred_method_params: Default::default(),
         models: vec![post_model],
         library_classes: vec![],

@@ -47,12 +47,17 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
         return Vec::new();
     }
     let module_path = vec![Symbol::from("RouteTable")];
-    // Same partition the per-target Spinel emit used: path "/" goes
-    // to `RouteTable.root`, everything else to `RouteTable.table`. Callers
-    // typically combine them at use site (`[RouteTable.root] +
-    // RouteTable.table`).
-    let (root_routes, table_routes): (Vec<&FlatRoute>, Vec<&FlatRoute>) =
-        flat.iter().partition(|r| r.path == "/");
+    // The first route on path "/" (the `root`, when the app has one)
+    // goes to `RouteTable.root`, every other route to `RouteTable.table`.
+    // Callers combine them at use site (`[RouteTable.root] +
+    // RouteTable.table`). Only the first: Rails matches on verb AND
+    // path, so a `match "/", via: %i[post delete]` beside a `root` (or
+    // the second verb of that `match`) is a route of its own, and it
+    // stays in the table in declaration order.
+    let root_index = flat.iter().position(|r| r.path == "/");
+    let root_routes: Vec<&FlatRoute> = root_index.map(|i| &flat[i]).into_iter().collect();
+    let table_routes: Vec<&FlatRoute> =
+        flat.iter().enumerate().filter(|(i, _)| Some(*i) != root_index).map(|(_, r)| r).collect();
 
     let route_class_id = ClassId(Symbol::from("ActionDispatch::Router::Route"));
     let route_ty = Ty::Class {

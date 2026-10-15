@@ -45,10 +45,11 @@ fn emit_literal_local(lit: &Literal) -> String {
 ///   - Equality: `assert_equal a, b`
 ///   - Model: `Model.last`, `@record.reload`
 ///
-/// Setup (`setup do @article = articles(:one) end`) isn't preserved
-/// in the current IR; ivars read-without-assign auto-prime from the
-/// `<plural>::one()` fixture accessor. Matches real-blog's convention.
-fn emit_rust_controller_test(out: &mut String, test: &Test, app: &App) {
+/// An ivar read without assignment primes from the fixture the setup
+/// assigns it (`@article = articles(:unsigned)`), else from the
+/// `<plural>::one()` fixture accessor.
+fn emit_rust_controller_test(out: &mut String, test: &Test, setup: Option<&Expr>, app: &App) {
+    let fixture_names: Vec<Symbol> = app.fixtures.iter().map(|f| f.name.clone()).collect();
     let name = test_fn_name(&test.name);
     writeln!(out, "#[tokio::test(flavor = \"multi_thread\")]").unwrap();
     writeln!(out, "#[allow(unused_mut, unused_variables)]").unwrap();
@@ -63,6 +64,10 @@ fn emit_rust_controller_test(out: &mut String, test: &Test, app: &App) {
 
     let walked = crate::lower::walk_controller_ivars(&test.body);
     for ivar in walked.ivars_read_without_assign() {
+        if let Some((fixture, label)) = setup.and_then(|s| crate::lower::setup_fixture(s, &ivar, &fixture_names)) {
+            writeln!(out, "    let mut {} = fixtures::{}::{}();", ivar.as_str(), fixture.as_str(), label).unwrap();
+            continue;
+        }
         let plural = crate::naming::pluralize_snake(&crate::naming::camelize(ivar.as_str()));
         writeln!(
             out,
@@ -433,7 +438,7 @@ pub(super) fn emit_rust_test_module(tm: &TestModule, app: &App) -> EmittedFile {
 
     for test in &tm.tests {
         writeln!(s).unwrap();
-        emit_rust_controller_test(&mut s, test, app);
+        emit_rust_controller_test(&mut s, test, tm.setup.as_ref(), app);
     }
 
     let filename = snake_case(tm.name.0.as_str());

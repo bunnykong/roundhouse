@@ -1839,6 +1839,7 @@ end
     app.i18n.load_locales(available, fallbacks, &gem_files, &mut files);
     app.i18n.available_unknown = available_unknown;
     app.i18n.field_error_proc = field_error_proc_file(vfs, dir);
+    app.i18n.plurals = plural_rules(vfs, dir, app.gem_lock.as_ref(), &app.i18n);
     crate::i18n::stamp_models(&mut app);
 
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
@@ -2806,6 +2807,13 @@ fn splice_concerns_into_controllers(app: &mut App) {
     let mut posts_spliced: std::collections::HashSet<(crate::ident::ClassId, crate::ident::Symbol)> =
         std::collections::HashSet::new();
 
+    // Per controller, the action names a route reaches on it or on a
+    // controller that inherits from it. A module method that is PUBLIC
+    // and routed here is an action of the includer, as in Rails (a
+    // concern's public method is an action like any other); the rest
+    // stay behind the private marker, as helpers.
+    let routed_here = routed_actions_with_descendants(app);
+
     for controller in &mut app.controllers {
         let include_groups = crate::analyze::controller_include_groups(controller);
         let includes: Vec<crate::ident::ClassId> = include_groups.iter().flatten().cloned().collect();
@@ -2851,6 +2859,8 @@ fn splice_concerns_into_controllers(app: &mut App) {
 
         let mut filters: Vec<ControllerBodyItem> = Vec::new();
         let mut methods: Vec<ControllerBodyItem> = Vec::new();
+        let mut actions: Vec<ControllerBodyItem> = Vec::new();
+        let routed = routed_here.get(&controller.name);
         for module in &filter_order {
             for filter in app.concern_filters.get(module).into_iter().flatten() {
                 if let Some(call) = &filter.block {
@@ -2966,7 +2976,10 @@ fn splice_concerns_into_controllers(app: &mut App) {
                     .entry(controller.name.clone())
                     .or_default()
                     .insert(method.name.clone(), module.clone());
-                methods.push(ControllerBodyItem::Action {
+                let is_action = matches!(method.visibility, crate::dialect::MethodVisibility::Public)
+                    && routed.is_some_and(|names| names.contains(&method.name));
+                let into = if is_action { &mut actions } else { &mut methods };
+                into.push(ControllerBodyItem::Action {
                     action: Action {
                         name_span: method.name_span,
                         name: method.name.clone(),
@@ -2986,17 +2999,21 @@ fn splice_concerns_into_controllers(app: &mut App) {
                 });
             }
         }
-        if filters.is_empty() && methods.is_empty() {
+        if filters.is_empty() && methods.is_empty() && actions.is_empty() {
             continue;
         }
         // Filters first (Rails runs an included filter ahead of the
-        // includer's own), then the methods behind a private marker —
-        // they're helpers, never routable actions.
-        let has_private_marker = controller
+        // includer's own), then the routed public methods among the
+        // includer's own public actions, then the rest behind a private
+        // marker — they're helpers.
+        let first_private = controller
             .body
             .iter()
-            .any(|i| matches!(i, ControllerBodyItem::PrivateMarker { .. }));
+            .position(|i| matches!(i, ControllerBodyItem::PrivateMarker { .. }));
+        let has_private_marker = first_private.is_some();
         let mut body = std::mem::take(&mut controller.body);
+        let at = first_private.unwrap_or(body.len());
+        body.splice(at..at, actions);
         filters.extend(body.drain(..));
         if !methods.is_empty() && !has_private_marker {
             filters.push(ControllerBodyItem::PrivateMarker {
@@ -3035,6 +3052,34 @@ fn splice_concerns_into_controllers(app: &mut App) {
         }
     }
     app.concern_spliced_actions = spliced_origin;
+}
+
+/// Controller -> the actions routes name on it or on any controller
+/// below it in the inheritance chain (a subclass dispatches an action
+/// its ancestor defines).
+fn routed_actions_with_descendants(
+    app: &App,
+) -> HashMap<crate::ident::ClassId, std::collections::HashSet<crate::ident::Symbol>> {
+    let parents: HashMap<&crate::ident::ClassId, &crate::ident::ClassId> = app
+        .controllers
+        .iter()
+        .filter_map(|c| c.parent.as_ref().map(|p| (&c.name, p)))
+        .collect();
+    let mut out: HashMap<crate::ident::ClassId, std::collections::HashSet<crate::ident::Symbol>> =
+        HashMap::new();
+    for route in crate::lower::routes::flatten_routes(app) {
+        let mut cur = Some(&route.controller);
+        let mut depth = 0;
+        while let Some(c) = cur {
+            out.entry(c.clone()).or_default().insert(route.action.clone());
+            depth += 1;
+            if depth > 16 {
+                break;
+            }
+            cur = parents.get(c).copied();
+        }
+    }
+    out
 }
 
 /// The order a controller's concern filters REGISTER in — the order
@@ -7738,7 +7783,8 @@ fn app_relative_path(value: &str) -> Option<&str> {
 /// check (what a Kamal proxy probes) — names Rails' OWN
 /// `Rails::HealthController`, which no app tree holds: the route
 /// dispatched to nothing and `/up` answered 404. Written here as the
-/// controller Rails ships (8.1: `render html:` of the green page; the
+/// controller Rails ships (8.1: a `respond_to` answering the green page
+/// to HTML and `{"status":"up","timestamp":"<iso8601>"}` to JSON; the
 /// `rescue_from` → red 500 half needs a boot failure, which a one-shot
 /// process reports by not answering at all). Synthesized only when a
 /// route targets it and the app doesn't define its own. A namespaced
@@ -7752,7 +7798,20 @@ fn synthesize_rails_health_controller(app: &mut crate::App) {
     if !routed || app.controllers.iter().any(|c| c.name.0.as_str() == RAILS_HEALTH_CONTROLLER) {
         return;
     }
-    let src = "class Rails::HealthController < ActionController::Base\n  def show\n    render html: \"<!DOCTYPE html><html><body style=\\\"background-color: green\\\"></body></html>\".html_safe\n  end\nend\n";
+    // The JSON arm is Rails' `render json: { status: "up", timestamp:
+    // Time.current.iso8601 }` written out as the encoded text it
+    // renders: an inline `render json:` arm of a `respond_to` reaches
+    // the runtime encoder, which only the CRuby breadth keeps, and the
+    // Spinel emit would drop the arm.
+    let src = r##"class Rails::HealthController < ActionController::Base
+  def show
+    respond_to do |format|
+      format.html { render html: "<!DOCTYPE html><html><body style=\"background-color: green\"></body></html>".html_safe }
+      format.json { render plain: "{\"status\":\"up\",\"timestamp\":\"#{Time.current.iso8601}\"}", content_type: "application/json" }
+    end
+  end
+end
+"##;
     if let Ok(Some(controller)) = super::controller::ingest_controller(src.as_bytes(), "<rails/health>") {
         app.controllers.push(controller);
     }
@@ -9926,8 +9985,39 @@ pub(super) fn fallbacks_line(line: &str, default: &str) -> Option<Result<Option<
     Some(match value {
         "true" => Ok(Some(vec![default.to_string()])),
         "false" | "nil" => Ok(None),
-        _ => locale_list(value).map(Some).ok_or_else(|| format!("`fallbacks = {value}` is not a list of locales")),
+        // Not the app's default for `I18n.default_locale`: a config file runs before the i18n railtie applies it, so the gem's `:en` is what it reads.
+        _ => locale_list(&value.replace("I18n.default_locale", ":en"))
+            .map(Some)
+            .ok_or_else(|| format!("`fallbacks = {value}` is not a list of locales")),
     })
+}
+
+/// Each locale's own plural rule: rails-i18n adds its pluralization
+/// module unless `config.rails_i18n.enabled_modules` leaves it out, and
+/// `config/locales/plurals.rb` is a file I18n's Pluralization backend
+/// reads, which wins where both name a locale.
+fn plural_rules<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    lock: Option<&crate::gems::Lockfile>,
+    catalog: &crate::i18n::Catalog,
+) -> std::collections::BTreeMap<String, String> {
+    let mut locales = catalog.locales();
+    for other in &catalog.others {
+        if !locales.contains(&other.locale) {
+            locales.push(other.locale.clone());
+        }
+    }
+    let application = vfs.read_to_string(&dir.join("config/application.rb")).unwrap_or_default();
+    let mut out: std::collections::BTreeMap<String, String> = crate::i18n::rails_i18n::plural_rules(lock, &application, &locales).into_iter().collect();
+    if let Ok(source) = vfs.read_to_string(&dir.join("config/locales/plurals.rb")) {
+        for (locale, rule) in crate::i18n::plural::cldr_rules(&source) {
+            if locales.contains(&locale) {
+                out.insert(locale, rule.unwrap_or_default());
+            }
+        }
+    }
+    out
 }
 
 /// `%i[en pl]`, `%w[en pl]`, `[:en, :pl]` or `["en", "pl"]`.

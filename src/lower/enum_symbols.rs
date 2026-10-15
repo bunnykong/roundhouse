@@ -42,7 +42,22 @@ const ATTR_METHODS: &[&str] = &[
     "merge",
 ];
 
-pub(crate) type EnumMap = std::collections::HashMap<String, std::collections::HashMap<String, Literal>>;
+/// column → (label → stored value), plus the class-body constants a
+/// `where(role: ROLES)` may name in place of a literal label list.
+#[derive(Default)]
+pub(crate) struct EnumMap {
+    columns: std::collections::HashMap<String, std::collections::HashMap<String, Literal>>,
+    /// `NAME = %i[a b]` (optionally `.freeze`) in a model or controller
+    /// body: its Symbols, keyed by `NAME` and by `Owner::NAME`. A bare
+    /// name two classes bind to different lists is left out.
+    symbol_lists: std::collections::HashMap<String, Vec<crate::ident::Symbol>>,
+}
+
+impl EnumMap {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+}
 
 pub fn apply_enum_symbol_lowering(app: &mut App) {
     let map = enum_columns(app);
@@ -72,7 +87,16 @@ pub fn apply_enum_symbol_lowering(app: &mut App) {
 /// mapping has no single right answer and guessing one would write the
 /// wrong integer into a real query.
 pub(crate) fn enum_columns(app: &App) -> EnumMap {
-    let mut out: EnumMap = Default::default();
+    let columns = enum_column_mappings(app);
+    let symbol_lists = if columns.is_empty() { Default::default() } else { symbol_list_constants(app) };
+    EnumMap { columns, symbol_lists }
+}
+
+fn enum_column_mappings(
+    app: &App,
+) -> std::collections::HashMap<String, std::collections::HashMap<String, Literal>> {
+    let mut out: std::collections::HashMap<String, std::collections::HashMap<String, Literal>> =
+        Default::default();
     let mut conflicted: std::collections::HashSet<String> = Default::default();
     for model in &app.models {
         for (column, labels) in &model.enums {
@@ -95,6 +119,69 @@ pub(crate) fn enum_columns(app: &App) -> EnumMap {
         }
     }
     out
+}
+
+/// Every model's and controller's `NAME = %i[...]` / `NAME = [:a,
+/// :b].freeze` class-body constant whose elements are all Symbols.
+fn symbol_list_constants(app: &App) -> std::collections::HashMap<String, Vec<crate::ident::Symbol>> {
+    use crate::ident::Symbol;
+    let mut out: std::collections::HashMap<String, Vec<Symbol>> = Default::default();
+    let mut conflicted: std::collections::HashSet<String> = Default::default();
+    let mut add = |owner: &str, expr: &Expr| {
+        let ExprNode::Assign { target: crate::expr::LValue::Const { path }, value } = &*expr.node else { return };
+        let [name] = path.as_slice() else { return };
+        let Some(symbols) = symbol_list(value) else { return };
+        out.insert(format!("{owner}::{}", name.as_str()), symbols.clone());
+        let bare = name.as_str().to_string();
+        if conflicted.contains(&bare) {
+            return;
+        }
+        match out.get(&bare) {
+            Some(existing) if *existing != symbols => {
+                out.remove(&bare);
+                conflicted.insert(bare);
+            }
+            Some(_) => {}
+            None => {
+                out.insert(bare, symbols);
+            }
+        }
+    };
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
+                add(model.name.0.as_str(), expr);
+            }
+        }
+    }
+    for controller in &app.controllers {
+        for item in &controller.body {
+            if let crate::dialect::ControllerBodyItem::Unknown { expr, .. } = item {
+                add(controller.name.0.as_str(), expr);
+            }
+        }
+    }
+    out
+}
+
+/// The Symbols of `%i[a b]`, `[:a, :b]`, or either with `.freeze`.
+fn symbol_list(value: &Expr) -> Option<Vec<crate::ident::Symbol>> {
+    let value = match &*value.node {
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if method.as_str() == "freeze" && args.is_empty() => recv,
+        _ => value,
+    };
+    let ExprNode::Array { elements, .. } = &*value.node else { return None };
+    if elements.is_empty() {
+        return None;
+    }
+    elements
+        .iter()
+        .map(|el| match &*el.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn same_mapping(
@@ -132,10 +219,42 @@ pub(crate) fn rewrite_node(expr: &mut Expr, map: &EnumMap) {
             let ExprNode::Lit { value: Literal::Sym { value: col } } = &*key.node else {
                 continue;
             };
-            let Some(mapping) = map.get(col.as_str()) else { continue };
+            let Some(mapping) = map.columns.get(col.as_str()) else { continue };
+            expand_symbol_list_constant(value, mapping, &map.symbol_lists);
             rewrite_value(value, mapping);
         }
     }
+}
+
+/// `where(role: ROLES)` with `ROLES = %i[admin owner].freeze`: Rails
+/// casts each element of the constant's list through the enum type, as
+/// it does a literal list. The constant reaches the SQL as Symbols
+/// otherwise, and the condition matches no row. Replaced by the literal
+/// list (then mapped element-wise by `rewrite_value`) only when every
+/// element is one of this column's labels; a constant whose definition
+/// is not a literal Symbol list, or is ambiguous, is left as written.
+fn expand_symbol_list_constant(
+    value: &mut Expr,
+    mapping: &std::collections::HashMap<String, Literal>,
+    lists: &std::collections::HashMap<String, Vec<crate::ident::Symbol>>,
+) {
+    let ExprNode::Const { path } = &*value.node else { return };
+    let key = path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
+    let key = key.trim_start_matches("::");
+    let Some(symbols) = lists.get(key) else { return };
+    if !symbols.iter().all(|sym| mapping.contains_key(sym.as_str())) {
+        return;
+    }
+    let elements = symbols
+        .iter()
+        .map(|sym| {
+            crate::lower::typing::with_ty(
+                Expr::new(value.span, ExprNode::Lit { value: Literal::Sym { value: sym.clone() } }),
+                crate::ty::Ty::Sym,
+            )
+        })
+        .collect();
+    *value = Expr::new(value.span, ExprNode::Array { elements, style: crate::expr::ArrayStyle::Brackets });
 }
 
 /// One attribute VALUE: a bare label, or an ARRAY of them.

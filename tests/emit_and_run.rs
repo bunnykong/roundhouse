@@ -35,6 +35,10 @@ mod view_presence_url_encode;
 mod controller_translate;
 #[path = "emit_and_run/i18n_locales.rs"]
 mod i18n_locales;
+#[path = "emit_and_run/i18n_runtime.rs"]
+mod i18n_runtime;
+#[path = "emit_and_run/i18n_plural_rules.rs"]
+mod i18n_plural_rules;
 #[path = "support/lambda_signatures.rs"]
 mod lambda_signatures_contract;
 #[path = "emit_and_run/lambda_signatures.rs"]
@@ -1279,8 +1283,8 @@ fn a_missing_translation_raises_where_the_environment_says_so() {
         .assert_passes();
 }
 
-/// A key computed at run time, a `:strict` setting, or a call with a
-/// block stays an error.
+/// A `:strict` setting or a call with a block stays an error; a key
+/// computed at run time is read from the catalog then (`i18n_runtime`).
 #[test]
 fn unresolvable_translations_stay_errors() {
     let (_emitted, errors) = emit_and_run::real_blog()
@@ -1290,7 +1294,8 @@ fn unresolvable_translations_stay_errors() {
             "  validates :title, presence: true\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 2, "{errors:?}");
+    let i18n: Vec<&String> = errors.iter().filter(|e| e.contains("I18n not supported")).collect();
+    assert!(i18n.len() == 1 && i18n[0].contains("a block on the call"), "{errors:?}");
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "config/environments/test.rb",
@@ -4363,11 +4368,9 @@ fn render_json_record_writer_is_unsupported_on_strict_targets() {
     use roundhouse::project::BuildTarget;
     let (_emitted, errors) = records_json_app().emit(BuildTarget::TypescriptWorker);
     assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
-    // Rust builds the writer, except a `methods:` one (`render_json_record_writer_runs_on_rust`).
-    let (_emitted, errors) = json_writer_rust_app().emit(BuildTarget::Rust);
-    assert!(errors.is_empty(), "{errors:?}");
+    // Rust builds the writer, `methods:` included (`render_json_record_writer_runs_on_rust`).
     let (_emitted, errors) = json_writer_app().emit(BuildTarget::Rust);
-    assert!(errors.iter().any(|e| e.contains("json_writer")), "{errors:?}");
+    assert!(errors.is_empty(), "{errors:?}");
     for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
         let (_emitted, errors) = records_json_app().emit(target);
         assert!(!errors.iter().any(|e| e.contains("json_writer")), "{target:?}: {errors:?}");
@@ -4455,7 +4458,7 @@ end
 #[test]
 #[ignore = "requires the Rust toolchain; compiles and executes an emitted app"]
 fn render_json_record_writer_runs_on_rust() {
-    let (emitted, errors) = json_writer_rust_app().emit(roundhouse::project::BuildTarget::Rust);
+    let (emitted, errors) = json_writer_app().emit(roundhouse::project::BuildTarget::Rust);
     assert!(errors.is_empty(), "{errors:?}");
     std::fs::create_dir_all(emitted.join("tests")).unwrap();
     std::fs::write(emitted.join("tests/json_writer.rs"), r##"
@@ -4476,7 +4479,7 @@ async fn record_json_is_rails_serializable_hash() {
         ("GET", "/articles/1/edit", r#"{"title":"A \u003cb\u003e \u0026 co","id":1}"#.to_string()),
         ("PATCH", "/articles/1", r#"{"id":1,"title":"A \u003cb\u003e \u0026 co","created_at":"2026-01-02T03:04:05.678Z"}"#.to_string()),
         ("DELETE", "/articles/1", r#"[{"id":1,"article_id":1,"commenter":"Ann","body":"Nice","created_at":"2026-01-05T00:00:00.000Z","updated_at":"2026-01-05T00:00:00.000Z"}]"#.to_string()),
-        ("GET", "/articles", format!("[{second},{one}]")),
+        ("GET", "/articles", format!("[{},{}]", second.replace("Z\"}", "Z\",\"headline\":\"Big\"}"), one.replace("Z\"}", "Z\",\"headline\":\"Big\"}"))),
     ] {
         let response = match method {
             "PATCH" => server.patch(path).form(&[("article[title]", "unused")]).await,
@@ -4497,15 +4500,6 @@ async fn record_json_is_rails_serializable_hash() {
         .expect("run the emitted Rust project's test");
     assert!(output.status.success(), "{}\n{}\n{}", emitted.display(),
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-}
-
-/// Without `methods:`, which Rust reports (`render_json_record_writer_is_unsupported_on_strict_targets`).
-fn json_writer_rust_app() -> emit_and_run::Overlay {
-    json_writer_app().edit(
-        "app/controllers/articles_controller.rb",
-        "    render json: @articles, methods: [:headline]\n",
-        "    render json: @articles\n",
-    )
 }
 
 /// The fixtures' test, as ActiveRecord 8.1.4 answers it.
@@ -15640,14 +15634,14 @@ fn model_methods_read_the_record_on_implicit_self_on_go() {
 /// A controller of its own, outside real-blog's resources, reading `params` into a local.
 fn probe_controller_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
-        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe/:id\", to: \"probe#show\", as: :probe\n  get \"/probe/:id/joined\", to: \"probe#joined\", as: :probe_joined\n  get \"/search\", to: \"probe#search\", as: :search\n")
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe/:id\", to: \"probe#show\", as: :probe\n  get \"/probe/:id/joined\", to: \"probe#joined\", as: :probe_joined\n  get \"/search\", to: \"probe#search\", as: :search\n  post \"/search\", to: \"probe#search\"\n  delete \"/search\", to: \"probe#search\"\n")
         .write(
             "app/controllers/probe_controller.rb",
             "class ProbeController < ApplicationController\n  def show\n    article = Article.find(params[:id])\n    render plain: article.title.to_s\n  end\n\n  def search\n    render plain: \"q=\" + params[:q].to_s + \" page=\" + params[:page].to_s\n  end\n\n  def joined\n    article = Article.find(params[:id])\n    render plain: article.comments.map(&:commenter).join(\"|\") + \" \" + [article.comments.size, 0].join(\",\") + \" \" + [true, false].join(\",\")\n  end\nend\n",
         )
         .write(
             "test/controllers/probe_controller_test.rb",
-            "require \"test_helper\"\n\nclass ProbeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:one)\n  end\n\n  test \"reads params into a local\" do\n    get probe_url(@article)\n    assert_response :success\n    assert_equal \"Getting Started with Rails\", response.body\n  end\n\n  test \"joins what is not a String\" do\n    get probe_joined_url(@article)\n    assert_equal \"Alice 1,0 true,false\", response.body\n  end\n\n  test \"reads the query string\" do\n    get search_url(q: \"rails\", page: 2)\n    assert_equal \"q=rails page=2\", response.body\n  end\n\n  test \"leaves an omitted key out of the query string\" do\n    get search_url(q: \"rails\")\n    assert_equal \"q=rails page=\", response.body\n  end\nend\n",
+            "require \"test_helper\"\n\nclass ProbeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:one)\n  end\n\n  test \"reads params into a local\" do\n    get probe_url(@article)\n    assert_response :success\n    assert_equal \"Getting Started with Rails\", response.body\n  end\n\n  test \"joins what is not a String\" do\n    get probe_joined_url(@article)\n    assert_equal \"Alice 1,0 true,false\", response.body\n  end\n\n  test \"reads the query string\" do\n    get search_url(q: \"rails\", page: 2)\n    assert_equal \"q=rails page=2\", response.body\n  end\n\n  test \"leaves an omitted key out of the query string\" do\n    get search_url(q: \"rails\")\n    assert_equal \"q=rails page=\", response.body\n  end\n\n  test \"lets the query string win over the form\" do\n    post search_url(q: \"query\"), params: { q: \"form\", page: \"3\" }\n    assert_equal \"q=query page=3\", response.body\n  end\n\n  test \"reads a bodyless delete\" do\n    delete search_url(q: \"gone\")\n    assert_equal \"q=gone page=\", response.body\n  end\nend\n",
         )
 }
 
@@ -15663,4 +15657,67 @@ fn a_controller_reads_params_into_a_local_on_rust() {
     let (emitted, errors) = probe_controller_app().emit(roundhouse::project::BuildTarget::Rust);
     assert!(errors.is_empty(), "{errors:?}");
     run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
+}
+
+/// A controller test whose setup names a fixture other than `one`.
+fn setup_fixture_label_app() -> emit_and_run::Overlay {
+    // In `ArticlesControllerTest`: a test class named for no controller is not emitted.
+    emit_and_run::real_blog().write(
+        "test/controllers/articles_controller_test.rb",
+        "require \"test_helper\"\n\nclass ArticlesControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    @article = articles(:two)\n  end\n\n  test \"shows the fixture the setup names\" do\n    get article_url(@article)\n    assert_response :success\n    assert_select \"h1\", \"Understanding MVC Architecture\"\n  end\nend\n",
+    )
+}
+
+#[test]
+fn a_controller_test_reads_the_fixture_its_setup_names() {
+    setup_fixture_label_app().run_test("test/controllers/articles_controller_test.rb").assert_passes();
+}
+
+/// Rust primed every such ivar with the `one` fixture, whatever the setup named.
+#[test]
+#[ignore = "requires the Rust toolchain; builds and runs an emitted app"]
+fn a_controller_test_reads_the_fixture_its_setup_names_on_rust() {
+    let (emitted, errors) = setup_fixture_label_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    run_emitted(&emitted, &[("cargo", &["test", "--quiet"])]);
+}
+
+/// The CRuby tree's `rake test` load path, as its Rakefile spells it, answers a gem's `require "logger"` with Ruby's
+/// own Logger (ruby-vips calls `Logger.new($stdout)`), and only an app with the blog's Article gets the scaffold's Article tests.
+#[test]
+fn cruby_rake_load_path_keeps_rubys_own_libraries() {
+    use roundhouse::project::BuildTarget;
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    for scaffold in [
+        "test/models/article_broadcasts_test.rb",
+        "test/views/articles_test.rb",
+        "test/views/articles_json_test.rb",
+        "test/query_count_test.rb",
+        "test/relation_find_test.rb",
+        "test/route_helpers_test.rb",
+    ] {
+        assert!(!emitted.join(scaffold).exists(), "{scaffold}");
+    }
+    let rakefile = std::fs::read_to_string(emitted.join("Rakefile")).unwrap();
+    let libs: Vec<String> = rakefile
+        .lines()
+        .filter_map(|line| Some(format!("-I{}", line.trim().strip_prefix("t.libs << \"")?.strip_suffix('"')?)))
+        .collect();
+    assert!(!libs.is_empty(), "{rakefile}");
+    let output = emit_and_run::ruby()
+        .args(&libs)
+        .args(["-e", "require \"logger\"; Logger.new($stdout).level = Logger::WARN"])
+        .current_dir(&*emitted)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{libs:?}\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let (emitted, _) = emit_and_run::real_blog().emit(BuildTarget::Ruby);
+    assert!(emitted.join("test/models/article_broadcasts_test.rb").exists());
 }

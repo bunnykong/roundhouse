@@ -63,6 +63,21 @@ module Main
     @route_table ||= [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table
   end
 
+  # A 404 the app did not rescue (no route, ActionNotFound,
+  # RecordNotFound), answered as Rails' production exceptions app
+  # (ActionDispatch::PublicExceptions) does: `{"status":404,"error":
+  # "Not Found"}` when the request's format is JSON
+  # (ActionDispatch::MimeNegotiation.json_format?), the HTML page
+  # otherwise. The spinel twin is `Main.render_not_found`.
+  def self.not_found_response(format_param, path, request, env)
+    extension = path.end_with?(".json") ? "json" : ""
+    if ActionDispatch::MimeNegotiation.json_format?(format_param, extension,
+         request.fetch(:accept, "").to_s, env["HTTP_X_REQUESTED_WITH"].to_s, env["CONTENT_TYPE"].to_s)
+      return [404, %({"status":404,"error":"Not Found"}), "application/json; charset=UTF-8", nil, {}, {}, {}, {}, {}]
+    end
+    [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+  end
+
   def self.dispatch_core(env, stdin)
     # Rails wraps every request in the AR query cache: identical
     # SELECTs within one request replay the first result; any write
@@ -123,7 +138,9 @@ module Main
     matched = ActionDispatch::Router.match(request[:method], request_path,
                            route_table)
     if matched.nil?
-      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+      # No route: the format is the `?format=` param, a trusted Accept,
+      # or the path's extension (Main.not_found_response).
+      return not_found_response(request[:params]["format"].to_s, request_path, request, env)
     end
     # A `(.:format)` EXTENSION the router stripped off the path
     # (`/rooms/3/refresh.turbo_stream`). The `.json` sniff above runs
@@ -269,7 +286,10 @@ module Main
     begin
       controller.process_action(matched.action)
     rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
-      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+      # The routed format (extension, route default) is the `format`
+      # param; an html one may still name `?format=`.
+      format_param = request_format == :html ? merged["format"].to_s : request_format.to_s
+      return not_found_response(format_param, request_path, request, env)
     rescue ActionController::ParameterMissing, ActionController::BadRequest
       # `params.expect` / `params.require` refused the request and the app
       # did not rescue it: Rails' rescue_responses answer :bad_request.

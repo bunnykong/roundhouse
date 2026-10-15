@@ -2458,6 +2458,9 @@ jobs:
       - name: cargo test --test emit_and_run controller params on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
         run: cargo test --locked --test emit_and_run a_controller_reads_params_into_a_local_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test emit_and_run setup fixture on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test emit_and_run a_controller_test_reads_the_fixture_its_setup_names_on_rust -- --ignored --nocapture --exact
       - name: cargo test --test emit_and_run implicit self on typescript
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --locked --test emit_and_run model_methods_read_the_record_on_implicit_self_on_typescript -- --ignored --nocapture --exact

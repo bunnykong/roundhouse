@@ -9,7 +9,7 @@ require_relative "../test_helper"
 require "models/article"
 require "models/article_params"
 require "models/comment"
-require "broadcasts"
+# `Broadcasts` comes in through `test_helper`'s boot chain, as in `broadcasts_test.rb`.
 
 class ArticleBroadcastsTest < Minitest::Test
   def setup

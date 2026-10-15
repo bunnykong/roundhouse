@@ -38,7 +38,7 @@ pub(super) fn emit_go_controller_test_body(
     // `@article` → `article := ArticlesOne()`.
     let walked = crate::lower::walk_controller_ivars(&test.body);
     for ivar in walked.ivars_read_without_assign() {
-        if let Some((fixture, label)) = setup.and_then(|s| setup_fixture(s, &ivar, ctx)) {
+        if let Some((fixture, label)) = setup.and_then(|s| crate::lower::setup_fixture(s, &ivar, ctx.fixture_names)) {
             out.push_str(&format!("{} := {}{}()\n", ivar.as_str(), crate::naming::camelize(fixture.as_str()), go_field_name(&label)));
             continue;
         }
@@ -63,18 +63,6 @@ pub(super) fn emit_go_controller_test_body(
         out.push('\n');
     }
     out
-}
-
-/// The `@<ivar> = <fixture>(:<label>)` a setup assigns, as (fixture, label).
-fn setup_fixture(setup: &Expr, ivar: &crate::ident::Symbol, ctx: &GoTestCtx) -> Option<(crate::ident::Symbol, String)> {
-    let value = crate::lower::test_body_stmts(setup).into_iter().rev().find_map(|stmt| match &*stmt.node {
-        ExprNode::Assign { target: LValue::Ivar { name }, value } if name == ivar => Some(value),
-        _ => None,
-    })?;
-    let ExprNode::Send { recv: None, method, args, .. } = &*value.node else { return None };
-    let [arg] = args.as_slice() else { return None };
-    let ExprNode::Lit { value: Literal::Sym { value: label } } = &*arg.node else { return None };
-    ctx.fixture_names.contains(method).then(|| (method.clone(), label.to_string()))
 }
 
 /// `response`, the request's `resp`.

@@ -404,14 +404,54 @@ fn resolves_uncached(
     site: Site<'_>,
 ) -> Option<Result<(), String>> {
     let parsed = parse(recv, method, args, block, site)?;
-    Some(match (parsed, split_key(args)) {
-        (Err(reason), _) if block.is_some() => Err(reason),
+    let answer = match (parsed, split_key(args)) {
+        (Err(reason), _) if block.is_some() => return Some(Err(reason)),
         (_, Some((_, then_args, else_args))) => [then_args, else_args]
             .iter()
             .try_for_each(|a| resolves(catalog, recv, method, a, block, site).expect("still a translate call")),
+        (Ok(call), None) if counted_by_rule(&call, catalog) => Err(COUNT_BY_RULE.to_string()),
         (Ok(call), None) => plans_at(catalog, &call, plan_key(recv, method, args, block, site), site.in_view()).map(|_| ()),
         (Err(reason), None) => Err(reason),
+    };
+    Some(match answer {
+        Err(reason) if block.is_none() && runs_at_run_time(&reason, args, catalog) => Ok(()),
+        other => other,
     })
+}
+
+/// Whether a call refused for `reason` can be answered by
+/// `I18n.translate_runtime` instead, which reads the app's whole catalog
+/// as the gem does. Not one whose count may meet a locale's plural rule
+/// that roundhouse cannot read.
+fn runs_at_run_time(reason: &str, args: &[Expr], catalog: &Catalog) -> bool {
+    let runtime = reason.starts_with("a key computed at run time")
+        || reason == "a scope computed at run time"
+        || reason == "a default computed at run time"
+        || reason == "options that are not a literal Hash"
+        || reason == "a `locale:` read after an option with effects"
+        || reason == COUNT_BY_RULE
+        || reason.starts_with("missing interpolation argument");
+    if !runtime || !matches!(args.len(), 1 | 2) {
+        return false;
+    }
+    if catalog.plurals.values().all(|rule| !rule.is_empty()) {
+        return true;
+    }
+    match args.get(1).map(|o| &*o.node) {
+        None => true,
+        Some(ExprNode::Hash { entries, .. }) => !entries.iter().any(|(k, _)| {
+            !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } })
+                || matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "count")
+        }),
+        Some(_) => false,
+    }
+}
+
+const COUNT_BY_RULE: &str = "a count whose form a locale's own plural rule picks";
+
+/// A count meets a locale's own rule only when the call runs.
+fn counted_by_rule(call: &Call, catalog: &Catalog) -> bool {
+    call.lookup.counted && !catalog.plurals.is_empty()
 }
 
 fn parse_args(args: &[Expr], view: Option<&str>, template: bool) -> Result<Call, String> {
@@ -508,8 +548,14 @@ thread_local! {
         std::cell::RefCell::new(Default::default());
 }
 
+thread_local! {
+    /// The calls this lowering left to `I18n.translate_runtime`, and every call that reads the translation table.
+    static RUNTIME_SITES: std::cell::RefCell<(Vec<Span>, Vec<Span>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 pub fn apply_i18n_translate_lowering(app: &mut App) {
     TABLE.with(|t| *t.borrow_mut() = Default::default());
+    RUNTIME_SITES.with(|r| *r.borrow_mut() = Default::default());
     let catalog = app.i18n.or_rails_default().clone();
     let controllers: std::collections::HashMap<crate::ident::ClassId, String> = app
         .controllers
@@ -557,6 +603,7 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
         rewrite(&mut view.body, &catalog, Site::View(Some(&name)));
     }
     app.i18n_table = TABLE.with(|t| std::mem::take(&mut t.borrow_mut().1));
+    (app.i18n_runtime_sites, app.i18n_table_sites) = RUNTIME_SITES.with(|r| std::mem::take(&mut *r.borrow_mut()));
 }
 
 /// Whether `controller` has `AbstractController::Translation`'s `t`:
@@ -611,9 +658,24 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
         *expr = typed(Expr::new(expr.span, ExprNode::If { cond, then_branch, else_branch }));
         return;
     }
-    let Ok(call) = parsed else { return };
+    let runtime = |reason: &str, expr: &mut Expr| {
+        let ExprNode::Send { args, block: None, .. } = &*expr.node else { return };
+        if runs_at_run_time(reason, args, catalog) {
+            *expr = runtime_call(expr.span, args, catalog, site);
+        }
+    };
+    let call = match parsed {
+        Ok(call) => call,
+        Err(reason) => return runtime(&reason, expr),
+    };
+    if counted_by_rule(&call, catalog) {
+        return runtime(COUNT_BY_RULE, expr);
+    }
     let key = plan_key(recv.as_ref(), method.as_str(), args, block.as_ref(), site);
-    let Ok(plans) = plans_at(catalog, &call, key, in_view) else { return };
+    let plans = match plans_at(catalog, &call, key, in_view) {
+        Ok(plans) => plans,
+        Err(reason) => return runtime(&reason, expr),
+    };
     let Some(folded) = fold_variants(&call, plans, expr.span, in_view, catalog) else { return };
     *expr = folded;
 }
@@ -702,6 +764,57 @@ fn fold_variants(call: &Call, plans: Vec<(Variant, Plan)>, span: Span, in_view: 
     Some(if html { raw(span, whole) } else { whole })
 }
 
+/// `I18n.translate_runtime(key, options, lazy_scope, in_view, raises)`
+/// for a call written `t(key, options)`: the options as the call passes
+/// them, and in a template the answer marked raw, the runtime having
+/// escaped what is not html-safe.
+fn runtime_call(span: Span, args: &[Expr], catalog: &Catalog, site: Site<'_>) -> Expr {
+    RUNTIME_SITES.with(|r| {
+        let mut r = r.borrow_mut();
+        r.0.push(span);
+        r.1.push(span);
+    });
+    let options = match args.get(1) {
+        Some(opts) => {
+            let mut opts = opts.clone();
+            // Left as keywords the hash would swallow the arguments that follow it.
+            if let ExprNode::Hash { kwargs, .. } = &mut *opts.node {
+                *kwargs = false;
+            }
+            opts
+        }
+        None => Expr {
+            ty: Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
+            ..Expr::new(span, ExprNode::Hash { entries: Vec::new(), kwargs: false })
+        },
+    };
+    let lazy = match site {
+        Site::View(Some(view)) => lit(span, view.replace("/_", ".").replace('/', ".")),
+        Site::Controller(scope) => typed(Expr::new(span, ExprNode::StringInterp {
+            parts: vec![
+                InterpPart::Text { value: format!("{scope}.") },
+                InterpPart::Expr { expr: typed(Expr::new(span, ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("action_name"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                })) },
+            ],
+        })),
+        _ => lit(span, String::new()),
+    };
+    let in_view = site.in_view();
+    let mut raises = const_send(span, "I18n", "missing_raises", vec![
+        Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: catalog.missing.raises } }),
+        lit(span, catalog.missing.flipped.join(",")),
+    ]);
+    raises.ty = Some(Ty::Bool);
+    let flag = Expr { ty: Some(Ty::Bool), ..Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: in_view } }) };
+    let call = typed(const_send(span, "I18n", "translate_runtime", vec![args[0].clone(), options, lazy, flag, raises]));
+    if in_view { raw(span, call) } else { call }
+}
+
 /// A call whose answer differs by locale as `I18n.translate_site(…)`: its
 /// entry per locale (and environment, and run-time key) goes to the app's
 /// table, which the runtime reads when the call runs.
@@ -746,6 +859,7 @@ fn table_site(call: &Call, locales: &[(String, Vec<(Plan, Vec<Variant>)>)], span
         shape.hash(&mut h);
         h.finish()
     };
+    RUNTIME_SITES.with(|r| r.borrow_mut().1.push(span));
     let id = TABLE.with(|t| {
         let mut t = t.borrow_mut();
         let (index, sites) = &mut *t;

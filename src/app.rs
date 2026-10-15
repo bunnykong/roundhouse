@@ -191,6 +191,14 @@ pub struct App {
     /// to the translation table the runtime reads.
     #[serde(skip)]
     pub i18n_table: Vec<crate::lower::i18n_translate::TableSite>,
+    /// The `t` calls left to `I18n.translate_runtime`, which reads the
+    /// app's whole catalog (written beside the table) when it runs.
+    #[serde(skip)]
+    pub i18n_runtime_sites: Vec<crate::span::Span>,
+    /// Every `t` that reads the translation table or the catalog when it
+    /// runs: the Ruby-family runtime alone carries them.
+    #[serde(skip)]
+    pub i18n_table_sites: Vec<crate::span::Span>,
     /// App-helper method registry: maps each method name defined in an
     /// `app/helpers/*.rb` module to the helper module (`ClassId`) that
     /// defines it. Rails mixes all helper modules into every view, so a
@@ -825,6 +833,8 @@ impl App {
             binary_assets: Vec::new(),
             i18n: crate::i18n::Catalog::default(),
             i18n_table: Vec::new(),
+            i18n_runtime_sites: Vec::new(),
+            i18n_table_sites: Vec::new(),
             models: Vec::new(),
             library_classes: Vec::new(),
             controllers: Vec::new(),

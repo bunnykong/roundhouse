@@ -68,8 +68,8 @@
 //! this — was neither: it emitted a literal `"cache!"` key holding the
 //! whole record.
 //!
-//! Still deferred: `json.merge!`, `json.key_format!`, `json.ignore_nil!`,
-//! and `json.child!`.
+//! Still deferred: `json.key_format!`, `json.ignore_nil!` and
+//! `json.child!`.
 
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
@@ -346,6 +346,7 @@ fn build_library_class(
         models: known_models.iter().cloned().collect(),
         temps: Default::default(),
         key_marks: Default::default(),
+        sound_merges: Default::default(),
         partials: partials.clone(),
         partial_key,
     };
@@ -465,7 +466,12 @@ fn jbuilder_method_parts(
         params.extend(locals.iter().cloned().map(Param::positional));
     } else if !ivar_params.is_empty() {
         params.extend(ivar_params.iter().cloned().map(Param::positional));
-    } else if !arg_name.is_empty() {
+    } else if !arg_name.is_empty() && is_partial {
+        // The convention arg is a PARTIAL's fallback only. An action
+        // view's render call passes exactly its ivar closure
+        // (`action_view_ivar_map`), so a template whose action sets no
+        // ivar (`def index; end` beside `json.ok true`) takes nothing:
+        // a guessed `gizmos` parameter made the call an ArgumentError.
         params.push(Param::positional(Symbol::from(arg_name.clone())));
     }
     // jbuilder templates today don't reference flash locals; if a
@@ -520,7 +526,8 @@ fn jbuilder_method_parts(
             .collect();
         crate::lower::view_to_library::build_view_signature_from(&typed, &extra_params)
     } else if ivar_params.is_empty() {
-        build_view_signature(stem, dir, is_partial, &arg_name, &extra_params, &known_models)
+        let convention_arg = if is_partial { arg_name.as_str() } else { "" };
+        build_view_signature(stem, dir, is_partial, convention_arg, &extra_params, &known_models)
     } else {
         let typed: Vec<(String, crate::ty::Ty)> = ivar_params
             .iter()
@@ -618,6 +625,10 @@ struct Ctx {
     /// (`io_key0`, …), shared the same way. Separate from `temps` so a
     /// template's collection locals keep their names.
     key_marks: std::rc::Rc<std::cell::Cell<usize>>,
+    /// The literal `json.merge!` statements (by address) an object
+    /// proved sound: top-level in their object, every sibling's keys
+    /// known and none of them repeated (`mark_sound_merges`).
+    sound_merges: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<usize>>>,
     /// Every jbuilder partial's parameters, for the calls this template
     /// makes to them.
     partials: std::rc::Rc<PartialParams>,
@@ -708,6 +719,10 @@ enum JbStmt<'a> {
     /// parameter named `json`, or a block argument that is not a
     /// literal block). Reported, never dropped.
     AroundUnlowered,
+    /// `json.merge!(hash)` — the hash's pairs join this object. A
+    /// literal Hash with literal keys is its pairs, written at compile
+    /// time; any other value is walked when the template runs.
+    Merge { value: &'a Expr },
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
@@ -830,6 +845,7 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
     // that may or may not have emitted one (`Sep::Unknown`).
     let mut out: Vec<Expr> = Vec::new();
     out.push(io_append_lit(&ctx.accumulator, "{"));
+    mark_sound_merges(&classified, raw_stmts, ctx);
     let end = emit_pairs(&classified, raw_stmts, ctx, &mut out, Sep::First);
     out.push(io_append_lit(&ctx.accumulator, "}"));
     // A statement the walker could not lower is written as nothing, so
@@ -855,6 +871,7 @@ fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
         }
         JbStmt::Around { body, .. } => has_unlowered(&branch_stmts(body), ctx),
         JbStmt::AroundUnlowered => true,
+        JbStmt::Merge { value } => !merge_lowers(s, value, ctx),
         _ => false,
     })
 }
@@ -1195,6 +1212,21 @@ fn emit_pairs(
                     "the block reaches `json` but its parameters or form cannot be lowered",
                 ));
             }
+            JbStmt::Merge { value } if merge_lowers(src, value, ctx) => {
+                sep = emit_merge(value, ctx, out, sep);
+            }
+            JbStmt::Merge { .. } => {
+                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                    file: String::new(),
+                    message: "jbuilder: `json.merge!` of a value that is not a Hash, or over a key the object may already set"
+                        .to_string(),
+                });
+                out.push(unsupported_stmt(
+                    src.span,
+                    "jbuilder merge!",
+                    "only a Hash literal whose keys the object sets nowhere else, or a value typed Hash, is lowered",
+                ));
+            }
             JbStmt::Unknown => {
                 out.push(io_append_lit(&ctx.accumulator, ""));
             }
@@ -1204,6 +1236,152 @@ fn emit_pairs(
         }
     }
     sep
+}
+
+/// The pairs of a literal `{ kind: "x", "n" => 2 }`: each key as the
+/// String Jbuilder writes, with its value. `None` when the value is not
+/// a Hash literal or a key is not a Symbol or String literal.
+fn literal_merge_pairs(value: &Expr) -> Option<Vec<(String, &Expr)>> {
+    let ExprNode::Hash { entries, .. } = &*value.node else { return None };
+    entries
+        .iter()
+        .map(|(k, v)| match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some((value.as_str().to_string(), v)),
+            _ => string_literal(k).map(|key| (key, v)),
+        })
+        .collect()
+}
+
+/// `json.merge!(hash)`: each pair of `hash` appended to this object.
+///
+/// A literal Hash writes its pairs as `json.<key> <value>` would. Any
+/// other value (an ivar, a method's answer) is iterated when the
+/// template runs, every pair under the comma check:
+///
+///   (@extra).each do |merge_key, merge_value|
+///     io << "," if !(io.end_with?("{"))
+///     io << JsonBuilder.encode_value(merge_key.to_s)
+///     io << ":"
+///     io << JsonBuilder.encode_value(merge_value)
+///   end
+///
+/// Only reached for a merge `merge_lowers` accepts. A typed Hash whose
+/// key the object also sets is written twice: its keys are only known
+/// when the template runs.
+fn emit_merge(value: &Expr, ctx: &Ctx, out: &mut Vec<Expr>, mut sep: Sep) -> Sep {
+    if let Some(pairs) = literal_merge_pairs(value) {
+        for (key, v) in pairs {
+            push_separator(out, ctx, sep);
+            out.push(io_append_lit(&ctx.accumulator, &format!("{}:", json_string_literal(&key))));
+            let encoded = json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(v, ctx)));
+            out.push(io_append_call(&ctx.accumulator, encoded));
+            sep = Sep::After;
+        }
+        return sep;
+    }
+    let n = ctx.key_marks.get();
+    ctx.key_marks.set(n + 1);
+    let key_var = Symbol::from(format!("merge_key{n}"));
+    let value_var = Symbol::from(format!("merge_value{n}"));
+    let mut body = Vec::new();
+    push_separator(&mut body, ctx, if sep == Sep::After { Sep::After } else { Sep::Unknown });
+    let key_string = send(Some(var_ref(key_var.clone())), "to_s", Vec::new(), None, false);
+    body.push(io_append_call(&ctx.accumulator, json_builder_encode(key_string)));
+    body.push(io_append_lit(&ctx.accumulator, ":"));
+    body.push(io_append_call(&ctx.accumulator, json_builder_encode(var_ref(value_var.clone()))));
+    let block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            params: vec![key_var, value_var],
+            rest_param: None,
+            block_param: None,
+            body: seq(body),
+            block_style: crate::expr::BlockStyle::Do,
+        },
+    );
+    let value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
+    out.push(send(Some(value), "each", Vec::new(), Some(block), false));
+    // The hash may be empty: the next pair asks the accumulator, unless
+    // one is already known to be there.
+    if sep == Sep::After { Sep::After } else { Sep::Unknown }
+}
+
+/// Whether a `json.merge!` statement is lowered: a literal Hash its
+/// object proved sound (`mark_sound_merges`), or any other value whose
+/// type is a Hash. Anything else (an Array, which Jbuilder renders as
+/// the whole value, an untyped value, a literal that repeats a key) is
+/// refused, as Jbuilder's answer there is not a pair per entry.
+fn merge_lowers(stmt: &Expr, value: &Expr, ctx: &Ctx) -> bool {
+    if literal_merge_pairs(value).is_some() {
+        return ctx.sound_merges.borrow().contains(&(stmt as *const Expr as usize));
+    }
+    !matches!(&*value.node, ExprNode::Hash { .. } | ExprNode::Array { .. })
+        && matches!(value.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+}
+
+/// The keys every run of `stmt` may set in its object, when they are
+/// all known: a pair's key, `extract!`'s attributes, a literal merge's
+/// keys, both branches of a condition. `None` for a partial, a block
+/// on another call, a merge of a non-literal, or anything unknown.
+fn object_keys(stmt: &JbStmt<'_>) -> Option<Vec<String>> {
+    let branch = |body: &Expr| -> Option<Vec<String>> {
+        let mut keys = Vec::new();
+        for s in branch_stmts(body) {
+            keys.extend(object_keys(&classify(s))?);
+        }
+        Some(keys)
+    };
+    match stmt {
+        JbStmt::Extract { attrs, .. } => Some(attrs.iter().map(|a| a.as_str().to_string()).collect()),
+        JbStmt::Pair { key, .. }
+        | JbStmt::PairPartial { key, .. }
+        | JbStmt::Nested { key, .. }
+        | JbStmt::PairBlock { key, .. } => Some(vec![key.as_str().to_string()]),
+        JbStmt::Merge { value } => literal_merge_pairs(value).map(|pairs| pairs.into_iter().map(|(k, _)| k).collect()),
+        JbStmt::Local => Some(Vec::new()),
+        JbStmt::Cond { then_branch, else_branch, .. } => {
+            let mut keys = branch(then_branch)?;
+            keys.extend(branch(else_branch)?);
+            Some(keys)
+        }
+        _ => None,
+    }
+}
+
+/// Record which of an object's own (top-level) literal `json.merge!`
+/// statements are sound: their keys are distinct, every other statement
+/// of the object sets only known keys, and none of those is one of
+/// them. Jbuilder deep-merges a repeated String key and Rails answers
+/// 500 for a repeated Symbol one, so a repeat is never a second pair.
+fn mark_sound_merges(classified: &[JbStmt<'_>], raw_stmts: &[&Expr], ctx: &Ctx) {
+    for (i, stmt) in classified.iter().enumerate() {
+        let JbStmt::Merge { value } = stmt else { continue };
+        let Some(own) = literal_merge_pairs(value).map(|pairs| pairs.into_iter().map(|(k, _)| k).collect::<Vec<_>>())
+        else {
+            continue;
+        };
+        let distinct: std::collections::HashSet<&String> = own.iter().collect();
+        if distinct.len() != own.len() {
+            continue;
+        }
+        let mut others: Vec<String> = Vec::new();
+        let known = classified.iter().enumerate().filter(|(j, _)| *j != i).all(|(_, c)| match object_keys(c) {
+            Some(keys) => {
+                others.extend(keys);
+                true
+            }
+            None => false,
+        });
+        if known && !others.iter().any(|k| distinct.contains(k)) {
+            ctx.sound_merges.borrow_mut().insert(raw_stmts[i] as *const Expr as usize);
+        }
+    }
+}
+
+/// `"key"` as a JSON string literal (quotes and backslashes escaped).
+fn json_string_literal(key: &str) -> String {
+    serde_json::to_string(key).unwrap_or_else(|_| format!("\"{key}\""))
 }
 
 /// `begin … rescue … end` around pairs, with Jbuilder's outcome when
@@ -1376,6 +1554,11 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             }
             JbStmt::Extract { obj, attrs }
         }
+        // `json.merge!(hash)`: Jbuilder merges the hash's pairs into
+        // the object being built (`_merge_values`). Without this arm
+        // the name fell through to the single-pair shape below and the
+        // template wrote a key named `merge!`.
+        "merge!" if args.len() == 1 && block.is_none() => JbStmt::Merge { value: &args[0] },
         "array!" => {
             // `json.array! @col, partial: P, as: V`. First positional
             // is the collection; trailing Hash carries partial/as.

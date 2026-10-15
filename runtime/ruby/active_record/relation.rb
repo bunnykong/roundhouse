@@ -933,10 +933,20 @@ module ActiveRecord
       self
     end
 
-    def distinct
+    # Rails' `QueryMethods#distinct(value = true)`: any truthy value
+    # turns DISTINCT on (`distinct(:name)` is not a column list; it is
+    # `distinct(true)`), `false` turns it off.
+    def distinct(value = true)
       unload_records
-      @distinct = true
+      @distinct = value ? true : false
       self
+    end
+
+    # Rails' `Relation#all`: the relation itself, as a new relation, so a
+    # chain written for a class (`Widget.all`) also reads on a scope or an
+    # association reader (`owner.widgets.active.all`).
+    def all
+      spawn
     end
 
     # `includes`/`preload`/`eager_load` — eager-load hints. The specs

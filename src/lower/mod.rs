@@ -1583,7 +1583,7 @@ pub use controller::{
 };
 pub use controller_test::{
     classify_assert_select, classify_controller_test_send, classify_url_expr,
-    flatten_params_pairs, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
+    flatten_params_pairs, setup_fixture, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
     UrlHelperCall,
 };
 pub use fixtures::{

@@ -151,7 +151,8 @@ module ActiveRecord
     # same method under Ruby's other name and DOES declare the block
     # shape, so a strict target that needs it has a spelling.
     def select: (*(String | Symbol) specs) -> Relation
-    def distinct: () -> Relation
+    def distinct: (?(bool | Symbol | String) value) -> Relation
+    def all: () -> Relation
     def includes: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
     def preload: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
     def eager_load: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation

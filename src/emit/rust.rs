@@ -1618,10 +1618,13 @@ fn render_axum_handler_wrappers(
         let action = r.action.as_str();
         let method_name = if action == "new" { "new_action" } else { action };
         let path_params = &r.path_params;
-        let has_body = matches!(
-            r.method,
-            HttpMethod::Post | HttpMethod::Patch | HttpMethod::Put,
-        );
+        let carries_body = |method: &HttpMethod| matches!(method, HttpMethod::Post | HttpMethod::Patch | HttpMethod::Put);
+        // Also a body another route to the action carries, where the controller reads `params`: `get` and `post` to one action share this wrapper, and axum's `Form` reads a GET's query string.
+        let has_body = carries_body(&r.method)
+            || has_params
+                && flat_routes.iter().any(|other| {
+                    other.controller.0.as_str() == controller_name && other.action == r.action && carries_body(&other.method)
+                });
         // Path params come in as String. The handler body strips an
         // optional `.json` suffix off each one before parsing as i64
         // — for `/articles/{id}` URLs ending in `.json`, matchit's
@@ -1679,14 +1682,25 @@ fn render_axum_handler_wrappers(
             // request body can only be consumed once; placing it
             // after the `Path` extractors keeps the consumption
             // ordering deterministic).
-            args.push(
-                "axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>"
-                    .to_string(),
-            );
+            if carries_body(&r.method) {
+                args.push(
+                    "axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>"
+                        .to_string(),
+                );
+            } else {
+                // Not a bare `Form`: this wrapper serves the action's other verbs too, and a DELETE with no form body would be refused before the action runs.
+                args.push(
+                    "form: Result<axum::extract::Form<std::collections::HashMap<String, String>>, axum::extract::rejection::FormRejection>"
+                        .to_string(),
+                );
+            }
         }
         let args_str = args.join(", ");
 
         let mut body = String::new();
+        if has_body && !carries_body(&r.method) {
+            body.push_str("    let form = form.map(|f| f.0).unwrap_or_default();\n");
+        }
         body.push_str("    crate::http::response_clear();\n");
         body.push_str("    crate::http::request_format_set(_fmt.0);\n");
         if has_params {
