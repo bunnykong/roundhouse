@@ -238,6 +238,56 @@ require "stringio"
 end
 "#;
 
+// json 2.18 only enforces immediate Integer limits on this 64-bit target.
+const INTEGER_BOUNDARIES: &str = r#"
+require "json"
+require "stringio"
+[-1, -(2**62), -(2**62)-1, -(2**64), 2**62-1, 2**62, 2**64].each do |limit|
+  puts limit.to_s
+  begin
+    p JSON.dump([], limit)
+    p JSON.dump([], nil, limit)
+    p JSON.dump([], {max_nesting: limit})
+    p JSON.dump([], nil, {max_nesting: limit})
+    p JSON.dump([], nil, nil, {max_nesting: limit})
+    stream = StringIO.new
+    p JSON.dump([], stream, limit).equal?(stream)
+    p stream.string
+  rescue ArgumentError => dump_error
+    puts dump_error.class.to_s + ":" + dump_error.message
+  end
+end
+"#;
+
+const CONVERSION_EXCEPTIONS: &str = r#"
+require "json"
+class JsonRaisingConversion
+  def to_io
+    raise JSON::NestingError, "conversion sentinel"
+  end
+end
+class JsonRaisingWriter
+  def write(text)
+    raise JSON::NestingError, "writer sentinel"
+  end
+  def flush
+    nil
+  end
+end
+[JsonRaisingConversion.new, JsonRaisingWriter.new].each do |destination|
+  begin
+    JSON.dump([], destination)
+  rescue => dump_error
+    puts dump_error.class.to_s + ":" + dump_error.message
+  end
+end
+begin
+  JSON.dump([[]], nil, 1)
+rescue => dump_error
+  puts dump_error.class.to_s + ":" + dump_error.message
+end
+"#;
+
 fn compare_native(script: &str) {
     let oracle = app().run_ruby(script);
     oracle.assert_passes();
@@ -251,7 +301,7 @@ fn compare_native(script: &str) {
 
 #[test]
 fn cruby_dump_contracts() {
-    for script in [IO, LIMIT, OPTIONS, FALSEY, NUMERIC_BOUNDARIES] {
+    for script in [IO, LIMIT, OPTIONS, FALSEY, NUMERIC_BOUNDARIES, INTEGER_BOUNDARIES, CONVERSION_EXCEPTIONS] {
         app().run_ruby(script).assert_passes();
     }
 }
@@ -284,6 +334,18 @@ fn dump_treats_falsey_destinations_as_absent() {
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_does_not_coerce_noninteger_limits() {
     compare_native(NUMERIC_BOUNDARIES);
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_ignores_bignum_limits() {
+    compare_native(INTEGER_BOUNDARIES);
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_preserves_conversion_exceptions() {
+    compare_native(CONVERSION_EXCEPTIONS);
 }
 
 const RETURN_TYPES: &str = r#"
@@ -511,6 +573,185 @@ p JsonProbe.three_way_converted(false, false)
 p JsonProbe.three_way_converted(true, false).string
 "#;
     let overlay = || app().write("app/services/json_probe.rb", RETURN_TYPES);
+    let oracle = overlay().run_ruby(script);
+    oracle.assert_passes();
+    let native = overlay().run_spinel_with_rbs(script);
+    native.assert_passes();
+    assert_eq!(native.stdout, oracle.stdout);
+}
+
+// Equivalent destination types must survive each expression form. Singleton
+// conversions deliberately differ from the same class's instance conversion.
+const DESTINATION_SHAPES: &str = r#"
+require "json"
+require "stringio"
+class JsonClassAdapter
+  def self.to_io
+    StringIO.new
+  end
+  def to_io
+    false
+  end
+end
+class JsonClassWriter
+  def self.write(text)
+    puts text
+    text.bytesize
+  end
+  def self.flush
+    nil
+  end
+end
+class JsonDestinations
+  STREAM = StringIO.new
+  ABSENT = false
+  def initialize
+    @stream = StringIO.new
+    @absent = false
+    @class_destination = JsonClassAdapter
+  end
+  def self.destination
+    StringIO.new
+  end
+  def self.local
+    stream = StringIO.new
+    JSON.dump([1], stream)
+  end
+  def self.local_absent
+    destination = false
+    JSON.dump([1], destination)
+  end
+  def ivar
+    JSON.dump([1], @stream)
+  end
+  def ivar_absent
+    JSON.dump([1], @absent)
+  end
+  def ivar_class
+    JSON.dump([1], @class_destination)
+  end
+  def self.class_method_call
+    JSON.dump([1], JsonDestinations.destination)
+  end
+  def self.constant
+    JSON.dump([1], STREAM)
+  end
+  def self.constant_absent
+    JSON.dump([1], ABSENT)
+  end
+  def self.absent_destination
+    nil
+  end
+  def self.call_absent
+    JSON.dump([1], JsonDestinations.absent_destination)
+  end
+  def self.unknown(destination)
+    JSON.dump([1], destination)
+  end
+  def self.singleton_conversion
+    JSON.dump([1], JsonClassAdapter)
+  end
+  def self.singleton_alias
+    destination = JsonClassAdapter
+    JSON.dump([1], destination)
+  end
+  def self.instance_conversion
+    JSON.dump([1], JsonClassAdapter.new)
+  end
+  def self.singleton_writer
+    JSON.dump([1], JsonClassWriter)
+  end
+  def self.class_destination
+    JsonClassAdapter
+  end
+  def self.returned_class_conversion
+    JSON.dump([1], JsonDestinations.class_destination)
+  end
+end
+"#;
+
+fn destination_rbs() -> String {
+    let (emitted, errors) = app()
+        .write("app/services/json_destinations.rb", DESTINATION_SHAPES)
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    std::fs::read_to_string(emitted.join("app/models/json_destinations.rbs")).unwrap()
+}
+
+fn assert_destination_returns(returns: &[(&str, &str)]) {
+    let rbs = destination_rbs();
+    for (method, result) in returns {
+        assert!(rbs.contains(&format!("def {method}: () -> {result}\n")), "{rbs}");
+    }
+}
+
+#[test]
+fn dump_local_destination_returns() {
+    assert_destination_returns(&[
+        ("self.local", "StringIO"),
+        ("self.local_absent", "String"),
+        ("self.singleton_alias", "StringIO"),
+    ]);
+}
+
+#[test]
+fn dump_ivar_destination_returns() {
+    assert_destination_returns(&[
+        ("ivar", "StringIO"),
+        ("ivar_absent", "String"),
+        ("ivar_class", "untyped"),
+    ]);
+}
+
+#[test]
+fn dump_class_method_destination_returns() {
+    assert_destination_returns(&[
+        ("self.class_method_call", "StringIO"),
+        ("self.call_absent", "String"),
+        ("self.returned_class_conversion", "StringIO"),
+    ]);
+}
+
+#[test]
+fn dump_constant_destination_returns() {
+    assert_destination_returns(&[
+        ("self.constant", "StringIO"),
+        ("self.constant_absent", "String"),
+        ("self.singleton_conversion", "StringIO"),
+        ("self.singleton_writer", "untyped"),
+        ("self.instance_conversion", "untyped"),
+    ]);
+}
+
+#[test]
+fn dump_unknown_destination_return_stays_gradual() {
+    let rbs = destination_rbs();
+    assert!(rbs.contains("def self.unknown: (untyped destination) -> untyped\n"), "{rbs}");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_destination_shapes_execute_with_application_sidecars() {
+    let script = r#"
+p JsonDestinations.local.string
+p JsonDestinations.local_absent
+p JsonDestinations.new.ivar.string
+p JsonDestinations.new.ivar_absent
+p JsonDestinations.new.ivar_class.string
+p JsonDestinations.class_method_call.string
+p JsonDestinations.call_absent
+p JsonDestinations.constant.string
+p JsonDestinations.constant_absent
+p JsonDestinations.singleton_conversion.string
+p JsonDestinations.singleton_alias.string
+p JsonDestinations.instance_conversion
+p JsonDestinations.singleton_writer.equal?(JsonClassWriter)
+p JsonDestinations.returned_class_conversion.string
+p JsonDestinations.unknown(StringIO.new).string
+p JsonDestinations.unknown(false)
+p JsonDestinations.unknown(nil)
+"#;
+    let overlay = || app().write("app/services/json_destinations.rb", DESTINATION_SHAPES);
     let oracle = overlay().run_ruby(script);
     oracle.assert_passes();
     let native = overlay().run_spinel_with_rbs(script);

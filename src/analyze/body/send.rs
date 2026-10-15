@@ -980,26 +980,61 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
-    fn json_dump_return_ty(&self, io: &Ty) -> Ty {
+    fn json_dump_return_ty(&self, io: &Ty, class_object: bool) -> Ty {
         match io {
-            Ty::Union { variants } => {
-                super::union_many(variants.iter().map(|ty| self.json_dump_return_ty(ty)).collect())
-            }
+            Ty::Union { variants } => super::union_many(
+                variants.iter().map(|ty| self.json_dump_return_ty(ty, class_object)).collect(),
+            ),
             Ty::Var { .. } | Ty::Untyped => Ty::Untyped,
-            Ty::Class { id, .. } if self.defines_instance_method(id, &Symbol::from("to_io")) => {
-                let converted = self.dispatch_on(Some(io), &Symbol::from("to_io"), None, &[], true);
-                match converted {
-                    // Both nil and false select the generator's no-IO mode.
-                    // Bool also admits true, which raises rather than returning.
-                    Ty::Nil | Ty::Bool => Ty::Str,
-                    Ty::Union { variants } => super::union_many(variants.iter().map(|ty| {
-                        if matches!(ty, Ty::Nil | Ty::Bool) { Ty::Str } else { ty.clone() }
-                    }).collect()),
-                    ty => ty,
+            // Method returns preserve class-object identity as Class[C]. A
+            // direct constant or local alias carries CLASS_OBJECT_VALUE instead.
+            Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => {
+                self.json_dump_return_ty(&args[0], true)
+            }
+            Ty::Class { .. } => {
+                let conversion = Symbol::from("to_io");
+                let writer = Symbol::from("write");
+                if !class_object
+                    && (self.owns_operator(Some(io), &conversion, true)
+                        || self.owns_operator(Some(io), &writer, true))
+                {
+                    // A nominal type can have lost class-object provenance (for
+                    // example through an ivar), even when both sides define the
+                    // protocol. Keep that ambiguity gradual rather than claiming
+                    // either side's concrete native return representation.
+                    Ty::Untyped
+                } else if self.owns_operator(Some(io), &conversion, class_object) {
+                    let converted = self.dispatch_on(Some(io), &conversion, None, &[], !class_object);
+                    // Conversion happens exactly once. Both nil and false select
+                    // no-IO mode; true raises rather than returning successfully.
+                    let result = |ty: &Ty| match ty {
+                        Ty::Nil | Ty::Bool => Ty::Str,
+                        // Spinel cannot unbox a dynamic return as singleton(C).
+                        // Keep class-object destinations in their boxed form.
+                        Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => Ty::Untyped,
+                        Ty::Class { .. } if self.owns_operator(Some(ty), &writer, true) => Ty::Untyped,
+                        ty => ty.clone(),
+                    };
+                    match converted {
+                        Ty::Union { variants } => super::union_many(variants.iter().map(result).collect()),
+                        ty => result(&ty),
+                    }
+                } else if self.owns_operator(Some(io), &writer, class_object) {
+                    if class_object {
+                        // The facade's dynamic return must stay boxed for a
+                        // class object; a singleton RBS return cannot unbox it.
+                        Ty::Untyped
+                    } else {
+                        io.clone()
+                    }
+                } else {
+                    // Method tables may still be pending, or this may be an
+                    // external destination. Absence of a known writer is not
+                    // proof that an arbitrary nominal value returns JSON text.
+                    Ty::Untyped
                 }
             }
-            Ty::Class { id, .. } if self.defines_instance_method(id, &Symbol::from("write")) => io.clone(),
-            // A nil destination, options Hash, or non-writer limit returns JSON text.
+            // A nil destination, options Hash, or non-writer limit returns text.
             _ => Ty::Str,
         }
     }
@@ -1881,7 +1916,9 @@ impl<'a> BodyTyper<'a> {
                     match method.as_str() {
                         "dump" => return match call_args.get(1) {
                             None => Ty::Str,
-                            Some(io) => io.ty.as_ref().map_or(Ty::Untyped, |ty| self.json_dump_return_ty(ty)),
+                            Some(io) => io.ty.as_ref().map_or(Ty::Untyped, |ty| {
+                                self.json_dump_return_ty(ty, io.decisions & crate::expr::CLASS_OBJECT_VALUE != 0)
+                            }),
                         },
                         "generate" | "pretty_generate" | "fast_generate" => {
                             return Ty::Str

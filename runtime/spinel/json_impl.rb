@@ -66,18 +66,20 @@ if RUBY_ENGINE == "spinel"
       opts = opts.merge(max_nesting: limit) if limit
       opts = opts.merge(options) if options
       nesting = opts[:max_nesting]
-      # Enforce integer limits without coercing other Numeric values: to_i
-      # would reject Infinity/NaN and impose a new limit on Rational values.
-      # Fractional Float limits still follow the bundled encoder's behavior.
-      nesting = nesting.is_a?(Integer) ? nesting : 0
-      check_dump_nesting(obj, nesting, 0) unless nesting == 0
-      json = generate(obj, opts)
-      return json unless anIO
-      anIO.write(json)
-      anIO.flush
-      anIO
-    rescue JSON::NestingError
-      raise ArgumentError, "exceed depth limit"
+      # Enforce the immediate-integer range json 2.18 accepts on a 64-bit
+      # host. Other Numeric values keep the bundled encoder's behavior.
+      nesting = 0 unless nesting.is_a?(Integer) &&
+        nesting >= -4611686018427387904 && nesting <= 4611686018427387903
+      begin
+        check_dump_nesting(obj, nesting, 0) unless nesting == 0
+        json = generate(obj, opts)
+        return json unless anIO
+        anIO.write(json)
+        anIO.flush
+        anIO
+      rescue JSON::NestingError
+        raise ArgumentError, "exceed depth limit"
+      end
     end
 
     def self.check_dump_nesting(value, limit, depth)
