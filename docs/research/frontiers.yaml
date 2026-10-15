@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "On strict-producer-reasons-20261015-ea3ec744, Campfire reason rows agree with verification off, but larger-app value parity fails. Closure-application-effects-20261015-ea3ec744 passes its bounded application gates after two missing controls complete. Declared-contributor-join-20261015-ea3ec744 is killed by module schedule dependence and added aliases. The complete row catalog and unchanged writer partition failures keep arbitrary-order inference open."
-  facts: [F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "On fixpoint-spine-20261015-ea3ec744, the integrated repairs pass the bounded kits and Campfire reason comparisons. The partition law still fails, and larger apps retain F55's value equalities."
+  facts: [F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Require complete producer and reason state, executed-closure coverage and partition/replay-compatible storage, with fresh larger-app controls. Keep attribution sensitivities separate from successful repairs."
+  next: "Repair partition and replay failures, then repeat complete value and reason comparisons on the larger apps."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
-    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
-    runner: "Saved receipt reductions and explicit native recipes at lab 4b80cdf4b90211001b41b579081901b699108d75"
+    compiler: "fixpoint-spine 14ee6a88c63f36a2b4ed7f8dae31ecd4e4dd3d58 (recorded 369d963d1866d404dc6976ed2b77e6a934a131f6)"
+    lab: "751d62e764beefcd8ba819c4ec403f6181576e7d; fixpoint-spine-20261015-ea3ec744"
+    runner: "Saved F62 reduction and focused native recipes at lab 751d62e764beefcd8ba819c4ec403f6181576e7d"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -101,19 +101,19 @@
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "Writer-partition-replay-20261015-four-pins preserves the plain partition and duplicate-round failures across four pins. Restoring a reflective bound does not repair those storage equalities. The later evening batch adds no chronological compiler replay confirmation, position-level storage-fidelity result or candidate latency claim."
-  facts: [F60, F59, F56, F61, F54, F50, F48, F39]
+  stands: "On fixpoint-spine-20261015-ea3ec744, reflective bounds are repaired, but writer partition and repeated-round failures remain. This adds no chronological replay or latency result."
+  facts: [F62, F60, F59, F56, F61, F54, F50, F48, F39]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Keep complete current evidence and exact cold shadows for chronological replay. Require storage policies to survive partitioning and repetition; do not infer incremental correctness from a saved experiment replay."
+  next: "Require partition and replay laws, complete current evidence and exact cold shadows before claiming incremental correctness."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
-    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
-    runner: "Saved receipt reductions and explicit native recipes at lab 4b80cdf4b90211001b41b579081901b699108d75"
+    compiler: "fixpoint-spine 14ee6a88c63f36a2b4ed7f8dae31ecd4e4dd3d58 (recorded 369d963d1866d404dc6976ed2b77e6a934a131f6)"
+    lab: "751d62e764beefcd8ba819c4ec403f6181576e7d; fixpoint-spine-20261015-ea3ec744"
+    runner: "Saved F62 reduction and focused native recipes at lab 751d62e764beefcd8ba819c4ec403f6181576e7d"
 - id: typed-recursion
   name: Typed recursion
   brief: frontiers/typed-recursion.md
