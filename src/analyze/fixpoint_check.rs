@@ -730,6 +730,7 @@ impl Analyzer {
         if super::precision::on() {
             line["precision"] = serde_json::json!(super::precision::census(app));
         }
+        if let Some(closure_harvest) = super::closure_census::report(app) { line["closure_harvest"] = closure_harvest; }
         eprintln!("rh-fixpoint: {line}");
     }
 }
