@@ -1606,7 +1606,7 @@ impl<'a> BodyTyper<'a> {
                 let block_ret = if let Some(b) = block {
                     let mut block_ctx = self.block_ctx_for(
                         ctx,
-                        recv_ty.as_ref(),
+                        class_value_recv_ty.as_ref().or(recv_ty.as_ref()),
                         method,
                         args,
                         class_object_receiver,
@@ -2074,7 +2074,7 @@ impl<'a> BodyTyper<'a> {
                         });
                         return dispatched;
                     }
-                    if let Some(t) = send::object_protocol_method(recv_ty.as_ref(), method, block_ret.as_ref(), class_object) {
+                    if let Some(t) = send::object_protocol_method(class_value_recv_ty.as_ref().or(recv_ty.as_ref()), method, block_ret.as_ref(), class_object) {
                         return t;
                     }
                 }

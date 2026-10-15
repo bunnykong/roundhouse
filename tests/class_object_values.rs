@@ -7,9 +7,12 @@ use std::path::PathBuf;
 
 use roundhouse::ingest::ingest_app_from_tree;
 
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+
 const REPRO: &str = include_str!("support/class_object_values.rb");
 
-fn sidecars(source: &str, extra: &[(&str, &str)]) -> String {
+fn analyzed_app(source: &str, extra: &[(&str, &str)]) -> roundhouse::App {
     let mut files: HashMap<PathBuf, Vec<u8>> = [
         ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
         ("app/lib/values.rb", source),
@@ -24,7 +27,11 @@ fn sidecars(source: &str, extra: &[(&str, &str)]) -> String {
     );
     let mut app = ingest_app_from_tree(files).expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);
-    roundhouse::emit::ruby::emit_library(&app)
+    app
+}
+
+fn sidecars(source: &str, extra: &[(&str, &str)]) -> String {
+    roundhouse::emit::ruby::emit_library(&analyzed_app(source, extra))
         .into_iter()
         .filter(|file| file.path.extension().is_some_and(|ext| ext == "rbs"))
         .map(|file| file.content)
@@ -394,6 +401,12 @@ fn resolved_data_and_struct_class_constants_are_class_values() {
         r#"class Factories
   DataValue = Data.define(:n)
   StructValue = Struct.new(:n, keyword_init: true)
+  def self.top_class(klass = TopData)
+    klass
+  end
+  def self.top_instance
+    TopData.new(1)
+  end
   def self.data_class(klass = DataValue)
     klass
   end
@@ -408,7 +421,7 @@ fn resolved_data_and_struct_class_constants_are_class_values() {
   end
 end
 "#,
-        &[],
+        &[("app/lib/top_data.rb", "TopData = Data.define(:n)\n")],
     );
     contains(
         &rbs,
@@ -423,6 +436,11 @@ end
         &rbs,
         "def self.struct_instance: () -> Factories::StructValue",
     );
+    contains(
+        &rbs,
+        "def self.top_class: (?singleton(TopData) klass) -> singleton(TopData)",
+    );
+    contains(&rbs, "def self.top_instance: () -> TopData");
 }
 
 #[test]
@@ -474,4 +492,201 @@ end
     let rbs = sidecars(&source, &[]);
     contains(&rbs, "def self.instance: () -> Widget");
     contains(&rbs, "def self.klass: () -> singleton(Widget)");
+}
+
+#[test]
+fn receiver_protocols_and_their_blocks_preserve_the_class_value() {
+    let source = format!(
+        "{REPRO}\n{}",
+        r#"module Marker
+end
+class ClassFlows
+  def self.via_then
+    Widget.then { |klass| klass }
+  end
+  def self.via_yield_self
+    Widget.yield_self { |klass| klass }
+  end
+  def self.observe(value)
+    value
+  end
+  def self.via_tap
+    Widget.tap { |klass| observe(klass) }
+  end
+  def self.via_send
+    Widget.public_send(:itself)
+  end
+  def self.maybe
+    Widget.presence
+  end
+  def self.via_extend
+    Widget.extend(Marker)
+  end
+  def self.via_class_eval
+    Widget.class_eval { self }
+  end
+  def self.class_value
+    Widget
+  end
+  def self.via_try
+    ClassFlows.try(:class_value)
+  end
+end
+"#
+    );
+    let rbs = sidecars(&source, &[]);
+    for method in [
+        "via_then",
+        "via_yield_self",
+        "via_tap",
+        "via_send",
+        "via_extend",
+        "via_class_eval",
+    ] {
+        contains(&rbs, &format!("def self.{method}: () -> singleton(Widget)"));
+    }
+    contains(
+        &rbs,
+        "def self.observe: (singleton(Widget) value) -> singleton(Widget)",
+    );
+    contains(&rbs, "def self.maybe: () -> singleton(Widget)?");
+    contains(&rbs, "def self.via_try: () -> singleton(Widget)?");
+}
+
+#[test]
+fn class_body_and_default_self_values_use_their_receiver_side() {
+    let app = analyzed_app(
+        r#"class SelfValues
+  OWNER = SelfValues
+  def self.by_constant(klass = OWNER)
+    klass
+  end
+  def self.by_default(klass = self)
+    klass
+  end
+  def instance_default(value = self)
+    value
+  end
+end
+"#,
+        &[
+            (
+                "app/models/record.rb",
+                "class Record < ApplicationRecord\n  def self.by_default(klass = self)\n    klass\n  end\nend\n",
+            ),
+            (
+                "app/models/application_record.rb",
+                "class ApplicationRecord < ActiveRecord::Base\nend\n",
+            ),
+            (
+                "app/controllers/application_controller.rb",
+                "class ApplicationController < ActionController::Base\nend\n",
+            ),
+            (
+                "app/controllers/self_values_controller.rb",
+                "class SelfValuesController < ApplicationController\n  def self.by_default(klass = self)\n    klass\n  end\nend\n",
+            ),
+        ],
+    );
+    let rbs = roundhouse::emit::ruby::emit_library(&app)
+        .into_iter()
+        .filter(|file| file.path.extension().is_some_and(|ext| ext == "rbs"))
+        .map(|file| file.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    contains(
+        &rbs,
+        "def self.by_constant: (?singleton(SelfValues) klass) -> singleton(SelfValues)",
+    );
+    contains(
+        &rbs,
+        "def self.by_default: (?singleton(SelfValues) klass) -> singleton(SelfValues)",
+    );
+    contains(
+        &rbs,
+        "def instance_default: (?SelfValues value) -> SelfValues",
+    );
+    let record = app
+        .models
+        .iter()
+        .find(|model| model.name.0.as_str() == "Record")
+        .expect("model");
+    let method = record
+        .methods()
+        .find(|method| method.name.as_str() == "by_default")
+        .expect("model method");
+    let controller = app
+        .controllers
+        .iter()
+        .find(|controller| controller.name.0.as_str() == "SelfValuesController")
+        .expect("controller");
+    let controller_method = controller
+        .class_methods()
+        .find(|method| method.name.as_str() == "by_default")
+        .expect("controller method");
+    for (method, owner) in [
+        (method, "Record"),
+        (controller_method, "SelfValuesController"),
+    ] {
+        for ty in [
+            method.params[0].default.as_ref().unwrap().ty.as_ref(),
+            method.body.ty.as_ref(),
+        ] {
+            assert!(
+                matches!(ty.and_then(roundhouse::ty::Ty::class_object_instance), Some(roundhouse::ty::Ty::Class { id, .. }) if id.0.as_str() == owner),
+                "{ty:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn class_parameter_module_protocols_run_and_instances_remain_rejected() {
+    let source = r#"class ProtocolTarget
+  TAG = 9
+  def self.visible
+    self
+  end
+  def visible
+    false
+  end
+  def self.number
+    TAG
+  end
+end
+class ProtocolDriver
+  def self.apply(klass)
+    [klass.class_eval { self } == klass,
+     klass.const_defined?(:TAG), klass.const_get(:TAG)]
+  end
+  def self.reassign
+    relation = ProtocolTarget
+    [1].each { |ignored| relation = relation.itself }
+    relation.visible.number
+  end
+  def self.result
+    apply(ProtocolTarget)
+  end
+end
+"#;
+    let run = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+        .write("app/lib/protocol_values.rb", source)
+        .run_ruby("p ProtocolDriver.result\np ProtocolDriver.reassign\n");
+    run.assert_passes();
+    assert_eq!(run.stdout, "[true, true, 9]\n9\n");
+
+    let (_emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+        .write(
+            "app/lib/protocol_values.rb",
+            &source.replace("apply(ProtocolTarget)", "apply(ProtocolTarget.new)"),
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    for method in ["class_eval", "const_defined?", "const_get"] {
+        assert!(
+            errors.iter().any(|error| error.contains(method)),
+            "an instance must not gain {method}: {errors:?}"
+        );
+    }
 }

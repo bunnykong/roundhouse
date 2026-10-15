@@ -2148,7 +2148,7 @@ impl Analyzer {
                 let ty = self.data_factories.get(&span)?;
                 Some((
                     rubydex::model::ids::declaration_id_from_lookup_name(lc.name.0.as_str()),
-                    ty.clone(),
+                    Ty::class_object(ty.clone()),
                 ))
             })
             .collect();
@@ -2482,9 +2482,12 @@ impl Analyzer {
                 // A default is part of the parameter's type. Typed before
                 // seeding so `value = nil` is `Nil` when no call site has
                 // said otherwise, and a later site can union with it.
-                for param in &mut method.params {
-                    if let Some(default) = &mut param.default {
-                        self.body_typer().analyze_expr(default, &class_ctx);
+                if method.params.iter().any(|p| p.default.is_some()) {
+                    let default_ctx = self.seed_method_params(&class_ctx, &model_name, method, true);
+                    for param in &mut method.params {
+                        if let Some(default) = &mut param.default {
+                            self.body_typer().analyze_expr(default, &default_ctx);
+                        }
                     }
                 }
                 let mctx = self.seed_method_params(&class_ctx, &model_name, method, true);
@@ -2655,9 +2658,12 @@ impl Analyzer {
                     }
                     _ => None,
                 }) {
-                    for p in &mut method.params {
-                        if let Some(default) = &mut p.default {
-                            self.body_typer().analyze_expr(default, &ctx);
+                    if method.params.iter().any(|p| p.default.is_some()) {
+                        let default_ctx = self.seed_method_params(&ctx, &ctrl_id, method, false);
+                        for p in &mut method.params {
+                            if let Some(default) = &mut p.default {
+                                self.body_typer().analyze_expr(default, &default_ctx);
+                            }
                         }
                     }
                     let mctx = self.seed_method_params(&ctx, &ctrl_id, method, false);

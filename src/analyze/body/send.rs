@@ -345,6 +345,8 @@ impl<'a> BodyTyper<'a> {
         class_object_receiver: bool,
         block: &Expr,
     ) -> Ctx {
+        let receiver_value = recv_ty;
+        let recv_ty = recv_ty.map(|ty| ty.class_object_instance().unwrap_or(ty));
         if crate::lower::range_enumerable::THROUGH_ARRAY.contains(&method.as_str())
             && crate::lower::range_enumerable::integer_range(recv_ty)
         {
@@ -415,7 +417,7 @@ impl<'a> BodyTyper<'a> {
             }
             return new_ctx;
         }
-        let Some(param_tys) = self.block_params_for(recv_ty, method, class_object_receiver) else {
+        let Some(param_tys) = self.block_params_for(receiver_value, method, class_object_receiver) else {
             return new_ctx;
         };
         for (name, ty) in params.iter().zip(param_tys.iter()) {
@@ -514,6 +516,7 @@ impl<'a> BodyTyper<'a> {
             }
             return Some(vec![recv_ty.clone()]);
         }
+        let recv_ty = recv_ty.class_object_instance().unwrap_or(recv_ty);
         if method.as_str() == "in_batches" {
             let is_model = |id: &ClassId| self.classes().get(id).is_some_and(|c| c.table.is_some());
             let of = match recv_ty {
@@ -1055,19 +1058,6 @@ impl<'a> BodyTyper<'a> {
             };
             return self.dispatch(Some(&as_array), method, block_ret, args);
         }
-        // A class value uses its represented class for lookup, but identity
-        // methods must return the class value, and `new` its instance.
-        if let Some(instance) = recv_ty.and_then(Ty::class_object_instance) {
-            if matches!(method.as_str(), "freeze" | "itself" | "tap")
-                || (matches!(method.as_str(), "dup" | "clone") && !self.owns_operator(Some(instance), method, true))
-            {
-                return recv_ty.unwrap().clone();
-            }
-            if method.as_str() == "class" {
-                return Ty::class_object(Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![].into() });
-            }
-            return self.dispatch_on(Some(instance), method, block_ret, args, false);
-        }
         if let Some(Ty::Class { id, .. }) = recv_ty {
             if id.0.as_str() == PARAM_VALUE {
                 return param_value_method(method, block_ret).unwrap_or_else(|| str_method(method));
@@ -1102,7 +1092,8 @@ impl<'a> BodyTyper<'a> {
             // User?`) answers the same: `nil.try` is nil, already in the
             // union below.
             let recv_ty = recv_ty.map(|t| t.clone().strip_nil());
-            if let (Some(Ty::Class { id, .. }), Some(first)) = (recv_ty.as_ref(), args.first()) {
+            let lookup = recv_ty.as_ref().map(|ty| ty.class_object_instance().unwrap_or(ty));
+            if let (Some(Ty::Class { id, .. }), Some(first)) = (lookup, args.first()) {
                 // `try(:m)` and `try("m")` name the same method.
                 let name = match &*first.node {
                     ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.clone()),
@@ -1132,6 +1123,9 @@ impl<'a> BodyTyper<'a> {
         }
         if method.as_str() == "class" {
             return match recv_ty {
+                Some(ty) if ty.class_object_instance().is_some() => {
+                    Ty::class_object(Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![].into() })
+                }
                 Some(ty @ Ty::Class { .. }) => Ty::class_object(ty.clone()),
                 _ => Ty::Class {
                     id: ClassId(Symbol::from("Class")),
@@ -1275,6 +1269,14 @@ impl<'a> BodyTyper<'a> {
         if let Some(ty) = universal_method(method) {
             return ty;
         }
+        // Only receiver lookup unwraps Class[T]. Protocols above pass the
+        // value itself through identity operations, sends and block returns.
+        if let Some(instance) = recv_ty.and_then(Ty::class_object_instance) {
+            if matches!(method.as_str(), "dup" | "clone") && !self.owns_operator(Some(instance), method, true) {
+                return recv_ty.unwrap().clone();
+            }
+        }
+        let recv_ty = recv_ty.map(|ty| ty.class_object_instance().unwrap_or(ty));
         // Captured before the match: the `Ty::Class { id, args }` arm
         // below shadows the call-args slice with the class's generic
         // type args, so the `format_db_time` intrinsic's arg-
@@ -2399,6 +2401,7 @@ impl<'a> BodyTyper<'a> {
     /// the honest type for an opaque dynamic call. A non-class receiver
     /// (Var / primitive) carries no method table, so → `Untyped`.
     fn receiver_method_return_union(&self, recv_ty: &Ty) -> Ty {
+        let recv_ty = recv_ty.class_object_instance().unwrap_or(recv_ty);
         let Ty::Class { id, .. } = recv_ty else {
             return Ty::Untyped;
         };
