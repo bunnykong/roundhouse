@@ -60,7 +60,7 @@ class Contract(unittest.TestCase):
             self.oracle.ValueGraph({'id':0,'tag':'Exception'})
 
     def test_missing_fails_and_unobserved_and_unbound_are_reported(self):
-        with tempfile.TemporaryDirectory(dir=str(LAB.parent/'tmp')) as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             d=Path(tmp)
             (d/'selection.json').write_text(json.dumps({'missing':['X','f','return'],'unused':['X','g','return']}))
             categories={'missing':empty_census(),'unused':empty_census()}
@@ -78,7 +78,7 @@ class Contract(unittest.TestCase):
             self.assertEqual(r['arms']['final']['missing_observations'],1)
 
     def test_incomplete_and_failed_trace_are_input_errors(self):
-        with tempfile.TemporaryDirectory(dir=str(LAB.parent/'tmp')) as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             trace=Path(tmp)/'trace.jsonl'
             for records in [[{'kind':'meta','format':'shape-oracle/v1'}],
                 [{'kind':'meta','format':'shape-oracle/v1'},{'kind':'error','message':'test failed'}]]:
@@ -86,7 +86,7 @@ class Contract(unittest.TestCase):
                 with self.assertRaises(self.oracle.InputError):self.oracle.load_records(trace)
 
     def test_matching_slot_labels_do_not_hide_a_different_recorded_source(self):
-        with tempfile.TemporaryDirectory(dir=str(LAB.parent/'tmp')) as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             d=Path(tmp)
             (d/'selection.json').write_text(json.dumps({'selected':{
                 'kind':'ivar_read','file':'app/jobs/base.rb','source_sha256':'static-source'}}))
