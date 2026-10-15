@@ -1622,6 +1622,9 @@ impl Analyzer {
         self.fold_finish(app);
 
         self.settle_pending(app);
+        if std::env::var("RH_SCRAMBLE_REASONS").is_ok_and(|value| value == "1") {
+            self.reason_scramble(app);
+        }
 
         self.stamp_inferred_method_signatures(app);
         self.report_fixpoint_checks(app);
@@ -1643,32 +1646,67 @@ impl Analyzer {
         if !(handoff::settle_on() || fold::on()) {
             return;
         }
-        fn settle(t: &mut Ty) {
+        fn settle(t: &mut Ty) -> bool {
             if let Some(settled) = handoff::settle_pending(t, &mut HashMap::new()) {
                 *t = settled;
+                true
+            } else {
+                false
             }
         }
-        fn rewrite(e: &mut Expr) {
+        fn rewrite(e: &mut Expr, count: &mut u64) {
             if let Some(t) = &mut e.ty {
-                settle(t);
+                *count += u64::from(settle(t));
             }
-            e.node.for_each_child_mut(&mut |c| rewrite(c));
+            e.node.for_each_child_mut(&mut |c| rewrite(c, count));
         }
         for cls in self.classes.values_mut() {
-            cls.instance_methods.values_mut().chain(cls.class_methods.values_mut()).for_each(settle);
+            cls.instance_methods.values_mut().chain(cls.class_methods.values_mut()).for_each(|t| { settle(t); });
         }
-        self.inferred_params.values_mut().chain(app.inferred_method_params.values_mut()).flatten().for_each(settle);
+        self.inferred_params.values_mut().chain(app.inferred_method_params.values_mut()).flatten()
+            .for_each(|t| { settle(t); });
         app.view_ivar_types
             .values_mut()
             .chain(app.partial_local_types.values_mut())
             .flat_map(|names| names.values_mut())
-            .for_each(settle);
+            .for_each(|t| { settle(t); });
         app.controller_resolutions
             .values_mut()
             .flat_map(|res| res.filter_chain.iter_mut())
             .flat_map(|filter| filter.assigns.values_mut())
-            .for_each(settle);
-        crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e));
+            .for_each(|t| { settle(t); });
+        let mut count = 0;
+        crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e, &mut count));
+        self.fixpoint_checks.reason_settled_exprs = count;
+    }
+
+    /// provenance walks exactly the stores and expression stamps settlement walks.
+    fn reason_scramble(&mut self, app: &mut App) {
+        fn rewrite(e: &mut Expr, count: &mut u64) {
+            if let Some(t) = &mut e.ty {
+                *count += handoff::reason_scramble(t);
+            }
+            e.node.for_each_child_mut(&mut |c| rewrite(c, count));
+        }
+        let mut count = 0;
+        for cls in self.classes.values_mut() {
+            for t in cls.instance_methods.values_mut().chain(cls.class_methods.values_mut()) {
+                count += handoff::reason_scramble(t);
+            }
+        }
+        for t in self.inferred_params.values_mut().chain(app.inferred_method_params.values_mut()).flatten() {
+            count += handoff::reason_scramble(t);
+        }
+        for t in app.view_ivar_types.values_mut().chain(app.partial_local_types.values_mut())
+            .flat_map(|names| names.values_mut()) {
+            count += handoff::reason_scramble(t);
+        }
+        for t in app.controller_resolutions.values_mut().flat_map(|res| res.filter_chain.iter_mut())
+            .flat_map(|filter| filter.assigns.values_mut()) {
+            count += handoff::reason_scramble(t);
+        }
+        crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e, &mut count));
+        self.fixpoint_checks.reason_scrambled = count;
     }
 
     /// `RH_FOLD`: expand every reference in the registry, the parameter

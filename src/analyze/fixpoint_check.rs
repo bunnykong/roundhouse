@@ -153,6 +153,8 @@ pub(super) struct Checks {
     untie_cuts: u64,
     pub(super) structure_start: Option<serde_json::Value>,
     pub(super) structure_end: Option<serde_json::Value>,
+    pub(super) reason_settled_exprs: u64,
+    pub(super) reason_scrambled: u64,
 }
 
 impl Checks {
@@ -671,6 +673,8 @@ impl Analyzer {
                     "unresolved": census.by_kind[2],
                 },
             });
+            line["reason_settled_exprs"] = serde_json::json!(self.fixpoint_checks.reason_settled_exprs);
+            line["reason_scrambled"] = serde_json::json!(self.fixpoint_checks.reason_scrambled);
             line["bound"] = serde_json::json!({
                 "calls": BOUND_CALLS.load(Ordering::Relaxed) - self.fixpoint_checks.bound_calls,
                 "cuts": BOUND_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.bound_cuts,

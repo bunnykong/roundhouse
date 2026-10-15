@@ -44,6 +44,9 @@ fn flag(name: &str) -> bool {
 pub(crate) static ALLARMS: LazyLock<bool> = LazyLock::new(|| flag("RH_BRK_ALLARMS"));
 /// Accumulating handoffs.
 static JOIN: LazyLock<bool> = LazyLock::new(|| flag("RH_FOLD_JOIN"));
+static PROVENANCE_SETTLE_UNRESOLVED: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("RH_SETTLE_REASON").is_ok_and(|value| value == "unresolved")
+});
 
 /// Whether `RH_FOLD_JOIN` is set.
 pub(crate) fn join_on() -> bool {
@@ -346,7 +349,11 @@ pub(crate) fn settle_pending(t: &Ty, memo: &mut HashMap<usize, Option<Ty>>) -> O
         return done.clone();
     }
     let out = match t {
-        Ty::Untyped { why: Provenance::Pending } => Some(Ty::gradual()),
+        Ty::Untyped { why: Provenance::Pending } => Some(if *PROVENANCE_SETTLE_UNRESOLVED {
+            Ty::unresolved()
+        } else {
+            Ty::gradual()
+        }),
         Ty::Array { elem } => settle_pending(elem, memo).map(|e| Ty::Array { elem: Arc::new(e) }),
         Ty::Hash { key, value } => {
             let (k, v) = (settle_pending(key, memo), settle_pending(value, memo));
@@ -403,6 +410,33 @@ pub(crate) fn settle_pending(t: &Ty, memo: &mut HashMap<usize, Option<Ty>>) -> O
     };
     memo.insert(key, out.clone());
     out
+}
+
+/// provenance's post-analysis reason-only intervention. Mutate shared payloads
+/// through their copy-on-write accessors, without rebuilding or interning.
+/// Count positions whose reason actually changes, including nested ones.
+pub(crate) fn reason_scramble(t: &mut Ty) -> u64 {
+    match t {
+        Ty::Untyped { why } => {
+            let changed = u64::from(*why != Provenance::Unresolved);
+            *why = Provenance::Unresolved;
+            changed
+        }
+        Ty::Array { elem } => reason_scramble(Arc::make_mut(elem)),
+        Ty::Hash { key, value } => {
+            reason_scramble(Arc::make_mut(key)) + reason_scramble(Arc::make_mut(value))
+        }
+        Ty::Tuple { elems } => elems.iter_mut().map(reason_scramble).sum(),
+        Ty::Union { variants } => variants.iter_mut().map(reason_scramble).sum(),
+        Ty::Class { args, .. } => args.iter_mut().map(reason_scramble).sum(),
+        Ty::Record { row } => row.fields.values_mut().map(reason_scramble).sum(),
+        Ty::Fn { params, block, ret, .. } => {
+            let params: u64 = params.iter_mut().map(|p| reason_scramble(Arc::make_mut(&mut p.ty))).sum();
+            let block = block.as_mut().map_or(0, |b| reason_scramble(Arc::make_mut(b)));
+            params + block + reason_scramble(Arc::make_mut(ret))
+        }
+        _ => 0,
+    }
 }
 
 fn informative(t: &Ty) -> bool {
