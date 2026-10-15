@@ -600,3 +600,61 @@ fn storage_normal_form() {
     }
     println!("STORAGE-NORMAL-FORM {}", json!({"norm": std::env::var("RH_PARAMETER_STORAGE_NORMAL_FORM").unwrap_or_else(|_| "1".into()), "counts": c}));
 }
+
+
+/// CARD-research condition aggregate laws over the provenance domain plus the named ownership witnesses.
+#[test]
+fn declared_contributor_join_laws() {
+    use crate::analyze::declared_contributor_join::Cells;
+    let mut domain = samples();
+    let u = |xs: Vec<Ty>| Ty::Union { variants: xs.into() };
+    let nominal = |name: &str| Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() };
+    domain.extend([Ty::Bool, u(vec![Ty::Str, Ty::Nil]),
+        u(vec![Ty::Str, Ty::unresolved(), Ty::Nil]),
+        u(vec![nominal("Account"), Ty::Nil]), nominal("Admin::ActionLog"),
+        u(vec![Ty::Bool, Ty::Nil]),
+        Ty::Hash { key: Arc::new(Ty::unresolved()), value: Arc::new(Ty::unresolved()) }]);
+    fn unknown(t: &Ty) -> bool {
+        match t {
+            Ty::Untyped { why } => why.reasons().iter().any(|r| *r != "Pending"),
+            Ty::Union { variants } => variants.iter().any(unknown),
+            _ => false,
+        }
+    }
+    let mut counts: std::collections::BTreeMap<&str, usize> =
+        ["comm","assoc","idem","identity","keeps_unknown","arrival"].into_iter().map(|x|(x,0)).collect();
+    let mut cases = 0;
+    for raw_a in &domain {
+        let a = initialize(raw_a.clone());
+        counts.get_mut("idem").map(|v| *v += usize::from(join(a.clone(),a.clone()) != a));
+        counts.get_mut("identity").map(|v| *v += usize::from(join(Ty::pending_untyped(),a.clone()) != a));
+        for raw_b in &domain {
+            let b = initialize(raw_b.clone());
+            let ab = join(a.clone(),b.clone());
+            counts.get_mut("comm").map(|v| *v += usize::from(ab != join(b.clone(),a.clone())));
+            counts.get_mut("keeps_unknown").map(|v| *v += usize::from((unknown(&a)||unknown(&b)) && !unknown(&ab)));
+            let m = ClassId(Symbol::from("Module"));
+            let mut first_own = Cells::default();
+            first_own.own = Some(crate::analyze::harvest_return::decide_cell(None, raw_a.clone()));
+            let _stored = first_own.aggregate();
+            first_own.modules.insert(m.clone(),raw_b.clone());
+            let stored_ab = first_own.aggregate();
+            let mut first_module = Cells::default();
+            first_module.modules.insert(m,raw_b.clone());
+            let _stored = first_module.aggregate();
+            first_module.own = Some(crate::analyze::harvest_return::decide_cell(None,raw_a.clone()));
+            counts.get_mut("arrival").map(|v| *v += usize::from(stored_ab != first_module.aggregate()));
+            for raw_c in &domain {
+                let c = initialize(raw_c.clone());
+                counts.get_mut("assoc").map(|v| *v += usize::from(
+                    join(ab.clone(),c.clone()) != join(a.clone(),join(b.clone(),c))));
+                cases += 1;
+            }
+        }
+    }
+    let conservative = join(Ty::Nil, Ty::unresolved());
+    assert!(unknown(&conservative));
+    println!("CONTRIBUTOR-JOIN-LAWS {}", json!({"counts":counts,"cases":cases}));
+    assert!(cases >= 100);
+    assert!(counts.values().all(|v| *v == 0), "{counts:?}");
+}

@@ -132,6 +132,10 @@ enum HarvestWrite {
 
 /// Single merge decision for an existing harvested return vs a new body type.
 fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
+    decide_with_stabilize(existing, new, !no_stabilize_on())
+}
+
+fn decide_with_stabilize(existing: &Ty, new: Ty, stabilize: bool) -> HarvestWrite {
     if matches!(existing, Ty::Fn { .. }) {
         return HarvestWrite::Keep;
     }
@@ -153,7 +157,7 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
         }
         return HarvestWrite::Set("harvest.untie_result", untied);
     }
-    if !no_stabilize_on()
+    if stabilize
         && let Some(stable) = stabilize_untyped_return_oscillation(existing, &new)
     {
         if existing == &stable {
@@ -169,6 +173,24 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     }
     // Distinct cores: last-write wins (residual thrash; not this PR's fix).
     HarvestWrite::Set("harvest.lastwrite", new)
+}
+
+/// Own contributor harvest: identical guards/untie/bound, with only stabilization omitted.
+pub(super) fn decide_cell(existing: Option<&Ty>, new: Ty) -> Ty {
+    let ty = super::fixpoint_bound::bound(new);
+    match existing {
+        None => {
+            super::det::note("harvest.first", None, &ty);
+            ty
+        }
+        Some(existing) => match decide_with_stabilize(existing, ty, false) {
+            HarvestWrite::Keep => existing.clone(),
+            HarvestWrite::Set(rule, next) => {
+                super::det::note(rule, Some(existing), &next);
+                next
+            }
+        }
+    }
 }
 
 #[cfg(test)]

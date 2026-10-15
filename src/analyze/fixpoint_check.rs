@@ -669,6 +669,9 @@ impl Analyzer {
         if !(*VERIFY || *DIGEST || *STATS || super::precision::on()) {
             return;
         }
+        if super::declared_contributor_join::values_on() {
+            self.contributor_dump(app).expect("write research condition value rows");
+        }
         let rounds: FixpointRounds = self.fixpoint_rounds;
         let mut line = serde_json::json!({
             "schema": 1,
@@ -889,4 +892,180 @@ end
         assert_eq!(moved["ir"], 1);
         assert_eq!(before.moved(&before).values().sum::<u64>(), 0);
     }
+}
+
+
+pub(super) fn contributor_ty(t: &Ty) -> serde_json::Value {
+    fn symbolic(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.get("kind").and_then(|x| x.as_str()) == Some("rec") {
+                    if let Some(slot) = m.get("slot").and_then(|x| x.as_u64()) {
+                        m.insert("slot".into(), serde_json::json!(format!("{:?}", super::fold::key_of(slot as u32))));
+                    }
+                }
+                for x in m.values_mut() { symbolic(x); }
+            }
+            serde_json::Value::Array(xs) => for x in xs { symbolic(x); },
+            _ => {}
+        }
+    }
+    let mut v = serde_json::to_value(t).unwrap();
+    symbolic(&mut v);
+    v
+}
+
+impl Analyzer {
+    fn contributor_dump(&self, app: &App) -> std::io::Result<()> {
+        use std::io::Write;
+        let path = std::path::PathBuf::from(std::env::var_os("RH_STRUCT_DUMP").expect("observer dump path"))
+            .with_file_name("contributor-values.jsonl");
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        let mut emit = |v: serde_json::Value| { serde_json::to_writer(&mut out, &v).unwrap(); writeln!(out).unwrap(); };
+        // Independent inventory before traversal: a copied fingerprint alone cannot certify completion.
+        fn count(e: &Expr) -> usize {
+            let mut n = 1;
+            e.node.for_each_child(&mut |c| n += count(c));
+            n
+        }
+        let aliases: BTreeMap<String, String> = super::fold::contributor_aliases().into_iter().collect();
+        let mut ir_count = 0;
+        crate::lower::for_each_emit_body_ref(app, &mut |e| ir_count += count(e));
+        let cache_count: usize = self.controller_action_meta_cache.values().map(|(bindings,bodies)| {
+            bindings.values().map(|bs| bs.len()).sum::<usize>() + bodies.values().map(count).sum::<usize>()
+        }).sum();
+        let counts = serde_json::json!({
+            "returns":self.classes.values().map(|c| c.instance_methods.len()+c.class_methods.len()).sum::<usize>(),
+            "params":self.inferred_params.values().map(Vec::len).sum::<usize>(),
+            "side_table":super::fold::contributor_values().len(),"controller_cache":cache_count,
+            "ir":ir_count,"aliases":aliases.len()});
+        let fp = self.state_fp(app);
+        emit(serde_json::json!({"part":"fingerprint", "parts":fp.parts, "ir":fp.ir,
+            "digests":fp.digests(), "row_counts":counts,"alias_inventory":aliases}));
+        let mut value = |part: &str, key: String, t: &Ty| emit(serde_json::json!({
+            "part":part,"key":key,"ty":contributor_ty(t),"debug":format!("{t:?}"),"hash":type_hash(t)}));
+        for (id,ci) in &self.classes {
+            for (m,t) in &ci.instance_methods { value("returns",format!("{}#{}",id.0.as_str(),m.as_str()),t); }
+            for (m,t) in &ci.class_methods { value("returns",format!("{}.{}",id.0.as_str(),m.as_str()),t); }
+        }
+        for ((id,m,side),row) in &self.inferred_params {
+            let sep = if *side == crate::dialect::MethodReceiver::Class { "." } else { "#" };
+            for (i,t) in row.iter().enumerate() {
+                value("params",format!("{}{sep}{}[{i}]",id.0.as_str(),m.as_str()),t);
+            }
+        }
+        for (key,t) in super::fold::contributor_values() { value("side_table",key,&t); }
+        for (id,(bindings,_)) in &self.controller_action_meta_cache {
+            for (method,bs) in bindings { for (k,t) in bs {
+                value("controller_cache",format!("{}#{}:binding:{}",id.0.as_str(),method.as_str(),k.as_str()),t);
+            }}
+        }
+        fn expr(e: &Expr, part: &str, root: &str, path: &mut Vec<usize>,
+                emit: &mut dyn FnMut(serde_json::Value)) {
+            emit(serde_json::json!({"part":part,"key":format!("{root}:{}",path.iter().map(|x|x.to_string()).collect::<Vec<_>>().join("/")),
+                "root":root,"path":path,"span":e.span,
+                "node":e.node.kind_str(),"ty":e.ty.as_ref().map(contributor_ty),
+                "debug":e.ty.as_ref().map(|t|format!("{t:?}")),
+                "hash":e.ty.as_ref().map_or(0,type_hash),
+                "note":hash_of((e.decisions,e.diagnostic.as_ref().map(annotation_hash))),
+                "diagnostic":e.diagnostic,"decisions":format!("{:?}",e.decisions)}));
+            let mut i=0;
+            e.node.for_each_child(&mut |c| { path.push(i); i+=1; expr(c,part,root,path,emit); path.pop(); });
+        }
+        for (id,(_,bodies)) in &self.controller_action_meta_cache {
+            for (m,body) in bodies {
+                expr(body,"controller_cache",&format!("{}#{}:body",id.0.as_str(),m.as_str()),&mut Vec::new(),&mut emit);
+            }
+        }
+        let sources = contributor_root_sources(app);
+        let mut occurrences = BTreeMap::<String,usize>::new();
+        crate::lower::for_each_emit_body_ref(app, &mut |root| {
+            let body=serde_json::json!({"source":sources.get(&(root as *const Expr as usize)),
+                "span":root.span,"kind":root.node.kind_str()}).to_string();
+            let n=occurrences.entry(body.clone()).or_default();
+            let key=format!("{body}:occurrence:{n}"); *n+=1;
+            expr(root,"ir",&key,&mut Vec::new(),&mut emit);
+        });
+        for (key,module) in super::fold::contributor_aliases() {
+            emit(serde_json::json!({"part":"aliases","key":key,"module":module}));
+        }
+        emit(serde_json::json!({"part":"complete","row_counts":counts}));
+        out.flush()
+    }
+}
+
+
+/// The older classification probe used Expr.declaration_source, absent on the spine.
+/// Attribute roots out of band so observation cannot alter IR, equality, or scheduling.
+fn contributor_root_sources(app: &App) -> HashMap<usize, String> {
+    use crate::dialect::{ModelBodyItem, ControllerBodyItem};
+    fn mark(out: &mut HashMap<usize,String>, e: &Expr, class: &str, name: &str) {
+        let declaration = serde_json::json!([class,name]).to_string();
+        out.insert(e as *const Expr as usize, serde_json::json!([declaration,"body"]).to_string());
+    }
+    fn method(out: &mut HashMap<usize,String>, id: &ClassId, m: &crate::dialect::MethodDef) {
+        let name = format!("{:?}::{}",m.receiver,m.name.as_str());
+        mark(out,&m.body,id.0.as_str(),&name);
+        for p in &m.params { if let Some(e) = &p.default { mark(out,e,id.0.as_str(),&name); } }
+    }
+    fn library(out: &mut HashMap<usize,String>, c: &crate::dialect::LibraryClass) {
+        for m in &c.methods { method(out,&c.name,m); }
+        for (name,e) in &c.constants { mark(out,e,c.name.0.as_str(),name.as_str()); }
+        for e in &c.unknown_calls { mark(out,e,c.name.0.as_str(),"class-body"); }
+        for e in &c.class_ivar_initializers { mark(out,e,c.name.0.as_str(),"class-ivar"); }
+    }
+    let mut out = HashMap::new();
+    for c in &app.library_classes { library(&mut out,c); }
+    if let Some(c) = &app.rails_application { library(&mut out,c); }
+    for c in &app.models {
+        for m in c.methods() { method(&mut out,&c.name,m); }
+        for item in &c.body {
+            match item {
+                ModelBodyItem::Scope { scope, .. } => {
+                    mark(&mut out,&scope.body,c.name.0.as_str(),scope.name.as_str());
+                    for p in &scope.params { if let Some(e) = &p.default { mark(&mut out,e,c.name.0.as_str(),scope.name.as_str()); } }
+                }
+                ModelBodyItem::Unknown { expr, .. } => mark(&mut out,expr,c.name.0.as_str(),"class-body"),
+                ModelBodyItem::Callback { callback, .. } => if let Some(e) = &callback.condition {
+                    mark(&mut out,e,c.name.0.as_str(),"callback");
+                },
+                _ => {}
+            }
+        }
+        for e in c.class_attr_defaults.values() { mark(&mut out,e,c.name.0.as_str(),"class-attr"); }
+    }
+    for c in &app.controllers {
+        for a in c.actions() {
+            mark(&mut out,&a.body,c.name.0.as_str(),a.name.as_str());
+            for (_,e) in &a.opt_params { mark(&mut out,e,c.name.0.as_str(),a.name.as_str()); }
+            for (_,e) in &a.kw_params { if let Some(e) = e { mark(&mut out,e,c.name.0.as_str(),a.name.as_str()); } }
+        }
+        for m in c.class_methods() { method(&mut out,&c.name,m); }
+        for item in &c.body {
+            match item {
+                ControllerBodyItem::Unknown { expr, .. } => mark(&mut out,expr,c.name.0.as_str(),"class-body"),
+                ControllerBodyItem::Filter { filter, .. } => {
+                    for e in [&filter.if_cond_expr,&filter.unless_cond_expr].into_iter().flatten() {
+                        mark(&mut out,e,c.name.0.as_str(),"filter");
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for v in &app.views {
+        mark(&mut out,&v.body,"view",v.name.as_str());
+        for p in v.strict_locals.iter().flatten() {
+            if let Some(e) = &p.default { mark(&mut out,e,"view",v.name.as_str()); }
+        }
+    }
+    for tm in &app.test_modules {
+        if let Some(e) = &tm.setup { mark(&mut out,e,tm.name.0.as_str(),"setup"); }
+        for t in &tm.tests { mark(&mut out,&t.body,tm.name.0.as_str(),"test"); }
+        for (n,e) in &tm.constants { mark(&mut out,e,tm.name.0.as_str(),n.as_str()); }
+        for m in &tm.helpers { method(&mut out,&tm.name,m); }
+        for c in &tm.inner_classes { library(&mut out,c); }
+    }
+    for helper in &app.routes.direct_helpers { mark(&mut out,&helper.body,"RouteHelpers","direct"); }
+    out
 }

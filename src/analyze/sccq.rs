@@ -1812,7 +1812,13 @@ impl Analyzer {
                             continue;
                         }
                         if let Some(t) = table.get(name) {
-                            val = Some(t.clone());
+                            if !side && super::declared_contributor_join::on()
+                                && let Some(cells) = self.research condition.targets.get_mut(&(class.clone(), name.clone())) {
+                                if self.research condition.completed.contains(&(m.clone(), name.clone())) {
+                                    cells.modules.insert(m.clone(), t.clone());
+                                }
+                                val = Some(cells.aggregate());
+                            } else { val = Some(t.clone()); }
                         }
                     }
                     if let Some(v) = val {
@@ -1842,7 +1848,13 @@ impl Analyzer {
                                 continue;
                             }
                             if let Some(t) = table.get(name) {
-                                val = Some(t.clone());
+                                if !side && super::declared_contributor_join::on()
+                                    && let Some(cells) = self.research condition.targets.get_mut(&(id.clone(), name.clone())) {
+                                    if self.research condition.completed.contains(&(m.clone(), name.clone())) {
+                                        cells.modules.insert(m.clone(), t.clone());
+                                    }
+                                    val = Some(cells.aggregate());
+                                } else { val = Some(t.clone()); }
                             }
                         }
                         let Some(v) = val else { continue };
@@ -1850,7 +1862,8 @@ impl Analyzer {
                         let folded_side = if side { &mut folded.1 } else { &mut folded.0 };
                         let cls = self.classes.entry(id.clone()).or_default();
                         let table = if side { &mut cls.class_methods } else { &mut cls.instance_methods };
-                        if table.contains_key(name) && !folded_side.contains(name) {
+                        if table.contains_key(name) && !folded_side.contains(name)
+                            && !(!side && super::declared_contributor_join::on() && self.research condition.targets.contains_key(&(id.clone(), name.clone()))) {
                             continue;
                         }
                         if table.get(name) != Some(&v) {
@@ -1937,8 +1950,10 @@ impl Analyzer {
                     let body_ty = super::tuple_return_ty(&action.body)
                         .or_else(|| super::effective_return_ty(&action.body));
                     if let Some(body_ty) = body_ty.filter(|t| !matches!(t, Ty::Var { .. })) {
-                        let target = &mut self.classes.entry(controller.name.clone()).or_default().instance_methods;
-                        Self::insert_inferred_return(target, &action.name, body_ty);
+                        if !self.contributor_write_own(&controller.name, &action.name, body_ty.clone()) {
+                            let target = &mut self.classes.entry(controller.name.clone()).or_default().instance_methods;
+                            Self::insert_inferred_return(target, &action.name, body_ty);
+                        }
                     }
                 }
                 Family::CtrlClassMethod => {

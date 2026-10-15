@@ -47,6 +47,7 @@ pub(crate) mod forwarding;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
+mod declared_contributor_join;
 pub mod producer_evidence;
 mod parameter_conservation;
 mod fixpoint_bound;
@@ -102,6 +103,7 @@ fn spliced_own_on() -> bool {
 }
 
 pub struct Analyzer {
+    research condition: declared_contributor_join::State,
     classes: HashMap<ClassId, ClassInfo>,
     /// Inferred parameter types per (class, method). Empty after
     /// `Analyzer::new`; populated by `unify_params_from_call_sites`
@@ -1193,6 +1195,7 @@ impl Analyzer {
             .collect();
 
         Self {
+            research condition: declared_contributor_join::State::default(),
             classes,
             inferred_params: HashMap::new(),
             declared_signatures: app
@@ -1310,6 +1313,9 @@ impl Analyzer {
         errgate::reset();
         handoff::reset();
         fold::reset();
+        self.research condition = if declared_contributor_join::on() || declared_contributor_join::values_on() {
+            declared_contributor_join::State::declare(app, &self.classes)
+        } else { declared_contributor_join::State::default() };
         slots::reset();
         structure::reset(|| (Self::defined_methods(app), Self::param_shapes(app)));
         if fixpoint_check::stats_on() {
@@ -1775,6 +1781,7 @@ impl Analyzer {
             let fp = self.c1_state_fp(app);
             eprintln!("rh-det-pre: {}", fp.det_line());
         }
+        self.contributor_prefinal();
         self.fold_finish(app);
 
         if std::env::var("RH_PROVENANCE_ROWDUMP").as_deref() == Ok("1")
@@ -5252,6 +5259,10 @@ impl Analyzer {
         let _evidence = producer_evidence::writer(class_id, &method.name, method.receiver == crate::dialect::MethodReceiver::Class, method.body.span);
         let ret = self.method_return_ty(class_id, method);
         producer_evidence::input(ret.as_ref());
+        if declared_contributor_join::on() && method.receiver == crate::dialect::MethodReceiver::Instance
+            && ret.as_ref().is_some_and(|t| !matches!(t, Ty::Var { .. })) {
+            self.research condition.completed.insert((class_id.clone(), method.name.clone()));
+        }
         let target = match method.receiver {
             crate::dialect::MethodReceiver::Instance => {
                 &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -5339,6 +5350,7 @@ impl Analyzer {
                 if matches!(body_ty, Ty::Var { .. }) {
                     continue;
                 }
+                if self.contributor_write_own(class_id, &action.name, body_ty.clone()) { continue; }
                 let target =
                     &mut self.classes.entry(class_id.clone()).or_default().instance_methods;
                 Self::insert_inferred_return(target, &action.name, body_ty);
@@ -5604,6 +5616,16 @@ impl Analyzer {
                 let folded = self.concern_folded.entry(id.clone()).or_default();
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
+                    if declared_contributor_join::on() && let Some(cells) = self.research condition.targets.get_mut(&(id.clone(), name.clone())) {
+                        if self.research condition.completed.contains(&(m.clone(), name.clone())) {
+                            cells.modules.insert(m.clone(), ty.clone());
+                        }
+                        det::note_named("copy.concern_inst", name.as_str(), cls.instance_methods.get(name), ty);
+                        cls.instance_methods.insert(name.clone(), cells.aggregate());
+                        folded.0.insert(name.clone());
+                        fold::note_alias(&id, name, &m);
+                        continue;
+                    }
                     if spliced_own_on()
                         && app.concern_spliced_actions.get(&id).is_some_and(|m| m.contains_key(name))
                     {
@@ -5617,6 +5639,9 @@ impl Analyzer {
                     }
                     det::note_named("copy.concern_inst", name.as_str(), cls.instance_methods.get(name), ty);
                     cls.instance_methods.insert(name.clone(), ty.clone());
+                    if declared_contributor_join::on() && self.research condition.completed.contains(&(m.clone(), name.clone())) {
+                        self.research condition.completed.insert((id.clone(), name.clone()));
+                    }
                     folded.0.insert(name.clone());
                     // `RH_FOLD`: the copy reads the module's slot.
                     fold::note_alias(&id, name, &m);
