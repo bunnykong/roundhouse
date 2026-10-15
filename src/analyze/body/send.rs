@@ -1276,6 +1276,7 @@ impl<'a> BodyTyper<'a> {
                 return recv_ty.unwrap().clone();
             }
         }
+        let class_constructor = method.as_str() == "new" && recv_ty.and_then(Ty::class_object_instance).is_some();
         let recv_ty = recv_ty.map(|ty| ty.class_object_instance().unwrap_or(ty));
         // Captured before the match: the `Ty::Class { id, args }` arm
         // below shadows the call-args slice with the class's generic
@@ -1631,17 +1632,18 @@ impl<'a> BodyTyper<'a> {
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
                         return unwrap_fn_ret(&subst(ty));
                     }
-                    if let Some(ty) = cls.instance_methods.get(method) {
-                        return unwrap_fn_ret(&subst(ty));
-                    }
-                    // Mixed-in modules (`include IntervalHelper`)
-                    // contribute their instance methods to this class.
-                    // Checked after the class's own methods, before the
-                    // parent — Ruby's ancestor order puts an included
-                    // module between the class and its superclass.
-                    for module_id in &cls.includes {
-                        if let Some(ty) = self.lookup_in_module(module_id, method) {
-                            return subst(&ty);
+                    // A class constructor cannot call an instance's `new`.
+                    // Class-side overrides above still win over Class#new.
+                    if !class_constructor {
+                        if let Some(ty) = cls.instance_methods.get(method) {
+                            return unwrap_fn_ret(&subst(ty));
+                        }
+                        // Mixed-in modules contribute instance methods after
+                        // the class's own methods and before its parent.
+                        for module_id in &cls.includes {
+                            if let Some(ty) = self.lookup_in_module(module_id, method) {
+                                return subst(&ty);
+                            }
                         }
                     }
                     // Class-object sends only consult class-side

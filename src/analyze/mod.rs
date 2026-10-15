@@ -5653,7 +5653,8 @@ impl Analyzer {
         match (has(MethodReceiver::Instance), has(MethodReceiver::Class)) {
             (true, true) if recv == SiteRecv::Instance => Some(MethodReceiver::Instance),
             (_, true) => Some(MethodReceiver::Class),
-            (true, false) if recv == SiteRecv::DotClass => None,
+            (true, false) if recv == SiteRecv::DotClass
+                || (recv == SiteRecv::Class && method.as_str() == "new") => None,
             _ => Some(MethodReceiver::Instance),
         }
     }
@@ -6144,7 +6145,6 @@ impl Analyzer {
                 };
                 let site_recv = match recv.as_ref().map(|r| &*r.node) {
                     None | Some(ExprNode::SelfRef) if class_body => SiteRecv::Class,
-                    Some(ExprNode::Const { .. }) => SiteRecv::Class,
                     Some(ExprNode::Send { method: m, args, .. }) if m.as_str() == "class" && args.is_empty() => {
                         SiteRecv::DotClass
                     }
@@ -6251,11 +6251,12 @@ impl Analyzer {
                     // `StoriesPaginator.new(scope, …)` passed a typed
                     // `Relation[Story]` and the paginator's `@scope`
                     // still answered `Array[untyped]` to every caller.
-                    // A constant or another proven class value constructs
-                    // instances; an instance answering `new` is a different method.
+                    // Proven class values, including implicit class-side self,
+                    // construct instances. A value constant holding an instance
+                    // may answer its own `new`; that is not a constructor site.
                     let record_initialize = method.as_str() == "new"
-                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. })
-                            || r.ty.as_ref().is_some_and(Ty::is_class_object));
+                        && ((recv.is_none() && class_body)
+                            || recv.as_ref().and_then(|r| r.ty.as_ref()).is_some_and(Ty::is_class_object));
                     for class_id in recv_classes {
                         if record_initialize
                             && !self.data_factories_without_custom_initialize.contains(&class_id)

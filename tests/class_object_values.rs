@@ -564,6 +564,15 @@ fn class_body_and_default_self_values_use_their_receiver_side() {
   def self.by_default(klass = self)
     klass
   end
+  def self.implicit_identity
+    itself
+  end
+  def self.implicit_block
+    yield_self { |klass| klass }
+  end
+  def implicit_identity
+    itself
+  end
   def instance_default(value = self)
     value
   end
@@ -606,6 +615,12 @@ end
         &rbs,
         "def instance_default: (?SelfValues value) -> SelfValues",
     );
+    contains(
+        &rbs,
+        "def self.implicit_identity: () -> singleton(SelfValues)",
+    );
+    contains(&rbs, "def self.implicit_block: () -> singleton(SelfValues)");
+    contains(&rbs, "def implicit_identity: () -> SelfValues");
     let record = app
         .models
         .iter()
@@ -689,4 +704,51 @@ end
             "an instance must not gain {method}: {errors:?}"
         );
     }
+}
+
+#[test]
+fn implicit_constructors_and_instance_constants_keep_their_call_side() {
+    let source = format!(
+        "{REPRO}\n{}",
+        r#"class ImplicitFactory
+  attr_reader :klass
+  def initialize(klass)
+    @klass = klass
+  end
+  def self.implicit_result
+    new(Widget).klass.new(17).n
+  end
+end
+class InstanceWithNew
+  attr_reader :value
+  def initialize(value)
+    @value = value
+  end
+  def new(klass)
+    klass
+  end
+end
+class ConstantReceiver
+  INSTANCE = InstanceWithNew.new(1)
+  def self.make_instance
+    InstanceWithNew.new(1)
+  end
+  def self.constant_result
+    INSTANCE.new(Widget)
+  end
+end
+"#
+    );
+    let rbs = sidecars(&source, &[]);
+    contains(&rbs, "def initialize: (singleton(Widget) klass) -> untyped");
+    contains(&rbs, "attr_reader klass: singleton(Widget)");
+    contains(&rbs, "def self.implicit_result: () -> Integer");
+    contains(&rbs, "attr_reader value: Integer");
+    contains(&rbs, "def initialize: (untyped value) -> untyped");
+    contains(&rbs, "def self.make_instance: () -> InstanceWithNew");
+    contains(
+        &rbs,
+        "def new: (singleton(Widget) klass) -> singleton(Widget)",
+    );
+    contains(&rbs, "def self.constant_result: () -> singleton(Widget)");
 }

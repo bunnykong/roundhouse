@@ -1483,7 +1483,7 @@ impl<'a> BodyTyper<'a> {
 
                 let recv_ty = match recv.as_mut() {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
-                    None => ctx.self_ty.clone(),
+                    None => ctx.self_ty.clone().map(|ty| if ctx.class_side { Ty::class_object(ty) } else { ty }),
                 };
                 // Keep the value type for dispatch/identity returns. The
                 // receiver-aware helpers below look up the represented class.
