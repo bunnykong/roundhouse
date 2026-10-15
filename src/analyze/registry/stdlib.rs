@@ -996,7 +996,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .entry(ClassId(Symbol::from(*class)))
             .or_default()
             .block_value_methods
-            .insert(Symbol::from(*method));
+            .insert((Symbol::from(*method), crate::dialect::MethodReceiver::Instance));
     }
     // `Array.wrap` is folded by `lower::enumerable_ext` before emit.
     // Registered so the analyzer does not report it as unknown. The

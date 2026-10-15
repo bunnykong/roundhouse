@@ -2333,8 +2333,17 @@ impl<'a> BodyTyper<'a> {
         block_ret: Option<&Ty>,
     ) -> Option<Ty> {
         let ret = block_ret.filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))?;
+        // Metadata is keyed by the represented class. The returned value
+        // is still the block's own type, which may itself be Class[T].
+        let side = if recv_ty.is_some_and(Ty::is_class_object) {
+            crate::dialect::MethodReceiver::Class
+        } else {
+            crate::dialect::MethodReceiver::Instance
+        };
+        let recv_ty = recv_ty.map(|ty| ty.class_object_instance().unwrap_or(ty));
         let Some(Ty::Class { id, .. }) = recv_ty else { return None };
-        if id.0.as_str() == "Rails::Cache" && method.as_str() == "fetch" {
+        if side == crate::dialect::MethodReceiver::Instance
+            && id.0.as_str() == "Rails::Cache" && method.as_str() == "fetch" {
             return Some(ret.clone());
         }
         let mut current = Some(id.clone());
@@ -2342,12 +2351,17 @@ impl<'a> BodyTyper<'a> {
             let cls = self.classes().get(current.as_ref()?)?;
             let own = std::iter::once(cls).chain(cls.includes.iter().filter_map(|m| self.classes().get(m)));
             for c in own {
-                if c.block_value_methods.contains(method) {
+                if c.block_value_methods.contains(&(method.clone(), side)) {
                     return Some(ret.clone());
                 }
                 // Defined here without being one: it shadows anything
                 // further up.
-                if c.instance_methods.contains_key(method) || c.class_methods.contains_key(method) {
+                let methods = if side == crate::dialect::MethodReceiver::Class {
+                    &c.class_methods
+                } else {
+                    &c.instance_methods
+                };
+                if methods.contains_key(method) {
                     return None;
                 }
             }

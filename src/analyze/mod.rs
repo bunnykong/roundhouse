@@ -4958,20 +4958,20 @@ impl Analyzer {
     /// method forwarding its block to a sibling that is one becomes one
     /// a round later, as its callee's verdict lands.
     fn harvest_block_value_methods(&mut self, app: &App) {
-        let mut found: Vec<(ClassId, Symbol)> = Vec::new();
+        let mut found: Vec<(ClassId, Symbol, MethodReceiver)> = Vec::new();
         for model in &app.models {
             for method in model.methods() {
                 let bp = method.block_param.as_ref().map(|p| &p.name);
-                if self.returns_block_value(&model.name, &method.name, &method.body, bp) {
-                    found.push((model.name.clone(), method.name.clone()));
+                if self.returns_block_value(&model.name, &method.name, &method.body, bp, method.receiver) {
+                    found.push((model.name.clone(), method.name.clone(), method.receiver));
                 }
             }
         }
         for lc in &app.library_classes {
             for method in &lc.methods {
                 let bp = method.block_param.as_ref().map(|p| &p.name);
-                if self.returns_block_value(&lc.name, &method.name, &method.body, bp) {
-                    found.push((lc.name.clone(), method.name.clone()));
+                if self.returns_block_value(&lc.name, &method.name, &method.body, bp, method.receiver) {
+                    found.push((lc.name.clone(), method.name.clone(), method.receiver));
                 }
             }
         }
@@ -4982,8 +4982,9 @@ impl Analyzer {
                     &action.name,
                     &action.body,
                     action.block_param.as_ref(),
+                    MethodReceiver::Instance,
                 ) {
-                    found.push((controller.name.clone(), action.name.clone()));
+                    found.push((controller.name.clone(), action.name.clone(), MethodReceiver::Instance));
                 }
             }
         }
@@ -4996,11 +4997,11 @@ impl Analyzer {
         for (class, method) in registry::stdlib::BUILTIN_BLOCK_VALUE_METHODS {
             let class_id = ClassId(Symbol::from(*class));
             if !source_instance_method(app, &class_id, method) {
-                found.push((class_id, Symbol::from(*method)));
+                found.push((class_id, Symbol::from(*method), MethodReceiver::Instance));
             }
         }
-        for (class_id, method) in found {
-            self.classes.entry(class_id).or_default().block_value_methods.insert(method);
+        for (class_id, method, side) in found {
+            self.classes.entry(class_id).or_default().block_value_methods.insert((method, side));
         }
     }
 
@@ -5353,6 +5354,7 @@ impl Analyzer {
         method: &Symbol,
         body: &Expr,
         block_param: Option<&Symbol>,
+        receiver: MethodReceiver,
     ) -> bool {
         let leaves = return_leaves(body);
         // Only campfire's explicit `RecordCache#fetch` contract answers
@@ -5402,7 +5404,10 @@ impl Analyzer {
                     // informative block type.
                     let recv_ty = match recv {
                         Some(r) => r.ty.clone(),
-                        None => Some(Ty::Class { id: owner.clone(), args: vec![].into() }),
+                        None => {
+                            let ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+                            Some(if receiver == MethodReceiver::Class { Ty::class_object(ty) } else { ty })
+                        }
                     };
                     // `Rails.cache` by its spelling too: app analysis
                     // does not type it (the runtime's RBS is not in the

@@ -226,8 +226,9 @@ pub struct ClassInfo {
     /// reader does not model, so dispatch answers the CALL SITE's block
     /// type for these, the way it already does for `then` and
     /// `transaction`. Harvested each fixpoint round
-    /// (`Analyzer::harvest_method_returns`).
-    pub block_value_methods: std::collections::HashSet<Symbol>,
+    /// (`Analyzer::harvest_method_returns`). Keyed by receiver side too:
+    /// `def wrap` and `def self.wrap` can return different things.
+    pub block_value_methods: std::collections::HashSet<(Symbol, crate::dialect::MethodReceiver)>,
     /// Methods callable on an instance: `post.title`, `post.destroy`.
     pub instance_methods: HashMap<Symbol, Ty>,
     /// AccessorKind per method — lets the body-typer flag Method

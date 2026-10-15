@@ -23,7 +23,7 @@ pub(super) struct InferenceSig {
 #[derive(Clone)]
 pub(super) struct DirtyHints {
     pub sig: InferenceSig,
-    pub block_value: HashMap<ClassId, HashSet<Symbol>>,
+    pub block_value: HashMap<ClassId, HashSet<(Symbol, crate::dialect::MethodReceiver)>>,
 }
 
 /// The method names whose answer differs between a class's current
@@ -74,9 +74,9 @@ pub(super) fn dirty_classes_for_retype(
         match prev_block_value.get(id) {
             Some(before) if before == &cls.block_value_methods => {}
             Some(before) => {
-                names.extend(cls.block_value_methods.symmetric_difference(before).cloned())
+                names.extend(cls.block_value_methods.symmetric_difference(before).map(|(name, _)| name.clone()))
             }
-            None => names.extend(cls.block_value_methods.iter().cloned()),
+            None => names.extend(cls.block_value_methods.iter().map(|(name, _)| name.clone())),
         }
         if names.is_empty() {
             continue;

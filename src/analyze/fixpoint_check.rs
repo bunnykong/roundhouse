@@ -416,7 +416,7 @@ impl Analyzer {
                 "block_values",
                 c.to_string(),
                 hash_of((
-                    names_hash(&ci.block_value_methods),
+                    hash_of(ci.block_value_methods.iter().map(|(name, side)| (name.as_str(), *side)).collect::<BTreeSet<_>>()),
                     names_hash(&ci.relation_derived),
                     names_hash(&ci.materializing_scopes),
                 )),
