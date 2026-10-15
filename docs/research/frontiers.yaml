@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "On `ownership-pending-composition-20261015-e248de81`, ten Campfire value digests agree while the storage laws fail. On `parameter-storage-normal-form-20261015-648d5074`, normalization clears the finite law failures but four reason rows still vary without verification. On `ownership-generalization-20261015-f78d995f`, all twelve larger-app pairs change values. The checked five-app scoreboard remains schedule-dependent beyond Campfire, with Discourse mostly incomplete (F55)."
-  facts: [F55, F54, F53, F52, F51, F47, F46, F45, F44]
+  stands: "On strict-producer-reasons-20261015-ea3ec744, Campfire reason rows agree with verification off, but larger-app value parity fails. Closure-application-effects-20261015-ea3ec744 passes its bounded application gates after two missing controls complete. Declared-contributor-join-20261015-ea3ec744 is killed by module schedule dependence and added aliases. The complete row catalog and unchanged writer partition failures keep arbitrary-order inference open."
+  facts: [F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Retain the unnormalized storage counterexamples and explicit value/reason observers. Require contribution-preserving writer ownership and fresh multi-app gates before any arbitrary-order claim."
+  next: "Require complete producer and reason state, executed-closure coverage and partition/replay-compatible storage, with fresh larger-app controls. Keep attribution sensitivities separate from successful repairs."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "composition ff36c138 (recorded 648d5074); normal form 9863326b (d00c5c54); ownership measurement 1d510b0b (67f76284); five-app source 0b390253 (ea3ec744)"
-    lab: "0583d3e045e3847ffd043aef15dd2fc1007f94bc; separate October 15 evening measurement conditions"
-    runner: "Saved receipt reductions and tools/observers at lab 0583d3e045e3847ffd043aef15dd2fc1007f94bc"
+    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
+    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
+    runner: "Saved receipt reductions and explicit native recipes at lab 4b80cdf4b90211001b41b579081901b699108d75"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "The evening results add no runtime soundness confirmation. The storage-law defect and its bounded normal-form repair concern exact native storage; larger-app ownership changes contribution paths. Cached value equality ignores reasons, and verification can hide reason-only changes."
-  facts: [F55, F54, F53, F52, F51, F47, F46, F43, F41]
+  stands: "Ownership-runtime-values-20261015-f78d995f confirms excluded runtime values in 578 repeated row observations and an already-too-narrow render/redirect/respond model. The direct respond_to Nil registration is distinct from RBS void conversion. Declared-contributor-join-20261015-ea3ec744 has a local fixed-contribution floor but fails schedule/alias gates. Closure application and sampled writer membership remain bounded checks."
+  facts: [F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Keep the existing runtime membership and coverage gates. Require fresh candidate exports, executed-writer coverage and emission checks before interpreting bounded storage laws as soundness."
+  next: "Retain actual runtime exclusions and explicit test-double/reachability limits. Require public-input exports and runtime/emission coverage before any whole-analyzer soundness claim."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "composition ff36c138 (recorded 648d5074); normal form 9863326b (d00c5c54); ownership measurement 1d510b0b (67f76284); five-app source 0b390253 (ea3ec744)"
-    lab: "0583d3e045e3847ffd043aef15dd2fc1007f94bc; separate October 15 evening measurement conditions"
+    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
+    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,36 +84,36 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "On `parameter-storage-normal-form-20261015-648d5074`, recursive normalization clears the finite storage-law failures without establishing reason-level schedule independence. The cached-observer reference shows why value equality, verification and audit require separate named settings. Three-app ownership changes values; no precision or soundness improvement follows. The checked five-app scoreboard remains schedule-dependent beyond Campfire, with Discourse mostly incomplete (F55)."
-  facts: [F55, F54, F53, F52, F51, F50, F49, F46, F45]
+  stands: "On ownership-runtime-values-20261015-f78d995f, 578 repeated observations exclude witnessed values while 900 narrowings agree with finite collaborators; remaining guarded, boundary and unwitnessed classes stay separate. Strict-producer-reasons-20261015-ea3ec744 removes the bounded Campfire reason residual but fails larger-app parity. The row-attribution condition exposes overlapping history and premature-label sensitivities without establishing a safe repair."
+  facts: [F61, F56, F59, F58, F57, F60, F55, F52]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Conserve contributions and reasons through the tested storage boundary, and keep native value hashes distinct from exact reason rows. Trace changed contributions before interpreting a digest change as a precision gain."
+  next: "Interpret changed types as admitted Ruby values and preserve uncertainty that protects actual returns. Distinguish exact reason equality, source guards, finite collaborators and method-boundary counterexamples."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "composition ff36c138 (recorded 648d5074); normal form 9863326b (d00c5c54); ownership measurement 1d510b0b (67f76284); five-app source 0b390253 (ea3ec744)"
-    lab: "0583d3e045e3847ffd043aef15dd2fc1007f94bc; separate October 15 evening measurement conditions"
-    runner: "Saved receipt reductions and tools/observers at lab 0583d3e045e3847ffd043aef15dd2fc1007f94bc"
+    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
+    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
+    runner: "Saved receipt reductions and explicit native recipes at lab 4b80cdf4b90211001b41b579081901b699108d75"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "The evening storage-normal-form and observer results add no chronological replay confirmation. Cached observer cells perform zero analyzer runs, which is experiment-cache reuse rather than incremental compiler replay. The six fingerprint edit audits and incomplete cost denominators remain separately conditioned."
-  facts: [F54, F52, F51, F50, F48, F49, F42, F39]
+  stands: "Writer-partition-replay-20261015-four-pins preserves the plain partition and duplicate-round failures across four pins. Restoring a reflective bound does not repair those storage equalities. The later evening batch adds no chronological compiler replay confirmation, position-level storage-fidelity result or candidate latency claim."
+  facts: [F60, F59, F56, F61, F54, F50, F48, F39]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Retain chronological replay, position-level reason fidelity and the mandatory cold shadow. Use explicit observer settings for replay comparisons; keep experiment-cache hits separate from compiler work avoided."
+  next: "Keep complete current evidence and exact cold shadows for chronological replay. Require storage policies to survive partitioning and repetition; do not infer incremental correctness from a saved experiment replay."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "composition ff36c138 (recorded 648d5074); normal form 9863326b (d00c5c54); ownership measurement 1d510b0b (67f76284); five-app source 0b390253 (ea3ec744)"
-    lab: "0583d3e045e3847ffd043aef15dd2fc1007f94bc; separate October 15 evening measurement conditions"
-    runner: "Saved receipt reductions and tools/observers at lab 0583d3e045e3847ffd043aef15dd2fc1007f94bc"
+    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
+    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
+    runner: "Saved receipt reductions and explicit native recipes at lab 4b80cdf4b90211001b41b579081901b699108d75"
 - id: typed-recursion
   name: Typed recursion
   brief: frontiers/typed-recursion.md
@@ -134,15 +134,15 @@
   name: Cost
   brief: frontiers/cost.md
   status: open
-  stands: "On `cached-observers-20261015-source-rebuild`, forty-one cached cells need zero analyzer runs. This is experiment reuse, not a compiler latency result. No new native benchmark was run; the fingerprint campaign still has zero of thirty candidate cost pairs."
-  facts: [F54, F48, F50, F42, F39, F35, F30]
+  stands: "The later evening results provide no new compiler benchmark or latency result. Their shared-host timings remain profiles under their recorded conditions. Cached evidence reduction starts zero analyzers and is distinct from compiler work avoided. The incomplete fingerprint cost denominators remain open."
+  facts: [F60, F57, F56, F54, F48, F50, F42, F39]
   skills:
     - Rust performance and profiling
     - hash-consing
     - data-structure design
-  next: "Use observer caching to avoid repeated experiment work, while collecting the still-missing alternating compiler cost pairs in an exclusive host window. Keep queue, reduction, cache scope and whole-command wall explicit."
+  next: "Complete the registered alternating cost pairs in an exclusive measurement window. Preserve host, observer, queue and whole-command scope alongside every timing comparison."
   check: frontiers/cost.md#the-check
   check_public: public
   pins:
-    compiler: "composition ff36c138 (recorded 648d5074); normal form 9863326b (d00c5c54); ownership measurement 1d510b0b (67f76284); five-app source 0b390253 (ea3ec744)"
-    lab: "0583d3e045e3847ffd043aef15dd2fc1007f94bc; separate October 15 evening measurement conditions"
+    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
+    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
