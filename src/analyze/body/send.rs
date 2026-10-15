@@ -980,6 +980,33 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    fn json_dump_responds_to(&self, io: &Ty, method: &Symbol, class_object: bool) -> bool {
+        use crate::dialect::{MethodReceiver, MethodVisibility};
+        fn lookup(typer: &BodyTyper<'_>, id: &ClassId, method: &Symbol, side: MethodReceiver, depth: usize) -> Option<bool> {
+            if depth >= 32 { return None; }
+            let class = typer.classes().get(id)?;
+            let own = match side {
+                MethodReceiver::Class => &class.class_methods,
+                MethodReceiver::Instance => &class.instance_methods,
+            };
+            if own.contains_key(method) {
+                return Some(class.method_visibility.get(&(side, method.clone()))
+                    .copied().unwrap_or_default() == MethodVisibility::Public);
+            }
+            if side == MethodReceiver::Instance {
+                for module in class.includes.iter().rev() {
+                    if let Some(public) = lookup(typer, module, method, side, depth + 1) {
+                        return Some(public);
+                    }
+                }
+            }
+            class.parent.as_ref().and_then(|parent| lookup(typer, parent, method, side, depth + 1))
+        }
+        let Ty::Class { id, .. } = io else { return false };
+        let side = if class_object { MethodReceiver::Class } else { MethodReceiver::Instance };
+        lookup(self, id, method, side, 0) == Some(true)
+    }
+
     fn json_dump_return_ty(&self, io: &Ty, class_object: bool) -> Ty {
         match io {
             Ty::Union { variants } => super::union_many(
@@ -995,15 +1022,15 @@ impl<'a> BodyTyper<'a> {
                 let conversion = Symbol::from("to_io");
                 let writer = Symbol::from("write");
                 if !class_object
-                    && (self.owns_operator(Some(io), &conversion, true)
-                        || self.owns_operator(Some(io), &writer, true))
+                    && (self.json_dump_responds_to(io, &conversion, true)
+                        || self.json_dump_responds_to(io, &writer, true))
                 {
                     // A nominal type can have lost class-object provenance (for
                     // example through an ivar), even when both sides define the
                     // protocol. Keep that ambiguity gradual rather than claiming
                     // either side's concrete native return representation.
                     Ty::Untyped
-                } else if self.owns_operator(Some(io), &conversion, class_object) {
+                } else if self.json_dump_responds_to(io, &conversion, class_object) {
                     let converted = self.dispatch_on(Some(io), &conversion, None, &[], !class_object);
                     // Conversion happens exactly once. Both nil and false select
                     // no-IO mode; true raises rather than returning successfully.
@@ -1012,14 +1039,14 @@ impl<'a> BodyTyper<'a> {
                         // Spinel cannot unbox a dynamic return as singleton(C).
                         // Keep class-object destinations in their boxed form.
                         Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => Ty::Untyped,
-                        Ty::Class { .. } if self.owns_operator(Some(ty), &writer, true) => Ty::Untyped,
+                        Ty::Class { .. } if self.json_dump_responds_to(ty, &writer, true) => Ty::Untyped,
                         ty => ty.clone(),
                     };
                     match converted {
                         Ty::Union { variants } => super::union_many(variants.iter().map(result).collect()),
                         ty => result(&ty),
                     }
-                } else if self.owns_operator(Some(io), &writer, class_object) {
+                } else if self.json_dump_responds_to(io, &writer, class_object) {
                     if class_object {
                         // The facade's dynamic return must stay boxed for a
                         // class object; a singleton RBS return cannot unbox it.

@@ -50,12 +50,18 @@ if RUBY_ENGINE == "spinel"
         end
       end
 
+      # Spinel's boxed literal-name respond_to? path ignores visibility.
+      # Runtime names retain public-only instance checks; singleton queries
+      # need the literal-name path to preserve class-object dispatch.
+      to_io_method = :to_io
+      write_method = :write
       unless anIO.nil?
-        if anIO.respond_to?(:to_io)
+        if anIO.is_a?(Module) ? anIO.respond_to?(:to_io) : anIO.respond_to?(to_io_method)
           anIO = anIO.to_io
         # Carried-C StringIO methods are callable but absent from Spinel's
         # respond_to? table. It is a writer, just like a Ruby-defined sink.
-        elsif limit.nil? && !anIO.respond_to?(:write) &&
+        elsif limit.nil? &&
+            !(anIO.is_a?(Module) ? anIO.respond_to?(:write) : anIO.respond_to?(write_method)) &&
             !anIO.is_a?(StringIO)
           limit = anIO
           anIO = nil

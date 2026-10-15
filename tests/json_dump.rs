@@ -758,3 +758,91 @@ p JsonDestinations.unknown(nil)
     native.assert_passes();
     assert_eq!(native.stdout, oracle.stdout);
 }
+
+// The consumer stays outside analysis so dump's destination remains untyped.
+const DESTINATION_VISIBILITY: &str = r#"
+require "json"
+require "stringio"
+class JsonPrivateConversion
+  private
+  def to_io
+    raise "private conversion called"
+  end
+end
+class JsonPrivateWriter
+  private
+  def write(text)
+    raise "private writer called"
+  end
+end
+class JsonPublicConversion
+  def to_io
+    StringIO.new
+  end
+end
+class JsonNeitherProtocol
+end
+class JsonPrivateConversionWriter
+  attr_reader :text
+  def initialize
+    @text = +""
+  end
+  def write(text)
+    @text << text
+    text.bytesize
+  end
+  def flush
+    nil
+  end
+  private
+  def to_io
+    nil
+  end
+end
+class JsonVisibilityProbe
+  def self.dump(destination)
+    JSON.dump([1], destination)
+  end
+  def self.writer
+    JSON.dump([1], JsonPrivateConversionWriter.new)
+  end
+  def self.converted
+    JSON.dump([1], JsonPublicConversion.new)
+  end
+end
+"#;
+
+#[test]
+fn dump_destination_inference_ignores_private_conversion() {
+    let (emitted, errors) = app()
+        .write("app/services/json_visibility_probe.rb", DESTINATION_VISIBILITY)
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let rbs = std::fs::read_to_string(emitted.join("app/models/json_visibility_probe.rbs")).unwrap();
+    assert!(rbs.contains("def self.dump: (untyped destination) -> untyped\n"), "{rbs}");
+    assert!(rbs.contains("def self.writer: () -> JsonPrivateConversionWriter\n"), "{rbs}");
+    assert!(rbs.contains("def self.converted: () -> StringIO\n"), "{rbs}");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_destination_visibility_executes_with_application_sidecars() {
+    let script = r#"
+p JsonVisibilityProbe.dump(JsonPrivateConversion.new)
+p JsonVisibilityProbe.dump(JsonPrivateWriter.new)
+p JsonVisibilityProbe.dump(JsonPublicConversion.new).string
+p JsonVisibilityProbe.dump(JsonNeitherProtocol.new)
+writer = JsonPrivateConversionWriter.new
+p JsonVisibilityProbe.dump(writer).equal?(writer)
+p writer.text
+p JsonVisibilityProbe.writer.text
+p JsonVisibilityProbe.converted.string
+"#;
+    let overlay = || app().write("app/services/json_visibility_probe.rb", DESTINATION_VISIBILITY);
+    let oracle = overlay().run_ruby(script);
+    oracle.assert_passes();
+    assert_eq!(oracle.stdout, "\"[1]\"\n\"[1]\"\n\"[1]\"\n\"[1]\"\ntrue\n\"[1]\"\n\"[1]\"\n\"[1]\"\n");
+    let native = overlay().run_spinel_with_rbs(script);
+    native.assert_passes();
+    assert_eq!(native.stdout, oracle.stdout);
+}
