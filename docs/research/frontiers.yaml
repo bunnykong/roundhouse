@@ -69,7 +69,7 @@
   check_public: partial
   pins:
     compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
-    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
+    lab: "0730e7f3402b1f37d15c875570b072c760248363; six separate October 15 later evening conditions"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -95,8 +95,8 @@
   check_public: public
   pins:
     compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
-    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
-    runner: "Saved receipt reductions and explicit native recipes at lab 4b80cdf4b90211001b41b579081901b699108d75"
+    lab: "0730e7f3402b1f37d15c875570b072c760248363; six separate October 15 later evening conditions"
+    runner: "Saved receipt reductions and explicit native recipes at lab 0730e7f3402b1f37d15c875570b072c760248363"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
@@ -145,4 +145,4 @@
   check_public: public
   pins:
     compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
-    lab: "4b80cdf4b90211001b41b579081901b699108d75; six separate October 15 later evening conditions"
+    lab: "0730e7f3402b1f37d15c875570b072c760248363; six separate October 15 later evening conditions"
