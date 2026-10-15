@@ -564,3 +564,39 @@ fn storage_m0_equal_merge() {
         assert_eq!(origins(&got),origins(&a).union(&origins(&b)).cloned().collect());
     }
 }
+
+#[test]
+#[ignore = "provenance protocol: normal form L0 and attribution of the extended census"]
+fn storage_normal_form() {
+    assert!(on(), "run with RH_PARAMETER_REASON_CONSERVE=1");
+    let st = |a: &Ty, b: &Ty| crate::wire_ty::storage_types(&[a.clone()], &[b.clone()]);
+    let n = |t: &Ty| super::normalize(t.clone());
+    let nested_raw = |x: &Ty| !st(&n(x), &super::join_normal(Ty::Bottom, x.clone()));
+    let (ts, p, originals) = (storage_samples(), Ty::pending_untyped(), samples().len());
+    let mut c: std::collections::BTreeMap<&str, u64> = Default::default();
+    let mut inc = |k: &'static str| *c.entry(k).or_default() += 1;
+    for (i, x) in ts.iter().enumerate() {
+        if !st(&n(&n(x)), &n(x)) { inc("n_not_idempotent") }
+        if !st(&n(x), x) { inc(if i < originals { "n_changes_original" } else { "n_changes_added" }) }
+        if evidence(&origins(&n(x))) != evidence(&origins(x)) { inc("n_loses_evidence") }
+        if nested_raw(x) { inc("nested_raw_samples") }
+    }
+    for a in &ts {
+        for b in &ts {
+            let ab = unify_param_ty(a.clone(), b.clone());
+            if !st(&unify_param_ty(ab.clone(), a.clone()), &ab) {
+                inc("idem");
+                if !(nested_raw(a) || nested_raw(b)) { inc("idem_unattributed") }
+            }
+        }
+    }
+    for x in &ts {
+        let nn = unify_param_ty(x.clone(), x.clone());
+        let want = if matches!(nn, Ty::Bottom) { p.clone() } else { nn };
+        if !st(&unify_param_ty(p.clone(), x.clone()), &want) {
+            inc("pid");
+            if !nested_raw(x) { inc("pid_unattributed") }
+        }
+    }
+    println!("STORAGE-NORMAL-FORM {}", json!({"norm": std::env::var("RH_PARAMETER_STORAGE_NORMAL_FORM").unwrap_or_default(), "counts": c}));
+}

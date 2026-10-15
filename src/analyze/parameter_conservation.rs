@@ -14,7 +14,7 @@ fn pident() -> bool {
     *ON.get_or_init(|| std::env::var("RH_PROVENANCE_PIDENT").as_deref() != Ok("0"))
 }
 
-/// provenance L2: an `untyped` whose only reason is Pending is the identity beside any other arm.
+/// provenance L2: an `untyped` whose only reason is Pending is the identity beside any other variant.
 fn pending_only(t: &Ty) -> bool {
     matches!(t, Ty::Untyped { why } if *why == crate::ty::Provenance::Pending)
 }
@@ -30,9 +30,73 @@ pub(super) fn initialize(observed: Ty) -> Ty {
     }
 }
 
+fn norm_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_PARAMETER_STORAGE_NORMAL_FORM").as_deref() == Ok("1"))
+}
+
+/// provenance L0: normalize every contribution before it enters the parameter join.
+pub(super) fn join(a: Ty, b: Ty) -> Ty {
+    if norm_on() {
+        join_normal(normalize(a), normalize(b))
+    } else {
+        join_normal(a, b)
+    }
+}
+
+/// Recursive storage normal form; record insertion order and evidence survive.
+pub(super) fn normalize(t: Ty) -> Ty {
+    match t {
+        Ty::Union { variants } => variants
+            .iter()
+            .cloned()
+            .map(normalize)
+            .fold(Ty::Bottom, join_normal),
+        Ty::Array { elem } => Ty::Array {
+            elem: Arc::new(normalize(Arc::unwrap_or_clone(elem))),
+        },
+        Ty::Hash { key, value } => Ty::Hash {
+            key: Arc::new(normalize(Arc::unwrap_or_clone(key))),
+            value: Arc::new(normalize(Arc::unwrap_or_clone(value))),
+        },
+        Ty::Tuple { elems } => Ty::Tuple {
+            elems: elems.iter().cloned().map(normalize).collect(),
+        },
+        Ty::Class { id, args } => Ty::Class {
+            id,
+            args: args.iter().cloned().map(normalize).collect(),
+        },
+        Ty::Record { row } => Ty::Record {
+            row: crate::ty::Row {
+                fields: row
+                    .fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), normalize(ty.clone())))
+                    .collect(),
+                rest: row.rest,
+            },
+        },
+        Ty::Fn { params, block, ret, effects } => Ty::Fn {
+            params: params
+                .iter()
+                .map(|p| crate::ty::Param {
+                    name: p.name.clone(),
+                    ty: Arc::new(normalize(Arc::unwrap_or_clone(p.ty.clone()))),
+                    kind: p.kind.clone(),
+                })
+                .collect(),
+            block: block.map(|t| Arc::new(normalize(Arc::unwrap_or_clone(t)))),
+            ret: Arc::new(normalize(Arc::unwrap_or_clone(ret))),
+            effects,
+        },
+        Ty::Untyped { why } => Ty::Untyped { why: why.union(why) },
+        other => other,
+    }
+}
+
 /// Same container-spine union as the native join, without dropping unknowns.
 /// Equal native shapes merge *all* reason bits even with RH_PROVENANCE_AUDIT disabled.
-pub(super) fn join(a: Ty, b: Ty) -> Ty {
+fn join_normal(a: Ty, b: Ty) -> Ty {
     fn push(t: Ty, out: &mut Vec<Ty>) {
         match t {
             Ty::Bottom => {}
