@@ -363,3 +363,85 @@ fn writer_law_parameter_reason_conservation_seed_arrival() {
         "native arrival order chooses known versus Pending priority"
     );
 }
+
+#[test]
+#[ignore = "provenance registered protocol: residual cell laws on next's native join (repair off)"]
+fn absorption_residual_cell_laws() {
+    assert!(!on(), "run with RH_PARAMETER_REASON_CONSERVE=0");
+    use crate::analyze::absorption_residual::kinds;
+    type Cell = (Ty, u8);
+    let join = |a: &Cell, b: &Cell| -> Cell {
+        let v = unify_param_ty(a.0.clone(), b.0.clone());
+        let hidden = (kinds(&a.0, true) | kinds(&b.0, true)) & !kinds(&v, true);
+        (v, a.1 | b.1 | hidden)
+    };
+    let eq = |a: &Cell, b: &Cell| crate::wire_ty::storage_types(&[a.0.clone()], &[b.0.clone()]) && a.1 == b.1;
+    let cells: Vec<Cell> = samples().into_iter().map(|t| (t, 0)).collect();
+    let mut checks = 0u64;
+    for a in &cells {
+        for b in &cells {
+            let ab = join(a, b);
+            assert!(eq(&ab, &join(b, a)), "commutativity: a={a:?}; b={b:?}; ab={ab:?}");
+            assert!(eq(&join(&ab, a), &ab), "duplicate replay: a={a:?}; b={b:?}; ab={ab:?}");
+            let input = kinds(&a.0, true) | kinds(&b.0, true);
+            assert_eq!(kinds(&ab.0, true) | ab.1, input, "lost evidence: a={a:?}; b={b:?}; ab={ab:?}");
+            assert_eq!(kinds(&ab.0, true) & ab.1, 0, "residual overlaps visible: a={a:?}; b={b:?}; ab={ab:?}");
+            for c in &cells {
+                let left = join(&ab, c);
+                assert!(eq(&left, &join(a, &join(b, c))), "associativity: a={a:?}; b={b:?}; c={c:?}; left={left:?}");
+                for (x, y, z) in [(a, b, c), (a, c, b), (b, a, c), (b, c, a), (c, a, b), (c, b, a)] {
+                    assert!(eq(&join(&join(x, y), z), &left), "permutation: a={a:?}; b={b:?}; c={c:?}; order={x:?},{y:?},{z:?}");
+                    checks += 1;
+                }
+            }
+        }
+    }
+    println!("provenance-RESIDUAL-LAWS {{\"samples\":{},\"permutation_checks\":{checks}}}", cells.len());
+}
+
+#[test]
+#[ignore = "provenance registered protocol addendum: arrival orders through native row fold and bound"]
+fn absorption_residual_cell_laws_rows() {
+    assert!(!on(), "run with RH_PARAMETER_REASON_CONSERVE=0");
+    let key = (
+        ClassId(Symbol::from("LawOwner")),
+        Symbol::from("call"),
+        MethodReceiver::Instance,
+    );
+    let fold = |obs: &[&Ty]| {
+        let mut rows = HashMap::new();
+        fold_param_observations(
+            &mut rows,
+            obs.iter().map(|t| (key.clone(), vec![(*t).clone()])).collect(),
+        );
+        rows[&key][0].clone()
+    };
+    let same = |a: &Ty, b: &Ty| crate::wire_ty::storage_types(&[a.clone()], &[b.clone()]);
+    let ts = samples();
+    let (mut fold2, mut fold3) = (0u64, 0u64);
+    for a in &ts {
+        for b in &ts {
+            let expected = fold(&[a, b]);
+            for order in [[a, b], [b, a]] {
+                let got = fold(&order);
+                assert!(same(&expected, &got),
+                    "fold2: a={a:?}; b={b:?}; expected={expected:?}; got={got:?}");
+                fold2 += 1;
+            }
+            for c in &ts {
+                let expected = fold(&[a, b, c]);
+                for order in [[a, b, c], [a, c, b], [b, a, c],
+                              [b, c, a], [c, a, b], [c, b, a]] {
+                    let got = fold(&order);
+                    assert!(same(&expected, &got),
+                        "fold3: a={a:?}; b={b:?}; c={c:?}; order={order:?}; expected={expected:?}; got={got:?}");
+                    fold3 += 1;
+                }
+            }
+        }
+    }
+    println!("provenance-RESIDUAL-ROWS {}", json!({
+        "samples": ts.len(), "fold2_order_checks": fold2, "fold3_order_checks": fold3,
+        "storage_counterexamples": 0,
+    }));
+}

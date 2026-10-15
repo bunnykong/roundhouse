@@ -242,6 +242,13 @@ pub(super) fn parameter_context(key: &super::ParamKey, position: usize, phase: &
         .replace((destination(key, position), phase.to_owned())))))
 }
 
+/// Read the same destination identity that the native audit records.
+pub(super) fn current_parameter_destination() -> String {
+    AUDIT.with(|a| a.borrow().parameter_current.as_ref()
+        .map(|(destination, _)| destination.clone())
+        .unwrap_or_else(|| "unmapped".to_owned()))
+}
+
 pub(super) fn parameter_seed(observed: &Ty, result: &Ty) {
     if !on() { return; }
     AUDIT.with(|a| a.borrow_mut().parameter_seed_initializations += 1);

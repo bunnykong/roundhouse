@@ -48,6 +48,51 @@ mod filter_targets;
 pub mod graphql;
 mod harvest_return;
 pub mod producer_evidence;
+pub(crate) mod absorption_residual {
+    use crate::ty::Ty;
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
+    pub const G: u8 = 2;
+    pub const U: u8 = 4;
+    pub const A: u8 = 8;
+    pub fn on() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var("RH_ABSORPTION_RESIDUAL").as_deref() == Ok("1"))
+    }
+    static MAP: Mutex<BTreeMap<String, u8>> = Mutex::new(BTreeMap::new());
+    /// Top-level evidence kinds. A bare `Var` counts as A only when `var_is_evidence`.
+    pub fn kinds(t: &Ty, var_is_evidence: bool) -> u8 {
+        let one = |a: &Ty| match a {
+            Ty::Untyped { why } => why.reporting_bits() & (G | U),
+            Ty::Var { .. } if var_is_evidence => A,
+            _ => 0,
+        };
+        match t {
+            Ty::Union { variants } => variants.iter().fold(0, |k, a| k | one(a)),
+            other => one(other),
+        }
+    }
+    /// Kinds present in the inputs but not visible in the result.
+    pub fn hidden(stored: &Ty, observed: &Ty, result: &Ty, stored_var: bool) -> u8 {
+        (kinds(stored, stored_var) | kinds(observed, true)) & !kinds(result, true)
+    }
+    pub fn record(destination: String, bits: u8) {
+        if bits != 0 {
+            *MAP.lock().unwrap().entry(destination).or_default() |= bits;
+        }
+    }
+    pub fn report(public: bool) -> serde_json::Value {
+        let map = MAP.lock().unwrap();
+        let count = |b: u8| map.values().filter(|v| **v & b != 0).count();
+        let mut out = serde_json::json!({"destinations": map.len(),
+            "by_kind": {"Gradual": count(G), "Unresolved": count(U), "Ambiguous": count(A)}});
+        if public {
+            out["map"] = serde_json::json!(*map);
+        }
+        out
+    }
+}
+
 mod parameter_conservation;
 mod fixpoint_bound;
 mod fixpoint_check;
@@ -1627,6 +1672,10 @@ impl Analyzer {
 
         self.stamp_inferred_method_signatures(app);
         self.report_fixpoint_checks(app);
+        if absorption_residual::on() {
+            eprintln!("rh-absorption-residual: {}", absorption_residual::report(
+                std::env::var("RH_PUBLIC_INPUT").as_deref() == Ok("1")));
+        }
         if detfp::on() {
             let fp = self.c1_state_fp(app);
             eprintln!("rh-det: {}", fp.det_line());
@@ -6416,6 +6465,10 @@ impl Analyzer {
                             // the helper channel; explicit-receiver and
                             // own-class channels keep their semantics.
                             if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
+                                if absorption_residual::on() {
+                                    absorption_residual::record(format!("entrance|{:?}", expr.span),
+                                        absorption_residual::kinds(&t, true));
+                                }
                                 Ty::Var { var: crate::ident::TyVar(0) }
                             } else {
                                 t
@@ -6440,6 +6493,10 @@ impl Analyzer {
                                             .clone()
                                             .unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
                                         let t = if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
+                                            if absorption_residual::on() {
+                                                absorption_residual::record(format!("entrance|{:?}", expr.span),
+                                                    absorption_residual::kinds(&t, true));
+                                            }
                                             Ty::Var { var: crate::ident::TyVar(0) }
                                         } else {
                                             t
@@ -7615,9 +7672,14 @@ pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     } else {
         unify_param_ty_raw
     };
-    if !producer_evidence::on() { return join(stored, observed); }
+    let residual = absorption_residual::on() && !parameter_conservation::on();
+    if !producer_evidence::on() && !residual { return join(stored, observed); }
     let result=join(stored.clone(), observed.clone());
     producer_evidence::parameter_merge(&stored,&observed,&result);
+    if residual {
+        absorption_residual::record(producer_evidence::current_parameter_destination(),
+            absorption_residual::hidden(&stored, &observed, &result, false));
+    }
     result
 }
 fn unify_param_ty_raw(stored: Ty, observed: Ty) -> Ty {
