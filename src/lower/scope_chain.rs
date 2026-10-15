@@ -1617,8 +1617,10 @@ pub fn ground_literal_model_dispatch(expr: &mut Expr, app: &crate::App, assocs: 
     let Some(ty) = recv.ty.as_ref().map(|ty| ty.peel_nilable()) else {
         return;
     };
+    let class_value = ty.class_object_instance();
+    let ty = class_value.unwrap_or(ty);
     let (id, association) = match ty {
-        crate::ty::Ty::Class { id, .. } => (id, !matches!(&*recv.node, ExprNode::Const { .. })),
+        crate::ty::Ty::Class { id, .. } => (id, class_value.is_none() && !matches!(&*recv.node, ExprNode::Const { .. })),
         crate::ty::Ty::Relation { of } => (of, false),
         crate::ty::Ty::Array { elem } => {
             let crate::ty::Ty::Class { id, .. } = elem.peel_nilable() else {

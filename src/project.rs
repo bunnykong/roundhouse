@@ -5452,6 +5452,7 @@ fn is_unported_model_instance_method(
 /// Whether `recv`'s class carries a `method` the compiler wrote (its name span synthetic), as opposed to one the app declares.
 fn calls_synthesized_method(recv: &crate::expr::Expr, method: &str, app: &App) -> bool {
     fn class_ids(ty: &crate::ty::Ty, out: &mut Vec<crate::ident::ClassId>) {
+        let ty = ty.class_object_instance().unwrap_or(ty);
         match ty {
             crate::ty::Ty::Class { id, .. } => out.push(id.clone()),
             crate::ty::Ty::Union { variants } => variants.iter().for_each(|v| class_ids(v, out)),
@@ -5568,7 +5569,8 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             }
         }
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
-            if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
+            if let Some(crate::ty::Ty::Class { id, .. }) = expr.ty.as_ref()
+                .map(|ty| ty.class_object_instance().unwrap_or(ty)) {
                 report_unavailable_class_value(app, target, id.0.as_str(), expr.span);
             }
         }
@@ -9526,13 +9528,16 @@ mod tests {
             .unwrap().methods[0].clone();
         base.library_classes.clear();
 
-        for root in 0..8 {
+        for root in 0..16 {
+            let wrapped = root >= 8;
+            let root = root % 8;
             let mut app = base.clone();
             let span = Span { file: FileId(1), start: root, end: root + 1 };
             let mut constant = Expr::new(span, ExprNode::Const {
                 path: vec![Symbol::new("Net"), Symbol::new("HTTPOK")],
             });
-            constant.ty = Some(Ty::Class { id: ClassId(Symbol::new("Net::HTTPOK")), args: vec![].into() });
+            let instance = Ty::Class { id: ClassId(Symbol::new("Net::HTTPOK")), args: vec![].into() };
+            constant.ty = Some(if wrapped { Ty::class_object(instance) } else { instance });
             match root {
                 0 | 1 => app.fixtures.push(Fixture {
                     name: Symbol::new("probes"), path: Symbol::new("probes"), model_class: None,

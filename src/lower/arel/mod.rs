@@ -250,7 +250,7 @@ fn chain_root_class<'e>(
             _ => break,
         }
     }
-    match expr.ty.as_ref() {
+    match expr.ty.as_ref().map(|ty| ty.class_object_instance().unwrap_or(ty)) {
         Some(Ty::Relation { of }) | Some(Ty::Class { id: of, .. }) => Some(of.clone()),
         _ => None,
     }
@@ -912,5 +912,20 @@ mod tests {
             matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }),
             "empty Seq collapsed to nil"
         );
+    }
+}
+
+#[cfg(test)]
+mod class_value_tests {
+    use super::*;
+    #[test]
+    fn a_computed_class_query_root_keeps_its_represented_model() {
+        let model = ClassId(crate::ident::Symbol::from("Book"));
+        let instance = Ty::Class { id: model.clone(), args: vec![].into() };
+        for ty in [instance.clone(), Ty::class_object(instance), Ty::Relation { of: model.clone() }] {
+            let mut recv = Expr::new(crate::span::Span::synthetic(), ExprNode::Ivar { name: crate::ident::Symbol::from("klass") });
+            recv.ty = Some(ty);
+            assert_eq!(chain_root_class(&recv, &HashMap::new()), Some(model.clone()));
+        }
     }
 }

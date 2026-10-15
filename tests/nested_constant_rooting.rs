@@ -116,3 +116,20 @@ fn a_constant_the_nesting_really_owns_is_left_alone() {
         "the nested reading has a target — leave it:\n{helper_line}"
     );
 }
+
+#[test]
+fn analyzed_class_values_keep_the_resolved_class_when_emission_adds_nesting() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("lib/service.rb", "class Service\n  def self.answer = 42\nend\n"),
+        ("lib/ui/service.rb", "class UI::Service\n  def self.answer = 99\nend\n"),
+        ("lib/ui/calls.rb", "class UI::Calls\n  def self.probe = Service.answer\nend\n"),
+    ])).unwrap();
+    roundhouse::session::analyze_and_lower(&mut app);
+    let source = ruby::emit_library(&app).into_iter()
+        .filter(|f| f.path.extension().is_some_and(|e| e == "rb"))
+        .map(|f| f.content).collect::<Vec<_>>().join("\n");
+    assert!(source.contains("::Service.answer"), "{source}");
+    let output = std::process::Command::new("ruby").args(["-e", &format!("{source}\np UI::Calls.probe")]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "42\n");
+}

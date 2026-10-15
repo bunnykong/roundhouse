@@ -133,7 +133,8 @@ fn is_range(e: &Expr) -> bool {
 }
 
 fn model_of(ty: Option<&Ty>) -> Option<ClassId> {
-    match ty? {
+    let ty = ty?.peel_nilable();
+    match ty.class_object_instance().unwrap_or(ty) {
         Ty::Relation { of } => Some(of.clone()),
         Ty::Class { id, args } if args.is_empty() => Some(id.clone()),
         _ => None,

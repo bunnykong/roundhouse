@@ -543,6 +543,7 @@ fn ty_is_attached(ty: &Ty) -> bool {
 }
 
 fn ty_is_blob_class(ty: &Ty) -> bool {
+    let ty = ty.class_object_instance().unwrap_or(ty);
     match ty {
         Ty::Class { id, .. } => {
             let name = id.0.as_str();
@@ -1484,5 +1485,32 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
             mutates_self: false,
             block_param: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod class_value_tests {
+    use super::*;
+
+    #[test]
+    fn blob_class_aliases_keep_upload_lowering_but_attachment_instances_stay_distinct() {
+        for class in ["ActiveStorage::Blob", "Blob"] {
+            let instance = Ty::Class { id: ClassId(Symbol::from(class)), args: vec![].into() };
+            let class_value = Ty::class_object(instance);
+            for ty in [class_value.clone(), Ty::Union { variants: vec![class_value, Ty::Nil].into() }] {
+                let mut recv = Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("klass") });
+                recv.ty = Some(ty);
+                let mut call = Expr::new(Span::synthetic(), ExprNode::Send {
+                    recv: Some(recv), method: Symbol::from("create_and_upload!"),
+                    args: vec![Expr::new(Span::synthetic(), ExprNode::Hash { entries: vec![], kwargs: true })],
+                    block: None, parenthesized: true,
+                });
+                rewrite_attach(&mut call);
+                assert!(matches!(&*call.node, ExprNode::Send { method, .. } if method.as_str() == "from_attachable"), "{call:?}");
+            }
+        }
+        let attached = Ty::Class { id: attached_class(), args: vec![].into() };
+        assert!(ty_is_attached(&attached));
+        assert!(!ty_is_attached(&Ty::class_object(attached)));
     }
 }

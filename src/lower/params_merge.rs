@@ -575,6 +575,10 @@ fn walk<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 }
 
 fn callee_class(recv: &Expr, assoc: &AssocCtx<'_>) -> Option<Symbol> {
+    if let Some(Ty::Class { id, .. }) = recv.ty.as_ref().map(Ty::peel_nilable)
+        .and_then(Ty::class_object_instance) {
+        return Some(unqualified(id.0.as_str()));
+    }
     if let ExprNode::Const { path } = &*recv.node {
         return path.last().cloned();
     }
@@ -610,7 +614,8 @@ fn callee_class(recv: &Expr, assoc: &AssocCtx<'_>) -> Option<Symbol> {
     // the site open — unlike the controller-broadcast rewriter, there is
     // no NAME fallback here, because a wrong class here would silently
     // convert an argument that is not an attribute hash.
-    if let Some(Ty::Class { id, .. }) = recv.ty.as_ref() {
+    if let Some(Ty::Class { id, .. }) = recv.ty.as_ref().map(Ty::peel_nilable)
+        .map(|ty| ty.class_object_instance().unwrap_or(ty)) {
         return Some(unqualified(id.0.as_str()));
     }
     None

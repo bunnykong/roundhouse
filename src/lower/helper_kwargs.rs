@@ -261,12 +261,17 @@ fn refuse_typed_splats(
     let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
         return;
     };
-    let slots = match (&*recv.node, &recv.ty) {
-        (ExprNode::Const { path }, _) => {
+    let class_value = recv.ty.as_ref().map(crate::ty::Ty::peel_nilable)
+        .and_then(crate::ty::Ty::class_object_instance);
+    let slots = match (&*recv.node, &recv.ty, class_value) {
+        (_, _, Some(crate::ty::Ty::Class { id, .. })) => {
+            class_params.get(&(id.0.as_str().to_string(), method.clone()))
+        }
+        (ExprNode::Const { path }, _, _) => {
             let class = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
             class_params.get(&(class, method.clone()))
         }
-        (_, Some(crate::ty::Ty::Class { id, .. })) => {
+        (_, Some(crate::ty::Ty::Class { id, .. }), _) => {
             instance_slots.get(&(id.0.as_str().to_string(), method.clone()))
         }
         _ => None,
@@ -560,5 +565,34 @@ fn is_context_free(e: &Expr) -> bool {
             .iter()
             .all(|(k, v)| is_context_free(k) && is_context_free(v)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod class_value_tests {
+    use super::*;
+    use crate::ident::{ClassId, VarId};
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    #[test]
+    fn computed_class_splats_use_the_class_contract_and_not_instance_slots() {
+        let key = ("Service".to_string(), Symbol::from("take"));
+        let slots = vec![Slot { name: Symbol::from("label"), default: None, from_keyword: true, from_kwrest: false }];
+        let class_params = [(key.clone(), slots.clone())].into_iter().collect();
+        let instance = Ty::Class { id: ClassId(Symbol::from("Service")), args: vec![].into() };
+        for (ty, refused) in [(Ty::class_object(instance.clone()), true), (instance, false)] {
+            let mut recv = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: Symbol::from("klass") });
+            recv.ty = Some(ty);
+            let mut call = Expr::new(Span::synthetic(), ExprNode::Send {
+                recv: Some(recv), method: Symbol::from("take"),
+                args: vec![Expr::new(Span::synthetic(), ExprNode::KeywordSplat {
+                    value: Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(1), name: Symbol::from("options") }),
+                })], block: None, parenthesized: true,
+            });
+            let mut diags = vec![];
+            refuse_typed_splats(&mut call, &class_params, &HashMap::new(), &mut diags);
+            assert_eq!(!diags.is_empty(), refused, "{call:?}");
+        }
     }
 }

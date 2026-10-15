@@ -246,3 +246,32 @@ end
         "a disagreeing call site must leave the source shape alone, got {stmts:#?}"
     );
 }
+
+#[test]
+fn class_value_receivers_keep_cross_boundary_params_bindings() {
+    for (setup, receiver) in [
+        ("klass = FirstRun", "klass"),
+        ("@klass = FirstRun", "@klass"),
+        ("", "FirstRun.itself"),
+    ] {
+        let source = format!(r#"class FirstRunsController < ApplicationController
+  def create
+    {setup}
+    {receiver}.create!(user_params)
+  end
+  def user_params
+    params.require(:user).permit(:name, :email_address)
+  end
+end
+"#);
+        let mut app = app_from(vec![
+            ("db/schema.rb", SCHEMA),
+            ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
+            ("app/models/first_run.rb", "class FirstRun\n  def self.create!(user_params)\n    User.new(user_params.merge(role: 1))\n  end\nend\n"),
+            ("app/controllers/first_runs_controller.rb", &source),
+        ]);
+        roundhouse::session::analyze_and_lower(&mut app);
+        let stmts = create_bang_statements(&app);
+        assert!(stmts.contains(&"_pm0 = User.from_params(user_params)".to_string()), "{receiver}: {stmts:?}");
+    }
+}

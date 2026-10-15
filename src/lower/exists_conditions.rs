@@ -72,7 +72,8 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     // IS typed is exactly what `send_dispatch_failed` reports — campfire's
     // `Ban.exists?(ip_address:)` read out as `no known method where on
     // Class(Ban)`, naming the one method every model has.
-    let relation_ty = match recv.ty.as_ref() {
+    let relation_ty = match recv.ty.as_ref()
+        .map(|ty| ty.class_object_instance().unwrap_or(ty)) {
         Some(crate::ty::Ty::Class { id, .. }) => {
             Some(crate::ty::Ty::Relation { of: id.clone() })
         }

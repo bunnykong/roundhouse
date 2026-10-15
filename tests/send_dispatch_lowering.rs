@@ -274,3 +274,61 @@ fn a_helper_spliced_into_several_includers_is_still_one_definition() {
     assert!(out.contains("when \"hour\""), "got:\n{out}");
     assert!(!out.contains(".send("), "dynamic send survived:\n{out}");
 }
+
+#[test]
+fn class_value_dispatch_arms_keep_class_side_return_metadata() {
+    for receiver in ["Target", "klass", "@klass", "Target.itself"] {
+        let source = format!(r#"class Target
+  def self.answer = 42
+  def answer = "instance"
+end
+class Caller
+  def self.probe
+    klass = Target
+    @klass = Target
+    [:answer].map {{ |name| {receiver}.public_send(name) }}
+  end
+end
+"#);
+        let mut app = App::new();
+        app.library_classes = ingest_library_classes(source.as_bytes(), "test.rb").unwrap();
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        let diags = apply_send_static_dispatch(&mut app, analyzer.class_registry());
+        assert!(diags.is_empty(), "{diags:?}");
+        let body = &app.library_classes.iter().find(|c| c.name.0.as_str() == "Caller").unwrap()
+            .methods.iter().find(|m| m.name.as_str() == "probe").unwrap().body;
+        fn collect(e: &roundhouse::Expr, out: &mut Vec<roundhouse::ty::Ty>) {
+            if let roundhouse::ExprNode::Case { arms, .. } = &*e.node {
+                out.extend(arms.iter().filter_map(|a| a.body.ty.clone()));
+            }
+            e.node.for_each_child(&mut |c| collect(c, out));
+        }
+        let mut arms = Vec::new();
+        collect(body, &mut arms);
+        assert!(arms.contains(&roundhouse::ty::Ty::Int), "{receiver}: {body:?}");
+        assert!(!arms.contains(&roundhouse::ty::Ty::Str), "opposite-side metadata: {receiver}: {body:?}");
+    }
+}
+
+#[test]
+fn class_value_callers_cannot_leave_a_partial_selector_name_set() {
+    let (out, diags) = ground_and_emit(r#"class Target
+  def self.first = 1
+  def self.second = 2
+  def self.pick(name)
+    public_send(name)
+  end
+end
+class Calls
+  def self.probe
+    klass = Target
+    Target.pick(:first)
+    klass.pick(:second)
+  end
+end
+"#);
+    assert!(out.contains("public_send(name)"), "a computed caller must veto the partial name set: {out}");
+    assert!(!out.contains("when :first"), "{out}");
+    assert!(!diags.is_empty(), "the unknown selector needs its existing residue boundary");
+}

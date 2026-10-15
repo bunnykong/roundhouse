@@ -446,6 +446,7 @@ fn wall_from_unsupported_text(text: &str, path: &str) -> Option<String> {
 }
 
 fn wall_from_send(method: &str, recv_ty: &Ty, path: &str) -> Option<String> {
+    let recv_ty = recv_ty.class_object_instance().unwrap_or(recv_ty);
     let recv = match recv_ty {
         Ty::Class { id, .. } => id.0.as_str(),
         _ => "",
@@ -698,5 +699,19 @@ mod tests {
         let json = serde_json::to_string_pretty(&inv).expect("serialize");
         assert!(json.contains("\"schema\": 1"));
         assert!(json.contains("billing-ivar-@subscription"));
+    }
+}
+
+#[cfg(test)]
+mod class_value_tests {
+    use super::*;
+    #[test]
+    fn class_value_dispatch_failures_keep_their_gem_wall() {
+        let instance = Ty::Class {
+            id: crate::ident::ClassId(crate::ident::Symbol::from("Noticed::Event")), args: vec![].into(),
+        };
+        for ty in [instance.clone(), Ty::class_object(instance)] {
+            assert_eq!(wall_from_send("unmodeled", &ty, "app/models/event.rb").as_deref(), Some("noticed-relation-api"));
+        }
     }
 }

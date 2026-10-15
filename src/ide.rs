@@ -458,8 +458,8 @@ pub struct Member {
 
 /// Which side of the class the receiver is: `user.` completes instance
 /// members, `User.` completes class members (scopes, finders). The
-/// type system flattens both onto `Ty::Class { id }`, so the caller
-/// decides syntactically — a constant receiver is the class object.
+/// value type distinguishes `Class[T]` from an instance `T`, including
+/// class values stored in locals, ivars and method returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemberSide {
     Instance,
@@ -974,8 +974,8 @@ pub fn word_start(text: &str, cursor: usize) -> usize {
 /// Primary path: ask the last-good analysis for the type at the
 /// receiver's final character — the tightest covering node is the
 /// receiver itself (a `Var` read, or the full `Send` chain for
-/// `a.b.first.`), and its syntactic kind distinguishes the class
-/// object (`Const` → class side: scopes, finders) from a value
+/// `a.b.first.`), and its value type distinguishes the class
+/// object (class side: scopes, finders) from an instance
 /// (instance side: columns, associations). Falls back textually for
 /// receivers on lines the stale snapshot hasn't seen: a constant
 /// resolves by registry name, an ivar by the type the same ivar has
@@ -993,7 +993,7 @@ pub fn receiver_class(
     let pos = offset_to_position(text, (dot - 1) as u32);
     if let Some(info) = type_at_position(app, path, pos) {
         if let Some(id) = info.ty.as_ref().and_then(root_class) {
-            let side = if info.node_kind == "Const" {
+            let side = if info.ty.as_ref().is_some_and(|ty| ty.peel_nilable().is_class_object()) {
                 MemberSide::Class
             } else {
                 MemberSide::Instance
@@ -1012,7 +1012,8 @@ pub fn receiver_class(
     if let Some(name) = token.strip_prefix('@') {
         let ivars = file_ivars(app, path);
         let ty = ivars.get(&Symbol::from(name)).and_then(|t| t.as_ref())?;
-        return root_class(ty).map(|id| (id, MemberSide::Instance));
+        let side = if ty.peel_nilable().is_class_object() { MemberSide::Class } else { MemberSide::Instance };
+        return root_class(ty).map(|id| (id, side));
     }
     None
 }
@@ -1022,6 +1023,7 @@ pub fn receiver_class(
 /// user gets members while the nil-safety diagnostics separately flag
 /// the unguarded call).
 pub fn root_class(ty: &Ty) -> Option<ClassId> {
+    let ty = ty.class_object_instance().unwrap_or(ty);
     match ty {
         Ty::Class { id, .. } => Some(id.clone()),
         Ty::Union { variants } => variants.iter().find_map(root_class),
@@ -1403,7 +1405,7 @@ fn method_references_to(app: &App, def: &DefSite<'_>) -> Vec<Reference> {
             match recv {
                 Some(r) => {
                     let certain = match resolve_receiver_class(r.ty.as_ref()) {
-                        Some(id) if id == def.owner => true,
+                        Some(id) if id == def.owner && receiver_class_side(r) == def.class_side => true,
                         Some(_) => return,
                         None => false,
                     };
@@ -1667,7 +1669,7 @@ fn method_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Referen
     // references, header included, so go-to-definition lands on the
     // `def`. A column or association has no header and takes the
     // call-site walk below.
-    if let Some(def) = def_of(app, &target, method, false) {
+    if let Some(def) = def_of(app, &target, method, receiver_class_side(recv)) {
         return Some(method_references_to(app, &def));
     }
 
@@ -1678,6 +1680,9 @@ fn method_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Referen
                 return;
             };
             if m != method {
+                return;
+            }
+            if receiver_class_side(r) != receiver_class_side(recv) {
                 return;
             }
             let certain = match resolve_receiver_class(r.ty.as_ref()) {
@@ -1698,12 +1703,13 @@ fn method_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Referen
 /// The class a receiver resolves to, if its type pins exactly one: a
 /// `Class`, or a union of one class arm with `nil` (`Article?` → `Article`).
 fn resolve_receiver_class(ty: Option<&Ty>) -> Option<ClassId> {
-    match ty? {
+    let ty = ty?;
+    match ty.class_object_instance().unwrap_or(ty) {
         Ty::Class { id, .. } => Some(id.clone()),
         Ty::Union { variants } => {
             let mut found: Option<ClassId> = None;
             for v in variants {
-                match v {
+                match v.class_object_instance().unwrap_or(v) {
                     Ty::Nil => {}
                     Ty::Class { id, .. } if found.is_none() => found = Some(id.clone()),
                     // a second class, or a non-nil non-class arm → ambiguous
@@ -1714,6 +1720,10 @@ fn resolve_receiver_class(ty: Option<&Ty>) -> Option<ClassId> {
         }
         _ => None,
     }
+}
+
+fn receiver_class_side(recv: &Expr) -> bool {
+    recv.ty.as_ref().is_some_and(|ty| ty.peel_nilable().is_class_object())
 }
 
 /// The span of just the method-name token within a call. The IR carries no
@@ -4501,3 +4511,72 @@ end
     }
 }
 
+
+#[cfg(test)]
+mod class_value_tests {
+    use super::*;
+    use crate::analyze::Analyzer;
+
+    #[test]
+    fn completions_and_definitions_follow_class_values_and_preserve_receiver_side() {
+        let text = r#"class Widget
+  def self.answer = 42
+  def answer = "instance"
+end
+class Calls
+  ALIAS = Widget
+  INSTANCE = Widget.new
+  def self.class_for = Widget
+  def self.probe(klass = Widget)
+    local = Widget
+    @klass = Widget
+    items = [Widget]
+    mapping = { entry: Widget }
+    Widget.answer
+    ::Widget.answer
+    ALIAS.answer
+    local.answer
+    @klass.answer
+    klass.answer
+    items[0].answer
+    mapping[:entry].answer
+    class_for.answer
+    Widget.itself.answer
+    INSTANCE.answer
+    Widget.new.answer
+  end
+end
+"#;
+        let path = "lib/probe.rb";
+        let tree = [(std::path::PathBuf::from(path), text.as_bytes().to_vec())].into_iter().collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).unwrap();
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        let file = file_id(&app, path).unwrap();
+        let class_definition = def_of(&app, &ClassId(Symbol::from("Widget")), &Symbol::from("answer"), true).unwrap().span;
+        let instance_definition = def_of(&app, &ClassId(Symbol::from("Widget")), &Symbol::from("answer"), false).unwrap().span;
+        for (needle, side, expected_definition) in [
+            ("    Widget.answer", MemberSide::Class, class_definition),
+            ("    ::Widget.answer", MemberSide::Class, class_definition),
+            ("    ALIAS.answer", MemberSide::Class, class_definition),
+            ("    local.answer", MemberSide::Class, class_definition),
+            ("    @klass.answer", MemberSide::Class, class_definition),
+            ("    klass.answer", MemberSide::Class, class_definition),
+            ("    items[0].answer", MemberSide::Class, class_definition),
+            ("    mapping[:entry].answer", MemberSide::Class, class_definition),
+            ("    class_for.answer", MemberSide::Class, class_definition),
+            ("    Widget.itself.answer", MemberSide::Class, class_definition),
+            ("    INSTANCE.answer", MemberSide::Instance, instance_definition),
+            ("    Widget.new.answer", MemberSide::Instance, instance_definition),
+        ] {
+            let dot = text.find(needle).unwrap() + needle.rfind('.').unwrap();
+            let resolved = receiver_class(&app, analyzer.class_registry(), path, text, dot).unwrap();
+            assert_eq!(resolved, (ClassId(Symbol::from("Widget")), side), "{needle}");
+            assert_eq!(definition(&app, file, (dot + 2) as u32), Some(expected_definition), "{needle}");
+        }
+        // Completion on a newly typed line falls back to the last known ivar.
+        let stale = format!("{text}\n@klass.");
+        assert_eq!(receiver_class(&app, analyzer.class_registry(), path, &stale, stale.len() - 1),
+            Some((ClassId(Symbol::from("Widget")), MemberSide::Class)));
+    }
+}

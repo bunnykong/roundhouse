@@ -147,3 +147,50 @@ fn hash_where_identifiers_run_on_spinel() {
 fn hash_exists_identifiers_run_on_spinel() {
     run_identifier_spinel(false);
 }
+
+/// A model constant carries Class[Widget]. Every derived condition API must
+/// still split ranges before the Relation's hash-equality fallback runs.
+#[test]
+fn class_value_range_conditions_run_on_ruby() {
+    app().write("app/models/widget.rb", r#"class Widget < ApplicationRecord
+  def self.matches
+    where(id: 1..3, owner_id: 1).to_a
+  end
+  def self.exclusive
+    Widget.where(owner_id: 1, id: 1...3).to_a
+  end
+  def self.beginless
+    Widget.where(id: ..2, owner_id: 1).to_a
+  end
+  def self.endless
+    Widget.where(owner_id: 1, id: 2..).to_a
+  end
+  def self.multiple
+    Widget.where(id: 1..3, number: 6..8, owner_id: 1).to_a
+  end
+  def self.one = Widget.find_by(id: 1..3, owner_id: 1)
+  def self.one_bang = Widget.find_by!(owner_id: 1, id: 1..3)
+  def self.present = Widget.exists?(id: 1..3, owner_id: 1)
+  def self.sole_match = Widget.find_sole_by(id: 1..1, owner_id: 1)
+  def self.remove = Widget.delete_by(id: 1..3, owner_id: 1)
+  def self.destroy_matches = Widget.destroy_by(id: 1..3, owner_id: 1)
+end
+"#).run_ruby(r#"
+Db.exec("INSERT INTO widgets (id, owner_id, number) VALUES (1, 1, 7), (2, 1, 8), (9, 1, 9), (3, 2, 7)")
+raise "inclusive" unless Widget.matches.map(&:id) == [1, 2]
+raise "exclusive" unless Widget.exclusive.map(&:id) == [1, 2]
+raise "beginless" unless Widget.beginless.map(&:id) == [1, 2]
+raise "endless" unless Widget.endless.map(&:id) == [2, 9]
+raise "multiple ranges" unless Widget.multiple.map(&:id) == [1, 2]
+raise "find_by" unless Widget.one.id == 1
+raise "find_by!" unless Widget.one_bang.id == 1
+raise "exists?" unless Widget.present
+raise "find_sole_by" unless Widget.sole_match.id == 1
+raise "delete_by" unless Widget.remove == 2
+raise "wrong deleted records" unless Widget.all.to_a.map(&:id) == [3, 9]
+Db.exec("INSERT INTO widgets (id, owner_id, number) VALUES (1, 1, 7), (2, 1, 8)")
+raise "destroy_by" unless Widget.destroy_matches.map(&:id) == [1, 2]
+raise "wrong destroyed records" unless Widget.all.to_a.map(&:id) == [3, 9]
+puts "class-value range predicates passed"
+"#).assert_passes();
+}

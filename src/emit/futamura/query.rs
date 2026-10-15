@@ -621,7 +621,7 @@ impl Chain {
 /// and scope chains as `Array[Model]` as well as `Relation[Model]`; the
 /// chain walker, not the type, decides whether it is really a query.
 fn relation_model(e: &Expr) -> Option<&ClassId> {
-    match &e.ty {
+    match e.ty.as_ref().map(|ty| ty.class_object_instance().unwrap_or(ty)) {
         Some(Ty::Relation { of }) => Some(of),
         Some(Ty::Array { elem }) => match &**elem {
             Ty::Class { id, .. } => Some(id),
@@ -728,4 +728,19 @@ fn collect_locals<'e>(e: &'e Expr, out: &mut HashMap<(VarId, Symbol), Option<&'e
         out.entry((*id, name.clone())).and_modify(|v| *v = None).or_insert(Some(value));
     }
     e.node.for_each_child(&mut |c| collect_locals(c, out));
+}
+
+#[cfg(test)]
+mod class_value_tests {
+    use super::*;
+    #[test]
+    fn specialization_resolves_class_query_roots_without_changing_instance_owners() {
+        let model = ClassId(Symbol::from("Book"));
+        let instance = Ty::Class { id: model.clone(), args: vec![].into() };
+        let mut recv = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("Book")] });
+        recv.ty = Some(Ty::class_object(instance.clone()));
+        assert_eq!(relation_model(&recv), Some(&model));
+        assert_eq!(non_nil_class(&instance), Some(&model));
+        assert_ne!(non_nil_class(recv.ty.as_ref().unwrap()), Some(&model));
+    }
 }

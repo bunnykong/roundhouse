@@ -174,7 +174,13 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
             // Resolve the callee's class_name for this Send.
             let callee_class: Option<String> = match new_recv.as_ref().map(|r| &*r.node) {
                 Some(ExprNode::Const { path }) => {
-                    path.last().map(|s| s.as_str().to_string())
+                    new_recv.as_ref().and_then(|r| r.ty.as_ref())
+                        .and_then(Ty::class_object_instance)
+                        .and_then(|ty| match ty {
+                            Ty::Class { id, .. } => Some(id.0.as_str().rsplit("::").next().unwrap().to_string()),
+                            _ => None,
+                        })
+                        .or_else(|| path.last().map(|s| s.as_str().to_string()))
                 }
                 // SelfRef and implicit-self (recv=None) both resolve to
                 // the enclosing LC.
@@ -187,12 +193,15 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
                 // registry. Same id-last-segment rule the cross-LC
                 // dispatch in `emit/rust/expr/send` uses.
                 Some(ExprNode::Var { .. } | ExprNode::Ivar { .. }) => {
-                    new_recv.as_ref().and_then(|r| match r.ty.as_ref()? {
+                    new_recv.as_ref().and_then(|r| {
+                        let ty = r.ty.as_ref()?.peel_nilable();
+                        match ty.class_object_instance().unwrap_or(ty) {
                         Ty::Class { id, .. } => {
                             let raw = id.0.as_str();
                             Some(raw.rsplit("::").next().unwrap_or(raw).to_string())
                         }
                         _ => None,
+                        }
                     })
                 }
                 _ => None,
@@ -688,5 +697,33 @@ mod tests {
         let ExprNode::Lambda { extra_params, body, .. } = &*out.node else { panic!("lambda") };
         assert!(first_arg_is_cast(body), "body: {body:?}");
         assert!(first_arg_is_cast(extra_params[0].default.as_ref().unwrap()), "default: {extra_params:?}");
+    }
+}
+
+#[cfg(test)]
+mod class_value_tests {
+    use super::*;
+    use crate::ident::{ClassId, Symbol, VarId};
+    use crate::span::Span;
+
+    #[test]
+    fn computed_class_receivers_keep_declared_argument_coercions() {
+        let target = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+        let registry = [("Service".to_string(), [("take".to_string(), vec![target])].into_iter().collect())].into_iter().collect();
+        let instance = Ty::Class { id: ClassId(Symbol::from("Scope::Service")), args: vec![].into() };
+        let value = Ty::class_object(instance.clone());
+        for ty in [instance, value.clone(), Ty::Union { variants: vec![value, Ty::Nil].into() }] {
+            for node in [ExprNode::Var { id: VarId(0), name: Symbol::from("klass") }, ExprNode::Ivar { name: Symbol::from("klass") }] {
+                let mut recv = Expr::new(Span::synthetic(), node);
+                recv.ty = Some(ty.clone());
+                let call = Expr::new(Span::synthetic(), ExprNode::Send {
+                    recv: Some(recv), method: Symbol::from("take"),
+                    args: vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: "x".into() } })],
+                    block: None, parenthesized: true,
+                });
+                let rewritten = rewrite_expr(&call, &registry, "Caller");
+                assert!(matches!(&*rewritten.node, ExprNode::Send { args, .. } if matches!(&*args[0].node, ExprNode::Cast { .. })), "{rewritten:?}");
+            }
+        }
     }
 }

@@ -6330,7 +6330,8 @@ fn root_shadowed_constants(
     // Root its actual class when the new nesting would bind the head to
     // another class; a typed VALUE constant never carries this mark.
     if expr.decisions & crate::expr::RESOLVED_CLASS_REF != 0 {
-        if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
+        if let Some(crate::ty::Ty::Class { id, .. }) = expr.ty.as_ref()
+            .map(|ty| ty.class_object_instance().unwrap_or(ty)) {
             let resolved = id.0.as_str();
             for prefix in prefixes.iter().rev() {
                 if known(&format!("{prefix}::{}", head.as_str())) {

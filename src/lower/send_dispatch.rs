@@ -179,6 +179,8 @@ fn apply_param_selector_dispatch(
                             }
                         }
                         Some((_, ty)) => {
+                            let ty = ty.map(|ty| ty.peel_nilable())
+                                .map(|ty| ty.class_object_instance().unwrap_or(ty));
                             let unknown = match ty {
                                 None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
                                 Some(Ty::Class { id, .. }) => targets.keys().any(|k| &k.0 == id),
@@ -631,14 +633,15 @@ fn duration_plural(name: &str) -> Option<&'static str> {
 }
 
 /// The return type dispatch would compute for `name` on the receiver's
-/// class — own instance methods, then mixed-in modules, then the parent
-/// chain, exactly the walk analyze's dispatch performs. `None` when the
+/// class and side — own methods, then the parent chain. Instance lookup
+/// also visits mixed-in modules. `None` when the
 /// receiver isn't a registered class or the method's return is still an
 /// open inference variable.
 fn method_return_via_registry(
     registry: &HashMap<ClassId, ClassInfo>,
     class: &ClassId,
     name: &str,
+    class_side: bool,
 ) -> Option<Ty> {
     let mut seen: BTreeSet<ClassId> = BTreeSet::new();
     let mut stack = vec![class.clone()];
@@ -647,7 +650,8 @@ fn method_return_via_registry(
             continue;
         }
         let Some(cls) = registry.get(&cid) else { continue };
-        if let Some(ty) = cls.instance_methods.get(&Symbol::from(name)) {
+        let methods = if class_side { &cls.class_methods } else { &cls.instance_methods };
+        if let Some(ty) = methods.get(&Symbol::from(name)) {
             // A `-> self` found on an ancestor answers the class the
             // walk started from, as analyze's dispatch substitutes.
             let ty = ty.subst_self(&Ty::Class { id: class.clone(), args: Vec::new().into() });
@@ -660,7 +664,9 @@ fn method_return_via_registry(
                 t => Some(t),
             };
         }
-        stack.extend(cls.includes.iter().cloned());
+        if !class_side {
+            stack.extend(cls.includes.iter().cloned());
+        }
         if let Some(p) = &cls.parent {
             stack.push(p.clone());
         }
@@ -671,10 +677,12 @@ fn method_return_via_registry(
 /// The class the arms dispatch on, when the receiver types to one.
 /// `None` receivers are implicit self — the hook walk carries no class
 /// context, so those arms fall back to the gradual stamp.
-fn recv_class(recv: &Option<Expr>) -> Option<ClassId> {
+fn recv_class(recv: &Option<Expr>) -> Option<(ClassId, bool)> {
     let r = recv.as_ref()?;
-    match r.ty.as_ref() {
-        Some(Ty::Class { id, .. }) => Some(id.clone()),
+    let ty = r.ty.as_ref()?.peel_nilable();
+    let class_value = ty.class_object_instance();
+    match class_value.unwrap_or(ty) {
+        Ty::Class { id, .. } => Some((id.clone(), class_value.is_some())),
         _ => None,
     }
 }
@@ -722,7 +730,7 @@ fn build_arms(
             body.ty = Some(
                 class
                     .as_ref()
-                    .and_then(|c| method_return_via_registry(registry, c, called.as_str()))
+                    .and_then(|(c, side)| method_return_via_registry(registry, c, called.as_str(), *side))
                     .unwrap_or(Ty::Untyped),
             );
             Arm { pattern, guard: None, body }

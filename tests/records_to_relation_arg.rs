@@ -80,3 +80,18 @@ fn a_literal_at_a_param_that_is_not_a_relation_is_left_alone() {
     );
     assert!(!src.contains(".where(id:"), "{src}");
 }
+
+#[test]
+fn class_value_receivers_keep_relation_parameter_metadata() {
+    for (setup, receiver) in [
+        ("klass = Room", "klass"),
+        ("@klass = Room", "@klass"),
+        ("", "Room.itself"),
+    ] {
+        let src = emitted(
+            &format!("{setup}\n    room = {receiver}.find_or_create_for([ users(:david), users(:kevin) ])\n    assert room"),
+            "find_or_create_for(User.where(id: params[:user_ids]))",
+        );
+        assert!(src.contains(".where(id: [UsersFixtures.david.id, UsersFixtures.kevin.id])"), "{receiver}: {src}");
+    }
+}

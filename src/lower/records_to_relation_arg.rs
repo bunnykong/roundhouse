@@ -92,11 +92,16 @@ fn rewrite_send(e: &Expr, app: &App) -> Option<Expr> {
 /// class-method call names, or the class an instance receiver types
 /// to. `collect_send_sites` records both the same way.
 fn callee_class(recv: &Expr) -> Option<ClassId> {
+    if let Some(Ty::Class { id, .. }) = recv.ty.as_ref().map(Ty::peel_nilable)
+        .and_then(Ty::class_object_instance) {
+        return Some(id.clone());
+    }
     if let ExprNode::Const { path } = &*recv.node {
         let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
         return Some(ClassId(Symbol::from(joined.as_str())));
     }
-    match &recv.ty {
+    match recv.ty.as_ref().map(Ty::peel_nilable)
+        .map(|ty| ty.class_object_instance().unwrap_or(ty)) {
         Some(Ty::Class { id, .. }) => Some(id.clone()),
         _ => None,
     }

@@ -75,7 +75,8 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     // on a typed receiver — `send_dispatch_failed` naming `where`,
     // which is the one method every model has. Both a class receiver
     // and an already-built relation land on the same relation type.
-    let relation_ty = match recv.ty.as_ref() {
+    let relation_ty = match recv.ty.as_ref().map(Ty::peel_nilable)
+        .map(|ty| ty.class_object_instance().unwrap_or(ty)) {
         Some(Ty::Class { id, .. }) => Ty::Relation { of: id.clone() },
         Some(Ty::Relation { of }) => Ty::Relation { of: of.clone() },
         _ => return,
