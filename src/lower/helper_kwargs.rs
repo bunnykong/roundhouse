@@ -180,11 +180,7 @@ fn rewrite_class_calls_node(
     instance_params: &InstanceCallParams,
     diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
 ) {
-    if matches!(
-        &e.diagnostic,
-        Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
-            if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
-    ) {
+    if constructor::is_refused(e) {
         return;
     }
     if constructor::rewrite_custom_new_call(e, instance_params, diagnostics) {
@@ -232,6 +228,14 @@ fn rewrite_class_calls_node(
 /// flattened `**rest` is left to `kwrest_forward`, which owns that shape.
 pub(crate) fn refuse_flattened_keyword_splats(app: &mut App) -> Vec<crate::diagnostic::Diagnostic> {
     let mut diagnostics = Vec::new();
+    // Keep constructor refusals ahead of the first splat projection too:
+    // after that, an unsafe **bundle is indistinguishable from a Hash.
+    let (_, constructors) = crate::analyze::forwarding::keyword_calls_and_constructor_contracts(app);
+    let names = super::forwarding::constructor_names(app, &constructors);
+    let constructor_params = InstanceCallParams::new(app, constructors, &names);
+    super::for_each_forwarding_body(app, &mut |e| {
+        constructor::refuse_keyword_splats(e, &constructor_params, &mut diagnostics);
+    });
     let class_params = library_class_call_params(app);
     let index = owned::OwnerIndex::new(app);
     let instance_slots = index.instance_slots();
@@ -251,6 +255,9 @@ fn refuse_typed_splats(
     diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
 ) {
     e.node.for_each_child_mut(&mut |c| refuse_typed_splats(c, class_params, instance_slots, diagnostics));
+    if constructor::is_refused(e) {
+        return;
+    }
     let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
         return;
     };

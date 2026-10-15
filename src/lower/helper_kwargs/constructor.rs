@@ -8,8 +8,38 @@ use std::collections::{HashMap, HashSet};
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
+use crate::ty::Ty;
 
 use super::{Slot, slot_of};
+
+/// A nullable class value still has one constructor ABI. Distinct class
+/// values (or a class mixed with an instance) need a refusal, not a guess.
+fn constructor_class(ty: &Ty) -> Option<&crate::ident::ClassId> {
+    if let Some(Ty::Class { id, .. }) = ty.class_object_instance() {
+        return Some(id);
+    }
+    let Ty::Union { variants } = ty else { return None };
+    let mut found = None;
+    for variant in variants.iter().filter(|ty| !matches!(ty, Ty::Nil)) {
+        let id = constructor_class(variant)?;
+        if found.is_some_and(|previous| previous != id) {
+            return None;
+        }
+        found = Some(id);
+    }
+    found
+}
+
+fn has_flattened_constructor(ty: &Ty, params: &InstanceCallParams) -> bool {
+    if let Some(Ty::Class { id, .. }) = ty.class_object_instance() {
+        let name = params.unqualified_class_ids.get(id.0.as_str())
+            .map_or(id.0.as_str(), String::as_str);
+        return params.slots.contains_key(&(name.to_string(), Symbol::from("initialize")))
+            || params.custom_new_slots.contains_key(&(name.to_string(), Symbol::from("new")))
+            || params.unknown_new.contains(name);
+    }
+    matches!(ty, Ty::Union { variants } if variants.iter().any(|ty| has_flattened_constructor(ty, params)))
+}
 
 pub(super) struct InstanceCallParams {
     pub(super) slots: HashMap<(String, Symbol), Vec<Slot>>,
@@ -20,6 +50,7 @@ pub(super) struct InstanceCallParams {
     unqualified_class_ids: HashMap<String, String>,
     ambiguous_names: HashSet<String>,
     model_names: HashSet<String>,
+    parents: HashMap<String, String>,
 }
 
 impl InstanceCallParams {
@@ -95,6 +126,14 @@ impl InstanceCallParams {
         let mut custom_new_slots = HashMap::new();
         let mut unknown_new = HashSet::new();
         let unqualified_class_ids = names.unqualified_class_ids.clone();
+        let class_names: HashSet<String> = constructors.keys()
+            .map(|id| id.0.as_str().to_string()).collect();
+        let parents = app.library_classes.iter().map(|c| (&c.name, c.parent.as_ref()))
+            .chain(app.models.iter().map(|m| (&m.name, m.parent.as_ref())))
+            .filter_map(|(child, parent)| {
+                let parent = super::owned::resolve_const(&class_names, child.0.as_str(), parent?.0.as_str())?;
+                Some((child.0.as_str().to_string(), parent))
+            }).collect();
         for (class_id, contract) in constructors {
             add_constructor_slots(
                 &class_id,
@@ -114,8 +153,52 @@ impl InstanceCallParams {
             unqualified_class_ids,
             ambiguous_names: names.ambiguous_names.clone(),
             model_names: names.model_names.clone(),
+            parents,
         }
     }
+}
+
+/// A non-constant class receiver can be `self` (or an alias of it) in
+/// an inherited method. Its subclasses must agree on the emitted ABI.
+fn conflicting_subclass_constructor(
+    params: &InstanceCallParams,
+    class: &str,
+    span: crate::span::Span,
+    args: &[Expr],
+) -> bool {
+    if !has_keyword_arguments(args) {
+        return false;
+    }
+    let respelled = |class: &str| -> Result<Vec<Expr>, ()> {
+        if constructor_refusal_reason(params, span, class, class, args).is_some() {
+            return Err(());
+        }
+        let slots = if params.custom_new.contains(class) {
+            params.custom_new_slots.get(&(class.to_string(), Symbol::from("new")))
+        } else {
+            params.slots.get(&(class.to_string(), Symbol::from("initialize")))
+        };
+        let mut rewritten = args.to_vec();
+        if let Some(slots) = slots {
+            respell_constructor(&mut rewritten, slots)?;
+        }
+        Ok(rewritten)
+    };
+    let expected = respelled(class);
+    for child in params.parents.keys() {
+        let mut current = params.parents.get(child);
+        for _ in 0..32 {
+            let Some(parent) = current else { break };
+            if parent == class {
+                if expected.is_err() || respelled(child) != expected {
+                    return true;
+                }
+                break;
+            }
+            current = params.parents.get(parent);
+        }
+    }
+    false
 }
 
 /// The positional slots of a method whose keywords ingest flattened, or
@@ -319,6 +402,13 @@ fn add_constructor_slots(
     );
 }
 
+pub(super) fn is_refused(expr: &Expr) -> bool {
+    matches!(&expr.diagnostic,
+        Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
+            if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
+    )
+}
+
 pub(super) fn refuse_keyword_splats(
     expr: &mut Expr,
     params: &InstanceCallParams,
@@ -326,6 +416,9 @@ pub(super) fn refuse_keyword_splats(
 ) {
     expr.node
         .for_each_child_mut(&mut |child| refuse_keyword_splats(child, params, diagnostics));
+    if is_refused(expr) {
+        return;
+    }
     let ExprNode::Send {
         recv: Some(recv),
         method,
@@ -335,10 +428,21 @@ pub(super) fn refuse_keyword_splats(
     else {
         return;
     };
-    if method.as_str() != "new" || !matches!(&*recv.node, ExprNode::Const { .. }) {
+    if method.as_str() != "new" {
         return;
     }
-    let Some(crate::ty::Ty::Class { id, .. }) = &recv.ty else {
+    let Some(ty) = recv.ty.as_ref() else {
+        return;
+    };
+    let Some(id) = constructor_class(ty) else {
+        if has_flattened_constructor(ty, params) && has_keyword_arguments(args) {
+            refuse_constructor(
+                expr.span,
+                &mut expr.diagnostic,
+                "cannot verify one constructor keyword contract for this union of receiver types",
+                diagnostics,
+            );
+        }
         return;
     };
     let class_name = params
@@ -349,6 +453,15 @@ pub(super) fn refuse_keyword_splats(
         constructor_refusal_reason(params, expr.span, id.0.as_str(), class_name, args)
     {
         refuse_constructor(expr.span, &mut expr.diagnostic, reason, diagnostics);
+    } else if !matches!(&*recv.node, ExprNode::Const { .. })
+        && conflicting_subclass_constructor(params, class_name, expr.span, args)
+    {
+        refuse_constructor(
+            expr.span,
+            &mut expr.diagnostic,
+            "a subclass has different constructor keyword slots, so this dynamic class receiver cannot use one positional spelling",
+            diagnostics,
+        );
     }
 }
 
@@ -365,11 +478,7 @@ fn rewrite_instance_call(
     params: &InstanceCallParams,
     diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
 ) {
-    if matches!(
-        &expr.diagnostic,
-        Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
-            if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
-    ) {
+    if is_refused(expr) {
         return;
     }
     if params.slots.is_empty()
@@ -388,10 +497,23 @@ fn rewrite_instance_call(
     else {
         return;
     };
-    let Some(crate::ty::Ty::Class { id, .. }) = &recv.ty else {
+    let Some(receiver_ty) = recv.ty.as_ref() else {
         return;
     };
-    let is_constructor = method.as_str() == "new" && matches!(&*recv.node, ExprNode::Const { .. });
+    let class_value = constructor_class(receiver_ty);
+    // A value constant may hold an instance with an ordinary `new`
+    // method. Only a class value uses the constructor contract.
+    let is_constructor = method.as_str() == "new" && class_value.is_some();
+    if class_value.is_some() && !is_constructor {
+        return;
+    }
+    let id = match class_value {
+        Some(id) => id,
+        None => {
+            let Ty::Class { id, .. } = receiver_ty else { return };
+            id
+        }
+    };
     let class_id = if is_constructor {
         params
             .unqualified_class_ids
@@ -458,10 +580,10 @@ pub(super) fn rewrite_custom_new_call(
     else {
         return false;
     };
-    if method.as_str() != "new" || !matches!(&*recv.node, ExprNode::Const { .. }) {
+    if method.as_str() != "new" {
         return false;
     }
-    let Some(crate::ty::Ty::Class { id, .. }) = &recv.ty else {
+    let Some(id) = recv.ty.as_ref().and_then(constructor_class) else {
         return false;
     };
     let class_id = params
@@ -547,7 +669,7 @@ fn constructor_refusal_reason(
     None
 }
 
-fn refuse_constructor(
+pub(super) fn refuse_constructor(
     span: crate::span::Span,
     diagnostic_kind: &mut Option<crate::diagnostic::DiagnosticKind>,
     detail: &str,

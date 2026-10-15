@@ -172,14 +172,20 @@ pub(super) fn apply_with_plans(
                         && args
                             .iter()
                             .any(|arg| matches!(&*arg.node, ExprNode::KeywordSplat { .. }))
-                        && recv.as_ref().is_some_and(|recv| {
-                            matches!(&*recv.node, ExprNode::Const { .. })
+                        // `class_body_new` supplies an implicit class
+                        // receiver later. Keep its source splat until the
+                        // constructor contract can be consulted there.
+                        && recv.as_ref().is_none_or(|recv| {
+                            (recv.ty.as_ref().is_some_and(crate::ty::Ty::contains_class_object)
+                                || matches!(&*recv.node, ExprNode::Const { .. }))
                                 && (matches!(
                                     &e.diagnostic,
                                     Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                                         if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
+                                ) || recv.ty.as_ref().is_some_and(|ty|
+                                    matches!(ty, crate::ty::Ty::Union { .. }) && ty.contains_class_object()
                                 ) || matches!(
-                                    &recv.ty,
+                                    recv.ty.as_ref().and_then(crate::ty::Ty::class_object_instance),
                                     Some(crate::ty::Ty::Class { id, .. })
                                         if names.splat_classes.contains(
                                             names.unqualified_class_ids

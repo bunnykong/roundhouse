@@ -330,6 +330,9 @@ fn collect_signatures(app: &App) -> Signatures {
             if matches!(m.receiver, MethodReceiver::Instance) {
                 sigs.methods
                     .insert((lc.name.clone(), m.name.clone()), m.params.clone());
+            } else {
+                sigs.class_methods
+                    .insert((lc.name.clone(), m.name.clone()), m.params.clone());
             }
         }
     }
@@ -676,23 +679,32 @@ fn callee_params<'s>(
     method: &Symbol,
     sigs: &'s Signatures,
 ) -> Option<&'s Vec<Param>> {
-    let Ty::Class { id, .. } = recv_ty else { return None };
-    let lookup = if method.as_str() == "new" {
-        Symbol::from("initialize")
-    } else {
-        method.clone()
+    let receiver = recv_ty.clone().strip_nil();
+    let class_value = receiver.class_object_instance();
+    let Ty::Class { id, .. } = class_value.unwrap_or(&receiver) else { return None };
+    let find = |table: &'s HashMap<(ClassId, Symbol), Vec<Param>>, name: &Symbol| {
+        let mut current = Some(id.clone());
+        for _ in 0..32 {
+            let cid = current?;
+            if let Some(params) = table.get(&(cid.clone(), name.clone())) {
+                return Some(params);
+            }
+            current = sigs.parents.get(&cid).cloned();
+        }
+        None
     };
-    let mut current = Some(id.clone());
-    // Same cycle cap `normalize_trailing_kwargs` uses — a malformed
-    // parent chain must not hang the compiler.
-    for _ in 0..32 {
-        let cid = current?;
-        if let Some(params) = sigs.methods.get(&(cid.clone(), lookup.clone())) {
+    if class_value.is_some() {
+        // A custom class-side `new` wins over initialize, including an
+        // inherited override. An instance's ordinary `new` never hops.
+        if let Some(params) = find(&sigs.class_methods, method) {
             return Some(params);
         }
-        current = sigs.parents.get(&cid).cloned();
+        if method.as_str() != "new" {
+            return None;
+        }
+        return find(&sigs.methods, &Symbol::from("initialize"));
     }
-    None
+    find(&sigs.methods, method)
 }
 
 /// Evaluated once per keyword, so only expressions that are free of

@@ -228,7 +228,7 @@ enum Resolved<'a> {
 
 /// `name` as written inside `owner`, resolved against the library
 /// classes the way a constant reference is: innermost namespace first.
-fn resolve_const(names: &HashSet<String>, owner: &str, name: &str) -> Option<String> {
+pub(super) fn resolve_const(names: &HashSet<String>, owner: &str, name: &str) -> Option<String> {
     let name = name.trim_start_matches("::");
     let mut scope: Vec<&str> = owner.split("::").collect();
     loop {
@@ -286,13 +286,16 @@ pub(super) fn refuse_library_class_splats(
     diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
 ) {
     fn walk(
-        e: &Expr,
+        e: &mut Expr,
         owner: &str,
         side: Side,
         index: &OwnerIndex,
         diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
     ) {
-        e.node.for_each_child(&mut |c| walk(c, owner, side, index, diagnostics));
+        e.node.for_each_child_mut(&mut |c| walk(c, owner, side, index, diagnostics));
+        if super::constructor::is_refused(e) {
+            return;
+        }
         let ExprNode::Send { recv, method, args, .. } = &*e.node else { return };
         let Some(side) = owner_side(recv, side) else { return };
         let refused = match index.lookup(owner, side, method) {
@@ -301,13 +304,22 @@ pub(super) fn refuse_library_class_splats(
             Err(()) => super::carries_splat(args),
         };
         if refused {
-            super::refuse(e.span, super::SPLAT_REFUSAL, diagnostics);
+            if side == Side::Class && method.as_str() == "new" {
+                super::constructor::refuse_constructor(
+                    e.span,
+                    &mut e.diagnostic,
+                    "cannot safely rebind keyword splats to custom `new` positional slots",
+                    diagnostics,
+                );
+            } else {
+                super::refuse(e.span, super::SPLAT_REFUSAL, diagnostics);
+            }
         }
     }
-    for lc in &app.library_classes {
+    for lc in &mut app.library_classes {
         let owner = lc.name.0.as_str();
-        for m in &lc.methods {
-            walk(&m.body, owner, Side::from(m.receiver), index, diagnostics);
+        for m in &mut lc.methods {
+            walk(&mut m.body, owner, Side::from(m.receiver), index, diagnostics);
         }
     }
 }
@@ -353,6 +365,9 @@ fn rewrite_node(
     index: &OwnerIndex,
     diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
 ) {
+    if super::constructor::is_refused(e) {
+        return;
+    }
     let span = e.span;
     let ExprNode::Send { recv, method, args, .. } = &mut *e.node else {
         return;

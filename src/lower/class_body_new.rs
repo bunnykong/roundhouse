@@ -304,9 +304,9 @@ fn rewrite(expr: &mut Expr, owner: &str) {
     // Receiver identity is independent of the constructor's result: the
     // result may be SelfInstance or an overridden constructor's other class.
     // Later keyword expansion resolves initialize against this receiver.
-    konst.ty = Some(crate::ty::Ty::Class {
+    konst.ty = Some(crate::ty::Ty::class_object(crate::ty::Ty::Class {
         id: crate::ident::ClassId(Symbol::from(owner)),
         args: Vec::new().into(),
-    });
+    }));
     *recv = Some(konst);
 }
