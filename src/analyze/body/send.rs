@@ -980,6 +980,28 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    fn json_dump_return_ty(&self, io: &Ty) -> Ty {
+        match io {
+            Ty::Union { variants } => {
+                super::union_many(variants.iter().map(|ty| self.json_dump_return_ty(ty)).collect())
+            }
+            Ty::Var { .. } | Ty::Untyped => Ty::Untyped,
+            Ty::Class { id, .. } if self.defines_instance_method(id, &Symbol::from("to_io")) => {
+                let converted = self.dispatch_on(Some(io), &Symbol::from("to_io"), None, &[], true);
+                match converted {
+                    Ty::Nil => Ty::Str,
+                    Ty::Union { variants } => super::union_many(variants.iter().map(|ty| {
+                        if matches!(ty, Ty::Nil) { Ty::Str } else { ty.clone() }
+                    }).collect()),
+                    ty => ty,
+                }
+            }
+            Ty::Class { id, .. } if self.defines_instance_method(id, &Symbol::from("write")) => io.clone(),
+            // A nil destination, options Hash, or non-writer limit returns JSON text.
+            _ => Ty::Str,
+        }
+    }
+
     pub(super) fn dispatch(
         &self,
         recv_ty: Option<&Ty>,
@@ -1850,13 +1872,16 @@ impl<'a> BodyTyper<'a> {
                         _ => {}
                     }
                 }
-                // JSON stdlib — `JSON.generate` and `JSON.dump` return
-                // String; `JSON.parse` / `JSON.load` return parsed
-                // structure (untyped — the body is genuinely
-                // polymorphic). `pretty_generate` is also String.
+                // JSON.dump returns its destination, after to_io conversion,
+                // or a String without one. The other encoders return String;
+                // parse/load return a polymorphic structure.
                 if id.0.as_str() == "JSON" {
                     match method.as_str() {
-                        "generate" | "dump" | "pretty_generate" | "fast_generate" => {
+                        "dump" => return match call_args.get(1) {
+                            None => Ty::Str,
+                            Some(io) => io.ty.as_ref().map_or(Ty::Untyped, |ty| self.json_dump_return_ty(ty)),
+                        },
+                        "generate" | "pretty_generate" | "fast_generate" => {
                             return Ty::Str
                         }
                         "parse" | "load" => return Ty::Untyped,
