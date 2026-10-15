@@ -7,10 +7,10 @@
 //!   - [`coerce_arg_for_class_method`] — looks up the param Ty from
 //!     `class_method_param_ty` then defers to the core coercion fn.
 //!   - [`coerce_arg_for_param_ty`] — core fn, exported so siblings
-//!     (`assign.rs`, `literal.rs`, `emit_expr_inner`'s arms) can call
+//!     (`assign.rs`, `literal.rs`, `emit_expr_inner`'s variants) can call
 //!     it directly when they already know the target Ty.
 //!   - [`cast_via_value_for_union`] / [`coerce_arg_for_field_ty`] —
-//!     field-position variants used by the Cast arm and the
+//!     field-position variants used by the Cast variant and the
 //!     constructor `self.field = value` rewrite.
 
 use crate::expr::{Expr, ExprNode, Literal};
@@ -64,7 +64,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // `Cast(inner, primitive_ty)` from the `lower::ty_coerce_insertion`
     // Family 2, and inner's body-typer Ty contains Untyped, use the
     // arg-position coercion (`(raw).as_str().unwrap()`) — NOT
-    // emit_expr's Cast arm (which goes through `coerce_arg_for_field_ty`
+    // emit_expr's Cast variant (which goes through `coerce_arg_for_field_ty`
     // producing the owned-String shape `as_str().unwrap().to_string()`
     // appropriate for field assigns but wasteful at `&str` arg
     // positions). Pre-Stage-6 unwrapped args hit this same path via
@@ -236,8 +236,8 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     //    Hash-literal shapes (the two arg shapes shim calls receive in
     //    practice).
     if let ExprNode::Cast { value, target_ty } = &*arg.node {
-        if matches!(target_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped))
-            && matches!(param_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped))
+        if matches!(target_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped { .. }))
+            && matches!(param_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped { .. }))
         {
             let inner_raw = emit_expr(value);
             return format!(
@@ -246,7 +246,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         }
     }
     if let Ty::Hash { value: pv, .. } = param_ty {
-        if matches!(pv.as_ref(), Ty::Untyped)
+        if matches!(pv.as_ref(), Ty::Untyped { .. })
             && !matches!(&*arg.node, ExprNode::Cast { .. })
         {
             if arg_hash_var_local_ty(arg).is_some()
@@ -377,7 +377,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     //
     // Conservative firing: only when arg.ty matches the callee's
     // param ty exactly AND arg is SelfRef/Var/Ivar (always emit as a
-    // borrowed-place reference, not owned). Send arms returning
+    // borrowed-place reference, not owned). Send variants returning
     // owned T don't need a clone; Const-typed args don't either.
     //
     // **Why this stays in rust and isn't lifted to the
@@ -398,7 +398,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // Hash<Str, Class(ParamValue)> both render as
         // `HashMap<String, serde_json::Value>` at Rust level (since
         // ParamValue is a type alias for Value). A strict
-        // `arg.ty == param_ty` gate misses these. Class arms still
+        // `arg.ty == param_ty` gate misses these. Class variants still
         // demand id-equality so `Article` ≠ `Comment` for the clone.
         let outer_shape_matches = match (param_ty, arg.ty.as_ref()) {
             (Ty::Class { id: pid, .. }, Some(Ty::Class { id: aid, .. })) => pid == aid,
@@ -484,7 +484,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // Closes `html_escape(if persisted? { article_path(id) } else
         // { articles_path() })` where each branch is a Send returning
         // owned String. Borrowing the whole If-expr (`&(if ... {} else
-        // {})`) makes Rust coerce both arms' Strings into a shared
+        // {})`) makes Rust coerce both variants' Strings into a shared
         // `&str` via Deref.
         let if_owned_producing = if let ExprNode::If { then_branch, else_branch, .. } = &*arg.node {
             owned_producing_node(&*then_branch.node)
@@ -534,7 +534,7 @@ pub(crate) fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) 
             // A `serde_json::Value` cannot BE a `DateTime<Utc>`, so the
             // only honest reading is the stored text form — which is
             // exactly what `parse_db_time` accepts, and it already
-            // returns the Option this arm wants.
+            // returns the Option this variant wants.
             Ty::Time => {
                 Some(format!("({raw}).as_str().and_then(crate::rh_datetime::parse_db_time)"))
             }
@@ -546,7 +546,7 @@ pub(crate) fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) 
         Ty::Int => Some(format!("({raw}).as_i64().unwrap()")),
         Ty::Float => Some(format!("({raw}).as_f64().unwrap()")),
         Ty::Bool => Some(format!("({raw}).as_bool().unwrap()")),
-        // Same reading as the nilable arm, unwrapped. Reached from the
+        // Same reading as the nilable variant, unwrapped. Reached from the
         // Hash-shaped `update`'s temporal normalize
         // (`format_db_time(Cast(attrs[:created_at], Time))`), which is
         // nil-guarded at the IR level — a `Value` that is neither a
@@ -600,7 +600,7 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
                 // A `serde_json::Value` can only carry a time as its
                 // stored TEXT form, which is exactly what
                 // `parse_db_time` reads — and it already returns the
-                // Option this arm wants.
+                // Option this variant wants.
                 Ty::Time => Some("as_str().and_then(crate::rh_datetime::parse_db_time)"),
                 _ => None,
             },
@@ -642,7 +642,7 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
         // result as `Union<ParamValue, Nil>` even when the actual Rust
         // emit produces an `unwrap_or(...)`-flattened `Value`.
         let inner = super::super::util::peel_nil(t);
-        matches!(inner, Ty::Untyped | Ty::Record { .. })
+        matches!(inner, Ty::Untyped { .. } | Ty::Record { .. })
             || matches!(
                 inner,
                 Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
@@ -673,7 +673,7 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
     if arg_renders_as_value {
         if let Ty::Hash { key, value } = field_ty {
             if key.is_stringish() {
-                let value_is_value_shaped = matches!(**value, Ty::Untyped | Ty::Record { .. })
+                let value_is_value_shaped = matches!(**value, Ty::Untyped { .. } | Ty::Record { .. })
                     || matches!(
                         &**value,
                         Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"

@@ -2678,7 +2678,7 @@ fn is_all_or_none(e: &Expr) -> bool {
 }
 
 /// `(expr)` around a single statement — surface-only parens, same as
-/// the ones `ingest_expr`'s own `ParenthesesNode` arm strips. Only
+/// the ones `ingest_expr`'s own `ParenthesesNode` variant strips. Only
 /// unwraps when there's exactly one statement inside: `(a; b)`'s two
 /// void statements aren't a lambda in disguise, so those are left
 /// alone and fail the caller's lambda check same as before.
@@ -3290,7 +3290,7 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // boundary (`JsonColumn`); analysis uses the deliberate gradual
         // type. A `has_json` declaration adds its stronger per-key schema
         // separately in `lower::has_json`.
-        ColumnType::Json | ColumnType::Jsonb => Ty::Untyped,
+        ColumnType::Json | ColumnType::Jsonb => Ty::gradual(),
         ColumnType::Uuid => Ty::Str,
         ColumnType::Reference { .. } => Ty::Int,
     }

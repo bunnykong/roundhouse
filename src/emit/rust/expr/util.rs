@@ -7,7 +7,7 @@ use crate::expr::{Expr, ExprNode, Literal};
 
 /// Conservative `Copy`-trait check for Rust target types. Numeric +
 /// bool + nil are Copy; String/Vec/HashMap/Option/Class are not.
-/// Used by the `Ivar` arm to decide whether a tail-position read
+/// Used by the `Ivar` variant to decide whether a tail-position read
 /// needs `.clone()` to avoid moving out of `&self`. `Ty::Untyped`
 /// commits to `serde_json::Value` which is non-Copy.
 pub(crate) fn is_copy_ty(t: &crate::ty::Ty) -> bool {
@@ -132,7 +132,7 @@ pub(crate) fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
         Ty::Int => Some("0_i64".to_string()),
         Ty::Float => Some("0.0_f64".to_string()),
         Ty::Bool => Some("false".to_string()),
-        Ty::Untyped => Some("serde_json::Value::Null".to_string()),
+        Ty::Untyped { .. } => Some("serde_json::Value::Null".to_string()),
         Ty::Nil => Some("None".to_string()),
         // `T | Nil` Union maps to `Option<T>` in the rust emitter
         // (see `ty::rust_ty` Union handling). Missing-arg default is
@@ -160,14 +160,14 @@ pub(crate) fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
     }
 }
 
-/// True when an arm body's emit is already `Value`-shaped (Ivar
+/// True when an variant body's emit is already `Value`-shaped (Ivar
 /// read in a class whose field is typed `Untyped`, or a Send
 /// already wrapped with `Value::from`). Conservative — over-wraps
 /// won't cause a type error since `Value::from(Value)` doesn't
 /// impl, so we only skip the wrap on the shapes that emit_expr
 /// has already coerced.
 pub(crate) fn arm_body_already_value(body: &Expr) -> bool {
-    matches!(body.ty.as_ref(), Some(crate::ty::Ty::Untyped))
+    matches!(body.ty.as_ref(), Some(crate::ty::Ty::Untyped { .. }))
         || matches!(
             &*body.node,
             ExprNode::Lit { value: Literal::Nil }
@@ -179,13 +179,13 @@ pub(crate) fn arm_body_already_value(body: &Expr) -> bool {
 pub(crate) fn ty_contains_untyped(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
     match ty {
-        Ty::Untyped => true,
+        Ty::Untyped { .. } => true,
         Ty::Union { variants } => variants.iter().any(ty_contains_untyped),
         _ => false,
     }
 }
 
-/// Emit a Case `Pattern` as a Rust `match` arm pattern, or `None` when
+/// Emit a Case `Pattern` as a Rust `match` variant pattern, or `None` when
 /// there is no faithful form. The lowerer-synthesized
 /// `synth_index_read`/`synth_index_write` use `Pattern::Lit { value:
 /// Symbol }` against an `&str`-typed scrutinee — emit as a
@@ -242,7 +242,7 @@ pub(crate) fn coerce_to_value(value: &Expr, rhs: &str) -> String {
     use crate::ty::Ty;
     let already_value = matches!(
         value.ty.as_ref(),
-        Some(Ty::Untyped)
+        Some(Ty::Untyped { .. })
             | Some(Ty::Var { .. })
             | Some(Ty::Record { .. })
             | Some(Ty::Hash { .. })

@@ -25,7 +25,7 @@ use roundhouse::App;
 /// Walk `runtime/ruby/**/*.rbs` and merge each parsed signature into
 /// `app.rbs_signatures`. Without this the test body-typer can't
 /// dispatch precisely against framework methods, and the strict-
-/// typed Crystal emit falls through to the default `Ty::Untyped →
+/// typed Crystal emit falls through to the default `Ty::gradual() →
 /// String` collapse. Same helper as `framework_tests_typescript`
 /// (intentional duplication — keeping each gate self-contained).
 fn load_framework_rbs(app: &mut App) {

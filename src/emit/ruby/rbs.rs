@@ -19,7 +19,7 @@ use crate::ty::{Param, ParamKind, Ty};
 
 thread_local! {
     /// True while rendering a class-side `def self.x` signature. See the
-    /// `Ty::SelfInstance` arm of `ty_to_rbs_in`.
+    /// `Ty::SelfInstance` variant of `ty_to_rbs_in`.
     static CLASS_SIDE_SIG: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -376,7 +376,7 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
         // Analysis-time relation type. On the STRICT targets reaching
         // here is a coverage gap — a chain that escaped the arel fold
         // with no runtime to fall back on — and their renderers report
-        // it. The ruby family is the exception this arm exists for:
+        // it. The ruby family is the exception this variant exists for:
         // `runtime/ruby/active_record/relation.rb` IS a real class, the
         // emitted code names it (`ActiveRecord::Relation.new(Room)` is
         // what a `has_many :through` reader returns), and the
@@ -428,20 +428,20 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
             format!("^({p}) -> {}", rbs(ret))
         }
         Ty::Var { .. } => "untyped".into(),
-        Ty::Untyped => "untyped".into(),
+        Ty::Untyped { .. } | Ty::Rec { .. } => "untyped".into(),
         Ty::Bottom => "bot".into(),
     }
 }
 
 fn render_union(variants: &[Ty], enclosing: &[&str]) -> String {
-    // `String | untyped` IS `untyped` — the gradual arm subsumes every
+    // `String | untyped` IS `untyped` — the gradual variant subsumes every
     // other one, so rendering the members alongside it advertises a
     // precision the type does not have. Spinel reads `(String |
     // untyped)` as a real union and emits the poly dispatch anyway, so
-    // the fake arm costs speed on top of honesty. Collapse first,
+    // the fake variant costs speed on top of honesty. Collapse first,
     // before the `T?` sugar, or a `T | untyped | nil` renders the
     // equally-meaningless `untyped?`.
-    if variants.iter().any(|v| matches!(v, Ty::Untyped | Ty::Var { .. })) {
+    if variants.iter().any(|v| matches!(v, Ty::Untyped { .. } | Ty::Var { .. })) {
         return "untyped".into();
     }
     // `T | nil` collapses to `T?` (RBS idiomatic optional form).

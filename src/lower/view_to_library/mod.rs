@@ -573,7 +573,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         // is live — thread it as a param when the template reads it bare
         // (`flash[f]`). The layout wrap passes `@flash`.
         if is_layout && view_uses_bare_name(&rewritten, "flash") {
-            typed.push(("flash".to_string(), crate::ty::Ty::Untyped));
+            typed.push(("flash".to_string(), crate::ty::Ty::gradual()));
         }
     }
 
@@ -607,7 +607,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let mut nullable: std::collections::HashSet<String> =
         extra_params.iter().cloned().collect();
     for (n, ty) in &typed {
-        if matches!(ty, crate::ty::Ty::Untyped) {
+        if matches!(ty, crate::ty::Ty::Untyped { .. }) {
             nullable.insert(n.clone());
         }
     }
@@ -703,7 +703,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             .map(|p| p.name.as_str().to_string())
             .collect();
         for tp in &sig_params {
-            if matches!(*tp.ty, crate::ty::Ty::Untyped) {
+            if matches!(*tp.ty, crate::ty::Ty::Untyped { .. }) {
                 nullable.insert(tp.name.as_str().to_string());
             }
         }
@@ -1079,7 +1079,7 @@ pub fn insert_db_stub(
         Symbol::from("column_value"),
         fn_sig(
             vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
-            Ty::Untyped,
+            Ty::gradual(),
         ),
     );
     db_info.class_methods.insert(
@@ -1179,7 +1179,7 @@ pub fn insert_db_stub(
     );
     as_info.class_methods.insert(
         Symbol::from("format_db_time"),
-        fn_sig(vec![(Symbol::from("value"), Ty::Untyped)], str_or_nil()),
+        fn_sig(vec![(Symbol::from("value"), Ty::gradual())], str_or_nil()),
     );
     as_info
         .class_methods
@@ -1223,7 +1223,7 @@ pub(crate) fn insert_route_helper_stubs(
     for f in &funcs {
         let name = Symbol::from(f.name.as_str());
         info.class_methods.entry(name.clone()).or_insert_with(|| {
-            fn_sig(vec![(Symbol::from("args"), Ty::Untyped)], Ty::Str)
+            fn_sig(vec![(Symbol::from("args"), Ty::gradual())], Ty::Str)
         });
         info.class_method_kinds.entry(name).or_insert(AccessorKind::Method);
     }
@@ -1250,8 +1250,8 @@ pub(crate) fn insert_framework_stubs(
 
     // ViewHelpers — every output helper returns String; setters return Nil.
     let mut vh = crate::analyze::ClassInfo::default();
-    let untyped = Ty::Untyped;
-    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let untyped = Ty::gradual();
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) };
     let html_helpers = [
         "turbo_stream_from",
         "link_to",
@@ -1308,7 +1308,7 @@ pub(crate) fn insert_framework_stubs(
     // normalize_trailing_kwargs uses the last param's TYPE to decide
     // whether a trailing kwargs Hash should flip to an explicit Hash
     // literal at the call site (Crystal doesn't auto-collect kwargs
-    // into a Hash positional). With `Ty::Untyped`, normalize can't
+    // into a Hash positional). With `Ty::gradual()`, normalize can't
     // tell — declare `Ty::Hash` so it can. Helpers with named-
     // keyword params (truncate, dom_id, ...) keep the loose shim:
     // their kwargs DON'T flip and bind to the right named slot under
@@ -1369,7 +1369,7 @@ pub(crate) fn insert_framework_stubs(
     vh.class_methods.insert(
         Symbol::from("optional_value_attr"),
         fn_sig(
-            vec![(Symbol::from("value"), Ty::Untyped)],
+            vec![(Symbol::from("value"), Ty::gradual())],
             Ty::Str,
         ),
     );
@@ -1380,7 +1380,7 @@ pub(crate) fn insert_framework_stubs(
     vh.class_methods.insert(
         Symbol::from("escape_or_empty"),
         fn_sig(
-            vec![(Symbol::from("value"), Ty::Untyped)],
+            vec![(Symbol::from("value"), Ty::gradual())],
             Ty::Str,
         ),
     );
@@ -1418,7 +1418,7 @@ pub(crate) fn insert_framework_stubs(
         );
     }
     tag_all_method(&mut vh);
-    // Canonical Rails-style nested path; body-typer's Const-arm
+    // Canonical Rails-style nested path; body-typer's Const-variant
     // bare-name expansion swaps `Const { path: ["ViewHelpers"] }`
     // (from app/view source code) to the full path via this registry
     // entry. Lowerer-synthesized refs (`view_helpers_call`) also
@@ -1481,7 +1481,7 @@ pub(crate) fn insert_framework_stubs(
     let mut jb = crate::analyze::ClassInfo::default();
     jb.class_methods.insert(
         Symbol::from("encode_value"),
-        fn_sig(vec![(Symbol::from("v"), Ty::Untyped)], Ty::Str),
+        fn_sig(vec![(Symbol::from("v"), Ty::gradual())], Ty::Str),
     );
     jb.class_methods.insert(
         Symbol::from("encode_string"),
@@ -1549,7 +1549,7 @@ pub(crate) fn insert_framework_stubs(
     // marking the param `KeywordRest` so the body-typer's
     // normalize_trailing_kwargs leaves the call's `kwargs: true` flag
     // alone (preserves the bare named-args call shape across targets).
-    let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) };
     let bc_sig = Ty::Fn {
         params: vec![crate::ty::Param {
             name: Symbol::from("opts"),
@@ -1720,20 +1720,20 @@ pub(crate) fn insert_framework_stubs(
     let mut session_cls = crate::analyze::ClassInfo::default();
     session_cls.instance_methods.insert(
         Symbol::from("[]"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::gradual()),
     );
     session_cls.instance_methods.insert(
         Symbol::from("[]="),
         fn_sig(
-            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("value"), Ty::Untyped)],
-            Ty::Untyped,
+            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("value"), Ty::gradual())],
+            Ty::gradual(),
         ),
     );
     session_cls.instance_methods.insert(
         Symbol::from("fetch"),
         fn_sig(
-            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("default"), Ty::Untyped)],
-            Ty::Untyped,
+            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("default"), Ty::gradual())],
+            Ty::gradual(),
         ),
     );
     session_cls.instance_methods.insert(
@@ -1746,7 +1746,7 @@ pub(crate) fn insert_framework_stubs(
     );
     session_cls.instance_methods.insert(
         Symbol::from("delete"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::gradual()),
     );
     session_cls.instance_methods.insert(
         Symbol::from("length"),
@@ -1764,7 +1764,7 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("to_h"),
         fn_sig(
             vec![],
-            Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
+            Ty::Hash { key: std::sync::Arc::new(Ty::gradual()), value: std::sync::Arc::new(Ty::gradual()) },
         ),
     );
     tag_all_method(&mut session_cls);
@@ -1869,7 +1869,7 @@ pub(crate) fn build_view_signature(
                 }),
             })
         } else {
-            Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) })
+            Some(Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) })
         }
     } else {
         // Show / edit / new / partial: arg is the model itself.
@@ -1879,7 +1879,7 @@ pub(crate) fn build_view_signature(
                 args: vec![].into(),
             })
         } else {
-            Some(Ty::Untyped)
+            Some(Ty::gradual())
         }
     };
 
@@ -2830,10 +2830,10 @@ pub(crate) fn view_ivar_closures(
         closure.entry(key.clone()).or_default().extend(reads);
         let mut child_keys = render_partial_keys(&v.body, dir, &pools);
         // A `render partial: @above` folds every pooled candidate partial's
-        // ivar needs into this view, so the dispatch's arms have their
+        // ivar needs into this view, so the dispatch's variants have their
         // closure args threaded as params here. The pool entries' ivar-
         // valued locals (`locals: {tag: @tag}`) count as reads of THIS
-        // view — the arm rebinds them onto the partial's declared locals.
+        // view — the variant rebinds them onto the partial's declared locals.
         let (dyn_keys, dyn_locals_ivars) = dynamic_render_edges(&v.body, dir, &pools);
         child_keys.extend(dyn_keys);
         closure.entry(key.clone()).or_default().extend(dyn_locals_ivars);
@@ -3050,7 +3050,7 @@ fn controller_view_dir(name: &ClassId) -> String {
 /// One pooled candidate partial for a dynamic-render ivar: the name a
 /// controller assigns plus the `locals:` sub-hash of the options form
 /// (empty for bare-string assigns). Locals keep only the value shapes a
-/// dispatch arm can re-express — ivar reads (threaded into the rendering
+/// dispatch variant can re-express — ivar reads (threaded into the rendering
 /// view's closure) and literals; any other shape is dropped and the
 /// declared local falls to its header default.
 #[derive(Clone)]
@@ -3138,8 +3138,8 @@ fn collect_ivar_str_assigns(
 /// the bare string (`@above = "stories/subnav"`) or the options-hash
 /// (`@above = {partial: "stories/subnav", locals: {…}}`). The `locals:`
 /// sub-hash keeps symbol-keyed ivar-read and literal values — the shapes
-/// a dispatch arm can rebind (`{tag: @tag}` reads as the threaded `tag`
-/// local at the arm); any other value shape is dropped and that local
+/// a dispatch variant can rebind (`{tag: @tag}` reads as the threaded `tag`
+/// local at the variant); any other value shape is dropped and that local
 /// falls to the partial's header default.
 fn partial_options_from_assign_value(value: &Expr) -> Option<DynPoolEntry> {
     match &*value.node {
@@ -3201,7 +3201,7 @@ fn partial_options_from_assign_value(value: &Expr) -> Option<DynPoolEntry> {
 /// resolves to a partial ViewKey (so the closure fixpoint folds each
 /// candidate's ivar needs into the rendering view), and each ivar-valued
 /// local (`locals: {tag: @tag}`) is a read of the rendering view too —
-/// the dispatch arm rebinds it onto the partial's declared local.
+/// the dispatch variant rebinds it onto the partial's declared local.
 fn dynamic_render_edges(
     body: &Expr,
     dir: &str,
@@ -3304,7 +3304,7 @@ fn declared_local_ty(
         .partial_local_types
         .get(&view.name)
         .and_then(|locals| locals.get(&Symbol::from(name)))
-        .filter(|t| !matches!(t, crate::ty::Ty::Untyped))
+        .filter(|t| !matches!(t, crate::ty::Ty::Untyped { .. }))
         .filter(|t| !mentions_relation(t))
         .cloned();
     // The name is a convention; a render site handing a String is a
@@ -3313,7 +3313,7 @@ fn declared_local_ty(
     if let Some(crate::ty::Ty::Str) = at_render {
         return crate::ty::Ty::Str;
     }
-    if !matches!(by_name, crate::ty::Ty::Untyped) {
+    if !matches!(by_name, crate::ty::Ty::Untyped { .. }) {
         return by_name;
     }
     at_render.unwrap_or(by_name)
@@ -3329,13 +3329,13 @@ fn declared_local_ty(
 /// (`ms.comments.build`) was gradual.
 fn closure_ivar_ty(view: &View, name: &str, known_models: &[String], app: &App) -> crate::ty::Ty {
     let by_name = ivar_ty(name, known_models);
-    if !matches!(by_name, crate::ty::Ty::Untyped) {
+    if !matches!(by_name, crate::ty::Ty::Untyped { .. }) {
         return by_name;
     }
     app.view_ivar_types
         .get(&view.name)
         .and_then(|ivars| ivars.get(&Symbol::from(name)))
-        .filter(|t| !matches!(t, crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. }))
+        .filter(|t| !matches!(t, crate::ty::Ty::Untyped { .. } | crate::ty::Ty::Var { .. }))
         .filter(|t| !mentions_relation(t))
         .cloned()
         .unwrap_or(by_name)
@@ -3405,7 +3405,7 @@ pub(crate) fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
             model
         }
     } else {
-        Ty::Untyped
+        Ty::gradual()
     }
 }
 
@@ -3424,7 +3424,7 @@ pub(crate) fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String])
             args: vec![].into(),
         }
     } else {
-        Ty::Untyped
+        Ty::gradual()
     }
 }
 
@@ -3633,7 +3633,7 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr, locals: &IvarLocals) -> Expr 
         },
         // Template-level `<% while subtree %>` bodies (lobsters' users
         // tree) and `<% x ||= … %>` statements read ivars too — without
-        // these arms an `@ivar` inside survives to the emitted module,
+        // these variants an `@ivar` inside survives to the emitted module,
         // where no ivar exists.
         ExprNode::While { cond, body, until_form } => ExprNode::While {
             cond: r(cond),
@@ -4108,7 +4108,7 @@ pub(super) struct ViewCtx {
     pub(super) model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
     /// Snake-singular names of models that OVERRIDE `to_param`
     /// (lobsters' Story→short_id, Domain→domain). The form-action
-    /// member arm passes `record.to_param` for these — Rails fills
+    /// member variant passes `record.to_param` for these — Rails fills
     /// the `:id` segment from `to_param`, and the route helper's
     /// param is String-typed. Non-slug models pass `record.id`
     /// (Integer param) so strict targets keep a typed scalar.
@@ -4126,10 +4126,10 @@ pub(super) struct ViewCtx {
     pub(super) store_readers:
         std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     /// Generated RouteHelpers function names. The form-action
-    /// persisted?-ternary emits only the arms whose helper EXISTS
+    /// persisted?-ternary emits only the variants whose helper EXISTS
     /// (lobsters' domains has a member route but no collection —
     /// `RouteHelpers.domains_path` would be an undefined method).
-    /// Empty in single-view test harnesses → both arms (the
+    /// Empty in single-view test harnesses → both variants (the
     /// pre-gating shape).
     pub(super) route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
     /// The app's translations for form labels and submit text.
@@ -4137,7 +4137,7 @@ pub(super) struct ViewCtx {
     /// Generated RouteHelpers function name -> how many REQUIRED
     /// positionals it takes (`article_path` 1, `articles_path` 0).
     ///
-    /// The member arm of a resource form — and every record-in-URL
+    /// The member variant of a resource form — and every record-in-URL
     /// position — assumes its `<singular>_path` takes an `:id`. A
     /// SINGULAR Rails resource (`resource :account`, `resource
     /// :profile`) breaks that: the member helper is the whole route and
@@ -4186,7 +4186,7 @@ pub(super) struct ViewCtx {
     /// (`dynamic_partial_pools`): each entry is a partial-name literal a
     /// controller assigns plus its options-form `locals:`. `emit_render_
     /// partial` reads this for a `render partial: @<ivar>` DynamicNamed
-    /// dispatch: each pooled name resolves to a `Views::X.method` arm,
+    /// dispatch: each pooled name resolves to a `Views::X.method` variant,
     /// binding the entry's locals onto a strict-locals target's declared
     /// interface. Empty for apps without dynamic partials (the blog), so
     /// the dispatch never fires.
@@ -4530,8 +4530,8 @@ pub(super) fn route_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
 /// required positional.
 ///
 /// One home for the five places that build a record-in-URL call (the
-/// three `form_with` action arms, the bare-record URL arg, and the
-/// association-reader arm). Each of them had the id/`to_param`/whole-
+/// three `form_with` action variants, the bare-record URL arg, and the
+/// association-reader variant). Each of them had the id/`to_param`/whole-
 /// record choice already right and the ARITY question not asked at all,
 /// which is a singular Rails resource's whole failure mode — see
 /// `ViewCtx::route_helper_arity`.
@@ -4664,7 +4664,7 @@ pub(super) fn todo_io_append(tag: &str, span: crate::span::Span) -> Expr {
     noop_io_append()
 }
 
-/// `io << ""` — a statement that keeps an arm non-empty while rendering
+/// `io << ""` — a statement that keeps an variant non-empty while rendering
 /// nothing. The catch-all's body without its ledger line, for statements
 /// that genuinely have nothing to drop (a bare literal).
 pub(super) fn noop_io_append() -> Expr {

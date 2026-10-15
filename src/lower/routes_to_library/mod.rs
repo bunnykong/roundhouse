@@ -359,7 +359,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     funcs
 }
 
-/// `a && b`, for the resolver's arm conditions.
+/// `a && b`, for the resolver's variant conditions.
 fn and(a: Expr, b: Expr) -> Expr {
     Expr::new(
         Span::synthetic(),
@@ -532,7 +532,7 @@ fn build_url_options_function(
     //      is no `:length` to recall and Rails answers `/top`.
     //
     // `/newest/:user/page/:page` is never a candidate for another
-    // action's link: every arm is keyed on the controller#action.
+    // action's link: every variant is keyed on the controller#action.
     let mut groups: Vec<(String, Vec<&FlatRoute>)> = Vec::new();
     for route in flat {
         if route.method != HttpMethod::Get {
@@ -654,7 +654,7 @@ fn build_url_options_function(
             parenthesized: false,
         },
     );
-    // Fold the arms into a nested if/else, last arm outermost-last.
+    // Fold the variants into a nested if/else, last variant outermost-last.
     let mut body = unroutable;
     for (key, extra_cond, path) in arms.into_iter().rev() {
         let is_key = Expr::new(
@@ -683,7 +683,7 @@ fn build_url_options_function(
         .chain(std::iter::once("action".to_string()))
         .chain(extras.iter().cloned())
         .collect();
-    // The request's path parameters, last: what the RECALL arms read.
+    // The request's path parameters, last: what the RECALL variants read.
     let recall_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     LibraryFunction {
         module_path: module_path.to_vec(),
@@ -1318,7 +1318,7 @@ fn string_segment_demand(
     // in `config/routes.rb` and names its target with a SYMBOL rather
     // than calling the helper.
     //
-    // campfire's is the whole reason this arm exists:
+    // campfire's is the whole reason this variant exists:
     //
     //     direct :fresh_user_avatar do |user, options|
     //       route_for :user_avatar, user.avatar_token, v: …
@@ -2078,7 +2078,7 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
             Span::synthetic(),
             ExprNode::Var { id: VarId(0), name: Symbol::from("params") },
         ),
-        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) },
     );
     let call = |recv: Option<Expr>, m: &str, args: Vec<Expr>, ty: Ty| {
         with_ty(
@@ -2158,7 +2158,7 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
         signature: Some(fn_sig(
             vec![(
                 Symbol::from("params"),
-                Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) },
             )],
             Ty::Str,
         )),

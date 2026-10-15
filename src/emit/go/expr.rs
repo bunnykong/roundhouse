@@ -316,7 +316,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             // Go's `for` is a statement. emit_return_at's `_ =>`
             // fallback wraps the while value as `return …`, which
             // is invalid — body-position while loops will need a
-            // dedicated emit_return_at::While arm (deferred until
+            // dedicated emit_return_at::While variant (deferred until
             // a body actually puts a while at tail position).
             let cond_s = emit_expr(ctx, cond);
             let cond_text = if *until_form {
@@ -401,7 +401,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 // router away from the `map[string]string` its declared
                 // return needs.
                 let value_informative = !value.is_open()
-                    && !matches!(&**value, Ty::Untyped);
+                    && !matches!(&**value, Ty::Untyped { .. });
                 if k_raw != "interface{}" || v_ty != "interface{}" || value_informative {
                     // An open key with an informative value is the
                     // refined-accumulator shape: the analyzer widens the
@@ -585,7 +585,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
 ///   doesn't currently emit these for model dispatch.
 ///
 /// Trailing `return <zero>` after the switch keeps Go's flow analysis
-/// happy — even with a `default` arm, Go doesn't infer switch
+/// happy — even with a `default` variant, Go doesn't infer switch
 /// exhaustiveness across all literal values.
 fn emit_case(
     ctx: &EmitCtx,
@@ -596,11 +596,11 @@ fn emit_case(
     let scrutinee_s = emit_expr(ctx, scrutinee);
     let go_ret = super::ty::go_ty_stub(result_ty);
     let mut out = format!("func() {go_ret} {{\n\tswitch {scrutinee_s} {{\n");
-    // Use the tail-aware return emitter for each arm body so Assign
+    // Use the tail-aware return emitter for each variant body so Assign
     // tails (Article#OpSet's `case :id then @id = value` shape) emit
     // as `self.ID = converted; return self.ID` rather than the
     // invalid `return self.ID = converted` (Go doesn't allow assign
-    // as an expression). Each arm gets a fresh ctx scope so sibling
+    // as an expression). Each variant gets a fresh ctx scope so sibling
     // `:=` declarations don't leak across cases.
     for arm in arms {
         let arm_ctx = ctx.enter_scope();
@@ -736,7 +736,7 @@ fn emit_interp_appends(ctx: &EmitCtx, var: &str, parts: &[crate::expr::InterpPar
     lines.join("\n\t")
 }
 
-/// analysis requires a return after the switch even when every arm
+/// analysis requires a return after the switch even when every variant
 /// returns. `interface{}` slot → `nil`; primitives → typed zero.
 fn go_case_zero(ty: Option<&Ty>) -> &'static str {
     match ty {
@@ -811,7 +811,7 @@ pub(super) fn emit_send(
                         let mut widened = a.clone();
                         widened.ty = Some(Ty::Hash {
                             key: std::sync::Arc::new(Ty::Str),
-                            value: std::sync::Arc::new(Ty::Untyped),
+                            value: std::sync::Arc::new(Ty::gradual()),
                         });
                         return emit_expr(ctx, &widened);
                     }
@@ -1491,7 +1491,7 @@ pub(super) fn emit_send(
     // Ruby `!x` parses two ways depending on the parser path:
     //   - `Send { recv: x, method: "!", args: [] }` (method-style)
     //   - `Send { recv: None, method: "!", args: [x] }` (op-style)
-    // Both reach Go as the unary `!(...)`. Without the no-recv arm,
+    // Both reach Go as the unary `!(...)`. Without the no-recv variant,
     // the op-style form falls through to `Bang(...)` via the
     // `go_method_ident`-then-call dispatch (sees `!` as a method
     // name and pascalizes it to `Bang`).
@@ -1931,7 +1931,7 @@ pub(super) fn emit_send(
     // Go has no string-buffer type — the `<<` shovel peephole above
     // routes Str-typed recv to `io = io + X` concat, so the buffer
     // collapses to a plain `string`. Intercept before the general
-    // `Const.new` arm so we don't generate an undefined `NewString`.
+    // `Const.new` variant so we don't generate an undefined `NewString`.
     if method == "new" {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
@@ -2034,7 +2034,7 @@ pub(super) fn emit_send(
     // 1:1 in Go's stdlib (`strip` is `strings.TrimSpace(…)`, not
     // `.Strip()`). Applied whenever the method name matches the
     // known str-specific set — we don't gate on receiver Ty because
-    // many lowered Var receivers come through with `Ty::Untyped`
+    // many lowered Var receivers come through with `Ty::gradual()`
     // (signature said `untyped`) or with no analyzer-set Ty at all.
     // A wrong hit (e.g. an Array's `include?` rendering as
     // `strings.Contains`) emits invalid Go and surfaces the gap;
@@ -2274,7 +2274,7 @@ pub(super) fn emit_send(
 ///   Ty knowledge that's better handled when a concrete site demands it.
 ///
 /// Other Cast targets fall back to identity — each subsequent family
-/// adds an arm here.
+/// adds an variant here.
 fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
     let inner = emit_expr(ctx, value);
     // Nullable COLUMN read narrowed to its scalar (`Cast(@body, Str)`
@@ -2289,7 +2289,7 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
         }
     }
     // Reading a nullable COLUMN into an untyped slot (`record[:col]`
-    // — `get_index`/`attributes` per-column arms): unbox the pointer,
+    // — `get_index`/`attributes` per-column variants): unbox the pointer,
     // nil staying nil. Ruby hands back the value, so a consumer like
     // the form's optional-value attribute or the JSON encoder must not
     // see a pointer (it formats as "0xc000014870").
@@ -2310,7 +2310,7 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
         }
     }
     // The other direction: an untyped value cast INTO a nullable
-    // column's slot type (`write_attribute`'s per-column arms) needs
+    // column's slot type (`write_attribute`'s per-column variants) needs
     // the null-preserving converter, not a bare assignment.
     if let Ty::Union { variants } = target_ty {
         if variants.iter().any(|v| matches!(v, Ty::Nil)) {
@@ -2336,7 +2336,7 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
         }
     }
     if let Ty::Hash { value: tv, .. } = target_ty {
-        if matches!(tv.as_ref(), Ty::Untyped) {
+        if matches!(tv.as_ref(), Ty::Untyped { .. }) {
             let tgt = super::ty::go_ty_stub(Some(target_ty));
             let src = super::ty::go_ty_stub(value.ty.as_ref());
             if src != tgt {
@@ -2347,12 +2347,12 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
         }
     }
     // Source/target Go-type identity check shared by the primitive
-    // arms below. The Cast IIFE is wasteful (and invalid) when the
+    // variants below. The Cast IIFE is wasteful (and invalid) when the
     // inner already has the target Go type — `row.ID` typed `int64`
     // flowing into an `int64` slot doesn't need a type assertion;
     // `(row.ID).(int64)` is a vet error since `row.ID` isn't an
     // interface. Identity-emit when source Ty's go_ty_stub already
-    // matches the target's. Mirrors the Hash-widening arm above.
+    // matches the target's. Mirrors the Hash-widening variant above.
     let tgt = super::ty::go_ty_stub(Some(target_ty));
     let src = super::ty::go_ty_stub(value.ty.as_ref());
     let already_typed = src == tgt;
@@ -2380,7 +2380,7 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
     // type is time.Time when a caller passed one; anything else
     // (missing key already nil-guarded upstream) zero-values, which
     // format_db_time renders as the epoch — same honest-subset
-    // posture as the numeric arms.
+    // posture as the numeric variants.
     if matches!(target_ty, Ty::Time) {
         if already_typed {
             return inner;
@@ -3857,7 +3857,7 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
         // statement without a `return` wrap. Ruby `raise` diverges
         // (Never type), so the method exits without a return value;
         // Go's `panic()` returns nothing, making `return panic(...)`
-        // a syntax error. The Send arm in emit_expr handles the
+        // a syntax error. The Send variant in emit_expr handles the
         // expression-position case (rare — raise in value position).
         ExprNode::Send { recv: None, method, .. }
             if method.as_str() == "raise" =>

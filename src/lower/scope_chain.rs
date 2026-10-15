@@ -116,7 +116,7 @@ pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
         // `has_rich_text` — `with_attached_<attr>`,
         // `with_rich_text_<attr>[_and_embeds]`. Their bodies are
         // synthesized later (identity, see `attached::
-        // push_preload_scope_methods`), so neither arm above can see
+        // push_preload_scope_methods`), so neither variant above can see
         // them: they are not a `ModelBodyItem::Scope`, and an identity
         // body does not "mention a bare chain start".
         //
@@ -131,7 +131,7 @@ pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
         //
         // and Rails evaluates a scope lambda with `self` as the current
         // relation, so the bare `with_attached_attachment` chains onto
-        // it. Unregistered here, the call fell through every arm, took
+        // it. Unregistered here, the call fell through every variant, took
         // its own `__rel` default — a FRESH relation — and the
         // `where(room_id:)` the controller had built vanished. `/rooms/1`
         // rendered the last 40 messages in the whole table: room 5's.
@@ -913,7 +913,7 @@ pub struct DeclinedAssocScope {
 /// not.
 ///
 /// A name already registered as a scope is skipped — that path threads
-/// the relation as a FILTER and is what the seed arm already does.
+/// the relation as a FILTER and is what the seed variant already does.
 pub fn build_assoc_class_methods(
     models: &[Model],
     assocs: &AssocRegistry,
@@ -1625,7 +1625,7 @@ pub fn ground_literal_model_dispatch(expr: &mut Expr, app: &crate::App, assocs: 
                 return;
             };
             // An arbitrary Array[Model] is not a Rails collection proxy.
-            // Only the association read the seed arm can reproduce is.
+            // Only the association read the seed variant can reproduce is.
             let ExprNode::Send {
                 recv: Some(owner),
                 method: aname,
@@ -1800,7 +1800,7 @@ pub fn mentions_assoc_constructor(expr: &Expr, assocs: &AssocRegistry) -> bool {
             return;
         }
         if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
-            // NOTE (measured, deliberately NOT widened): the seed arm
+            // NOTE (measured, deliberately NOT widened): the seed variant
             // also handles chain methods and terminals on a has_many
             // read, so a body whose only relation surface is
             // `@room.messages.first(3)` — naming no scope, tripping no
@@ -1834,7 +1834,7 @@ pub fn mentions_assoc_constructor(expr: &Expr, assocs: &AssocRegistry) -> bool {
 /// .find(id)`. A second gate for `rewrite_call_site` beside
 /// `mentions_assoc_constructor`, and the reason it is a separate one is
 /// the measurement recorded there: widening that gate to everything the
-/// seed arm handles turns `domain.origins.count` in a per-row view from
+/// seed variant handles turns `domain.origins.count` in a per-row view from
 /// a correct cached read into an N+1. The lookup family has no such
 /// trade — `Array` answers none of these methods, so the site is a
 /// NoMethodError today and a query after.
@@ -2322,7 +2322,7 @@ impl Ctx<'_> {
     /// position and the other in an argument, and Rails scopes both.
     /// Dropping it here left the argument silently running against the
     /// whole table. A constant-rooted argument (`where(id: Story.where(
-    /// …))`) is unaffected either way — the Const arm never consults
+    /// …))`) is unaffected either way — the Const variant never consults
     /// the scope body.
     fn at_callsite(&self) -> Ctx<'_> {
         Ctx {
@@ -2628,17 +2628,17 @@ pub(crate) fn owner_reads_once(owner: &Expr) -> bool {
     }
 }
 
-/// Association resolution for the seed arm: `(target, fk, <owner>.id)`,
+/// Association resolution for the seed variant: `(target, fk, <owner>.id)`,
 /// from the owner's stamped type, else the owner's NAME, else the assoc
 /// name when it is a unique has_many across models.
 /// Is `value` a SEEDABLE association read — the `<owner>.<assoc>`
-/// shape the seed arm in `rewrite_send` knows how to turn into
+/// shape the seed variant in `rewrite_send` knows how to turn into
 /// `Relation.new(Target).where(fk: <owner>.id)`? Returns the target it
 /// resolved to.
 ///
 /// The owner forms and the seedability filter are deliberately the same
-/// three the seed arm itself matches on, so a name recorded here is one
-/// the arm will accept when the expression is swapped back in. Anything
+/// three the seed variant itself matches on, so a name recorded here is one
+/// the variant will accept when the expression is swapped back in. Anything
 /// else — an arg-carrying call, a block, an owner that would re-evaluate
 /// — is not recorded at all rather than recorded and later declined.
 fn seedable_assoc_read(ctx: &Ctx, value: &Expr, span: crate::span::Span) -> Option<ClassId> {
@@ -2860,7 +2860,7 @@ fn relation_new(span: crate::span::Span, model: &ClassId) -> Expr {
 /// literals ride as-is, so `where(user: nil)` stays `user_id IS NULL`, and
 /// call-expression values are left alone rather than double-evaluated.
 /// Returns the association names whose join in the RECEIVER chain must
-/// be re-emitted with its Rails alias — see the nested-hash arm.
+/// be re-emitted with its Rails alias — see the nested-hash variant.
 #[must_use]
 /// `where(col: a..b)` → `where("<table>.col >= ? AND <table>.col <= ?", a, b)`.
 ///
@@ -2873,7 +2873,7 @@ fn relation_new(span: crate::span::Span, model: &ClassId) -> Expr {
 ///
 /// Converted at the CALL SITE rather than taught to the runtime
 /// because there is no `Ty::Range` in the type system and no target
-/// ships a Range: a `val.is_a?(Range)` arm in `runtime/ruby` would
+/// ships a Range: a `val.is_a?(Range)` variant in `runtime/ruby` would
 /// have to compile on all eleven. Here the range is a literal, so what
 /// crosses into the runtime is the raw fragment + binds it already
 /// understands (`substitute_binds`).
@@ -2906,7 +2906,7 @@ fn range_condition_fragment(
         // Range object, i.e. none.
         //
         // Only `nil` and Range members are claimed. A mixed array with
-        // scalars would need `IN (…)` composed alongside the OR arms,
+        // scalars would need `IN (…)` composed alongside the OR variants,
         // and nothing in the corpus writes one.
         ExprNode::Array { elements, .. } => {
             let mut arms: Vec<String> = Vec::new();
@@ -2955,7 +2955,7 @@ fn range_clause(col: &str, e: &Expr, binds: &mut Vec<Expr>) -> Option<String> {
         return None;
     }
     // Both halves present: parenthesize so the pair survives being
-    // ORed with a sibling arm.
+    // ORed with a sibling variant.
     Some(if clauses.len() == 1 {
         clauses.remove(0)
     } else {
@@ -3044,7 +3044,7 @@ fn lower_relation_args(
         | "exists?" => {
             // `where(connected_at: TTL.ago..)` — a RANGE value. Rails
             // renders `>=` / `<=` / `<` / BETWEEN; the runtime's
-            // `column_predicate` has no Range arm and falls through to
+            // `column_predicate` has no Range variant and falls through to
             // `col = <the range object>`, which matches nothing and
             // says nothing. Converted HERE, where the range is a
             // literal, because the alternative is teaching every
@@ -3083,7 +3083,7 @@ fn lower_relation_args(
                     // polymorphic writer stores with (shared
                     // `polymorphic_type_switch`), so read and write cannot
                     // disagree: an STI subclass lands in its implementor's
-                    // arm. A literal nil is IS NULL on both columns, as the
+                    // variant. A literal nil is IS NULL on both columns, as the
                     // plain `where(user: nil)` path. The value is read more
                     // than once, so only an effect-free read qualifies. Where
                     // the type half cannot be built (no resolved implementors
@@ -3316,9 +3316,9 @@ pub(crate) struct Locals {
     /// relation.
     rel: HashMap<Symbol, ClassId>,
     /// Variable OR IVAR -> the association read it was assigned from,
-    /// as the `(target, fk, owner-id)` triple the seed arm below wants.
+    /// as the `(target, fk, owner-id)` triple the seed variant below wants.
     ///
-    /// The seed arm matches `<owner>.<assoc>.<method>` as ONE
+    /// The seed variant matches `<owner>.<assoc>.<method>` as ONE
     /// expression. Rails code routinely breaks that chain over an
     /// assignment — campfire's push-subscriptions controller opens
     /// every action with `@push_subscriptions = Current.user
@@ -3337,7 +3337,7 @@ pub(crate) struct Locals {
     /// The value is the association-read expression itself plus the
     /// target it resolved to. Storing the EXPRESSION (rather than the
     /// seed triple) is what keeps this cheap: the later read swaps it
-    /// back in as the receiver and the existing seed arm then handles
+    /// back in as the receiver and the existing seed variant then handles
     /// the call verbatim, one code path for both spellings.
     assoc: HashMap<Symbol, (ClassId, Expr)>,
 }
@@ -3433,7 +3433,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
     // `self.where(...)` in a scope body / model class method is the same
     // implicit-self query root as bare `where(...)` — Ruby just makes the
     // receiver visible. Normalize to the receiver-less form so the None
-    // arm's rooting logic serves both spellings (`Keystore.value_for`'s
+    // variant's rooting logic serves both spellings (`Keystore.value_for`'s
     // `self.where(key: key)` seeds exactly like `where(key: key)`).
     let recv = match recv {
         Some(r) if matches!(&*r.node, ExprNode::SelfRef) => {
@@ -3835,7 +3835,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // self) is spelled `Send { recv: None }` and reads as the
             // same association `self.bans` does, so it is normalized to
             // the SelfRef form before the match below rather than given
-            // a parallel arm. Model bodies write both spellings and
+            // a parallel variant. Model bodies write both spellings and
             // concerns write the bare one almost exclusively;
             // campfire's `User::Bannable#create_bans_from_sessions` is
             // `bans.create!(ip_address: ip)` and kept the reader's
@@ -3851,9 +3851,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // `undefined method 'find_by' for an instance of Array`.
             //
             // Swap the recorded read back in as the receiver and the
-            // arm below seeds it exactly as if the chain had never been
+            // variant below seeds it exactly as if the chain had never been
             // broken. Gated on relation surface actually FOLLOWING, for
-            // the same reason the arm itself is: plain iteration
+            // the same reason the variant itself is: plain iteration
             // (`each`/`map`) must keep the Array and the reader's
             // preload cache, and re-querying there would drop both.
             if let Some((target, read)) = match &*r.node {
@@ -3869,7 +3869,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     // .create!(attrs)` wants the association's foreign
                     // key preset exactly as `user.subscriptions
                     // .create!(attrs)` does. They are not relation
-                    // surface — the arm below answers them with a
+                    // surface — the variant below answers them with a
                     // record — but they are the same association hop,
                     // and `mentions_assoc_alias` already counts them.
                     || matches!(method.as_str(), "build" | "create" | "create!")
@@ -3882,7 +3882,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 // grant_to … end end`): the model lowerer flattened it
                 // onto the owner as `<assoc>_<method>`, so the call
                 // drops the association hop and keeps the owner as
-                // receiver. Ahead of the seed arm and independent of it
+                // receiver. Ahead of the seed variant and independent of it
                 // — an extension call wants the owner RECORD, not a
                 // relation, so seedability (`as:`, a row-changing scope)
                 // has no bearing on it.
@@ -4229,15 +4229,15 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             // receiver. Chains keep the model; terminals end it.
                             //
                             // Both take the same condition-hash lowering the
-                            // Const arm applies (`user: user` -> `user_id:
+                            // Const variant applies (`user: user` -> `user_id:
                             // user && user.id`, association joins). It is the
                             // TARGET's associations that resolve here — the
                             // hash keys conditions on the seeded relation, not
                             // on the owner. Skipping it emitted `WHERE
                             // memberships.user = …` for campfire's
                             // `memberships.destroy_by user: users`, a column
-                            // that does not exist; the Const arm has always
-                            // called this and the seed arm never did.
+                            // that does not exist; the Const variant has always
+                            // called this and the seed variant never did.
                             let mut args = args;
                             let _ = lower_relation_args(&target, &method, &mut args, ctx);
                             let keeps_model = is_chain;
@@ -4880,7 +4880,7 @@ mod tests {
         let reg = polymorphic_fixture(vec![ClassId(Symbol::from("Message"))]);
         let keys: Vec<String> = where_record(var("message"), &reg).into_iter().map(|(k, _)| k).collect();
         assert_eq!(keys, ["record_id", "record_type"]);
-        // The type switch has an otherwise-arm no stored row can match, so a
+        // The type switch has an otherwise-variant no stored row can match, so a
         // value that is none of the implementors finds nothing (not `IS NULL`).
         let (scopes, models) = (ScopeRegistry::new(), HashSet::new());
         let ctx = ctx_with(&scopes, &models, &reg);
@@ -5018,7 +5018,7 @@ mod tests {
         let mut comments_var =
             Expr::new(span(), ExprNode::Var { id: VarId(1), name: Symbol::from("comments") });
         comments_var.ty = Some(crate::ty::Ty::Array {
-            elem: std::sync::Arc::new(crate::ty::Ty::Untyped),
+            elem: std::sync::Arc::new(crate::ty::Ty::gradual()),
         });
         let mut args = vec![Expr::new(
             span(),
@@ -5141,7 +5141,7 @@ mod tests {
     }
 
     /// A Range value compared for EQUALITY matched nothing, silently —
-    /// `column_predicate` has no Range arm and falls through to
+    /// `column_predicate` has no Range variant and falls through to
     /// `col = <the range object>`. Both ends, one end, and neither.
     #[test]
     fn a_range_condition_becomes_comparisons() {
@@ -5218,7 +5218,7 @@ mod tests {
 
     /// A member this rewrite does not reproduce declines the whole
     /// condition rather than composing half of it: a scalar would need
-    /// `IN (…)` alongside the OR arms.
+    /// `IN (…)` alongside the OR variants.
     #[test]
     fn an_array_with_a_scalar_member_declines() {
         let m = ClassId(Symbol::from("Membership"));

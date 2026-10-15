@@ -173,7 +173,7 @@ fn squish_bang_strips_rails_nul_boundaries() {{
     );
 }
 
-// Phase D3 (2026-06-05) retired runtime/elixir/view_helpers.ex — the v2
+// Phase producer evidence (2026-06-05) retired runtime/elixir/view_helpers.ex — the v2
 // path transpiles `runtime/ruby/action_view/view_helpers.rb` into the emit
 // output instead of hand-writing the Elixir file, so there's no
 // hand-written destination to validate against (mirrors the go retirement
@@ -224,7 +224,7 @@ fn walk_ruby_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
 }
 
 /// Walk the typed IR and count every sub-expression whose type is
-/// `Ty::Untyped` (RBS-declared gradual escape). Bar B tracker —
+/// `Ty::gradual()` (RBS-declared gradual escape). Bar B tracker —
 /// these nodes pass the strict Bar A test but block strict-target
 /// emission (Rust). Non-recursive in itself; calls
 /// `count_gradual_recurse` to descend.
@@ -235,7 +235,7 @@ fn count_gradual(e: &Expr) -> usize {
 }
 
 fn count_gradual_recurse(e: &Expr, total: &mut usize) {
-    if matches!(&e.ty, Some(Ty::Untyped)) {
+    if matches!(&e.ty, Some(Ty::Untyped { .. })) {
         *total += 1;
     }
     use ExprNode as N;
@@ -543,7 +543,7 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
 }
 
 /// Every method body across every `runtime/ruby/*.rb` must be fully
-/// typed — no None, no `Ty::Var` sentinels. `Ty::Untyped`
+/// typed — no None, no `Ty::Var` sentinels. `Ty::gradual()`
 /// (RBS-declared gradual escape) is *allowed*: this is Bar A
 /// (gradual-typed cleanly), separate from Bar B (concretely typed,
 /// required for Rust emission). Mirrors the Rails-side promise
@@ -559,7 +559,7 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
 /// Holds the typed-runtime promise: every framework Ruby method
 /// body types end-to-end with no Var residual.
 ///
-/// `Ty::Untyped` (RBS-declared gradual escape) is allowed and
+/// `Ty::gradual()` (RBS-declared gradual escape) is allowed and
 /// counts as fully-typed (Bar A semantics). Bar B (zero
 /// `Untyped`) is a separate, stricter goal tracked by the
 /// `inference_on_spinel_blog_runtime_with_rbs::untyped_subexpressions_with_rbs_baseline`
@@ -620,12 +620,12 @@ fn every_runtime_method_body_is_fully_typed() {
         };
         for (class_id, methods) in per_file {
             // parse_app_signatures returns fully-qualified names
-            // (`ActiveRecord::Broadcasts`); the body-typer's Const arm
+            // (`ActiveRecord::Broadcasts`); the body-typer's Const variant
             // also builds `Ty::Class { id }` with the full path. Key
             // the registry on the full path so lookups match. Also
             // alias under the last segment so source-level bare
             // refs (`Article.find(...)`) resolve through the same
-            // entry — the Const arm produces a single-segment Ty
+            // entry — the Const variant produces a single-segment Ty
             // for those.
             let short = short_id(&class_id);
             let methods_vec: Vec<(roundhouse::ident::Symbol, Ty)> = methods
@@ -702,7 +702,7 @@ fn every_runtime_method_body_is_fully_typed() {
     // including class as fully-qualified but the included module
     // as bare), so the merged-in methods only land on the short
     // alias. Body-typer dispatches via full-path `Ty::Class { id }`
-    // (the Const arm builds the joined path), so without this
+    // (the Const variant builds the joined path), so without this
     // re-mirror, the included methods are invisible at the actual
     // dispatch site.
     let class_keys: Vec<ClassId> = class_registry.keys().cloned().collect();
@@ -790,7 +790,7 @@ fn every_runtime_method_body_is_fully_typed() {
     assert!(report.is_empty(), "{}", report.join("\n\n"));
 }
 
-/// **Bar B tracker** — counts `Ty::Untyped` sub-expressions across
+/// **Bar B tracker** — counts `Ty::gradual()` sub-expressions across
 /// the framework runtime corpus. These pass the strict Bar A test
 /// (`every_runtime_method_body_is_fully_typed`) but represent
 /// RBS-declared gradual escapes that block strict-target emission
@@ -885,7 +885,7 @@ fn every_runtime_method_body_concretely_typed() {
     }
 
     eprintln!(
-        "framework runtime Bar B residual (Ty::Untyped sites): {total_gradual} \
+        "framework runtime Bar B residual (Ty::unresolved() sites): {total_gradual} \
          across {} files",
         by_file.len(),
     );
@@ -1059,7 +1059,7 @@ fn every_runtime_method_body_concretely_typed() {
     const CEILING: usize = 739;
     assert!(
         total_gradual <= CEILING,
-        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
+        "{total_gradual} Ty::unresolved() sites exceeds ceiling of {CEILING}",
     );
 }
 
@@ -1087,7 +1087,7 @@ fn active_support_inflector_slice_adds_no_bar_b_sites() {
         assert_eq!(
             count_gradual(&method.body),
             0,
-            "ActiveSupport::Inflector.{name} introduces no Ty::Untyped Bar B sites",
+            "ActiveSupport::Inflector.{name} introduces no Ty::unresolved() Bar B sites",
         );
     }
 }
@@ -1117,8 +1117,8 @@ fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
         ExprNode::Hash { entries: vec![], kwargs: false },
     );
     arg.ty = Some(Ty::Hash {
-        key: std::sync::Arc::new(Ty::Untyped),
-        value: std::sync::Arc::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::gradual()),
+        value: std::sync::Arc::new(Ty::gradual()),
     });
     let emitted = roundhouse::emit::kotlin::emit_expr_for_runtime(&arg);
     assert_eq!(

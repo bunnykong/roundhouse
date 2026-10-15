@@ -38,7 +38,7 @@ use roundhouse::ingest::ingest_test_file;
 /// Walk `runtime/ruby/**/*.rbs` and merge each parsed signature into
 /// `app.rbs_signatures`. Without this the test body-typer can't dispatch
 /// precisely against framework methods, and the strict-typed Rust emit
-/// falls through to the default `Ty::Untyped` collapse. Same helper as
+/// falls through to the default `Ty::gradual()` collapse. Same helper as
 /// the crystal/typescript gates (intentional duplication — each gate
 /// stays self-contained).
 fn load_framework_rbs(app: &mut App) {
@@ -282,7 +282,7 @@ fn inflector_test_passes_under_rust() {
 //         with no `message` field and no Display / std::error::Error.
 //       * `super(message)` inside `initialize` → `/* TODO rust:
 //         ExprNode::Discriminant(22) */`. rust's expr emit has no
-//         `Super` arm at all (only the `decide/` walkers know it).
+//         `Super` variant at all (only the `decide/` walkers know it).
 //       * optional params. rust drops Ruby defaults and makes every
 //         param required, so `RecordNotFound.new()` — which the test
 //         calls, and which is the whole point of the default-message

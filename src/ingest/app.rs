@@ -2958,7 +2958,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
                     match &p.default {
                         Some(d) => opt_params.push((p.name.clone(), d.clone())),
                         None => {
-                            params.fields.insert(p.name.clone(), Ty::Untyped);
+                            params.fields.insert(p.name.clone(), Ty::gradual());
                         }
                     }
                 }
@@ -3214,7 +3214,7 @@ fn qualify_lexical_consts(
 ///
 /// `def self.banned?(ip) exists?(ip_address: ip) end` means
 /// `Ban.exists?(…)` — inside a class method, self IS the model. Written
-/// bare, the arel builder never sees it: its base arm needs a Const
+/// bare, the arel builder never sees it: its base variant needs a Const
 /// receiver to resolve a table from, so the call fell through to the
 /// runtime's `Base.exists?`, which takes an ID and got a Hash
 /// (`Db.escape_int: undefined method 'to_i' for an instance of Hash`).
@@ -3242,7 +3242,7 @@ fn qualify_model_class_method_ar_calls(app: &mut App) {
     use crate::dialect::{MethodReceiver, ModelBodyItem};
     use crate::expr::{Expr, ExprNode};
 
-    /// The base-arm shapes `lower::arel::build` resolves from a Const
+    /// The base-variant shapes `lower::arel::build` resolves from a Const
     /// receiver. `find`/`first`/`last` are deliberately absent: they
     /// take an id or no argument and already work receiverless through
     /// the runtime.
@@ -3755,7 +3755,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             // A reader beside the writer is the normal shape
             // (`def options; @options || {}; end`). The writer still
             // only stores the keyword rest, so the call is consumed.
-            // An attached block never reaches this arm.
+            // An attached block never reaches this variant.
             // A refused concern is not executed. A method whose body is
             // only the keyword-rest store is still consumed: the other
             // statements stay unexpanded.
@@ -4227,7 +4227,7 @@ fn substitute_params(
                     // `**kwrest` as `Param::keyword(name, None); p.rest =
                     // true` (NOT flattened to the `from_kwrest`
                     // positional-with-`{}`-default this match's `None =>`
-                    // arm below exists for) when the def's own source calls
+                    // variant below exists for) when the def's own source calls
                     // `(**name)`/`, **name)` — exactly the
                     // `before_action(**kwargs) { ... }` shape a block-form
                     // filter macro forwards through. `p.keyword` is what
@@ -8994,7 +8994,7 @@ pub(super) fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<Str
 /// `(Vips.block_untrusted(true) seen, operations named by Vips.block(
 /// "<name>", true))` from an initializer. Line-shaped like the
 /// content-type trim above: the two calls are one statement each, and
-/// only the `true` arms are policy (`false` is libvips' default).
+/// only the `true` variants are policy (`false` is libvips' default).
 /// Parens are optional (`Vips.block_untrusted true`); a `#` comment
 /// does not count. Named blocks accept double or single quotes.
 pub(super) fn extract_vips_loader_policy(source: &[u8]) -> (bool, Vec<String>) {

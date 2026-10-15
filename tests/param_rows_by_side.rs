@@ -144,3 +144,31 @@ fn an_instance_call_passes_a_class_method_on_the_way_up() {
     assert_eq!(params_of(&files, "Base", "fetch", MethodReceiver::Class), vec![Ty::Int]);
     assert_eq!(params_of(&files, "Grand", "fetch", MethodReceiver::Instance), vec![Ty::Str]);
 }
+
+/// Recursive-reference parameter slots must retain the receiver side too.
+/// Run this suite both with flags off and with the complete S3 configuration.
+#[test]
+fn recursive_methods_of_one_name_keep_separate_parameter_slots() {
+    let files = [
+        ("app/services/walker.rb", r#"class Walker
+  def self.walk(value, again)
+    walk(value, false) if again
+    value
+  end
+  def walk(value, again)
+    walk(value, false) if again
+    value
+  end
+end
+"#),
+        ("app/services/caller.rb", r#"class Caller
+  def run
+    Walker.walk(1, true)
+    Walker.new.walk("leaf", true)
+  end
+end
+"#),
+    ];
+    assert_eq!(params_of(&files, "Walker", "walk", MethodReceiver::Class), vec![Ty::Int, Ty::Bool]);
+    assert_eq!(params_of(&files, "Walker", "walk", MethodReceiver::Instance), vec![Ty::Str, Ty::Bool]);
+}

@@ -64,7 +64,7 @@ pub fn apply_has_one_builder_lowering(app: &mut App) {
                 let owner_key_ty = if owner_key.as_str() == "id" {
                     Ty::Int
                 } else {
-                    model.attributes.fields.get(&owner_key).cloned().unwrap_or(Ty::Untyped)
+                    model.attributes.fields.get(&owner_key).cloned().unwrap_or(Ty::gradual())
                 };
                 table
                     .entry(model.name.clone())
@@ -200,7 +200,7 @@ fn rewrite(expr: &mut Expr, table: &Builders, self_owner: Option<&ClassId>) {
 
     let span = expr.span;
     let mut attrs = Expr::new(span, ExprNode::Hash { entries, kwargs: true });
-    attrs.ty = Some(Ty::Untyped);
+    attrs.ty = Some(Ty::gradual());
     *expr = Expr::new(
         span,
         ExprNode::Send {
@@ -215,7 +215,7 @@ fn rewrite(expr: &mut Expr, table: &Builders, self_owner: Option<&ClassId>) {
     // written here — same reason `destroy_by` stamps its `where`. All
     // three constructors answer an instance of the target; `create`
     // (non-bang) answers an unsaved-but-present record when validation
-    // fails, never nil, so there is no Nil arm on any of them.
+    // fails, never nil, so there is no Nil variant on any of them.
     expr.ty = Some(Ty::Class { id: target.clone(), args: vec![].into() });
 }
 

@@ -124,7 +124,7 @@ pub(super) fn rewrite_render_to_views(
     current_action: &str,
     // The Views modules of every controller that INHERITS this one —
     // where a template this controller lacks may still live. See the
-    // `subclass_template_hook` arm below.
+    // `subclass_template_hook` variant below.
     inheritor_modules: &[String],
 ) -> Expr {
     // A controller with no Views module of its own (ApplicationController)
@@ -484,7 +484,7 @@ pub(super) fn rewrite_render_to_views(
             // template that is right there.
             let is_svg = render_kwargs_have_format(args, "svg");
             // campfire's raw `pwa/service_worker.js`, reached by the
-            // implicit render's js arm — same qualified-stem rule.
+            // implicit render's js variant — same qualified-stem rule.
             let is_js = render_kwargs_have_format(args, "js");
             let is_json = render_kwargs_have_format(args, "json");
             // Mastodon's `custom_css#show`: `resolve_formats_only_render`
@@ -674,7 +674,7 @@ pub(super) fn rewrite_render_to_views(
                 } else if is_svg {
                     // campfire's avatar initials. Same shape as the two
                     // above — format-qualified view method, MIME from the
-                    // shared table so this arm and `mime_for_format`
+                    // shared table so this variant and `mime_for_format`
                     // cannot disagree about what an svg is.
                     (
                         Symbol::from(format!("{}_svg", view_method.as_str())),
@@ -947,7 +947,7 @@ fn json_render_body(value: &Expr) -> Expr {
 
 fn may_be_str(ty: Option<&Ty>) -> bool {
     match ty {
-        None | Some(Ty::Str | Ty::Untyped | Ty::Var { .. }) => true,
+        None | Some(Ty::Str | Ty::Untyped { .. } | Ty::Var { .. }) => true,
         Some(Ty::Union { variants }) => variants.iter().any(|v| may_be_str(Some(v))),
         _ => false,
     }
@@ -1226,7 +1226,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                 }
                 expand_build(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span)
             }
-            // Only the TYPED arm is recognized. An attribute-Hash
+            // Only the TYPED variant is recognized. An attribute-Hash
             // `create` already works through the runtime, and turning it
             // into build+save here would only restate it.
             AssocKind::Create { bang } => {
@@ -1967,10 +1967,10 @@ pub(super) fn rewrite_params(expr: &Expr) -> Expr {
         // to the permit rewrite, and half-rewriting it would leave
         // `.permit` hanging off a plain Hash: one NoMethodError traded
         // for another, with the emit looking fixed. Matched here, ahead
-        // of the `require` arm below, and returned with only the bare
+        // of the `require` variant below, and returned with only the bare
         // `params` swapped for `@params` — `map_expr` is top-down and
         // does not recurse into a replacement, so this shields the
-        // inner `require` from the arm that follows.
+        // inner `require` from the variant that follows.
         ExprNode::Send { recv: Some(permit_recv), method, args, block, parenthesized }
             if method.as_str() == "permit" =>
         {
@@ -2022,7 +2022,7 @@ pub(super) fn rewrite_params(expr: &Expr) -> Expr {
         // if the `||` had come first — what it did instead was die on
         // `presence_in` for nil, one method later.
         //
-        // Matched AHEAD of the standalone-`require` arm and rebuilt
+        // Matched AHEAD of the standalone-`require` variant and rebuilt
         // whole, because `map_expr` is top-down and does not recurse
         // into a replacement: the index is the outer node, so the
         // require underneath it has to be lowered here or not at all.
@@ -2375,7 +2375,7 @@ fn is_rails_url_helpers_chain(e: &Expr) -> bool {
 /// Drop that receiver, leaving the BARE call the rewrite below already
 /// knows how to ground.
 ///
-/// A pre-pass rather than another arm in the map: the arm would have to
+/// A pre-pass rather than another variant in the map: the variant would have to
 /// reproduce the id-projection the bare form gets, because `map_expr`
 /// does not descend into a replacement it just made. Normalizing first
 /// means the two spellings take exactly one path, which is the point —

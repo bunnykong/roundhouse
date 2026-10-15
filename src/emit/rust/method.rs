@@ -165,12 +165,12 @@ fn render_params(m: &MethodDef) -> String {
 
     // Append `f: impl FnOnce(P1, P2, ...) -> R` when the signature
     // declares a block with a typed Fn signature. `yield(args)` in the
-    // body emits as `f(args)` (per `emit_send`'s Yield arm); the closure
+    // body emits as `f(args)` (per `emit_send`'s Yield variant); the closure
     // param is the receiving side of that call. Untyped/proc-typed
     // blocks fall back to a permissive `Box<dyn Fn>`-shaped closure —
     // body still references `f`, so the binding has to exist. RBS
     // block-signature parsing (src/rbs.rs::parse_function_type_to_fn)
-    // produces `Ty::Fn`; older `Ty::Untyped` block placeholders use
+    // produces `Ty::Fn`; older `Ty::gradual()` block placeholders use
     // the permissive fallback path.
     if let Some(bp) = block_param {
         // Prefer source-declared block-param name (from `MethodDef.block_param`)
@@ -321,7 +321,7 @@ fn needs_function_tail_some_wrap(body: &crate::expr::Expr, return_ty: Option<&Ty
     // nullable-column reader (`def body; @body; end` over an
     // `Option<String>` slot). The expression's own `ty` can have been
     // narrowed to the inner type by then, so the field table is the
-    // authority, same as the `Cast` arm in expr/mod.rs.
+    // authority, same as the `Cast` variant in expr/mod.rs.
     if let ExprNode::Ivar { name } = &*tail.node {
         if super::expr::ivar_field_ty(name.as_str())
             .map(|t| matches!(t, Ty::Union { ref variants } if variants.iter().any(|v| matches!(v, Ty::Nil))))
@@ -467,7 +467,7 @@ pub(super) fn emit_instance_method(
     // Arity + types come from the first observed Yield call in the
     // body. The RBS signature carries a `block: Option<Box<Ty>>`
     // slot, but the current RBS parser collapses block signatures
-    // to `Ty::Untyped` — until that improves, body-derived
+    // to `Ty::gradual()` — until that improves, body-derived
     // inference is the only signal. HWIA's `each` body yields
     // `(k: String, v: serde_json::Value)`, which is what we want.
     //
@@ -492,7 +492,7 @@ pub(super) fn emit_instance_method(
     };
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
     // Thread the method's RBS-declared return type through to the
-    // Return arm in `emit_expr` so `return nil` in a method typed
+    // Return variant in `emit_expr` so `return nil` in a method typed
     // `-> T?` emits as `return None` instead of bare `return` (the
     // latter is E0069 in non-Unit-returning functions).
     let return_ty = match m.signature.as_ref() {
@@ -522,7 +522,7 @@ pub(super) fn emit_instance_method(
             super::expr::with_constructor_mode(fields, || emit_expr(&body))
         } else {
             // Body root is a function return position — let the
-            // `Ivar` arm see `IN_RETURN_TAIL=true` so a getter shaped
+            // `Ivar` variant see `IN_RETURN_TAIL=true` so a getter shaped
             // `def field; @field; end` emits as `self.field.clone()`
             // for non-Copy field types. `emit_expr_tail` is the
             // flag-preserving variant; the plain `emit_expr` would
@@ -749,7 +749,7 @@ fn default_value_for_ty(ty: &Ty) -> String {
         Ty::Nil => "()".to_string(),
         Ty::Array { .. } => "Vec::new()".to_string(),
         Ty::Hash { .. } => "std::collections::HashMap::new()".to_string(),
-        Ty::Untyped => "serde_json::Value::Null".to_string(),
+        Ty::Untyped { .. } => "serde_json::Value::Null".to_string(),
         Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => {
             "None".to_string()
         }
@@ -820,7 +820,7 @@ fn find_yield_signature(body: &crate::expr::Expr) -> Option<Vec<Ty>> {
     use crate::expr::ExprNode;
     match &*body.node {
         ExprNode::Yield { args } => {
-            Some(args.iter().map(|a| a.ty.clone().unwrap_or(Ty::Untyped)).collect())
+            Some(args.iter().map(|a| a.ty.clone().unwrap_or(Ty::gradual())).collect())
         }
         ExprNode::Seq { exprs } => exprs.iter().find_map(find_yield_signature),
         ExprNode::If { cond, then_branch, else_branch } => find_yield_signature(cond)

@@ -24,7 +24,7 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
     use crate::ty::Ty;
     let hash_str_untyped = || Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::gradual()),
     };
     let str_opt = || Ty::Union {
         variants: vec![Ty::Str, Ty::Nil].into(),
@@ -109,7 +109,7 @@ pub(super) fn controller_shim_method_param_ty(method: &str, idx: usize) -> Optio
     use crate::ty::Ty;
     let hash_str_untyped = || Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::gradual()),
     };
     match (method, idx) {
         ("render_with", 1) => Some(hash_str_untyped()),
@@ -346,7 +346,7 @@ pub(super) fn dispatch_method_by_recv_ty(
             // is stricter (full-string match); `unwrap_or(0)` covers
             // the failure path. `&str` and `String` both expose
             // `.parse()` so this works uniformly across the recv-Ty
-            // Str/Sym arms.
+            // Str/Sym variants.
             "to_i" if args.is_empty() => {
                 // Method chain (already primary). No outer wrap
                 // needed — `.parse::<i64>().unwrap_or(0).method()`
@@ -420,7 +420,7 @@ pub(super) fn dispatch_method_by_recv_ty(
             "to_i" if args.is_empty() => Some(recv_s.to_string()),
             _ => None,
         },
-        Some(Ty::Untyped) | Some(Ty::Record { .. }) => match method {
+        Some(Ty::Untyped { .. }) | Some(Ty::Record { .. }) => match method {
             "to_s" if args.is_empty() => Some(ruby_to_s_emit(recv, &recv_s, false)),
             _ => None,
         },

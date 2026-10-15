@@ -2457,7 +2457,7 @@ end
 
 #[test]
 fn engine_haml_helper_calls_keep_their_source_boundary() {
-    let path = "vendor/catalog/app/views/home/index.html.haml";
+    let path = "vendor/catalog/app/views$HOST_PATH";
     let (_emitted, app, errors) = engine_mount::overlay()
         .write(path, "= root_path\n")
         .emit_with_app(roundhouse::project::BuildTarget::Ruby);
@@ -3561,7 +3561,7 @@ end
 }
 
 /// `Date.parse(params[:from])` types the way a String argument does: a
-/// request parameter is a union whose other arms (nil, an Array, nested
+/// request parameter is a union whose other variants (nil, an Array, nested
 /// params) raise in Rails as well. The calendar sends after it run too:
 /// a week that starts on a named day, and `in_time_zone` with a zone
 /// that may be nil. Expected values are Rails 8.1's.
@@ -4241,7 +4241,7 @@ end
 /// runtime port reads `utc_offset` as Rails does, as the period's base
 /// `render json: record.errors` writes the errors keyed by attribute, as
 /// Rails' `errors.as_json` (`to_hash`) does, not the Array of full
-/// messages: the scaffold's JSON failure arm (#586), the same inside a
+/// messages: the scaffold's JSON failure variant (#586), the same inside a
 /// Hash, and `errors.as_json` itself.
 #[test]
 fn render_json_errors_is_keyed_by_attribute() {
@@ -11212,7 +11212,7 @@ puts "Data factory identity, aliases, constructors, values and immutability pass
         assert!(factory.contains_key(&Symbol::from("new")), "{sidecar}");
         for reader in readers {
             let signature = &factory[&Symbol::from(reader)];
-            assert!(matches!(signature, Ty::Fn { ret, .. } if **ret == Ty::Untyped), "{sidecar}");
+            assert!(matches!(signature, Ty::Fn { ret, .. } if **ret == Ty::gradual()), "{sidecar}");
             assert!(!factory.contains_key(&Symbol::from(format!("{reader}="))), "{sidecar}");
         }
         let owner_methods = &signatures[&ClassId(Symbol::from(owner))];
@@ -12517,7 +12517,7 @@ raise "constructor consumer" unless FactoryConsumer.label == "CUSTOM"
 }
 
 /// Unlike a hash pattern with keys, `{}` requires the hash to be empty.
-/// A bare `is_a?(Hash)` check silently chose the wrong case arm for
+/// A bare `is_a?(Hash)` check silently chose the wrong case variant for
 /// every nonempty hash. `**` explicitly permits the remaining keys.
 #[test]
 fn an_empty_hash_pattern_rejects_extra_keys() {

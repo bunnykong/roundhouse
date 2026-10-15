@@ -91,7 +91,7 @@ pub fn emit_expr(e: &Expr) -> String {
     //
     // Applied to Ivar reads typed as a concrete non-nilable type
     // (`Class`, primitives `Int`/`Str`/`Bool`/`Float`/`Sym`,
-    // collections `Array`/`Hash`). Excluded: `Ty::Untyped`,
+    // collections `Array`/`Hash`). Excluded: `Ty::gradual()`,
     // `Ty::Nil`, `Ty::Var`, `Ty::Union` — these either are or
     // already include nil; `.not_nil!` would be wrong or redundant.
     // Schema-derived attr accessors carry the non-nilable column
@@ -138,7 +138,7 @@ fn is_non_nilable_primitive(ty: &crate::ty::Ty) -> bool {
 }
 
 /// Strip a trailing `Nil` variant from a binary `Union { T, Nil }`,
-/// returning the `T` arm. Larger unions and non-union types pass
+/// returning the `T` variant. Larger unions and non-union types pass
 /// through unchanged. Used to see through ivar reads that the body-
 /// typer surfaced as nilable (`@slots` first read observes nil).
 fn unwrap_nilable_union(ty: &crate::ty::Ty) -> &crate::ty::Ty {
@@ -774,8 +774,8 @@ fn emit_node(n: &ExprNode) -> String {
             // Plain `.as(T)` rejects at compile time when the value's
             // monomorphized type can't be `T` (e.g., a model's `[]=`
             // method called from `fill_timestamps` with `value: String`
-            // can't cast to `Int64` for the `:id` arm — even if that
-            // arm is unreachable for that call). `.as?(T)` returns
+            // can't cast to `Int64` for the `:id` variant — even if that
+            // variant is unreachable for that call). `.as?(T)` returns
             // `T?` regardless of static type and is decided at
             // runtime; `.not_nil!` then re-asserts non-nil on the
             // expected branch. Wraps the value in parens so chained
@@ -1317,7 +1317,7 @@ pub(super) fn emit_send_base(
     // tighter than binary operators (`<`, `==`, etc.), so
     // `!recv.op(arg)` would parse as `(!recv) < arg` when the inner
     // Send emits as infix (`A < B`). Explicit parens preserve the
-    // intended `!(recv.op(arg))`. Mirrors the same arm in Ruby's
+    // intended `!(recv.op(arg))`. Mirrors the same variant in Ruby's
     // emit (src/emit/ruby/expr.rs).
     if method.as_str() == "!" && args.is_empty() {
         if let Some(r) = recv {
@@ -1362,7 +1362,7 @@ pub(super) fn emit_send_base(
             // Untyped or absent. The strict targets' class and Hash
             // identity calls (assert_same, the hydrate sentinel) land
             // here when a local has no IR type, and Crystal types that
-            // variable as a Reference. A proven struct took the arm above.
+            // variable as a Reference. A proven struct took the variant above.
             return format!("{recv_s}.same?({})", args_s[0]);
         }
     }
@@ -1922,7 +1922,7 @@ fn emit_arm(arm: &Arm) -> String {
     // A guard-free Wildcard is the case's `else` clause (that's what
     // ingest lowers `else` to, and what the shared send grounding
     // synthesizes); `when _` doesn't parse in Crystal. Mirrors the
-    // ruby emitter's arm renderer.
+    // ruby emitter's variant renderer.
     let mut s = if matches!(arm.pattern, Pattern::Wildcard) && arm.guard.is_none() {
         "else".to_string()
     } else {

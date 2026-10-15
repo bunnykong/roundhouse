@@ -2,7 +2,7 @@
 //! `runtime/ruby/`).
 //!
 //! Built as a strangler-fig (`elixir2`) via the go/rust migration
-//! pattern; the legacy v1 app-shell emitters were retired in Phase D3
+//! pattern; the legacy v1 app-shell emitters were retired in Phase producer evidence
 //! and the module assumed the `elixir` name once the shim retired.
 //! `entry` holds the public `emit` (project shell + overlay) that
 //! lived in the old shim.
@@ -521,7 +521,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                                 if model_names.contains(&camel) {
                                     class_ty(&camel)
                                 } else {
-                                    crate::ty::Ty::Untyped
+                                    crate::ty::Ty::gradual()
                                 }
                             }
                         };
@@ -578,7 +578,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // server. The compare/boot driver invokes it via `mix run -e`.
             out.push(emit_main_file());
 
-            // W7 (Phase D2) — the v2 ExUnit test tree: `TestClient`/
+            // W7 (Phase writer laws) — the v2 ExUnit test tree: `TestClient`/
             // `TestResponse` runtime, v2 fixtures, and per-controller
             // test modules under `test/v2/`. Distinct module names + paths
             // from the v1 tree, so both suites run under `mix test` during
@@ -608,7 +608,7 @@ fn emit_main_file() -> EmittedFile {
     }
 }
 
-/// Emit `lib/v2/dispatch.ex` — `Dispatch.call/5`. One `case` arm per
+/// Emit `lib/v2/dispatch.ex` — `Dispatch.call/5`. One `case` variant per
 /// concrete controller (mirrors go's `emit_dispatch_file`): construct the
 /// controller struct, set `params`/`request_format`, run `process_action`,
 /// then wrap a non-empty HTML body in the app layout (when one exists) and

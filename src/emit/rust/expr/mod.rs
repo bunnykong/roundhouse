@@ -102,7 +102,7 @@ pub(super) fn narrowed_param_read(
     if is_option_of(&declared, narrowed) && !is_rebound_var(name) {
         return Some(format!("{}.clone().unwrap()", util::escape_rust_keyword(name)));
     }
-    if matches!(declared, crate::ty::Ty::Untyped) {
+    if matches!(declared, crate::ty::Ty::Untyped { .. }) {
         if let Some(coerce) = value_narrowing_coercion(narrowed) {
             return Some(format!("{}.{coerce}", util::escape_rust_keyword(name)));
         }
@@ -306,7 +306,7 @@ where
 
 /// Emit a Send's *immediate* recv. When the recv is a Var (or a Send
 /// shape that resolves to a bare param read — Ruby implicit-self), set
-/// `SUPPRESS_VAR_CLONE` for the duration so the Var arm skips its
+/// `SUPPRESS_VAR_CLONE` for the duration so the Var variant skips its
 /// multi-read `.clone()` append. Auto-ref handles `&self`/`&mut self`
 /// at recv positions; the explicit clone was breaking `&mut self`
 /// setters (fixture loader `instance.set_id(...)`). Falls through to
@@ -742,7 +742,7 @@ pub(super) fn is_static_method(name: &str) -> bool {
 pub(super) fn emit_expr(e: &Expr) -> String {
     // Public entry clears IN_RETURN_TAIL: any caller recursing into a
     // child expression is, by default, not in return tail. The Seq /
-    // Return / If arms re-enable the flag for their tail children via
+    // Return / If variants re-enable the flag for their tail children via
     // `emit_expr_tail`.
     let raw = with_return_tail(false, || emit_expr_inner(e));
     apply_str_coercion(raw, e)
@@ -758,7 +758,7 @@ pub(super) fn emit_expr_tail(e: &Expr) -> String {
 
 /// Wrap `raw` with the str-coercion shape stamped by the decide
 /// pass (`emit/rust/decide/str_color.rs`). Single application
-/// point so per-node match arms in `emit_expr_inner` can keep
+/// point so per-node match variants in `emit_expr_inner` can keep
 /// producing the natural non-coerced shape; coercions land here
 /// based on the `STR_TO_OWNED` / `STR_BORROW` bits once and don't
 /// have to be re-derived per node kind.
@@ -835,7 +835,7 @@ fn emit_expr_inner(e: &Expr) -> String {
             ) {
                 use crate::ty::Ty;
                 let declared_peeled = crate::emit::rust::expr::util::peel_nil(declared);
-                let declared_is_value = matches!(declared_peeled, Ty::Untyped | Ty::Record { .. })
+                let declared_is_value = matches!(declared_peeled, Ty::Untyped { .. } | Ty::Record { .. })
                     || matches!(
                         declared_peeled,
                         Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
@@ -972,8 +972,8 @@ fn emit_expr_inner(e: &Expr) -> String {
                         let value_shaped = matches!(
                             r.ty.as_ref(),
                             Some(crate::ty::Ty::Hash { key, value })
-                                if matches!(**key, crate::ty::Ty::Untyped)
-                                    && matches!(**value, crate::ty::Ty::Untyped)
+                                if matches!(**key, crate::ty::Ty::Untyped { .. })
+                                    && matches!(**value, crate::ty::Ty::Untyped { .. })
                         );
                         if value_shaped {
                             // `.as_object()` yields a serde_json `Map`,
@@ -1182,8 +1182,8 @@ fn emit_expr_inner(e: &Expr) -> String {
         ExprNode::Seq { exprs } => emit_seq(exprs),
         ExprNode::Assign { target, value } => emit_assign(target, value),
         // `x += v` / `x ||= v` — desugared to the plain Assign (or the
-        // `If` for `||=`/`&&=`) the arms above already emit, as Go and
-        // TypeScript do. Without this arm the catch-all dropped the
+        // `If` for `||=`/`&&=`) the variants above already emit, as Go and
+        // TypeScript do. Without this variant the catch-all dropped the
         // whole statement, so every `i += 1` loop counter in a
         // transpiled runtime body never advanced.
         ExprNode::OpAssign { target, op, value } => {
@@ -1225,22 +1225,22 @@ fn emit_expr_inner(e: &Expr) -> String {
         // params lower to `&str`), so Sym-literal patterns emit as
         // `"name"` string literals.
         //
-        // Wildcard arm: synthesized based on the enclosing return
+        // Wildcard variant: synthesized based on the enclosing return
         // type — `Value::Null` for `Value`-returning fns
         // (`get_index`), `()` for unit-returning fns (`set_index`).
-        // Without an `_` arm, the match isn't exhaustive over `&str`
+        // Without an `_` variant, the match isn't exhaustive over `&str`
         // and Rust rejects with E0004.
         //
-        // For `Value`-returning fns each arm's body is a concrete
+        // For `Value`-returning fns each variant's body is a concrete
         // primitive (an Ivar read of `String`/`i64`/etc.); wrap with
         // `serde_json::Value::from(...)` so the match unifies on
-        // `Value` regardless of which arm fired.
+        // `Value` regardless of which variant fired.
         ExprNode::Case { scrutinee, arms } => emit_case(scrutinee, arms),
         // `Cast { value, target_ty }` — explicit type narrowing the
         // model lowerer emits at adapter-row sites. The lowerer's
         // `synth_from_row` wraps each `row.<col>` accessor with a
         // Cast to the column's declared type; `synth_index_write`
-        // wraps the per-arm `value` (column-union → emits as
+        // wraps the per-variant `value` (column-union → emits as
         // `serde_json::Value` in rust) with a Cast to the column
         // type so `@<col> = value.as(T)` gets the concrete shape.
         //
@@ -1286,7 +1286,7 @@ fn emit_expr_inner(e: &Expr) -> String {
                 return format!("({}).clone().unwrap()", emit_expr(value));
             }
             // Cast INTO a nilable slot over an ivar (`[]`'s per-column
-            // arms read `Cast(@col, Union{[T, Nil]})`): the value stays
+            // variants read `Cast(@col, Union{[T, Nil]})`): the value stays
             // an Option, but it is behind `&self`, so it has to be
             // cloned rather than moved. Wrapping the read in a Cast
             // bypassed the ivar-read clone the bare read would have got.
@@ -1313,7 +1313,7 @@ fn emit_expr_inner(e: &Expr) -> String {
         }
         // Ruby `raise "msg"` → Rust `panic!("{}", "msg")`. Cross-
         // target shape matches the TS IIFE/`throw` and Crystal `raise`
-        // arms; `panic!` is a macro that diverges to `!`, so it
+        // variants; `panic!` is a macro that diverges to `!`, so it
         // works in any expression position without an IIFE wrap.
         // Assertion failures (produced by the test_module lowerer's
         // `inline_assertions` pass) reach here as

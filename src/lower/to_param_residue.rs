@@ -4,7 +4,7 @@
 //! ActiveSupport defines `to_param` on Object (`to_s`), true/false/nil,
 //! Hash (`to_query`) and Array (the elements' params joined by "/"); a
 //! record answers its own. The CRuby lane serves an untyped receiver
-//! from the core_ext reopen, but spinel's dispatch for the name has arms
+//! from the core_ext reopen, but spinel's dispatch for the name has variants
 //! for the app's records only, so a builtin value fell through to
 //! NoMethodError. lobsters' anonymous story-list cache key is the shape
 //! (`opts.merge(page: page).sort.map { |k, v| "#{k}=#{v.to_param}" }`,
@@ -49,7 +49,7 @@ pub fn apply_to_param_residue_lowering(app: &mut App) {
 /// A receiver whose `to_param` no static method answers.
 fn is_residue(ty: Option<&Ty>) -> bool {
     match ty {
-        None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
+        None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => true,
         Some(Ty::Union { variants }) => variants.iter().any(|v| !matches!(v, Ty::Class { .. })),
         _ => false,
     }

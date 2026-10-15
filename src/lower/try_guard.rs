@@ -21,7 +21,7 @@
 //! ```
 //!
 //! `:messages` is not nil and answers no `to_gid_param`, so Rails
-//! returns nil and takes the `|| s` arm. The nil guard called it and
+//! returns nil and takes the `|| s` variant. The nil guard called it and
 //! raised — `undefined method 'to_gid_param' for an instance of Symbol`
 //! — which is campfire's `test_creating_a_message_broadcasts_the_
 //! message_to_the_room`, the app's own assertion of the behaviour
@@ -39,7 +39,7 @@
 //! * nothing in the tree defines it -> the call can only ever answer
 //!   nil, so fold to `nil`
 //! * too many unrelated definers to name -> keep the nil guard, and say
-//!   so in the ledger rather than emit a twenty-arm `is_a?` chain
+//!   so in the ledger rather than emit a twenty-variant `is_a?` chain
 //!
 //! WHY THE NARROWING IS SAFE WHERE THE NIL GUARD WAS NOT: `nil.is_a?(B)`
 //! is false, so a nil receiver still answers nil — the narrowing does
@@ -58,10 +58,10 @@ use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::ty::Ty;
 
-/// Past this many unrelated definers, `is_a?` arms stop being an
+/// Past this many unrelated definers, `is_a?` variants stop being an
 /// improvement on the nil guard and start being noise. Nothing in the
 /// corpus reaches it — the widest real set (`to_gid_param`, on every
-/// model) collapses to ONE arm through its common base.
+/// model) collapses to ONE variant through its common base.
 const MAX_ARMS: usize = 3;
 
 #[allow(dead_code)]
@@ -147,7 +147,7 @@ pub(crate) fn rewrite_node(
     // blob partial's `blob.try(:caption)` turned into a transpile error
     // on an app `check` had passed clean. A gradual `try` stays
     // untyped, so the ledger still counts it.
-    let try_ty = expr.ty.clone().filter(|t| !matches!(t, Ty::Untyped));
+    let try_ty = expr.ty.clone().filter(|t| !matches!(t, Ty::Untyped { .. }));
     let mut call = Expr::new(
         span,
         ExprNode::Send {

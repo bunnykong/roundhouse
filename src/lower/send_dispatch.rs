@@ -20,9 +20,9 @@
 //!           end
 //!
 //! which every target compiles and CRuby executes identically (the
-//! `else` arm preserves `send`'s NoMethodError-on-unknown behavior in
+//! `else` variant preserves `send`'s NoMethodError-on-unknown behavior in
 //! spirit). Sites whose name set can't be proven go on the residue
-//! ledger and keep their source shape — an incomplete arm list would
+//! ledger and keep their source shape — an incomplete variant list would
 //! turn a legal dispatch into a raise, so enumeration bails toward
 //! "no rewrite" on anything unclassifiable. This is the lowering-side
 //! completion of the analyze-side receiver-aware send typing
@@ -35,11 +35,11 @@
 //! calls are matched in their SOURCE form — a bare `time_interval(...)`
 //! reaching a mixed-in helper — where the emit pass saw them only
 //! after helper-qualification (`IntervalHelper.time_interval(...)`);
-//! (b) synthesized arms are ty-stamped from the analyzer's class
+//! (b) synthesized variants are ty-stamped from the analyzer's class
 //! registry, because the residual-diagnostics audit walks hook output
 //! (the emit-time pass ran after it and dodged).
 //!
-//! Duration-unit arms deliberately call the PLURAL unit form
+//! Duration-unit variants deliberately call the PLURAL unit form
 //! (`"day" → days`) — identical semantics on a numeric receiver, and
 //! the plural is what the shared duration lowering (running right
 //! after this pass in the hook, by contract — see
@@ -180,7 +180,7 @@ fn apply_param_selector_dispatch(
                         }
                         Some((_, ty)) => {
                             let unknown = match ty {
-                                None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
+                                None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => true,
                                 Some(Ty::Class { id, .. }) => targets.keys().any(|k| &k.0 == id),
                                 _ => false,
                             };
@@ -365,7 +365,7 @@ fn walk_var_uses(
         _ => {
             // A tracked var escaping into any other context (argument,
             // return value, interpolation) is handled conservatively by
-            // the Send arm above for calls; other bare-var reads don't
+            // the Send variant above for calls; other bare-var reads don't
             // let the collection mutate, so they're safe to ignore.
             e.node.for_each_child(&mut |c| walk_var_uses(c, sets, poisoned));
         }
@@ -454,8 +454,8 @@ fn rewrite(
     ) {
         return;
     }
-    // The receiver lands in every arm, and the case evaluates the
-    // scrutinee before it. Only one arm runs, so the receiver is still
+    // The receiver lands in every variant, and the case evaluates the
+    // scrutinee before it. Only one variant runs, so the receiver is still
     // evaluated once; what could change is ORDER, and a plain variable
     // scrutinee has no effect to reorder against.
     if !recv_is_duplicable(recv) && !matches!(&*target.node, ExprNode::Var { .. }) {
@@ -585,7 +585,7 @@ fn enumerate_names(
 /// guard, and whose non-literal hash values (`options[:with_comments]`,
 /// `parent_comment && parent_comment.short_id`) are data — never
 /// symbols — on every real path. If a run-time symbol ever does arrive
-/// from one of them, the rewrite's wildcard arm raises loudly instead
+/// from one of them, the rewrite's wildcard variant raises loudly instead
 /// of silently misdispatching.
 fn collect_symbol_outcomes(e: &Expr, names: &mut Vec<String>) {
     match &*e.node {
@@ -600,7 +600,7 @@ fn collect_symbol_outcomes(e: &Expr, names: &mut Vec<String>) {
     }
 }
 
-/// The rewrite duplicates the receiver into every arm, so it must be a
+/// The rewrite duplicates the receiver into every variant, so it must be a
 /// side-effect-free read. Implicit self / `self` always qualify; chains
 /// of variable, ivar, constant, and `[]` reads do too.
 fn recv_is_duplicable(recv: &Option<Expr>) -> bool {
@@ -612,7 +612,7 @@ fn recv_is_duplicable(recv: &Option<Expr>) -> bool {
 
 /// ActiveSupport duration units in their singular form. When a
 /// string-scrutinee dispatch's names are all duration units (lobsters'
-/// `dur.send(intv.downcase).ago`), the arms call the plural form —
+/// `dur.send(intv.downcase).ago`), the variants call the plural form —
 /// identical semantics on a numeric receiver, and the plural is what
 /// the shared duration lowering (which runs right after this pass in
 /// the hook) rewrites unconditionally into the Duration runtime.
@@ -668,9 +668,9 @@ fn method_return_via_registry(
     None
 }
 
-/// The class the arms dispatch on, when the receiver types to one.
+/// The class the variants dispatch on, when the receiver types to one.
 /// `None` receivers are implicit self — the hook walk carries no class
-/// context, so those arms fall back to the gradual stamp.
+/// context, so those variants fall back to the gradual stamp.
 fn recv_class(recv: &Option<Expr>) -> Option<ClassId> {
     let r = recv.as_ref()?;
     match r.ty.as_ref() {
@@ -717,18 +717,18 @@ fn build_arms(
             // unstamped send on a typed receiver reads as a dispatch
             // failure. Stamp what dispatch would compute; where the
             // registry can't answer (untyped receivers, duration-unit
-            // arms awaiting the duration lowering), the honest type of
+            // variants awaiting the duration lowering), the honest type of
             // a formerly-reflective call is the gradual one.
             body.ty = Some(
                 class
                     .as_ref()
                     .and_then(|c| method_return_via_registry(registry, c, called.as_str()))
-                    .unwrap_or(Ty::Untyped),
+                    .unwrap_or(Ty::gradual()),
             );
             Arm { pattern, guard: None, body }
         })
         .collect();
-    // `send` raises NoMethodError on an unknown name; the wildcard arm
+    // `send` raises NoMethodError on an unknown name; the wildcard variant
     // preserves that failure mode instead of silently returning nil.
     arms.push(Arm {
         pattern: Pattern::Wildcard,

@@ -111,7 +111,7 @@ fn json_actions_for(
 ///
 /// `js` is the service worker: `navigator.serviceWorker.register(
 /// "/service-worker.js")` asks for format js and Rails renders campfire's
-/// raw `pwa/service_worker.js`. Without the arm the action had no
+/// raw `pwa/service_worker.js`. Without the variant the action had no
 /// template for html and answered an empty 204, which the browser
 /// refuses to register — so no push subscription could ever start.
 type TextFormatActions = std::collections::HashMap<Symbol, Vec<&'static str>>;
@@ -486,7 +486,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("params"),
         Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::Untyped),
+            value: std::sync::Arc::new(Ty::gradual()),
         },
     );
     // `@flash` is also framework-guaranteed: the render-rewrite emits
@@ -1023,7 +1023,7 @@ fn subclass_template_hooks(
             } else {
                 // `render_to_string :show, format: :json` in the
                 // inheritor's own context — the rewrite's string-valued
-                // arm hands back the bare `Views::…` call.
+                // variant hands back the bare `Views::…` call.
                 let span = Span::synthetic();
                 let mut args = vec![Expr::new(
                     span,
@@ -1122,7 +1122,7 @@ fn build_methods(
     partials: &PartialMap,
     // respond_to BREADTH — format.rss branches + inline `render json:`
     // preserved under the request_format dispatch. ONLY the CRuby/JRuby
-    // trees pass true: the widened arms call the CRuby-overlay
+    // trees pass true: the widened variants call the CRuby-overlay
     // JsonRender, which the spinel AOT compile (same emit family,
     // routed-aware too) cannot resolve. Everyone else keeps the narrow
     // html(+simple-json) flatten, emit unchanged.
@@ -1275,7 +1275,7 @@ fn build_methods(
 
     // Actions this controller reaches only through its parent. Rails
     // dispatches them; the `case` in `synthesize_process_action` has to
-    // carry an arm or they fall off the end and answer 200. Nearest
+    // carry an variant or they fall off the end and answer 200. Nearest
     // ancestor wins, and anything this controller defines itself (public
     // OR private — a private override is still the method Ruby finds)
     // is not inherited.
@@ -1285,7 +1285,7 @@ fn build_methods(
     // "declared above the `private` marker", and lobsters'
     // ApplicationController declares `authenticate_user`,
     // `require_logged_in_user` and a dozen other FILTER TARGETS that
-    // way — gating on visibility put a dispatch arm for every one of
+    // way — gating on visibility put a dispatch variant for every one of
     // them into 25 controllers. An action is what the router can send
     // here; anything else is a method that happens to be public.
     //
@@ -2189,7 +2189,7 @@ fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
             // symbol there, which is what Mastodon's source writes).
             // `content_type: "text/css"` is a MIME string instead —
             // resolved through the same reverse table
-            // `mime_for_format`'s own arm feeds, so the two can't
+            // `mime_for_format`'s own variant feeds, so the two can't
             // disagree about what a format's canonical MIME is. A
             // value this can't resolve (a charset-qualified string, an
             // interpolated expression, an unlisted MIME) declines —
@@ -2442,7 +2442,7 @@ fn calls_super(body: &Expr) -> bool {
 /// per-arg types lands when a routing-table-aware typer surfaces.
 fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     use crate::lower::typing::fn_sig;
-    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) };
 
     // Terminals — render/redirect/head/render_404 all return Nil.
     // The framework runtime declares these with named keyword params
@@ -2487,13 +2487,13 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     };
     info.instance_methods
         .entry(Symbol::from("render"))
-        .or_insert_with(|| positional_with_kwargs("html", Ty::Untyped));
+        .or_insert_with(|| positional_with_kwargs("html", Ty::gradual()));
     info.instance_methods
         .entry(Symbol::from("redirect_to"))
-        .or_insert_with(|| positional_with_kwargs("location", Ty::Untyped));
+        .or_insert_with(|| positional_with_kwargs("location", Ty::gradual()));
     info.instance_methods
         .entry(Symbol::from("redirect_back_or_to"))
-        .or_insert_with(|| positional_with_kwargs("fallback_location", Ty::Untyped));
+        .or_insert_with(|| positional_with_kwargs("fallback_location", Ty::gradual()));
     info.instance_methods
         .entry(Symbol::from("head"))
         .or_insert_with(|| fn_sig(vec![(Symbol::from("status"), Ty::Sym)], Ty::Nil));
@@ -2867,7 +2867,7 @@ fn action_to_method(
             // mistake the blanket-Nil pin above was (issue #810). Untyped
             // lets the compiler infer from the body instead; campfire's
             // `role_params`, which builds a bare Hash, still infers Hash.
-            Ty::Untyped
+            Ty::gradual()
         }
     } else if is_public {
         // Routed actions terminate in render/redirect → Nil.
@@ -2880,7 +2880,7 @@ fn action_to_method(
         // `@a, @b = get_from_cache(...)` as a nil destructure (and the
         // massign repro matrix showed every honest shape passes).
         // Untyped lets the compiler infer from the body instead.
-        Ty::Untyped
+        Ty::gradual()
     };
     // Private-helper params take the analyzer's call-site-unified type
     // when one landed (campfire's `broadcast_create_room(room)` has one
@@ -2898,13 +2898,13 @@ fn action_to_method(
         .enumerate()
         .map(|(i, p)| {
             let ty = if p.rest {
-                Ty::Untyped
+                Ty::gradual()
             } else {
                 unified
                     .and_then(|v| v.get(i))
                     .filter(|t| !matches!(t, Ty::Var { .. }))
                     .cloned()
-                    .unwrap_or(Ty::Untyped)
+                    .unwrap_or(Ty::gradual())
             };
             // A defaulted param also holds its DEFAULT whenever a caller
             // leaves it out, and the call-site unification only sees the
@@ -2913,10 +2913,10 @@ fn action_to_method(
             // params String, so the slot said `String?` and the two
             // one-argument callers handed spinel `true` for a C string.
             let ty = match &p.default {
-                Some(d) if !p.rest && !matches!(ty, Ty::Untyped) => {
+                Some(d) if !p.rest && !matches!(ty, Ty::Untyped { .. }) => {
                     match default_literal_ty(d) {
                         Some(dt) => union_with(ty, dt),
-                        None => Ty::Untyped,
+                        None => Ty::gradual(),
                     }
                 }
                 _ => ty,

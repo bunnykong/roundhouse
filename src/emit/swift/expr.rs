@@ -404,7 +404,7 @@ fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 // Typed value receiver — `@controller.render("err",
                 // status: :unprocessable_entity)` in a test body. The
                 // annotation names the class just as well as a Const
-                // does; without this arm every kwarg call through a
+                // does; without this variant every kwarg call through a
                 // local or ivar falls back to a dictionary literal and
                 // fails to typecheck against the real parameter list.
                 _ => match r.ty.as_ref() {
@@ -932,7 +932,7 @@ fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
                     "Any?".to_string()
                 }
             }
-            Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Var { .. }) | None => {
+            Some(crate::ty::Ty::Untyped { .. }) | Some(crate::ty::Ty::Var { .. }) | None => {
                 "Any?".to_string()
             }
             Some(t) => swift_ty(t),
@@ -1581,7 +1581,7 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
 /// second-guess it.
 fn is_concrete_elem(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
-    !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil | Ty::Bottom)
+    !matches!(ty, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Nil | Ty::Bottom)
 }
 
 fn emit_array(elements: &[Expr], e: &Expr) -> String {
@@ -1910,7 +1910,7 @@ fn isa_narrow_cond(cond: &Expr) -> Option<String> {
 
 /// `case` → `switch`. Swift `switch` is a statement, not an expression
 /// (unlike Kotlin `when`), so a `Case` in return position is rendered
-/// with `returning: true`: each arm body gets the `return` pushed into
+/// with `returning: true`: each variant body gets the `return` pushed into
 /// it (via `wrap_return`), and a missing default returns `nil` (Ruby's
 /// `case` without `else` evaluates to nil).
 fn emit_case(scrutinee: &Expr, arms: &[Arm], returning: bool) -> String {
@@ -2285,7 +2285,7 @@ fn branch_is_terminal(e: &Expr) -> bool {
 
 /// Prefix `return` for a body in return position — recursing into the
 /// shapes where the `return` must land deeper: a `Seq`'s final statement,
-/// every arm of a `Case` (Swift `switch` is not an expression), and both
+/// every variant of a `Case` (Swift `switch` is not an expression), and both
 /// branches of a two-armed `If` (multi-statement Swift `if` branches
 /// aren't expressions either). Terminal/valueless statements pass
 /// through unprefixed.
@@ -2998,7 +2998,7 @@ fn emit_send(
         // Ruby source spells them out precisely so every target has
         // them — and rewriting either to Swift's `.count` / `.isEmpty`
         // names something the class doesn't have. A sentinel scrutinee
-        // (no arm matches it) drops through to the general call path
+        // (no variant matches it) drops through to the general call path
         // below, which still sees the real `method`.
         let coercible = if is_known_instance_method(r, method) { "\0" } else { method };
         match coercible {
@@ -3256,7 +3256,7 @@ mod equal_identity_tests {
     #[test]
     fn equal_on_a_hash_stays_a_call() {
         let mut recv = var("attrs");
-        recv.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) });
+        recv.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::gradual()) });
         let out = emit_expr(&send(recv, "equal?", var("sentinel")));
         assert!(out.contains("equalPred"), "{out}");
         assert!(!out.contains("==="), "{out}");

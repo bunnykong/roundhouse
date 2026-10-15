@@ -275,7 +275,7 @@ fn uploaded_file_ty() -> Ty {
 /// family's `ActionDispatch::Http::UploadedFile.provided` /
 /// `.from_params`, the one narrowing of a params value to that class,
 /// kept out of `Params` because the strict targets' `ParamValue` union
-/// has no file arm (see the class's own header in
+/// has no file variant (see the class's own header in
 /// runtime/spinel/multipart.rb). `sub` is the hash to read — the
 /// resource sub-hash in `from_raw`, the raw params in a helper that
 /// permits at the top level.
@@ -853,7 +853,7 @@ fn rewrite_tail(e: &Expr, spec: &ParamsSpec) -> Expr {
 ///
 /// Presence before value, matching `from_raw`'s ordering so the two read
 /// the same way. A literal's key is provided BY BEING WRITTEN, which is
-/// why that arm is a bare `true` rather than a lookup.
+/// why that variant is a bare `true` rather than a lookup.
 fn build_params_object(
     at: &Expr,
     spec: &ParamsSpec,
@@ -989,7 +989,7 @@ pub(super) fn hand_update_the_attrs(
             block: None,
             parenthesized: false,
         },
-        Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
+        Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) }),
     );
     attrs.span = span;
     args[0] = attrs;
@@ -1823,7 +1823,7 @@ pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     // The declared type is `initialize`'s parameter type verbatim: this
     // hash is built to be handed straight to it, and a narrower element
     // type would need a widening conversion at every call site.
-    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) };
     let attrs_var = || {
         with_ty(
             Expr::new(
@@ -1938,7 +1938,7 @@ pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
 /// Gating on the `_provided` companion slot is what it SHOULD do, and
 /// the flags are already there for it (`update_from_<resource>_params!`
 /// reads them). The blocker is downstream: an
-/// `if @x_provided then @x else nil end` in an arm body emits as
+/// `if @x_provided then @x else nil end` in an variant body emits as
 /// `serde_json::Value::from(if self.x_provided { self.x.clone() })` —
 /// the Rust emitter drops a `Nil` else branch, which is fine in
 /// statement position and E0317 in expression position, and the
@@ -1962,14 +1962,14 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
         })
         .collect();
 
-    // A `case` with zero arms has no `when` clause at all, which is a
+    // A `case` with zero variants has no `when` clause at all, which is a
     // Ruby syntax error — reachable here whenever every permitted key is
     // non-scalar (`permit(widget_ids: [])`, nothing else) and so `fields`
     // drops to empty (see `tests/params_all_non_scalar_keys.rs`). `key`
     // is then unused; the body is just `nil`, same signature, same
-    // `Ty::Untyped` result.
+    // `Ty::gradual()` result.
     let body = if arms.is_empty() {
-        expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::Untyped))
+        expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::gradual()))
     } else {
         expr(
             ExprNode::Case {
@@ -1979,7 +1979,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
                 ),
                 arms,
             },
-            Some(Ty::Untyped),
+            Some(Ty::gradual()),
         )
     };
 
@@ -1995,7 +1995,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
         // Heterogeneous: the value when provided, nil when not.
         signature: Some(crate::lower::typing::fn_sig(
             vec![(key, Ty::Sym)],
-            Ty::Untyped,
+            Ty::gradual(),
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -2196,7 +2196,7 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
                 }
             }
         }
-        // Merge form first — the bare-permit arm below would match the
+        // Merge form first — the bare-permit variant below would match the
         // same node (Form 3 delegates) and drop the merged values.
         if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node {
             if method.as_str() == "merge"

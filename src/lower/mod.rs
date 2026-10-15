@@ -665,17 +665,17 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
-    // synthesizes into case arms, so it must observe that pass's output.
+    // synthesizes into case variants, so it must observe that pass's output.
     ("duration", &["send_static_dispatch"]),
     // `first(n)`/`last(n)` on an analyzer-typed Relation -> `first_n` /
     // `last_n`, and `rel.count > n` -> `more_than?(n)`, including the
-    // arms send_static_dispatch synthesizes from a `public_send(selector, n)`,
+    // variants send_static_dispatch synthesizes from a `public_send(selector, n)`,
     // so it observes that pass's output.
     ("relation_counted_terminal", &["send_static_dispatch"]),
     // Grounds `attach(io:, filename:, content_type:)` to positional
     // Strings by reading the io at the call site — the runtime's RBS
     // has no File type, and an `untyped` parameter there is five new
-    // Ty::Untyped sites every strict target pays for. No ordering
+    // Ty::gradual() sites every strict target pays for. No ordering
     // constraint of its own: it matches on Rails' own keyword spelling,
     // which no earlier pass rewrites.
     ("attach", &[]),
@@ -1021,7 +1021,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("send_static_dispatch");
     // AFTER send_dispatch — see POST_ANALYZE_PASS_ORDER (the `duration`
     // entry's runs_after). An all-duration-unit name set dispatches
-    // through case arms synthesized as plural unit calls that count on
+    // through case variants synthesized as plural unit calls that count on
     // this grounding (`send_dispatch::duration_plural`).
     duration::apply_duration_lowering(app);
     ran!("duration");

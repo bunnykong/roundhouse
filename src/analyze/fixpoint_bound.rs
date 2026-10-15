@@ -32,7 +32,7 @@
 //! value that may be a Hash, an Array or a scalar renders as
 //! `serde_json::Value`, which has none of the Hash and Array methods
 //! called on it (`transform_values`, `sort`, `merge`, iteration), and a
-//! `case … when Hash` renders every arm as `_`. The crate fails
+//! `case … when Hash` renders every variant as `_`. The crate fails
 //! `cargo check` while `check` reports no error. The emitted Ruby runs
 //! (`tests/recursive_type_bound.rs`).
 
@@ -56,23 +56,24 @@ pub(super) fn bound(ty: Ty) -> Ty {
         return ty;
     }
     super::fixpoint_check::note_bound(true);
+    super::det::note_cap("bound.firings");
     let mut limit = measure(&ty).0.min(MAX_DEPTH);
     loop {
         let cut = cut(&ty, limit);
         if measure(&cut).1 <= MAX_NODES {
             return cut;
         }
-        // A union with more leaf arms than the node bound has no nesting
+        // A union with more leaf variants than the node bound has no nesting
         // left to cut.
         if limit == 0 {
-            return Ty::Untyped;
+            return Ty::unresolved();
         }
         limit -= 1;
     }
 }
 
 /// A type that adds a level of nesting: one with children, other than a
-/// union, whose arms sit at its own level.
+/// union, whose variants sit at its own level.
 fn is_container(ty: &Ty) -> bool {
     match ty {
         Ty::Array { .. } | Ty::Hash { .. } | Ty::Fn { .. } => true,
@@ -128,7 +129,7 @@ fn measure(ty: &Ty) -> (usize, usize) {
 }
 
 /// `ty` with at most `levels` nested containers: one that would sit
-/// deeper is `untyped`. Unions are re-joined, since cut arms can coincide.
+/// deeper is `untyped`. Unions are re-joined, since cut variants can coincide.
 fn cut(ty: &Ty, levels: usize) -> Ty {
     if let Ty::Union { variants } = ty {
         return body::union_many(variants.iter().map(|v| cut(v, levels)).collect());
@@ -137,7 +138,7 @@ fn cut(ty: &Ty, levels: usize) -> Ty {
         return ty.clone();
     }
     if levels == 0 {
-        return Ty::Untyped;
+        return Ty::unresolved();
     }
     let inner = |t: &Ty| cut(t, levels - 1);
     match ty {
@@ -220,7 +221,7 @@ mod tests {
         while let Ty::Array { elem } = innermost {
             innermost = elem;
         }
-        assert_eq!(innermost, &Ty::Untyped);
+        assert_eq!(innermost, &Ty::unresolved());
     }
 
     #[test]
@@ -240,7 +241,7 @@ mod tests {
         let classes = (0..MAX_NODES).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("C{i}").as_str())), args: vec![].into() });
         let wide = body::union_many(classes.chain([arr(Ty::Int)]).collect());
         assert!(measure(&wide).1 > MAX_NODES);
-        assert_eq!(bound(wide), Ty::Untyped);
+        assert_eq!(bound(wide), Ty::unresolved());
     }
 
     /// An ivar's type is carried too: the next round seeds it into every

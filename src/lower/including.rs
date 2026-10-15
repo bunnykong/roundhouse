@@ -78,14 +78,14 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     }
     let span = expr.span;
     // The type `to_a` lands on, read off the receiver we are rewriting
-    // (`materialized_to_a` below). `None` when no arm of the receiver
+    // (`materialized_to_a` below). `None` when no variant of the receiver
     // can answer — a receiver whose surface we cannot see is one we
     // cannot claim `to_a` for, and leaving it unstamped keeps it on the
     // ledger where it belongs.
     let materialized = recv.ty.as_ref().and_then(materialized_to_a);
     let elem_ty = match &materialized {
         Some(Ty::Array { elem }) => (**elem).clone(),
-        _ => Ty::Untyped,
+        _ => Ty::gradual(),
     };
     let mut elements = Expr::new(
         span,
@@ -116,13 +116,13 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
 }
 
 /// The type `to_a` lands on, or `None` when the receiver's surface
-/// doesn't say. A union answers from whichever arm can — the same
-/// policy the body-typer's union dispatch uses, where arms that decline
-/// are dropped and one resolving arm answers. campfire's
+/// doesn't say. A union answers from whichever variant can — the same
+/// policy the body-typer's union dispatch uses, where variants that decline
+/// are dropped and one resolving variant answers. campfire's
 /// `params.fetch(:user_ids, []).including(Current.user.id)` types
 /// `Array[…] | Str` because the params model calls every value a `Str`
 /// (`Roundhouse::ParamValue` is the runtime type, not one the analyzer
-/// carries); the Array arm is the one that answers, and leaving the
+/// carries); the Array variant is the one that answers, and leaving the
 /// whole union unstamped put a `to_a` error on working code.
 fn materialized_to_a(t: &Ty) -> Option<Ty> {
     match t {

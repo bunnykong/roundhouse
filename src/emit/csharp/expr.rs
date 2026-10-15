@@ -1128,7 +1128,7 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
 
 /// `if` in value position → C# ternary. When the condition is an `is_a?`
 /// narrowing (`x is T ? x : default`), the then-branch is cast to `T` — C#
-/// doesn't auto-narrow `x` in the true arm the way Kotlin smart-casts.
+/// doesn't auto-narrow `x` in the true variant the way Kotlin smart-casts.
 fn emit_if_expr(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     let c = emit_expr(cond);
     let els = if is_empty_branch(else_branch) {
@@ -1148,7 +1148,7 @@ fn emit_if_expr(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     format!("({c} ? ({}) : ({els}))", emit_expr(then_branch))
 }
 
-/// `case` in value position → C# switch-expression. Arms are cast to
+/// `case` in value position → C# switch-expression. variants are cast to
 /// `object?` so heterogeneous bodies (a model indexer's `long id` vs
 /// `string title`) share a common result type.
 fn emit_case_expr(scrutinee: &Expr, arms: &[Arm]) -> String {
@@ -1271,7 +1271,7 @@ fn coerce_nullable_finder(
             let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
             matches!(non_nil.as_slice(), [Ty::Class { .. }])
         }
-        None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => {
+        None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => {
             let ExprNode::Const { path } = &*r.node else { return rendered };
             let cls = type_name(&path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"));
             CLASS_HIERARCHY.with(|h| h.borrow().contains_key(&cls))
@@ -1884,7 +1884,7 @@ fn emit_return_stmt(value: &Expr) -> String {
 /// non-null are read with `!` in the branch where they hold.
 fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     // `is_a?` narrowing guard: `if (x is T) { …x… }` → `if (x is T xAsT)
-    // { …xAsT… }`. C# doesn't narrow `x` in the true arm without a pattern
+    // { …xAsT… }`. C# doesn't narrow `x` in the true variant without a pattern
     // variable (and can't reuse `x`'s name), so bind a fresh name and rewrite
     // the then-branch's references. Only the then-branch narrows.
     if let Some((var, ty)) = narrowing_guard(cond) {
@@ -1974,7 +1974,7 @@ fn rename_word(body: &str, from: &str, to: &str) -> String {
 }
 
 /// `case` in statement position → an `if`/`else if` chain on scrutinee
-/// equality (arms have statement bodies, which a switch-expression can't
+/// equality (variants have statement bodies, which a switch-expression can't
 /// hold).
 fn emit_case_stmt(scrutinee: &Expr, arms: &[Arm]) -> String {
     let s = emit_expr(scrutinee);
@@ -2005,7 +2005,7 @@ fn emit_case_stmt(scrutinee: &Expr, arms: &[Arm]) -> String {
     }
     if let Some(eb) = else_body {
         if first {
-            // Only a default arm.
+            // Only a default variant.
             return eb;
         }
         out.push_str(&format!("else {{\n{eb}\n}}"));
@@ -2124,8 +2124,8 @@ fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
 fn nilable_prop_conversion(base: &str, value: &Expr) -> Option<String> {
     use crate::ty::Ty;
     let rhs_untyped = match value.ty.as_ref() {
-        None | Some(Ty::Untyped) => true,
-        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped)),
+        None | Some(Ty::Untyped { .. }) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped { .. })),
         _ => false,
     };
     if !rhs_untyped {

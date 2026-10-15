@@ -131,7 +131,7 @@ fn params_resolves_via_implicit_self_in_action_body() {
     }
 
     // `params[:id]` resolves to the element union: a String among
-    // Array / Parameters arms, or nil.
+    // Array / Parameters variants, or nil.
     match bracket_send.ty.as_ref().expect("bracket ty populated") {
         Ty::Union { variants } => {
             assert!(variants.iter().any(|v| matches!(v, Ty::Str)));
@@ -2475,7 +2475,7 @@ end
 #[test]
 fn diverging_tail_method_harvests_early_returns() {
     // A method whose *tail* diverges (here a `raise`; in lobsters a
-    // `begin/case` whose arms all `return`) but which returns a
+    // `begin/case` whose variants all `return`) but which returns a
     // concrete value on an early path must harvest that early return's
     // type — not `Bottom`. Without it, a caller's `lookup["k"]` fails
     // dispatch on `Bottom`.
@@ -2554,7 +2554,7 @@ fn a_return_of_unknown_shape_is_not_divergence() {
     // the tail diverges. `Bottom` would claim the method never returns
     // — a lie dispatch acts on: `Bottom | Nil` folds to exactly `Nil`,
     // so a caller's `&.downcase` has nothing left after the safe-nav
-    // strips the Nil arm. campfire's
+    // strips the Nil variant. campfire's
     // `Opengraph::Fetch#fetch_content_type` returns
     // `response["Content-Type"]` off an untyped `response`.
     let app = app_from_files(&[
@@ -2957,7 +2957,7 @@ end
         .find(|m| m.name.as_str() == "shift")
         .expect("shift");
     match shift.body.ty.as_ref() {
-        Some(Ty::Untyped) => {}
+        Some(Ty::Untyped { .. }) => {}
         other => panic!("Date − Untyped must stay Untyped, got {other:?}"),
     }
 }
@@ -2996,7 +2996,7 @@ end
         .find(|m| m.name.as_str() == "shift")
         .expect("shift");
     match shift.body.ty.as_ref() {
-        Some(Ty::Untyped) => {}
+        Some(Ty::Untyped { .. }) => {}
         other => panic!("Date + Untyped must stay Untyped, got {other:?}"),
     }
 }
@@ -3036,7 +3036,7 @@ end
     for name in ["shift_right", "shift_left"] {
         let m = thing.methods().find(|m| m.name.as_str() == name).expect(name);
         match m.body.ty.as_ref() {
-            Some(Ty::Untyped) => {}
+            Some(Ty::Untyped { .. }) => {}
             other => panic!("Date {name} with Untyped must stay Untyped, got {other:?}"),
         }
     }
@@ -4371,7 +4371,7 @@ fn tutorial_fixture(show_body: &str, user_model_extra: &str) -> roundhouse::App 
             "app/controllers/home_controller.rb",
             "class HomeController < ApplicationController\n  def index\n    @microposts = Micropost.with_attached_image.includes(:user)\n  end\nend\n",
         ),
-        ("app/views/home/index.html.erb", "<ol><%= render @microposts %></ol>\n"),
+        ("app/views$HOST_PATH", "<ol><%= render @microposts %></ol>\n"),
         (
             "app/views/microposts/_micropost.html.erb",
             "<li><%= micropost.user.name %><% if micropost.image.attached? %>img<% end %></li>\n",

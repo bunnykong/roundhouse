@@ -19,7 +19,7 @@
 //! unnoticed until the generic Widget/Gadget reduction here.
 //!
 //! Fix: no fields means the `[]` body is a bare `nil` literal instead of
-//! a `Case` with zero arms — same signature, same `Ty::Untyped` result,
+//! a `Case` with zero variants — same signature, same `Ty::gradual()` result,
 //! still parses, and callers already treat an absent key as nil-ish
 //! (PRESENCE IS NOT HONORED on this reader; see its doc comment).
 

@@ -110,7 +110,7 @@ pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassI
             // it to that call and write the text it would build —
             // provided every value's TYPE says how. One value that does
             // not (a nested record, a Hash) leaves the whole model on
-            // the runtime encoder, whose dropped arm is already ledgered
+            // the runtime encoder, whose dropped variant is already ledgered
             // at the site.
             let table = app.schema.tables.get(&model.table.0);
             let Some(writer) = model.body.iter().find_map(|item| match item {
@@ -794,7 +794,7 @@ fn as_json_method(owner: &ClassId, readers: &[Symbol]) -> MethodDef {
                     // what the emitted RBS says of them.
                     let mut read =
                         Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() });
-                    read.ty = Some(crate::ty::Ty::Untyped);
+                    read.ty = Some(crate::ty::Ty::gradual());
                     read
                 },
             )

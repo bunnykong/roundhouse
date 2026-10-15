@@ -250,7 +250,7 @@ pub(super) fn emit_return(value: &Expr) -> String {
         // `return` statement is physically nested in a non-tail spot
         // (e.g. the guard `return @cache if @loaded` that sits as the
         // first stmt of a Seq). Set the return-tail flag so value-emit's
-        // tail-aware coercions fire — notably the Ivar arm's `.clone()`
+        // tail-aware coercions fire — notably the Ivar variant's `.clone()`
         // for a non-Copy field read, which otherwise moves out of `&self`
         // (E0507). Without this the eager-load guard `return
         // self.comments_cache` failed to compile (issue #27).
@@ -308,7 +308,7 @@ pub(super) fn emit_bool_op(
                     let value_ty_untyped = matches!(
                         r.ty.as_ref().map(peel_nil),
                         Some(crate::ty::Ty::Hash { value, .. })
-                            if matches!(value.as_ref(), crate::ty::Ty::Untyped)
+                            if matches!(value.as_ref(), crate::ty::Ty::Untyped { .. })
                     );
                     // String default literal -> `.to_string()` (defer
                     // to str_color if already annotated).
@@ -340,7 +340,7 @@ pub(super) fn emit_bool_op(
             // needs to be `Value`-shaped.
             let lhs_inner_untyped = matches!(
                 left.ty.as_ref().map(peel_nil),
-                Some(crate::ty::Ty::Untyped)
+                Some(crate::ty::Ty::Untyped { .. })
             );
             // `Option<Str>` (rust emits as `Option<String>`) `||`
             // literal-str — `unwrap_or` expects `String`, but Str
@@ -420,21 +420,21 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
     // (get_index / set_index), which dispatch on a Symbol-typed `name`
     // param against per-column literal patterns.
     //
-    // Wildcard arm: synthesized based on the enclosing return type —
+    // Wildcard variant: synthesized based on the enclosing return type —
     // `Value::Null` for `Value`-returning fns, `()` for unit-returning
-    // fns. Without an `_` arm, the match isn't exhaustive over `&str`.
+    // fns. Without an `_` variant, the match isn't exhaustive over `&str`.
     // An IR-carried guard-free Wildcard (a source `else`, or the shared
-    // send grounding's raise arm) already IS the default — appending a
+    // send grounding's raise variant) already IS the default — appending a
     // second `_` would be unreachable.
     //
     // Only literal, binding and wildcard patterns have a Rust `match`
     // form (`try_emit_case_pattern`). A range, class or other `===`
-    // pattern, a nil/float literal, or a guarded arm has none — report
-    // instead of inventing `_` (which would let the first such arm
+    // pattern, a nil/float literal, or a guarded variant has none — report
+    // instead of inventing `_` (which would let the first such variant
     // swallow every input). Fail-closed matches Python/TS intent; the
     // supported set keeps Bind for indexer symbol dispatch, which those
     // emitters do not.
-    // The diagnostic points at the first such arm's guard or pattern
+    // The diagnostic points at the first such variant's guard or pattern
     // expression; a literal pattern carries no span, so it falls back to
     // the scrutinee.
     if let Some(arm) = arms
@@ -450,7 +450,7 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
     }
     let scrutinee_s = emit_expr(scrutinee);
     let return_ty = current_return_ty();
-    let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
+    let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped { .. }));
     let arm_strs: Vec<String> = arms
         .iter()
         .map(|arm| {

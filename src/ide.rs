@@ -53,7 +53,7 @@ pub struct TypeAt {
     /// absent or an unresolved inference variable.
     pub display: String,
     /// Whether a value here can be `nil` — the type is `nil`, or a union
-    /// with a `nil` arm. Drives nil-safety underlines. Conservatively
+    /// with a `nil` variant. Drives nil-safety underlines. Conservatively
     /// `false` for unknown/untyped positions: we underline only types we
     /// can *prove* admit nil.
     pub nilable: bool,
@@ -376,7 +376,7 @@ fn describe(expr: &Expr) -> TypeAt {
 }
 
 /// Whether a value of this type can be `nil`: the type is `nil`, or a
-/// union with a `nil` arm (transitively). Unknown / untyped / gradual
+/// union with a `nil` variant (transitively). Unknown / untyped / gradual
 /// positions return `false` — we only claim nilability we can prove.
 /// Consumers answering the *question* "can this be nil?" should prefer
 /// [`nil_verdict`], which distinguishes a proven "no" from "can't tell".
@@ -391,14 +391,14 @@ pub fn can_be_nil(ty: &Ty) -> bool {
 /// Three-valued nilability: `Some(true)` when the type provably admits
 /// nil, `Some(false)` when it provably cannot, `None` when the inference
 /// has nothing to stand on — the position is untyped, an unresolved
-/// inference variable, or a union with such an arm (an `untyped` arm
+/// inference variable, or a union with such an variant (an `untyped` variant
 /// could be nil at runtime; claiming "cannot be nil" there would be an
-/// overclaim). A union that *also* carries a proven `nil` arm stays
-/// `Some(true)` — nil is possible regardless of what the unknown arm is.
+/// overclaim). A union that *also* carries a proven `nil` variant stays
+/// `Some(true)` — nil is possible regardless of what the unknown variant is.
 pub fn nil_verdict(ty: Option<&Ty>) -> Option<bool> {
     fn unknown_arm(ty: &Ty) -> bool {
         match ty {
-            Ty::Untyped | Ty::Var { .. } => true,
+            Ty::Untyped { .. } | Ty::Var { .. } => true,
             Ty::Union { variants } => variants.iter().any(unknown_arm),
             _ => false,
         }
@@ -424,7 +424,7 @@ pub fn nil_verdict(ty: Option<&Ty>) -> Option<bool> {
 // is (a column is a field, an association jumps to another model, a
 // scope chains). Deliberately not covered: the built-in scalar surface
 // (String/Array/Hash/Time methods), which lives in `send.rs` match
-// arms rather than enumerable tables — commodity completions other
+// variants rather than enumerable tables — commodity completions other
 // tools already provide; the differentiated ones are the Rails ones.
 
 /// What kind of member a completion item is, for editor `kind` mapping
@@ -1018,7 +1018,7 @@ pub fn receiver_class(
 }
 
 /// The root class of a receiver type: `Article` itself, or the class
-/// arm of a nilable union (`Article?` completes as `Article` — the
+/// variant of a nilable union (`Article?` completes as `Article` — the
 /// user gets members while the nil-safety diagnostics separately flag
 /// the unguarded call).
 pub fn root_class(ty: &Ty) -> Option<ClassId> {
@@ -1130,7 +1130,7 @@ pub fn render_ty(ty: &Ty) -> String {
         // An unresolved inference variable reads as "untyped" to a
         // consumer — same bucket the diagnostics walker treats as unknown.
         Ty::Var { .. } => "untyped".to_string(),
-        Ty::Untyped => "untyped".to_string(),
+        Ty::Untyped { .. } | Ty::Rec { .. } => "untyped".to_string(),
         Ty::Bottom => "bot".to_string(),
     }
 }
@@ -1696,7 +1696,7 @@ fn method_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Referen
 }
 
 /// The class a receiver resolves to, if its type pins exactly one: a
-/// `Class`, or a union of one class arm with `nil` (`Article?` → `Article`).
+/// `Class`, or a union of one class variant with `nil` (`Article?` → `Article`).
 fn resolve_receiver_class(ty: Option<&Ty>) -> Option<ClassId> {
     match ty? {
         Ty::Class { id, .. } => Some(id.clone()),
@@ -1706,7 +1706,7 @@ fn resolve_receiver_class(ty: Option<&Ty>) -> Option<ClassId> {
                 match v {
                     Ty::Nil => {}
                     Ty::Class { id, .. } if found.is_none() => found = Some(id.clone()),
-                    // a second class, or a non-nil non-class arm → ambiguous
+                    // a second class, or a non-nil non-class variant → ambiguous
                     _ => return None,
                 }
             }
@@ -3066,7 +3066,7 @@ pub fn candidate_signature(
         .enumerate()
         .map(|(i, name)| crate::ty::Param {
             name: name.clone(),
-            ty: inferred.and_then(|ts| ts.get(i)).cloned().unwrap_or(Ty::Untyped).into(),
+            ty: inferred.as_ref().and_then(|ts| ts.get(i)).cloned().unwrap_or(Ty::gradual()).into(),
             kind: crate::ty::ParamKind::Required,
         })
         .collect();
@@ -3534,7 +3534,7 @@ mod tests {
     fn render_ty_collapses_nilable_union_to_question_mark() {
         let t = Ty::Union { variants: vec![class("Article"), Ty::Nil].into() };
         assert_eq!(render_ty(&t), "Article?");
-        // Wider unions keep an explicit `nil` arm.
+        // Wider unions keep an explicit `nil` variant.
         let wide = Ty::Union { variants: vec![Ty::Int, Ty::Str, Ty::Nil].into() };
         assert_eq!(render_ty(&wide), "Integer | String | nil");
     }
@@ -3542,7 +3542,7 @@ mod tests {
     #[test]
     fn unresolved_variable_renders_untyped() {
         assert_eq!(render_ty(&Ty::Var { var: TyVar(7) }), "untyped");
-        assert_eq!(render_ty(&Ty::Untyped), "untyped");
+        assert_eq!(render_ty(&Ty::gradual()), "untyped");
     }
 
     #[test]
@@ -3551,7 +3551,7 @@ mod tests {
         assert!(can_be_nil(&Ty::Union { variants: vec![class("Article"), Ty::Nil].into() }));
         assert!(!can_be_nil(&class("Article")));
         assert!(!can_be_nil(&Ty::Var { var: TyVar(0) }));
-        assert!(!can_be_nil(&Ty::Untyped));
+        assert!(!can_be_nil(&Ty::gradual()));
     }
 
     #[test]
@@ -3680,16 +3680,16 @@ mod tests {
         assert_eq!(nil_verdict(Some(&Ty::Int)), Some(false));
         // Can't tell: untyped, unresolved var, unions carrying either,
         // and positions the analyzer never typed at all.
-        assert_eq!(nil_verdict(Some(&Ty::Untyped)), None);
+        assert_eq!(nil_verdict(Some(&Ty::gradual())), None);
         assert_eq!(nil_verdict(Some(&Ty::Var { var: TyVar(0) })), None);
         assert_eq!(
-            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Str].into() })),
+            nil_verdict(Some(&Ty::Union { variants: vec![Ty::gradual(), Ty::Str].into() })),
             None
         );
         assert_eq!(nil_verdict(None), None);
-        // An unknown arm doesn't retract a proven nil arm.
+        // An unknown variant doesn't retract a proven nil variant.
         assert_eq!(
-            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() })),
+            nil_verdict(Some(&Ty::Union { variants: vec![Ty::gradual(), Ty::Nil].into() })),
             Some(true)
         );
     }

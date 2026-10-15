@@ -421,7 +421,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // Ty)` row into a ClassInfo extra so the test body-typer
         // dispatches precisely against framework methods. Same
         // pattern the TS emit uses (see typescript.rs); critical
-        // for Crystal because `Ty::Untyped` falls through to
+        // for Crystal because `Ty::gradual()` falls through to
         // `String` at the emit boundary, so RBS-driven typing of
         // the test body is what produces correct typed dispatch
         // (e.g. NamedTuple receivers from typed Router.match).
@@ -447,7 +447,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // to walk Article → ApplicationRecord → AR::Base when
         // resolving inherited class methods like `last`. Each is
         // registered under both the full path AND the last-segment
-        // alias (`Base`) so the typer's Const arm resolves bare
+        // alias (`Base`) so the typer's Const variant resolves bare
         // refs in test bodies.
         for lc in &runtime_classes_for_typing {
             let info = crate::lower::class_info_from_library_class(lc);

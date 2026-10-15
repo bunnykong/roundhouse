@@ -309,7 +309,7 @@ pub(in crate::analyze) fn register(
                     Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
                     _ => None,
                 })
-                .unwrap_or(Ty::Untyped);
+                .unwrap_or(Ty::gradual());
             let cls = classes.entry(lc.name.clone()).or_default();
             cls.parent = lc.parent.clone();
             for (entry, ty) in [
@@ -392,7 +392,7 @@ pub(in crate::analyze) fn register(
 /// returns `SelfType` and there is no honest `Self` to name. Answering
 /// them as the module's own class would be a LIE the type system acts
 /// on, and answering them `Untyped` would be worse than silence — an
-/// `Untyped` arm absorbs dispatch, so it would mask real gaps in every
+/// `Untyped` variant absorbs dispatch, so it would mask real gaps in every
 /// chain built on it. Leaving them out keeps those calls exactly where
 /// they are today: unresolved, and honest about it.
 ///
@@ -409,7 +409,7 @@ fn ar_instance_ty(kind: crate::catalog::ReturnKind) -> Option<Ty> {
             Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) })
         }
         ReturnKind::HashStrUntyped => {
-            Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) })
+            Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::unresolved()) })
         }
         ReturnKind::ArrayOfSym => Some(Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }),
         ReturnKind::ArrayOfInt => Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) }),

@@ -566,7 +566,7 @@ fn walk_without_shadowed_lambda_params(e: &Expr, name: &Symbol, f: &mut dyn FnMu
 /// .create_with_attachment!(message_params)` reaches
 /// `Message.create_with_attachment!` and names its parameter exactly as
 /// the constant spelling would, so both have to land on the same key.
-/// Missing that arm is not merely a lost binding: campfire's two sites
+/// Missing that variant is not merely a lost binding: campfire's two sites
 /// for that method are one of each, and seeing only one of them would
 /// have concluded a params object where the app has an attribute hash.
 fn walk<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
@@ -600,7 +600,7 @@ fn callee_class(recv: &Expr, assoc: &AssocCtx<'_>) -> Option<Symbol> {
     // Then the STAMPED TYPE, which is how a plain ivar receiver resolves.
     // A controller's record usually arrives as one — `@bot = User
     // .active_bots.find(params[:id])`, inlined from a `before_action` —
-    // and neither arm above sees a class in that. So
+    // and neither variant above sees a class in that. So
     // `User.create_bot!(bot_params)` got its `.to_attrs` and
     // `@bot.update_bot!(bot_params)`, one action away in the same
     // controller, did not: the model method was handed a params object
@@ -617,7 +617,7 @@ fn callee_class(recv: &Expr, assoc: &AssocCtx<'_>) -> Option<Symbol> {
 }
 
 /// The key space for `callee_class` is the UNQUALIFIED class name,
-/// matching the `Const` arm's `path.last()`.
+/// matching the `Const` variant's `path.last()`.
 fn unqualified(name: &str) -> Symbol {
     Symbol::from(name.rsplit("::").next().unwrap_or(name))
 }
@@ -1040,7 +1040,7 @@ fn rewrite_method(
 fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
     let hash_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Sym),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::gradual()),
     };
     let (mut params, block, ret, effects) = match method.signature.clone() {
         Some(Ty::Fn {
@@ -1055,12 +1055,12 @@ fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::gradual().into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            std::sync::Arc::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::gradual()),
             method.effects.clone(),
         ),
     };
@@ -1095,12 +1095,12 @@ fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpe
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::gradual().into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            std::sync::Arc::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::gradual()),
             method.effects.clone(),
         ),
     };
@@ -1129,7 +1129,7 @@ fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpe
 /// expression slot it came from — a `Seq` nested inside `administrator =
 /// room.creator = …`, which renders as newline-joined lines and binds
 /// the wrong value. So descend only where a statement list genuinely
-/// lives (a Seq, an `if` branch, a block/lambda body, a `case` arm),
+/// lives (a Seq, an `if` branch, a block/lambda body, a `case` variant),
 /// and hand `f` the whole enclosing statement otherwise — `replace_in`
 /// finds the match anywhere inside it.
 fn hoist_in_statements(body: &mut Expr, f: &mut impl FnMut(&mut Expr, &mut Vec<Expr>)) {

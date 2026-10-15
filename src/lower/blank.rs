@@ -148,7 +148,7 @@ pub(crate) fn ground_body(body: &mut Expr, defs: &AppDefinitions) -> bool {
 /// [`apply_blank_lowering`] walks no view body, so a predicate in a
 /// jbuilder value stayed a dynamic call: on CRuby the overlay serves
 /// it, on Spinel it raised `undefined method 'presence' for nil`. The
-/// grounding is the one every app body gets, `Runtime` arm included,
+/// grounding is the one every app body gets, `Runtime` variant included,
 /// so an untyped receiver becomes `ActiveSupport.presence(x)`.
 ///
 /// Everything inside a value counts, the condition of a ternary or an
@@ -287,7 +287,7 @@ enum Grounding {
     /// No static type to ground on: hand the value to the ruby-family
     /// runtime predicate, which branches on the value instead. The
     /// receiver becomes an argument, so it is evaluated exactly once —
-    /// that is why this arm needs no effect-free gate.
+    /// that is why this variant needs no effect-free gate.
     Runtime,
     /// Can't ground; leave the call and report.
     Skip(&'static str),
@@ -319,7 +319,7 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
     // campfire's `revise(granted: [], revoked: [])` reads
     // `granted.present?`, its typer never runs over the extension's
     // body, and a bare User handed in by the test had no `present?`
-    // arm on spinel ("undefined method 'present?' for an instance of
+    // variant on spinel ("undefined method 'present?' for an instance of
     // User") where `ActiveSupport.present?` answers true, as Rails'
     // `Object#present?` does for any record.
     let Some(t) = ty else { return Runtime };
@@ -362,7 +362,7 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
         Ty::Union { variants } => {
             // `String | Content` used to fall through to Runtime, and
             // `compact_blank` then rejected through `ActiveSupport.blank?`,
-            // which does not call `Content#blank?`. Any arm that owns the
+            // which does not call `Content#blank?`. Any variant that owns the
             // predicate keeps the dynamic path, including a nilable
             // `Content | Nil`.
             if variants.iter().any(|v| {
@@ -388,7 +388,7 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
                 OwnDispatch | Skip(_) => unreachable!("own-predicate unions returned above"),
             }
         }
-        Ty::Untyped | Ty::Var { .. } => Runtime,
+        Ty::Untyped { .. } | Ty::Var { .. } => Runtime,
         _ => Runtime,
     }
 }
@@ -490,12 +490,12 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
                 LValue::Var { id, name } => Some(mk(
                     r.span,
                     ExprNode::Var { id: *id, name: name.clone() },
-                    r.ty.clone().unwrap_or(Ty::Untyped),
+                    r.ty.clone().unwrap_or(Ty::gradual()),
                 )),
                 LValue::Ivar { name } => Some(mk(
                     r.span,
                     ExprNode::Ivar { name: name.clone() },
-                    r.ty.clone().unwrap_or(Ty::Untyped),
+                    r.ty.clone().unwrap_or(Ty::gradual()),
                 )),
                 _ => None,
             },
@@ -731,7 +731,7 @@ fn try_rewrite_compact_blank(
             body: cond_body,
             block_style: Default::default(),
         },
-        Ty::Untyped,
+        Ty::gradual(),
     );
     *expr = mk(
         span,
@@ -787,7 +787,7 @@ fn non_nil(t: &Ty) -> Ty {
             let mut kept: Vec<Ty> =
                 variants.iter().filter(|v| !matches!(v, Ty::Nil)).cloned().collect();
             match kept.len() {
-                0 => Ty::Untyped,
+                0 => Ty::gradual(),
                 1 => kept.remove(0),
                 _ => Ty::Union { variants: kept.into() },
             }
@@ -898,7 +898,7 @@ fn runtime_predicate(span: crate::span::Span, r: Expr, pred: Pred, ret: Ty) -> E
     let recv = mk(
         span,
         ExprNode::Const { path: vec![Symbol::new("ActiveSupport")] },
-        Ty::Untyped,
+        Ty::gradual(),
     );
     mk(
         span,
@@ -1046,7 +1046,7 @@ fn non_nil_ty(r: &Expr) -> Ty {
             }
         }
         Some(t) => t.clone(),
-        None => Ty::Untyped,
+        None => Ty::gradual(),
     }
 }
 
@@ -1055,7 +1055,7 @@ fn nullable(t: Ty) -> Ty {
 }
 
 fn unlowered(expr: &Expr, recv_ty: Option<&Ty>, method: &str, reason: &str) -> Diagnostic {
-    let recv_ty = recv_ty.cloned().unwrap_or(Ty::Untyped);
+    let recv_ty = recv_ty.cloned().unwrap_or(Ty::gradual());
     let kind = DiagnosticKind::BlankUnlowered {
         method: Symbol::new(method),
         recv_ty: recv_ty.clone(),

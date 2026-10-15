@@ -153,7 +153,7 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
             let ExprNode::BoolOp { right, .. } = &*expr.node else { unreachable!() };
             send_gates(right, models)
         };
-        // Gate failures fall through untouched: the Send arm below
+        // Gate failures fall through untouched: the Send variant below
         // sees the same gates and pushes the one residue note.
         if is_model && pure {
             let span = expr.span;
@@ -319,7 +319,7 @@ fn send_gates(e: &Expr, models: &HashSet<ClassId>) -> (bool, bool, bool) {
 
 /// True when the receiver types to an app model — directly
 /// (`Class{Invitation}`) or through the post-`find_by` nilable shape
-/// (`Invitation | Nil`, whose nil arm crashes on `update` exactly as
+/// (`Invitation | Nil`, whose nil variant crashes on `update` exactly as
 /// Rails would).
 fn recv_is_model(r: &Expr, models: &HashSet<ClassId>) -> bool {
     match r.ty.as_ref() {
@@ -345,5 +345,5 @@ fn recv_is_model(r: &Expr, models: &HashSet<ClassId>) -> bool {
 }
 
 fn recv_ty_is_unknown(r: &Expr) -> bool {
-    matches!(r.ty.as_ref(), None | Some(Ty::Untyped) | Some(Ty::Var { .. }))
+    matches!(r.ty.as_ref(), None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }))
 }

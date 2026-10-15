@@ -2,7 +2,7 @@
 //!
 //! `emit_expr` is the entry; `emit_node` dispatches on `ExprNode`. Helpers
 //! for arrays, hashes, sends, blocks, literals, lvalues, patterns, and
-//! match arms live here too.
+//! match variants live here too.
 
 use crate::diagnostic::DiagnosticKind;
 use crate::expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
@@ -215,7 +215,7 @@ fn is_empty_branch(e: &Expr) -> bool {
 /// True when any node in this expression tree assigns a variable —
 /// `Assign`/`OpAssign`/`MultiAssign` at any depth. Used to keep an
 /// `if` whose condition binds locals in statement form (see the If
-/// arm in `emit_node`).
+/// variant in `emit_node`).
 fn contains_assign(e: &Expr) -> bool {
     if matches!(
         &*e.node,
@@ -632,10 +632,10 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     // value is not poly — and the row-hydration lookups this pass
     // rewrites carry no stamped type at all, so that gate would skip
     // them too. For a boolean, identity is not a no-op: it is the bug.
-    // The Bool arm sits after `pure_read` so a nullable read keeps nil.
+    // The Bool variant sits after `pure_read` so a nullable read keeps nil.
     let value_is_poly = matches!(
         value.ty.as_ref(),
-        Some(Ty::Untyped) | Some(Ty::Union { .. })
+        Some(Ty::Untyped { .. }) | Some(Ty::Union { .. })
     );
     if !value_is_poly && !is_bool_target(target_ty) {
         return inner;
@@ -653,16 +653,16 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     // the raw-hash path and `row.col` on the typed-row path. Both are
     // side-effect-free lookups off a local, so evaluating twice costs a
     // second lookup and nothing else. This has to cover them, because a
-    // NILABLE target now reaches a coercion arm (see the match below)
+    // NILABLE target now reaches a coercion variant (see the match below)
     // and `nil.to_i` is 0 — the exact NULL-destroying shape the guard
-    // above exists to prevent. Widening the arms without widening this
+    // above exists to prevent. Widening the variants without widening this
     // set collapsed lobsters' /u from 292KB to 3KB: `invited_by_user_id`
     // read 0 instead of nil, so `group_by(&:fk)[nil]` found no roots
     // and the whole invite tree rendered empty.
     // A NILABLE target extends the re-evaluable set to the two shapes
     // the hydration paths read a column through — `row["col"]` and
     // `row.col`, both side-effect-free lookups off a local. It has to,
-    // because such a target now reaches a coercion arm (see the match
+    // because such a target now reaches a coercion variant (see the match
     // below) and `nil.to_i` is 0, the exact NULL-destroying shape the
     // guard exists to prevent. Non-nilable targets keep the original,
     // narrower set: nothing there can be nil, and widening the guard
@@ -672,10 +672,10 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
         target_ty,
         Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil))
     );
-    // BOTH arms gate on a nilable target, for the reason the paragraph
+    // BOTH variants gate on a nilable target, for the reason the paragraph
     // above gives for the second one: a guard exists to keep SQL NULL
     // alive, and a target that cannot be nil has no NULL to keep. The
-    // Var/Ivar arm used to fire unconditionally, which is how `[]=`'s
+    // Var/Ivar variant used to fire unconditionally, which is how `[]=`'s
     // `value` param — always a Var — wrapped EVERY column, including
     // `id`. That emitted `@id = (value).nil? ? nil : (value).to_i` into
     // a slot the RBS pins `Integer` and the runtime seeds `0`: a write
@@ -719,9 +719,9 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
             format!("({inner}).{m}")
         }
     };
-    // Peeled, so a NULLABLE column reaches its own arm. A nullable
+    // Peeled, so a NULLABLE column reaches its own variant. A nullable
     // scalar types `T | Nil`, which matched none of these and fell to
-    // the identity arm below — the same hole `is_bool_target` already
+    // the identity variant below — the same hole `is_bool_target` already
     // peels around for `Bool | Nil`, left open for every other scalar.
     // NULL survives it: the hydration wraps this cast in its own
     // `.nil?` guard, and `coerce` adds a second one for pure reads.
@@ -730,7 +730,7 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
         Ty::Sym => coerce("to_sym"),
         Ty::Int => coerce("to_i"),
         Ty::Float => coerce("to_f"),
-        // Ruby has no `to_b`, which is why this arm was missing — but
+        // Ruby has no `to_b`, which is why this variant was missing — but
         // the coercion is the load-bearing one on the row-hydration
         // path, and leaving it as identity is a correctness bug rather
         // than a missed narrowing.
@@ -1318,18 +1318,18 @@ pub(super) fn emit_send_base(
     // setters MUST keep the explicit `self.x =` form because Ruby
     // parses `x = value` as a local-variable creation, not a method
     // call. Fall through to the standard `(Some(r), _)` path for
-    // setter sends so emit_send_base's setter arm picks it up.
+    // setter sends so emit_send_base's setter variant picks it up.
     if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
         && !is_setter_method(m)
         // Operators are infix, not messages, in Ruby's surface: dropping
         // the receiver from `self == other` leaves `== other`, which
-        // doesn't parse. Both the operator arm below and the `[]` arm
+        // doesn't parse. Both the operator variant below and the `[]` variant
         // want the explicit receiver.
         && !is_binary_operator(m)
         && m != "[]"
         // A method whose name is a Ruby keyword (`self.class`, `self.then`)
         // can't drop to the implicit form — bare `class` parses as the
-        // keyword. Keep the explicit `self.class` (falls to the Some(r) arm).
+        // keyword. Keep the explicit `self.class` (falls to the Some(r) variant).
         && !is_ruby_keyword(m)
         // A ZERO-ARG bare name is the one form Ruby resolves lexically:
         // after `comments = self.comments.x`, a bare `comments` on the
@@ -1801,7 +1801,7 @@ fn emit_pattern(p: &Pattern) -> String {
     }
 }
 
-/// Emit one `CaseMatch` arm as Ruby's `in pattern [if/unless guard]`.
+/// Emit one `CaseMatch` variant as Ruby's `in pattern [if/unless guard]`.
 fn emit_match_arm(arm: &crate::expr::MatchArm) -> String {
     use crate::expr::MatchGuardKind;
     let mut s = format!("in {}", emit_match_pattern(&arm.pattern));

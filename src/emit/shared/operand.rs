@@ -16,7 +16,7 @@
 //!   * `Ty::Var` — an unresolved inference variable.
 //!   * `Ty::Untyped` — the explicit gradual escape hatch (RBS `untyped`,
 //!     or a type the analyzer couldn't refine past it).
-//!   * `Ty::Union` with any gradual arm — one gradual variant means we
+//!   * `Ty::Union` with any gradual variant — one gradual variant means we
 //!     can't prove the whole value is incompatible (e.g.
 //!     `(Float | untyped) * Float`). Checked recursively so nested
 //!     unions collapse the same way.
@@ -29,7 +29,7 @@ use crate::ty::Ty;
 /// module docs for the four gradual/unknown cases.
 pub fn is_gradual_operand(t: Option<&Ty>) -> bool {
     match t {
-        None | Some(Ty::Var { .. }) | Some(Ty::Untyped) => true,
+        None | Some(Ty::Var { .. }) | Some(Ty::Untyped { .. }) | Some(Ty::Rec { .. }) => true,
         // Not `Incompatible`: a request-params value is whatever the request carried, so its operators are the native ones.
         Some(Ty::Class { id, .. }) if id.0.as_str() == crate::analyze::PARAM_VALUE => true,
         Some(Ty::Union { variants }) => {
@@ -45,7 +45,7 @@ pub fn is_user_operator_receiver(receiver: &crate::expr::Expr) -> bool {
 }
 
 /// An ordered number: `Int`, `Float`, `Numeric`/`BigDecimal`/`Rational`, or
-/// a union whose every arm is one (`Float | Integer`, `Numeric | Integer`).
+/// a union whose every variant is one (`Float | Integer`, `Numeric | Integer`).
 /// Ruby's arithmetic and comparison are defined between any two of them, so
 /// for these the classifiers treat the pair like `Int` and `Float`.
 pub fn is_number(ty: &Ty) -> bool {
@@ -72,7 +72,7 @@ mod tests {
         assert!(is_gradual_operand(Some(&Ty::Var {
             var: crate::ident::TyVar(0),
         })));
-        assert!(is_gradual_operand(Some(&Ty::Untyped)));
+        assert!(is_gradual_operand(Some(&Ty::gradual())));
     }
 
     #[test]
@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn union_is_gradual_iff_an_arm_is() {
-        // A union of fully-concrete arms is NOT gradual — Ruby may still
+        // A union of fully-concrete variants is NOT gradual — Ruby may still
         // raise on it (e.g. `Int | Nil`), so the classifier keeps
         // checking.
         let concrete = Ty::Union {
@@ -91,9 +91,9 @@ mod tests {
         };
         assert!(!is_gradual_operand(Some(&concrete)));
 
-        // One gradual arm makes the whole union gradual.
+        // One gradual variant makes the whole union gradual.
         let with_untyped = Ty::Union {
-            variants: vec![Ty::Float, Ty::Untyped].into(),
+            variants: vec![Ty::Float, Ty::gradual()].into(),
         };
         assert!(is_gradual_operand(Some(&with_untyped)));
 
@@ -101,7 +101,7 @@ mod tests {
         let nested = Ty::Union {
             variants: vec![
                 Ty::Union {
-                    variants: vec![Ty::Untyped, Ty::Untyped].into(),
+                    variants: vec![Ty::gradual(), Ty::gradual()].into(),
                 },
                 Ty::Int,
             ].into(),

@@ -260,7 +260,7 @@ fn method_params_for(recv: Option<&Expr>, method: &str) -> Option<HashSet<String
         }
         // Typed value receiver — `@controller.render("err", status:
         // :unprocessable_entity)` in a test body. The annotation names
-        // the class just as well as a Const does; without this arm every
+        // the class just as well as a Const does; without this variant every
         // kwarg call through a local or ivar falls back to a map literal
         // and fails to typecheck against the real parameter list. The
         // ancestor walk matters here too: the method is usually the
@@ -1127,13 +1127,13 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
         // fail Kotlin invariance against String-keyed helper params.
         if let Some(crate::ty::Ty::Hash { key, value }) = e.ty.as_ref() {
             let k = match key.as_ref() {
-                crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. } | crate::ty::Ty::Sym => {
+                crate::ty::Ty::Untyped { .. } | crate::ty::Ty::Var { .. } | crate::ty::Ty::Sym => {
                     "String".to_string()
                 }
                 _ => kotlin_ty(key),
             };
             let v = match value.as_ref() {
-                crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. } => "Any?".to_string(),
+                crate::ty::Ty::Untyped { .. } | crate::ty::Ty::Var { .. } => "Any?".to_string(),
                 _ => kotlin_ty(value),
             };
             return format!("mutableMapOf<{k}, {v}>()");
@@ -1192,7 +1192,7 @@ fn emit_hash_precise(entries: &[(Expr, Expr)], e: &Expr) -> String {
 /// `Bottom` name no storable value.
 fn is_concrete_elem(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
-    !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil | Ty::Bottom | Ty::Union { .. })
+    !matches!(ty, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Nil | Ty::Bottom | Ty::Union { .. })
 }
 
 /// Emit a non-empty hash literal with no explicit type arguments, so the
@@ -1476,7 +1476,7 @@ fn coerce_nullable_finder(
             let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
             matches!(non_nil.as_slice(), [Ty::Class { .. }])
         }
-        None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => {
+        None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => {
             let ExprNode::Const { path } = &*r.node else { return rendered };
             let cls = type_name(
                 &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
@@ -1941,7 +1941,7 @@ fn emit_send(
         // Ruby source spells them out precisely so every target has
         // them — and rewriting either to Kotlin's `.size` / `.isEmpty()`
         // names something the class doesn't have. A sentinel scrutinee
-        // (no arm matches it) drops through to the general call path
+        // (no variant matches it) drops through to the general call path
         // below, which still sees the real `method`.
         let coercible = if recv_declares_method(r, method) { "\0" } else { method };
         match coercible {
@@ -2222,13 +2222,13 @@ fn try_emit_pinned_hash(entries: &[(Expr, Expr)], ty: &crate::ty::Ty) -> Option<
 fn hash_elem_pinnable(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
     match ty {
-        Ty::Untyped | Ty::Var { .. } | Ty::Bottom | Ty::Nil => false,
+        Ty::Untyped { .. } | Ty::Var { .. } | Ty::Bottom | Ty::Nil => false,
         Ty::Union { variants } => {
             !variants.is_empty()
                 && variants.iter().any(|v| !matches!(v, Ty::Nil))
                 && variants.iter().all(|v| match v {
                     Ty::Nil => true,
-                    Ty::Untyped | Ty::Var { .. } | Ty::Bottom | Ty::Union { .. } => false,
+                    Ty::Untyped { .. } | Ty::Var { .. } | Ty::Bottom | Ty::Union { .. } => false,
                     _ => true,
                 })
         }
@@ -2242,8 +2242,8 @@ fn hash_elem_pinnable(ty: &crate::ty::Ty) -> bool {
 fn nilable_prop_conversion(base: &str, value: &Expr) -> Option<String> {
     use crate::ty::Ty;
     let rhs_untyped = match value.ty.as_ref() {
-        None | Some(Ty::Untyped) => true,
-        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped)),
+        None | Some(Ty::Untyped { .. }) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped { .. })),
         _ => false,
     };
     if !rhs_untyped {

@@ -13,7 +13,7 @@
 //! Reachability is computed over the classes the `ruby` target emits
 //! (controllers with their filter chain spelled out in `process_action`,
 //! views as module functions, models, library classes), starting from
-//! one action's arm of `process_action`. It over-approximates: a send
+//! one action's variant of `process_action`. It over-approximates: a send
 //! whose receiver the analysis did not type reaches every app method of
 //! that name, and a symbol literal naming an app method counts as a
 //! call (callbacks, `send`). An error inside a reached method's source
@@ -504,7 +504,7 @@ fn containing_methods<'m>(
     innermost
 }
 
-/// Every app method one action can run: its arm of `process_action`
+/// Every app method one action can run: its variant of `process_action`
 /// (the filters that apply to it, then the action), closed over calls.
 fn reach(
     index: &Index,
@@ -580,7 +580,7 @@ fn calls_for_action(e: &Expr, action: &str, f: &mut dyn FnMut(&Expr)) {
             });
             match hit {
                 Some(arm) => calls_for_action(&arm.body, action, f),
-                // No arm: every unmatched arm (an `else`) may run.
+                // No variant: every unmatched variant (an `else`) may run.
                 None => {
                     for a in arms.iter().filter(|a| !matches!(a.pattern, Pattern::Lit { .. })) {
                         calls_for_action(&a.body, action, f);
@@ -758,7 +758,7 @@ fn classes_of(ty: &Ty) -> Vec<String> {
             out
         }
         // Primitives, containers and the like: runtime methods only.
-        Ty::Untyped | Ty::Var { .. } => Vec::new(),
+        Ty::Untyped { .. } | Ty::Var { .. } => Vec::new(),
         _ => vec![String::from("\0none")],
     }
 }

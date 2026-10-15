@@ -183,7 +183,7 @@ fn relax_from_stmt_handle(lc: &mut LibraryClass) {
         if m.name.as_str() == "from_stmt" && m.receiver == MethodReceiver::Class {
             if let Some(crate::ty::Ty::Fn { params, .. }) = m.signature.as_mut() {
                 if let Some(p) = params.first_mut() {
-                    p.ty = crate::ty::Ty::Untyped.into();
+                    p.ty = crate::ty::Ty::gradual().into();
                 }
             }
         }
@@ -309,7 +309,7 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     library::apply_raw_helper_monomorphization(&mut lcs, app);
     // Dynamic `send(k)` → static `case` dispatch moved to the shared
     // post-analyze hook (`lower::apply_send_static_dispatch`) — hook
-    // bodies arrive here already grounded, with duration-unit arms in
+    // bodies arrive here already grounded, with duration-unit variants in
     // plural form for the duration lowering below.
     // `record.update!(k: v)` inlining moved to the shared post-analyze
     // hook (`lower::apply_update_kwargs_inline`) — hook bodies arrive
@@ -502,10 +502,10 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
 /// `app/models/<name>.rb` because they're plain holders, not request
 /// handlers.
 pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
-    // RSS_ONLY: the spinel tree compiles these, so the inline-json arms
+    // RSS_ONLY: the spinel tree compiles these, so the inline-json variants
     // stay out — they reference the CRuby-overlay JsonRender and don't
     // type under the AOT compile (CI caught `render(JsonRender.encode
-    // (...))` as sp_RbVal-vs-char* in articles_controller). The rss arm
+    // (...))` as sp_RbVal-vs-char* in articles_controller). The rss variant
     // reaches only the emitted `Views::<X>.rss` template and the shared
     // `Rails.cache.fetch_str`, both of which this tree already carries.
     let mut lcs = lower_controllers_for_spinel(app, FormatBreadth::RSS_ONLY);
@@ -551,7 +551,7 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
 /// writes, before rendering. Shared with `emit::futamura::routes`.
 pub(crate) fn lowered_controller_lcs_with_layout(app: &App) -> Vec<LibraryClass> {
     // FULL: the CRuby/JRuby trees ship the overlay (JsonRender) so the
-    // widened respond_to arms all resolve; these files dedupe last-wins
+    // widened respond_to variants all resolve; these files dedupe last-wins
     // over the spinel-shape ones.
     let mut lcs = lower_controllers_for_spinel(app, FormatBreadth::FULL);
     library::apply_scope_lowering(&mut lcs, app);
@@ -748,7 +748,7 @@ pub(crate) fn lowered_view_lcs(app: &App) -> (Vec<&crate::dialect::View>, Vec<Li
     // — then resolve bare app-helper calls (`avatar_img(...)` →
     // `ApplicationHelper.avatar_img(...)`). Scope lowering is a strict
     // no-op for scope-free apps (the blog), and a view LC is never a
-    // model, so only the call-site rewrite arm runs.
+    // model, so only the call-site rewrite variant runs.
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     // Whatever `apply_helper_lowering` did not claim as an app helper

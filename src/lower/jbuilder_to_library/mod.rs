@@ -1039,7 +1039,7 @@ fn emit_pairs(
                 // `json.created_at message.created_at.utc` — a temporal
                 // column of the template's argument, bare or through
                 // `utc`/`getutc`/`gmtime`, takes the same
-                // `encode_datetime(<col>_raw)` route the Extract arm
+                // `encode_datetime(<col>_raw)` route the Extract variant
                 // gives `json.(message, :created_at)`: the stored TEXT
                 // is UTC, so `utc` is the identity on it, and
                 // `encode_value` would otherwise render `Time#to_s`
@@ -2210,7 +2210,7 @@ fn template_param_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
     if name == "params" {
         return crate::ty::Ty::Hash {
             key: std::sync::Arc::new(crate::ty::Ty::Str),
-            value: std::sync::Arc::new(crate::ty::Ty::Untyped),
+            value: std::sync::Arc::new(crate::ty::Ty::gradual()),
         };
     }
     crate::lower::view_to_library::ivar_ty(name, known_models)

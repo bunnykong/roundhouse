@@ -22,7 +22,7 @@ pub fn ts_ty(ty: &Ty) -> String {
         // runtime, not the first-class `Ty::Time` column type.)
         Ty::Time => "Date".into(),
         Ty::Date => crate::emit::diagnostics::unsupported_date_ty("typescript"),
-        Ty::Untyped => "any".into(),
+        Ty::Untyped { .. } => "any".into(),
         Ty::Bottom => "never".into(),
         // A self type the analyzer should have substituted with
         // the receiving class (see `Ty::SelfInstance`). Reaching
@@ -31,7 +31,7 @@ pub fn ts_ty(ty: &Ty) -> String {
             return crate::emit::diagnostics::unsupported_self_instance_ty("typescript");
         }
         // Analysis-time relation type — erased by query specialization
-        // before emit (see `Ty::Relation`). Explicit arm so the `any`
+        // before emit (see `Ty::Relation`). Explicit variant so the `any`
         // catch-all below can't silently absorb it: report, never
         // degrade.
         Ty::Relation { of } => {

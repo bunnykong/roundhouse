@@ -462,9 +462,9 @@ fn method_reads_self(body: &Expr) -> bool {
             }),
             ExprNode::Hash { entries, .. } => entries.iter().any(|(k, v)| walk(k) || walk(v)),
             ExprNode::Array { elements, .. } => elements.iter().any(walk),
-            // `||` / `&&` short-circuit expressions. Without this arm
+            // `||` / `&&` short-circuit expressions. Without this variant
             // a body like `label || @model_name` short-circuits the
-            // self-detection: walk falls into the catch-all `_` arm
+            // self-detection: walk falls into the catch-all `_` variant
             // and returns false, so the method gets misclassified as
             // static-safe (FormBuilder.submit was the visible case —
             // 3 E0424 errors from the missing &self receiver).
@@ -475,12 +475,12 @@ fn method_reads_self(body: &Expr) -> bool {
                     || end.as_ref().map(|e| walk(e)).unwrap_or(false)
             }
             ExprNode::Yield { args } => args.iter().any(walk),
-            // `case scrutinee; when …; body; end` — the per-arm
+            // `case scrutinee; when …; body; end` — the per-variant
             // bodies + scrutinee can reach self via Ivar reads or
             // direct self-references. Lowerer-synthesized
             // `get_index` / `set_index` are the canonical case
-            // (each arm reads/writes a `@col` Ivar); without this
-            // arm both methods misclassified as static and emitted
+            // (each variant reads/writes a `@col` Ivar); without this
+            // variant both methods misclassified as static and emitted
             // without a `&self` receiver, blowing every Ivar
             // reference into E0424.
             ExprNode::Case { scrutinee, arms } => {
@@ -603,7 +603,7 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
             // value-typed payload without an E0308. Without widening
             // the field types as `()` and every other path fails.
             None => Ty::Union {
-                variants: vec![Ty::Nil, Ty::Untyped].into(),
+                variants: vec![Ty::Nil, Ty::gradual()].into(),
             },
         }
     } else {
@@ -614,8 +614,8 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
         tys.iter()
             .max_by_key(|t| match t {
                 Ty::Hash { key, value } => {
-                    let k = !matches!(**key, Ty::Untyped);
-                    let v = !matches!(**value, Ty::Untyped);
+                    let k = !matches!(**key, Ty::Untyped { .. });
+                    let v = !matches!(**value, Ty::Untyped { .. });
                     (k as u8) + (v as u8)
                 }
                 // Empty `[]` seeds Array[Untyped]; a later `ivar << s`
@@ -623,7 +623,7 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
                 // the concrete elem so rust emits `Vec<String>` not
                 // `Vec<Value>`.
                 Ty::Array { elem } => {
-                    if matches!(elem.as_ref(), Ty::Untyped) {
+                    if matches!(elem.as_ref(), Ty::Untyped { .. }) {
                         1
                     } else {
                         2
@@ -632,7 +632,7 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
                 _ => 0,
             })
             .cloned()
-            .unwrap_or(Ty::Untyped)
+            .unwrap_or(Ty::gradual())
     }
 }
 
@@ -655,7 +655,7 @@ fn walk_collect_ivars(
     }
     match &*e.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let ty = value.ty.clone().unwrap_or(Ty::Untyped);
+            let ty = value.ty.clone().unwrap_or(Ty::gradual());
             record(name.as_str(), ty, order, observed);
             walk_collect_ivars(value, order, observed);
         }
@@ -668,7 +668,7 @@ fn walk_collect_ivars(
             target: LValue::Attr { recv, name },
             value,
         } if matches!(&*recv.node, ExprNode::SelfRef) => {
-            let ty = value.ty.clone().unwrap_or(Ty::Untyped);
+            let ty = value.ty.clone().unwrap_or(Ty::gradual());
             record(name.as_str(), ty, order, observed);
             walk_collect_ivars(value, order, observed);
         }
@@ -685,7 +685,7 @@ fn walk_collect_ivars(
             if method.as_str() == "<<" && args.len() == 1 =>
         {
             if let ExprNode::Ivar { name } = &*recv.node {
-                let elem = args[0].ty.clone().unwrap_or(Ty::Untyped);
+                let elem = args[0].ty.clone().unwrap_or(Ty::gradual());
                 record(
                     name.as_str(),
                     Ty::Array {
@@ -708,8 +708,8 @@ fn walk_collect_ivars(
                     .map(|tys| tys.iter().any(|t| matches!(t, Ty::Hash { .. })))
                     .unwrap_or(false);
                 if already_hash {
-                    let k_ty = args[0].ty.clone().unwrap_or(Ty::Untyped);
-                    let v_ty = args[1].ty.clone().unwrap_or(Ty::Untyped);
+                    let k_ty = args[0].ty.clone().unwrap_or(Ty::gradual());
+                    let v_ty = args[1].ty.clone().unwrap_or(Ty::gradual());
                     record(
                         key,
                         Ty::Hash {

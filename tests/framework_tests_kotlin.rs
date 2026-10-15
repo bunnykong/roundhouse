@@ -31,7 +31,7 @@ use roundhouse::App;
 /// Walk `runtime/ruby/**/*.rbs` and merge each parsed signature into
 /// `app.rbs_signatures`. Without this the test body-typer can't dispatch
 /// precisely against framework methods (`Inflector.pluralize`, …) and the
-/// strict-typed Kotlin emit falls through to the `Ty::Untyped → Any?`
+/// strict-typed Kotlin emit falls through to the `Ty::gradual() → Any?`
 /// collapse. Same helper as the typescript/crystal gates (intentional
 /// duplication — keeping each gate self-contained).
 fn load_framework_rbs(app: &mut App) {

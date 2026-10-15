@@ -20,7 +20,7 @@ use crate::effect::EffectSet;
 use crate::ident::{ClassId, Symbol, TyVar};
 
 /// The types that inhabit Roundhouse values.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Ty {
     Int,
@@ -128,7 +128,15 @@ pub enum Ty {
     /// elevate any reachable `Untyped` to an emit-time error via the
     /// diagnostic pipeline — the gradual escape only survives
     /// emission for targets that explicitly accept it.
-    Untyped,
+    ///
+    /// `why` records which of three meanings a producer gave it
+    /// ([`Provenance`]). It is carried for reporting only: two
+    /// `Untyped` values compare, order and hash equal whatever their
+    /// provenance, and it is not serialized.
+    Untyped {
+        #[serde(skip)]
+        why: Provenance,
+    },
 
     /// The bottom type — values of this type don't exist at runtime
     /// because the expression diverges (`raise`, `return`, `next`,
@@ -145,6 +153,88 @@ pub enum Ty {
     /// the union filter is the analog of Crystal's `Type.merge`
     /// dropping NoReturn variants during type joining.
     Bottom,
+
+    /// A reference to an inference slot of a recursive component: a
+    /// method's return, a parameter, or a position or narrowing below them
+    /// (`analyze::fold`). Built only with `RH_FOLD=1`, and analysis-only:
+    /// the analyzer expands every reference before it returns, so emitters
+    /// never meet one, and read one as `Untyped` if they do.
+    Rec { slot: u32 },
+}
+
+/// Why a type is `untyped`. One value used to carry three meanings, and
+/// every rule that meets it has to keep or drop it, which is right for one
+/// meaning and wrong for another. The producers now say which they mean.
+///
+/// A finite set of input reasons, with gradual winning the effective tag.
+/// RH_PROVENANCE_AUDIT conserves the set at equal merges; ordinary type equality,
+/// ordering, hashing and serialization remain provenance-insensitive.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Provenance(u8);
+
+#[allow(non_upper_case_globals)]
+impl Provenance {
+    /// Not computed yet: an inference gap that a later round may fill. It
+    /// carries no evidence about the value.
+    pub const Pending: Self = Self(1);
+    /// The author opted out: RBS `untyped`, Sorbet `T.untyped`, or a
+    /// declared or modeled signature (the catalog, the framework runtime)
+    /// that says any value is accepted.
+    pub const Gradual: Self = Self(2);
+    /// Nothing answers it: an unsupported construct, an unknown or external
+    /// surface, or a position the analysis cut or widened.
+    pub const Unresolved: Self = Self(4);
+
+    pub fn union(self, other: Self) -> Self {
+        static LIFT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let b = self.0 | other.0;
+        let lift = *LIFT.get_or_init(|| std::env::var("RH_PROVENANCE_LIFT").as_deref() != Ok("0"));
+        Self(if lift && b & 6 != 0 { b & !1 } else { b })
+    }
+    pub(crate) fn reporting_bits(self) -> u8 { self.0 }
+    pub fn effective(self) -> Self {
+        if self.0 & 2 != 0 { Self::Gradual } else if self.0 & 4 != 0 { Self::Unresolved } else { Self::Pending }
+    }
+    pub fn reasons(self) -> Vec<&'static str> {
+        [(1,"Pending"),(4,"Unresolved"),(2,"Gradual")].into_iter()
+            .filter_map(|(bit,name)| (self.0 & bit != 0).then_some(name)).collect()
+    }
+}
+impl Default for Provenance { fn default() -> Self { Self::Gradual } }
+impl std::fmt::Debug for Provenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reasons().join("+"))
+    }
+}
+
+impl Ty {
+    /// `untyped`, as a producer that means `why`.
+    pub const fn untyped(why: Provenance) -> Ty {
+        Ty::Untyped { why }
+    }
+
+    /// `untyped` the author or a declaration chose.
+    pub const fn gradual() -> Ty {
+        Ty::Untyped { why: Provenance::Gradual }
+    }
+
+    /// `untyped` because nothing answers the position.
+    pub const fn unresolved() -> Ty {
+        Ty::Untyped { why: Provenance::Unresolved }
+    }
+
+    /// `untyped` standing in for a value not computed yet.
+    pub const fn pending_untyped() -> Ty {
+        Ty::Untyped { why: Provenance::Pending }
+    }
+
+    /// The provenance of an `untyped`, `None` for any other type.
+    pub fn provenance(&self) -> Option<Provenance> {
+        match self {
+            Ty::Untyped { why } => Some(why.effective()),
+            _ => None,
+        }
+    }
 }
 
 impl Ty {
@@ -161,50 +251,65 @@ impl Ty {
     /// `Array[instance]`, `instance?` and a signature's params are all
     /// substituted, not just a bare return.
     pub fn subst_self(&self, with: &Ty) -> Ty {
-        match self {
+        self.subst_self_memo(with, &mut std::collections::HashMap::new())
+    }
+
+    /// [`Self::subst_self`], visiting each shared node once: `memo` is
+    /// keyed by node address, which is stable while `self` is borrowed.
+    fn subst_self_memo(&self, with: &Ty, memo: &mut std::collections::HashMap<usize, Ty>) -> Ty {
+        let key = self as *const Ty as usize;
+        if let Some(result) = memo.get(&key) {
+            return result.clone();
+        }
+        let result = match self {
             Ty::SelfInstance => with.clone(),
-            Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(elem.subst_self(with)) },
+            Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(elem.subst_self_memo(with, memo)) },
             Ty::Hash { key, value } => Ty::Hash {
-                key: std::sync::Arc::new(key.subst_self(with)),
-                value: std::sync::Arc::new(value.subst_self(with)),
+                key: std::sync::Arc::new(key.subst_self_memo(with, memo)),
+                value: std::sync::Arc::new(value.subst_self_memo(with, memo)),
             },
             Ty::Tuple { elems } => {
-                Ty::Tuple { elems: elems.iter().map(|t| t.subst_self(with)).collect() }
+                Ty::Tuple { elems: elems.iter().map(|t| t.subst_self_memo(with, memo)).collect() }
             }
             Ty::Record { row } => Ty::Record {
                 row: Row {
                     fields: row
                         .fields
                         .iter()
-                        .map(|(name, ty)| (name.clone(), ty.subst_self(with)))
+                        .map(|(name, ty)| (name.clone(), ty.subst_self_memo(with, memo)))
                         .collect(),
                     rest: row.rest.clone(),
                 },
             },
             Ty::Union { variants } => {
-                Ty::Union { variants: variants.iter().map(|t| t.subst_self(with)).collect() }
+                Ty::Union { variants: variants.iter().map(|t| t.subst_self_memo(with, memo)).collect() }
             }
             Ty::Class { id, args } => Ty::Class {
                 id: id.clone(),
-                args: args.iter().map(|t| t.subst_self(with)).collect(),
+                args: args.iter().map(|t| t.subst_self_memo(with, memo)).collect(),
             },
             Ty::Fn { params, block, ret, effects } => Ty::Fn {
                 params: params
                     .iter()
                     .map(|p| Param {
                         name: p.name.clone(),
-                        ty: p.ty.subst_self(with).into(),
+                        ty: p.ty.subst_self_memo(with, memo).into(),
                         kind: p.kind.clone(),
                     })
                     .collect(),
-                block: block.as_ref().map(|b| std::sync::Arc::new(b.subst_self(with))),
-                ret: std::sync::Arc::new(ret.subst_self(with)),
+                block: block.as_ref().map(|b| std::sync::Arc::new(b.subst_self_memo(with, memo))),
+                ret: std::sync::Arc::new(ret.subst_self_memo(with, memo)),
                 effects: effects.clone(),
             },
             // Leaves, and `Relation { of }` whose `of` is a ClassId
             // rather than a Ty.
             other => other.clone(),
-        }
+        };
+        // An unchanged node keeps its identity, so sharing survives the
+        // substitution.
+        let result = if result == *self { self.clone() } else { result };
+        memo.insert(key, result.clone());
+        result
     }
 
     /// Every `Class { from }` / `Relation { of: from }` rewritten to `to`, recursing like [`Self::subst_self`].
@@ -273,7 +378,7 @@ impl Ty {
     /// declaration the last word rather than a hint.
     pub fn mentions_unknown(&self) -> bool {
         match self {
-            Ty::Var { .. } | Ty::Untyped => true,
+            Ty::Var { .. } | Ty::Untyped { .. } => true,
             Ty::Class { args, .. } => args.iter().any(Ty::mentions_unknown),
             Ty::Array { elem } => elem.mentions_unknown(),
             Ty::Hash { key, value } => key.mentions_unknown() || value.mentions_unknown(),
@@ -300,7 +405,7 @@ impl Ty {
     /// are *known* types, so sites that also treat those as noise use
     /// their own `matches!` and must not be folded into this predicate.
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Ty::Var { .. } | Ty::Untyped)
+        matches!(self, Ty::Var { .. } | Ty::Untyped { .. })
     }
 
     /// The element type of a collection-shaped type: `Array[T]` → `T`,
@@ -397,7 +502,7 @@ impl Ty {
         }
     }
 
-    /// For a binary nilable union `T | Nil`, return the non-`Nil` arm
+    /// For a binary nilable union `T | Nil`, return the non-`Nil` variant
     /// `T`; otherwise return `self` unchanged. Only the exact two-variant
     /// `{T, Nil}` shape is peeled — wider unions stay intact.
     pub(crate) fn peel_nilable(&self) -> &Ty {
@@ -431,7 +536,7 @@ impl Ty {
     }
 
     /// True when `self` is [`Ty::Untyped`] / [`Ty::Var`], or a union
-    /// that carries either as a top-level arm.
+    /// that carries either as a top-level variant.
     pub(crate) fn has_unknown_arm(&self) -> bool {
         match self {
             Ty::Union { variants } => variants.iter().any(Ty::is_unknown),
@@ -439,7 +544,7 @@ impl Ty {
         }
     }
 
-    /// Drop every top-level [`Ty::Untyped`] / [`Ty::Var`] arm from a
+    /// Drop every top-level [`Ty::Untyped`] / [`Ty::Var`] variant from a
     /// union, returning the concrete core: the sole survivor if one
     /// remains, a narrower `Union` if several do, and `Untyped` if
     /// nothing concrete remains. Unlike [`Self::strip_nil`] (which
@@ -451,12 +556,12 @@ impl Ty {
             Ty::Union { variants } => {
                 let kept: Vec<Ty> = variants.into_iter().filter(|v| !v.is_unknown()).collect();
                 match kept.len() {
-                    0 => Ty::Untyped,
+                    0 => Ty::gradual(),
                     1 => kept.into_iter().next().unwrap(),
                     _ => Ty::Union { variants: kept.into() },
                 }
             }
-            Ty::Var { .. } => Ty::Untyped,
+            Ty::Var { .. } => Ty::pending_untyped(),
             other => other,
         }
     }
@@ -479,11 +584,16 @@ impl Ty {
     /// picking by order instead of by arrival keeps a join's stored
     /// form independent of the order its inputs came in.
     pub(crate) fn canonical_min(a: Ty, b: Ty) -> Ty {
-        if !a.holds_record() || cmp_ty(&b, &a) != std::cmp::Ordering::Less {
-            a
+        let (chosen, other) = if !a.holds_record() || cmp_ty(&b, &a) != std::cmp::Ordering::Less {
+            (a, b)
         } else {
-            b
-        }
+            (b, a)
+        };
+        if crate::analyze::producer_evidence::on() {
+            let result = crate::analyze::producer_evidence::merge_equal(chosen.clone(), &other);
+            crate::analyze::producer_evidence::equal_merge(&chosen, &other, &result);
+            result
+        } else { chosen }
     }
 
     fn holds_record(&self) -> bool {
@@ -531,13 +641,18 @@ fn ty_tag(ty: &Ty) -> u8 {
         Ty::Class { .. } => 14,
         Ty::Fn { .. } => 15,
         Ty::Var { .. } => 16,
-        Ty::Untyped => 17,
+        Ty::Untyped { .. } => 17,
         Ty::Bottom => 18,
         Ty::Nil => 19,
+        Ty::Rec { .. } => 20,
     }
 }
 
 fn cmp_ty(a: &Ty, b: &Ty) -> std::cmp::Ordering {
+    crate::ty_ops::compare(a, b, || cmp_ty_raw(a, b))
+}
+
+fn cmp_ty_raw(a: &Ty, b: &Ty) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     ty_tag(a).cmp(&ty_tag(b)).then_with(|| match (a, b) {
         (Ty::Relation { of: x }, Ty::Relation { of: y }) => x.cmp(y),
@@ -564,6 +679,7 @@ fn cmp_ty(a: &Ty, b: &Ty) -> std::cmp::Ordering {
             .then_with(|| cmp_ty(rx, ry))
             .then_with(|| ex.effects.cmp(&ey.effects)),
         (Ty::Var { var: x }, Ty::Var { var: y }) => x.cmp(y),
+        (Ty::Rec { slot: x }, Ty::Rec { slot: y }) => x.cmp(y),
         _ => Ordering::Equal,
     })
 }
@@ -640,7 +756,7 @@ fn param_kind_tag(kind: &ParamKind) -> u8 {
 
 /// A row-polymorphic record shape.
 /// `fields` are known; `rest` is the open-extension variable if this is a partial view.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
     pub fields: Shared<IndexMap<Symbol, Ty>>,
     pub rest: Option<TyVar>,
@@ -652,14 +768,14 @@ impl Row {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Param {
     pub name: Symbol,
     pub ty: std::sync::Arc<Ty>,
     pub kind: ParamKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ParamKind {
     Required,
@@ -670,8 +786,102 @@ pub enum ParamKind {
     Block,
 }
 
+// IndexMap Eq ignores insertion order; preserve that in Row's Hash.
+impl std::hash::Hash for Row {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.rest.hash(state);
+        self.fields.len().hash(state);
+        let mut fields: Vec<_> = self.fields.iter().collect();
+        fields.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, ty) in fields { name.hash(state); ty.hash(state); }
+    }
+}
+
+#[cfg(test)]
+mod shared_identity_tests {
+    use super::*;
+    use std::hash::{Hash, Hasher};
+    fn fingerprint(t: &Ty) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        t.hash(&mut h); h.finish()
+    }
+    #[test]
+    fn equal_record_orders_have_equal_hashes_without_reordering_serialization() {
+        let a = Ty::Record { row: Row { fields: [(Symbol::from("a"), Ty::Int),
+            (Symbol::from("b"), Ty::Str)].into_iter().collect(), rest: None } };
+        let b = Ty::Record { row: Row { fields: [(Symbol::from("b"), Ty::Str),
+            (Symbol::from("a"), Ty::Int)].into_iter().collect(), rest: None } };
+        assert_eq!(a, b); assert_eq!(fingerprint(&a), fingerprint(&b));
+        // Preserve existing IndexMap wire order; hashing never mutates Row.
+        assert_ne!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
+    }
+    #[test]
+    fn extracting_shared_children_preserves_other_owners_and_wire_type() {
+        let child = Arc::new(Ty::Tuple { elems: vec![Ty::Str, Ty::Int].into() });
+        let array = Ty::Array { elem: child.clone() };
+        let Ty::Array { elem } = array else { unreachable!() };
+        assert_eq!(Arc::unwrap_or_clone(elem), *child);
+        let restored: Ty = serde_json::from_str(&serde_json::to_string(&Ty::Array {
+            elem: child.clone() }).unwrap()).unwrap();
+        assert_eq!(restored, Ty::Array { elem: child });
+    }
+}
+
 impl From<std::sync::Arc<Ty>> for Ty {
     fn from(value: std::sync::Arc<Ty>) -> Self {
         std::sync::Arc::unwrap_or_clone(value)
+    }
+}
+
+/// Structural equality that compares each pair of shared nodes once
+/// (`ty_ops::equal`).
+impl PartialEq for Ty {
+    fn eq(&self, other: &Self) -> bool {
+        crate::ty_ops::equal(self, other)
+    }
+}
+
+/// Structural hash that hashes each shared node once (`ty_hash`).
+impl std::hash::Hash for Ty {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        crate::ty_hash::hash(self, h);
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    use std::hash::{Hash, Hasher};
+
+    fn hash(t: &Ty) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    }
+
+    /// The tag is carried, not consulted: every kind of `untyped` compares,
+    /// orders, hashes and serializes as `untyped` did.
+    #[test]
+    fn provenance_never_changes_how_untyped_behaves() {
+        let kinds = [Ty::pending_untyped(), Ty::gradual(), Ty::unresolved()];
+        for a in &kinds {
+            for b in &kinds {
+                assert_eq!(a, b);
+                assert_eq!(hash(a), hash(b));
+                assert_eq!(cmp_ty(a, b), std::cmp::Ordering::Equal);
+                assert_eq!(serde_json::to_string(a).unwrap(), serde_json::to_string(b).unwrap());
+            }
+        }
+        assert_eq!(serde_json::to_string(&Ty::unresolved()).unwrap(), r#"{"kind":"untyped"}"#);
+        let back: Ty = serde_json::from_str(r#"{"kind":"untyped"}"#).unwrap();
+        assert_eq!(back.provenance(), Some(Provenance::Gradual));
+        let u = Ty::Union { variants: vec![Ty::Int, Ty::unresolved()].into() };
+        assert_eq!(u, Ty::Union { variants: vec![Ty::Int, Ty::gradual()].into() });
+    }
+
+    #[test]
+    fn a_pending_var_strips_to_pending_untyped() {
+        assert_eq!(Ty::Var { var: TyVar(0) }.strip_unknown().provenance(), Some(Provenance::Pending));
+        assert_eq!(Ty::Int.provenance(), None);
     }
 }

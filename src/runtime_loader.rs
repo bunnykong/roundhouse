@@ -634,7 +634,7 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
             ("merge_attrs", "hash_ext"),
             // `RubyToS` trait — the `inner_v.to_s` / `v.to_s` sends
             // in `render_attrs` lower to `(recv).ruby_to_s()` via
-            // the `Ty::Untyped` arm in
+            // the `Ty::gradual()` variant in
             // `src/emit/rust/expr/send/dispatch.rs`; the trait
             // needs to be in scope for those method calls to
             // resolve. Trait lives in `runtime/rust/http.rs` so it

@@ -48,7 +48,7 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
                 name: p.name.clone(),
                 // `lock!` takes Rails' lock clause; `reload`'s options are open.
                 ty: if method.name.as_str() == "reload" {
-                    Ty::Untyped.into()
+                    Ty::gradual().into()
                 } else {
                     Ty::Union { variants: vec![Ty::Bool, Ty::Str, Ty::Nil].into() }.into()
                 },
@@ -118,7 +118,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // own body wants every one of them applied.
     crate::lower::tag_block_passing::apply_helpers(&mut lcs);
     apply_scope_lowering(&mut lcs, app);
-    // ActiveJob payloads: the enqueue arm of each planned job's
+    // ActiveJob payloads: the enqueue variant of each planned job's
     // `perform_later`, and `to_gid_uri` beside `to_gid_param`.
     // Ruby-family only, like the GlobalID runtime it writes through.
     crate::lower::job_payload::apply_ruby(&mut lcs, app);
@@ -148,7 +148,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // send→case grounding, update-kwargs inlining, mailer class-side
     // wrappers, and duration grounding run in the shared post-analyze
     // hook, which covers these library classes (dispatch's plural
-    // duration-unit arms arrive already grounded).
+    // duration-unit variants arrive already grounded).
     // Transpiled-shape classes carry hand-written accessors that
     // `synth_attr_reader` never sees, so the datetime reader/writer
     // rewrite still runs here for them (Ruby-only). Model-lowered classes
@@ -578,7 +578,7 @@ fn splice_nested(
     // (`class WebPush::Connections`) at the margin with a body one level
     // in. The blocks are cut at the nested body's indentation, so the
     // compact form takes them `depth - 1` levels shallower. Without this
-    // arm the splice found no header and the children, already left out
+    // variant the splice found no header and the children, already left out
     // of the tree as files of their own, were silently gone.
     // The blocks are cut at column 0 (`child_block`); each header form
     // wants them at its own body's indentation.
@@ -692,7 +692,7 @@ pub(super) fn apply_extras_facades(files: &mut [(String, String)], app: &App) {
                 // (`sig_path_for`), and `spin_shape` only flattens them to
                 // file-adjacent LATER — so at this point every sidecar is
                 // still `sig/app/models/<stem>.rbs`. Matching only the bare
-                // form meant this arm never fired for any of the four
+                // form meant this variant never fired for any of the four
                 // façades: the `.rb` swapped, the `.rbs` did not, and every
                 // consumer read roundhouse's own inference instead of the
                 // hand-written contract sitting beside the façade.
@@ -899,12 +899,12 @@ fn rewrite_library_partial_render(
 /// where `@scope` is an untyped ctor param) resolves without static
 /// receiver-type knowledge. One def per scope NAME serves every model
 /// sharing it, whatever their arities: SCOPE_UNSET sentinels detect
-/// how many positionals the caller supplied, and each arm forwards
-/// that exact shape. Positional-only arms dispatch through `klass` —
+/// how many positionals the caller supplied, and each variant forwards
+/// that exact shape. Positional-only variants dispatch through `klass` —
 /// every model's `__scope_<name>__<n>` entry has the same full arity
 /// by construction, which is what spinel's class-value dispatch
 /// requires (it neither defaults omitted optionals through the
-/// dispatch nor accepts kwargs). Keyword-carrying arms dispatch
+/// dispatch nor accepts kwargs). Keyword-carrying variants dispatch
 /// through `case klass.name` constant receivers instead. An argument
 /// shape no model accepts raises ArgumentError at the call, as Rails
 /// would. Statically resolvable — explicit defs, no method_missing,
@@ -938,10 +938,10 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         // The registry carries the SYNTHESIZED preload scopes too (it
         // must — the scope-body rewriter reads it to thread `__rel`
         // through a bare `with_attached_attachment`). They are handled
-        // by the identity arm below, which is both faster and clearer
+        // by the identity variant below, which is both faster and clearer
         // than a `__scope_` hop to a body that returns its argument;
         // leaving them here would make `by_name` claim them and the
-        // identity arm skip them as "a declared scope of the same name".
+        // identity variant skip them as "a declared scope of the same name".
         let plain_preload = if crate::lower::plain_text_attr::record_table_present(&app.schema) {
             crate::lower::plain_text_attr::preload_scope_names(model)
         } else {
@@ -1108,7 +1108,7 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
     })
 }
 
-/// Everything the arm renderers need about one delegate name.
+/// Everything the variant renderers need about one delegate name.
 struct DelegateCtx<'a> {
     name: &'a Symbol,
     /// Display names for the delegate's positional params.
@@ -1248,7 +1248,7 @@ fn render_scope_delegate(
 }
 
 /// Branch on which of the delegate's keywords the caller supplied
-/// (each independently sentinel-checked), then render the arity arms
+/// (each independently sentinel-checked), then render the arity variants
 /// for that exact keyword subset at the leaf.
 fn render_kw_tree<'a>(
     out: &mut String,
@@ -1276,10 +1276,10 @@ fn render_kw_tree<'a>(
     }
 }
 
-/// The supplied-arity arms for one keyword subset: arm `n` fires when
+/// The supplied-arity variants for one keyword subset: variant `n` fires when
 /// `a<n>` is the first unset positional (guards run in ascending order,
-/// each returning or raising). Positional-only arms go through `klass`;
-/// keyword arms need constant receivers (`case klass.name`) because
+/// each returning or raising). Positional-only variants go through `klass`;
+/// keyword variants need constant receivers (`case klass.name`) because
 /// kwargs don't survive spinel's class-value dispatch.
 fn render_arity_arms(
     out: &mut String,
@@ -1505,7 +1505,7 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol, owner
             at,
             crate::ty::Param {
                 name: rel_param.clone(),
-                ty: Ty::Untyped.into(),
+                ty: Ty::gradual().into(),
                 kind: crate::ty::ParamKind::Optional,
             },
         );
@@ -2064,7 +2064,7 @@ fn invalidate_on_fk_write(lc: &mut LibraryClass, name: &Symbol, fk: &Symbol) {
 ///
 /// Ruby-family only, like its neighbours. A strict target's `Rooms::
 /// Open` is not a subtype of `Room` — there is no inheritance to make
-/// the case arms share a return type — so this is not expressible
+/// the case variants share a return type — so this is not expressible
 /// there, and those targets keep hydrating the base class.
 pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
     // subclass -> base, from the one authority on the question.
@@ -2076,7 +2076,7 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
     for (sub, base) in &bases {
         subs_of.entry(base.clone()).or_default().push(sub.clone());
     }
-    // Deterministic arm order — the map's iteration order is not.
+    // Deterministic variant order — the map's iteration order is not.
     for v in subs_of.values_mut() {
         v.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     }
@@ -3879,7 +3879,7 @@ fn rewrite_helper_calls(
         // method is view-callable, for the marked methods the existing
         // path cannot serve.
         //
-        // TWO ARMS OF ONE RULE, and the discriminator already exists.
+        // TWO variants OF ONE RULE, and the discriminator already exists.
         // `controller_helper_method_names` clones a marked method
         // CLASS-SIDE when its body is pure over its arguments, and the
         // view calls `DomainsController.caption_of_button(domain)` —
@@ -3892,7 +3892,7 @@ fn rewrite_helper_calls(
         //
         // `index` is the "already served" test: a name in
         // `helper_method_index` has a module or a class-side clone
-        // behind it, and this arm must not take it — doing so turned
+        // behind it, and this variant must not take it — doing so turned
         // lobsters' working static call into a dynamic one.
         //
         // Shadowed by the module's own methods and its params, because a
@@ -3970,7 +3970,7 @@ fn rewrite_helper_calls(
                         Symbol::from(m),
                     )
                 };
-                // The typed receiver is what arms the emitter's
+                // The typed receiver is what variants the emitter's
                 // string-key coercion (`is_string_keyed_hash`):
                 // `@params` inside a controller is declared
                 // `Hash[String, ParamValue]`, and a view's
@@ -5324,8 +5324,8 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
         ExprNode::SelfRef => sig.self_model.clone(),
         // (2) A singular association read, or (4) `.first` / `.last` on
         // a has_many read — one record of the collection's type. Both
-        // are receiver-ful zero-arg Sends, so they share an arm: a
-        // separate `first`/`last` arm placed after this one would be
+        // are receiver-ful zero-arg Sends, so they share an variant: a
+        // separate `first`/`last` variant placed after this one would be
         // unreachable, since this pattern matches those method names too.
         ExprNode::Send { recv: Some(r), method, args, block: None, .. } if args.is_empty() => {
             if let Some(target) = assoc_targets
@@ -5614,7 +5614,7 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
         // The public `<col>=` writer (`self.<col>_raw =
         // ActiveSupport.format_db_time(value)`) is synthesized by the
         // shared model lowering (`schema::synth_temporal_writer`, kind
-        // `Method` so the AttributeWriter arm above can't re-point it
+        // `Method` so the AttributeWriter variant above can't re-point it
         // at a nonexistent `@<col>`) — it arrives here already present,
         // and its raw-writer dispatch picks up the memo invalidation
         // installed above.
@@ -6381,7 +6381,7 @@ fn root_shadowed_constants(
 /// dispatch it feeds is emitted by the SHARED view lowerer. That's correct
 /// only while lobsters (the sole dynamic-partial app) is ruby-only — a
 /// strict target rendering `render @above` would see the un-collapsed hash
-/// and never match a string arm. Revisit when another target grows dynamic
+/// and never match a string variant. Revisit when another target grows dynamic
 /// partials (move this collapse to the shared controller lowering then).
 pub(crate) fn apply_dynamic_render_options_lowering(lcs: &mut [LibraryClass]) {
     for lc in lcs.iter_mut() {
@@ -7762,7 +7762,7 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>, b
             // left the emitted tree unable to load at all.
             //
             // Blocks that DO run now (`map`, `each`) are descended into
-            // at the Send arm below, so a Lambda reaching this arm is a
+            // at the Send variant below, so a Lambda reaching this variant is a
             // stored literal.
             ExprNode::Lambda { .. } => false,
             ExprNode::Send { recv, method, args, block, .. } => {
@@ -8226,7 +8226,7 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     // chain, saw an undefined superclass and the file did not define.
     // `PlatformAgent` is the same shape and no longer a façade:
     // `runtime/ruby/user_agent.rb` PORTS it, so the anchor is that file
-    // rather than the façade host. It needs its own arm precisely
+    // rather than the façade host. It needs its own variant precisely
     // because this resolver reads `is_gem_facade_root` and nothing
     // else — dropping the pair from that list to port them took the
     // anchor with it, and campfire's ruby lane went 256/288 to 0/288 on
@@ -8234,7 +8234,7 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     // stayed green throughout: its `main.rb` requires every runtime
     // file eagerly, so the constant happened to exist by the time
     // `application_platform.rb` ran. Exactly the accident the comment
-    // above says this arm exists to stop.
+    // above says this variant exists to stop.
     if raw == "PlatformAgent" || raw == "UserAgent" {
         return Some("runtime/user_agent".to_string());
     }
@@ -8850,7 +8850,7 @@ fn boolean_cast_body(col: &Symbol) -> Expr {
 // setters/caches already exist from the static-path work).
 //
 // No method_missing, no send: nested specs (`story: :user`) recurse
-// through the case arm's statically-named target class — the same
+// through the case variant's statically-named target class — the same
 // case-dispatch shape as dynamic-partial rendering. Bodies are generated
 // as Ruby source and parsed back through `runtime_src::parse_methods`
 // (templates are fixed; identifiers come from assoc/table names).
@@ -8867,7 +8867,7 @@ fn boolean_cast_body(col: &Symbol) -> Expr {
 //
 // Known gaps, deliberate: scoped / polymorphic has_one, direct has_many
 // with a scope or polymorphic owner, and scope-carrying through-assocs
-// (other than a plain `order("...")`) get no batch arm — the dispatch
+// (other than a plain `order("...")`) get no batch variant — the dispatch
 // falls through and the lazy reader stays correct (just N+1, matching
 // Rails, which also lazy-loads what `includes` doesn't name). Unscoped
 // non-polymorphic has_one uses PreloadKind::HasOne (first-wins). Assigning
@@ -9498,7 +9498,7 @@ end
         }
     }
 
-    // Dispatch: one case arm per preloadable assoc; unknown names fall
+    // Dispatch: one case variant per preloadable assoc; unknown names fall
     // through silently (lazy readers stay correct — mirrors what Rails
     // does for anything `includes` didn't name).
     src.push_str("\ndef self._preload_dispatch(records, name, nested)\n");
@@ -9585,7 +9585,7 @@ end
 /// an `html_escape` of it collapses — and a helper whose safe argument
 /// reaches neither is emitted as an ordinary clone rather than guessed
 /// at. Widening this is a typed-safe-string project, not a bigger match
-/// arm.
+/// variant.
 pub(crate) fn apply_raw_helper_monomorphization(lcs: &mut [LibraryClass], app: &App) {
     let sites = raw_helper_sites(app);
     if sites.is_empty() {
@@ -9775,11 +9775,11 @@ mod insert_rel_param_tests {
         let sig = Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("tags"),
-                ty: Ty::Untyped.into(),
+                ty: Ty::unresolved().into(),
                 kind: ParamKind::Rest,
             }].into(),
             block: None,
-            ret: std::sync::Arc::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::unresolved()),
             effects: crate::effect::EffectSet::pure(),
         };
         let mut m = bare_method(params, Some(sig));
@@ -9810,11 +9810,11 @@ mod insert_rel_param_tests {
         let sig = Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("user"),
-                ty: Ty::Untyped.into(),
+                ty: Ty::unresolved().into(),
                 kind: ParamKind::Required,
             }].into(),
             block: None,
-            ret: std::sync::Arc::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::unresolved()),
             effects: crate::effect::EffectSet::pure(),
         };
         let mut m = bare_method(params, Some(sig));
@@ -9830,7 +9830,7 @@ mod insert_rel_param_tests {
         };
         let rel_ty_param = params.iter().find(|p| p.name == rel_param).expect("__rel in signature");
         assert_eq!(rel_ty_param.kind, ParamKind::Optional);
-        assert_eq!(*rel_ty_param.ty, Ty::Untyped, "unchanged: still Untyped, not Relation");
+        assert_eq!(*rel_ty_param.ty, Ty::gradual(), "unchanged: still Untyped, not Relation");
     }
 
     /// `def f(*tags, **opts)`: no keyword may follow `**opts`, so `__rel:`
@@ -9842,11 +9842,11 @@ mod insert_rel_param_tests {
         let params = vec![Param::rest(Symbol::from("tags")), kwrest];
         let sig = Ty::Fn {
             params: vec![
-                crate::ty::Param { name: Symbol::from("tags"), ty: Ty::Untyped.into(), kind: ParamKind::Rest },
-                crate::ty::Param { name: Symbol::from("opts"), ty: Ty::Untyped.into(), kind: ParamKind::KeywordRest },
+                crate::ty::Param { name: Symbol::from("tags"), ty: Ty::unresolved().into(), kind: ParamKind::Rest },
+                crate::ty::Param { name: Symbol::from("opts"), ty: Ty::unresolved().into(), kind: ParamKind::KeywordRest },
             ].into(),
             block: None,
-            ret: std::sync::Arc::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::unresolved()),
             effects: crate::effect::EffectSet::pure(),
         };
         let mut m = bare_method(params, Some(sig));

@@ -1158,7 +1158,7 @@ fn push_writer_and_save(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symb
                 nil_lit(),
             ],
         }),
-        Some(super::model_to_library::fn_sig(vec![(value, Ty::Untyped)], Ty::Nil)),
+        Some(super::model_to_library::fn_sig(vec![(value, Ty::gradual())], Ty::Nil)),
         AccessorKind::Method,
         true,
     );
@@ -1229,7 +1229,7 @@ fn push_writer_and_save(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symb
 
 /// Rails' name for the attachment association behind `has_one_attached
 /// :<attr>`: `<attr>_attachment`. It is the spec `with_attached_<attr>`
-/// preloads and the arm `_preload_dispatch` answers, so an app that
+/// preloads and the variant `_preload_dispatch` answers, so an app that
 /// writes Rails' own `includes(logo_attachment: :blob)` lands on the
 /// same loader.
 pub fn attachment_assoc_name(attr: &Symbol) -> Symbol {
@@ -1425,7 +1425,7 @@ pub fn preload_scopes(model: &Model) -> Vec<(Symbol, Symbol)> {
 /// reader queried per record at ask time and the hint had nothing to
 /// attach to; that was an N+1 stated rather than hidden, and on
 /// campfire's room page it was 80 of 233 round trips. The reader
-/// memoizes now (`push_reader`) and `_preload_dispatch` carries an arm
+/// memoizes now (`push_reader`) and `_preload_dispatch` carries an variant
 /// for `<attr>_attachment` (`emit::ruby::library::preload_targets`),
 /// so the relation's `to_a` batches every record's attachment row into
 /// one query and installs a row-bearing proxy on each record. Leaving

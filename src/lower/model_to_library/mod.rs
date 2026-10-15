@@ -366,7 +366,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                     Symbol::from("params"),
                     Ty::Hash {
                         key: std::sync::Arc::new(Ty::Sym),
-                        value: std::sync::Arc::new(Ty::Untyped),
+                        value: std::sync::Arc::new(Ty::gradual()),
                     },
                 )],
                 Ty::Class { id: class_id.clone(), args: vec![].into() },
@@ -1497,7 +1497,7 @@ fn resolve_model_aliases(
     // any hand-written override collapsed it in the real `methods`
     // (Rails apps declare each of those exactly once per model, so
     // that one synthesized copy is what's live from here on, until a
-    // later hand-written redefinition — tracked by the arm below —
+    // later hand-written redefinition — tracked by the variant below —
     // changes it again).
     let mut live: HashMap<Symbol, MethodDef> = HashMap::new();
 
@@ -1531,12 +1531,12 @@ fn resolve_model_aliases(
                     // Declared later in the body — not live yet, and
                     // resolving against the eventual definition would
                     // break snapshot semantics, so this is a refusal
-                    // (the `None` arm below), not a fallback.
+                    // (the `None` variant below), not a fallback.
                     None
                 } else if table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old)) {
                     // A plain AR column reader — Rails itself raises
                     // NameError here (attribute methods are generated
-                    // lazily), so this never resolves; the `None` arm
+                    // lazily), so this never resolves; the `None` variant
                     // below names `alias_attribute` instead.
                     None
                 } else {
@@ -1972,14 +1972,14 @@ pub(crate) fn push_scope_variants(
                 for p in &shape.positionals[..k] {
                     sig_params.push(crate::ty::Param {
                         name: p.name.clone(),
-                        ty: Ty::Untyped.into(),
+                        ty: Ty::gradual().into(),
                         kind: crate::ty::ParamKind::Required,
                     });
                 }
                 for p in &subset {
                     sig_params.push(crate::ty::Param {
                         name: p.name.clone(),
-                        ty: Ty::Untyped.into(),
+                        ty: Ty::gradual().into(),
                         kind: crate::ty::ParamKind::Keyword { required: true },
                     });
                 }
@@ -1995,7 +1995,7 @@ pub(crate) fn push_scope_variants(
                     signature: Some(Ty::Fn {
                         params: sig_params.into(),
                         block: None,
-                        ret: std::sync::Arc::new(Ty::Untyped),
+                        ret: std::sync::Arc::new(Ty::gradual()),
                         effects: crate::effect::EffectSet::default(),
                     }),
                     effects: crate::effect::EffectSet::default(),
@@ -2181,11 +2181,11 @@ fn build_class_info_with_finder_inputs(
                 // Unsigned methods retain default types, not call-site seeds.
                 params: m.params.iter().map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: p.default.as_ref().and_then(|d| d.ty.clone()).unwrap_or(Ty::Untyped).into(),
+                    ty: p.default.as_ref().and_then(|d| d.ty.clone()).unwrap_or(Ty::gradual()).into(),
                     kind: p.ty_kind(),
                 }).collect(),
                 block: (m.block_param.is_some() || m.has_anonymous_block)
-                    .then(|| std::sync::Arc::new(Ty::Untyped)),
+                    .then(|| std::sync::Arc::new(Ty::gradual())),
                 ret: std::sync::Arc::new(inferred.clone()),
                 effects: m.effects.clone(),
             });
@@ -2201,7 +2201,7 @@ fn build_class_info_with_finder_inputs(
         variants: vec![owner_ty.clone(), Ty::Nil].into(),
     };
     let array_owner = Ty::Array { elem: std::sync::Arc::new(owner_ty.clone()) };
-    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) };
 
     // ApplicationRecord declares `id` and `id=` (the schema synthesizers
     // skip the id column because it's inherited from the base class).
@@ -2239,7 +2239,7 @@ fn build_class_info_with_finder_inputs(
     // `errors` returns `Array[String]` — matches both the framework
     // Ruby (`runtime/ruby/active_record/base.rb`, where `@errors` is
     // declared `Array[String]` in the `.rbs` sidecar) and every
-    // validation-rule push site (every `errors << "..."` arm in
+    // validation-rule push site (every `errors << "..."` variant in
     // `validations.rs` shoves a String literal). The earlier
     // `Array[untyped]` predated the RBS sidecar; widening was load-
     // bearing for nothing. Tightening to `Str` lets rust's `<<` emit
@@ -2270,12 +2270,12 @@ fn build_class_info_with_finder_inputs(
     insert_default(
         &mut info.instance_methods,
         "validates_presence_of",
-        fn_sig(vec![(Symbol::from("attr"), Ty::Sym), (Symbol::from("value"), Ty::Untyped)], Ty::Nil),
+        fn_sig(vec![(Symbol::from("attr"), Ty::Sym), (Symbol::from("value"), Ty::gradual())], Ty::Nil),
     );
     insert_default(
         &mut info.instance_methods,
         "validates_absence_of",
-        fn_sig(vec![(Symbol::from("attr"), Ty::Sym), (Symbol::from("value"), Ty::Untyped)], Ty::Nil),
+        fn_sig(vec![(Symbol::from("attr"), Ty::Sym), (Symbol::from("value"), Ty::gradual())], Ty::Nil),
     );
     insert_default(
         &mut info.instance_methods,
@@ -2283,7 +2283,7 @@ fn build_class_info_with_finder_inputs(
         fn_sig(
             vec![
                 (Symbol::from("attr"), Ty::Sym),
-                (Symbol::from("value"), Ty::Untyped),
+                (Symbol::from("value"), Ty::gradual()),
                 (Symbol::from("opts"), any_hash.clone()),
             ],
             Ty::Nil,
@@ -2295,7 +2295,7 @@ fn build_class_info_with_finder_inputs(
         fn_sig(
             vec![
                 (Symbol::from("attr"), Ty::Sym),
-                (Symbol::from("value"), Ty::Untyped),
+                (Symbol::from("value"), Ty::gradual()),
                 (Symbol::from("opts"), any_hash.clone()),
             ],
             Ty::Nil,
@@ -2307,7 +2307,7 @@ fn build_class_info_with_finder_inputs(
         fn_sig(
             vec![
                 (Symbol::from("attr"), Ty::Sym),
-                (Symbol::from("value"), Ty::Untyped),
+                (Symbol::from("value"), Ty::gradual()),
                 (Symbol::from("opts"), any_hash.clone()),
             ],
             Ty::Nil,
@@ -2319,7 +2319,7 @@ fn build_class_info_with_finder_inputs(
         fn_sig(
             vec![
                 (Symbol::from("attr"), Ty::Sym),
-                (Symbol::from("value"), Ty::Untyped),
+                (Symbol::from("value"), Ty::gradual()),
                 (Symbol::from("opts"), any_hash.clone()),
             ],
             Ty::Nil,
@@ -2332,7 +2332,7 @@ fn build_class_info_with_finder_inputs(
             vec![
                 (Symbol::from("attr"), Ty::Sym),
                 (Symbol::from("fk_value"), Ty::Int),
-                (Symbol::from("target_class"), Ty::Untyped),
+                (Symbol::from("target_class"), Ty::gradual()),
             ],
             Ty::Nil,
         ),
@@ -2590,7 +2590,7 @@ fn broadcasts_class_info() -> crate::analyze::ClassInfo {
     // site, which every target dispatches correctly: Ruby kwargs →
     // Hash, Crystal NamedTuple → named params, TS object literal).
     use crate::dialect::AccessorKind;
-    let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) };
     let sig = Ty::Fn {
         params: vec![crate::ty::Param {
             name: Symbol::from("opts"),
@@ -2712,7 +2712,7 @@ fn type_method_body(
 /// their own. Param types stay untyped — this pins only the return.
 /// A scalar, or a scalar unioned with nil — `String?` and friends.
 ///
-/// The nullable arm matters because a `rescue` contributes one: a body
+/// The nullable variant matters because a `rescue` contributes one: a body
 /// of `uri.to_s … rescue nil` types `Str | Nil`, and refusing to
 /// backfill that leaves the method `-> untyped`, i.e. a boxed return
 /// where a flat nullable scalar was available. Spinel stores `String?`
@@ -2749,7 +2749,7 @@ fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
         .iter()
         .map(|p| crate::ty::Param {
             name: p.name.clone(),
-            ty: Ty::Untyped.into(),
+            ty: Ty::gradual().into(),
             kind: p.ty_kind(),
         })
         .collect();
@@ -3059,7 +3059,7 @@ mod tests {
     fn raw_container_and_fn_body_types_are_excluded() {
         let app = app("  def callable\n    1\n  end");
         let mut methods = article_methods(&app);
-        for ty in [fn_sig(vec![], Ty::Int), Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) }, Ty::Untyped] {
+        for ty in [fn_sig(vec![], Ty::Int), Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) }, Ty::gradual()] {
             let callable = methods.iter_mut().find(|m| m.name.as_str() == "callable").unwrap();
             callable.signature = None;
             callable.body.ty = Some(ty);
@@ -3076,7 +3076,7 @@ mod tests {
         let app = app("  def self.evens\n    [1, 2].map { |x| x * 2 }\n  end");
         let mut methods = article_methods(&app);
         let ints = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
-        for (ty, kept) in [(ints.clone(), true), (Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }, false)] {
+        for (ty, kept) in [(ints.clone(), true), (Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) }, false)] {
             let evens = methods.iter_mut().find(|m| m.name.as_str() == "evens").unwrap();
             evens.signature = None;
             evens.body.ty = Some(ty);

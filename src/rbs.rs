@@ -472,7 +472,7 @@ fn method_signature_ty(
             // Untyped or proc-typed block — keep the placeholder for
             // backward compatibility with code paths that only checked
             // presence-of-block.
-            Some(Ty::Untyped)
+            Some(Ty::gradual())
         }
     } else {
         None
@@ -784,14 +784,14 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
         Node::NilType(_) => Ok(Ty::Nil),
         Node::VoidType(_) => Ok(Ty::Nil),
         // `untyped` is RBS's gradual escape hatch — explicit
-        // author-signed opt-out from checking. Maps to `Ty::Untyped`
+        // author-signed opt-out from checking. Maps to `Ty::gradual()`
         // (distinct from `Ty::Var`, which is the analyzer's "I don't
         // know yet" sentinel for inference gaps). Untyped propagates
         // through dispatch unconditionally; targets that admit a
         // gradual escape (TS `any`, Python `Any`) emit it cleanly,
         // strict targets (Rust, Go) elevate it to a Diagnostic::Error
         // at emit time.
-        Node::AnyType(_) => Ok(Ty::Untyped),
+        Node::AnyType(_) => Ok(Ty::gradual()),
         Node::OptionalType(opt) => {
             let inner = ty_from_node(&opt.type_(), ctx)?;
             Ok(union_or_single(vec![inner, Ty::Nil]))
@@ -857,7 +857,7 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
         }
         // `instance` — an instance of the class that RECEIVED the
         // call, which is exactly what a base class cannot name about
-        // its subclasses. Until this arm existed, a signature
+        // its subclasses. Until this variant existed, a signature
         // containing one failed to parse and took the whole method
         // signature with it, so an inherited factory typed as nothing
         // at all and the chain below it went untyped.
@@ -894,12 +894,12 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
         // `top` is the supertype of everything, on which RBS lets you
         // call nothing. Nothing dispatches on it, so `untyped` answers
         // the same without inventing a class.
-        Node::TopType(_) => Ok(Ty::Untyped),
+        Node::TopType(_) => Ok(Ty::gradual()),
         // A method-level type variable (`[T] (T) -> T`). The analyzer
         // does not instantiate a signature's variables per call, so the
         // variable is an unmodelled boundary: `untyped`, not a class
         // called `T`. Stated here so it is one place to change.
-        Node::VariableType(_) => Ok(Ty::Untyped),
+        Node::VariableType(_) => Ok(Ty::gradual()),
         // `A & B`: see `intersection_ty`.
         Node::IntersectionType(inter) => {
             let members: Vec<Ty> = inter
@@ -941,8 +941,8 @@ pub(crate) fn intersection_ty(members: Vec<Ty>) -> Ty {
         .collect();
     match real.as_slice() {
         [only] => (*only).clone(),
-        [] => members.into_iter().next().unwrap_or(Ty::Untyped),
-        _ => Ty::Untyped,
+        [] => members.into_iter().next().unwrap_or(Ty::gradual()),
+        _ => Ty::gradual(),
     }
 }
 
@@ -1045,8 +1045,8 @@ fn map_class_instance(name: &str, args: Vec<Ty>) -> Ty {
         },
         // A bare `Hash` / `Array` is the unparameterized container, not a
         // class named Hash with nothing to call on it.
-        ("Hash", []) => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
-        ("Array", []) => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+        ("Hash", []) => Ty::Hash { key: std::sync::Arc::new(Ty::gradual()), value: std::sync::Arc::new(Ty::gradual()) },
+        ("Array", []) => Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) },
         _ => Ty::Class {
             id: ClassId(Symbol::new(name)),
             args: args.into(),
@@ -1148,7 +1148,7 @@ pub fn print_ty(ty: &Ty) -> String {
         }
         Ty::Union { variants } => {
             // `T | nil` prints as the idiomatic `T?`; a wider union
-            // keeps its explicit arms. The optional shorthand needs
+            // keeps its explicit variants. The optional shorthand needs
             // parens around a non-simple inner type.
             let (nil, rest): (Vec<&Ty>, Vec<&Ty>) =
                 variants.iter().partition(|v| matches!(v, Ty::Nil));
@@ -1185,13 +1185,13 @@ pub fn print_ty(ty: &Ty) -> String {
         // Value-position function types would need RBS proc syntax,
         // which the parse direction rejects — degrade.
         Ty::Fn { .. } => "untyped".to_string(),
-        Ty::Var { .. } | Ty::Untyped => "untyped".to_string(),
+        Ty::Var { .. } | Ty::Untyped { .. } => "untyped".to_string(),
         _ => "untyped".to_string(),
     }
 }
 
 /// [`print_ty`], parenthesized when the top-level shape is a
-/// multi-arm union — RBS method-type positions (params, return)
+/// multi-variant union — RBS method-type positions (params, return)
 /// don't accept a bare `A | B`. (The `T?` shorthand never needs
 /// this.) Over-wrapping something already bracketed is harmless;
 /// a parenthesized type is still a type.

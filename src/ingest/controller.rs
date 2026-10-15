@@ -576,7 +576,7 @@ fn ingest_controller_body_item(
                 if let Some(rp) = req.as_required_parameter_node() {
                     params
                         .fields
-                        .insert(Symbol::from(constant_id_str(&rp.name())), Ty::Untyped);
+                        .insert(Symbol::from(constant_id_str(&rp.name())), Ty::gradual());
                 }
             }
             // Optional positionals (`opts = {}`) — keep the name + default
@@ -1567,7 +1567,7 @@ fn restructure_next_stmts(stmts: &[Expr]) -> Option<Vec<Expr>> {
 }
 
 /// `next unless cond` / `next if cond` as Prism's unless-desugar leaves
-/// it (`ingest::expr`'s `UnlessNode` arm swaps branches, same IR as an
+/// it (`ingest::expr`'s `UnlessNode` variant swaps branches, same IR as an
 /// `if` with the condition negated): a modifier-if whose "no else"
 /// branch is the `nil` default and whose other branch is a bare `next`
 /// with no value. Returns the condition and which branch held the
@@ -2020,7 +2020,7 @@ fn sugar_dot_paren_used(text: &str, name: &str) -> bool {
 }
 
 /// `true` if `expr` contains an `ExprNode::Yield` anywhere. See
-/// `around_block_filter`'s 0/1-param arm.
+/// `around_block_filter`'s 0/1-param variant.
 fn contains_yield(expr: &Expr) -> bool {
     if matches!(&*expr.node, ExprNode::Yield { .. }) {
         return true;

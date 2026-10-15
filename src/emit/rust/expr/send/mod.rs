@@ -267,7 +267,7 @@ pub(super) fn emit_send(
             // A declared parameter is authoritative: its RBS type is
             // the emitted Rust type (`value: Option<String>`).
             // Skipped once the read is narrowed to a non-Option type
-            // (the Var arm then emits an unwrapped value).
+            // (the Var variant then emits an unwrapped value).
             ExprNode::Var { name, .. } => {
                 super::param_ty(name.as_str())
                     .map(|t| super::util::is_option_ty(&t))
@@ -471,7 +471,7 @@ pub(super) fn emit_send(
         // sources with `&(...)` so the borrow matches. Non-Str
         // setter args (`set_id(i64)`) pass through unchanged.
         //
-        // Heuristic — the Const-recv arm above uses an explicit
+        // Heuristic — the Const-recv variant above uses an explicit
         // param-Tys table; for instance-Sends we don't have a global
         // sibling registry yet, so the setter-name + arg-Ty + owned-
         // node combo carries the same signal. Limited to one-arg
@@ -484,7 +484,7 @@ pub(super) fn emit_send(
             // params for Str cols are typed Str, matching the row
             // accessor's return Ty. For non-Str args the coerce
             // function returns the bare emit.
-            args[0].ty.as_ref().unwrap_or(&crate::ty::Ty::Untyped),
+            args[0].ty.as_ref().unwrap_or(&crate::ty::Ty::gradual()),
         );
         out.push(coerced);
         out

@@ -115,7 +115,7 @@ fn plan(catalog: &Catalog, variant: &Variant, call: &Call, in_view: bool) -> Res
     if keys.len() + subtrees.len() > MAX_REACH {
         return Err(format!("a key computed at run time that can reach {} translations", keys.len() + subtrees.len()));
     }
-    // Each arm is the literal key, already scoped, with the call's defaults scoped the same way.
+    // Each variant is the literal key, already scoped, with the call's defaults scoped the same way.
     let mut defaults = Vec::new();
     for d in &call.lookup.defaults {
         defaults.push(match d {
@@ -472,7 +472,7 @@ fn parse_args(args: &[Expr], view: Option<&str>, template: bool) -> Result<Call,
             "locale" => {
                 call.locale = Some(match literal_text(v) {
                     Some(locale) => Locale::Literal(locale),
-                    // Read before the arms that evaluate the other options,
+                    // Read before the variants that evaluate the other options,
                     // so none before it may have an effect to reorder.
                     None => {
                         let effect = call.order.iter().any(|n| {
@@ -968,7 +968,7 @@ fn with_locale(e: &Expr) -> Option<Expr> {
                 block: None,
                 parenthesized: false,
             });
-            call.ty = Some(Ty::Untyped);
+            call.ty = Some(Ty::gradual());
             call
         }
         _ => return None,
@@ -1033,9 +1033,9 @@ fn fold_plan(call: &Call, plan: Plan, locale: &str, span: Span, in_view: bool, c
 }
 
 /// `__k = I18n.normalize_key("<scoped prefix>#{…}")`, then a `case` over
-/// every key it can reach, each arm folded as that literal key. In a
-/// template every arm is escaped or html-safe already, and the caller
-/// marks the whole raw, since arms differ in which they are.
+/// every key it can reach, each variant folded as that literal key. In a
+/// template every variant is escaped or html-safe already, and the caller
+/// marks the whole raw, since variants differ in which they are.
 #[allow(clippy::too_many_arguments)]
 fn dynamic_fold(
     call: &Call,

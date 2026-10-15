@@ -403,7 +403,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // JsonBuilder, Inflector, Router, ActionController::Base,
     // ActiveRecord::Base) so the global class-method registry can
     // resolve qualified calls like `ViewHelpers::html_escape(...)`
-    // and pad their param Tys for the Const-recv arm's coerce path.
+    // and pad their param Tys for the Const-recv variant's coerce path.
     // Without these entries, app-side calls into the runtime modules
     // fall through `external_class_method_param_tys` /
     // `current_class_method_param_tys` / `global_class_method_param_tys`
@@ -524,7 +524,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // needs the registry as extras so the view body-typer can resolve
     // `article.comments()` to `Vec<Comment>` (and thus dispatch
     // `.size()` / `.each` through `try_recv_typed_method`'s Ty::Array
-    // arm). Without it, those method chains land with `recv.ty ==
+    // variant). Without it, those method chains land with `recv.ty ==
     // None` and the Vec bridges don't fire.
     let (mut model_lcs, model_registry): (
         Vec<crate::dialect::LibraryClass>,
@@ -2320,7 +2320,7 @@ fn collect_global_class_methods(
         // reached at call sites as `Article::new(...)`. The instance
         // entry doubles as the class-method registry for any same-
         // name call across the recv kinds. The downstream caller
-        // (emit_send Const-recv arm) picks the entry by method name;
+        // (emit_send Const-recv variant) picks the entry by method name;
         // it doesn't care about receiver kind.
         for m in &lc.methods {
             if m.mutates_self {
@@ -2337,7 +2337,7 @@ fn collect_global_class_methods(
                     .iter()
                     .map(|p| Param {
                         name: Symbol::from(p.as_str()),
-                        ty: Ty::Untyped.into(),
+                        ty: Ty::gradual().into(),
                         kind: ParamKind::Required,
                     })
                     .collect(),

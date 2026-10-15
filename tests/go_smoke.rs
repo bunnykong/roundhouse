@@ -303,7 +303,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
 ///
 /// Critical: tail-position `raise` must NOT be wrapped in `return`
 /// (Go rejects `return panic(...)` — panic returns nothing). The
-/// emit_return_at Send-raise arm handles that.
+/// emit_return_at Send-raise variant handles that.
 #[test]
 fn raise_panic_peephole() {
     // `def fail!(msg); raise NotImplementedError, msg; end` — the
@@ -924,7 +924,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("attrs"),
-                ty: Ty::Untyped.into(),
+                ty: Ty::gradual().into(),
                 kind: ParamKind::Required,
             }].into(),
             block: None,

@@ -57,7 +57,7 @@ fn accessor_field_ty(m: &MethodDef) -> Ty {
         (AccessorKind::AttributeWriter, Some(Ty::Fn { params, .. })) if !params.is_empty() => {
             (*params[0].ty).clone()
         }
-        _ => m.body.ty.clone().unwrap_or(Ty::Untyped),
+        _ => m.body.ty.clone().unwrap_or(Ty::gradual()),
     }
 }
 
@@ -103,7 +103,7 @@ fn params_and_ret(m: &MethodDef) -> (Vec<String>, Ty) {
         }
         _ => (
             m.params.iter().map(|p| super::shared::py_ident(p.as_str())).collect(),
-            Ty::Untyped,
+            Ty::gradual(),
         ),
     }
 }
@@ -144,7 +144,7 @@ fn emit_class_method(m: &MethodDef) -> String {
     sig.extend(params);
     // A method that `yield`s gets an injected `_block` parameter; the
     // body's `yield(...)` renders as `_block(...)` (see `emit::python::
-    // expr`'s Yield arm). Mirrors the TS emitter's `__block`.
+    // expr`'s Yield variant). Mirrors the TS emitter's `__block`.
     if super::expr::body_contains_yield(&m.body) {
         sig.push("_block".to_string());
     }

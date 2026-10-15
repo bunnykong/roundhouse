@@ -10,11 +10,11 @@
 //! grounded call as honest residue — ONE named runtime seam (provide a
 //! Duration value class) instead of scattered nonexistent-Int-method
 //! sends; widening them is a separate step (the Time-arith seam), same
-//! posture as `send_dispatch`'s plural arms before this pass existed.
+//! posture as `send_dispatch`'s plural variants before this pass existed.
 //!
 //! ORDER: must run AFTER `apply_send_static_dispatch` in the
 //! post-analyze hook — for an all-duration-unit name set, dispatch
-//! synthesizes its case arms as plural unit calls counting on this
+//! synthesizes its case variants as plural unit calls counting on this
 //! pass to ground them (`send_dispatch::duration_plural`; guard test
 //! `tests/send_dispatch_lowering.rs`). This constraint is declared
 //! canonically in `lower::POST_ANALYZE_PASS_ORDER` (the `duration`
@@ -520,7 +520,7 @@ pub(crate) fn rewrite_durations(expr: &mut Expr) {
             parenthesized: true,
         };
         if matches!(expr.ty, None | Some(Ty::Var { .. })) {
-            expr.ty = Some(Ty::Untyped);
+            expr.ty = Some(Ty::gradual());
         }
     }
 }

@@ -35,7 +35,7 @@ use std::collections::HashMap;
 
 /// (ClassName, method_name) → param_tys. ClassName is the last segment
 /// of the LC's name (e.g. `ViewHelpers` for `ActionView::ViewHelpers`)
-/// to match how `Const { path }` recv arms look up at emit time.
+/// to match how `Const { path }` recv variants look up at emit time.
 type CalleeRegistry = HashMap<String, HashMap<String, Vec<Ty>>>;
 
 /// Insert `ExprNode::Cast` wrappers at call-site arg positions where
@@ -411,7 +411,7 @@ fn needs_hash_widening(param_ty: &Ty, arg: &Expr) -> bool {
     let Ty::Hash { value: pv, .. } = param_ty else {
         return false;
     };
-    if !matches!(pv.as_ref(), Ty::Untyped) {
+    if !matches!(pv.as_ref(), Ty::Untyped { .. }) {
         return false;
     }
     // Skip args already wrapped in Cast — idempotency.
@@ -422,7 +422,7 @@ fn needs_hash_widening(param_ty: &Ty, arg: &Expr) -> bool {
         return true;
     }
     if let Some(Ty::Hash { value: av, .. }) = arg.ty.as_ref() {
-        if !matches!(av.as_ref(), Ty::Untyped) {
+        if !matches!(av.as_ref(), Ty::Untyped { .. }) {
             return true;
         }
     }
@@ -446,7 +446,7 @@ fn needs_some_wrap(param_ty: &Ty, arg: &Expr) -> bool {
     let Some(inner) = peel_option(param_ty) else {
         return false;
     };
-    if matches!(inner, Ty::Untyped) {
+    if matches!(inner, Ty::Untyped { .. }) {
         return false;
     }
     // Owned-producing branch.
@@ -480,9 +480,9 @@ fn needs_some_wrap(param_ty: &Ty, arg: &Expr) -> bool {
 ///   - Spinel: sp_RbVal → const char * / int
 ///   - Ruby (for spinel typer benefit): poly value → narrowed type via to_s/to_i
 ///
-/// rust consumes via its existing Cast arm (`coerce_arg_for_field_ty`
+/// rust consumes via its existing Cast variant (`coerce_arg_for_field_ty`
 /// has the Value→primitive narrowing); ruby consumes via Stage 5's
-/// emit_cast; go consumes via emit_cast's primitive arm.
+/// emit_cast; go consumes via emit_cast's primitive variant.
 fn needs_value_to_primitive(param_ty: &Ty, arg: &Expr) -> bool {
     if matches!(&*arg.node, ExprNode::Cast { .. }) {
         return false;
@@ -507,8 +507,8 @@ fn needs_value_to_primitive(param_ty: &Ty, arg: &Expr) -> bool {
     // Without coercion the call lands with a string-or-nil where the
     // target wants Int. Insert a Cast so the emit handles the parse
     // + zero-fallback (Ruby's `nil.to_i == 0` semantics) at the call
-    // site. Fires for any "Union with a Nil arm and a primitive arm,
-    // target primitive differs from the arm" shape.
+    // site. Fires for any "Union with a Nil variant and a primitive variant,
+    // target primitive differs from the variant" shape.
     if let Ty::Union { variants } = arg_ty {
         let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
         let has_other_primitive = variants.iter().any(|v| {
@@ -546,7 +546,7 @@ fn needs_primitive_to_value(param_ty: &Ty, arg: &Expr) -> bool {
     // recognition in `coerce.rs` Family 3 — kept name-keyed at the
     // IR level rather than promoted to a Ty variant since `ParamValue`
     // is a target-rendering decision, not an IR shape).
-    let param_renders_as_value = matches!(param_ty, Ty::Untyped)
+    let param_renders_as_value = matches!(param_ty, Ty::Untyped { .. })
         || matches!(
             param_ty,
             Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
@@ -579,7 +579,7 @@ fn needs_hash_literal_to_value(param_ty: &Ty, arg: &Expr) -> bool {
     if !matches!(&*arg.node, ExprNode::Hash { .. }) {
         return false;
     }
-    matches!(param_ty, Ty::Untyped | Ty::Record { .. })
+    matches!(param_ty, Ty::Untyped { .. } | Ty::Record { .. })
         || matches!(
             param_ty,
             Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
@@ -589,7 +589,7 @@ fn needs_hash_literal_to_value(param_ty: &Ty, arg: &Expr) -> bool {
 /// Peel `Option<T>` (`Union { Nil, T }`) to `T`; identity for non-
 /// Option types. Variant of `peel_option` that returns the input
 /// unchanged when no peel applies, useful for "if it's nullable,
-/// look at the non-Nil arm, else look at the type itself".
+/// look at the non-Nil variant, else look at the type itself".
 fn peel_nil(ty: &Ty) -> &Ty {
     peel_option(ty).unwrap_or(ty)
 }
@@ -599,14 +599,14 @@ fn peel_nil(ty: &Ty) -> &Ty {
 /// ty_contains_untyped` because the lowerer is target-neutral.
 fn ty_contains_untyped(ty: &Ty) -> bool {
     match ty {
-        Ty::Untyped => true,
+        Ty::Untyped { .. } => true,
         Ty::Union { variants } => variants.iter().any(ty_contains_untyped),
         _ => false,
     }
 }
 
 /// Peel `Option<T>` (`Union { Nil, T }`) to its inner `T`. Returns
-/// `None` when the param isn't a 2-variant Union with one Nil arm.
+/// `None` when the param isn't a 2-variant Union with one Nil variant.
 /// Mirrors rust's `is_option_ty` + `peel_nil` shape but as a single
 /// idiomatic helper for this lowerer.
 fn peel_option(ty: &Ty) -> Option<&Ty> {

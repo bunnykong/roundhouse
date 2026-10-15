@@ -77,7 +77,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         // both `Array<Model>` in this type system and both an
         // `ActiveRecord::Relation` at runtime, where `select` is the
         // projection. campfire's `extract_direct_memberships` reached
-        // here as `Ty::Untyped` until its caller's receiver got a type,
+        // here as `Ty::gradual()` until its caller's receiver got a type,
         // and then the same call — the same runtime relation — stopped
         // being rewritten and raised `select: no columns (a block form
         // reached the projection)`. A type getting BETTER must not
@@ -93,7 +93,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
 /// A `Ty` that can be an `ActiveRecord::Relation` at runtime:
 /// `Ty::Relation`, its ARRAY REPRESENTATION (`Array<Model>` — an
 /// association read, an inline `Model.where(…)` chain), or a union
-/// with either inside. The union arm is not hypothetical: campfire's
+/// with either inside. The union variant is not hypothetical: campfire's
 /// `Current.user.memberships.visible…` starts from a nilable
 /// `Current.user`, and the dispatch over the union hands back a union.
 fn relation_shaped(ty: &Ty) -> bool {

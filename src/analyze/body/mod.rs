@@ -84,17 +84,26 @@ impl ConstScope {
     }
 
     pub fn get(&self, name: &Symbol) -> Option<&Ty> {
+        super::sccq::rec_const_name(name);
         self.own.get(name).or_else(|| self.global.get(name))
     }
 
     /// Only the constants this scope's class declares itself.
     pub fn get_own(&self, name: &Symbol) -> Option<&Ty> {
+        super::sccq::rec_const_name(name);
         self.own.get(name)
     }
 
     /// Only the app-wide, by-bare-name registry.
     pub fn get_global(&self, name: &Symbol) -> Option<&Ty> {
+        super::sccq::rec_const_name(name);
         self.global.get(name)
+    }
+
+    /// A copy of the app-wide registry (the worklist diffs it between
+    /// passes).
+    pub(crate) fn global_entries(&self) -> HashMap<Symbol, Ty> {
+        (*self.global).clone()
     }
 }
 
@@ -145,7 +154,7 @@ pub struct Ctx {
     /// Set when typing a view/layout body. In that context `yield` renders
     /// content to a String (bare `yield` → the layout's `body` String param;
     /// `yield :slot` → `ViewHelpers.get_slot` → String — see
-    /// `lower/view_to_library/partial.rs::emit_yield`), so the Yield arm types
+    /// `lower/view_to_library/partial.rs::emit_yield`), so the Yield variant types
     /// it `String` instead of the generic `Untyped`. Off elsewhere, where a
     /// block's return type isn't tracked through the method signature.
     pub in_view: bool,
@@ -172,6 +181,9 @@ pub struct Ctx {
 /// Rails schema + conventions; the body-typer reads it.
 #[derive(Default, Clone)]
 pub struct ClassInfo {
+    /// `RH_SCHED=sccq`: this class's index in the worklist's read sets (0 =
+    /// not indexed). Never read by inference.
+    pub sccq_idx: u32,
     /// Kind of the indexed source declaration; never inferred from its name.
     pub is_module: bool,
     /// Constant values declared by external gem RBI/RBS files.
@@ -237,7 +249,7 @@ pub struct ClassInfo {
     pub class_method_kinds: HashMap<Symbol, crate::dialect::AccessorKind>,
     pub instance_method_kinds: HashMap<Symbol, crate::dialect::AccessorKind>,
     /// Parent class for inheritance lookups. The force-parens check
-    /// in the Send arm walks this chain so methods inherited from
+    /// in the Send variant walks this chain so methods inherited from
     /// (e.g.) ActiveRecord::Base resolve when called on a subclass
     /// (`new Article(...).save` looks up `save` on Article first,
     /// then ApplicationRecord, then Base — finding it as
@@ -253,8 +265,8 @@ pub struct ClassInfo {
     /// association) and not the target's (`Membership` has no
     /// `grant_to`). And the association read types `Array<Membership>`,
     /// which has forgotten which association produced it — so the
-    /// dispatch arms cannot find them from the receiver's TYPE at all.
-    /// The Send arm looks them up from the receiver's SHAPE instead,
+    /// dispatch variants cannot find them from the receiver's TYPE at all.
+    /// The Send variant looks them up from the receiver's SHAPE instead,
     /// which is the same two hops the emit-time flattening reads
     /// (`room.memberships.grant_to(u)` → `room.memberships_grant_to(u)`).
     pub assoc_extensions: HashMap<(Symbol, Symbol), Ty>,
@@ -359,11 +371,45 @@ pub struct BodyTyper<'a> {
     i18n: Option<&'a crate::i18n::Catalog>,
 }
 
+/// The dispatch table as the typer reads it. With `RH_SCHED=sccq` a fetched
+/// class is recorded in the read set of the unit being typed (one relaxed
+/// load when nothing records).
+#[derive(Clone, Copy)]
+pub(super) struct Classes<'a>(&'a HashMap<ClassId, ClassInfo>);
+
+impl<'a> Classes<'a> {
+    #[inline]
+    pub(super) fn get(&self, id: &ClassId) -> Option<&'a ClassInfo> {
+        let found = self.0.get(id);
+        if let Some(info) = found {
+            super::sccq::rec_class(info.sccq_idx);
+        }
+        found
+    }
+
+    #[inline]
+    pub(super) fn contains_key(&self, id: &ClassId) -> bool {
+        self.0.contains_key(id)
+    }
+
+    #[inline]
+    pub(super) fn values(&self) -> std::collections::hash_map::Values<'a, ClassId, ClassInfo> {
+        self.0.values()
+    }
+
+    /// The table without recording: the fold's unfold sites record the
+    /// slots they read instead (`fold::value_of`).
+    #[inline]
+    pub(crate) fn raw(&self) -> &'a HashMap<ClassId, ClassInfo> {
+        self.0
+    }
+}
+
 impl<'a> BodyTyper<'a> {
     /// Submodule accessor for the dispatch table. `classes` itself
     /// stays private to this module; `send.rs` reaches it here.
-    pub(super) fn classes(&self) -> &'a HashMap<ClassId, ClassInfo> {
-        self.classes
+    pub(super) fn classes(&self) -> Classes<'a> {
+        Classes(self.classes)
     }
 
     fn answers_receiver(&self, ty: &Ty, method: &Symbol) -> bool {
@@ -454,7 +500,7 @@ impl<'a> BodyTyper<'a> {
             if !seen.insert(cid) {
                 continue;
             }
-            let Some(cls) = self.classes.get(cid) else { continue };
+            let Some(cls) = self.classes().get(cid) else { continue };
             if cls.instance_methods.contains_key(method) || cls.class_methods.contains_key(method) {
                 return true;
             }
@@ -471,6 +517,21 @@ impl<'a> BodyTyper<'a> {
     pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog) -> Self {
         self.i18n = Some(catalog);
         self
+    }
+
+    /// Catalog answers for the final-IR error census; never retypes a body.
+    pub(crate) fn errgate_answer(&self, recv: &Ty, method: &Symbol, block: Option<&Ty>, args: &[Expr]) -> bool {
+        !matches!(self.dispatch(Some(recv), method, block, args), Ty::Var { .. })
+    }
+
+    pub(crate) fn errgate_compatible(&self, op: &Symbol, left: &Expr, right: &Expr, a: &Ty, b: &Ty) -> bool {
+        let mut left = left.clone(); left.ty = Some(a.clone());
+        let mut right = right.clone(); right.ty = Some(b.clone());
+        let mut e = Expr::new(left.span, ExprNode::Send {
+            recv: Some(left), method: op.clone(), args: vec![right], block: None, parenthesized: true,
+        });
+        diagnostic::detect_diagnostic(&mut e);
+        !matches!(e.diagnostic, Some(crate::diagnostic::DiagnosticKind::IncompatibleBinop { .. }))
     }
 
     /// Share the analyzer's immutable source index across typing passes.
@@ -553,11 +614,11 @@ impl<'a> BodyTyper<'a> {
         match pattern {
             MatchPattern::Value { .. } | MatchPattern::Nil => Vec::new(),
             MatchPattern::Bind { name } => {
-                vec![(name.clone(), subject_ty.cloned().unwrap_or(Ty::Untyped))]
+                vec![(name.clone(), subject_ty.cloned().unwrap_or(Ty::unresolved()))]
             }
             MatchPattern::Capture { pattern, name } => {
                 let mut out = self.match_pattern_bindings(pattern, subject_ty);
-                out.push((name.clone(), subject_ty.cloned().unwrap_or(Ty::Untyped)));
+                out.push((name.clone(), subject_ty.cloned().unwrap_or(Ty::unresolved())));
                 out
             }
             // Ruby permits `_`-prefixed bindings in alternatives. A
@@ -571,7 +632,7 @@ impl<'a> BodyTyper<'a> {
                     out.extend(self.match_pattern_bindings(p, None));
                 }
                 if let Some(Some(name)) = rest {
-                    out.push((name.clone(), Ty::Untyped));
+                    out.push((name.clone(), Ty::unresolved()));
                 }
                 out
             }
@@ -581,10 +642,10 @@ impl<'a> BodyTyper<'a> {
                     out.extend(self.match_pattern_bindings(p, None));
                 }
                 if let Some(name) = pre_rest {
-                    out.push((name.clone(), Ty::Untyped));
+                    out.push((name.clone(), Ty::unresolved()));
                 }
                 if let Some(name) = post_rest {
-                    out.push((name.clone(), Ty::Untyped));
+                    out.push((name.clone(), Ty::unresolved()));
                 }
                 out
             }
@@ -603,7 +664,7 @@ impl<'a> BodyTyper<'a> {
                 for (key, sub) in pairs {
                     match sub {
                         Some(p) => out.extend(self.match_pattern_bindings(p, value_ty.as_ref())),
-                        None => out.push((key.clone(), value_ty.clone().unwrap_or(Ty::Untyped))),
+                        None => out.push((key.clone(), value_ty.clone().unwrap_or(Ty::unresolved()))),
                     }
                 }
                 if let Some(HashRest::Collect { name }) = rest {
@@ -612,7 +673,7 @@ impl<'a> BodyTyper<'a> {
                     // need not be symbols, even though pattern keys are.
                     let rest_ty = match subject_ty {
                         Some(ty @ Ty::Hash { .. }) if constant.is_none() => ty.clone(),
-                        _ => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
+                        _ => Ty::Hash { key: std::sync::Arc::new(Ty::unresolved()), value: std::sync::Arc::new(Ty::unresolved()) },
                     };
                     out.push((name.clone(), rest_ty));
                 }
@@ -667,7 +728,7 @@ impl<'a> BodyTyper<'a> {
         // Bounded: a parent link that cycles must not hang the typer.
         for _ in 0..16 {
             let Some(cur) = cursor else { break };
-            let Some(info) = self.classes.get(&cur) else { break };
+            let Some(info) = self.classes().get(&cur) else { break };
             if let Some(ty) = info.attributes.fields.get(name) {
                 return Some(info.instance_methods.get(name).unwrap_or(ty).clone());
             }
@@ -787,7 +848,7 @@ impl<'a> BodyTyper<'a> {
 
     fn is_module_callback(&self, recv_ty: Option<&Ty>, method: &Symbol) -> bool {
         matches!(method.as_str(), "included" | "prepended" | "append_features" | "prepend_features")
-            && matches!(recv_ty, Some(Ty::Class { id, .. }) if self.classes.get(id).is_some_and(|c| c.is_module && c.class_methods.contains_key(method)))
+            && matches!(recv_ty, Some(Ty::Class { id, .. }) if self.classes().get(id).is_some_and(|c| c.is_module && c.class_methods.contains_key(method)))
     }
 
     fn owns_operator(&self, ty: Option<&Ty>, method: &Symbol, class_object: bool) -> bool {
@@ -798,7 +859,7 @@ impl<'a> BodyTyper<'a> {
                 let mut current = Some(id);
                 for _ in 0..32 {
                     let Some(id) = current else { break };
-                    let Some(class) = self.classes.get(id) else { break };
+                    let Some(class) = self.classes().get(id) else { break };
                     let own = if class_object { &class.class_methods } else { &class.instance_methods };
                     if own.contains_key(method) { return true; }
                     if !class_object && class.includes.iter().any(|m| self.lookup_in_module(m, method).is_some()) { return true; }
@@ -808,6 +869,104 @@ impl<'a> BodyTyper<'a> {
             }
             _ => false,
         }
+    }
+
+    /// `apply_narrowing`, except that (`RH_FOLD`) a binding holding a slot
+    /// reference is unfolded first and narrowed by constructor head, and a
+    /// binding that was exactly a reference becomes a reference to the
+    /// site's narrowed slot.
+    fn narrow(&self, ctx: &Ctx, pred: &narrowing::NarrowPred, then_branch: bool, site: &crate::span::Span) -> Ctx {
+        let at = crate::analyze::fold::site_of(site);
+        let unfolded = match self.fold_narrow(ctx, pred, at) {
+            std::borrow::Cow::Borrowed(c) => return narrowing::apply_narrowing(c, pred, then_branch),
+            std::borrow::Cow::Owned(c) => c,
+        };
+        let mut out = narrowing::with_head_match(|| narrowing::apply_narrowing(&unfolded, pred, then_branch));
+        let mut keys = Vec::new();
+        narrowing::pred_keys(pred, &mut keys);
+        for key in keys {
+            let (name, ivar) = match &key {
+                narrowing::VarKey::Local(n) => (n, false),
+                narrowing::VarKey::Ivar(n) => (n, true),
+                narrowing::VarKey::Reader(..) | narrowing::VarKey::Member(..) => continue,
+            };
+            let before = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) };
+            let Some(Ty::Rec { slot }) = before else { continue };
+            let opened = if ivar { unfolded.ivar_bindings.get(name) } else { unfolded.local_bindings.get(name) }.cloned();
+            let bindings = if ivar { &mut out.ivar_bindings } else { &mut out.local_bindings };
+            let Some(after) = bindings.get(name).cloned() else { continue };
+            if matches!(after, Ty::Rec { .. }) {
+                continue;
+            }
+            if opened.as_ref() == Some(&after) {
+                // Nothing narrowed: keep the reference itself.
+                bindings.insert(name.clone(), Ty::Rec { slot: *slot });
+                continue;
+            }
+            let filter = format!("{}_{}", narrowing::pred_desc(pred, name, then_branch), name.as_str());
+            bindings.insert(name.clone(), crate::analyze::fold::narrowed_ref(at, filter, after));
+        }
+        out
+    }
+
+    /// `RH_FOLD`: the context narrowing starts from, with every binding the
+    /// predicate names unfolded one level when it holds a slot reference.
+    fn fold_narrow<'c>(
+        &self,
+        ctx: &'c Ctx,
+        pred: &narrowing::NarrowPred,
+        at: crate::analyze::fold::SiteId,
+    ) -> std::borrow::Cow<'c, Ctx> {
+        if !crate::analyze::fold::on() {
+            return std::borrow::Cow::Borrowed(ctx);
+        }
+        let mut keys = Vec::new();
+        narrowing::pred_keys(pred, &mut keys);
+        let mut out: Option<Ctx> = None;
+        for key in keys {
+            let (name, ivar) = match &key {
+                narrowing::VarKey::Local(n) => (n, false),
+                narrowing::VarKey::Ivar(n) => (n, true),
+                narrowing::VarKey::Reader(..) | narrowing::VarKey::Member(..) => continue,
+            };
+            let current = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) };
+            let Some(t) = current else { continue };
+            if let Some(u) = crate::analyze::fold::head(t, at, self.classes().raw()) {
+                let c = out.get_or_insert_with(|| ctx.clone());
+                if ivar {
+                    c.ivar_bindings.insert(name.clone(), u);
+                } else {
+                    c.local_bindings.insert(name.clone(), u);
+                }
+            }
+        }
+        match out {
+            Some(c) => std::borrow::Cow::Owned(c),
+            None => std::borrow::Cow::Borrowed(ctx),
+        }
+    }
+
+    /// `RH_FOLD`: a `case` scrutinee that is a local or ivar bound to a
+    /// slot reference, with the binding unfolded one level, and the slot
+    /// when the binding was exactly a reference.
+    fn fold_case_binding(&self, scrutinee: &Expr, ctx: &Ctx) -> Option<(Symbol, bool, Ty, Option<u32>)> {
+        if !crate::analyze::fold::on() {
+            return None;
+        }
+        let (name, ivar) = match &*scrutinee.node {
+            ExprNode::Var { name, .. } => (name, false),
+            ExprNode::Ivar { name } => (name, true),
+            ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => (method, false),
+            _ => return None,
+        };
+        let bound = if ivar { ctx.ivar_bindings.get(name) } else { ctx.local_bindings.get(name) }?;
+        let at = crate::analyze::fold::site_of(&scrutinee.span);
+        let unfolded = crate::analyze::fold::head(bound, at, self.classes().raw())?;
+        let base = match bound {
+            Ty::Rec { slot } => Some(*slot),
+            _ => None,
+        };
+        Some((name.clone(), ivar, unfolded, base))
     }
 
     fn compute(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
@@ -908,6 +1067,7 @@ impl<'a> BodyTyper<'a> {
                         if !keep_bare_splice {
                             qualify_resolved_path(path, name);
                         }
+                        super::sccq::rec_const_id(declaration);
                         let value = self.typed_constants
                             .and_then(|values| values.get(declaration))
                             .cloned()
@@ -954,11 +1114,9 @@ impl<'a> BodyTyper<'a> {
                                 .or_else(|| ctx.constants.get_global(name).cloned())
                         } else {
                             let name = written_class_id(path);
-                            self.typed_constants
-                                .and_then(|values| {
-                                    values.get(&declaration_id_from_lookup_name(name.0.as_str()))
-                                })
-                                .cloned()
+                            let id = declaration_id_from_lookup_name(name.0.as_str());
+                            super::sccq::rec_const_id(&id);
+                            self.typed_constants.and_then(|values| values.get(&id)).cloned()
                         };
                         // Otherwise retain the written class path, but
                         // never guess another class by its suffix.
@@ -1022,7 +1180,7 @@ impl<'a> BodyTyper<'a> {
                 // in spirit to RBS's `untyped` declaration. Distinct
                 // from `Var` (analyzer gap) so the gradual diagnostic
                 // shape is right.
-                Ty::Untyped
+                Ty::unresolved()
             }
 
             ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
@@ -1047,7 +1205,7 @@ impl<'a> BodyTyper<'a> {
                                     });
                                 }
                                 _ => {
-                                    rescued = Some(Ty::Untyped);
+                                    rescued = Some(Ty::unresolved());
                                     break;
                                 }
                             }
@@ -1079,7 +1237,7 @@ impl<'a> BodyTyper<'a> {
                 // value on the handled path. `ensure` never contributes
                 // a value.
                 //
-                // Dropping the rescue arms — what this did before —
+                // Dropping the rescue variants — what this did before —
                 // makes `uri.to_s … rescue nil` infer `String` where it
                 // answers `String?`, and the emitted RBS then
                 // OVER-CLAIMS. campfire's
@@ -1089,7 +1247,7 @@ impl<'a> BodyTyper<'a> {
                 // build stopped on `returning 'sp_RbVal' from a
                 // function with incompatible result type 'const char *'`.
                 //
-                // `Bottom` arms are SKIPPED rather than unioned: a
+                // `Bottom` variants are SKIPPED rather than unioned: a
                 // `rescue` that only re-raises diverges and must not
                 // drag the whole expression to Bottom. Same rule
                 // `effective_return_ty` applies to a diverging tail.
@@ -1186,15 +1344,15 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::BoolOp { left, op, right, .. } => {
                 let lt = self.analyze_expr(left, ctx);
-                // Short-circuit narrowing: when the right arm runs,
-                // the left arm has already produced a value that
+                // Short-circuit narrowing: when the right variant runs,
+                // the left variant has already produced a value that
                 // determined the short-circuit. For `&&` the right
-                // arm runs only if left was truthy; for `||` only if
-                // left was falsy. If the left arm was a recognized
+                // variant runs only if left was truthy; for `||` only if
+                // left was falsy. If the left variant was a recognized
                 // narrowing predicate (`x.is_a?(T)`, `x.nil?`, etc.),
-                // type the right arm under the corresponding
+                // type the right variant under the corresponding
                 // narrowed Ctx so subsequent reads of the same var
-                // see the refined type. Mirrors how the `If` arm
+                // see the refined type. Mirrors how the `If` variant
                 // threads narrowing into its then/else branches.
                 // Var assignments inside `left` (the canonical case is
                 // `(x = find_by(...)) && x.foo`) need to flow into
@@ -1217,10 +1375,10 @@ impl<'a> BodyTyper<'a> {
                 let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member });
                 let mut right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
-                        narrowing::apply_narrowing(&seeded, p, true)
+                        self.narrow(&seeded, p, true, &left.span)
                     }
                     (Some(p), crate::expr::BoolOpKind::Or) => {
-                        narrowing::apply_narrowing(&seeded, p, false)
+                        self.narrow(&seeded, p, false, &left.span)
                     }
                     _ => seeded.clone(),
                 };
@@ -1228,6 +1386,12 @@ impl<'a> BodyTyper<'a> {
                 // rebound or written through between the guard and the use.
                 narrowing::drop_unstable_members(&mut right_ctx, &[&*left, &*right]);
                 let rt = self.analyze_expr(right, &right_ctx);
+                // `RH_FOLD`: the left variant's truthiness reads its structure,
+                // so a reference there is unfolded (a narrowing site); a
+                // left that wins whole keeps the reference itself.
+                let lt_ref = lt.clone();
+                let lt = crate::analyze::fold::head(&lt, crate::analyze::fold::site_of(&left.span), self.classes().raw())
+                    .unwrap_or(lt);
                 // Short-circuit: the result is either left (if it
                 // determined the short-circuit) or right — a union
                 // of the two operand types. For `||`, Nil never wins
@@ -1242,8 +1406,8 @@ impl<'a> BodyTyper<'a> {
                     // Two `||` shapes are not unions at all, and saying
                     // union anyway is what cost campfire's spinel BINARY
                     // a link. `ActionText::ContentHelper.allowed_attributes
-                    // || (…).to_a` has a left arm that can only be one
-                    // thing; the union dragged the right arm's
+                    // || (…).to_a` has a left variant that can only be one
+                    // thing; the union dragged the right variant's
                     // `Array[untyped]` into a list declared
                     // `Array[String]` further down.
                     //
@@ -1252,12 +1416,12 @@ impl<'a> BodyTyper<'a> {
                     //     Ruby's falsy set is `nil` and `false` and
                     //     nothing else, so this reads off the type.
                     //   * a left that is exactly `Nil` never wins, so the
-                    //     result is exactly the RIGHT arm's type —
+                    //     result is exactly the RIGHT variant's type —
                     //     `remove_nil` leaves a bare `Nil` alone (it peels
                     //     from a union), and the union then re-added the
                     //     nil the operator had just ruled out.
                     if never_falsy(&lt) {
-                        return lt;
+                        return lt_ref;
                     }
                     if matches!(lt, Ty::Nil) {
                         return rt;
@@ -1265,7 +1429,7 @@ impl<'a> BodyTyper<'a> {
                     narrowing::remove_nil(&lt)
                 } else {
                     // `a && b` answers `a` only when `a` was falsy, so only
-                    // the arms of `a` that CAN be falsy belong to the result:
+                    // the variants of `a` that CAN be falsy belong to the result:
                     // `params[:id] && params[:id].to_i` (which is how `&.`
                     // reads) is `Integer | nil`, not `String | Integer | nil`
                     // -- a String is never the falsy value that stopped it.
@@ -1306,9 +1470,9 @@ impl<'a> BodyTyper<'a> {
                 // parameter (`c = b`) rather than an outer local.
                 for param in extra_params.iter_mut() {
                     let ty = match (&mut param.default, param.keyword && param.rest) {
-                        (_, true) => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
+                        (_, true) => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::unresolved()) },
                         (Some(default), false) => self.analyze_expr(default, &inner),
-                        (None, false) => Ty::Untyped,
+                        (None, false) => Ty::unresolved(),
                     };
                     if param.name.as_str().is_empty() {
                         continue;
@@ -1343,7 +1507,7 @@ impl<'a> BodyTyper<'a> {
             // `Send` uses, with no argument evidence (`&[]`) since none
             // is available yet — the block's yielded values become
             // ARGUMENTS to `name` at runtime, not evidence about ITS
-            // return type. `block_ret` in the `Send` arm below reads
+            // return type. `block_ret` in the `Send` variant below reads
             // this node's type as the element type for map/select/etc.
             //
             // Known gap: `name`'s OWN param types come from its
@@ -1453,7 +1617,7 @@ impl<'a> BodyTyper<'a> {
                 // free-function code path. Targets that don't model self
                 // as an instance (e.g., Crystal's module-shape controller
                 // emit) render `SelfRef` as appropriate for their shape;
-                // see the per-target SelfRef arms in each emit_expr.
+                // see the per-target SelfRef variants in each emit_expr.
                 let resolves_through_self = ctx.annotate_self_dispatch
                     && recv.is_none()
                     && matches!(
@@ -1519,6 +1683,16 @@ impl<'a> BodyTyper<'a> {
                         Some(t.subst_self(self_ty))
                     }
                     (other, _) => other,
+                };
+                // `RH_FOLD`: unfold a receiver reference one level before
+                // anything reads its structure (block parameters,
+                // projections, dispatch).
+                let recv_ty = match recv_ty {
+                    Some(t) if crate::analyze::fold::on() => {
+                        let at = crate::analyze::fold::site_of(&expr_span);
+                        Some(crate::analyze::fold::head(&t, at, self.classes().raw()).unwrap_or(t))
+                    }
+                    other => other,
                 };
                 // `Parameters` is a Hash-shaped bag: what its own class does
                 // not answer (`fetch`, `each`, `map`, `count`, ...) is the
@@ -1628,7 +1802,7 @@ impl<'a> BodyTyper<'a> {
                         ExprNode::Var { name, .. } => match ctx.local_bindings.get(name) {
                             Some(Ty::Nil) => None,
                             Some(ty) if forwarded_block_may_be_nil(ty) => None,
-                            _ => Some(Ty::Untyped),
+                            _ => Some(Ty::unresolved()),
                         },
                         _ => None,
                     }
@@ -1774,7 +1948,7 @@ impl<'a> BodyTyper<'a> {
                     if let Some(t) = args[0]
                         .ty
                         .clone()
-                        .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))
+                        .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped { .. }))
                     {
                         return t;
                     }
@@ -1835,6 +2009,18 @@ impl<'a> BodyTyper<'a> {
                     .and_then(|t| literal_extremum_ty(recv.as_ref(), t, method, args))
                 {
                     return t;
+                }
+                if super::errgate::on() {
+                    let mut slots = std::collections::BTreeSet::new();
+                    let side = recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }))
+                        || (recv.is_none() && ctx.class_side);
+                    if let Some(Ty::Class { id, .. }) = recv_ty.as_ref() {
+                        if let Some(ci) = self.classes().raw().get(id) {
+                            let table = if side { &ci.class_methods } else { &ci.instance_methods };
+                            if table.contains_key(method) { slots.insert(super::errgate::ret_slot(id, method, side)); }
+                        }
+                    }
+                    super::errgate::origin(&expr_span, slots);
                 }
                 if expr.decisions & crate::expr::REVERSE_MERGE != 0
                     && let (Some(defaults), [hash]) = (recv_ty.as_ref(), args.as_slice())
@@ -1906,7 +2092,7 @@ impl<'a> BodyTyper<'a> {
                 // argument says more.
                 // Not a Float argument: CRuby's `BigDecimal(Float)` needs a precision and spinel's package has none.
                 if recv.is_none() && method.as_str() == "BigDecimal" && args.len() == 1 && block.is_none()
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
                     && matches!(args[0].ty.as_ref(), Some(Ty::Str | Ty::Int))
                     && !self.app_defines(ctx.self_ty.as_ref(), method)
                 {
@@ -1916,7 +2102,7 @@ impl<'a> BodyTyper<'a> {
                 if recv.is_none() && block.is_none()
                     && ((method.as_str() == "Integer" && matches!(args.len(), 1 | 2)) || (method.as_str() == "Float" && args.len() == 1))
                     && !args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { .. }))
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
                     && !self.app_defines(ctx.self_ty.as_ref(), method)
                 {
                     return if method.as_str() == "Integer" { Ty::Int } else { Ty::Float };
@@ -1924,7 +2110,7 @@ impl<'a> BodyTyper<'a> {
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
                     && (matches!(dispatched, Ty::Var { .. })
-                        || (matches!(dispatched, Ty::Untyped)
+                        || (matches!(dispatched, Ty::Untyped { .. })
                             && !self.app_defines(ctx.self_ty.as_ref(), method)))
                 {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
@@ -1969,7 +2155,7 @@ impl<'a> BodyTyper<'a> {
                     }
                 }
                 if method.as_str() == "human_attribute_name"
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
                     && crate::lower::human_attribute_name::literal_attribute(args).is_some()
                     && match recv.as_ref() {
                         Some(r) => crate::lower::human_attribute_name::receiver_model(r),
@@ -1984,7 +2170,7 @@ impl<'a> BodyTyper<'a> {
                     return Ty::Str;
                 }
                 if method.as_str() == "where"
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
                     && block.is_none()
                     && crate::lower::errors_index::where_args(args).is_some()
@@ -1992,7 +2178,7 @@ impl<'a> BodyTyper<'a> {
                     return crate::lower::errors_index::error_array_ty();
                 }
                 if method.as_str() == "delete"
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
                     && block.is_none()
                     && crate::lower::errors_index::delete_field(args).is_some()
@@ -2000,7 +2186,7 @@ impl<'a> BodyTyper<'a> {
                     return Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Nil].into() };
                 }
                 if matches!(method.as_str(), "import" | "merge!")
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
                     && block.is_none()
                     && crate::lower::errors_add::import_grounds(method.as_str(), args, &|id| self.classes.get(id).is_some_and(|c| c.table.is_some()))
@@ -2008,14 +2194,14 @@ impl<'a> BodyTyper<'a> {
                     return crate::lower::errors_index::error_array_ty();
                 }
                 if method.as_str() == "[]"
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
                     && matches!(recv_ty.as_ref().map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if id.0.as_str() == crate::lower::errors_index::DETAILS_ENTRY)
                     && crate::lower::errors_index::reads_detail_type(args)
                 {
                     return Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() };
                 }
                 if matches!(method.as_str(), "of_kind?" | "added?")
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
                     && block.is_none()
                     && crate::lower::errors_index::of_kind_grounds(args)
@@ -2023,7 +2209,7 @@ impl<'a> BodyTyper<'a> {
                     return Ty::Bool;
                 }
                 if method.as_str() == "full_message"
-                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. })
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
                     && crate::lower::errors_add::full_message_bakes(recv.as_ref(), args, block.as_ref())
                 {
@@ -2038,7 +2224,7 @@ impl<'a> BodyTyper<'a> {
                 let class_object_receiver = class_object_receiver
                     || (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
                         && send::is_module_protocol(method) && self.self_is_module_instance(ctx));
-                if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
+                if matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. }) && self.inquirers.is_some()
                     && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let class_object = class_object_receiver;
@@ -2066,7 +2252,7 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
-                if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
+                if matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. }) && self.inquirers.is_some()
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let gap = match recv_ty.as_ref() {
                         Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "ActiveModel::Errors" | "ActiveModel::Error") => Some(id.0.as_str()),
@@ -2090,7 +2276,7 @@ impl<'a> BodyTyper<'a> {
                             Some("Object extension")
                         }
                         // Not refused again on a receiver the constant refusal already accounts for.
-                        _ if matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped))
+                        _ if matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped { .. }))
                             && recv.as_ref().is_some_and(|r| rooted_in_refused_constant(r)) => None,
                         // Grounded, so not a gap: `presence_in(<Array[String]>)` is
                         // `ActiveSupport.presence_in` (lower::presence_in), and a
@@ -2100,7 +2286,7 @@ impl<'a> BodyTyper<'a> {
                         // `to_query(key)` (the Object/Array/nil form), still refuse.
                         _ if method.as_str() == "presence_in" && args.len() == 1 && block.is_none() && is_string_array(args[0].ty.as_ref()) => None,
                         _ if method.as_str() == "to_query" && args.is_empty() && block.is_none()
-                            && matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. })) => None,
+                            && matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped { .. } | Ty::Hash { .. })) => None,
                         _ if matches!(method.as_str(), "to_query" | "instance_values" | "acts_like?" | "presence_in" | "as_json" | "with_options" | "pretty_inspect") => Some("Object extension"),
                         _ => None,
                     };
@@ -2136,7 +2322,7 @@ impl<'a> BodyTyper<'a> {
                 // what it bound: `if user = User.authenticate_by(…)`
                 // reads `user` as `User` in the then-branch, `User?`
                 // in the else-branch. (Narrowing before seeding would
-                // find no binding to narrow and leave the nil arm.)
+                // find no binding to narrow and leave the nil variant.)
                 let mut cond_assigns: HashMap<Symbol, Ty> = HashMap::new();
                 collect_var_assignments_into(cond, &mut cond_assigns);
                 let mut base = ctx.clone();
@@ -2148,13 +2334,13 @@ impl<'a> BodyTyper<'a> {
                 let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &base);
                 let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member });
                 let mut then_ctx = match &pred {
-                    Some(p) => narrowing::apply_narrowing(&base, p, true),
+                    Some(p) => self.narrow(&base, p, true, &cond.span),
                     None => base.clone(),
                 };
                 narrowing::drop_unstable_members(&mut then_ctx, &[&*cond, &*then_branch]);
                 let t = self.analyze_expr(then_branch, &then_ctx);
                 let mut else_ctx = match &pred {
-                    Some(p) => narrowing::apply_narrowing(&base, p, false),
+                    Some(p) => self.narrow(&base, p, false, &cond.span),
                     None => base.clone(),
                 };
                 narrowing::drop_unstable_members(&mut else_ctx, &[&*cond, &*else_branch]);
@@ -2164,17 +2350,64 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Case { scrutinee, arms } => {
                 self.analyze_expr(scrutinee, ctx);
+                // `RH_FOLD`: `case x when Hash …` narrows `x` by constructor
+                // head when `x` holds a slot reference (main does not narrow
+                // `case`; unchanged without one).
+                let mut fold_case = self.fold_case_binding(scrutinee, ctx);
+                let mut removed: Vec<String> = Vec::new();
                 let mut branch_tys = Vec::new();
                 for arm in arms.iter_mut() {
-                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, ctx); }
-                    branch_tys.push(self.analyze_expr(&mut arm.body, ctx));
+                    let arm_ctx = match fold_case.as_mut() {
+                        Some((name, ivar, remaining, base)) => {
+                            let (bound, filter) = match narrowing::when_class_ty(&arm.pattern) {
+                                Some(t) => {
+                                    let (this, rest) = narrowing::head_split(remaining, &t);
+                                    *remaining = rest;
+                                    let head = narrowing::head_name(&t);
+                                    let filter = format!(
+                                        "when_{head}{}",
+                                        removed.iter().map(|r| format!("_not_{r}")).collect::<String>()
+                                    );
+                                    removed.push(head);
+                                    (this, filter)
+                                }
+                                None => (
+                                    remaining.clone(),
+                                    format!(
+                                        "case_else{}",
+                                        removed.iter().map(|r| format!("_not_{r}")).collect::<String>()
+                                    ),
+                                ),
+                            };
+                            // A scrutinee that was exactly a reference is
+                            // bound to a reference to the narrowed slot.
+                            let bound = match base {
+                                Some(_) => crate::analyze::fold::narrowed_ref(
+                                    crate::analyze::fold::site_of(&expr_span),
+                                    format!("{filter}_{}", name.as_str()),
+                                    bound,
+                                ),
+                                None => bound,
+                            };
+                            let mut c = ctx.clone();
+                            if *ivar {
+                                c.ivar_bindings.insert(name.clone(), bound);
+                            } else {
+                                c.local_bindings.insert(name.clone(), bound);
+                            }
+                            std::borrow::Cow::Owned(c)
+                        }
+                        None => std::borrow::Cow::Borrowed(ctx),
+                    };
+                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, &arm_ctx); }
+                    branch_tys.push(self.analyze_expr(&mut arm.body, &arm_ctx));
                 }
                 union_many(branch_tys)
             }
 
             // Pattern bindings are lexical locals. Failed guards do not
             // roll them back, and failed patterns can bind a prefix.
-            // Sibling arms see possible earlier bindings joined with
+            // Sibling variants see possible earlier bindings joined with
             // their old value (nil for a newly introduced local).
             ExprNode::CaseMatch { scrutinee, arms, else_body } => {
                 let scrutinee_ty = self.analyze_expr(scrutinee, ctx);
@@ -2248,7 +2481,7 @@ impl<'a> BodyTyper<'a> {
                 // Seq walk never sees it as a statement) refines the
                 // binding, but the seed keeps `Ty::Nil` — and a stale
                 // `Ty::Nil` is worse here than a stale element type,
-                // because `nil?` const-folds on it. Go's `nil?` arm
+                // because `nil?` const-folds on it. Go's `nil?` variant
                 // maps `Some(Ty::Nil) => "true"`, so `if !size.nil?`
                 // emitted `if !(true)` and the guarded branch became
                 // DEAD CODE — a silent miscompile, not a type error.
@@ -2365,7 +2598,7 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     // A `begin … rescue … end` STATEMENT exports the
-                    // locals its body and rescue arms assign at their own
+                    // locals its body and rescue variants assign at their own
                     // top level — Ruby's `begin` opens no scope — typed
                     // as the assigned value OR what the name held before
                     // (nil when it was unbound): the exception may come
@@ -2398,7 +2631,7 @@ impl<'a> BodyTyper<'a> {
                     // with any prior binding and skip an unknown RHS so a
                     // before_action-seeded type isn't clobbered.
                     // `instance_variable_set(:@article, record)` is Kernel,
-                    // not `Assign`, so the arm above misses it. Fold a
+                    // not `Assign`, so the variant above misses it. Fold a
                     // statically resolvable name so a later statement in
                     // the same method can read the ivar.
                     if let Some((name, ty)) =
@@ -2443,6 +2676,13 @@ impl<'a> BodyTyper<'a> {
                     // targets with no usable RHS signal are left as-is.
                     if let ExprNode::MultiAssign { targets, value } = &*e.node {
                         let rhs = value.ty.clone();
+                        // `RH_FOLD`: destructuring reads a reference's structure.
+                        let rhs = match &rhs {
+                            Some(t) => crate::analyze::fold::head(t, crate::analyze::fold::site_of(&e.span), self.classes().raw())
+                                .map(Some)
+                                .unwrap_or(rhs),
+                            None => rhs,
+                        };
                         for (i, target) in targets.iter().enumerate() {
                             let Some(ty) = multiassign_target_ty(&rhs, i) else {
                                 continue;
@@ -2676,7 +2916,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         if then_diverges && else_empty {
                             if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
-                                local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
+                                local_ctx = self.narrow(&local_ctx, &pred, false, &cond.span);
                             }
                         }
                         // The mirror image is `unless`, which the ingest
@@ -2691,7 +2931,7 @@ impl<'a> BodyTyper<'a> {
                         let else_diverges = matches!(else_branch.ty.as_ref(), Some(Ty::Bottom));
                         if else_diverges && then_empty {
                             if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
-                                local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, true);
+                                local_ctx = self.narrow(&local_ctx, &pred, true, &cond.span);
                             }
                         }
                     }
@@ -2710,7 +2950,17 @@ impl<'a> BodyTyper<'a> {
                 // empty container literals already infer from their
                 // contents.
                 if let LValue::Ivar { name } = target {
-                    if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
+                    if crate::analyze::slots::ivar_cut(ctx.self_ty.as_ref(), name) {
+                        // `RH_FOLD_SLOTS`: an ivar on a slot-graph cycle
+                        // takes no pre-stamp from its own seed, and keeps no
+                        // stale stamp from an earlier round either: that
+                        // stamp is state carried between rounds.
+                        if matches!(&*value.node, ExprNode::Array { elements, .. } if elements.is_empty())
+                            || matches!(&*value.node, ExprNode::Hash { entries, .. } if entries.is_empty())
+                        {
+                            value.ty = None;
+                        }
+                    } else if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
                         propagate_expected_to_empty_container(value, &expected);
                     }
                 }
@@ -2753,7 +3003,7 @@ impl<'a> BodyTyper<'a> {
                 // so type as Untyped: the call site signed for an opaque block
                 // return, and propagating Untyped lets downstream dispatch
                 // resolve cleanly instead of bottoming out at Var.
-                if ctx.in_view { Ty::Str } else { Ty::Untyped }
+                if ctx.in_view { Ty::Str } else { Ty::unresolved() }
             }
 
             ExprNode::Raise { value } => {
@@ -2783,13 +3033,13 @@ impl<'a> BodyTyper<'a> {
                 Ty::Bottom
             }
 
-            ExprNode::ForwardArgs | ExprNode::ForwardKeywords => Ty::Untyped,
+            ExprNode::ForwardArgs | ExprNode::ForwardKeywords => Ty::unresolved(),
             ExprNode::ForwardKeywordsWithPairs { entries } => {
                 for (key, value) in entries.iter_mut() {
                     self.analyze_expr(key, ctx);
                     self.analyze_expr(value, ctx);
                 }
-                Ty::Untyped
+                Ty::unresolved()
             }
 
             ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
@@ -2834,7 +3084,7 @@ impl<'a> BodyTyper<'a> {
                 // no element-type signal.
                 let elem = begin_ty
                     .or(end_ty)
-                    .unwrap_or(Ty::Untyped);
+                    .unwrap_or(Ty::unresolved());
                 Ty::Class {
                     id: ClassId(Symbol::from("Range")),
                     args: vec![elem].into(),
@@ -3024,7 +3274,7 @@ fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
             .map(|elems| elems.into_iter().reduce(union_of).unwrap_or(Ty::Bottom)),
         // Any other class may answer `to_ary`/`to_a` (a Struct, a Set,
         // anything Enumerable), which `Array()` then unpacks.
-        Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. } | Ty::Record { .. } | Ty::Class { .. } => None,
+        Ty::Var { .. } | Ty::Untyped { .. } | Ty::Hash { .. } | Ty::Record { .. } | Ty::Class { .. } => None,
         scalar => Some(scalar.clone()),
     }
 }
@@ -3081,7 +3331,9 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         // target gets the element model, same as `Array<of>`.
         Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
-        Some(Ty::Untyped) => Some(Ty::Untyped),
+        Some(Ty::Untyped { .. }) => Some(Ty::unresolved()),
+        // A reference nobody unfolded reads as `untyped`.
+        Some(Ty::Rec { .. }) => Some(Ty::unresolved()),
         _ => None,
     }
 }
@@ -3089,8 +3341,8 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
 /// Walk an Expr collecting every `Assign { target: LValue::Var, .. }`
 /// it contains, recording `name → expr.ty`. Used to thread local
 /// bindings produced by an embedded assignment (`(x = find_by(...))`)
-/// from a `BoolOp::And` left-arm or `If::cond` into the subsequent
-/// arm's Ctx. The Seq-statement-level handler covers the common case
+/// from a `BoolOp::And` left-variant or `If::cond` into the subsequent
+/// variant's Ctx. The Seq-statement-level handler covers the common case
 /// of top-level `x = ...` statements; this covers the nested form.
 ///
 /// Descent stops at scope-introducing nodes (`Lambda`, `Let`) so a
@@ -3256,6 +3508,15 @@ fn collect_var_assignments_into(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 }
 
 pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
+    // The join memo pays for one large DAG-shaped join. The fold's joins are
+    // many small independent ones, where it only costs hashing and copies.
+    if crate::analyze::fold::on() {
+        return union_of_raw(a, b);
+    }
+    crate::join_memo::join(a, b, union_of_raw)
+}
+
+fn union_of_raw(a: Ty, b: Ty) -> Ty {
     // Bottom is the divergent-expression type — the branch carrying
     // it doesn't contribute a value, so it drops out of joins.
     // Mirrors Crystal's `Type.merge` filter on `NoReturnType`.
@@ -3365,18 +3626,18 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
 /// The join for an ivar slot the fixpoint carries between rounds
 /// (`extract_ivar_assignments`' repeated writes and `[]=` widening).
 ///
-/// [`union_of`] with a pending `Var` as the identity: a `Var` arm
-/// drops out wherever another arm sits beside it, at the top and
+/// [`union_of`] with a pending `Var` as the identity: a `Var` variant
+/// drops out wherever another variant sits beside it, at the top and
 /// inside Hash and Array spines, so `{}` (`Hash[Var, Var]`) joined
 /// with a `[]=` write gives the same Hash whichever arrived first, as
 /// `widen_hash_ivar_value` always meant (it replaced a `Var` value
-/// side). `Untyped` stays an arm: gradual absorption is unchanged
+/// side). `Untyped` stays an variant: gradual absorption is unchanged
 /// (#617).
 pub(crate) fn join_ivar_slot(a: Ty, b: Ty) -> Ty {
     drop_pending_arms(union_of(a, b))
 }
 
-/// Remove `Var` arms that sit beside a non-`Var` arm, in a union and
+/// Remove `Var` variants that sit beside a non-`Var` variant, in a union and
 /// inside Hash and Array spines. A union of `Var`s alone keeps the one
 /// with the smallest id (canonical order sorts them first), so every
 /// pending value is one element of the lattice. Expects `union_of`'s
@@ -3497,7 +3758,7 @@ mod tests {
     fn kernel_array_does_not_capture_inherited_or_included_app_methods() {
         let owner = ClassId(Symbol::from("Owner"));
         let child = ClassId(Symbol::from("Child"));
-        for (included, ret) in [(false, Ty::Str), (true, Ty::Str), (false, Ty::Untyped)] {
+        for (included, ret) in [(false, Ty::Str), (true, Ty::Str), (false, Ty::unresolved())] {
             let mut classes = empty_classes();
             let mut info = ClassInfo::default();
             info.instance_methods.insert(Symbol::from("Array"), ret.clone());
@@ -4084,7 +4345,7 @@ mod tests {
             "opts",
             Ty::Hash {
                 key: std::sync::Arc::new(Ty::Str),
-                value: std::sync::Arc::new(Ty::Untyped),
+                value: std::sync::Arc::new(Ty::unresolved()),
             },
         );
         typer.analyze_expr(&mut seq, &ctx);
@@ -4504,7 +4765,7 @@ mod tests {
             Ty::Str,
             Ty::Time,
             Ty::Nil,
-            Ty::Untyped,
+            Ty::unresolved(),
             Ty::Bottom,
             Ty::Var { var: TyVar(7) },
             class("Story"),
@@ -4726,7 +4987,7 @@ mod tests {
     // another order and grouping, so each carried-slot join has to be
     // commutative, associative and idempotent, with pending (`Var`) as
     // its identity. The universe is generated from `law_universe` plus
-    // the unknown-arm shapes the joins classify, normalized through the
+    // the unknown-variant shapes the joins classify, normalized through the
     // join under test (a carried slot only ever holds a join's output),
     // and every law is checked over every pair and triple.
 
@@ -4738,14 +4999,14 @@ mod tests {
         let mut raw = law_universe();
         raw.extend([
             Ty::Var { var: TyVar(2) },
-            Ty::Union { variants: vec![Ty::Str, Ty::Untyped].into() },
+            Ty::Union { variants: vec![Ty::Str, Ty::unresolved()].into() },
             Ty::Union { variants: vec![Ty::Int, Ty::Var { var: TyVar(4) }].into() },
-            Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::unresolved(), Ty::Nil].into() },
             Ty::Union { variants: vec![Ty::Var { var: TyVar(5) }, Ty::Nil].into() },
-            Ty::Union { variants: vec![Ty::Var { var: TyVar(6) }, Ty::Untyped, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Var { var: TyVar(6) }, Ty::unresolved(), Ty::Nil].into() },
             Ty::Union {
                 variants: vec![
-                    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
+                    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::unresolved()) },
                     Ty::Nil,
                 ].into(),
             },
@@ -4794,39 +5055,57 @@ mod tests {
         assert_eq!(join(v1.clone(), v2.clone()), join(v2, v1));
     }
 
-    /// An `untyped` arm inside a union is classified like a bare
+    /// An `untyped` variant inside a union is classified like a bare
     /// `untyped`, so the answer doesn't depend on whether a producer
     /// joined `Int` and `Str` first.
     #[test]
     fn param_slot_join_classifies_untyped_arms_inside_unions() {
         let join = crate::analyze::unify_param_ty;
-        let str_or_untyped = Ty::Union { variants: vec![Ty::Str, Ty::Untyped].into() };
+        let str_or_untyped = Ty::Union { variants: vec![Ty::Str, Ty::unresolved()].into() };
         assert_eq!(
             join(Ty::Int, str_or_untyped),
-            join(join(Ty::Int, Ty::Str), Ty::Untyped),
+            join(join(Ty::Int, Ty::Str), Ty::unresolved()),
         );
     }
 
     /// `nil` alone doesn't absorb `untyped` (#617, rule (a)): a nil
     /// observation beside an untyped one is no evidence the parameter
-    /// is always nil. A non-nil concrete type still absorbs it.
+    /// is always nil. The conservative store retains it beside a concrete
+    /// type too; the legacy reader view still absorbs it there.
     #[test]
     fn param_slot_join_keeps_untyped_beside_nil_alone() {
         let join = crate::analyze::unify_param_ty;
-        let nil_or_untyped = Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() };
-        assert_eq!(join(Ty::Nil, Ty::Untyped), nil_or_untyped);
-        assert_eq!(join(Ty::Untyped, Ty::Nil), nil_or_untyped);
+        let nil_or_untyped = Ty::Union { variants: vec![Ty::unresolved(), Ty::Nil].into() };
+        assert_eq!(join(Ty::Nil, Ty::unresolved()), nil_or_untyped);
+        assert_eq!(join(Ty::unresolved(), Ty::Nil), nil_or_untyped);
         let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
-        assert_eq!(join(nil_or_untyped.clone(), Ty::Str), str_or_nil);
-        assert_eq!(join(Ty::Str, nil_or_untyped), str_or_nil);
+        let expected = if crate::analyze::parameter_conservation::on() {
+            Ty::Union { variants: vec![Ty::Str, Ty::unresolved(), Ty::Nil].into() }
+        } else {
+            str_or_nil.clone()
+        };
+        assert_eq!(join(nil_or_untyped.clone(), Ty::Str), expected);
+        assert_eq!(join(Ty::Str, nil_or_untyped.clone()), expected);
+        assert_eq!(crate::analyze::unify_param_ty_raw(nil_or_untyped.clone(), Ty::Str), str_or_nil);
+        assert_eq!(crate::analyze::unify_param_ty_raw(Ty::Str, nil_or_untyped), str_or_nil);
     }
 
     /// A parameter observed as `{}` at one call site and as a filled
-    /// Hash at another is that Hash, as for an ivar.
+    /// Hash at another retains the ambiguous legacy Vars in conservative
+    /// storage. The absorbed reader view remains that filled Hash.
     #[test]
     fn param_slot_join_drops_pending_inside_hash_spines() {
         let filled = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) };
-        assert_eq!(crate::analyze::unify_param_ty(empty_hash(), filled.clone()), filled);
+        let expected = if crate::analyze::parameter_conservation::on() {
+            Ty::Hash {
+                key: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Str, pending()].into() }),
+                value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, pending()].into() }),
+            }
+        } else {
+            filled.clone()
+        };
+        assert_eq!(crate::analyze::unify_param_ty(empty_hash(), filled.clone()), expected);
+        assert_eq!(crate::analyze::unify_param_ty_raw(empty_hash(), filled.clone()), filled);
     }
 
     #[test]
@@ -5041,7 +5320,7 @@ mod tests {
         //
         // `h` is statically `Hash[Sym, Str]`; the value-omission bind
         // `data:` should type as the hash's uniform value type (`Str`),
-        // and so should the arm body that reads it back.
+        // and so should the variant body that reads it back.
         let h_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
         let pattern = MatchPattern::Hash {
             constant: None,
@@ -5112,17 +5391,17 @@ mod tests {
 
         let classes = empty_classes();
         let typer = BodyTyper::new(&classes);
-        let ctx = ctx_with_local("r", Ty::Untyped);
+        let ctx = ctx_with_local("r", Ty::unresolved());
         typer.analyze_expr(&mut expr, &ctx);
 
         let ExprNode::CaseMatch { arms, .. } = &*expr.node else {
             panic!("expected CaseMatch, got {:?}", expr.node);
         };
-        assert_eq!(arms[0].body.ty, Some(Ty::Untyped));
+        assert_eq!(arms[0].body.ty, Some(Ty::unresolved()));
     }
 }
 
-/// The arms of `ty` a falsy value can come from -- `nil`, `false`, and
+/// The variants of `ty` a falsy value can come from -- `nil`, `false`, and
 /// anything not known to be truthy. `None` when there are none.
 fn falsy_part(ty: &Ty) -> Option<Ty> {
     match ty {
@@ -5148,7 +5427,7 @@ fn falsy_part(ty: &Ty) -> Option<Ty> {
 ///
 /// A whitelist, not a blacklist: `Untyped`, `Var` and anything else the
 /// enum grows must fall through to the union, because being wrong here
-/// drops a real arm from a real type.
+/// drops a real variant from a real type.
 fn never_falsy(ty: &Ty) -> bool {
     match ty {
         Ty::Int
@@ -5222,7 +5501,7 @@ fn expect_hash_arg_ty(recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::E
     let (key, value) = match recv_ty {
         Some(Ty::Hash { key, value }) => (key.clone(), value.clone()),
         Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionController::Parameters" => {
-            (std::sync::Arc::new(Ty::Str), std::sync::Arc::new(Ty::Untyped))
+            (std::sync::Arc::new(Ty::Str), std::sync::Arc::new(Ty::unresolved()))
         }
         _ => return None,
     };
@@ -5264,8 +5543,8 @@ fn promotes_to_param_value(
     };
     // Not only the source's `params`: after the controller lowering it reads `@params`, a `Hash[String, untyped]`.
     let untyped = match recv_ty {
-        Some(Ty::Untyped) => true,
-        Some(Ty::Union { variants }) => variants.iter().all(|v| matches!(v, Ty::Untyped | Ty::Nil)),
+        Some(Ty::Untyped { .. }) => true,
+        Some(Ty::Union { variants }) => variants.iter().all(|v| matches!(v, Ty::Untyped { .. } | Ty::Nil)),
         _ => false,
     };
     // The fork models the full parameter-value union before this
@@ -5409,6 +5688,15 @@ pub(super) const RUBY_TOP_LEVEL: &[&str] = &[
     "Socket", "StringIO", "Struct", "Tempfile", "Thread", "Time", "Timeout", "URI", "YAML",
     "Zlib",
 ];
+
+#[cfg(test)]
+mod producer_reason_provenance_probe;
+
+#[cfg(test)]
+pub(super) fn evidence_control_dispatch(receiver: &Ty, method: &Symbol) -> Ty {
+    let classes = HashMap::new();
+    BodyTyper::new(&classes).dispatch(Some(receiver), method, None, &[])
+}
 
 /// `Array[String]` — what `ActiveSupport.presence_in(value, list)` declares for its list.
 fn is_string_array(ty: Option<&Ty>) -> bool {
