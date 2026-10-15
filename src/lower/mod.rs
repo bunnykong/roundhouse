@@ -1528,6 +1528,46 @@ pub(crate) fn for_each_emit_body_ref(app: &crate::App, f: &mut impl FnMut(&crate
     }
 }
 
+/// Mutable twin of `for_each_emit_body_ref`, for final Pending settlement.
+pub(crate) fn for_each_emit_body_mut(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+    for_each_forwarding_body(app, f);
+    for item in app.models.iter_mut().flat_map(|model| &mut model.body) {
+        if let crate::dialect::ModelBodyItem::Association { assoc, .. } = item {
+            match assoc {
+                crate::dialect::Association::BelongsTo { default: Some(e), .. }
+                | crate::dialect::Association::HasMany { scope: Some(e), .. } => f(e),
+                _ => {}
+            }
+        }
+    }
+    for action in app.controllers.iter_mut().flat_map(|c| c.actions_mut()) {
+        for default in action.kw_params.iter_mut().filter_map(|(_, e)| e.as_mut()) { f(default); }
+    }
+    for view in &mut app.views {
+        for default in view.strict_locals.iter_mut().flatten().filter_map(|p| p.default.as_mut()) { f(default); }
+    }
+    for fixture in &mut app.fixtures {
+        for e in &mut fixture.preamble { f(e); }
+        for value in fixture.records.values_mut().flat_map(|record| record.values_mut()) {
+            if let crate::dialect::FixtureValue::Ruby(e) = value { f(e); }
+        }
+    }
+    for helper in &mut app.routes.direct_helpers { f(&mut helper.body); }
+    for function in &mut app.sql_functions {
+        let mut visit_method = |method: &mut crate::dialect::MethodDef| {
+            f(&mut method.body);
+            for default in method.params.iter_mut().filter_map(|p| p.default.as_mut()) { f(default); }
+        };
+        match &mut function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => visit_method(method),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
+                visit_method(step);
+                visit_method(finalize);
+            }
+        }
+    }
+}
+
 pub use associations::{
     build_has_many_table, resolve_has_many, resolve_has_many_on_local, HasManyRef, HasManyRow,
 };

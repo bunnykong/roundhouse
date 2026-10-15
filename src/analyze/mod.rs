@@ -47,10 +47,17 @@ pub(crate) mod forwarding;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
+pub(crate) mod strict_producers;
 pub mod producer_evidence;
 mod parameter_conservation;
 mod fixpoint_bound;
 mod fixpoint_check;
+mod closure_census;
+#[cfg(test)]
+mod closure_application;
+#[cfg(test)]
+#[allow(dead_code)]
+mod writer_laws;
 mod precision;
 mod det;
 mod detfp;
@@ -189,6 +196,7 @@ pub struct Analyzer {
     /// `RH_SCHED=sccq`: the ordered worklist. `None` runs main's global
     /// rounds.
     sccq: Option<Box<sccq::Engine>>,
+    strict_stub_originals: Vec<(ParamKey, Ty)>,
     /// The worklist's class passes leave model, library and controller
     /// method bodies to it.
     sccq_skip_fine: bool,
@@ -1217,6 +1225,7 @@ impl Analyzer {
             fixpoint_rounds: FixpointRounds::default(),
             fixpoint_checks: fixpoint_check::Checks::default(),
             sccq: None,
+            strict_stub_originals: Vec::new(),
             sccq_skip_fine: false,
             sccq_harvest_fine: false,
             sccq_production_end: None,
@@ -1305,12 +1314,27 @@ impl Analyzer {
 
     fn analyze_cached(&mut self, app: &mut App) {
         producer_evidence::reset(&app.sources);
+        closure_census::start();
         self.fixpoint_checks = fixpoint_check::Checks::start();
         det::reset();
         errgate::reset();
         handoff::reset();
         fold::reset();
         slots::reset();
+        self.strict_stub_originals.clear();
+        if strict_producers::stubs_on() {
+            for key in Self::defined_methods(app) {
+                let Some(cls) = self.classes.get_mut(&key.0) else { continue };
+                let table = match key.2 {
+                    MethodReceiver::Instance => &mut cls.instance_methods,
+                    MethodReceiver::Class => &mut cls.class_methods,
+                };
+                if let Some(stub @ Ty::Untyped { .. }) = table.get_mut(&key.1) {
+                    self.strict_stub_originals.push((key, stub.clone()));
+                    *stub = Ty::pending_untyped();
+                }
+            }
+        }
         structure::reset(|| (Self::defined_methods(app), Self::param_shapes(app)));
         if fixpoint_check::stats_on() {
             self.fixpoint_checks.structure_start = Some(self.structure_snapshot(app).summary());
@@ -1809,7 +1833,7 @@ impl Analyzer {
     /// as "never returns". Each type settles on its own, so the walk's
     /// order does not matter.
     fn settle_pending(&mut self, app: &mut App) {
-        if !(handoff::settle_on() || fold::on()) {
+        if !(handoff::settle_on() || fold::on() || strict_producers::stubs_on() || strict_producers::xfer_on()) {
             return;
         }
         fn settle(t: &mut Ty) {
@@ -1837,7 +1861,11 @@ impl Analyzer {
             .flat_map(|res| res.filter_chain.iter_mut())
             .flat_map(|filter| filter.assigns.values_mut())
             .for_each(settle);
-        crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e));
+        if strict_producers::stubs_on() || strict_producers::xfer_on() {
+            crate::lower::for_each_emit_body_mut(app, &mut |e| rewrite(e));
+        } else {
+            crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e));
+        }
     }
 
     /// `RH_FOLD`: expand every reference in the registry, the parameter
@@ -2662,8 +2690,23 @@ impl Analyzer {
             // ivars, untyped, absent from the schema. Seed as gradual
             // so a direct `@edit_user_id` read resolves (don't clobber
             // a schema column of the same name).
+            let mut own_assignments = HashMap::new();
+            if strict_producers::stubs_on() {
+                for method in model.methods() {
+                    let mut syntax = method.body.clone();
+                    fn seed_missing(e: &mut Expr) {
+                        if e.ty.is_none() { e.ty = Some(Ty::pending_untyped()); }
+                        e.node.for_each_child_mut(&mut seed_missing);
+                    }
+                    seed_missing(&mut syntax);
+                    extract_ivar_assignments(&syntax, &mut own_assignments);
+                }
+            }
             for name in collect_attr_accessor_names(&model.body) {
-                class_ivars.entry(name).or_insert(Ty::unresolved());
+                let seed = if strict_producers::stubs_on() && own_assignments.contains_key(&name) {
+                    Ty::pending_untyped()
+                } else { Ty::unresolved() };
+                class_ivars.entry(name).or_insert(seed);
             }
 
             // Phase 0: type the model's `Unknown` body items so the
@@ -5015,16 +5058,18 @@ impl Analyzer {
     }
 
     fn inference_matches(&self, prev: &InferenceSig) -> bool {
-        if self.classes.len() != prev.instance.len() || self.inferred_params != prev.params {
+        if self.classes.len() != prev.instance.len()
+            || self.inferred_params.len() != prev.params.len()
+            || self.inferred_params.iter().any(|(k, v)| !strict_producers::same_row(Some(v), prev.params.get(k))) {
             return false;
         }
         for (id, cls) in &self.classes {
             match prev.instance.get(id) {
-                Some(methods) if methods == &cls.instance_methods => {}
+                Some(methods) if strict_producers::same_table(methods, &cls.instance_methods) => {}
                 _ => return false,
             }
             match prev.class_methods.get(id) {
-                Some(methods) if methods == &cls.class_methods => {}
+                Some(methods) if strict_producers::same_table(methods, &cls.class_methods) => {}
                 _ => return false,
             }
         }
@@ -5134,6 +5179,19 @@ impl Analyzer {
         det::next_round();
         let before = det::registry_snapshot(&self.classes);
         self.harvest_method_returns(app, harvest_tests);
+        // The first complete production harvest identifies declarations it skips.
+        if !harvest_tests {
+            for (key, original) in std::mem::take(&mut self.strict_stub_originals) {
+                let Some(cls) = self.classes.get_mut(&key.0) else { continue };
+                let table = match key.2 {
+                    MethodReceiver::Instance => &mut cls.instance_methods,
+                    MethodReceiver::Class => &mut cls.class_methods,
+                };
+                if table.get(&key.1).is_some_and(strict_producers::is_p) {
+                    table.insert(key.1, original);
+                }
+            }
+        }
         // `RH_FOLD_JOIN`: returns join with the value they held after the
         // previous harvest, after the registry copies too.
         handoff::join_rets(&mut self.classes);
@@ -5609,7 +5667,7 @@ impl Analyzer {
                     {
                         // The includer harvest types this spliced body itself.
                         // The copy only declares existence, never a value writer.
-                        cls.instance_methods.entry(name.clone()).or_insert(Ty::unresolved());
+                        cls.instance_methods.entry(name.clone()).or_insert_with(strict_producers::stub);
                         continue;
                     }
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
@@ -5925,7 +5983,8 @@ impl Analyzer {
                 Self::insert_inferred_return(table, method, t.clone());
             }
             _ => {
-                if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })) {
+                if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })
+                    && !(strict_producers::stubs_on() && strict_producers::is_p(t))) {
                     table.insert(method.clone(), Ty::unresolved());
                 }
             }
@@ -8800,19 +8859,73 @@ pub fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     extract_ivar_assignments_in(expr, out, &ivar_set::IvarNameEnv::NONE);
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ClosureHarvestMode {
+    #[default]
+    Legacy,
+    Entrances,
+    Apply,
+}
+
+impl ClosureHarvestMode {
+    fn parse(entrances: Option<&str>, apply: Option<&str>) -> Self {
+        if apply == Some("1") { Self::Apply }
+        else if entrances == Some("1") { Self::Entrances }
+        else if apply.is_none() { Self::Apply }
+        else { Self::Legacy }
+    }
+    fn env() -> Self {
+        static MODE: std::sync::LazyLock<ClosureHarvestMode> = std::sync::LazyLock::new(||
+            ClosureHarvestMode::parse(std::env::var("RH_CLOSURE_ENTRANCES").ok().as_deref(),
+                          std::env::var("RH_CLOSURE_APPLY").ok().as_deref()));
+        *MODE
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ClosureWriteTag {
+    #[default]
+    Legacy,
+    Entrance,
+    Applied(&'static str),
+}
+
 pub(crate) fn extract_ivar_assignments_in(
-    expr: &Expr,
-    out: &mut HashMap<Symbol, Ty>,
-    env: &ivar_set::IvarNameEnv<'_>,
+    expr: &Expr, out: &mut HashMap<Symbol, Ty>, env: &ivar_set::IvarNameEnv<'_>,
 ) {
-    let mut walk = IvarWalk::default();
+    extract_ivar_assignments_mode(expr, out, env, ClosureHarvestMode::env());
+}
+
+pub(crate) fn extract_ivar_assignments_mode(
+    expr: &Expr, out: &mut HashMap<Symbol, Ty>, env: &ivar_set::IvarNameEnv<'_>, mode: ClosureHarvestMode,
+) {
+    let census = mode != ClosureHarvestMode::Legacy && fixpoint_check::stats_on();
+    let before = census.then(|| out.clone());
+    let walk = extract_ivar_walk(expr, out, env, mode);
+    if let Some(before) = before {
+        let mut legacy = before.clone();
+        extract_ivar_walk(expr, &mut legacy, env, ClosureHarvestMode::Legacy);
+        let mut entrances = before;
+        if mode == ClosureHarvestMode::Apply {
+            extract_ivar_walk(expr, &mut entrances, env, ClosureHarvestMode::Entrances);
+        } else {
+            entrances.clone_from(out);
+        }
+        closure_census::note(out, &legacy, &entrances, &walk);
+    }
+}
+
+fn extract_ivar_walk(
+    expr: &Expr, out: &mut HashMap<Symbol, Ty>, env: &ivar_set::IvarNameEnv<'_>, mode: ClosureHarvestMode,
+) -> IvarWalk {
+    let mut walk = IvarWalk { mode, ..IvarWalk::default() };
     walk_ivar_assignments(expr, out, env, &mut walk);
     // `[]=` writes join once the walk has seen every assignment, so a
     // write that comes before the `{}` seed (or before the class
     // instance that owns `[]=`) gives the same slot as one after it
     // (#617).
     let mut index_writes: std::collections::BTreeMap<Symbol, Ty> = std::collections::BTreeMap::new();
-    for (name, value) in walk.index_writes {
+    for (name, value) in std::mem::take(&mut walk.index_writes) {
         let joined = match index_writes.remove(&name) {
             Some(prev) => crate::analyze::body::union_of(prev, value),
             None => value,
@@ -8827,16 +8940,23 @@ pub(crate) fn extract_ivar_assignments_in(
     // all of its writes are joined: `bound` doesn't distribute over the
     // join, so bounding after each write made the slot depend on the
     // order of its writes (#617).
-    for name in walk.touched {
-        if let Some(ty) = out.remove(&name) {
-            out.insert(name, fixpoint_bound::bound(ty));
+    for name in &walk.touched {
+        if let Some(ty) = out.remove(name) {
+            out.insert(name.clone(), fixpoint_bound::bound(ty));
         }
     }
+    walk
 }
 
 /// What a walk of one body collects besides the slots themselves.
 #[derive(Default)]
 struct IvarWalk {
+    mode: ClosureHarvestMode,
+    tag: ClosureWriteTag,
+    new_writes: BTreeSet<Symbol>,
+    applied_writes: BTreeSet<Symbol>,
+    reflective: BTreeSet<Symbol>,
+    sites: Vec<(crate::span::Span, ClosureWriteTag, Symbol)>,
     /// Ivars the walk assigned, bounded once at the end.
     touched: BTreeSet<Symbol>,
     /// `@ivar[k] = v` value types, joined into their slots at the end.
@@ -8851,6 +8971,7 @@ fn walk_ivar_assignments(
 ) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            if walk.mode != ClosureHarvestMode::Legacy { walk_ivar_now(value, out, env, walk); }
             if let Some(ty) = value.ty.clone() {
                 // Union with existing entry so repeated assignments to
                 // the same ivar accumulate (rather than the last write
@@ -8861,6 +8982,7 @@ fn walk_ivar_assignments(
                 };
                 out.insert(name.clone(), merged);
                 walk.touched.insert(name.clone());
+                closure_note_write(expr, name, walk);
             }
         }
         // Short-circuit compound assignment to an ivar (`@x ||= y`,
@@ -8868,6 +8990,7 @@ fn walk_ivar_assignments(
         // a plain assignment so a controller's `@story ||= Story.find(..)`
         // still flows its type to before_action seeds and views.
         ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
+            if walk.mode != ClosureHarvestMode::Legacy { walk_ivar_now(value, out, env, walk); }
             if let Some(ty) = value.ty.clone() {
                 let merged = match out.remove(name) {
                     Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),
@@ -8875,6 +8998,7 @@ fn walk_ivar_assignments(
                 };
                 out.insert(name.clone(), merged);
                 walk.touched.insert(name.clone());
+                closure_note_write(expr, name, walk);
             }
         }
         // `@a, @b = expr` — destructuring assignment. Each ivar target
@@ -8895,6 +9019,7 @@ fn walk_ivar_assignments(
                         };
                         out.insert(name.clone(), merged);
                         walk.touched.insert(name.clone());
+                closure_note_write(expr, name, walk);
                     }
                 }
             }
@@ -8911,6 +9036,7 @@ fn walk_ivar_assignments(
             if let ExprNode::Ivar { name } = &*recv.node {
                 if let Some(v_ty) = &value.ty {
                     walk.index_writes.push((name.clone(), v_ty.clone()));
+                    closure_note_write(expr, name, walk);
                 }
             }
             walk_ivar_assignments(recv, out, env, walk);
@@ -8929,6 +9055,7 @@ fn walk_ivar_assignments(
             if let ExprNode::Ivar { name } = &*recv.node {
                 if let Some(v_ty) = &args[1].ty {
                     walk.index_writes.push((name.clone(), v_ty.clone()));
+                    closure_note_write(expr, name, walk);
                 }
             }
             walk_ivar_assignments(recv, out, env, walk);
@@ -8948,7 +9075,11 @@ fn walk_ivar_assignments(
         // Assign variant never sees it. Fold a statically resolvable name
         // here so the controller→view channel harvests the write.
         ExprNode::Send { recv, method, args, block, .. } => {
-            ivar_set::harvest_ivar_set(recv, method, args, env, out);
+            if let Some(name) = ivar_set::harvest_ivar_set(recv, method, args, env, out) {
+                walk.reflective.insert(name.clone());
+                if walk.mode != ClosureHarvestMode::Legacy { walk.touched.insert(name.clone()); }
+                closure_note_write(expr, &name, walk);
+            }
             if let Some(r) = recv {
                 walk_ivar_assignments(r, out, env, walk);
             }
@@ -9030,8 +9161,192 @@ fn walk_ivar_assignments(
             walk_ivar_assignments(value, out, env, walk);
             walk_ivar_assignments(body, out, env, walk);
         }
+        ExprNode::Array { .. } | ExprNode::Hash { .. } | ExprNode::ForwardKeywordsWithPairs { .. }
+        | ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. } if walk.mode != ClosureHarvestMode::Legacy => {
+            walk_ivar_now(expr, out, env, walk);
+        }
         _ => {}
     }
+}
+
+fn closure_note_write(expr: &Expr, name: &Symbol, walk: &mut IvarWalk) {
+    if walk.tag == ClosureWriteTag::Legacy { return; }
+    walk.new_writes.insert(name.clone());
+    if matches!(walk.tag, ClosureWriteTag::Applied(_)) { walk.applied_writes.insert(name.clone()); }
+    walk.sites.push((expr.span, walk.tag, name.clone()));
+}
+
+fn is_closure_constructor(expr: &Expr) -> bool {
+    let ExprNode::Send { recv, method, args, block: Some(block), .. } = &*expr.node else { return false };
+    if !args.is_empty() || !matches!(&*block.node, ExprNode::Lambda { .. }) { return false; }
+    match (recv, method.as_str()) {
+        (None, "lambda" | "proc") => true,
+        (Some(recv), "new") => matches!(&*recv.node, ExprNode::Const { path }
+            if path.len() == 1 && path[0].as_str() == "Proc"),
+        _ => false,
+    }
+}
+
+fn closure_body(expr: &Expr) -> Option<&Expr> {
+    match &*expr.node {
+        ExprNode::Lambda { body, .. } => Some(body),
+        ExprNode::Send { block: Some(block), .. } if is_closure_constructor(expr) => {
+            let ExprNode::Lambda { body, .. } = &*block.node else { unreachable!() };
+            Some(body)
+        }
+        _ => None,
+    }
+}
+
+fn rebinds_self_elsewhere(recv: &Option<Expr>, method: &Symbol) -> bool {
+    match method.as_str() {
+        "instance_exec" | "instance_eval" => recv.as_ref().is_some_and(|r|
+            !matches!(&*r.node, ExprNode::SelfRef)),
+        "class_exec" | "class_eval" | "module_exec" | "module_eval" => true,
+        "new" => recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path }
+            if path.len() == 1 && matches!(path[0].as_str(), "Class" | "Module" | "Struct"))),
+        "define" => recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path }
+            if path.len() == 1 && path[0].as_str() == "Data")),
+        _ => false,
+    }
+}
+
+fn closure_apply(body: &Expr, kind: &'static str, out: &mut HashMap<Symbol, Ty>,
+            env: &ivar_set::IvarNameEnv<'_>, walk: &mut IvarWalk) {
+    if walk.mode != ClosureHarvestMode::Apply { return; }
+    let old = walk.tag;
+    if !matches!(old, ClosureWriteTag::Applied(_)) { walk.tag = ClosureWriteTag::Applied(kind); }
+    walk_ivar_now(body, out, env, walk);
+    walk.tag = old;
+}
+
+/// New evaluated regions are entered without changing any legacy walk's order.
+/// Closure effects are selected by their immediate consumer, never by a Lambda's ancestry.
+fn walk_ivar_now(expr: &Expr, out: &mut HashMap<Symbol, Ty>,
+                 env: &ivar_set::IvarNameEnv<'_>, walk: &mut IvarWalk) {
+    let old = walk.tag;
+    if old == ClosureWriteTag::Legacy { walk.tag = ClosureWriteTag::Entrance; }
+    match &*expr.node {
+        ExprNode::Lambda { .. } => {},
+        ExprNode::Array { elements, .. } => {
+            for e in elements { walk_ivar_now(e, out, env, walk); }
+        }
+        ExprNode::Hash { entries, kwargs } => {
+            for (k, v) in entries {
+                walk_ivar_now(k, out, env, walk);
+                if *kwargs && let Some(body) = closure_body(v) {
+                    closure_apply(body, "argument", out, env, walk);
+                } else { walk_ivar_now(v, out, env, walk); }
+            }
+        }
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (k, v) in entries {
+                walk_ivar_now(k, out, env, walk);
+                if let Some(body) = closure_body(v) { closure_apply(body, "argument", out, env, walk); }
+                else { walk_ivar_now(v, out, env, walk); }
+            }
+        }
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => walk_ivar_now(value, out, env, walk),
+        ExprNode::Assign { target: LValue::Ivar { name }, value }
+        | ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
+            walk_ivar_now(value, out, env, walk);
+            if let Some(ty) = value.ty.clone() {
+                let merged = match out.remove(name) { Some(prev) => body::join_ivar_slot(prev, ty), None => ty };
+                out.insert(name.clone(), merged);
+                walk.touched.insert(name.clone());
+                closure_note_write(expr, name, walk);
+            }
+        }
+        ExprNode::MultiAssign { targets, value } => {
+            for (i, target) in targets.iter().enumerate() {
+                if let LValue::Ivar { name } = target
+                    && let Some(ty) = body::multiassign_target_ty(&value.ty, i) {
+                    let merged = match out.remove(name) { Some(prev) => body::join_ivar_slot(prev, ty), None => ty };
+                    out.insert(name.clone(), merged);
+                    walk.touched.insert(name.clone());
+                    closure_note_write(expr, name, walk);
+                }
+            }
+            walk_ivar_now(value, out, env, walk);
+        }
+        ExprNode::Assign { target: LValue::Index { recv, index }, value }
+        | ExprNode::OpAssign { target: LValue::Index { recv, index }, value, .. } => {
+            if let ExprNode::Ivar { name } = &*recv.node && let Some(ty) = &value.ty {
+                walk.index_writes.push((name.clone(), ty.clone()));
+                closure_note_write(expr, name, walk);
+            }
+            walk_ivar_now(recv, out, env, walk);
+            walk_ivar_now(index, out, env, walk);
+            walk_ivar_now(value, out, env, walk);
+        }
+        ExprNode::Send { recv, method, args, block, .. } => {
+            let receiver_body = if matches!(method.as_str(), "call" | "yield" | "[]" | "===") {
+                recv.as_ref().and_then(closure_body)
+            } else { None };
+            if receiver_body.is_none() && let Some(r) = recv { walk_ivar_now(r, out, env, walk); }
+            for a in args {
+                if closure_body(a).is_none() { walk_ivar_now(a, out, env, walk); }
+            }
+            if let Some(name) = ivar_set::harvest_ivar_set(recv, method, args, env, out) {
+                walk.reflective.insert(name.clone());
+                walk.touched.insert(name.clone());
+                closure_note_write(expr, &name, walk);
+            }
+            if method.as_str() == "[]=" && args.len() == 2
+                && let Some(r) = recv && let ExprNode::Ivar { name } = &*r.node
+                && let Some(ty) = &args[1].ty {
+                walk.index_writes.push((name.clone(), ty.clone()));
+                closure_note_write(expr, name, walk);
+            }
+            if let Some(body) = receiver_body { closure_apply(body, "receiver", out, env, walk); }
+            for a in args {
+                if let Some(body) = closure_body(a) { closure_apply(body, "argument", out, env, walk); }
+            }
+            if let Some(b) = block {
+                if let Some(body) = closure_body(b) {
+                    if !is_closure_constructor(expr) && !rebinds_self_elsewhere(recv, method) {
+                        closure_apply(body, "block", out, env, walk);
+                    }
+                } else { walk_ivar_now(b, out, env, walk); }
+            }
+        }
+        ExprNode::Seq { exprs } => for e in exprs { walk_ivar_now(e, out, env, walk); },
+        ExprNode::If { cond, then_branch, else_branch } => {
+            walk_ivar_now(cond, out, env, walk);
+            walk_ivar_now(then_branch, out, env, walk);
+            walk_ivar_now(else_branch, out, env, walk);
+        }
+        ExprNode::While { cond, body, .. } => {
+            walk_ivar_now(cond, out, env, walk); walk_ivar_now(body, out, env, walk);
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            walk_ivar_now(expr, out, env, walk); walk_ivar_now(fallback, out, env, walk);
+        }
+        ExprNode::Case { arms, .. } => for a in arms { walk_ivar_now(&a.body, out, env, walk); },
+        ExprNode::BoolOp { left, right, .. } => {
+            walk_ivar_now(left, out, env, walk); walk_ivar_now(right, out, env, walk);
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            walk_ivar_now(body, out, env, walk);
+            for r in rescues { walk_ivar_now(&r.body, out, env, walk); }
+            if let Some(e) = else_branch { walk_ivar_now(e, out, env, walk); }
+            if let Some(e) = ensure { walk_ivar_now(e, out, env, walk); }
+        }
+        ExprNode::Return { value } => walk_ivar_now(value, out, env, walk),
+        ExprNode::Assign { target: LValue::Var { .. }, value }
+        | ExprNode::OpAssign { target: LValue::Var { .. }, value, .. } => {
+            if let Some(body) = closure_body(value) { closure_apply(body, "local", out, env, walk); }
+            else { walk_ivar_now(value, out, env, walk); }
+        }
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => walk_ivar_now(value, out, env, walk),
+        ExprNode::Let { value, body, .. } => {
+            if let Some(body) = closure_body(value) { closure_apply(body, "local", out, env, walk); }
+            else { walk_ivar_now(value, out, env, walk); }
+            walk_ivar_now(body, out, env, walk);
+        }
+        _ => {},
+    }
+    walk.tag = old;
 }
 
 /// Widen an ivar's Hash value-type with the joined value type of the

@@ -673,7 +673,10 @@ impl<'a> BodyTyper<'a> {
                     // need not be symbols, even though pattern keys are.
                     let rest_ty = match subject_ty {
                         Some(ty @ Ty::Hash { .. }) if constant.is_none() => ty.clone(),
-                        _ => Ty::Hash { key: std::sync::Arc::new(Ty::unresolved()), value: std::sync::Arc::new(Ty::unresolved()) },
+                        _ => {
+                            let unknown = subject_ty.map(crate::analyze::strict_producers::unresolved_from).unwrap_or_else(Ty::unresolved);
+                            Ty::Hash { key: std::sync::Arc::new(unknown.clone()), value: std::sync::Arc::new(unknown) }
+                        },
                     };
                     out.push((name.clone(), rest_ty));
                 }
@@ -1205,7 +1208,7 @@ impl<'a> BodyTyper<'a> {
                                     });
                                 }
                                 _ => {
-                                    rescued = Some(Ty::unresolved());
+                                    rescued = Some(c.ty.as_ref().map(crate::analyze::strict_producers::unresolved_from).unwrap_or_else(Ty::unresolved));
                                     break;
                                 }
                             }
@@ -3331,9 +3334,13 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         // target gets the element model, same as `Array<of>`.
         Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
-        Some(Ty::Untyped { .. }) => Some(Ty::unresolved()),
+        Some(t) if crate::analyze::strict_producers::xfer_on() && crate::analyze::strict_producers::only_pending(t) => Some(Ty::pending_untyped()),
+        Some(t @ Ty::Untyped { .. }) => Some(crate::analyze::strict_producers::unresolved_from(t)),
         // A reference nobody unfolded reads as `untyped`.
-        Some(Ty::Rec { .. }) => Some(Ty::unresolved()),
+        Some(Ty::Rec { slot }) => Some(if crate::analyze::strict_producers::xfer_on()
+            && crate::analyze::fold::value_of(*slot, &HashMap::new()).is_none() {
+                Ty::pending_untyped()
+            } else { Ty::unresolved() }),
         _ => None,
     }
 }
@@ -5729,3 +5736,6 @@ fn set_discarded(e: &mut Expr, discarded: bool) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod strict_producer_tests;

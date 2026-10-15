@@ -258,6 +258,9 @@ pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool
 /// the harvest's own rule does (#521); two informative values join after
 /// their unknown variants are stripped.
 pub(crate) fn join(old: Ty, new: Ty) -> Ty {
+    if super::strict_producers::xfer_on() && super::strict_producers::is_p(&new)
+        && !super::strict_producers::is_p(&old) { return old; }
+    let pending_unknowns = super::strict_producers::stripped_pending(&[&old, &new]);
     if old == new {
         return if storage_m0_on() { super::producer_evidence::merge_equal(new, &old) } else { new };
     }
@@ -276,7 +279,7 @@ pub(crate) fn join(old: Ty, new: Ty) -> Ty {
     // `rescue`): stripped, the method claims it always returns `nil`. The
     // harvest keeps that pair for the same reason (`harvest_return`).
     if unknown && joined == Ty::Nil {
-        return super::body::union_of(Ty::Nil, Ty::unresolved());
+        return super::body::union_of(Ty::Nil, if pending_unknowns { Ty::pending_untyped() } else { Ty::unresolved() });
     }
     joined
 }
@@ -286,6 +289,7 @@ pub(crate) fn join(old: Ty, new: Ty) -> Ty {
 /// which typing wrote last, and a value the slot already holds changes
 /// nothing (commutative and idempotent on the whole domain).
 pub(crate) fn join_slot(old: Ty, new: Ty) -> Ty {
+    if super::strict_producers::xfer_on() && super::strict_producers::is_p(&old) { return new; }
     if contains_arm(&old, &new) {
         return if storage_m0_on() { storage_merge_contained(old, &new) } else { old };
     }

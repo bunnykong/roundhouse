@@ -37,6 +37,7 @@ impl<'a> BodyTyper<'a> {
     /// is not a scope, or a union of different scopes.
     fn pagy_scope_ty(&self, ty: Option<&Ty>) -> Option<Ty> {
         match ty {
+            Some(t) if crate::analyze::strict_producers::xfer_on() && crate::analyze::strict_producers::only_pending(t) => Some(Ty::pending_untyped()),
             None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => Some(Ty::unresolved()),
             Some(Ty::Relation { of }) => Some(Ty::Relation { of: of.clone() }),
             Some(Ty::Array { .. }) => None,

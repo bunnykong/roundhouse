@@ -121,7 +121,7 @@ pub fn mentions(ty: &Ty) -> bool {
 
 pub fn from(ty: &Ty) -> Option<Ty> {
     match ty {
-        Ty::Untyped { .. } | Ty::Nil => Some(of(Ty::unresolved())),
+        t @ (Ty::Untyped { .. } | Ty::Nil) => Some(of(super::strict_producers::unresolved_from(t))),
         Ty::Hash { key, value } if indifferent_keys(key) => Some(of(converted(value))),
         Ty::Class { .. } => value_of(ty).map(|v| of(v.clone())),
         Ty::Union { variants } => {
@@ -160,7 +160,7 @@ pub fn from_gradual(ty: &Ty) -> Option<Ty> {
     leaves(ty, &mut all);
     (all.iter().any(|v| **v == Ty::unresolved())
         && all.iter().all(|v| matches!(v, Ty::Untyped { .. } | Ty::Nil | Ty::Hash { .. })))
-    .then(|| of(Ty::unresolved()))
+    .then(|| of(super::strict_producers::unresolved_from(ty)))
 }
 
 fn merged_value(other: &Ty) -> Option<Ty> {

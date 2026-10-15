@@ -26,7 +26,7 @@ pub(super) fn register(classes: &mut HashMap<ClassId, ClassInfo>, app: &App) {
             };
             table
                 .entry(method.name.clone())
-                .or_insert_with(|| method.signature.clone().unwrap_or(Ty::unresolved()));
+                .or_insert_with(|| method.signature.clone().unwrap_or_else(super::strict_producers::stub));
             match method.receiver {
                 MethodReceiver::Instance => &mut cls.instance_method_kinds,
                 MethodReceiver::Class => &mut cls.class_method_kinds,
