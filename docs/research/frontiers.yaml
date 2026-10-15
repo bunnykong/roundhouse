@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "On `declaration-access-coverage-20261011-v4-structure_fixture`, the eighteen old fixture misses are closed, but raw coverage and routing remain partial. The separate native parameter seed gate and reflective Array entrance are killed by concrete counterexamples. Complete any-order remains open."
-  facts: [F43, F40, F38, F36, F34, F33, F31, F25, F24, F22, F16, F14, F5]
+  stands: "On `writer-ownership-20261015-bf56edf9`, spliced ownership is schedule-consistent on Campfire with verification off; skipping stabilization equalizes value digests but changes answers and leaves seven reason-only differences. The finite two-level Pending law (on normal-form samples) and reader view pass, while wrapped Bottom and invoked-closure counterexamples kill broader initialization and entrance claims. Any-order remains open."
+  facts: [F47, F46, F45, F44, F43, F40, F38, F36, F34, F33, F31, F25, F24, F22, F16, F14, F5]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Finish the raw entrance inventory and justify generated-view routing. Model completion per parameter writer and cover evaluated Array children before integrating the narrow repairs; retain partition failures, unset repeats and the complete five-app any-order check."
+  next: "Generalize declared writer ownership, test compositions only in a new condition, include wrapped Bottom and nested unions in native laws, and cover invoked or escaping closures. Retain complete structure/membership, partition failures, independent repeats and all-producer obligations."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "declaration coverage bf56edf9 on abda389c; parameter seed af9c85be and reflective entrance 0ffb1333 on 38403140"
-    lab: "8791119d40b0b7bd0157ec55bef480b9b504cf30; frozen measurement inputs 76cdb1ea"
-    runner: "Week continuation receipt rerun.py at lab 8791119d40b0b7bd0157ec55bef480b9b504cf30"
+    compiler: "ownership 18875a96 (recorded f78d995f) on bf56edf9; Pending/view 2e51b2aa (e248de81); Bottom c8feb2f8 (0db5d628); containers 35d21de5 (eda0783b)"
+    lab: "c86fbd9431618c1264bee3825ba3f58522bc1371; frozen measurement inputs 76cdb1ea"
+    runner: "October 15 receipt rerun.py at lab c86fbd9431618c1264bee3825ba3f58522bc1371"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "On `time-widening-calibration-f29-concrete-widening-time-20261011-v1`, the corrected synthetic widening admits all 127 saved observations without new opacity; erasure and the historical Time failures remain red. Fresh parameter exports retain F19/F29 coverage and rejection failures, and the reflective Array writer is uncovered. App soundness remains open."
-  facts: [F43, F41, F38, F36, F34, F32, F29, F28, F27, F25, F20, F19, F18, F17, F14, F8]
+  stands: "October 15 adds no soundness confirmation. Valid RBS wrapped Bottom defeats the conservative initialization rule without a runtime rejection, while invoked closures supply Ruby-observed writes omitted by native harvest. F19 coverage holes and F29 91/36 decisions remain. Semantic ownership/reader-view changes still need fresh soundness gates."
+  facts: [F47, F46, F45, F44, F43, F41, F38, F36, F34, F32, F29, F28, F27, F25, F20, F19, F18, F17, F14, F8]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Use the calibrated component guard on fresh semantic-candidate exports with fixed selections. Keep membership, missing/unsupported coverage and new opacity separate; isolate the String and nil job_id omissions, exercise the interval tick and cover executed writer entrances."
+  next: "Cover executed closure writes and normalize producer shapes before claiming completion. Apply the calibrated checker to fresh candidate exports with fixed selections; keep runtime membership, missing coverage, component opacity and emitted-code behavior separate."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "F29 main c210f226 / next 38403140; Time calibration f78c3975 on component checker 8f7c1af7; parameter af9c85be"
-    lab: "8791119d40b0b7bd0157ec55bef480b9b504cf30; frozen measurement inputs 76cdb1ea"
+    compiler: "Bottom c8feb2f8 (recorded 0db5d628); container harvest 35d21de5 (eda0783b); historical F29 main c210f226 / next 38403140"
+    lab: "c86fbd9431618c1264bee3825ba3f58522bc1371; frozen measurement inputs 76cdb1ea"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,36 +84,36 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "On `native-parameter-reason-seeds-native-seed-arrival-breaker-v1-shared-host`, a reason-preserving join is killed by arrival-dependent native initialization. On `warm-lossless-storage-20261011-lossless-storage-v1`, the tested codec preserves complete reasons after storage. Producer completion and complete origins remain open; the separate five-app precision baseline is unchanged."
-  facts: [F39, F38, F41, F34, F32, F29, F27, F23, F19, F18, F14, F7]
+  stands: "On `pending-value-reason-identity-20261015-a7b6d3f8`, both Pending identities give zero finite-law counterexamples on normal-form samples (unnormalized stored contents fail); the Campfire reader view restores the baseline fully typed count but leaves schedule-2 returns different. The residual observer misses nested-union losses and keeps order history. Emission ignores the tested reason scrambling; matching warm/cold censuses are bounded storage evidence."
+  facts: [F50, F49, F46, F45, F44, F39, F38, F41, F34, F32, F29, F27, F23, F19, F18, F14, F7]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Separate allocation, observed values, permanent reasons and completion per writer. Re-run the seed permutation before broader native integration, preserve the lossless storage boundary, and retain runtime failures and coverage denominators beside every precision comparison."
+  next: "Keep value and reason identity changes atomic on the tested lineage. Normalize union inputs, recompute residuals from current row state, distinguish seeds from observed Vars and retain every negative producer/completion witness. Check soundness before interpreting precision gains."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "parameter af9c85be (recorded 134457dc) on next 38403140; codec 2dbbe1b1 (recorded 71b09336) on warm d9ec78c3"
-    lab: "8791119d40b0b7bd0157ec55bef480b9b504cf30; frozen measurement inputs 76cdb1ea"
-    runner: "Week continuation receipt rerun.py at lab 8791119d40b0b7bd0157ec55bef480b9b504cf30"
+    compiler: "Pending/view 2e51b2aa (e248de81); residual cc149e46 (be7a677d); emission/storage 9c834701 (35cef988)"
+    lab: "c86fbd9431618c1264bee3825ba3f58522bc1371; frozen measurement inputs 76cdb1ea"
+    runner: "October 15 receipt rerun.py at lab c86fbd9431618c1264bee3825ba3f58522bc1371"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "On `warm-lossless-storage-20261011-lossless-storage-v1`, twenty native payloads, reason-only revisits, diagnostic remapping and bounded support checks pass. On `warm-fingerprint-edit-audits-20261011-fast-six-audit`, three Mastodon edited audits pass while Discourse edits and replicated cost gates remain incomplete. Full replay and mandatory cold shadow remain."
-  facts: [F42, F39, F43, F40, F38, F37, F35, F34, F33, F30, F15]
+  stands: "On `fingerprint-six-edit-gates-20261015-1fbfee1a`, all six edited audits pass, closing F42 coverage; candidate cost pairs remain 0/30. On `reason-emission-storage-controls-20261015-71b09336`, lossless replay preserves the tested one-edit reason census, including supplementary shuffled conditions. Settlement has no positive witness. Full replay and cold validation remain."
+  facts: [F50, F48, F49, F47, F46, F45, F44, F42, F39, F43, F40, F38, F37, F35, F34, F33, F30, F15]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Keep the lossless codec and fingerprint optimization in separate conditions until integration is justified. Finish the remaining edited audits and five alternating audit-off pairs. Establish complete structure, origins, completion and read coverage before selective reuse; retain warm≤cold and 100 ms gates."
+  next: "Reserve an exclusive cost window, finish the missing parent/candidate/cold pairs and preserve complete chronological replay plus cold shadow. Require stable position-level provenance and a positive settlement witness before general storage/settlement claims; retain complete reads, origins and structural membership obligations."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "warm d9ec78c3; codec 2dbbe1b1; fingerprint campaign c5dfc633 with native code unchanged from 1fbfee1a"
-    lab: "8791119d40b0b7bd0157ec55bef480b9b504cf30; frozen measurement inputs 76cdb1ea"
-    runner: "Week continuation receipt rerun.py at lab 8791119d40b0b7bd0157ec55bef480b9b504cf30"
+    compiler: "native fingerprints 1fbfee1a versus d9ec78c3; campaign 0a62c8ef; reason controls 9c834701 (35cef988 on 71b09336)"
+    lab: "c86fbd9431618c1264bee3825ba3f58522bc1371; frozen measurement inputs 76cdb1ea"
+    runner: "October 15 receipt rerun.py at lab c86fbd9431618c1264bee3825ba3f58522bc1371"
 - id: typed-recursion
   name: Typed recursion
   brief: frontiers/typed-recursion.md
@@ -134,15 +134,15 @@
   name: Cost
   brief: frontiers/cost.md
   status: open
-  stands: "On `warm-fingerprint-edit-audits-20261011-fast-six-audit`, the three Mastodon edits pass audited parity, but only three of six edited comparisons finish. These are one-pair audit-on shared-host profiles, not audit-off latency replication. The separate three-app cold campaign is incomplete; F35 retains its original bounded optimization result."
-  facts: [F42, F39, F35, F30, F12, F11, F10]
+  stands: "On `fingerprint-six-edit-gates-20261015-1fbfee1a`, six correctness audits pass but parent profiles are 1/6, candidate cost pairs 0/30 and broader cold pairs 2/15. No candidate timing, useful-cost, regression or 100 ms result follows. F35 retains its separately conditioned bounded optimization result."
+  facts: [F48, F50, F42, F39, F35, F30, F12, F11, F10]
   skills:
     - Rust performance and profiling
     - hash-consing
     - data-structure design
-  next: "Reserve the host, finish edited Discourse byte/guard audits, then collect five alternating audit-off pairs per edit and all parent/candidate cold pairs. Use completed component profiles before choosing the next hashing optimization; retain validation, RSS, cache-size and total-wall scopes."
+  next: "Reserve an exclusive window and finish five missing parent profiles, thirty alternating candidate pairs and thirteen broader cold pairs. Keep each complete timed pair under one exclusive lock and report validation, whole-command wall, memory and cache scope; do not substitute hit counts or audited walls for missing measurements."
   check: frontiers/cost.md#the-check
   check_public: public
   pins:
-    compiler: "warm d9ec78c3; native fingerprints 1fbfee1a; campaign c5dfc633; historical fixpoint-arena 96519abf"
-    lab: "8791119d40b0b7bd0157ec55bef480b9b504cf30; frozen measurement inputs 76cdb1ea"
+    compiler: "native fingerprints 1fbfee1a versus parent d9ec78c3; prepared campaign 0a62c8ef (recorded 88c59987)"
+    lab: "c86fbd9431618c1264bee3825ba3f58522bc1371; frozen measurement inputs 76cdb1ea"
