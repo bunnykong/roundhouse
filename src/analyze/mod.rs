@@ -7544,11 +7544,26 @@ pub(crate) fn fold_param_observations(
         for (position, (slot, observed)) in entry.iter_mut().zip(tys.into_iter()).enumerate() {
             let _audit = producer_evidence::parameter_context(&key, position, "join");
             let old = det::descent_on().then(|| slot.clone());
-            let next = if parameter_conservation::on() && position >= previous_len {
-                // This Var was just allocated by resize, never observed from Ruby.
-                // Discharge only that empty seed, not a caller's ambiguous Var.
-                let next = parameter_conservation::initialize(observed.clone());
-                producer_evidence::parameter_seed(&observed, &next);
+            let next = if parameter_conservation::on() {
+                // Only the resize seed is empty. Interpret every actual observation
+                // by the same rule, whether or not it allocated this cell.
+                let allocated = position >= previous_len;
+                let stored = if allocated {
+                    Ty::Bottom
+                } else {
+                    std::mem::replace(slot, Ty::Bottom)
+                };
+                let next = parameter_conservation::join(
+                    stored.clone(),
+                    parameter_conservation::contribution(observed.clone()),
+                );
+                // Audit the raw observation so producer/source identities survive
+                // its conservative interpretation (in particular Bottom -> Pending).
+                if allocated {
+                    producer_evidence::parameter_seed(&observed, &next);
+                } else {
+                    producer_evidence::parameter_merge(&stored, &observed, &next);
+                }
                 next
             } else {
                 unify_param_ty(std::mem::replace(slot, Ty::Bottom), observed)

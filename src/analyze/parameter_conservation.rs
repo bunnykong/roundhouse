@@ -9,10 +9,11 @@ pub(super) fn on() -> bool {
     *ON.get_or_init(|| std::env::var("RH_PARAMETER_REASON_CONSERVE").as_deref() == Ok("1"))
 }
 
-/// A newly allocated row cell has no contributor yet. This is the only
-/// producer-specific empty seed discharged here; an observed Var is retained.
-/// Bottom from one observation cannot certify that all future writers finished.
-pub(super) fn initialize(observed: Ty) -> Ty {
+/// Interpret each caller observation independently of the row's allocation.
+/// Bottom from one observation cannot certify that all future writers finished,
+/// so it contributes Pending at every arrival position. Aggregate Bottom remains
+/// the join identity; an observed Var is retained without a completion proof.
+pub(super) fn contribution(observed: Ty) -> Ty {
     if matches!(observed, Ty::Bottom) {
         Ty::pending_untyped()
     } else {

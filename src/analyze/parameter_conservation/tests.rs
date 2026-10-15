@@ -363,3 +363,242 @@ fn writer_law_parameter_reason_conservation_seed_arrival() {
         "native arrival order chooses known versus Pending priority"
     );
 }
+// Native fold laws include allocation and the post-fold bound, rather than
+// assuming the standalone join's Bottom identity also describes an observation.
+fn row_law_fold(ts: &[Ty], batches: &[usize]) -> Vec<Ty> {
+    let key = (
+        ClassId(Symbol::from("RowLawOwner")),
+        Symbol::from("call"),
+        MethodReceiver::Instance,
+    );
+    let mut rows = HashMap::new();
+    let mut offset = 0;
+    for &size in batches {
+        fold_param_observations(
+            &mut rows,
+            ts[offset..offset + size]
+                .iter()
+                .map(|t| (key.clone(), vec![t.clone()]))
+                .collect(),
+        );
+        offset += size;
+    }
+    assert_eq!(offset, ts.len());
+    rows.remove(&key).unwrap()
+}
+
+#[test]
+#[ignore = "repair-on native row arrival, partition and replay gate"]
+fn writer_law_parameter_reason_conservation_row_permutations() {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    assert!(on());
+    audit::reset(&[]);
+    let ts = samples();
+    let values = [
+        Value::Nil,
+        Value::Int,
+        Value::Str,
+        Value::Array(vec![]),
+        Value::Array(vec![Value::Int]),
+        Value::Array(vec![Value::Str]),
+        Value::Array(vec![Value::Nil]),
+        Value::Array(vec![Value::Int, Value::Str]),
+        Value::Hash(vec![]),
+        Value::Hash(vec![(Value::Str, Value::Int)]),
+        Value::Hash(vec![(Value::Str, Value::Str)]),
+        Value::Hash(vec![(Value::Str, Value::Nil)]),
+        Value::Tuple(vec![Value::Int, Value::Str]),
+        Value::Tuple(vec![Value::Int, Value::Nil]),
+    ];
+    let mut pairs = 0;
+    let mut membership_checks = 0;
+    let mut fingerprint = DefaultHasher::new();
+    for a in &ts {
+        for b in &ts {
+            let expected = row_law_fold(&[a.clone(), b.clone()], &[2]);
+            for (x, y) in [(a, b), (b, a)] {
+                for batches in [&[2][..], &[1, 1][..]] {
+                    let got = row_law_fold(&[x.clone(), y.clone()], batches);
+                    assert!(
+                        crate::wire_ty::storage_types(&expected, &got),
+                        "native pair arrival/partition: {a:?}, {b:?}: {expected:?} != {got:?}"
+                    );
+                }
+            }
+            let reasons = origins(a)
+                .union(&origins(b))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert!(reasons.is_subset(&origins(&expected[0])));
+            for v in &values {
+                if contains(a, v) || contains(b, v) {
+                    assert!(contains(&expected[0], v), "native row lost {v:?}");
+                }
+                membership_checks += 1;
+            }
+            format!("{expected:?}").hash(&mut fingerprint);
+            pairs += 1;
+        }
+    }
+    // Twelve heads/reasons, including nested material unknowns and an explicit
+    // mixed union. Bound is exercised at every requested partition boundary.
+    let triples = [
+        Ty::Bottom,
+        Ty::Int,
+        Ty::Str,
+        Ty::Var { var: TyVar(7) },
+        Ty::pending_untyped(),
+        Ty::unresolved(),
+        Ty::gradual(),
+        array(Ty::Int),
+        array(Ty::gradual()),
+        hash(Ty::unresolved()),
+        tuple(Ty::gradual()),
+        Ty::Union {
+            variants: vec![Ty::Int, Ty::unresolved()].into(),
+        },
+    ];
+    let mut triple_count = 0;
+    let mut permutations = 0;
+    let mut partitions = 0;
+    let mut replays = 0;
+    for a in &triples {
+        for b in &triples {
+            for c in &triples {
+                let expected = row_law_fold(&[a.clone(), b.clone(), c.clone()], &[3]);
+                for (x, y, z) in [
+                    (a, b, c),
+                    (a, c, b),
+                    (b, a, c),
+                    (b, c, a),
+                    (c, a, b),
+                    (c, b, a),
+                ] {
+                    let input = [x.clone(), y.clone(), z.clone()];
+                    for batches in [&[3][..], &[1, 2][..], &[2, 1][..], &[1, 1, 1][..]] {
+                        let got = row_law_fold(&input, batches);
+                        assert!(crate::wire_ty::storage_types(&expected, &got),
+                            "native triple arrival/partition {input:?}, {batches:?}: {expected:?} != {got:?}");
+                        partitions += 1;
+                    }
+                    let replay = [
+                        x.clone(),
+                        y.clone(),
+                        z.clone(),
+                        x.clone(),
+                        y.clone(),
+                        z.clone(),
+                    ];
+                    let got = row_law_fold(&replay, &[3, 3]);
+                    assert!(
+                        crate::wire_ty::storage_types(&expected, &got),
+                        "native row replay changed storage"
+                    );
+                    replays += 1;
+                    permutations += 1;
+                }
+                format!("{expected:?}").hash(&mut fingerprint);
+                triple_count += 1;
+            }
+        }
+    }
+    let known = row_law_fold(&[Ty::Int, Ty::Str, Ty::Int], &[1, 2]);
+    assert!(crate::wire_ty::storage_types(
+        &known,
+        &[unify_param_ty(Ty::Int, Ty::Str)]
+    ));
+    assert!(!known[0].mentions_unknown() && !contains(&known[0], &Value::Nil));
+    let unfinished = row_law_fold(&[Ty::Bottom, Ty::Bottom], &[1, 1]);
+    assert!(crate::wire_ty::storage_types(
+        &unfinished,
+        &[Ty::pending_untyped()]
+    ));
+    if audit::on() {
+        let snapshot = audit::snapshot();
+        assert!(snapshot["parameter_repair_merges"].as_u64().unwrap() > 0);
+        assert_eq!(snapshot["parameter_type_origin_losses"], 0);
+        assert_eq!(snapshot["parameter_output_origin_losses"], 0);
+    }
+    println!(
+        "PARAMETER-ROW-LAWS {}",
+        json!({
+            "pair_samples":ts.len(), "pairs":pairs, "finite_membership_checks":membership_checks,
+            "triple_samples":triples.len(), "triples":triple_count, "permutations":permutations,
+            "partitions":partitions, "replays":replays, "storage_fingerprint":fingerprint.finish(),
+            "lost_values":0, "lost_reasons":0
+        })
+    );
+}
+
+#[test]
+#[ignore = "repair-on native row late allocation and canonical seed gate"]
+fn writer_law_parameter_reason_conservation_row_allocation() {
+    assert!(on());
+    let key = (
+        ClassId(Symbol::from("ArityOwner")),
+        Symbol::from("call"),
+        MethodReceiver::Instance,
+    );
+    let inputs = [
+        vec![Ty::Int],
+        vec![Ty::Str, Ty::Bottom],
+        vec![Ty::Int, Ty::Int],
+    ];
+    let expected = vec![
+        unify_param_ty(Ty::Int, Ty::Str),
+        unify_param_ty(Ty::Int, Ty::pending_untyped()),
+    ];
+    let mut cases = 0;
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        for batches in [&[3][..], &[1, 2][..], &[2, 1][..], &[1, 1, 1][..]] {
+            let mut rows = HashMap::new();
+            let mut offset = 0;
+            for &size in batches {
+                fold_param_observations(
+                    &mut rows,
+                    order[offset..offset + size]
+                        .iter()
+                        .map(|&i| (key.clone(), inputs[i].clone()))
+                        .collect(),
+                );
+                offset += size;
+            }
+            assert!(
+                crate::wire_ty::storage_types(&expected, &rows[&key]),
+                "late-arity allocation chose priority: {order:?}, {batches:?}: {:?}",
+                rows[&key]
+            );
+            cases += 1;
+        }
+    }
+    let noncanonical = [
+        Ty::Union {
+            variants: vec![Ty::Int, Ty::Int, Ty::Bottom].into(),
+        },
+        Ty::Union {
+            variants: vec![array(Ty::Int), array(Ty::Str)].into(),
+        },
+        Ty::Union {
+            variants: vec![hash(Ty::Int), hash(Ty::Str)].into(),
+        },
+    ];
+    for t in &noncanonical {
+        let got = row_law_fold(std::slice::from_ref(t), &[1]);
+        assert!(
+            crate::wire_ty::storage_types(&got, &[unify_param_ty(Ty::Bottom, t.clone())]),
+            "allocation bypassed the canonical join: {got:?}"
+        );
+    }
+    println!(
+        "PARAMETER-ROW-ALLOCATION {}",
+        json!({"late_arity_cases":cases,
+        "canonical_seed_cases":noncanonical.len(), "row":format!("{expected:?}")})
+    );
+}
