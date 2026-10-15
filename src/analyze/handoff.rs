@@ -5,10 +5,10 @@
 //! nothing grows, and the fixpoint has nothing to settle to. Two rules
 //! that the round loop applies are of that kind:
 //!
-//! - **First-arm block binding.** A block parameter binds from a union
-//!   receiver's first arm that answers: F(Hash) = Hash | Array[Integer],
+//! - **First-variant block binding.** A block parameter binds from a union
+//!   receiver's first variant that answers: F(Hash) = Hash | Array[Integer],
 //!   but F(Hash | Array[Integer]) = Hash. With `RH_BRK_ALLARMS=1` each
-//!   parameter joins every arm that answers (`body::send`).
+//!   parameter joins every variant that answers (`body::send`).
 //! - **Last-writer handoffs.** Each harvest rebuilds a method's return and
 //!   each unification its parameter row, so a round can drop what the round
 //!   before it knew. With `RH_FOLD_JOIN=1` they accumulate: a return joins
@@ -22,7 +22,7 @@
 //! not depend on the order typings write in: two pending values (no
 //! informative core, as in `harvest_return::has_informative_core`) join by
 //! `union_of`; a pending value yields to an informative one; informative
-//! values join after their unknown arms are stripped, except that a
+//! values join after their unknown variants are stripped, except that a
 //! nil-only core keeps its `untyped`, as the harvest's sticky `nil |
 //! untyped` does; a value a slot already holds changes nothing. A join that
 //! kept the last writer makes two typings of one body flip a slot forever
@@ -40,7 +40,7 @@ fn flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == "1")
 }
 
-/// All-arms block binding.
+/// All-variants block binding.
 pub(crate) static ALLARMS: LazyLock<bool> = LazyLock::new(|| flag("RH_BRK_ALLARMS"));
 /// Accumulating handoffs.
 static JOIN: LazyLock<bool> = LazyLock::new(|| flag("RH_FOLD_JOIN"));
@@ -254,12 +254,12 @@ pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool
 }
 
 /// Join of two values of one slot when one is pending: the pending side
-/// (`Var`/`untyped` arms only) yields to the other's informative core, as
+/// (`Var`/`untyped` variants only) yields to the other's informative core, as
 /// the harvest's own rule does (#521); two informative values join after
-/// their unknown arms are stripped.
+/// their unknown variants are stripped.
 pub(crate) fn join(old: Ty, new: Ty) -> Ty {
     if old == new {
-        return new;
+        return if storage_m0_on() { super::producer_evidence::merge_equal(new, &old) } else { new };
     }
     if !informative(&old) {
         return new;
@@ -287,7 +287,7 @@ pub(crate) fn join(old: Ty, new: Ty) -> Ty {
 /// nothing (commutative and idempotent on the whole domain).
 pub(crate) fn join_slot(old: Ty, new: Ty) -> Ty {
     if contains_arm(&old, &new) {
-        return old;
+        return if storage_m0_on() { storage_merge_contained(old, &new) } else { old };
     }
     if !informative(&old) && !informative(&new) {
         return super::body::union_of(old, new);
@@ -295,8 +295,30 @@ pub(crate) fn join_slot(old: Ty, new: Ty) -> Ty {
     join(old, new)
 }
 
-/// `old == new`, or `old` is a union with `new` as an arm (or with every
-/// arm of a union `new`).
+// M0 is a diagnostic annotation join at existing equal/contained exits.
+pub(super) fn storage_m0_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_MERGE_EQUAL_REASON_EVIDENCE").as_deref() == Ok("1"))
+}
+
+fn storage_merge_contained(old: Ty, new: &Ty) -> Ty {
+    if old == *new {
+        return super::producer_evidence::merge_equal(old, new);
+    }
+    let Ty::Union { variants } = old else { return old };
+    let incoming: &[Ty] = match new {
+        Ty::Union { variants } => variants,
+        other => std::slice::from_ref(other),
+    };
+    Ty::Union { variants: variants.iter().map(|arm| {
+        incoming.iter().filter(|other| arm == *other).fold(arm.clone(), |a,b| {
+            super::producer_evidence::merge_equal(a,b)
+        })
+    }).collect() }
+}
+
+/// `old == new`, or `old` is a union with `new` as an variant (or with every
+/// variant of a union `new`).
 pub(crate) fn contains_arm(old: &Ty, new: &Ty) -> bool {
     if old == new {
         return true;

@@ -343,6 +343,12 @@ pub(crate) fn hash_ty<H: Hasher>(t: &Ty, h: &mut H) {
             hash_ty(ret, h);
             format!("{effects:?}").hash(h);
         }
+        Ty::Untyped { why } => {
+            static REASONS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *REASONS.get_or_init(|| std::env::var("RH_REASON_STATE_CHECK").as_deref() == Ok("1")) {
+                why.reporting_bits().hash(h);
+            }
+        }
         Ty::Var { var } => var.0.hash(h),
         // A fold reference is its slot.
         Ty::Rec { slot } => slot.hash(h),

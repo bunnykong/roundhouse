@@ -4,7 +4,7 @@
 //! harvest table between a concrete type and `Concrete|Untyped` every
 //! round and exhaust `FIXPOINT_CAP`. When an existing entry and a new
 //! body type share the same concrete core (after dropping top-level
-//! `Untyped`/`Var` arms), store that core. Nil-only cores keep sticky
+//! `Untyped`/`Var` variants), store that core. Nil-only cores keep sticky
 //! `Nil|Untyped` — a full lattice join was tried and rejected because
 //! `Untyped` then `Nil` collapsed Campfire URI helpers to bare `Nil`.
 //!
@@ -19,24 +19,29 @@ use crate::ty::Ty;
 
 use super::body;
 
+fn no_stabilize_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_SKIP_RETURN_STABILIZE").is_ok_and(|v| v == "1"))
+}
+
 fn gradual_nil() -> Ty {
     body::union_of(Ty::Nil, Ty::unresolved())
 }
 
-/// True when stripping top-level unknown arms leaves a usable core
+/// True when stripping top-level unknown variants leaves a usable core
 /// (anything other than bare [`Ty::Untyped`]).
 fn has_informative_core(ty: &Ty) -> bool {
     match ty {
         Ty::Untyped { .. } | Ty::Var { .. } => false,
         // Nested unions (a sorbet signature keeps their shape) count only
-        // if some arm somewhere is known.
+        // if some variant somewhere is known.
         Ty::Union { variants } => variants.iter().any(has_informative_core),
         _ => true,
     }
 }
 
 /// If two harvested returns differ only by top-level `Untyped`/`Var`
-/// arms, return the stable form to store. Non-Nil concrete cores keep
+/// variants, return the stable form to store. Non-Nil concrete cores keep
 /// the stripped type (`Configuration|Untyped` → `Configuration`).
 /// Nil-only cores keep `Nil|Untyped` when either side was gradual.
 fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
@@ -131,6 +136,12 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
         return HarvestWrite::Keep;
     }
     if existing == &new {
+        if super::handoff::storage_m0_on() {
+            let merged = super::producer_evidence::merge_equal(new, existing);
+            if !crate::wire_ty::storage_types(std::slice::from_ref(existing), std::slice::from_ref(&merged)) {
+                return HarvestWrite::Set("harvest.storage_annotation_merge", merged);
+            }
+        }
         return HarvestWrite::Keep;
     }
     if let Some(untied) = untie_recursive_return(existing, &new) {
@@ -142,7 +153,9 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
         }
         return HarvestWrite::Set("harvest.untie_result", untied);
     }
-    if let Some(stable) = stabilize_untyped_return_oscillation(existing, &new) {
+    if !no_stabilize_on()
+        && let Some(stable) = stabilize_untyped_return_oscillation(existing, &new)
+    {
         if existing == &stable {
             return HarvestWrite::Keep;
         }
@@ -168,7 +181,7 @@ pub(super) fn evidence_control_decision(existing: Ty, new: Ty) -> Ty {
 /// Conservative insertion into the harvested-return table.
 ///
 /// RBS-sourced `Ty::Fn` stays authoritative. Same-core returns that
-/// differ only by unknown arms stabilize to the concrete core (Nil
+/// differ only by unknown variants stabilize to the concrete core (Nil
 /// cores stay gradual). An informative existing return is never
 /// replaced by bare `Untyped`/`Var`. First writes are stored as-is,
 /// including gradual unions.

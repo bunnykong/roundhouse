@@ -433,3 +433,134 @@ fn provenance_lineage_factorial() {
     println!("PENDING-FACTORIAL {}", json!({"arm": arm, "counts": n, "examples": ex,
         "seed_ok": seed_ok, "no_early_never": no_early_never}));
 }
+
+#[test]
+#[ignore = "ownership/provenance: extended native census, including producer-normalization shapes"]
+fn storage_extended_laws() {
+    assert!(on(), "run with RH_PARAMETER_REASON_CONSERVE=1");
+    let arm = (std::env::var("RH_PROVENANCE_PIDENT").expect("set RH_PROVENANCE_PIDENT"),
+               std::env::var("RH_PROVENANCE_LIFT").expect("set RH_PROVENANCE_LIFT"));
+    let st = |a: &Ty, b: &Ty| crate::wire_ty::storage_types(&[a.clone()], &[b.clone()]);
+    let key = (ClassId(Symbol::from("LawOwner")), Symbol::from("call"), MethodReceiver::Instance);
+    let fold = |obs: &[&Ty]| {
+        let mut rows = HashMap::new();
+        fold_param_observations(&mut rows, obs.iter().map(|t| (key.clone(), vec![(*t).clone()])).collect());
+        rows[&key][0].clone()
+    };
+    let (ts, p) = (storage_samples(), Ty::pending_untyped());
+    let mut n: std::collections::BTreeMap<&str, u64> = Default::default();
+    let mut ex: std::collections::BTreeMap<&str, Vec<String>> = Default::default();
+    let mut bad = |law: &'static str, case: String| {
+        *n.entry(law).or_default() += 1;
+        let e = ex.entry(law).or_default();
+        if e.len() < 5 { e.push(case) }
+    };
+    for a in &ts {
+        for b in &ts {
+            let ab = unify_param_ty(a.clone(), b.clone());
+            if !st(&ab, &unify_param_ty(b.clone(), a.clone())) { bad("comm", format!("{a:?} | {b:?}")) }
+            if !st(&unify_param_ty(ab.clone(), a.clone()), &ab) { bad("idem", format!("{a:?} | {b:?}")) }
+            if !st(&fold(&[a, b]), &fold(&[b, a])) { bad("fold2", format!("{a:?} | {b:?}")) }
+            let want: BTreeSet<String> = evidence(&origins(a)).union(&evidence(&origins(b))).cloned().collect();
+            if evidence(&origins(&ab)) != want { bad("evidence", format!("{a:?} | {b:?}")) }
+            for c in &ts {
+                let left = unify_param_ty(ab.clone(), c.clone());
+                let right = unify_param_ty(a.clone(), unify_param_ty(b.clone(), c.clone()));
+                if !st(&left, &right) { bad("assoc", format!("{a:?} | {b:?} | {c:?}")) }
+                let f = fold(&[a, b, c]);
+                if [[a, c, b], [b, a, c], [b, c, a], [c, a, b], [c, b, a]].iter().any(|o| !st(&f, &fold(o))) {
+                    bad("fold3", format!("{a:?} | {b:?} | {c:?}"))
+                }
+            }
+        }
+    }
+    for x in &ts {
+        let normalized = unify_param_ty(x.clone(), x.clone());
+        let want = if matches!(normalized, Ty::Bottom) { p.clone() } else { normalized };
+        if !st(&unify_param_ty(p.clone(), x.clone()), &want) { bad("pid", format!("{x:?}")) }
+    }
+    let seed_ok = st(&fold(&[&Ty::Bottom, &Ty::Int]), &fold(&[&Ty::Int, &Ty::Bottom]));
+    let no_early_never = !matches!(fold(&[&Ty::Bottom]), Ty::Bottom);
+    println!("STORAGE-EXTENDED {}", json!({"arm": arm, "samples": ts.len(), "counts": n, "examples": ex,
+        "seed_ok": seed_ok, "no_early_never": no_early_never}));
+    assert!(n.is_empty() && seed_ok && no_early_never, "native extended laws have counterexamples: {n:?}");
+}
+
+
+fn storage_rbs_observation(declaration: &str) -> Ty {
+    let source = format!("class StorageSampleSource\n def produce: () -> ({declaration})\nend\n");
+    let parsed = crate::rbs::parse_app_signatures(&source).expect("valid production RBS input");
+    let ty = &parsed[&ClassId(Symbol::from("StorageSampleSource"))][&Symbol::from("produce")];
+    let Ty::Fn { ret, .. } = ty else { panic!("expected parsed method signature") };
+    (**ret).clone()
+}
+
+fn storage_samples() -> Vec<Ty> {
+    let mut ts = samples();
+    for declaration in ["bot | bot", "Array[String | Integer]", "Hash[String, String | Integer]",
+                        "Array[Integer | Integer | bot]", "Hash[String, Integer | Integer | bot]"] {
+        ts.push(storage_rbs_observation(declaration));
+    }
+    let nested = Ty::Union { variants: vec![
+        Ty::Union { variants: vec![Ty::Int, Ty::pending_untyped()].into() },
+        Ty::unresolved(), Ty::gradual(), Ty::Bottom,
+    ].into() };
+    ts.extend([nested.clone(), array(nested.clone()), hash(nested)]);
+    ts
+}
+
+fn storage_fold(observations: &[Ty]) -> Ty {
+    let key = (ClassId(Symbol::from("StorageSampleOwner")), Symbol::from("observe"), MethodReceiver::Instance);
+    let mut rows = HashMap::new();
+    for observed in observations {
+        fold_param_observations(&mut rows, vec![(key.clone(), vec![observed.clone()])]);
+    }
+    rows[&key][0].clone()
+}
+
+#[test]
+#[ignore = "ownership/provenance: required native C1 Bottom regression, production parser and fold"]
+fn storage_rbs_bottom_pending() {
+    assert!(on());
+    let mut bad = Vec::new();
+    for declaration in ["bot", "bot | bot"] {
+        let observed = storage_rbs_observation(declaration);
+        let got = storage_fold(std::slice::from_ref(&observed));
+        println!("STORAGE-BOTTOM {}", json!({"declaration": declaration, "observed": observed,
+            "native_row": got, "native_debug": format!("{got:?}"), "origins": origins(&got),
+            "pending": matches!(&got, Ty::Untyped { why } if *why == Provenance::Pending),
+            "bottom": matches!(&got, Ty::Bottom)}));
+        if !matches!(&got, Ty::Untyped { why } if *why == Provenance::Pending) { bad.push(declaration); }
+    }
+    assert!(bad.is_empty(), "unfinished writer exported native Bottom: {bad:?}");
+}
+
+#[test]
+#[ignore = "ownership/provenance: advance prediction supplemental RBS array replay"]
+fn storage_rbs_array_replay() {
+    assert!(on());
+    for declaration in ["Array[Integer]", "Array[String | Integer]",
+                        "Array[Integer | Integer | bot]", "Hash[String, Integer | Integer | bot]"] {
+        let observed = storage_rbs_observation(declaration);
+        let once = storage_fold(std::slice::from_ref(&observed));
+        let replayed = storage_fold(&[observed.clone(), observed.clone()]);
+        let same = crate::wire_ty::storage_types(std::slice::from_ref(&once), std::slice::from_ref(&replayed));
+        println!("STORAGE-REPLAY {}", json!({"declaration": declaration, "observed": observed,
+            "once": once, "replayed": replayed, "storage_equal": same}));
+    }
+}
+
+#[test]
+#[ignore = "ownership/provenance: M0 changes annotations while preserving values"]
+fn storage_m0_equal_merge() {
+    assert!(super::super::handoff::storage_m0_on());
+    let a=array(Ty::gradual());
+    let b=array(Ty::unresolved());
+    let joined=super::super::handoff::join(a.clone(),b.clone());
+    let slot=super::super::handoff::join_slot(a.clone(),b.clone());
+    let harvested=super::super::harvest_return::evidence_control_decision(a.clone(),b.clone());
+    for got in [joined,slot,harvested] {
+        assert_eq!(a,got);
+        assert_eq!(origins(&got),origins(&a).union(&origins(&b)).cloned().collect());
+    }
+}

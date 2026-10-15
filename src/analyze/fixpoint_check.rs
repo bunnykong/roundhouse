@@ -30,7 +30,7 @@
 //! # The carried state
 //!
 //! Everything a round reads that an earlier round wrote. Types hash
-//! structurally, with union arms and record fields in a canonical order
+//! structurally, with union variants and record fields in a canonical order
 //! and inference variables' ids ignored, so the digests of two runs
 //! compare what they inferred rather than the order a hash map produced
 //! it in.
@@ -169,7 +169,7 @@ impl Checks {
     }
 }
 
-/// Structural hash of a type: union arms sorted and deduplicated, record
+/// Structural hash of a type: union variants sorted and deduplicated, record
 /// fields sorted by name, inference variables' ids ignored.
 pub(super) fn type_hash(t: &Ty) -> u64 {
     let mut h = DefaultHasher::new();
@@ -423,6 +423,78 @@ impl Census {
     }
 }
 
+/// Read-only ownership/provenance diagnostic, at exactly the census's emit-bound roots.
+/// Source tags, spans and per-root occurrences distinguish cloned bodies
+/// without depending on unrelated roots' iteration order.
+fn dump_census(app: &App, path: std::ffi::OsString) -> std::io::Result<()> {
+    use std::io::Write;
+
+    fn visit(
+        e: &Expr,
+        body: &serde_json::Value,
+        site: &mut Vec<usize>,
+        sources: &[crate::span::SourceFile],
+        out: &mut impl Write,
+    ) -> std::io::Result<()> {
+        if let Some(t) = &e.ty {
+            let kinds = untyped_kinds(t);
+            if kinds != 0 {
+                let row = serde_json::json!({
+                    "emit_body": body,
+                    "site": {
+                        "path": site,
+                        "source": e.span.file.0.checked_sub(1)
+                            .and_then(|i| sources.get(i as usize)).map(|s| s.path.as_str()),
+                        "span": e.span,
+                    },
+                    "untyped_kinds": kinds,
+                    "type_hash": format!("{:016x}", type_hash(t)),
+                });
+                writeln!(out, "{row}")?;
+            }
+        }
+        let mut result = Ok(());
+        let mut child = 0;
+        e.node.for_each_child(&mut |c| {
+            if result.is_ok() {
+                site.push(child);
+                result = visit(c, body, site, sources, out);
+                site.pop();
+            }
+            child += 1;
+        });
+        result
+    }
+
+    let mut declarations = BTreeMap::<usize, String>::new();
+    for class in &app.library_classes {
+        for method in &class.methods {
+            declarations.insert(&method.body as *const Expr as usize,
+                format!("{}#{:?}::{}", class.name.0.as_str(), method.receiver, method.name.as_str()));
+        }
+    }
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut occurrences = BTreeMap::<String, usize>::new();
+    let mut result = Ok(());
+    crate::lower::for_each_emit_body_ref(app, &mut |root| {
+        if result.is_ok() {
+            let mut body = serde_json::json!({
+                "source": root.span.file.0.checked_sub(1)
+                    .and_then(|i| app.sources.get(i as usize)).map(|s| s.path.as_str()),
+                "declaration": declarations.get(&(root as *const Expr as usize)),
+                "span": root.span,
+                "kind": root.node.kind_str(),
+            });
+            let occurrence = occurrences.entry(body.to_string()).or_default();
+            body["occurrence"] = serde_json::json!(*occurrence);
+            *occurrence += 1;
+            result = visit(root, &body, &mut Vec::new(), &app.sources, &mut out);
+        }
+    });
+    result?;
+    out.flush()
+}
+
 fn loop_end(end: LoopEnd) -> serde_json::Value {
     match end {
         LoopEnd::Settled(round) => serde_json::json!({"end": "settled", "round": round}),
@@ -629,6 +701,9 @@ impl Analyzer {
             });
             let mut census = Census::default();
             crate::lower::for_each_emit_body_ref(app, &mut |e| census.expr(e));
+            if let Some(path) = std::env::var_os("RH_REASON_SITE_CENSUS") {
+                dump_census(app, path).expect("write RH_REASON_SITE_CENSUS");
+            }
             line["census"] = serde_json::json!({
                 "typed": census.typed,
                 "missing": census.missing,

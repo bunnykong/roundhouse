@@ -95,6 +95,11 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::{ParamKind, Row, Ty};
 
+fn spliced_own_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_SPLICED_WRITER_OWNERSHIP").is_ok_and(|v| v == "1"))
+}
+
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
     /// Inferred parameter types per (class, method). Empty after
@@ -1852,7 +1857,7 @@ impl Analyzer {
                                 // An UNTYPED call site is absence of
                                 // evidence, not evidence of untyped.
                                 // Unioning it in would poison the seed:
-                                // an `Untyped` arm ABSORBS dispatch, so
+                                // an `Untyped` variant ABSORBS dispatch, so
                                 // `User | Untyped | Nil` answers
                                 // `Untyped` for every method — which is
                                 // exactly what campfire produced.
@@ -2077,7 +2082,7 @@ impl Analyzer {
             }
         }
         // Library classes carry theirs on a FIELD rather than as an
-        // `Unknown` body item, so they need their own arm — and without it
+        // `Unknown` body item, so they need their own variant — and without it
         // every constant a CONCERN or a HELPER declares was invisible here.
         // That is not a rare corner: campfire keeps `CONNECTION_TTL` in
         // `Membership::Connectable`, `PAGE_SIZE` in `Message::Pagination`,
@@ -3124,11 +3129,11 @@ impl Analyzer {
             // the action's actual entry state), and the body-typer's
             // own flow refines further per-statement.
             //
-            // The Nil arm is stripped from each base type: across a
+            // The Nil variant is stripped from each base type: across a
             // method boundary the type system can't see the
             // find-then-guard idiom (`@x = M.find_by(..); redirect
             // unless @x`) that makes these ivars non-nil on the path
-            // that reaches the reader, and keeping the Nil arm would
+            // that reaches the reader, and keeping the Nil variant would
             // only trade an `ivar_unresolved` for a `send_dispatch`
             // on the (unreachable) nil case. `Var`/`Bottom` carry no
             // usable shape and are dropped.
@@ -3173,7 +3178,7 @@ impl Analyzer {
                         let mut seed = controller_wide.clone();
                         // Overlay the action's precise before_action seed:
                         // for an action that actually runs the filter, the
-                        // filter's exact binding (including any Nil arm the
+                        // filter's exact binding (including any Nil variant the
                         // action narrows itself) wins over the stripped base.
                         for (k, v) in
                             merged_before_seed(&chained_filters, &action.name, &chained_bindings)
@@ -3697,7 +3702,7 @@ impl Analyzer {
                     for (k, v) in from_concern {
                         // The includer's own answer wins; the concern only
                         // fills what that environment has nothing to say
-                        // about. An `is_open` arm is nothing to say.
+                        // about. An `is_open` variant is nothing to say.
                         let vacant = seed.get(k).is_none_or(|t| t.is_open());
                         if vacant {
                             seed.insert(k.clone(), v.clone());
@@ -3966,7 +3971,7 @@ impl Analyzer {
             let is_current_attributes = current_attribute_writes.contains_key(&lc_name);
             if let Some(writes) = current_attribute_writes.get(&lc_name) {
                 for (name, ty) in writes {
-                    // The Nil arm is ADDED, unlike the controller-wide
+                    // The Nil variant is ADDED, unlike the controller-wide
                     // ivar seed's `strip_nil`: a CurrentAttributes
                     // attribute is nil until the request's setup writes
                     // it and is reset after, so nil is the attribute's
@@ -5300,6 +5305,14 @@ impl Analyzer {
                 let folded = self.concern_folded.entry(id.clone()).or_default();
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
+                    if spliced_own_on()
+                        && app.concern_spliced_actions.get(&id).is_some_and(|m| m.contains_key(name))
+                    {
+                        // The includer harvest types this spliced body itself.
+                        // The copy only declares existence, never a value writer.
+                        cls.instance_methods.entry(name.clone()).or_insert(Ty::unresolved());
+                        continue;
+                    }
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
                         continue; // own/catalog entry wins
                     }
@@ -5479,7 +5492,7 @@ impl Analyzer {
                     *returns += 1;
                     tails(value, out, returns);
                 }
-                // A raising arm returns nothing.
+                // A raising variant returns nothing.
                 ExprNode::Raise { .. } => {}
                 _ => out.push(e),
             }
@@ -5526,7 +5539,7 @@ impl Analyzer {
     /// True when every value `body` can return is the value of the
     /// block the method was called with: `yield`, or a call handing
     /// `block_param` on to a method that itself returns its block's
-    /// value (see `ClassInfo::block_value_methods`). A raising arm
+    /// value (see `ClassInfo::block_value_methods`). A raising variant
     /// returns nothing and does not count against it; a `return` off
     /// the tail must pass the same test, or the walk declines.
     fn returns_block_value(
@@ -7056,14 +7069,14 @@ const MAX_FILTER_CALL_DEPTH: usize = 4;
 ///     callee's writes as-is, unioned with whatever else is reachable.
 ///   - A call reached on only SOME alternative of an `If`/`Case`/
 ///     `BoolOp`/loop/rescue (the other alternative(s) don't reach an
-///     equivalent write) contributes its writes with a `Ty::Nil` arm
+///     equivalent write) contributes its writes with a `Ty::Nil` variant
 ///     unioned in for the alternatives that don't write it — see
 ///     [`merge_alternative_branches`]. This is what turns Procore's
 ///     `@project` (written only on the `if self.class.project_area?`
-///     arm of `set_variables_in_authorize!`, with `company_area?` /
+///     variant of `set_variables_in_authorize!`, with `company_area?` /
 ///     `super_area?` / an `else` that logs and returns) into
 ///     `Project?` rather than a false unconditional `Project`: the
-///     union of "`Project` on one arm" and "nothing on the other
+///     union of "`Project` on one variant" and "nothing on the other
 ///     three" is nilable, not `Project`. That is strictly better than
 ///     today's `ivar_unresolved` on `@project` and does not misreport
 ///     the one case that matters (a caller that reads `@project`
@@ -7076,7 +7089,7 @@ const MAX_FILTER_CALL_DEPTH: usize = 4;
 ///     analyzer can't evaluate (`unless feature_active?(...)`) are
 ///     NEVER evaluated for their value — this function only ever reads
 ///     a branching node's *branches*, not its condition's truthiness,
-///     so "both/every arm may run" falls out automatically rather than
+///     so "both/every variant may run" falls out automatically rather than
 ///     needing a special case per condition shape.
 ///
 /// `visited` is the current call STACK (pushed on entry to a callee,
@@ -7109,7 +7122,7 @@ fn collect_transitive_filter_ivars(
         // `then_branch`/`else_branch` are alternatives: Ruby's `if`
         // with no `else` types the missing branch as a Nil-producing
         // no-op, which `merge_alternative_branches` needs as an
-        // explicit empty contribution to make an only-one-arm write
+        // explicit empty contribution to make an only-one-variant write
         // nilable — it's already exactly that shape here because
         // `else_branch` is a literal `nil` expression when the source
         // omitted one, and walking it yields `{}`.
@@ -7131,7 +7144,7 @@ fn collect_transitive_filter_ivars(
             // No `when`/pattern may match — Ruby's `case` with nothing
             // matching (and no `else`) evaluates to nil — so an
             // implicit empty alternative is added even when every
-            // explicit arm agrees, otherwise an exhaustive-looking
+            // explicit variant agrees, otherwise an exhaustive-looking
             // `case` would wrongly type as non-nilable.
             branches.push(HashMap::new());
             union_ivar_maps(&mut out, merge_alternative_branches(branches));
@@ -7194,20 +7207,20 @@ fn collect_transitive_filter_ivars(
                     if visited.insert(method.clone()) {
                         // One recursive call finds BOTH the callee's own
                         // direct writes and whatever it further calls —
-                        // the Assign/OpAssign/MultiAssign arms below
+                        // the Assign/OpAssign/MultiAssign variants below
                         // record a direct write with the same
                         // branch-aware nilability as everything else in
                         // this function. Do not swap this for a plain
                         // `extract_ivar_assignments(callee_body, ..)`:
-                        // that function's own `If`/`Case` arms union
-                        // every branch's writes WITHOUT a Nil arm for
+                        // that function's own `If`/`Case` variants union
+                        // every branch's writes WITHOUT a Nil variant for
                         // "this branch didn't write it" (correct for
                         // its existing direct, single-body callers,
                         // which never needed that distinction) — using
                         // it here silently discarded the nilability
                         // this function exists to add, which is exactly
                         // how `set_variables_in_authorize!`'s `@project`
-                        // (real one arm of an if/elsif/elsif/else) was
+                        // (real one variant of an if/elsif/elsif/else) was
                         // first observed coming out as non-nilable
                         // `Project` instead of `Project?`.
                         union_ivar_maps(
@@ -7247,9 +7260,9 @@ fn collect_transitive_filter_ivars(
         // A direct ivar write, recorded the same way
         // `extract_ivar_assignments` records one — from `value.ty`,
         // unioned with anything already known for that name — except
-        // this arm sits inside the branch-aware walk above, so a write
+        // this variant sits inside the branch-aware walk above, so a write
         // that only some `If`/`Case` alternatives reach still gets its
-        // Nil arm from `merge_alternative_branches` at the enclosing
+        // Nil variant from `merge_alternative_branches` at the enclosing
         // branch node, not lost the way going through
         // `extract_ivar_assignments` on the whole callee body would.
         ExprNode::Assign { target: LValue::Ivar { name }, value }
@@ -7307,7 +7320,7 @@ fn union_ivar_maps(out: &mut HashMap<Symbol, Ty>, incoming: HashMap<Symbol, Ty>)
     }
 }
 
-/// Merge mutually-exclusive branch contributions (the arms of an `if`/
+/// Merge mutually-exclusive branch contributions (the variants of an `if`/
 /// `case`/loop/rescue): a key written on every branch keeps the union
 /// of its per-branch types; a key written on only SOME branches gets
 /// `Ty::Nil` unioned in for the branches that don't write it, because
@@ -7404,7 +7417,7 @@ fn build_sourced_filter_chain(
                     continue;
                 };
                 match method.as_str() {
-                    // `include` needs no arm: ingest's
+                    // `include` needs no variant: ingest's
                     // `splice_concerns_into_controllers` already copied the
                     // module's `included do` filters into this body, each
                     // tagged with `from_concern` for provenance. Splicing
@@ -7453,7 +7466,7 @@ fn build_sourced_filter_chain(
                     // only: […]`'s argument form, which has no attached
                     // block at all (`ingest::controller::
                     // lambda_filter_target` recognizes both surfaces so
-                    // this arm and `report_unrecognized_controller_macros`
+                    // this variant and `report_unrecognized_controller_macros`
                     // / `build_filter_preamble` agree on what counts).
                     "before_action" | "after_action" | "prepend_before_action" => {
                         let Some(target_info) =
@@ -7596,16 +7609,16 @@ pub(crate) fn fold_param_observations(
 /// observations arrive in whatever order the call sites are visited,
 /// so this is a lattice join: commutative, associative and idempotent,
 /// with a pending `Var` as its identity (#617). It is defined on the
-/// canonical arm set `union_of` builds (nested unions flattened, one
-/// Hash and one Array spine, `Nil` kept as an arm, a pending `Var`
-/// dropped beside any other arm, inside spines too), with each
-/// top-level arm classified the same way whether it arrives bare or as
-/// an arm of a union:
+/// canonical variant set `union_of` builds (nested unions flattened, one
+/// Hash and one Array spine, `Nil` kept as an variant, a pending `Var`
+/// dropped beside any other variant, inside spines too), with each
+/// top-level variant classified the same way whether it arrives bare or as
+/// an variant of a union:
 /// - pending (`Var`, no observation yet) is the identity. When only
 ///   `Var`s remain, the join keeps the one with the smallest id; that
 ///   is the slot seed `TyVar(0)`, so the seed stays the identity.
 /// - `Untyped` (an argument nobody could type) is absorbed by a
-///   non-nil concrete arm. It says nothing about the value, and letting
+///   non-nil concrete variant. It says nothing about the value, and letting
 ///   it into the union turns every concrete observation into `untyped`
 ///   downstream (gradual absorption at dispatch). campfire's
 ///   `start_new_session_for(user)` has three callers passing `User`
@@ -7619,10 +7632,10 @@ pub(crate) fn fold_param_observations(
 ///
 /// This integration retains main's absorption policy in both modes. S2a's
 /// provenance remains reporting-only here; a future producer split must make
-/// gradual win when equal-looking arms merge. In that future policy only an unresolved `untyped` is
-/// absorbed this way, and a gradual one stays an arm beside concrete
-/// types. If arms with different provenance then share one `untyped`
-/// arm, merging them must keep gradual (gradual wins), or the result
+/// gradual win when equal-looking variants merge. In that future policy only an unresolved `untyped` is
+/// absorbed this way, and a gradual one stays an variant beside concrete
+/// types. If variants with different provenance then share one `untyped`
+/// variant, merging them must keep gradual (gradual wins), or the result
 /// depends on the grouping again and the join stops being associative.
 pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     let join = if parameter_conservation::on() {
@@ -7650,7 +7663,7 @@ fn unify_param_ty_raw(stored: Ty, observed: Ty) -> Ty {
     let Ty::Union { variants } = joined else {
         return joined;
     };
-    // `drop_pending_arms` leaves no `Var` in a union of two or more arms.
+    // `drop_pending_arms` leaves no `Var` in a union of two or more variants.
     if !variants.iter().any(|v| !v.is_unknown() && !matches!(v, Ty::Nil)) {
         return Ty::Union { variants };
     }
@@ -7724,7 +7737,7 @@ pub(crate) fn view_name_for_action(controller: &ClassId, action: &Action) -> Opt
 /// scope. The name comes from the LValue's path (last segment for
 /// the common single-name case; qualified writes `Foo::BAR = 1` use
 /// the joined path as their key, matching how the body-typer's
-/// Const-read arm looks up `path.last()`).
+/// Const-read variant looks up `path.last()`).
 /// Register a hardcoded stdlib/library class into the dispatch registry
 /// with the given class (singleton) and instance method return types.
 /// Never clobbers an app-defined method or class of the same name —
@@ -7775,7 +7788,7 @@ fn association_member_ty(assoc: &crate::dialect::Association) -> (Symbol, Ty) {
         // Polymorphic belongs_to with a resolved implementor set —
         // the reader yields any implementor (or nil); dispatch on the
         // union resolves member-wise. Unresolved (no inverse `as:`
-        // decls found) falls through to the phantom-target arm below.
+        // decls found) falls through to the phantom-target variant below.
         Association::BelongsTo { name, polymorphic: true, polymorphic_targets, .. }
             if !polymorphic_targets.is_empty() =>
         {
@@ -7832,7 +7845,7 @@ fn association_builder_members(assoc: &crate::dialect::Association) -> Vec<(Symb
 
 /// Class ids a typed call receiver contributes to param unify and the
 /// reverse call graph. Mirrors the receivers dispatch actually chases:
-/// bare Class, Relation→model, Array elem, and Class arms of a Union.
+/// bare Class, Relation→model, Array elem, and Class variants of a Union.
 fn class_ids_for_call_receiver(ty: &Ty) -> Vec<ClassId> {
     match ty {
         Ty::Class { id, .. } => vec![id.clone()],
@@ -8112,7 +8125,7 @@ fn record_const(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     }
 }
 
-/// Remove the `Nil` arm from a union. A bare `Nil` (or a union that
+/// Remove the `Nil` variant from a union. A bare `Nil` (or a union that
 /// was nothing but `Nil`) is preserved — there's no non-nil shape to
 /// fall back to. Used when building the controller-wide ivar base,
 /// where the find-then-guard idiom makes nilable ivars effectively
@@ -8121,7 +8134,7 @@ fn record_const(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 /// reachable in its body PLUS the tail (implicit-return) expression's
 /// type. The body-typer types a `return` *expression* as `Bottom` — it
 /// diverges at that source position — so a method whose tail diverges
-/// (every path `return`s, or the tail is a `case`/`begin` whose arms
+/// (every path `return`s, or the tail is a `case`/`begin` whose variants
 /// all return) reports `body.ty == Bottom` even though the early
 /// `return`s carry the real type. Reading only `body.ty` then harvests
 /// `Bottom`, and a caller's `result[:k]` fails dispatch on `Bottom`.
@@ -8225,8 +8238,8 @@ fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
             collect_return_types(value, out, saw);
         }
         // A `Lambda` reached here is in value position — a closure
-        // boundary. The `Send`/`Apply` arms below step past the node
-        // for the block case, so this arm never sees a block.
+        // boundary. The `Send`/`Apply` variants below step past the node
+        // for the block case, so this variant never sees a block.
         ExprNode::Lambda { .. } => {}
 
         ExprNode::Send { recv, args, block, method, .. } => {
@@ -8261,7 +8274,7 @@ fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
 
 /// Walk a call's block body for `return`s that belong to the enclosing
 /// method. Steps past the `Lambda` node deliberately: reaching the body
-/// through `collect_return_types` would hit the closure-boundary arm.
+/// through `collect_return_types` would hit the closure-boundary variant.
 fn collect_block_return_types(block: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
     match &*block.node {
         ExprNode::Lambda { body, .. } => collect_return_types(body, out, saw),
@@ -8348,7 +8361,7 @@ fn collect_const_attr_writes(
 /// after, which is the IDE's whole product getting worse to close a
 /// campfire error.
 ///
-/// So: no open or gradual arm anywhere in a top-level union, and not
+/// So: no open or gradual variant anywhere in a top-level union, and not
 /// one itself. The persistence exists to carry a shaped answer down an
 /// inheritance chain; a half-answer is what the Phase-A harvest already
 /// provides, and layering one can only subtract.
@@ -8486,7 +8499,7 @@ fn walk_ivar_assignments(
         // Tuple slot / Untyped escape) so a controller's
         // `@stories, @show_more = paginate(...)` flows `@stories` into
         // the view-ivar seed and the controller-wide ivar union.
-        // Without this arm the targets are invisible to every harvest.
+        // Without this variant the targets are invisible to every harvest.
         ExprNode::MultiAssign { targets, value } => {
             for (i, target) in targets.iter().enumerate() {
                 if let LValue::Ivar { name } = target {
@@ -8509,7 +8522,7 @@ fn walk_ivar_assignments(
         // []` — and plain index-assign). Widen the ivar hash's value
         // type from the written element so a cross-method or view read
         // (`@hat_groups[hg].sort_by`) sees `Array`, not `Var`. The plain
-        // `[]=` Send form is handled by the arm below.
+        // `[]=` Send form is handled by the variant below.
         ExprNode::Assign { target: LValue::Index { recv, index }, value }
         | ExprNode::OpAssign { target: LValue::Index { recv, index }, value, .. } => {
             if let ExprNode::Ivar { name } = &*recv.node {
@@ -8549,7 +8562,7 @@ fn walk_ivar_assignments(
         // the widening — this is purely recursive descent.
         //
         // `instance_variable_set` is Kernel, not `@ivar =`, so the
-        // Assign arm never sees it. Fold a statically resolvable name
+        // Assign variant never sees it. Fold a statically resolvable name
         // here so the controller→view channel harvests the write.
         ExprNode::Send { recv, method, args, block, .. } => {
             ivar_set::harvest_ivar_set(recv, method, args, env, out);
@@ -8577,7 +8590,7 @@ fn walk_ivar_assignments(
             walk_ivar_assignments(else_branch, out, env, walk);
         }
         // `while cond; body; end` — body may contain `@hash[k] = v`
-        // (Parameters' initialize loop). Without this arm, ivar
+        // (Parameters' initialize loop). Without this variant, ivar
         // value-type widening from `[]=` writes inside loops is
         // invisible. The condition is walked for the same
         // assignment-in-test reason as `If`.
@@ -8597,7 +8610,7 @@ fn walk_ivar_assignments(
         // `a && (@x = y)` / `a || (@x = y)` — an ivar assigned inside a
         // boolean chain (the `find_*` guard idiom). Descend both sides
         // so the buried assignment still gets typed. (Compound `@x ||= y`
-        // is `OpAssign`, handled by its own arm above — not `BoolOp`.)
+        // is `OpAssign`, handled by its own variant above — not `BoolOp`.)
         ExprNode::BoolOp { left, right, .. } => {
             walk_ivar_assignments(left, out, env, walk);
             walk_ivar_assignments(right, out, env, walk);
@@ -8619,7 +8632,7 @@ fn walk_ivar_assignments(
         ExprNode::Lambda { body, .. } => walk_ivar_assignments(body, out, env, walk),
         ExprNode::Return { value } => walk_ivar_assignments(value, out, env, walk),
         // Any other assignment target (local var, constant, attribute) that
-        // wasn't matched by the ivar/index arms above. We record no ivar for
+        // wasn't matched by the ivar/index variants above. We record no ivar for
         // the target itself, but the RHS can still assign ivars inside a
         // block — `content = Rails.cache.fetch(k) { @newest = ...;
         // @users_by_parent = ... }` (lobsters' `UsersController#tree`).
@@ -8641,7 +8654,7 @@ fn walk_ivar_assignments(
 /// Widen an ivar's Hash value-type with the joined value type of the
 /// `[]=` writes one body made to it.
 ///
-/// A slot with a Hash spine, bare or as an arm of a union (`Hash[K, V]
+/// A slot with a Hash spine, bare or as an variant of a union (`Hash[K, V]
 /// | Nil`, a hash that is nil on some path), joins `Hash[K, incoming]`
 /// with [`body::join_ivar_slot`], the join the plain assignments use;
 /// a pending key collapses to `Str` since `[]=` writes use `key.to_s`
@@ -9448,8 +9461,8 @@ pub fn register_stdlib_classes(
 }
 
 /// Every expression whose value a method body can return: the tail,
-/// through `if`/`case`/`begin`-`rescue` arms, plus the value of each
-/// `return` anywhere in the body outside a block. A raising arm returns
+/// through `if`/`case`/`begin`-`rescue` variants, plus the value of each
+/// `return` anywhere in the body outside a block. A raising variant returns
 /// nothing and contributes no leaf.
 /// `name.constantize.instantiate(attrs)`, or what `lower::record_snapshot`
 /// makes of it: a record rebuilt from a class NAME and raw attributes.
