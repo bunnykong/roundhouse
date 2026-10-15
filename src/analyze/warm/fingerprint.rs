@@ -47,14 +47,15 @@ pub(super) fn body_hash(mut value: Value) -> u64 {
 
 pub(super) fn unit(app: &App, u: &Unit) -> u64 {
     let _profile = phase(Phase::Fingerprint);
+    let codec = WarmCodec::selected();
     let value = match u.family {
-        Family::Lib => serde_json::to_value(&app.library_classes[u.ci].methods[u.mi]),
-        Family::ModelMethod => serde_json::to_value(app.models[u.ci].methods().nth(u.mi).unwrap()),
-        Family::ModelScope => serde_json::to_value(app.models[u.ci].scopes().nth(u.mi).unwrap()),
+        Family::Lib => codec.to_value(&app.library_classes[u.ci].methods[u.mi]),
+        Family::ModelMethod => codec.to_value(app.models[u.ci].methods().nth(u.mi).unwrap()),
+        Family::ModelScope => codec.to_value(app.models[u.ci].scopes().nth(u.mi).unwrap()),
         Family::CtrlAction => {
-            serde_json::to_value(app.controllers[u.ci].actions().nth(u.mi).unwrap())
+            codec.to_value(app.controllers[u.ci].actions().nth(u.mi).unwrap())
         }
-        Family::CtrlClassMethod => serde_json::to_value(
+        Family::CtrlClassMethod => codec.to_value(
             app.controllers[u.ci]
                 .body
                 .iter()
@@ -79,7 +80,7 @@ pub(super) fn environment(app: &App) -> u64 {
     // Global passes rebuild these non-unit inputs. Schema, route, view and
     // test-overlay edits start with a cold trace; class declarations and
     // constants are checked by the evaluations' input and read hashes.
-    let mut value = serde_json::to_value(app).unwrap();
+    let mut value = WarmCodec::selected().to_value(app).unwrap();
     let map = value.as_object_mut().unwrap();
     for key in [
         "sources",
@@ -97,7 +98,7 @@ pub(super) fn environment(app: &App) -> u64 {
 
 pub(super) fn value_hash(value: Option<&Ty>) -> u64 {
     let _profile = phase(Phase::ValueFingerprint);
-    let value = serde_json::to_value(value).unwrap();
+    let value = WarmCodec::selected().to_value(&value).unwrap();
     hash(&encode(value).unwrap_or(Value::Null))
 }
 
@@ -118,7 +119,7 @@ pub(super) fn class_hash(info: Option<&ClassInfo>, names: &[Symbol], wild: bool)
             .map(|(n, t)| {
                 (
                     n.as_str().to_owned(),
-                    encode(serde_json::to_value(t).unwrap()).unwrap_or(Value::Null),
+                    encode(WarmCodec::selected().to_value(t).unwrap()).unwrap_or(Value::Null),
                 )
             })
             .collect()
@@ -131,8 +132,8 @@ pub(super) fn class_hash(info: Option<&ClassInfo>, names: &[Symbol], wild: bool)
     extensions.sort_unstable();
     let value = serde_json::json!({
         "is_module": c.is_module, "scheduler_index": c.sccq_idx,
-        "constants": encode(serde_json::to_value(&c.constants).unwrap()),
-        "table": c.table, "attributes": encode(serde_json::to_value(&c.attributes).unwrap()),
+        "constants": encode(WarmCodec::selected().to_value(&c.constants).unwrap()),
+        "table": c.table, "attributes": encode(WarmCodec::selected().to_value(&c.attributes).unwrap()),
         "class_methods": methods(&c.class_methods), "instance_methods": methods(&c.instance_methods),
         "constructor": c.declares_constructor, "derived": sorted_names(&c.relation_derived),
         "materializing": sorted_names(&c.materializing_scopes), "block": sorted_names(&c.block_value_methods),
@@ -150,16 +151,16 @@ pub(super) fn inputs(
     extra: &Value,
 ) -> u64 {
     let _profile = phase(Phase::InputFingerprint);
-    let mut stamps = serde_json::to_value(expr).unwrap();
+    let mut stamps = WarmCodec::selected().to_value(expr).unwrap();
     strip(&mut stamps, false);
     let mut keys: Vec<_> = classes.keys().map(|c| c.0.as_str()).collect();
     keys.sort_unstable();
     let mut objects: Vec<_> = ctx.class_objects.iter().map(Symbol::as_str).collect();
     objects.sort_unstable();
     hash(&serde_json::json!({
-        "stamps": encode(stamps), "self": encode(serde_json::to_value(&ctx.self_ty).unwrap()),
-        "ivars": encode(serde_json::to_value(&ctx.ivar_bindings).unwrap()),
-        "locals": encode(serde_json::to_value(&ctx.local_bindings).unwrap()),
+        "stamps": encode(stamps), "self": encode(WarmCodec::selected().to_value(&ctx.self_ty).unwrap()),
+        "ivars": encode(WarmCodec::selected().to_value(&ctx.ivar_bindings).unwrap()),
+        "locals": encode(WarmCodec::selected().to_value(&ctx.local_bindings).unwrap()),
         "objects": objects, "keys": keys, "extra": extra,
         "mode": super::super::fold::warm_structure(),
         "flags": [ctx.annotate_self_dispatch, ctx.in_view, ctx.class_side,

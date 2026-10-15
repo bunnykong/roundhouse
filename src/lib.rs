@@ -73,6 +73,7 @@ pub mod treeshake;
 pub mod version;
 pub mod schema;
 pub mod span;
+pub mod storage_codec;
 pub mod ty;
 pub mod vfs;
 

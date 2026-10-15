@@ -227,10 +227,11 @@ fn valid(value: &Value) -> bool {
 
 /// Resolve every source/key dependency before restoring any fold identity.
 pub(super) fn ready(write: &Value, writes: &[(Value, Value)]) -> bool {
-    valid(write)
+    let codec = WarmCodec::selected();
+    codec.valid(write) && valid(write)
         && writes
             .iter()
-            .all(|(key, value)| decode_key(key).is_some() && valid(value))
+            .all(|(key, value)| decode_key(key).is_some() && codec.valid(value) && valid(value))
 }
 
 pub(super) fn decode(mut value: Value) -> Option<Value> {
@@ -271,7 +272,7 @@ pub(super) fn restore(write: &Value, current: &Expr) -> Option<Expr> {
     // Spans are resolved by unit and syntax position. Rebind source-local
     // VarIds from the current syntax rather than importing an old file's ids.
     let mut output = write.clone();
-    let input = serde_json::to_value(current).ok()?;
+    let input = WarmCodec::selected().to_value(current).ok()?;
     fn bindings(value: &Value, out: &mut BTreeMap<String, Vec<Value>>) {
         match value {
             Value::Object(map) => {
@@ -324,7 +325,7 @@ pub(super) fn restore(write: &Value, current: &Expr) -> Option<Expr> {
     let mut ids = BTreeMap::new();
     bindings(&input, &mut ids);
     rebind(&mut output, &mut ids)?;
-    serde_json::from_value(decode(output)?).ok()
+    WarmCodec::selected().from_value(decode(output)?).ok()
 }
 
 pub(super) fn apply_fold_writes(writes: &[(Value, Value)]) -> bool {
@@ -333,7 +334,7 @@ pub(super) fn apply_fold_writes(writes: &[(Value, Value)]) -> bool {
         .map(|(key, value)| {
             Some((
                 decode_key(key)?,
-                serde_json::from_value::<Ty>(decode(value.clone())?).ok()?,
+                WarmCodec::selected().from_value::<Ty>(decode(value.clone())?).ok()?,
             ))
         })
         .collect()

@@ -132,9 +132,12 @@ pub enum Ty {
     /// `why` records which of three meanings a producer gave it
     /// ([`Provenance`]). It is carried for reporting only: two
     /// `Untyped` values compare, order and hash equal whatever their
-    /// provenance, and it is not serialized.
+    /// provenance. Ordinary serialization omits it; the warm storage codec
+    /// explicitly preserves every bit.
     Untyped {
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "crate::storage_codec::skip_reasons",
+            serialize_with = "crate::storage_codec::serialize_reasons",
+            deserialize_with = "crate::storage_codec::deserialize_reasons")]
         why: Provenance,
     },
 
@@ -166,21 +169,42 @@ pub enum Ty {
 /// every rule that meets it has to keep or drop it, which is right for one
 /// meaning and wrong for another. The producers now say which they mean.
 ///
-/// The tag is carried, not consulted: no rule reads it yet, and it never
-/// changes how a type compares, orders, hashes or serializes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Provenance {
+/// The producer reason audit complete reason set. Ordinary type equality, ordering, hashing
+/// and IR serialization remain insensitive; the warm codec keeps every bit.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Provenance(u8);
+
+#[allow(non_upper_case_globals)]
+impl Provenance {
     /// Not computed yet: an inference gap that a later round may fill. It
     /// carries no evidence about the value.
-    Pending,
+    pub const Pending: Self = Self(1);
     /// The author opted out: RBS `untyped`, Sorbet `T.untyped`, or a
     /// declared or modeled signature (the catalog, the framework runtime)
     /// that says any value is accepted.
-    #[default]
-    Gradual,
+    pub const Gradual: Self = Self(2);
     /// Nothing answers it: an unsupported construct, an unknown or external
     /// surface, or a position the analysis cut or widened.
-    Unresolved,
+    pub const Unresolved: Self = Self(4);
+
+    // The producer reason audit complete reason-set representation; no absorption/join repair
+    // is imported here. This codec preserves sets already supplied by a producer.
+    pub fn union(self, other: Self) -> Self { Self(self.0 | other.0) }
+    pub(crate) fn reporting_bits(self) -> u8 { self.0 }
+    pub fn from_bits(bits: u8) -> Option<Self> { (1..=7).contains(&bits).then_some(Self(bits)) }
+    pub fn effective(self) -> Self {
+        if self.0 & 2 != 0 { Self::Gradual } else if self.0 & 4 != 0 { Self::Unresolved } else { Self::Pending }
+    }
+    pub fn reasons(self) -> Vec<&'static str> {
+        [(1, "Pending"), (4, "Unresolved"), (2, "Gradual")].into_iter()
+            .filter_map(|(bit, name)| (self.0 & bit != 0).then_some(name)).collect()
+    }
+}
+impl Default for Provenance { fn default() -> Self { Self::Gradual } }
+impl std::fmt::Debug for Provenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reasons().join("+"))
+    }
 }
 
 impl Ty {
@@ -729,6 +753,8 @@ fn param_kind_tag(kind: &ParamKind) -> u8 {
 /// `fields` are known; `rest` is the open-extension variable if this is a partial view.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
+    #[serde(serialize_with = "crate::storage_codec::serialize_fields",
+        deserialize_with = "crate::storage_codec::deserialize_fields")]
     pub fields: Shared<IndexMap<Symbol, Ty>>,
     pub rest: Option<TyVar>,
 }

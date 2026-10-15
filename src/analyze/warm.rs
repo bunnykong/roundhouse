@@ -20,10 +20,13 @@ use crate::App;
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
+use crate::storage_codec::WarmCodec;
 
 mod fingerprint;
 mod profile;
 mod wire;
+#[cfg(test)]
+mod provenance_tests;
 pub(crate) use profile::{Phase, phase};
 use fingerprint::{class_hash, inputs};
 use wire::{SiteMap, encode};
@@ -125,6 +128,8 @@ impl SchedulerReads {
 #[derive(Default, Serialize, Deserialize)]
 struct Cache {
     schema: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    codec: String,
     compiler: String,
     flags: Vec<(String, String)>,
     environment: u64,
@@ -140,6 +145,12 @@ pub(crate) struct Stats {
     typed: usize,
     unused: usize,
     recorded: usize,
+    input_invalidated: usize,
+    read_invalidated: usize,
+    incompatible_cache: usize,
+    diagnostic_replayed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codec: Option<Value>,
 }
 
 struct Session {
@@ -201,19 +212,24 @@ pub(crate) fn start(app: &App) -> Result<bool, String> {
     }
     let dir = PathBuf::from(dir);
     profile::start();
+    crate::storage_codec::reset_counters();
     let environment = fingerprint::environment(app);
+    let codec = WarmCodec::selected();
     let cache = Cache {
-        schema: 2,
+        schema: codec.cache_schema(),
+        codec: codec.identity().to_owned(),
         compiler: crate::version::COMMIT.unwrap_or("unknown").to_owned(),
         flags: flags(),
         environment,
         records: Vec::new(),
     };
     let load = phase(Phase::Load);
+    let mut incompatible_cache = 0;
     let old = match std::fs::read(dir.join("evaluations.json")) {
         Ok(bytes) => match decode_cache(&bytes) {
             Ok(c)
                 if c.schema == cache.schema
+                    && c.codec == cache.codec
                     && c.compiler == cache.compiler
                     && c.flags == cache.flags
                     && c.environment == environment =>
@@ -221,6 +237,7 @@ pub(crate) fn start(app: &App) -> Result<bool, String> {
                 c.records
             }
             _ => {
+                incompatible_cache += 1;
                 eprintln!("rh-warm: cache incompatible; starting cold");
                 Vec::new()
             }
@@ -245,6 +262,7 @@ pub(crate) fn start(app: &App) -> Result<bool, String> {
             classes_by_idx: HashMap::new(),
             stats: Stats {
                 loaded,
+                incompatible_cache,
                 ..Stats::default()
             },
         })
@@ -329,7 +347,7 @@ pub(crate) fn fold_write(key: &super::fold::SlotKey, before: Option<&Ty>, after:
     let Some(key) = wire::slot_key(key) else {
         return;
     };
-    let Some(value) = encode(serde_json::to_value(after).unwrap()) else {
+    let Some(value) = encode(WarmCodec::selected().to_value(after).unwrap()) else {
         return;
     };
     SESSION.with(|s| {
@@ -353,6 +371,9 @@ pub(crate) fn stop() -> Option<Pending> {
     SESSION.with(|s| s.borrow_mut().take()).map(|mut s| {
         s.stats.unused = s.old.len() - s.cursor;
         s.stats.recorded = s.cache.records.len();
+        if WarmCodec::selected() == WarmCodec::LosslessV3 {
+            s.stats.codec = Some(WarmCodec::LosslessV3.counters());
+        }
         let mut pending = Pending {
             dir: s.dir,
             cache: s.cache,
@@ -559,7 +580,15 @@ impl Evaluation {
             candidate
         });
         let covered = candidate.as_ref().is_some_and(|r| {
-            r.input == input && fingerprint::covered(&r.reads, ctx, classes, &extra)
+            if r.input != input {
+                SESSION.with(|s| s.borrow_mut().as_mut().unwrap().stats.input_invalidated += 1);
+                return false;
+            }
+            if !fingerprint::covered(&r.reads, ctx, classes, &extra) {
+                SESSION.with(|s| s.borrow_mut().as_mut().unwrap().stats.read_invalidated += 1);
+                return false;
+            }
+            true
         });
         // ConstScope guards can call S3's recorder. They are validation,
         // not reads made by the transfer, so discard this scratch set.
@@ -580,6 +609,15 @@ impl Evaluation {
                             let mut s = s.borrow_mut();
                             let s = s.as_mut().unwrap();
                             s.stats.replayed += 1;
+                            if WarmCodec::selected() == WarmCodec::LosslessV3 {
+                                fn has_diagnostic(expr: &Expr) -> bool {
+                                    if expr.diagnostic.is_some() { return true; }
+                                    let mut found = false;
+                                    expr.node.for_each_child(&mut |child| found |= has_diagnostic(child));
+                                    found
+                                }
+                                if has_diagnostic(&body) { s.stats.diagnostic_replayed += 1; }
+                            }
                             s.current = Some(r);
                         });
                         eval.replay = Some(body);
@@ -603,7 +641,7 @@ impl Evaluation {
         }
         let _record = phase(Phase::Record);
         let output = if self.replay.is_none() {
-            encode(serde_json::to_value(expr).expect("expression JSON"))
+            encode(WarmCodec::selected().to_value(expr).expect("expression JSON"))
         } else {
             None
         };
