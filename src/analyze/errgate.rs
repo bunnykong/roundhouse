@@ -358,3 +358,5 @@ fn input_digest(app: &App) -> String {
     }
     format!("{:016x}", h.finish())
 }
+
+pub(super) fn schedule_row_writer() -> Option<String> { WRITER.with(|w| w.borrow().clone()) }
