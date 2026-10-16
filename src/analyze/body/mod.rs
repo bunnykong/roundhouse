@@ -518,6 +518,16 @@ impl<'a> BodyTyper<'a> {
         self
     }
 
+    /// Defaults run before the body, and opaque forwarded blocks have no
+    /// modeled ABI/control-flow certificate. Keep those call results computed.
+    fn lambda_has_escaping_exit(&self, lambda: &Expr, breaks: bool, returns: bool, raises: bool) -> bool {
+        let ExprNode::Lambda { extra_params, body, .. } = &*lambda.node else { return true };
+        extra_params.iter().any(|p| {
+            (p.keyword && !p.rest && p.default.is_none())
+                || p.default.as_ref().is_some_and(|value| self.block_has_escaping_exit(value, breaks, returns, raises))
+        }) || self.block_has_escaping_exit(body, breaks, returns, raises)
+    }
+
     /// Potential exits from an executed block, respecting the distinct
     /// owners of loop/iterator breaks, method returns and rescued exceptions.
     /// This is a provenance boundary, not inference of the exit's value.
@@ -557,11 +567,16 @@ impl<'a> BodyTyper<'a> {
                 // A called literal lambda owns its return/break; only an
                 // exception from its body can unwind this enclosing block.
                 if let (Some(r), Some("call")) = (recv, name)
-                    && let ExprNode::Lambda { body, .. } = &*r.node
+                    && let ExprNode::Lambda { params, rest_param, extra_params, .. } = &*r.node
                 {
-                    return self.block_has_escaping_exit(body, false, false, raises)
+                    let optional = extra_params.iter().filter(|p| !p.keyword && !p.rest && p.default.is_some()).count();
+                    return self.const_resolver.as_ref().is_some_and(|r| r.has_source_namespace("Proc"))
+                        || call_args.len() < params.len()
+                        || (rest_param.is_none() && call_args.len() > params.len() + optional)
+                        || self.lambda_has_escaping_exit(r, false, false, raises)
                         || args.iter().any(scan);
                 }
+                if name == Some("call") { return true; }
                 // Both ordinary and literal-reflective never-returning calls
                 // can unwind to a rescue outside the yielding call.
                 // A literal String constructs RuntimeError only for a direct
@@ -613,8 +628,7 @@ impl<'a> BodyTyper<'a> {
                         && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), &target_method, false)
                         && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), &target_method, true));
                 !ignored && block.as_ref().is_some_and(|b| {
-                    matches!(&*b.node, ExprNode::Lambda { body, .. }
-                        if self.block_has_escaping_exit(body, false, returns, raises))
+                    b.decisions & crate::expr::FORWARDED_BLOCK != 0 || self.lambda_has_escaping_exit(b, false, returns, raises)
                 })
             }
             _ => {
@@ -2016,7 +2030,7 @@ impl<'a> BodyTyper<'a> {
                 // aliases, whose dispatch has already resolved above.
                 let dispatched = if self.block_may_replace_value(recv_ty.as_ref(), method, args, block_ret.as_ref())
                     && block.as_ref().is_some_and(|b| {
-                        matches!(&*b.node, ExprNode::Lambda { body, .. } if self.block_has_escaping_exit(body, true, true, true))
+                        b.decisions & crate::expr::FORWARDED_BLOCK != 0 || self.lambda_has_escaping_exit(b, true, true, true)
                     }) {
                     dispatched.computed()
                 } else { dispatched };

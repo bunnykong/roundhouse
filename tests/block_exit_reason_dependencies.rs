@@ -185,6 +185,7 @@ fn emitted_json_block_exits_and_identity_controls_run() {
     // and routed diagnostic above. No generated Rails fixture is required.
     let bodies = [
         "JSON.parse(raw).tap { break \"ok\" }",
+        "JSON.parse(raw).tap { |value, extra=Kernel.raise(\"x\")| true } rescue \"ok\"",
         "JSON.parse(raw).tap { return \"ok\" }",
         "begin; JSON.parse(raw).tap { raise \"x\" }; rescue Exception; \"ok\"; end",
         "JSON.parse(raw).tap { -> { return \"inner\" }.call; \"ignored\" }",
