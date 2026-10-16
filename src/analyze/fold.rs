@@ -251,6 +251,45 @@ pub(crate) fn ret_ref(class: &ClassId, method: &Symbol, class_side: bool) -> Opt
     Some(Ty::Rec { slot })
 }
 
+/// Enumerate the declared writer before reading its row. No destination is allocated here.
+pub(super) fn declare_param(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver,
+                           index: usize, span: crate::span::Span) {
+    if active() && is_rec_method(class,method) {
+        super::parameter_views::declare(&SlotKey::Param {class:class.clone(),method:method.clone(),side,index},span);
+    }
+}
+
+/// C materialization and lifetime; V replaces only the value from current raw cells.
+pub(super) fn param_seed(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver,
+                        index: usize, span: crate::span::Span, raw: Option<Ty>, control: Option<Ty>) -> Option<Ty> {
+    if !active() || !is_rec_method(class,method) { return control; }
+    let key=SlotKey::Param {class:class.clone(),method:method.clone(),side,index};
+    let slot=if control.is_some() {Some(intern(key.clone()))} else {slot_id(&key)};
+    let raw=raw.map(|t|slot.map_or_else(||t.clone(),|slot|strip_self(t.clone(),slot)));
+    let aggregate=super::parameter_views::replace(&key,span,raw);
+    let before=slot.and_then(|id|ST.with(|s|s.borrow().values.get(&id).cloned()));
+    if !super::parameter_views::on() {
+        let out=control.map(|t|param_ref(class,method,side,index,t));
+        let after=slot.and_then(|id|ST.with(|s|s.borrow().values.get(&id).cloned()));
+        super::parameter_views::note_storage(before.clone(),after,before.is_some() && out.is_some() && super::handoff::join_on());
+        return out;
+    }
+    if let Some(slot)=slot {
+        // No old stored value enters the right hand side.
+        let value=super::parameter_views::view(aggregate);
+        super::structure::fold_write(&key,"parameter-seed");
+        ST.with(|s| {
+            let mut s=s.borrow_mut();
+            if s.values.get(&slot)!=Some(&value) { note_moved(slot,s.values.get(&slot)); }
+            s.joined.remove(&slot);
+            super::det::note("fold.param_seed",s.values.get(&slot),&value);
+            s.values.insert(slot,value.clone());
+        });
+        super::parameter_views::note_storage(before,Some(value),false);
+        control.map(|_|Ty::Rec {slot})
+    } else { None }
+}
+
 /// A read of a parameter slot, when it is in reference mode. `value` is
 /// what the body would otherwise have been seeded with.
 pub(crate) fn param_ref(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver, index: usize, value: Ty) -> Ty {
@@ -341,6 +380,19 @@ fn accumulate(key: SlotKey, value: Ty) -> Ty {
     ST.with(|s| {
         let mut s = s.borrow_mut();
         let epoch = s.epoch;
+        // Current rows can preserve genuine unknowns only if downstream
+        // site transfers preserve them too. Reuse the RH_SITES_CURRENT rule:
+        // a visited site replaces its cell; an unvisited site retains it.
+        if super::parameter_conservation::row_current_on() {
+            if s.values.get(&slot) != Some(&value) {
+                note_moved(slot, s.values.get(&slot));
+            }
+            s.site_epoch.insert(slot, epoch);
+            s.joined.remove(&slot);
+            super::det::note("fold.site_slot", s.values.get(&slot), &value);
+            s.values.insert(slot, value);
+            return;
+        }
         let fresh = s.site_epoch.get(&slot).is_none_or(|e| *e < epoch);
         s.site_epoch.insert(slot, epoch);
         // Joins are idempotent: a value this slot has already joined since it
@@ -990,6 +1042,11 @@ pub(crate) fn deactivate() {
     ST.with(|s| s.borrow_mut().active = false);
 }
 
+/// Rewrite the actual stored slot values after inference, not their observers.
+pub(super) fn canonicalize_kept_vars() {
+    ST.with(|s| s.borrow_mut().values.values_mut().for_each(super::canonical_unknown::side_value));
+}
+
 /// Aggregates for the fixpoint canaries' stats line.
 pub(crate) fn stats() -> serde_json::Value {
     ST.with(|s| {
@@ -1021,6 +1078,44 @@ pub(crate) fn stats() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_unknown_rewrites_side_table_value_without_promoting_pending() {
+        ST.with(|s| *s.borrow_mut() = State::default());
+        let slot = intern(SlotKey::At { site: (1, 10, 20), step: Step::Val });
+        ST.with(|s| { s.borrow_mut().values.insert(slot, Ty::Union {
+            variants: vec![Ty::Int, Ty::Var { var: crate::ident::TyVar(0) }, Ty::pending_untyped()].into(),
+        }); });
+        canonicalize_kept_vars();
+        ST.with(|s| {
+            let s = s.borrow();
+            let Ty::Union { variants } = &s.values[&slot] else { panic!("stored union") };
+            assert!(!variants.iter().any(|t| matches!(t, Ty::Var { .. })));
+            assert!(variants.iter().any(|t| matches!(t, Ty::Untyped { why: crate::ty::Provenance::Unresolved })));
+            assert!(variants.iter().any(|t| matches!(t, Ty::Untyped { why: crate::ty::Provenance::Pending })));
+        });
+        ST.with(|s| *s.borrow_mut() = State::default());
+    }
+
+    #[test]
+    fn current_row_sites_retain_unknowns_and_replay_prior_inputs() {
+        if !super::super::parameter_conservation::row_current_on() { return; }
+        let known = Ty::Class { id: ClassId(Symbol::from("Session")), args: vec![].into() };
+        let unknown = super::super::parameter_conservation::join(known.clone(), Ty::unresolved());
+        for key in [SlotKey::At { site: (1, 10, 20), step: Step::Elem },
+                    SlotKey::Narrow { site: (1, 10, 20), filter: "truthy_session".into() }] {
+            ST.with(|s| *s.borrow_mut() = State::default());
+            for value in [known.clone(), unknown.clone(), known.clone(), unknown.clone()] {
+                new_epoch();
+                let Ty::Rec { slot } = accumulate(key.clone(), value.clone()) else { unreachable!() };
+                assert_eq!(value_of(slot, &HashMap::new()), Some(value.clone()));
+                new_epoch(); // a skipped site retains its latest contribution
+                assert_eq!(value_of(slot, &HashMap::new()), Some(value));
+            }
+        }
+        ST.with(|s| *s.borrow_mut() = State::default());
+    }
+
 
     fn union(v: Vec<Ty>) -> Ty {
         Ty::Union { variants: v.into() }

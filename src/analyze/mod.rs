@@ -47,9 +47,12 @@ pub(crate) mod forwarding;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
+pub mod strict_stub_completion;
 pub(crate) mod strict_producers;
 pub mod producer_evidence;
 mod parameter_conservation;
+mod parameter_views;
+mod canonical_unknown;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod closure_census;
@@ -197,6 +200,8 @@ pub struct Analyzer {
     /// rounds.
     sccq: Option<Box<sccq::Engine>>,
     strict_stub_originals: Vec<(ParamKey, Ty)>,
+    strict_stub_completion: strict_stub_completion::Tracker,
+    strict_stub_completion_census: Option<serde_json::Value>,
     /// The worklist's class passes leave model, library and controller
     /// method bodies to it.
     sccq_skip_fine: bool,
@@ -1177,7 +1182,8 @@ impl Analyzer {
         // emission. Register their real identities and declarations before
         // source typing; inferred returns converge in the same registry as
         // ordinary application methods.
-        test_module::register(&mut classes, app);
+        let mut strict_stub_completion = strict_stub_completion::Tracker::default();
+        test_module::register(&mut classes, app, &mut strict_stub_completion);
         for declaration in &app.library_classes {
             if let Some(info) = classes.get_mut(&declaration.name) { info.is_module = declaration.is_module; }
         }
@@ -1226,6 +1232,8 @@ impl Analyzer {
             fixpoint_checks: fixpoint_check::Checks::default(),
             sccq: None,
             strict_stub_originals: Vec::new(),
+            strict_stub_completion,
+            strict_stub_completion_census: None,
             sccq_skip_fine: false,
             sccq_harvest_fine: false,
             sccq_production_end: None,
@@ -1320,8 +1328,11 @@ impl Analyzer {
         errgate::reset();
         handoff::reset();
         fold::reset();
+        parameter_views::reset(&app.sources);
         slots::reset();
         self.strict_stub_originals.clear();
+        self.strict_stub_completion.reset_completions();
+        self.strict_stub_completion_census = None;
         if strict_producers::stubs_on() {
             for key in Self::defined_methods(app) {
                 let Some(cls) = self.classes.get_mut(&key.0) else { continue };
@@ -1330,6 +1341,7 @@ impl Analyzer {
                     MethodReceiver::Class => &mut cls.class_methods,
                 };
                 if let Some(stub @ Ty::Untyped { .. }) = table.get_mut(&key.1) {
+                    self.strict_stub_completion.minted(strict_stub_completion::INITIAL, &key.0, &key.1, key.2);
                     self.strict_stub_originals.push((key, stub.clone()));
                     *stub = Ty::pending_untyped();
                 }
@@ -1799,6 +1811,7 @@ impl Analyzer {
             let fp = self.c1_state_fp(app);
             eprintln!("rh-det-pre: {}", fp.det_line());
         }
+        parameter_views::report(&self.classes);
         self.fold_finish(app);
 
         if std::env::var("RH_PROVENANCE_ROWDUMP").as_deref() == Ok("1")
@@ -1814,6 +1827,8 @@ impl Analyzer {
             eprintln!("rh-parameter-rows: {}", serde_json::json!(rows));
         }
         self.settle_pending(app);
+
+        canonical_unknown::finish(self, app);
 
         self.stamp_inferred_method_signatures(app);
         self.report_fixpoint_checks(app);
@@ -1833,6 +1848,13 @@ impl Analyzer {
     /// as "never returns". Each type settles on its own, so the walk's
     /// order does not matter.
     fn settle_pending(&mut self, app: &mut App) {
+        if fixpoint_check::stats_on() || strict_stub_completion::on() || cfg!(test) {
+            let census = self.strict_stub_completion.census(self, app);
+            if fixpoint_check::stats_on() {
+                eprintln!("rh-strict-stub-completion: {}", census);
+            }
+            self.strict_stub_completion_census = Some(census);
+        }
         if !(handoff::settle_on() || fold::on() || strict_producers::stubs_on() || strict_producers::xfer_on()) {
             return;
         }
@@ -2972,6 +2994,7 @@ impl Analyzer {
                         &ctrl_id,
                         origin,
                         &action.name,
+                        action.body.span,
                         &action.params,
                         &action.kw_params,
                         action.block_param.as_ref(),
@@ -3530,6 +3553,7 @@ impl Analyzer {
                             &ctrl_name,
                             origin,
                             &action.name,
+                            action.body.span,
                             &action.params,
                             &action.kw_params,
                             action.block_param.as_ref(),
@@ -4054,6 +4078,7 @@ impl Analyzer {
                         &ctrl_name,
                         origin,
                         &action.name,
+                        action.body.span,
                         &action.params,
                         &action.kw_params,
                         action.block_param.as_ref(),
@@ -4884,7 +4909,8 @@ impl Analyzer {
         dsl_macro_host: bool,
     ) -> Ctx {
         let key = (class_id.clone(), method.name.clone(), method.receiver);
-        let observed = self.inferred_params.get(&key).map(|row| provenance_reader_row(row));
+        let raw_observed = self.inferred_params.get(&key);
+        let observed = raw_observed.map(|row| provenance_reader_row(row));
         let mut ctx = base.clone();
         ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
         ctx.instance_body = !ctx.class_side;
@@ -4922,13 +4948,13 @@ impl Analyzer {
             let seeded = param_ty_with_default(from_sites, param);
             let declared = self.declared_param_ty(class_id, &method.name, positional, &param.name);
             let is_declared = declared.is_some();
-            let ty = prefer_declared(declared, seeded);
-            if let Some(ty) = ty {
-                // `RH_FOLD`: a parameter of a recursive component is read
-                // by reference.
-                let ty = if is_declared { ty } else { fold::param_ref(class_id, &method.name, method.receiver, i, ty) };
-                ctx.local_bindings.insert(param.name.clone(), ty);
-            }
+            let control = prefer_declared(declared, seeded);
+            let ty = if is_declared { control } else {
+                fold::declare_param(class_id,&method.name,method.receiver,i,method.body.span);
+                let raw=param_ty_with_default(raw_observed.and_then(|row|row.get(i)).cloned(),param);
+                fold::param_seed(class_id,&method.name,method.receiver,i,method.body.span,raw,control)
+            };
+            if let Some(ty)=ty {ctx.local_bindings.insert(param.name.clone(),ty);}
         }
         // An indexed module's Ruby callback gets its host as a Module object,
         // even when the hook is dormant and no explicit call site supplies types.
@@ -4969,6 +4995,7 @@ impl Analyzer {
         class_id: &ClassId,
         origin: Option<&ClassId>,
         action_name: &Symbol,
+        definition_span: crate::span::Span,
         params: &Row,
         kw_params: &[(Symbol, Option<crate::expr::Expr>)],
         block_param: Option<&Symbol>,
@@ -4994,13 +5021,16 @@ impl Analyzer {
                 .reduce(unify_param_ty);
             let declared = self.declared_param_ty(class_id, action_name, Some(i), name);
             let is_declared = declared.is_some();
-            let ty = prefer_declared(declared, observed);
-            if let Some(ty) = ty {
-                // `RH_FOLD`: a parameter of a recursive component is read
-                // by reference.
-                let ty = if is_declared { ty } else { fold::param_ref(class_id, action_name, MethodReceiver::Instance, i, ty) };
-                ctx.local_bindings.insert(name.clone(), ty);
-            }
+            let control = prefer_declared(declared, observed);
+            let ty=if is_declared {control} else {
+                fold::declare_param(class_id,action_name,MethodReceiver::Instance,i,definition_span);
+                let own_raw=self.inferred_params.get(&(class_id.clone(),action_name.clone(),MethodReceiver::Instance));
+                let origin_raw=origin.and_then(|m|self.inferred_params.get(&(m.clone(),action_name.clone(),MethodReceiver::Instance)));
+                let raw=[own_raw,origin_raw].into_iter().flatten().filter_map(|v|v.get(i).cloned())
+                    .filter(|t|!matches!(t,Ty::Var {..})).reduce(unify_param_ty);
+                fold::param_seed(class_id,action_name,MethodReceiver::Instance,i,definition_span,raw,control)
+            };
+            if let Some(ty)=ty {ctx.local_bindings.insert(name.clone(),ty);}
         }
         // Keyword params sit beside the positional row rather than in
         // it, and a call site passes them by NAME — so there is no
@@ -5389,17 +5419,9 @@ impl Analyzer {
                 let _writer = errgate::writer(class_id, &action.name, false);
                 let _evidence = producer_evidence::writer(class_id, &action.name, false, action.body.span);
                 producer_evidence::input(action.body.ty.as_ref());
-                let Some(body_ty) =
-                    tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
-                else {
-                    continue;
-                };
-                if matches!(body_ty, Ty::Var { .. }) {
-                    continue;
-                }
-                let target =
-                    &mut self.classes.entry(class_id.clone()).or_default().instance_methods;
-                Self::insert_inferred_return(target, &action.name, body_ty);
+                let body_ty = tuple_return_ty(&action.body)
+                    .or_else(|| effective_return_ty(&action.body));
+                self.harvest_action_return(app, class_id, &action.name, body_ty);
             }
         }
 
@@ -5667,7 +5689,10 @@ impl Analyzer {
                     {
                         // The includer harvest types this spliced body itself.
                         // The copy only declares existence, never a value writer.
-                        cls.instance_methods.entry(name.clone()).or_insert_with(strict_producers::stub);
+                        cls.instance_methods.entry(name.clone()).or_insert_with(|| {
+                            self.strict_stub_completion.minted(strict_stub_completion::SPLICED, &id, name, MethodReceiver::Instance);
+                            strict_producers::stub()
+                        });
                         continue;
                     }
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
@@ -6804,7 +6829,7 @@ impl Analyzer {
                     let arg_tys: Vec<Ty> = args
                         .iter()
                         .map(|a| {
-                            let t = a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
+                            let t = parameter_conservation::argument(a);
                             // Template call sites are evidence of what
                             // callers pass; an `Untyped` arg there
                             // (`errors_for f.object`) means the CALLER's
@@ -6835,10 +6860,7 @@ impl Analyzer {
                             for (k, v) in entries {
                                 match &*k.node {
                                     ExprNode::Lit { value: Literal::Sym { value } } => {
-                                        let t = v
-                                            .ty
-                                            .clone()
-                                            .unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
+                                        let t = parameter_conservation::argument(v);
                                         let t = if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
                                             Ty::Var { var: crate::ident::TyVar(0) }
                                         } else {
@@ -8037,9 +8059,44 @@ pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
 fn provenance_reader_row(row: &[Ty]) -> std::borrow::Cow<'_, [Ty]> {
     static VIEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *VIEW.get_or_init(|| std::env::var("RH_PROVENANCE_READER_VIEW").as_deref() == Ok("1")) {
-        std::borrow::Cow::Owned(row.iter().map(|t| unify_param_ty_raw(t.clone(), t.clone())).collect())
+        std::borrow::Cow::Owned(row.iter().map(|t| view_param_ty(t.clone())).collect())
     } else {
         std::borrow::Cow::Borrowed(row)
+    }
+}
+
+/// Quick-test variant of the reader view. `RH_VIEW_KEEP=gradual` keeps Gradual `untyped` variants beside an
+/// informative variant; `RH_VIEW_KEEP=known` keeps every non-Pending `untyped` variant. Unset keeps the current view.
+fn view_param_ty(t: Ty) -> Ty {
+    static KEEP: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    let keep = *KEEP.get_or_init(|| match std::env::var("RH_VIEW_KEEP").as_deref() {
+        Ok("gradual") => 1,
+        Ok("known") => 2,
+        _ => 0,
+    });
+    if keep == 0 {
+        return unify_param_ty_raw(t.clone(), t);
+    }
+    let joined = crate::analyze::body::drop_pending_arms(crate::analyze::body::union_of(t.clone(), t));
+    let Ty::Union { variants } = joined else {
+        return joined;
+    };
+    if !variants.iter().any(|v| !v.is_unknown() && !matches!(v, Ty::Nil)) {
+        return Ty::Union { variants };
+    }
+    let mut kept: Vec<Ty> = variants
+        .into_iter()
+        .filter(|v| match v {
+            Ty::Untyped { why } => {
+                let bits = why.effective().reporting_bits();
+                if keep == 1 { bits == 2 } else { bits != 1 }
+            }
+            _ => true,
+        })
+        .collect();
+    match kept.len() {
+        1 => kept.pop().unwrap(),
+        _ => Ty::Union { variants: kept.into() },
     }
 }
 
