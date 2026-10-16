@@ -21,8 +21,9 @@ use crate::ident::{ClassId, Symbol, TyVar};
 
 /// Why a type is `untyped`: not computed yet (`PENDING`, a placeholder for
 /// a method or accessor whose value has not been typed), or a deliberate
-/// gradual opt-out (`GRADUAL`, the default). Merged by union, gradual
-/// winning. Only the harvest stabilizer reads it (#964).
+/// gradual opt-out (`GRADUAL`, the default). Pending is the identity
+/// of the reason join; gradual wins. Harvest change checks and the
+/// stabilizer read it without changing value equality (#964).
 #[derive(Clone, Copy, Debug, Eq)]
 pub struct Why(u8);
 
@@ -30,7 +31,11 @@ impl Why {
     pub const PENDING: Why = Why(1);
     pub const GRADUAL: Why = Why(2);
     pub fn union(self, other: Why) -> Why {
-        Why(self.0 | other.0)
+        if self.is_pending_only() && other.is_pending_only() {
+            Why::PENDING
+        } else {
+            Why::GRADUAL
+        }
     }
     /// Only a placeholder's reason: nothing gradual has reached it.
     pub fn is_pending_only(self) -> bool {
@@ -161,8 +166,8 @@ pub enum Ty {
     /// diagnostic pipeline — the gradual escape only survives
     /// emission for targets that explicitly accept it.
     Untyped {
-        /// Why this position is `untyped` (S2a, #964). Carried, never
-        /// compared: equality, ordering, serialization and rendering
+        /// Why this position is `untyped` (S2a, #964). Kept outside
+        /// value comparison: equality, ordering, serialization and rendering
         /// ignore it, so carrying it cannot move a value.
         #[serde(skip)]
         why: Why,
@@ -525,6 +530,9 @@ impl Ty {
     /// picking by order instead of by arrival keeps a join's stored
     /// form independent of the order its inputs came in.
     pub(crate) fn canonical_min(a: Ty, b: Ty) -> Ty {
+        if let (Ty::Untyped { why: x }, Ty::Untyped { why: y }) = (&a, &b) {
+            return Ty::Untyped { why: x.union(*y) };
+        }
         if !a.holds_record() || cmp_ty(&b, &a) != std::cmp::Ordering::Less {
             a
         } else {
@@ -746,5 +754,21 @@ mod reason_tests {
         assert_eq!(cmp_ty(&a, &b), std::cmp::Ordering::Equal);
         assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
         assert_eq!(crate::emit::ruby::ty_to_rbs(&a), crate::emit::ruby::ty_to_rbs(&b));
+    }
+
+    #[test]
+    fn reason_join_has_pending_identity_and_is_monotone() {
+        for a in [Why::PENDING, Why::GRADUAL] {
+            assert_eq!(a.union(Why::PENDING).0, a.0);
+            assert_eq!(Why::PENDING.union(a).0, a.0);
+            assert_eq!(a.union(a).0, a.0);
+            assert_eq!(a.union(Why::GRADUAL).0, Why::GRADUAL.0);
+            for b in [Why::PENDING, Why::GRADUAL] {
+                assert_eq!(a.union(b).0, b.union(a).0);
+                for c in [Why::PENDING, Why::GRADUAL] {
+                    assert_eq!(a.union(b).union(c).0, a.union(b.union(c)).0);
+                }
+            }
+        }
     }
 }

@@ -1278,7 +1278,13 @@ impl<'a> BodyTyper<'a> {
         // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
         // don't fall through to per-type method tables that would miss.
         if let Some(ty) = universal_method(method) {
-            return ty;
+            // An `untyped` answer from an unknown receiver keeps that
+            // receiver's reason: pending while it is a `Var` (#964).
+            return match (&ty, recv_ty) {
+                (Ty::Untyped { .. }, Some(Ty::Var { .. })) => Ty::pending_untyped(),
+                (Ty::Untyped { .. }, Some(Ty::Untyped { why })) => Ty::Untyped { why: *why },
+                _ => ty,
+            };
         }
         // Captured before the match: the `Ty::Class { id, args }` arm
         // below shadows the call-args slice with the class's generic
@@ -1318,7 +1324,7 @@ impl<'a> BodyTyper<'a> {
             //
             // Signing out of typing for a receiver is not signing out
             // of Ruby's own guarantees about the answer.
-            Some(Ty::Untyped { .. }) => conversion_fallback(method).unwrap_or(Ty::untyped()),
+            Some(Ty::Untyped { why }) => conversion_fallback(method).unwrap_or(Ty::Untyped { why: *why }),
             Some(Ty::Class { id, args }) => {
                 // `GlobalID::Locator.locate(…, only: Model)` /
                 // `locate_signed(…, only: Model, for:)` — the literal
@@ -1748,7 +1754,7 @@ impl<'a> BodyTyper<'a> {
                 // grow as new uses surface.
                 if id.0.as_str() == "Time" && method.as_str() == "use_zone" {
                     // Not the block's unresolved Var: that would report `use_zone` itself as the failure.
-                    return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::untyped());
+                    return pending_or(block_ret, Ty::untyped());
                 }
                 if id.0.as_str() == "Time" {
                     if let Some(ty) = time_method(method) {
@@ -1823,10 +1829,7 @@ impl<'a> BodyTyper<'a> {
                 // `Opengraph::Metadata?` through it, and `render json:`
                 // picks the record's writer from that type.
                 if id.0.as_str() == "Timeout" && method.as_str() == "timeout" {
-                    return match block_ret {
-                        Some(ret) if !matches!(ret, Ty::Var { .. }) => ret.clone(),
-                        _ => Ty::untyped(),
-                    };
+                    return pending_or(block_ret, Ty::untyped());
                 }
                 // `r, w, pid = PTY.spawn(env, *cmd)`: the pty's reader
                 // and writer and the child's pid. With a block — brace,
@@ -1894,7 +1897,7 @@ impl<'a> BodyTyper<'a> {
                 // gradual when it says nothing more.
                 if let Some(mm) = method_missing_ty {
                     return match unwrap_fn_ret(&mm) {
-                        Ty::Var { .. } => Ty::untyped(),
+                        Ty::Var { .. } => Ty::pending_untyped(),
                         t => t,
                     };
                 }
@@ -2274,7 +2277,7 @@ impl<'a> BodyTyper<'a> {
                 // (`Str | Nil` with `join`) still errors, as it should.
                 let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
                 match resolved.len() {
-                    0 if has_var => Ty::untyped(),
+                    0 if has_var => Ty::pending_untyped(),
                     0 => unknown(),
                     1 => resolved.into_iter().next().unwrap(),
                     _ => union_many(resolved),
@@ -2286,7 +2289,11 @@ impl<'a> BodyTyper<'a> {
             // type the receiver, `rows.to_h` is a Hash and `x.to_s` is
             // a String. Falling back to these (gradual element types)
             // resolves the read instead of leaving it `Var`.
-            _ => conversion_fallback(method).unwrap_or_else(unknown),
+            _ => match conversion_fallback(method) {
+                Some(t) if matches!(recv_ty, Some(Ty::Var { .. })) => pending_leaves(t),
+                Some(t) => t,
+                None => unknown(),
+            },
         }
     }
 
@@ -2778,7 +2785,8 @@ pub(crate) fn indexed_pluck(method: &Symbol, elem: &Ty, args: &[crate::expr::Exp
     let value = match elem {
         Ty::Hash { value, .. } if **value == Ty::untyped() => Ty::untyped(),
         Ty::Hash { value, .. } => super::union_of((**value).clone(), Ty::Nil),
-        Ty::Untyped { .. } | Ty::Var { .. } => Ty::untyped(),
+        Ty::Untyped { why } => Ty::Untyped { why: *why },
+        Ty::Var { .. } => Ty::pending_untyped(),
         _ => return None,
     };
     Some(Ty::Array { elem: std::sync::Arc::new(value) })
@@ -3384,7 +3392,7 @@ pub(super) fn hash_method(
 fn jbuilder_value(arg: Option<&crate::expr::Expr>) -> Ty {
     match arg.and_then(|a| a.ty.clone()) {
         None => Ty::Nil,
-        Some(Ty::Var { .. }) => Ty::untyped(),
+        Some(Ty::Var { .. }) => Ty::pending_untyped(),
         Some(t) => t,
     }
 }
@@ -3815,7 +3823,7 @@ pub(super) fn object_protocol_method(
     }
     let sym_list = || Ty::Array { elem: std::sync::Arc::new(Ty::Sym) };
     let recv = || recv_ty.cloned().unwrap_or(Ty::untyped());
-    let block = || block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::untyped());
+    let block = || pending_or(block_ret, Ty::untyped());
     Some(match method.as_str() {
         // Kernel / Object reflection.
         "instance_variable_get" | "instance_variable_set" | "method" | "instance_method"
@@ -3892,4 +3900,150 @@ fn param_value_method(method: &Symbol, block_ret: Option<&Ty>) -> Option<Ty> {
         "inspect" | "to_json" => Ty::Str,
         _ => return None,
     })
+}
+
+/// A block's value: pending while the block is still a `Var` (#964), the
+/// fallback when there is no block.
+fn pending_or(block_ret: Option<&Ty>, fallback: Ty) -> Ty {
+    match block_ret {
+        Some(Ty::Var { .. }) => Ty::pending_untyped(),
+        Some(t) => t.clone(),
+        None => fallback,
+    }
+}
+
+/// A conversion's `untyped` elements, pending because its receiver is.
+fn pending_leaves(t: Ty) -> Ty {
+    match t {
+        Ty::Hash { .. } => Ty::Hash {
+            key: std::sync::Arc::new(Ty::pending_untyped()),
+            value: std::sync::Arc::new(Ty::pending_untyped()),
+        },
+        Ty::Array { .. } => Ty::Array { elem: std::sync::Arc::new(Ty::pending_untyped()) },
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::*;
+    use crate::ident::TyVar;
+    use crate::analyze::body::ClassInfo;
+    use std::collections::HashMap;
+
+    fn var() -> Ty { Ty::Var { var: TyVar(0) } }
+    fn class(name: &str) -> Ty {
+        Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() }
+    }
+    fn assert_pending(ty: &Ty) {
+        assert!(matches!(ty, Ty::Untyped { why } if why.is_pending_only()), "expected Pending, got {ty:?}");
+    }
+    fn assert_gradual(ty: &Ty) {
+        assert!(matches!(ty, Ty::Untyped { why } if !why.is_pending_only()), "expected Gradual, got {ty:?}");
+    }
+
+    #[test]
+    fn untyped_dispatch_preserves_the_receiver_reason() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        let method = Symbol::from("dig");
+        assert_pending(&typer.dispatch(Some(&Ty::pending_untyped()), &method, None, &[]));
+        assert_gradual(&typer.dispatch(Some(&Ty::untyped()), &method, None, &[]));
+        assert_eq!(typer.dispatch(Some(&Ty::pending_untyped()), &Symbol::from("to_s"), None, &[]), Ty::Str);
+    }
+
+    #[test]
+    fn universal_presence_preserves_pending_receivers() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        let method = Symbol::from("presence");
+        assert_pending(&typer.dispatch(Some(&var()), &method, None, &[]));
+        assert_pending(&typer.dispatch(Some(&Ty::pending_untyped()), &method, None, &[]));
+        assert_gradual(&typer.dispatch(Some(&Ty::untyped()), &method, None, &[]));
+        assert_eq!(typer.dispatch(Some(&var()), &Symbol::from("nil?"), None, &[]), Ty::Bool);
+    }
+
+    fn check_block_producer(owner: &str, method: &str) {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        let recv = class(owner);
+        let name = Symbol::from(method);
+        assert_pending(&typer.dispatch(Some(&recv), &name, Some(&var()), &[]));
+        assert_gradual(&typer.dispatch(Some(&recv), &name, None, &[]));
+        assert_gradual(&typer.dispatch(Some(&recv), &name, Some(&Ty::untyped()), &[]));
+        assert_eq!(typer.dispatch(Some(&recv), &name, Some(&Ty::Str), &[]), Ty::Str);
+    }
+
+    #[test]
+    fn use_zone_waits_for_its_block_value() {
+        check_block_producer("Time", "use_zone");
+    }
+
+    #[test]
+    fn timeout_waits_for_its_block_value() {
+        check_block_producer("Timeout", "timeout");
+    }
+
+    #[test]
+    fn method_missing_waits_for_its_return() {
+        let mut info = ClassInfo::default();
+        info.class_methods.insert(Symbol::from("method_missing"), var());
+        let classes = HashMap::from([(ClassId(Symbol::from("Dynamic")), info)]);
+        let typer = BodyTyper::new(&classes);
+        assert_pending(&typer.dispatch(Some(&class("Dynamic")), &Symbol::from("dynamic_value"), None, &[]));
+    }
+
+    #[test]
+    fn union_of_var_receivers_waits_for_concrete_dispatch() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        let recv = Ty::Union { variants: vec![var(), Ty::Var { var: TyVar(1) }].into() };
+        // A non-universal method reaches the union-dispatch producer.
+        assert_pending(&typer.dispatch(Some(&recv), &Symbol::from("unknown_value"), None, &[]));
+    }
+
+    #[test]
+    fn conversions_of_pending_receivers_have_pending_elements() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        let converted = typer.dispatch(Some(&var()), &Symbol::from("to_h"), None, &[]);
+        let Ty::Hash { key, value } = converted else { panic!("expected Hash") };
+        assert_pending(&key);
+        assert_pending(&value);
+        let converted = typer.dispatch(Some(&var()), &Symbol::from("to_a"), None, &[]);
+        let Ty::Array { elem } = converted else { panic!("expected Array") };
+        assert_pending(&elem);
+        assert_eq!(typer.dispatch(Some(&var()), &Symbol::from("to_s"), None, &[]), Ty::Str);
+    }
+
+    #[test]
+    fn indexed_pluck_preserves_unknown_element_reasons() {
+        let key = Expr::new(crate::span::Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("key") });
+        let method = Symbol::from("pluck");
+        for (input, pending) in [(var(), true), (Ty::pending_untyped(), true), (Ty::untyped(), false)] {
+            let Ty::Array { elem } = indexed_pluck(&method, &input, std::slice::from_ref(&key)).unwrap()
+            else { panic!("expected Array") };
+            if pending { assert_pending(&elem); } else { assert_gradual(&elem); }
+        }
+    }
+
+    #[test]
+    fn jbuilder_waits_for_its_value() {
+        let mut arg = Expr::new(crate::span::Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("value") });
+        arg.ty = Some(var());
+        assert_pending(&jbuilder_value(Some(&arg)));
+        arg.ty = Some(Ty::untyped());
+        assert_gradual(&jbuilder_value(Some(&arg)));
+        assert_eq!(jbuilder_value(None), Ty::Nil);
+    }
+
+    #[test]
+    fn module_protocol_waits_for_its_block_value() {
+        for name in ["module_eval", "class_exec", "instance_eval"] {
+            let method = Symbol::from(name);
+            assert_pending(&object_protocol_method(None, &method, Some(&var()), true).unwrap());
+            assert_gradual(&object_protocol_method(None, &method, None, true).unwrap());
+            assert_eq!(object_protocol_method(None, &method, Some(&Ty::Str), true), Some(Ty::Str));
+        }
+    }
 }

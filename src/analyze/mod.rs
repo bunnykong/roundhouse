@@ -5505,7 +5505,8 @@ impl Analyzer {
             }
             _ => {
                 if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })) {
-                    table.insert(method.clone(), Ty::untyped());
+                    // Not computed yet: a placeholder until the body is typed (#964).
+                    table.insert(method.clone(), Ty::pending_untyped());
                 }
             }
         }
@@ -9571,4 +9572,34 @@ fn expr_calls_super(body: &Expr) -> bool {
     let mut found = matches!(&*body.node, ExprNode::Super { .. });
     body.node.for_each_child(&mut |c| found = found || expr_calls_super(c));
     found
+}
+
+#[cfg(test)]
+mod return_reason_tests {
+    use super::*;
+
+    #[test]
+    fn method_return_stub_is_pending_until_its_body_is_typed() {
+        let mut table = HashMap::new();
+        let method = Symbol::from("value");
+        Analyzer::register_method_return(&mut table, &method, None);
+        assert!(matches!(table.get(&method), Some(Ty::Untyped { why }) if why.is_pending_only()));
+        table.clear();
+        Analyzer::register_method_return(&mut table, &method, Some(&Ty::Var { var: crate::ident::TyVar(0) }));
+        assert!(matches!(table.get(&method), Some(Ty::Untyped { why }) if why.is_pending_only()));
+        Analyzer::register_method_return(&mut table, &method, Some(&Ty::Str));
+        assert_eq!(table.get(&method), Some(&Ty::Str));
+        Analyzer::register_method_return(&mut table, &method, None);
+        assert_eq!(table.get(&method), Some(&Ty::Str));
+    }
+
+    #[test]
+    fn method_return_stub_is_replaced_by_a_gradual_body() {
+        let mut table = HashMap::new();
+        let method = Symbol::from("value");
+        Analyzer::register_method_return(&mut table, &method, None);
+        Analyzer::register_method_return(&mut table, &method, Some(&Ty::untyped()));
+        assert!(matches!(table.get(&method), Some(Ty::Untyped { why }) if !why.is_pending_only()),
+                "a computed gradual body must replace the pending stub: {table:?}");
+    }
 }

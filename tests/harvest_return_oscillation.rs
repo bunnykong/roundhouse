@@ -123,3 +123,65 @@ fn circular_config_load_emits_configuration_not_gradual_churn() {
         "expected Configuration.load! to settle on Probe::Configuration, got:\n{rbs}"
     );
 }
+
+#[test]
+fn pending_presence_chain_with_a_nilable_name_still_emits_string_or_nil() {
+    let mut tree = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\nend\n".to_vec());
+    tree.insert(PathBuf::from("lib/a_user.rb"), br#"
+class User
+  def name
+    "Ada"
+  end
+end
+"#.to_vec());
+    tree.insert(PathBuf::from("lib/room_names.rb"), br#"
+module RoomNames
+  def self.room_display_name(title)
+    for_user = [User.new, nil].first
+    title.presence || for_user&.name
+  end
+
+  def self.for_room
+    room_display_name("Room")
+  end
+end
+"#.to_vec());
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let rbs = emit_library(&app).into_iter()
+        .filter(|f| f.path.extension().is_some_and(|e| e == "rbs"))
+        .map(|f| f.content).collect::<Vec<_>>().join("\n");
+    assert!(rbs.contains("def self.room_display_name: (String title) -> String?"),
+            "pending presence must not leave a gradual return, got:\n{rbs}");
+}
+
+#[test]
+fn gradual_json_value_forwarded_through_a_pending_stub_stays_gradual() {
+    let mut tree = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\nend\n".to_vec());
+    tree.insert(PathBuf::from("lib/wrapped_locale.rb"), br#"
+module WrappedLocale
+  def self.locale_for(x)
+    x&.dig("lang") || :en
+  end
+
+  def self.forward(x)
+    x
+  end
+
+  def self.resolve(raw)
+    locale_for(forward(JSON.parse(raw)))
+  end
+end
+"#.to_vec());
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let rbs = emit_library(&app).into_iter()
+        .filter(|f| f.path.extension().is_some_and(|e| e == "rbs"))
+        .map(|f| f.content).collect::<Vec<_>>().join("\n");
+    assert!(rbs.contains("def self.locale_for: (untyped x) -> untyped"),
+            "a forwarded JSON value is still gradual, got:\n{rbs}");
+    assert!(rbs.contains("def self.resolve: (untyped raw) -> untyped"),
+            "forwarding a JSON value must not declare resolve as Symbol, got:\n{rbs}");
+}
