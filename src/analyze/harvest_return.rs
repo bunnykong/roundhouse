@@ -128,14 +128,14 @@ fn untie_recursive_return(existing: &Ty, new: &Ty) -> Option<Ty> {
 }
 
 enum HarvestWrite {
-    Keep,
+    Keep(&'static str),
     Set(&'static str, Ty),
 }
 
 /// Single merge decision for an existing harvested return vs a new body type.
 fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     if matches!(existing, Ty::Fn { .. }) {
-        return HarvestWrite::Keep;
+        return HarvestWrite::Keep("fn_authority");
     }
     if existing == &new {
         if super::strict_producers::xfer_on() && super::strict_producers::is_p(existing)
@@ -148,14 +148,14 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
                 return HarvestWrite::Set("harvest.storage_annotation_merge", merged);
             }
         }
-        return HarvestWrite::Keep;
+        return HarvestWrite::Keep("equal");
     }
     if let Some(untied) = untie_recursive_return(existing, &new) {
         super::fixpoint_check::note_untie_cut();
         super::det::note_cap("harvest_untie_cut");
         super::det::note("harvest.untie", Some(existing), &untied);
         if existing == &untied {
-            return HarvestWrite::Keep;
+            return HarvestWrite::Keep("untie_equal");
         }
         return HarvestWrite::Set("harvest.untie_result", untied);
     }
@@ -163,7 +163,7 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
         && let Some(stable) = stabilize_untyped_return_oscillation(existing, &new)
     {
         if existing == &stable {
-            return HarvestWrite::Keep;
+            return HarvestWrite::Keep("stabilize_equal");
         }
         return HarvestWrite::Set("harvest.stabilize", stable);
     }
@@ -171,7 +171,7 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     // concrete return. `Union[Untyped, Untyped]` is not `is_unknown()`
     // (that matches only the bare forms) but it has no informative core.
     if has_informative_core(existing) && (new.is_unknown() || !has_informative_core(&new)) {
-        return HarvestWrite::Keep;
+        return HarvestWrite::Keep("informative_keep");
     }
     // Distinct cores: last-write wins (residual thrash; not this PR's fix).
     HarvestWrite::Set("harvest.lastwrite", new)
@@ -180,7 +180,7 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
 #[cfg(test)]
 pub(super) fn evidence_control_decision(existing: Ty, new: Ty) -> Ty {
     match decide_harvested_return(&existing, new) {
-        HarvestWrite::Keep => existing, HarvestWrite::Set(_, t) => t,
+        HarvestWrite::Keep(_) => existing, HarvestWrite::Set(_, t) => t,
     }
 }
 
@@ -197,6 +197,10 @@ pub(super) fn insert_inferred_return(
     ty: Ty,
 ) {
     let ty = super::fixpoint_bound::bound(ty);
+    let observed = std::env::var("RH_CONTRIBUTOR_VALUES").as_deref() == Ok("1");
+    let previous = if observed { table.get(method).cloned() } else { None };
+    let incoming = if observed { Some(ty.clone()) } else { None };
+    let mut stage = "first";
     match table.get(method) {
         Some(existing) if super::strict_producers::stubs_on() && super::strict_producers::is_p(existing) => {
             super::det::note_named("harvest.first", method.as_str(), Some(existing), &ty);
@@ -207,12 +211,24 @@ pub(super) fn insert_inferred_return(
             table.insert(method.clone(), ty);
         }
         Some(existing) => match decide_harvested_return(existing, ty) {
-            HarvestWrite::Keep => {}
+            HarvestWrite::Keep(why) => { stage = why; }
             HarvestWrite::Set(rule, next) => {
+                stage = rule;
                 super::det::note_named(rule, method.as_str(), Some(existing), &next);
                 table.insert(method.clone(), next);
             }
         },
+    }
+    if observed {
+        let writer = super::errgate::current_return_writer();
+        super::fixpoint_check::current_return_trace(serde_json::json!({"entity":"harvest-decision", "target":writer,
+            "method":method.as_str(), "stage":stage,
+            "previous":previous.as_ref().map(|t| format!("{t:?}")),
+            "incoming":incoming.as_ref().map(|t| format!("{t:?}")),
+            "next":table.get(method).map(|t| format!("{t:?}")),
+            "previous_ty":previous.as_ref().map(super::fixpoint_check::contributor_ty),
+            "incoming_ty":incoming.as_ref().map(super::fixpoint_check::contributor_ty),
+            "next_ty":table.get(method).map(super::fixpoint_check::contributor_ty)}));
     }
 }
 

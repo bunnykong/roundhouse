@@ -360,6 +360,8 @@ pub(crate) fn lexical_class<T>(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    literal_law: bool,
+    declared_empty_hash: Option<Ty>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
     data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
@@ -511,7 +513,19 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None, i18n: None }
+        Self { classes, literal_law: false, declared_empty_hash: None, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None, i18n: None }
+    }
+
+    /// Analysis-only L8: inferred output stamps are never expectations.
+    pub(crate) fn with_literal_law(mut self, enabled: bool) -> Self {
+        self.literal_law = enabled;
+        self
+    }
+
+    /// A declaration supplied to this typing, independent of any output stamp.
+    pub(crate) fn with_declared_empty_hash(mut self, ty: Ty) -> Self {
+        self.declared_empty_hash = Some(ty);
+        self
     }
 
     pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog) -> Self {
@@ -1281,7 +1295,10 @@ impl<'a> BodyTyper<'a> {
                 // Honor it instead of falling back to `Hash<Var, Var>`
                 // — strict targets need the concrete shape, and the
                 // surrounding declaration already constrains the type.
-                if entries.is_empty() {
+                if entries.is_empty() && self.literal_law {
+                    if let Some(t) = &self.declared_empty_hash { return t.clone(); }
+                }
+                if entries.is_empty() && !self.literal_law {
                     if let Some(t @ Ty::Hash { .. }) = expr.ty.as_ref() {
                         return t.clone();
                     }
@@ -1311,7 +1328,7 @@ impl<'a> BodyTyper<'a> {
                 // `Ty::Array<T>` from `with_ty` (or from
                 // `propagate_expected_to_empty_container`) takes
                 // precedence over the `Var`-defaulted inference.
-                if elements.is_empty() {
+                if elements.is_empty() && !self.literal_law {
                     if let Some(t @ Ty::Array { .. }) = expr.ty.as_ref() {
                         return t.clone();
                     }
@@ -2963,8 +2980,10 @@ impl<'a> BodyTyper<'a> {
                         {
                             value.ty = None;
                         }
-                    } else if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
-                        propagate_expected_to_empty_container(value, &expected);
+                    } else if !self.literal_law {
+                        if let Some(expected) = ctx.ivar_bindings.get(name).cloned() {
+                            propagate_expected_to_empty_container(value, &expected);
+                        }
                     }
                 }
                 let value_ty = self.analyze_expr(value, ctx);
@@ -5739,3 +5758,6 @@ fn set_discarded(e: &mut Expr, discarded: bool) {
 
 #[cfg(test)]
 mod strict_producer_tests;
+
+#[cfg(test)]
+mod literal_transfer_purity;

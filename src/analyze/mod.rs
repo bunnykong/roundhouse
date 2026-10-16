@@ -1238,6 +1238,7 @@ impl Analyzer {
     /// Cheap — just a struct with a reference.
     fn body_typer(&self) -> BodyTyper<'_> {
         let typer = BodyTyper::new(&self.classes)
+            .with_literal_law(std::env::var("RH_LITERAL_CURRENT_WRITES").as_deref() == Ok("1"))
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n)
             .with_typed_constants(&self.typed_constants)
@@ -2422,6 +2423,7 @@ impl Analyzer {
             let mut next_resolved = seeded();
             let shared = body::ConstScope::global(map.clone());
             let typer = BodyTyper::new(&self.classes)
+                .with_literal_law(std::env::var("RH_LITERAL_CURRENT_WRITES").as_deref() == Ok("1"))
                 .with_inquirers(&self.inquirers)
                 .with_typed_constants(&resolved)
                 .with_data_factories(&self.data_factories);
@@ -5965,6 +5967,7 @@ impl Analyzer {
                     forwards
                         && (rails_cache
                             || crate::analyze::body::BodyTyper::new(&self.classes)
+                                .with_literal_law(std::env::var("RH_LITERAL_CURRENT_WRITES").as_deref() == Ok("1"))
                                 .block_value_return(recv_ty.as_ref(), method, Some(&Ty::Nil))
                                 .is_some())
                 }

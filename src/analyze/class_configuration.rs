@@ -29,7 +29,7 @@ impl Analyzer {
                     class_side: true,
                     ..Ctx::default()
                 };
-                self.body_typer().analyze_expr(expr, &ctx);
+                self.body_typer().with_declared_empty_hash(empty_hash()).analyze_expr(expr, &ctx);
                 if let ExprNode::Assign {
                     target: LValue::Ivar { name },
                     value,
@@ -175,7 +175,9 @@ impl Analyzer {
                         );
                     }
                 }
-                seed_empty_hashes(&mut method.body, &ty);
+                if std::env::var("RH_LITERAL_CURRENT_WRITES").as_deref() != Ok("1") {
+                    seed_empty_hashes(&mut method.body, &ty);
+                }
                 self.body_typer().analyze_expr(&mut method.body, &ctx);
                 method.effects = self.collect_effects(&mut method.body, &ctx);
                 method.signature = Some(Ty::Fn {

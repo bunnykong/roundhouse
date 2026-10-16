@@ -261,7 +261,7 @@ fn annotation_hash(d: &DiagnosticKind) -> u64 {
 /// One expression: (file, start, end, type hash, annotation hash).
 type IrRow = (u32, u32, u32, u64, u64);
 
-fn ir_rows(e: &Expr, out: &mut Vec<IrRow>) {
+pub(super) fn ir_rows(e: &Expr, out: &mut Vec<IrRow>) {
     let ty = e.ty.as_ref().map_or(0, type_hash);
     let note = hash_of((e.decisions, e.diagnostic.as_ref().map(annotation_hash)));
     out.push((e.span.file.0, e.span.start, e.span.end, ty, note));
@@ -669,6 +669,10 @@ impl Analyzer {
         if !(*VERIFY || *DIGEST || *STATS || super::precision::on()) {
             return;
         }
+        if std::env::var("RH_CONTRIBUTOR_VALUES").as_deref() == Ok("1") {
+            self.contributor_dump(app).expect("write research condition value rows");
+            current_return_flush();
+        }
         let rounds: FixpointRounds = self.fixpoint_rounds;
         let mut line = serde_json::json!({
             "schema": 1,
@@ -890,4 +894,125 @@ end
         assert_eq!(moved["ir"], 1);
         assert_eq!(before.moved(&before).values().sum::<u64>(), 0);
     }
+}
+
+
+pub(super) fn contributor_ty(t: &Ty) -> serde_json::Value {
+    fn symbolic(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.get("kind").and_then(|x| x.as_str()) == Some("rec") {
+                    if let Some(slot) = m.get("slot").and_then(|x| x.as_u64()) {
+                        m.insert("slot".into(), serde_json::json!(format!("{:?}", super::fold::key_of(slot as u32))));
+                    }
+                }
+                for x in m.values_mut() { symbolic(x); }
+            }
+            serde_json::Value::Array(xs) => for x in xs { symbolic(x); },
+            _ => {}
+        }
+    }
+    let mut v = serde_json::to_value(t).unwrap();
+    symbolic(&mut v);
+    v
+}
+
+impl Analyzer {
+    fn contributor_dump(&self, app: &App) -> std::io::Result<()> {
+        use std::io::Write;
+        let path = std::path::PathBuf::from(std::env::var_os("RH_STRUCT_DUMP").expect("observer dump path"))
+            .with_file_name("contributor-values.jsonl");
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        let mut emit = |v: serde_json::Value| { serde_json::to_writer(&mut out, &v).unwrap(); writeln!(out).unwrap(); };
+        let fp = self.state_fp(app);
+        emit(serde_json::json!({"part":"fingerprint", "parts":fp.parts, "ir":fp.ir,
+            "sources":app.sources.iter().map(|s| &s.path).collect::<Vec<_>>(), "digests":fp.digests()}));
+        let mut value = |part: &str, key: String, t: &Ty| emit(serde_json::json!({
+            "part":part,"key":key,"ty":contributor_ty(t),"debug":format!("{t:?}"),"hash":type_hash(t)}));
+        for (id,ci) in &self.classes {
+            for (m,t) in &ci.instance_methods { value("returns",format!("{}#{}",id.0.as_str(),m.as_str()),t); }
+            for (m,t) in &ci.class_methods { value("returns",format!("{}.{}",id.0.as_str(),m.as_str()),t); }
+        }
+        for ((id,m,side),row) in &self.inferred_params {
+            let sep = if *side == crate::dialect::MethodReceiver::Class { "." } else { "#" };
+            for (i,t) in row.iter().enumerate() {
+                value("params",format!("{}{sep}{}[{i}]",id.0.as_str(),m.as_str()),t);
+            }
+        }
+        for (key,t) in super::fold::contributor_values() { value("side_table",key,&t); }
+        for (id,(bindings,_)) in &self.controller_action_meta_cache {
+            for (method,bs) in bindings { for (k,t) in bs {
+                value("controller_cache",format!("{}#{}:binding:{}",id.0.as_str(),method.as_str(),k.as_str()),t);
+            }}
+        }
+        fn expr(e: &Expr, part: &str, root: &str, path: &mut Vec<usize>,
+                emit: &mut dyn FnMut(serde_json::Value)) {
+            emit(serde_json::json!({"part":part,"key":format!("{root}:{}",path.iter().map(|x|x.to_string()).collect::<Vec<_>>().join("/")),
+                "root":root,"path":path,"span":e.span,"source":e.span.file.0,
+                "node":e.node.kind_str(),
+                "call":match &*e.node { crate::expr::ExprNode::Send { recv, method, .. } =>
+                    Some(serde_json::json!({"method":method.as_str(), "recv":recv.as_ref().and_then(|r| r.ty.as_ref()).map(contributor_ty)})), _ => None },
+                "ty":e.ty.as_ref().map(contributor_ty),
+                "debug":e.ty.as_ref().map(|t|format!("{t:?}")),
+                "hash":e.ty.as_ref().map_or(0,type_hash),
+                "note":hash_of((e.decisions,e.diagnostic.as_ref().map(annotation_hash))),
+                "diagnostic":e.diagnostic,"decisions":format!("{:?}",e.decisions)}));
+            let mut i=0;
+            e.node.for_each_child(&mut |c| { path.push(i); i+=1; expr(c,part,root,path,emit); path.pop(); });
+        }
+        for (id,(_,bodies)) in &self.controller_action_meta_cache {
+            for (m,body) in bodies {
+                expr(body,"controller_cache",&format!("{}#{}:body",id.0.as_str(),m.as_str()),&mut Vec::new(),&mut emit);
+            }
+        }
+        let mut declarations = BTreeMap::<usize,String>::new();
+        for c in &app.library_classes { for m in &c.methods {
+            declarations.insert(&m.body as *const Expr as usize, format!("{}{}{}",c.name.0.as_str(),
+                if m.receiver == crate::dialect::MethodReceiver::Class {"."} else {"#"},m.name.as_str()));
+        }}
+        for c in &app.models { for m in c.methods() {
+            declarations.insert(&m.body as *const Expr as usize, format!("{}{}{}",c.name.0.as_str(),
+                if m.receiver == crate::dialect::MethodReceiver::Class {"."} else {"#"},m.name.as_str()));
+        }}
+        for c in &app.controllers { for m in c.actions() {
+            declarations.insert(&m.body as *const Expr as usize, format!("{}#{}",c.name.0.as_str(),m.name.as_str()));
+        }}
+        let mut occurrences = BTreeMap::<String,usize>::new();
+        crate::lower::for_each_emit_body_ref(app, &mut |root| {
+            let body=serde_json::json!({"source":root.span.file.0.checked_sub(1)
+                .and_then(|i| app.sources.get(i as usize)).map(|s| s.path.as_str()),
+                "declaration":declarations.get(&(&*root as *const Expr as usize)),
+                "span":root.span,"kind":root.node.kind_str()}).to_string();
+            let n=occurrences.entry(body.clone()).or_default();
+            let key=format!("{body}:occurrence:{n}"); *n+=1;
+            expr(root,"ir",&key,&mut Vec::new(),&mut emit);
+        });
+        for (key,module) in super::fold::contributor_aliases() {
+            emit(serde_json::json!({"part":"aliases","key":key,"module":module}));
+        }
+        out.flush()
+    }
+}
+
+thread_local! {
+    static CURRENT_RETURN_TRACE: std::cell::RefCell<Option<std::io::BufWriter<std::fs::File>>> = const { std::cell::RefCell::new(None) };
+    static CURRENT_RETURN_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+pub(super) fn current_return_trace(mut value: serde_json::Value) {
+    if std::env::var("RH_CONTRIBUTOR_VALUES").as_deref() != Ok("1") { return; }
+    use std::io::Write;
+    let seq = CURRENT_RETURN_SEQ.with(|x| { let n=x.get()+1; x.set(n); n });
+    value["sequence"] = seq.into();
+    CURRENT_RETURN_TRACE.with(|x| {
+        let mut x=x.borrow_mut();
+        if x.is_none() {
+            let path=std::path::PathBuf::from(std::env::var_os("RH_STRUCT_DUMP").unwrap()).with_file_name("focus.jsonl");
+            *x=Some(std::io::BufWriter::new(std::fs::File::create(path).unwrap()));
+        }
+        let f=x.as_mut().unwrap(); serde_json::to_writer(&mut *f,&value).unwrap(); writeln!(f).unwrap();
+    });
+}
+fn current_return_flush() {
+    use std::io::Write;
+    CURRENT_RETURN_TRACE.with(|x| { if let Some(f)=x.borrow_mut().as_mut() { f.flush().unwrap(); } });
 }
