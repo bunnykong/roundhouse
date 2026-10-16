@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "Deferring Unresolved remains inconclusive because required evidence is unavailable. Deduplication fails to remove its targeted events. Boundary carry fails settlement and forbidden-event gates. General order independence remains open."
-  facts: [F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "Response-return composition preserves all 34 schedule-equal table sets across five apps. No larger-app gain follows; the profile still includes strict stubs that exclude witnessed Chatwoot values. General order independence remains open."
+  facts: [F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Retain the evidence gaps and failed predictions when judging any new, separately frozen condition."
+  next: "Require runtime admission as well as schedule equality for any new condition."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "deferred-unresolved 564a537c88d9aed740d7eab8aa22b63475d84885; boundary-row-carry b0b2cd145f8128d9c9597e70076eb7b04304823e"
-    lab: "455fdb93b22c1d4151e13bc97dcf1232c0f729b5; separate negative or inconclusive conditions"
-    runner: "Saved reductions and focused native recipes at lab 455fdb93b22c1d4151e13bc97dcf1232c0f729b5"
+    compiler: "fixpoint-spine e6e974a63707363f725df032ceb8b3500539df84; strict-producer-reasons db7ca9228d032a410356950b370901c2228e594d"
+    lab: "c2726941c27673182f734ca0b2fed525f28fb92c; strict-stub runtime loss and response composition"
+    runner: "Saved reductions and portable witnesses at lab c2726941c27673182f734ca0b2fed525f28fb92c"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "The literal-current-writes condition rejects witnessed Chatwoot Integer and nil values admitted by its control. The writer set misses nested element writes, killing this repair. Whole-analyzer soundness remains open."
-  facts: [F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "Strict stubs exclude real OAuth URL Strings in four Chatwoot rows; nine IMAP changes preserve runtime sets and none widens. The response-return integration profile retains this loss. F56 remains a Campfire result."
+  facts: [F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Require runtime admission witnesses for narrowed literal values, including nested writes."
+  next: "Require every Pending stub to complete before treating it as an identity at quiescence."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "literal-current-writes 15b142ddcb10c11a7e5c9a97107a7f5b9dc5cbbf"
-    lab: "455fdb93b22c1d4151e13bc97dcf1232c0f729b5; separate negative or inconclusive conditions"
+    compiler: "strict-producer-reasons db7ca9228d032a410356950b370901c2228e594d; fixpoint-spine e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "c2726941c27673182f734ca0b2fed525f28fb92c; strict-stub runtime loss and response composition"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,36 +84,36 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "Literal feedback excludes real heatmap values. Deferral is inconclusive, its deduplication variant is killed, and boundary carry is killed. These type changes do not establish a precision improvement."
-  facts: [F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
+  stands: "Four strict-stub narrowings reject real URL Strings; nine other changes preserve runtime sets. Response-return composition confirms its checks but adds no schedule-equal tables on larger apps. Neither result establishes a general precision gain."
+  facts: [F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Keep runtime admission and the frozen evidence gates beside any claim of improved types."
+  next: "Keep runtime witnesses and exact table memberships beside claims of improved types."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "literal-current-writes 15b142ddcb10c11a7e5c9a97107a7f5b9dc5cbbf; deferred-unresolved 564a537c88d9aed740d7eab8aa22b63475d84885; boundary-row-carry b0b2cd145f8128d9c9597e70076eb7b04304823e"
-    lab: "455fdb93b22c1d4151e13bc97dcf1232c0f729b5; separate negative or inconclusive conditions"
-    runner: "Saved reductions and focused native recipes at lab 455fdb93b22c1d4151e13bc97dcf1232c0f729b5"
+    compiler: "strict-producer-reasons db7ca9228d032a410356950b370901c2228e594d; fixpoint-spine e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "c2726941c27673182f734ca0b2fed525f28fb92c; strict-stub runtime loss and response composition"
+    runner: "Saved reductions and portable witnesses at lab c2726941c27673182f734ca0b2fed525f28fb92c"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "Deferral and boundary carry do not establish a correct update law: mandatory evidence is unavailable in the first result, and settlement and publication gates fail in the second. No latency or chronological replay result follows."
-  facts: [F66, F67, F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
+  stands: "The response-return integration preserves equality memberships but retains the strict-stub soundness loss. It establishes no correct incremental update law, latency result or chronological replay result."
+  facts: [F69, F68, F66, F67, F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Require complete evidence and passing settlement and publication gates before claiming an incremental update law."
+  next: "Require complete producer evidence and runtime admission before claiming an incremental update law."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "deferred-unresolved 564a537c88d9aed740d7eab8aa22b63475d84885; boundary-row-carry b0b2cd145f8128d9c9597e70076eb7b04304823e"
-    lab: "455fdb93b22c1d4151e13bc97dcf1232c0f729b5; separate negative or inconclusive conditions"
-    runner: "Saved reductions and focused native recipes at lab 455fdb93b22c1d4151e13bc97dcf1232c0f729b5"
+    compiler: "fixpoint-spine e6e974a63707363f725df032ceb8b3500539df84; strict-producer-reasons db7ca9228d032a410356950b370901c2228e594d"
+    lab: "c2726941c27673182f734ca0b2fed525f28fb92c; strict-stub runtime loss and response composition"
+    runner: "Saved reductions and portable witnesses at lab c2726941c27673182f734ca0b2fed525f28fb92c"
 - id: typed-recursion
   name: Typed recursion
   brief: frontiers/typed-recursion.md
