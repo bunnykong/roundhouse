@@ -1807,7 +1807,7 @@ impl<'a> BodyTyper<'a> {
                 // grow as new uses surface.
                 if id.0.as_str() == "Time" && method.as_str() == "use_zone" {
                     // Not the block's unresolved Var: that would report `use_zone` itself as the failure.
-                    return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::unresolved());
+                    return block_ret.map(|t| if matches!(t, Ty::Var { .. }) { super::super::strict_producers::deferred_var_answer("use_zone") } else { t.clone() }).unwrap_or_else(Ty::unresolved);
                 }
                 if id.0.as_str() == "Time" {
                     if let Some(ty) = time_method(method) {
@@ -1883,8 +1883,9 @@ impl<'a> BodyTyper<'a> {
                 // picks the record's writer from that type.
                 if id.0.as_str() == "Timeout" && method.as_str() == "timeout" {
                     return match block_ret {
-                        Some(ret) if !matches!(ret, Ty::Var { .. }) => ret.clone(),
-                        _ => Ty::unresolved(),
+                        Some(Ty::Var { .. }) => super::super::strict_producers::deferred_var_answer("timeout"),
+                        Some(ret) => ret.clone(),
+                        None => Ty::unresolved(),
                     };
                 }
                 // `r, w, pid = PTY.spawn(env, *cmd)`: the pty's reader
@@ -1953,7 +1954,7 @@ impl<'a> BodyTyper<'a> {
                 // gradual when it says nothing more.
                 if let Some(mm) = method_missing_ty {
                     return match unwrap_fn_ret(&mm) {
-                        Ty::Var { .. } => Ty::unresolved(),
+                        Ty::Var { .. } => super::super::strict_producers::deferred_var_answer("method_missing"),
                         t => t,
                     };
                 }
@@ -2333,7 +2334,7 @@ impl<'a> BodyTyper<'a> {
                 // (`Str | Nil` with `join`) still errors, as it should.
                 let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
                 match resolved.len() {
-                    0 if has_var => Ty::unresolved(),
+                    0 if has_var => super::super::strict_producers::deferred_var_answer("union_var"),
                     0 => unknown(),
                     1 => resolved.into_iter().next().unwrap(),
                     _ => union_many(resolved),
@@ -2345,7 +2346,17 @@ impl<'a> BodyTyper<'a> {
             // type the receiver, `rows.to_h` is a Hash and `x.to_s` is
             // a String. Falling back to these (gradual element types)
             // resolves the read instead of leaving it `Var`.
-            _ => conversion_fallback(method).unwrap_or_else(unknown),
+            _ => {
+                let deferred = matches!(recv_ty, Some(Ty::Var { .. }));
+                if deferred {
+                    match method.as_str() {
+                        "to_h" => Ty::Hash { key: std::sync::Arc::new(super::super::strict_producers::deferred_var_answer("conv_var")),
+                            value: std::sync::Arc::new(super::super::strict_producers::deferred_var_answer("conv_var")) },
+                        "to_a" | "to_ary" => Ty::Array { elem: std::sync::Arc::new(super::super::strict_producers::deferred_var_answer("conv_var")) },
+                        _ => conversion_fallback(method).unwrap_or_else(unknown),
+                    }
+                } else { conversion_fallback(method).unwrap_or_else(unknown) }
+            },
         }
     }
 
@@ -3497,10 +3508,10 @@ pub(super) fn hash_method(
 /// `nil` for a bare `json.key` with nothing to write. A Var argument
 /// (unresolved, reported at the argument itself) makes the value
 /// gradual rather than a second "no known method" about the builder.
-fn jbuilder_value(arg: Option<&crate::expr::Expr>) -> Ty {
+pub(super) fn jbuilder_value(arg: Option<&crate::expr::Expr>) -> Ty {
     match arg.and_then(|a| a.ty.clone()) {
         None => Ty::Nil,
-        Some(Ty::Var { .. }) => Ty::unresolved(),
+        Some(Ty::Var { .. }) => super::super::strict_producers::deferred_var_answer("jbuilder"),
         Some(t) => t,
     }
 }
@@ -3931,7 +3942,7 @@ pub(super) fn object_protocol_method(
     }
     let sym_list = || Ty::Array { elem: std::sync::Arc::new(Ty::Sym) };
     let recv = || recv_ty.cloned().unwrap_or(Ty::unresolved());
-    let block = || block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::unresolved());
+    let block = || block_ret.map(|t| if matches!(t, Ty::Var { .. }) { super::super::strict_producers::deferred_var_answer("block_closure") } else { t.clone() }).unwrap_or_else(Ty::unresolved);
     Some(match method.as_str() {
         // Kernel / Object reflection.
         "instance_variable_get" | "instance_variable_set" | "method" | "instance_method"

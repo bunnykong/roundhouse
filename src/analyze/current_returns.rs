@@ -1,4 +1,4 @@
-//! research condition research condition: current declared contributions, never previous aggregates.
+//! RETURN_HELPERS research condition: current declared contributions, never previous aggregates.
 //! Copy edges carry writer identities; only a publication by that writer replaces its value.
 use super::body::ClassInfo;
 use crate::{
@@ -316,7 +316,7 @@ impl State {
     }
     fn event(&mut self, v: Value) {
         if let Some(out) = self.events.as_mut() {
-            serde_json::to_writer(&mut *out, &v).expect("research condition audit event");
+            serde_json::to_writer(&mut *out, &v).expect("RETURN_HELPERS audit event");
             writeln!(out).unwrap();
         }
     }
@@ -614,7 +614,7 @@ pub(super) fn reset(app: &App, classes: &mut HashMap<ClassId, ClassInfo>) {
     {
         let path = std::path::PathBuf::from(path).with_file_name("current-return-ledger.jsonl");
         s.events = Some(std::io::BufWriter::new(
-            std::fs::File::create(path).expect("research condition ledger"),
+            std::fs::File::create(path).expect("RETURN_HELPERS ledger"),
         ));
     }
     s.event(json!({"event":"inventory","schema":1,"candidate":on(),"audit_setting":"RH_CONTRIBUTOR_VALUES=1; independent of V/A",
@@ -845,7 +845,7 @@ pub(super) fn report(classes: &HashMap<ClassId, ClassInfo>) {
     });
 }
 
-fn boundary_normalize(value: Ty) -> Ty {
+pub(super) fn boundary_normalize(value: Ty) -> Ty {
     let placeholders = match &value {
         Ty::Var { .. } => true,
         Ty::Union { variants } => {
@@ -859,6 +859,16 @@ fn boundary_normalize(value: Ty) -> Ty {
     if !placeholders {
         return value;
     }
+    if super::strict_producers::deferred_deferred("rs4") {
+        super::strict_producers::deferred_rclosure_pending();
+        let mut why = crate::ty::Provenance::Pending;
+        if let Ty::Union { variants } = &value {
+            for v in variants { if let Ty::Untyped { why: w } = v { why = why.union(*w); } }
+        }
+        let _ = super::strict_producers::deferred_var_answer("rs4");
+        return Ty::Untyped { why };
+    }
+    let _ = super::strict_producers::deferred_var_answer("rs4");
     let mut why = crate::ty::Provenance::Unresolved;
     if let Ty::Union { variants } = &value {
         for v in variants {
@@ -876,7 +886,7 @@ impl State {
             .iter()
             .any(|x| x.ends_with(":LegacyAmbiguousVar"))
             && !matches!(next, Ty::Var { .. })
-            && matches!(next, Ty::Untyped { .. })
+            && matches!(next, Ty::Untyped { why } if why.reporting_bits() & 4 != 0)
         {
             self.event(json!({"event":"permitted-var-to-u","writer":writer,
                 "input":describe(&value),"output":describe(&next),"source":"producer_evidence.rs::origins; LegacyAmbiguousVar -> Unresolved"}));

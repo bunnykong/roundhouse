@@ -365,8 +365,11 @@ pub(super) fn report() {
 
 /// Merge tags recursively for types that already compare equal. The ordinary
 /// type shape, record ordering, display, hash and serde contract stay unchanged.
-pub(crate) fn merge_equal(a: Ty, b: &Ty) -> Ty {
-    fn go(a: &Ty, b: &Ty, memo: &mut std::collections::HashMap<(usize, usize), Ty>) -> Ty {
+pub(crate) fn merge_equal(a: Ty, b: &Ty) -> Ty { merge_equal_impl(a, b, false) }
+/// N coalesces storage variants and must retain Pending evidence even when provenance's lattice lift is active.
+pub(crate) fn merge_equal_preserving(a: Ty, b: &Ty) -> Ty { merge_equal_impl(a, b, true) }
+fn merge_equal_impl(a: Ty, b: &Ty, preserve_pending: bool) -> Ty {
+    fn go(a: &Ty, b: &Ty, memo: &mut std::collections::HashMap<(usize, usize), Ty>, preserve_pending: bool) -> Ty {
         if std::ptr::eq(a, b) {
             return a.clone();
         }
@@ -375,26 +378,26 @@ pub(crate) fn merge_equal(a: Ty, b: &Ty) -> Ty {
             return t.clone();
         }
         let result = match (a, b) {
-            (Ty::Untyped { why: a }, Ty::Untyped { why: b }) => Ty::untyped(a.union(*b)),
+            (Ty::Untyped { why: a }, Ty::Untyped { why: b }) => Ty::untyped(if preserve_pending { a.union_preserving_pending(*b) } else { a.union(*b) }),
             (Ty::Array { elem: a }, Ty::Array { elem: b }) => Ty::Array {
-                elem: std::sync::Arc::new(go(a, b, memo)),
+                elem: std::sync::Arc::new(go(a, b, memo, preserve_pending)),
             },
             (Ty::Hash { key: ak, value: av }, Ty::Hash { key: bk, value: bv }) => Ty::Hash {
-                key: std::sync::Arc::new(go(ak, bk, memo)),
-                value: std::sync::Arc::new(go(av, bv, memo)),
+                key: std::sync::Arc::new(go(ak, bk, memo, preserve_pending)),
+                value: std::sync::Arc::new(go(av, bv, memo, preserve_pending)),
             },
             (Ty::Tuple { elems: a }, Ty::Tuple { elems: b }) => Ty::Tuple {
                 elems: a
                     .iter()
                     .zip(b.iter())
-                    .map(|(a, b)| go(a, b, memo))
+                    .map(|(a, b)| go(a, b, memo, preserve_pending))
                     .collect(),
             },
             (Ty::Union { variants: a }, Ty::Union { variants: b }) => Ty::Union {
                 variants: a
                     .iter()
                     .zip(b.iter())
-                    .map(|(a, b)| go(a, b, memo))
+                    .map(|(a, b)| go(a, b, memo, preserve_pending))
                     .collect(),
             },
             (Ty::Class { id, args: a }, Ty::Class { args: b, .. }) => Ty::Class {
@@ -402,7 +405,7 @@ pub(crate) fn merge_equal(a: Ty, b: &Ty) -> Ty {
                 args: a
                     .iter()
                     .zip(b.iter())
-                    .map(|(a, b)| go(a, b, memo))
+                    .map(|(a, b)| go(a, b, memo, preserve_pending))
                     .collect(),
             },
             (Ty::Record { row: a }, Ty::Record { row: b }) => Ty::Record {
@@ -410,7 +413,7 @@ pub(crate) fn merge_equal(a: Ty, b: &Ty) -> Ty {
                     fields: a
                         .fields
                         .iter()
-                        .map(|(k, t)| (k.clone(), go(t, &b.fields[k], memo)))
+                        .map(|(k, t)| (k.clone(), go(t, &b.fields[k], memo, preserve_pending)))
                         .collect(),
                     rest: a.rest.clone(),
                 },
@@ -434,15 +437,15 @@ pub(crate) fn merge_equal(a: Ty, b: &Ty) -> Ty {
                     .zip(b.iter())
                     .map(|(a, b)| {
                         let mut p = a.clone();
-                        p.ty = std::sync::Arc::new(go(&a.ty, &b.ty, memo));
+                        p.ty = std::sync::Arc::new(go(&a.ty, &b.ty, memo, preserve_pending));
                         p
                     })
                     .collect(),
                 block: match (ab, bb) {
-                    (Some(a), Some(b)) => Some(std::sync::Arc::new(go(a, b, memo))),
+                    (Some(a), Some(b)) => Some(std::sync::Arc::new(go(a, b, memo, preserve_pending))),
                     (a, _) => a.clone(),
                 },
-                ret: std::sync::Arc::new(go(ar, br, memo)),
+                ret: std::sync::Arc::new(go(ar, br, memo, preserve_pending)),
                 effects: effects.clone(),
             },
             (a, _) => a.clone(),
@@ -450,7 +453,7 @@ pub(crate) fn merge_equal(a: Ty, b: &Ty) -> Ty {
         memo.insert(key, result.clone());
         result
     }
-    go(&a, b, &mut std::collections::HashMap::new())
+    go(&a, b, &mut std::collections::HashMap::new(), preserve_pending)
 }
 
 #[cfg(test)]

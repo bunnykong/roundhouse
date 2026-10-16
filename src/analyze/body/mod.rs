@@ -1152,7 +1152,9 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Ivar { name } => {
                 ctx.ivar_bindings.get(name).cloned().unwrap_or_else(|| {
-                    if super::current_returns::pending_ivar(ctx.self_ty.as_ref(),name) { Ty::pending_untyped() } else { unknown() }
+                    if super::strict_producers::deferred_deferred("ivar_read") {
+                        super::strict_producers::deferred_var_answer("ivar_read")
+                    } else if super::current_returns::pending_ivar(ctx.self_ty.as_ref(),name) { Ty::pending_untyped() } else { unknown() }
                 })
             }
 
@@ -5741,3 +5743,6 @@ fn set_discarded(e: &mut Expr, discarded: bool) {
 
 #[cfg(test)]
 mod strict_producer_tests;
+
+#[cfg(test)]
+mod deferred_unresolved_tests;

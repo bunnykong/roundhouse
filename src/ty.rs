@@ -192,6 +192,7 @@ impl Provenance {
         Self(if lift && b & 6 != 0 { b & !1 } else { b })
     }
     pub(crate) fn reporting_bits(self) -> u8 { self.0 }
+    pub(crate) fn union_preserving_pending(self, other: Self) -> Self { Self(self.0 | other.0) }
     pub fn effective(self) -> Self {
         if self.0 & 2 != 0 { Self::Gradual } else if self.0 & 4 != 0 { Self::Unresolved } else { Self::Pending }
     }
@@ -577,8 +578,20 @@ impl Ty {
     ///
     /// Allocating a `Debug` string per variant on every join was the
     /// previous key; Campfire's analyzer fixpoint does this each round.
-    pub(crate) fn canonicalize_variants(variants: &mut [Ty]) {
+    pub(crate) fn canonicalize_variants(variants: &mut Vec<Ty>) {
         variants.sort_by(cmp_ty_nil_last);
+        if crate::analyze::strict_producers::deferred_ndedup() {
+            let mut unique: Vec<Ty> = Vec::with_capacity(variants.len());
+            for b in variants.drain(..) {
+                if unique.last().is_some_and(|a| *a == b) {
+                    let a = unique.pop().unwrap();
+                    let merged = Ty::canonical_min(a.clone(), b.clone());
+                    let merged = crate::analyze::producer_evidence::merge_equal_preserving(merged, &a);
+                    unique.push(crate::analyze::producer_evidence::merge_equal_preserving(merged, &b));
+                } else { unique.push(b); }
+            }
+            *variants = unique;
+        }
     }
 
     /// Of two `==` types, the one canonical order puts first. They can

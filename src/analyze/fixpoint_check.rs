@@ -153,6 +153,7 @@ pub(super) struct Checks {
     untie_cuts: u64,
     pub(super) structure_start: Option<serde_json::Value>,
     pub(super) structure_end: Option<serde_json::Value>,
+    pub(super) stratum1_rounds: Option<FixpointRounds>,
 }
 
 impl Checks {
@@ -682,6 +683,12 @@ impl Analyzer {
                 "absorb": loop_end(rounds.absorb),
             },
         });
+        line["c6"] = super::strict_producers::deferred_report();
+        if let Some(s1) = self.fixpoint_checks.stratum1_rounds {
+            line["loops"]["stratum1_production"] = loop_end(s1.production);
+            line["loops"]["stratum1_views_and_tests"] = loop_end(s1.views_and_tests);
+            line["loops"]["stratum1_absorb"] = loop_end(s1.absorb);
+        }
         if *VERIFY {
             let verified: Vec<serde_json::Value> = self
                 .fixpoint_checks
@@ -918,20 +925,28 @@ pub(super) fn contributor_ty(t: &Ty) -> serde_json::Value {
 }
 
 impl Analyzer {
-    fn contributor_dump(&self, app: &App) -> std::io::Result<()> {
+    fn contributor_dump(&self, app: &App) -> std::io::Result<()> { self.contributor_dump_named(app, "contributor-values.jsonl") }
+    pub(super) fn contributor_dump_named(&self, app: &App, name: &str) -> std::io::Result<()> {
         use std::io::Write;
         let path = std::path::PathBuf::from(std::env::var_os("RH_STRUCT_DUMP").expect("observer dump path"))
-            .with_file_name("contributor-values.jsonl");
+            .with_file_name(name);
         let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
-        let mut emit = |v: serde_json::Value| { serde_json::to_writer(&mut out, &v).unwrap(); writeln!(out).unwrap(); };
+        let mut records = Vec::<serde_json::Value>::new();
+        let mut emit = |v: serde_json::Value| records.push(v);
         let fp = self.state_fp(app);
         emit(serde_json::json!({"part":"fingerprint", "parts":fp.parts, "ir":fp.ir,
             "sources":app.sources.iter().map(|s| &s.path).collect::<Vec<_>>(), "digests":fp.digests()}));
         let mut value = |part: &str, key: String, t: &Ty| emit(serde_json::json!({
             "part":part,"key":key,"ty":contributor_ty(t),"native_ty":super::current_returns::describe(t)["native_ty"],"debug":format!("{t:?}"),"hash":type_hash(t)}));
         for (id,ci) in &self.classes {
+            for (k,t) in &ci.constants { value("constants",format!("{}::{}",id.0.as_str(),k.as_str()),t); }
+            for (k,t) in &ci.attributes.fields { value("attributes",format!("{}@{}",id.0.as_str(),k.as_str()),t); }
             for (m,t) in &ci.instance_methods { value("returns",format!("{}#{}",id.0.as_str(),m.as_str()),t); }
             for (m,t) in &ci.class_methods { value("returns",format!("{}.{}",id.0.as_str(),m.as_str()),t); }
+        }
+        for (decl,t) in &self.typed_constants { value("constants",format!("decl {decl:?}"),t); }
+        for ((id,m),bindings) in &self.refined_action_bindings {
+            for (k,t) in bindings { value("controller_bindings",format!("{}#{}:binding:{}",id.0.as_str(),m.as_str(),k.as_str()),t); }
         }
         for ((id,m,side),row) in &self.inferred_params {
             let sep = if *side == crate::dialect::MethodReceiver::Class { "." } else { "#" };
@@ -944,6 +959,23 @@ impl Analyzer {
             for (method,bs) in bindings { for (k,t) in bs {
                 value("controller_cache",format!("{}#{}:binding:{}",id.0.as_str(),method.as_str(),k.as_str()),t);
             }}
+        }
+        fn names<'a>(xs: impl IntoIterator<Item=&'a Symbol>) -> Vec<String> {
+            let mut xs=xs.into_iter().map(|x|x.as_str().to_owned()).collect::<Vec<_>>(); xs.sort(); xs
+        }
+        for (id,ci) in &self.classes {
+            emit(serde_json::json!({"part":"block_values","key":id.0.as_str(),"hash":fp.parts["block_values"][id.0.as_str()],
+                "names":{"block_value_methods":names(&ci.block_value_methods),"relation_derived":names(&ci.relation_derived),
+                    "materializing_scopes":names(&ci.materializing_scopes)}}));
+        }
+        for (id,(instance,class)) in &self.concern_folded {
+            let key=format!("concern {}",id.0.as_str());
+            emit(serde_json::json!({"part":"copies","key":key,"hash":fp.parts["copies"][&key],
+                "names":{"instance":names(instance),"class":names(class)}}));
+        }
+        for (id,xs) in &self.host_folded {
+            let key=format!("host {}",id.0.as_str());
+            emit(serde_json::json!({"part":"copies","key":key,"hash":fp.parts["copies"][&key],"names":{"host":names(xs)}}));
         }
         // Empty cache parents are real native entries, just like empty parameter vectors.
         for (id,(bindings,bodies)) in &self.controller_action_meta_cache {
@@ -998,6 +1030,26 @@ impl Analyzer {
         for (key,module) in super::fold::contributor_aliases() {
             emit(serde_json::json!({"part":"aliases","key":key,"module":module}));
         }
+        drop(emit);
+        let mut components = BTreeMap::<&str, BTreeMap<String, Vec<String>>>::new();
+        for part in ["params", "controller_bindings", "controller_cache"] {
+            let mut entries = BTreeMap::new();
+            for key in fp.parts.get(part).into_iter().flat_map(|p|p.keys()) {
+                let sep=if part=="params" {"["} else if part=="controller_cache" {"#"} else {":"};
+                let prefix=format!("{key}{sep}");
+                let mut keys=records.iter().filter(|r|r["part"].as_str()==Some(part))
+                    .filter_map(|r|r["key"].as_str()).filter(|k|k.starts_with(&prefix)).map(str::to_owned).collect::<Vec<_>>();
+                keys.sort(); entries.insert(key.clone(),keys);
+            }
+            components.insert(part,entries);
+        }
+        records[0]["components"] = serde_json::json!(components);
+        let cache_methods: BTreeMap<_,_> = self.controller_action_meta_cache.iter().map(|(id,(bindings,_))| {
+            let mut methods=bindings.keys().map(|m|m.as_str()).collect::<Vec<_>>(); methods.sort();
+            (id.0.as_str(),methods)
+        }).collect();
+        records[0]["cache_binding_methods"] = serde_json::json!(cache_methods);
+        for record in records { serde_json::to_writer(&mut out,&record)?; writeln!(out)?; }
         out.flush()
     }
 }

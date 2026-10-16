@@ -1314,6 +1314,7 @@ impl Analyzer {
     }
 
     fn analyze_cached(&mut self, app: &mut App) {
+        strict_producers::deferred_reset();
         current_returns::reset(app,&mut self.classes);
         producer_evidence::reset(&app.sources);
         closure_census::start();
@@ -1399,7 +1400,6 @@ impl Analyzer {
                 }
             }
         }
-        const FIXPOINT_CAP: usize = 12;
         // View-name and dynamic-render ivar sets are invariant across
         // fixpoint rounds — they read source views, not the registry.
         let mut dynamic_render_ivars: std::collections::HashSet<Symbol> =
@@ -1449,271 +1449,24 @@ impl Analyzer {
             )
         });
 
-        let mut rounds = FixpointRounds {
-            production: LoopEnd::RanToCap,
-            views_and_tests: LoopEnd::RanToCap,
-            absorb: LoopEnd::NotRun,
-        };
-        // Whole-program fixpoint: harvest returns + unify params, re-type,
-        // repeat until the registry signature stabilizes. Each round
-        // carries a fact one link further, so the cap bounds the longest
-        // CHAIN an app can have typed — not a cost most apps pay, since
-        // the signature check ends the loop as soon as nothing moves.
-        // It was 4, after Spinel's "1-2 iterations typically; 4 is a
-        // safety net" (`~/git/spinel/spinel_codegen.rb:7459-7492`), and
-        // lobsters never converged under it: `render json: @stories`
-        // sits at the end of `.new` args → `initialize` → `@scope` →
-        // `with_pagination_info` → `get` → `paginate` → the
-        // `get_from_cache` block → its return → the destructuring, which
-        // settles on round 9.
-        let round_inputs = fixpoint_check::RoundInputs {
-            dynamic_render_ivars: &dynamic_render_ivars,
-            existing_view_names: &existing_view_names,
-            module_methods: &module_methods,
-            module_includes: &module_includes,
-            parent_link_by_name: &parent_link_by_name,
-        };
-        let mut prev_hints = self.capture_dirty_hints();
-        // `RH_SCHED=sccq`: the ordered worklist settles production inside
-        // main's round loop and stopping criterion.
-        if self.sccq.is_some() {
-            rounds.production = self.sccq_phase(app, &round_inputs, false);
-            prev_hints = self.capture_dirty_hints();
-        }
-        for round in 0..FIXPOINT_CAP {
-            if self.sccq.is_some() {
-                break;
+        self.run_fixpoint_loops(app, &dynamic_render_ivars, &existing_view_names,
+            &module_methods, &module_includes, &parent_link_by_name,
+            !strict_producers::deferred_stratify() && fixpoint_check::verify_on());
+        if strict_producers::deferred_stratify() {
+            self.fixpoint_checks.stratum1_rounds = Some(self.fixpoint_rounds);
+            if std::env::var("RH_CONTRIBUTOR_VALUES").as_deref() == Ok("1") {
+                self.contributor_dump_named(app, "contributor-values-boundary.jsonl").expect("write stratum boundary");
             }
-            crate::timings::phase(format_args!("round {round}: harvest returns"), || {
-                self.harvest_returns_to_registry(app, false)
-            });
-            crate::timings::phase(format_args!("round {round}: unify params"), || {
-                self.unify_params_from_call_sites(app, UnifyScope::Production)
-            });
-            // Returns+params settle independently of block-value
-            // verdicts (`DirtyHints`); both must be quiet before the
-            // loop stops, or a newly block-valued method leaves its
-            // callers on the registered return instead of the block.
-            // With `RH_FOLD`, so must the state the registry cannot see.
-            let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
-            if self.inference_matches(&prev_hints.sig)
-                && self.block_value_matches(&prev_hints)
-                && side_stable
-            {
-                rounds.production = LoopEnd::Settled(round);
-                break;
+            self.restore_strict_stubs();
+            if strict_producers::deferred_need_second() {
+                strict_producers::deferred_start_second();
+                if self.sccq.is_some() { self.sccq_production_end = Some(self.capture_dirty_hints()); }
+                self.run_typing_passes(app, &dynamic_render_ivars, &existing_view_names, &module_methods,
+                    &module_includes, &parent_link_by_name, TypingMode::Production { dirty: None });
+                self.run_fixpoint_loops(app, &dynamic_render_ivars, &existing_view_names,
+                    &module_methods, &module_includes, &parent_link_by_name, fixpoint_check::verify_on());
             }
-            // Re-type with the refined registry. Idempotent BodyTyper
-            // means a second pass simply resolves dispatches and Var
-            // bindings the first pass couldn't — which is also why a
-            // class the harvest did not move is a class whose bodies
-            // this round would retype to exactly what they already say.
-            // Campfire's rounds shrink 191 → 89 → 44 → 29 → 13 → 2
-            // classes, ending on the Opengraph/Current/Nokogiri chain,
-            // so the later rounds retype the whole app for a handful of
-            // returns. `dirty_classes_for_retype` is that handful plus
-            // everything that reads it.
-            // A moved side-table value can change any body that reads the
-            // reference, which the dirty frontier cannot see.
-            let dirty = if fold::side_full_retype(side_stable) {
-                None
-            } else {
-                self.dirty_classes_for_retype(app, &prev_hints)
-            };
-            prev_hints = self.capture_dirty_hints();
-            crate::timings::phase(format_args!("round {round}: typing passes"), || {
-                self.run_typing_passes(
-                    app,
-                    &dynamic_render_ivars,
-                    &existing_view_names,
-                    &module_methods,
-                    &module_includes,
-                    &parent_link_by_name,
-                    TypingMode::Production { dirty: dirty.as_ref() },
-                )
-            });
         }
-        if fixpoint_check::verify_on() {
-            self.verify_round(app, &round_inputs, fixpoint_check::Loop::Production, None);
-            prev_hints = self.capture_dirty_hints();
-        }
-
-        // Intermediate rounds skip views/tests: production does not
-        // read test helper returns, and unifying from still-untyped view
-        // trees for seven rounds was wasted work. After production
-        // converges, type views once and then harvest/unify/retype
-        // *tests* until helper chains settle. Later test rounds reuse
-        // the production+view param snapshot instead of re-walking
-        // those trees. If view/test sites moved a production param,
-        // retype production until harvested returns stabilize. Nested
-        // constructors live in serializer bodies (AuthorResource.new
-        // inside ArticleResource.to_h), so each absorb pass must
-        // unify WithViews again — Production unify would drop the
-        // view sites, and skipping unify leaves nested initialize
-        // params as Var. After helper returns absorb those params,
-        // views are typed once more so template calls see the
-        // harvested helper surface rather than leftover untyped.
-        let production_sig = prev_hints.sig.clone();
-        let mut production_view_params = None;
-        for round in 0..FIXPOINT_CAP {
-            crate::timings::phase(
-                if round == 0 {
-                    "typing passes (views after fixpoint)".to_string()
-                } else {
-                    format!("round {round}: tests")
-                },
-                || {
-                    if round == 0 {
-                        // Views only. The loop above broke because its
-                        // harvest+unify moved nothing, so the production
-                        // bodies are exactly what the last round typed —
-                        // retyping them here was a pass spent confirming
-                        // a fixpoint the loop had already proved.
-                        self.run_typing_passes(
-                            app,
-                            &dynamic_render_ivars,
-                            &existing_view_names,
-                            &module_methods,
-                            &module_includes,
-                            &parent_link_by_name,
-                            TypingMode::ViewsAndTests,
-                        );
-                    } else {
-                        self.type_tests_only(app);
-                    }
-                },
-            );
-            self.harvest_returns_to_registry(app, true);
-            crate::timings::phase(
-                if round == 0 {
-                    "unify params (after views)".to_string()
-                } else {
-                    format!("round {round}: unify params (tests)")
-                },
-                || {
-                    if round == 0 {
-                        self.unify_params_from_call_sites(app, UnifyScope::WithViews);
-                        production_view_params = Some(self.inferred_params.clone());
-                        self.overlay_test_params(app);
-                    } else if let Some(snapshot) = production_view_params.as_ref() {
-                        self.unify_test_params_onto(app, snapshot);
-                    }
-                },
-            );
-            let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
-            if self.inference_matches(&prev_hints.sig)
-                && self.block_value_matches(&prev_hints)
-                && side_stable
-            {
-                rounds.views_and_tests = LoopEnd::Settled(round);
-                break;
-            }
-            prev_hints = self.capture_dirty_hints();
-        }
-        if fixpoint_check::verify_on() {
-            self.verify_round(
-                app,
-                &round_inputs,
-                fixpoint_check::Loop::ViewsAndTests,
-                production_view_params.as_mut(),
-            );
-        }
-        if self.sccq.is_some() {
-            // The worklist settles the absorb rounds too, whether or not the
-            // view and test rounds moved production signatures.
-            rounds.absorb = self.sccq_phase(app, &round_inputs, true);
-        } else if !self.inference_matches(&production_sig) {
-            rounds.absorb = LoopEnd::RanToCap;
-            let mut absorb_hints = self.capture_dirty_hints();
-            // The view/test rounds above moved signatures that
-            // production bodies read, and the last production pass
-            // predates every one of them — so the first absorb pass is
-            // a full retype. Only the rounds after it can be narrowed
-            // to what their predecessor moved.
-            let mut absorb_dirty: Option<std::collections::HashSet<ClassId>> = None;
-            for round in 0..FIXPOINT_CAP {
-                crate::timings::phase(
-                    if round == 0 {
-                        "typing passes (after view unify)".to_string()
-                    } else {
-                        format!("round {round}: absorb production")
-                    },
-                    || {
-                        self.run_typing_passes(
-                            app,
-                            &dynamic_render_ivars,
-                            &existing_view_names,
-                            &module_methods,
-                            &module_includes,
-                            &parent_link_by_name,
-                            TypingMode::Production { dirty: absorb_dirty.as_ref() },
-                        )
-                    },
-                );
-                self.harvest_returns_to_registry(app, true);
-                self.unify_params_from_call_sites(app, UnifyScope::WithViews);
-                if let Some(snapshot) = production_view_params.as_mut() {
-                    snapshot.clone_from(&self.inferred_params);
-                }
-                self.overlay_test_params(app);
-                let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
-                if self.inference_matches(&absorb_hints.sig)
-                    && self.block_value_matches(&absorb_hints)
-                    && side_stable
-                {
-                    rounds.absorb = LoopEnd::Settled(round);
-                    break;
-                }
-                absorb_dirty = if fold::side_full_retype(side_stable) {
-                    None
-                } else {
-                    self.dirty_classes_for_retype(app, &absorb_hints)
-                };
-                absorb_hints = self.capture_dirty_hints();
-            }
-        } else {
-            // View unify did not move production signatures, but helper
-            // *bodies* still need a pass against view-inferred params
-            // (`highlight_searched_content`'s `content` is only called
-            // from templates) before views are restamped.
-            crate::timings::phase("typing passes (helpers after view unify)", || {
-                self.run_typing_passes(
-                    app,
-                    &dynamic_render_ivars,
-                    &existing_view_names,
-                    &module_methods,
-                    &module_includes,
-                    &parent_link_by_name,
-                    TypingMode::Production { dirty: None },
-                )
-            });
-            self.harvest_returns_to_registry(app, true);
-            // …and that harvest can still move a helper's return, which
-            // production bodies read. The absorb branch above ends on a
-            // signature check, so it leaves production converged; this
-            // branch does not, so it pays the production pass the views
-            // stamp below no longer carries.
-            crate::timings::phase("typing passes (production after helper harvest)", || {
-                self.run_typing_passes(
-                    app,
-                    &dynamic_render_ivars,
-                    &existing_view_names,
-                    &module_methods,
-                    &module_includes,
-                    &parent_link_by_name,
-                    TypingMode::Production { dirty: None },
-                )
-            });
-        }
-        if fixpoint_check::verify_on() {
-            self.verify_round(
-                app,
-                &round_inputs,
-                fixpoint_check::Loop::Absorb,
-                production_view_params.as_mut(),
-            );
-        }
-        self.fixpoint_rounds = rounds;
         // Wave 12 types views once against production-only helper
         // returns, then unifies helper params from those sites. Helper
         // returns therefore settle only after the absorb/harvest above.
@@ -1841,6 +1594,7 @@ impl Analyzer {
         }
         fn settle(t: &mut Ty) {
             if let Some(settled) = handoff::settle_pending(t, &mut HashMap::new()) {
+                strict_producers::deferred_settled();
                 *t = settled;
             }
         }
@@ -1869,6 +1623,280 @@ impl Analyzer {
         } else {
             crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e));
         }
+    }
+
+    fn run_fixpoint_loops(&mut self, app: &mut App,
+        dynamic_render_ivars: &std::collections::HashSet<Symbol>,
+        existing_view_names: &std::collections::HashSet<Symbol>,
+        module_methods: &HashMap<ClassId, Vec<MethodDef>>,
+        module_includes: &HashMap<ClassId, Vec<ClassId>>,
+        parent_link_by_name: &HashMap<ClassId, Option<ClassId>>, verify: bool) {
+        const FIXPOINT_CAP: usize = 12;
+        let mut rounds = FixpointRounds {
+            production: LoopEnd::RanToCap,
+            views_and_tests: LoopEnd::RanToCap,
+            absorb: LoopEnd::NotRun,
+        };
+        // Whole-program fixpoint: harvest returns + unify params, re-type,
+        // repeat until the registry signature stabilizes. Each round
+        // carries a fact one link further, so the cap bounds the longest
+        // CHAIN an app can have typed — not a cost most apps pay, since
+        // the signature check ends the loop as soon as nothing moves.
+        // It was 4, after Spinel's "1-2 iterations typically; 4 is a
+        // safety net" (`~/git/spinel/spinel_codegen.rb:7459-7492`), and
+        // lobsters never converged under it: `render json: @stories`
+        // sits at the end of `.new` args → `initialize` → `@scope` →
+        // `with_pagination_info` → `get` → `paginate` → the
+        // `get_from_cache` block → its return → the destructuring, which
+        // settles on round 9.
+        let round_inputs = fixpoint_check::RoundInputs {
+            dynamic_render_ivars: &dynamic_render_ivars,
+            existing_view_names: &existing_view_names,
+            module_methods: &module_methods,
+            module_includes: &module_includes,
+            parent_link_by_name: &parent_link_by_name,
+        };
+        let mut prev_hints = self.capture_dirty_hints();
+        // `RH_SCHED=sccq`: the ordered worklist settles production inside
+        // main's round loop and stopping criterion.
+        if self.sccq.is_some() {
+            rounds.production = self.sccq_phase(app, &round_inputs, false);
+            prev_hints = self.capture_dirty_hints();
+        }
+        for round in 0..FIXPOINT_CAP {
+            if self.sccq.is_some() {
+                break;
+            }
+            crate::timings::phase(format_args!("round {round}: harvest returns"), || {
+                self.harvest_returns_to_registry(app, false)
+            });
+            crate::timings::phase(format_args!("round {round}: unify params"), || {
+                self.unify_params_from_call_sites(app, UnifyScope::Production)
+            });
+            // Returns+params settle independently of block-value
+            // verdicts (`DirtyHints`); both must be quiet before the
+            // loop stops, or a newly block-valued method leaves its
+            // callers on the registered return instead of the block.
+            // With `RH_FOLD`, so must the state the registry cannot see.
+            let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
+            if self.inference_matches(&prev_hints.sig)
+                && self.block_value_matches(&prev_hints)
+                && side_stable
+            {
+                rounds.production = LoopEnd::Settled(round);
+                break;
+            }
+            // Re-type with the refined registry. Idempotent BodyTyper
+            // means a second pass simply resolves dispatches and Var
+            // bindings the first pass couldn't — which is also why a
+            // class the harvest did not move is a class whose bodies
+            // this round would retype to exactly what they already say.
+            // Campfire's rounds shrink 191 → 89 → 44 → 29 → 13 → 2
+            // classes, ending on the Opengraph/Current/Nokogiri chain,
+            // so the later rounds retype the whole app for a handful of
+            // returns. `dirty_classes_for_retype` is that handful plus
+            // everything that reads it.
+            // A moved side-table value can change any body that reads the
+            // reference, which the dirty frontier cannot see.
+            let dirty = if fold::side_full_retype(side_stable) {
+                None
+            } else {
+                self.dirty_classes_for_retype(app, &prev_hints)
+            };
+            prev_hints = self.capture_dirty_hints();
+            crate::timings::phase(format_args!("round {round}: typing passes"), || {
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    TypingMode::Production { dirty: dirty.as_ref() },
+                )
+            });
+        }
+        if verify {
+            self.verify_round(app, &round_inputs, fixpoint_check::Loop::Production, None);
+            prev_hints = self.capture_dirty_hints();
+        }
+
+        // Intermediate rounds skip views/tests: production does not
+        // read test helper returns, and unifying from still-untyped view
+        // trees for seven rounds was wasted work. After production
+        // converges, type views once and then harvest/unify/retype
+        // *tests* until helper chains settle. Later test rounds reuse
+        // the production+view param snapshot instead of re-walking
+        // those trees. If view/test sites moved a production param,
+        // retype production until harvested returns stabilize. Nested
+        // constructors live in serializer bodies (AuthorResource.new
+        // inside ArticleResource.to_h), so each absorb pass must
+        // unify WithViews again — Production unify would drop the
+        // view sites, and skipping unify leaves nested initialize
+        // params as Var. After helper returns absorb those params,
+        // views are typed once more so template calls see the
+        // harvested helper surface rather than leftover untyped.
+        let production_sig = prev_hints.sig.clone();
+        let mut production_view_params = None;
+        for round in 0..FIXPOINT_CAP {
+            crate::timings::phase(
+                if round == 0 {
+                    "typing passes (views after fixpoint)".to_string()
+                } else {
+                    format!("round {round}: tests")
+                },
+                || {
+                    if round == 0 {
+                        // Views only. The loop above broke because its
+                        // harvest+unify moved nothing, so the production
+                        // bodies are exactly what the last round typed —
+                        // retyping them here was a pass spent confirming
+                        // a fixpoint the loop had already proved.
+                        self.run_typing_passes(
+                            app,
+                            &dynamic_render_ivars,
+                            &existing_view_names,
+                            &module_methods,
+                            &module_includes,
+                            &parent_link_by_name,
+                            TypingMode::ViewsAndTests,
+                        );
+                    } else {
+                        self.type_tests_only(app);
+                    }
+                },
+            );
+            self.harvest_returns_to_registry(app, true);
+            crate::timings::phase(
+                if round == 0 {
+                    "unify params (after views)".to_string()
+                } else {
+                    format!("round {round}: unify params (tests)")
+                },
+                || {
+                    if round == 0 {
+                        self.unify_params_from_call_sites(app, UnifyScope::WithViews);
+                        production_view_params = Some(self.inferred_params.clone());
+                        self.overlay_test_params(app);
+                    } else if let Some(snapshot) = production_view_params.as_ref() {
+                        self.unify_test_params_onto(app, snapshot);
+                    }
+                },
+            );
+            let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
+            if self.inference_matches(&prev_hints.sig)
+                && self.block_value_matches(&prev_hints)
+                && side_stable
+            {
+                rounds.views_and_tests = LoopEnd::Settled(round);
+                break;
+            }
+            prev_hints = self.capture_dirty_hints();
+        }
+        if verify {
+            self.verify_round(
+                app,
+                &round_inputs,
+                fixpoint_check::Loop::ViewsAndTests,
+                production_view_params.as_mut(),
+            );
+        }
+        if self.sccq.is_some() {
+            // The worklist settles the absorb rounds too, whether or not the
+            // view and test rounds moved production signatures.
+            rounds.absorb = self.sccq_phase(app, &round_inputs, true);
+        } else if !self.inference_matches(&production_sig) {
+            rounds.absorb = LoopEnd::RanToCap;
+            let mut absorb_hints = self.capture_dirty_hints();
+            // The view/test rounds above moved signatures that
+            // production bodies read, and the last production pass
+            // predates every one of them — so the first absorb pass is
+            // a full retype. Only the rounds after it can be narrowed
+            // to what their predecessor moved.
+            let mut absorb_dirty: Option<std::collections::HashSet<ClassId>> = None;
+            for round in 0..FIXPOINT_CAP {
+                crate::timings::phase(
+                    if round == 0 {
+                        "typing passes (after view unify)".to_string()
+                    } else {
+                        format!("round {round}: absorb production")
+                    },
+                    || {
+                        self.run_typing_passes(
+                            app,
+                            &dynamic_render_ivars,
+                            &existing_view_names,
+                            &module_methods,
+                            &module_includes,
+                            &parent_link_by_name,
+                            TypingMode::Production { dirty: absorb_dirty.as_ref() },
+                        )
+                    },
+                );
+                self.harvest_returns_to_registry(app, true);
+                self.unify_params_from_call_sites(app, UnifyScope::WithViews);
+                if let Some(snapshot) = production_view_params.as_mut() {
+                    snapshot.clone_from(&self.inferred_params);
+                }
+                self.overlay_test_params(app);
+                let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
+                if self.inference_matches(&absorb_hints.sig)
+                    && self.block_value_matches(&absorb_hints)
+                    && side_stable
+                {
+                    rounds.absorb = LoopEnd::Settled(round);
+                    break;
+                }
+                absorb_dirty = if fold::side_full_retype(side_stable) {
+                    None
+                } else {
+                    self.dirty_classes_for_retype(app, &absorb_hints)
+                };
+                absorb_hints = self.capture_dirty_hints();
+            }
+        } else {
+            // View unify did not move production signatures, but helper
+            // *bodies* still need a pass against view-inferred params
+            // (`highlight_searched_content`'s `content` is only called
+            // from templates) before views are restamped.
+            crate::timings::phase("typing passes (helpers after view unify)", || {
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    TypingMode::Production { dirty: None },
+                )
+            });
+            self.harvest_returns_to_registry(app, true);
+            // …and that harvest can still move a helper's return, which
+            // production bodies read. The absorb branch above ends on a
+            // signature check, so it leaves production converged; this
+            // branch does not, so it pays the production pass the views
+            // stamp below no longer carries.
+            crate::timings::phase("typing passes (production after helper harvest)", || {
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    TypingMode::Production { dirty: None },
+                )
+            });
+        }
+        if verify {
+            self.verify_round(
+                app,
+                &round_inputs,
+                fixpoint_check::Loop::Absorb,
+                production_view_params.as_mut(),
+            );
+        }
+        self.fixpoint_rounds = rounds;
     }
 
     /// `RH_FOLD`: expand every reference in the registry, the parameter
@@ -4923,7 +4951,7 @@ impl Analyzer {
             let seeded = param_ty_with_default(from_sites, param);
             let declared = self.declared_param_ty(class_id, &method.name, positional, &param.name);
             let is_declared = declared.is_some();
-            let ty = prefer_declared(declared, seeded);
+            let ty = strict_producers::deferred_seed_param(prefer_declared(declared, seeded));
             if let Some(ty) = ty {
                 // `RH_FOLD`: a parameter of a recursive component is read
                 // by reference.
@@ -4995,7 +5023,7 @@ impl Analyzer {
                 .reduce(unify_param_ty);
             let declared = self.declared_param_ty(class_id, action_name, Some(i), name);
             let is_declared = declared.is_some();
-            let ty = prefer_declared(declared, observed);
+            let ty = strict_producers::deferred_seed_param(prefer_declared(declared, observed));
             if let Some(ty) = ty {
                 // `RH_FOLD`: a parameter of a recursive component is read
                 // by reference.
@@ -5008,15 +5036,15 @@ impl Analyzer {
         // index to read an observation from. The declaration is the
         // only source, which is the case the signature readers exist
         // for.
-        for (name, _) in kw_params.iter() {
+        for (name, default) in kw_params.iter() {
             if ctx.local_bindings.contains_key(name) {
                 continue;
             }
-            if let Some(ty) =
-                self.declared_param_ty(class_id, action_name, None, name)
-            {
-                ctx.local_bindings.insert(name.clone(), ty);
-            }
+            let declared = self.declared_param_ty(class_id, action_name, None, name);
+            let default_uncomputed = default.as_ref().and_then(|d| d.ty.as_ref())
+                .is_none_or(|t| matches!(t, Ty::Var { .. } | Ty::Nil) || strict_producers::is_p(t));
+            let ty = if default_uncomputed { strict_producers::deferred_seed_param(declared) } else { declared };
+            if let Some(ty) = ty { ctx.local_bindings.insert(name.clone(), ty); }
         }
         if let Some(bp) = block_param {
             ctx.local_bindings.insert(bp.clone(), captured_block_ty());
@@ -5176,12 +5204,7 @@ impl Analyzer {
     /// RBS-derived `Ty::Fn` is preserved — its return is already what
     /// dispatch resolves to via `unwrap_fn_ret`). Skip methods whose
     /// body is `Ty::Var` (no information gained).
-    fn harvest_returns_to_registry(&mut self, app: &App, harvest_tests: bool) {
-        det::next_round();
-        let before = det::registry_snapshot(&self.classes);
-        self.harvest_method_returns(app, harvest_tests);
-        // The first complete production harvest identifies declarations it skips.
-        if !harvest_tests {
+    fn restore_strict_stubs(&mut self) {
             for (key, original) in std::mem::take(&mut self.strict_stub_originals) {
                 let Some(cls) = self.classes.get_mut(&key.0) else { continue };
                 let table = match key.2 {
@@ -5190,8 +5213,18 @@ impl Analyzer {
                 };
                 if table.get(&key.1).is_some_and(strict_producers::is_p) {
                     table.insert(key.1, original);
+                    strict_producers::deferred_restored();
                 }
             }
+    }
+
+    fn harvest_returns_to_registry(&mut self, app: &App, harvest_tests: bool) {
+        det::next_round();
+        let before = det::registry_snapshot(&self.classes);
+        self.harvest_method_returns(app, harvest_tests);
+        // The first complete production harvest identifies declarations it skips.
+        if !harvest_tests && strict_producers::deferred_defer() == "0" {
+            self.restore_strict_stubs();
         }
         // `RH_FOLD_JOIN`: returns join with the value they held after the
         // previous harvest, after the registry copies too.
@@ -5993,7 +6026,9 @@ impl Analyzer {
     ) {
         producer_evidence::input(body_ty);
         if current_returns::on() {
-            Self::insert_inferred_return(table, method, body_ty.cloned().unwrap_or_else(Ty::unresolved));
+            Self::insert_inferred_return(table, method, if strict_producers::deferred_deferred("register") && body_ty.is_none_or(|t| matches!(t, Ty::Var { .. })) {
+                strict_producers::deferred_var_answer("register")
+            } else { body_ty.cloned().unwrap_or_else(Ty::unresolved) });
             return;
         }
         match body_ty {
@@ -6004,7 +6039,7 @@ impl Analyzer {
                 current_returns::observe_filtered(&body_ty.cloned().unwrap_or_else(Ty::unresolved));
                 if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })
                     && !(strict_producers::stubs_on() && strict_producers::is_p(t))) {
-                    table.insert(method.clone(), Ty::unresolved());
+                    table.insert(method.clone(), strict_producers::deferred_var_answer("register"));
                 }
             }
         }
