@@ -163,11 +163,20 @@ fn safe_navigation_and_boolean_falsy_arms_do_not_admit_data() {
 }
 
 #[test]
+fn nonlocal_returns_unwinds_and_local_exit_controls() {
+    check_group("nonlocal-exit");
+    check_group("local-exit-control");
+}
+
+#[test]
 fn emitted_json_block_exits_and_identity_controls_run() {
     // Run the actual emitted Ruby, in addition to pinning the declarations
     // and routed diagnostic above. No generated Rails fixture is required.
     let bodies = [
         "JSON.parse(raw).tap { break \"ok\" }",
+        "JSON.parse(raw).tap { return \"ok\" }",
+        "begin; JSON.parse(raw).tap { raise \"x\" }; rescue Exception; \"ok\"; end",
+        "JSON.parse(raw).tap { -> { return \"inner\" }.call; \"ignored\" }",
         "JSON.parse(raw).find { break \"ok\" }",
         "JSON.parse(raw).detect { break \"ok\" }",
         "JSON.parse(raw).min { break \"ok\" }",
@@ -181,11 +190,12 @@ fn emitted_json_block_exits_and_identity_controls_run() {
         .iter()
         .filter(|c| bodies.contains(&c["body"].as_str().unwrap()))
         .collect::<Vec<_>>();
-    assert_eq!(
-        selected.len(),
-        bodies.len(),
-        "every runtime witness must be present"
-    );
+    for body in bodies {
+        assert!(
+            selected.iter().any(|case| case["body"] == body),
+            "missing runtime witness: {body}"
+        );
+    }
     for case in selected {
         let (app, original) = analyze(case, false, 2);
         let emitted = roundhouse::emit::ruby::emit_library(&app)

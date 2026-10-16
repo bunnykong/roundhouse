@@ -63,17 +63,7 @@ impl<'a> BodyTyper<'a> {
         args: &[Expr],
         block_ret: Option<&Ty>,
     ) -> bool {
-        let mut name = method.as_str();
-        let mut args = args;
-        while matches!(name, "send" | "public_send" | "__send__" | "try" | "try!") {
-            let Some(first) = args.first() else { return false };
-            name = match &*first.node {
-                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.as_str(),
-                ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value.as_str(),
-                _ => return false,
-            };
-            args = &args[1..];
-        }
+        let Some((name, _)) = literal_call_target(method, args) else { return false };
         matches!(name, "tap" | "then" | "yield_self" | "fetch" | "find" | "detect"
             | "min" | "max" | "transaction")
             || self.block_value_return(recv_ty, &Symbol::from(name), block_ret).is_some()
@@ -3929,6 +3919,21 @@ fn param_value_method(method: &Symbol, block_ret: Option<&Ty>) -> Option<Ty> {
         "inspect" | "to_json" => Ty::Str,
         _ => return None,
     })
+}
+
+/// Resolve the name shared by an ordinary call and its literal aliases.
+pub(super) fn literal_call_target<'a>(method: &'a Symbol, args: &'a [Expr]) -> Option<(&'a str, &'a [Expr])> {
+    let mut name = method.as_str();
+    let mut args = args;
+    while matches!(name, "send" | "public_send" | "__send__" | "try" | "try!") {
+        name = match &*args.first()?.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.as_str(),
+            ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value.as_str(),
+            _ => return None,
+        };
+        args = &args[1..];
+    }
+    Some((name, args))
 }
 
 /// Receiver-only value reads. Keys, indices, defaults, options and blocks

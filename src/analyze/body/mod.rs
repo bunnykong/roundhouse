@@ -518,6 +518,78 @@ impl<'a> BodyTyper<'a> {
         self
     }
 
+    /// Potential exits from an executed block, respecting the distinct
+    /// owners of loop/iterator breaks, method returns and rescued exceptions.
+    /// This is a provenance boundary, not inference of the exit's value.
+    fn block_has_escaping_exit(&self, e: &Expr, breaks: bool, returns: bool, raises: bool) -> bool {
+        let scan = |e: &Expr| self.block_has_escaping_exit(e, breaks, returns, raises);
+        match &*e.node {
+            ExprNode::Break { value } => breaks || value.as_ref().is_some_and(scan),
+            ExprNode::Return { value } => returns || scan(value),
+            ExprNode::Raise { value } => raises || !matches!(value.ty, Some(Ty::Str)) || scan(value),
+            // A literal lambda is a value; creating it does not run its body.
+            ExprNode::Lambda { .. } => false,
+            ExprNode::While { cond, body, .. } => {
+                self.block_has_escaping_exit(cond, false, returns, raises)
+                    || self.block_has_escaping_exit(body, false, returns, raises)
+            }
+            ExprNode::RescueModifier { expr, fallback } => {
+                self.block_has_escaping_exit(expr, breaks, returns, false) || scan(fallback)
+            }
+            ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+                // A local rescue handles the ordinary Kernel#raise fallback.
+                // Returns and breaks still cross it; a handler/ensure can exit too.
+                let catches = rescues.iter().any(|r| r.classes.is_empty() || r.classes.iter().any(|c| {
+                    matches!(&*c.node, ExprNode::Const { path } if {
+                        let parts = path.iter().map(Symbol::as_str).filter(|p| !p.is_empty()).collect::<Vec<_>>();
+                        matches!(parts.as_slice(), ["StandardError"] | ["Exception"] | ["RuntimeError"])
+                    })
+                }));
+                self.block_has_escaping_exit(body, breaks, returns, raises && !catches)
+                    || rescues.iter().any(|r| scan(&r.body))
+                    || else_branch.as_ref().is_some_and(scan)
+                    || ensure.as_ref().is_some_and(scan)
+            }
+            ExprNode::Send { recv, method, args, block, .. } => {
+                let target = send::literal_call_target(method, args);
+                let name = target.map(|(name, _)| name);
+                let call_args = target.map_or(args.as_slice(), |(_, args)| args);
+                // A called literal lambda owns its return/break; only an
+                // exception from its body can unwind this enclosing block.
+                if let (Some(r), Some("call")) = (recv, name)
+                    && let ExprNode::Lambda { body, .. } = &*r.node
+                {
+                    return self.block_has_escaping_exit(body, false, false, raises)
+                        || args.iter().any(scan);
+                }
+                // Both ordinary and literal-reflective never-returning calls
+                // can unwind to a rescue outside the yielding call.
+                let ordinary_raise = matches!(name, Some("raise" | "fail"))
+                    && matches!(call_args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Str));
+                if (raises || !ordinary_raise) && (matches!(e.ty, Some(Ty::Bottom))
+                    || matches!(name, Some("raise" | "fail" | "throw"))) { return true; }
+                if recv.as_ref().is_some_and(scan) || args.iter().any(scan) { return true; }
+                // Core value reads and proc/lambda creation ignore a supplied
+                // block. A source-defined override is not that core protocol.
+                let ignored = self.json_value_source(recv.as_ref(), method, args)
+                    || (name.is_some_and(|n| matches!(n, "proc" | "lambda")) && recv.is_none())
+                    || (name.is_some_and(|n| matches!(n, "freeze" | "itself" | "[]" | "dig" | "at"
+                        | "first" | "last" | "second" | "third" | "fourth" | "fifth" | "sole" | "sample"))
+                        && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), method, false)
+                        && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), method, true));
+                !ignored && block.as_ref().is_some_and(|b| {
+                    matches!(&*b.node, ExprNode::Lambda { body, .. }
+                        if self.block_has_escaping_exit(body, false, returns, raises))
+                })
+            }
+            _ => {
+                let mut found = false;
+                e.node.for_each_child(&mut |child| found |= scan(child));
+                found
+            }
+        }
+    }
+
     /// Prove the value-producing parser call from its receiver expression,
     /// never from a computed Class descriptor (JSON.class is not JSON).
     fn json_value_source(&self, recv: Option<&Expr>, method: &Symbol, args: &[Expr]) -> bool {
@@ -1903,13 +1975,14 @@ impl<'a> BodyTyper<'a> {
                 let dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
                 // A block exit may replace the receiver/member/block value
-                // that normal dispatch returns. Until break values are modeled,
-                // keep the existing result shape but do not certify that value
+                // that normal dispatch returns. Keep the existing result shape
+                // rather than inferring abrupt-completion values here; do not certify it
                 // as an identity/projection flow. This also covers literal send
                 // aliases, whose dispatch has already resolved above.
-                let dispatched = if block.as_ref().is_some_and(|b| {
-                    matches!(&*b.node, ExprNode::Lambda { body, .. } if block_has_escaping_break(body))
-                }) && self.block_may_replace_value(recv_ty.as_ref(), method, args, block_ret.as_ref()) {
+                let dispatched = if self.block_may_replace_value(recv_ty.as_ref(), method, args, block_ret.as_ref())
+                    && block.as_ref().is_some_and(|b| {
+                        matches!(&*b.node, ExprNode::Lambda { body, .. } if self.block_has_escaping_exit(body, true, true, true))
+                    }) {
                     dispatched.computed()
                 } else { dispatched };
                 let dispatched = if matches!(dispatched, Ty::Untyped { .. })
