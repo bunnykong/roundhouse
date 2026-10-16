@@ -1081,3 +1081,15 @@ pub(super) fn structure_parts() -> (Vec<SlotKey>, Vec<String>, Vec<String>) {
         (s.keys.clone(), refs, routing)
     })
 }
+
+// Read-only research condition classification observer. Snapshot before serialization to avoid nested borrows.
+pub(crate) fn contributor_values() -> Vec<(String, Ty)> {
+    ST.with(|s| {
+        let s = s.borrow();
+        s.values.iter().map(|(slot,t)| (format!("{:?}", s.keys.get(*slot as usize)), t.clone())).collect()
+    })
+}
+pub(crate) fn contributor_aliases() -> Vec<(String, String)> {
+    ST.with(|s| s.borrow().aliases.iter().map(|((c,m),src)|
+        (format!("{}#{}",c.0.as_str(),m.as_str()),src.0.as_str().to_string())).collect())
+}

@@ -1812,7 +1812,7 @@ impl Analyzer {
                             continue;
                         }
                         if let Some(t) = table.get(name) {
-                            val = Some(t.clone());
+                            val = Some(super::current_returns::copied((m,name,side),(class,name,side),&format!("concern:{}",m.0.as_str()),t.clone(),None));
                         }
                     }
                     if let Some(v) = val {
@@ -1833,6 +1833,7 @@ impl Analyzer {
                     let Some(order) = eng.modules_bfs.get(id) else { continue };
                     for side in [false, true] {
                         let mut val: Option<Ty> = None;
+                        let mut sources=Vec::new();
                         for m in order {
                             let Some(mc) = self.classes.get(m) else { continue };
                             let table = if side { &mc.class_methods } else { &mc.instance_methods };
@@ -1842,16 +1843,26 @@ impl Analyzer {
                                 continue;
                             }
                             if let Some(t) = table.get(name) {
+                                sources.push((m.clone(),t.clone()));
                                 val = Some(t.clone());
                             }
                         }
-                        let Some(v) = val else { continue };
+                        let Some(mut v) = val else { continue };
                         let folded = self.concern_folded.entry(id.clone()).or_default();
                         let folded_side = if side { &mut folded.1 } else { &mut folded.0 };
                         let cls = self.classes.entry(id.clone()).or_default();
                         let table = if side { &mut cls.class_methods } else { &mut cls.instance_methods };
                         if table.contains_key(name) && !folded_side.contains(name) {
+                            for (source,value) in &sources {
+                                if super::current_returns::spliced_from(id,name,side,source) {
+                                    let value=super::current_returns::copied((source,name,side),(id,name,side),&format!("concern:{}",source.0.as_str()),value.clone(),table.get(name));
+                                    if super::current_returns::on() && table.get(name)!=Some(&value) {table.insert(name.clone(),value);touched.push(id.clone());}
+                                }
+                            }
                             continue;
+                        }
+                        for (source,value) in sources {
+                            v=super::current_returns::copied((&source,name,side),(id,name,side),&format!("concern:{}",source.0.as_str()),value,table.get(name));
                         }
                         if table.get(name) != Some(&v) {
                             table.insert(name.clone(), v);
@@ -1867,6 +1878,7 @@ impl Analyzer {
             if let Some(cls) = self.classes.get_mut(class) {
                 if cls.class_methods.contains_key(name) {
                     if let Some(t) = cls.instance_methods.get(name).cloned() {
+                        let t=super::current_returns::copied((class,name,false),(class,name,true),"current-forwarder",t,cls.class_methods.get(name));
                         if cls.class_methods.get(name) != Some(&t) {
                             cls.class_methods.insert(name.clone(), t);
                             touched.push(class.clone());
@@ -1880,11 +1892,11 @@ impl Analyzer {
             let ty = eng
                 .view_owner_order
                 .iter()
-                .filter_map(|cid| self.classes.get(cid))
-                .find_map(|c| c.instance_methods.get(name).cloned());
-            if let Some(ty) = ty {
+                .find_map(|cid|self.classes.get(cid).and_then(|c|c.instance_methods.get(name)).map(|t|(cid.clone(),t.clone())));
+            if let Some((source,ty)) = ty {
                 let view_ctx = ClassId(Symbol::from("ActionView::Base"));
                 let cls = self.classes.entry(view_ctx.clone()).or_default();
+                let ty=super::current_returns::copied((&source,name,false),(&view_ctx,name,false),"view-helper",ty,cls.instance_methods.get(name));
                 if cls.instance_methods.get(name) != Some(&ty) {
                     cls.instance_methods.insert(name.clone(), ty);
                     touched.push(view_ctx);
@@ -1934,12 +1946,17 @@ impl Analyzer {
                 Family::CtrlAction => {
                     let controller = &app.controllers[unit.ci];
                     let Some(action) = controller.actions().nth(unit.mi) else { return reapplied };
+                    let _evidence=super::producer_evidence::writer(&controller.name,&action.name,false,action.body.span);
                     let body_ty = super::tuple_return_ty(&action.body)
                         .or_else(|| super::effective_return_ty(&action.body));
-                    if let Some(body_ty) = body_ty.filter(|t| !matches!(t, Ty::Var { .. })) {
-                        let target = &mut self.classes.entry(controller.name.clone()).or_default().instance_methods;
-                        Self::insert_inferred_return(target, &action.name, body_ty);
-                    }
+                    if let Some(body_ty) = body_ty {
+                        if !super::current_returns::on() && matches!(body_ty,Ty::Var{..}) {
+                            super::current_returns::observe_filtered(&body_ty);
+                        }else{
+                            let target = &mut self.classes.entry(controller.name.clone()).or_default().instance_methods;
+                            Self::insert_inferred_return(target, &action.name, body_ty);
+                        }
+                    }else{super::current_returns::missing_action();}
                 }
                 Family::CtrlClassMethod => {
                     let controller = &app.controllers[unit.ci];
@@ -1947,6 +1964,7 @@ impl Analyzer {
                         crate::dialect::ControllerBodyItem::ClassMethod { method, configuration_slot: None, .. } => Some(method),
                         _ => None,
                     }).nth(unit.mi) else { return reapplied };
+                    let _evidence=super::producer_evidence::writer(&controller.name,&method.name,true,method.body.span);
                     let ret = self.method_return_ty(&controller.name, method);
                     let target = &mut self.classes.entry(controller.name.clone()).or_default().class_methods;
                     Self::register_method_return(target, &method.name, ret.as_ref());

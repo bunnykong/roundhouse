@@ -52,7 +52,7 @@ pub(super) fn reset(sources: &[crate::span::SourceFile]) {
     }
 }
 
-pub(super) struct WriterGuard(Option<Option<String>>);
+pub(super) struct WriterGuard(Option<Option<String>>, #[allow(dead_code)] super::current_returns::WriterGuard);
 impl Drop for WriterGuard {
     fn drop(&mut self) {
         if let Some(previous) = self.0.take() {
@@ -66,8 +66,9 @@ pub(super) fn writer(
     class_side: bool,
     span: Span,
 ) -> WriterGuard {
+    let returns = super::current_returns::writer(owner, method, class_side, span);
     if !on() {
-        return WriterGuard(None);
+        return WriterGuard(None, returns);
     }
     AUDIT.with(|a| {
         let mut a = a.borrow_mut();
@@ -89,7 +90,7 @@ pub(super) fn writer(
         );
         let previous = a.current.replace(id.clone());
         a.writers.entry(id).or_default();
-        WriterGuard(Some(previous))
+        WriterGuard(Some(previous), returns)
     })
 }
 

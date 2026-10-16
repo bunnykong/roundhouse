@@ -196,6 +196,11 @@ pub(super) fn insert_inferred_return(
     method: &Symbol,
     ty: Ty,
 ) {
+    // research condition records the current boundary value before any historical decision or bound.
+    if let Some(next) = super::current_returns::publish(table, method, &ty) {
+        table.insert(method.clone(), next);
+        return;
+    }
     let ty = super::fixpoint_bound::bound(ty);
     match table.get(method) {
         Some(existing) if super::strict_producers::stubs_on() && super::strict_producers::is_p(existing) => {

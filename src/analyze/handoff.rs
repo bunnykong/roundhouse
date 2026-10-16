@@ -74,6 +74,7 @@ pub(crate) fn reset() {
 /// harvest. Called after the harvest and again after the registry copies,
 /// so a copy carries the joined value.
 pub(crate) fn join_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
+    if super::current_returns::on() { return super::current_returns::flush(classes); }
     if !*JOIN {
         return;
     }
@@ -197,6 +198,7 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
 /// [`join_rets`] for one reference-mode method (both sides), after the
 /// worklist harvested it.
 pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &ClassId, method: &Symbol) {
+    if super::current_returns::on() { return super::current_returns::flush(classes); }
     if !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(class, method) {
         return;
     }

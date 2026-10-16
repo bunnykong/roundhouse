@@ -1151,7 +1151,9 @@ impl<'a> BodyTyper<'a> {
                 .unwrap_or_else(unknown),
 
             ExprNode::Ivar { name } => {
-                ctx.ivar_bindings.get(name).cloned().unwrap_or_else(unknown)
+                ctx.ivar_bindings.get(name).cloned().unwrap_or_else(|| {
+                    if super::current_returns::pending_ivar(ctx.self_ty.as_ref(),name) { Ty::pending_untyped() } else { unknown() }
+                })
             }
 
             ExprNode::SelfRef => ctx.self_ty.clone().unwrap_or_else(unknown),

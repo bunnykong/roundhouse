@@ -48,6 +48,7 @@ mod filter_targets;
 pub mod graphql;
 mod harvest_return;
 pub(crate) mod strict_producers;
+mod current_returns;
 pub mod producer_evidence;
 mod parameter_conservation;
 mod fixpoint_bound;
@@ -1313,6 +1314,7 @@ impl Analyzer {
     }
 
     fn analyze_cached(&mut self, app: &mut App) {
+        current_returns::reset(app,&mut self.classes);
         producer_evidence::reset(&app.sources);
         closure_census::start();
         self.fixpoint_checks = fixpoint_check::Checks::start();
@@ -1799,6 +1801,7 @@ impl Analyzer {
             let fp = self.c1_state_fp(app);
             eprintln!("rh-det-pre: {}", fp.det_line());
         }
+        current_returns::report(&self.classes);
         self.fold_finish(app);
 
         if std::env::var("RH_PROVENANCE_ROWDUMP").as_deref() == Ok("1")
@@ -4199,11 +4202,9 @@ impl Analyzer {
         let sccq_skip = self.sccq_skip_fine;
         for (lc_ci, lc) in app.library_classes.iter_mut().enumerate() {
             if let Some(row) = mailer_with_params.get(&lc.name) {
-                self.classes
-                    .entry(lc.name.clone())
-                    .or_default()
-                    .instance_methods
-                    .insert(params_sym.clone(), Ty::Record { row: row.clone() });
+                let table=&mut self.classes.entry(lc.name.clone()).or_default().instance_methods;
+                let value=current_returns::mailer(&lc.name,&params_sym,Ty::Record{row:row.clone()},table.get(&params_sym));
+                table.insert(params_sym.clone(),value);
             }
             // Same gate as the controller loops, with one thing it still
             // owes the views half: a MAILER's ivar harvest seeds its
@@ -5203,16 +5204,16 @@ impl Analyzer {
         // — the authentication generator's shape, in every Rails 8 app.
         let view_ctx = ClassId(Symbol::from("ActionView::Base"));
         for name in &app.view_visible_controller_methods {
-            let owners = app
+            let mut owners = app
                 .controllers
                 .iter()
                 .map(|c| &c.name)
                 .chain(app.library_classes.iter().map(|lc| &lc.name));
             let ty = owners
-                .filter_map(|cid| self.classes.get(cid))
-                .find_map(|c| c.instance_methods.get(name).cloned());
-            if let Some(ty) = ty {
+                .find_map(|cid| self.classes.get(cid).and_then(|c| c.instance_methods.get(name)).map(|t|(cid.clone(),t.clone())));
+            if let Some((source,ty)) = ty {
                 let table = &mut self.classes.entry(view_ctx.clone()).or_default().instance_methods;
+                let ty=current_returns::copied((&source,name,false),(&view_ctx,name,false),"view-helper",ty,table.get(name));
                 det::note_named("copy.view_ctx", name.as_str(), table.get(name), &ty);
                 table.insert(name.clone(), ty);
             }
@@ -5392,9 +5393,11 @@ impl Analyzer {
                 let Some(body_ty) =
                     tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
                 else {
+                    current_returns::missing_action();
                     continue;
                 };
-                if matches!(body_ty, Ty::Var { .. }) {
+                if !current_returns::on() && matches!(body_ty, Ty::Var { .. }) {
+                    current_returns::observe_filtered(&body_ty);
                     continue;
                 }
                 let target =
@@ -5507,6 +5510,7 @@ impl Analyzer {
                 .collect();
             let Some(cls) = self.classes.get_mut(id) else { continue };
             for (name, ty) in copied {
+                let ty=current_returns::copied((id,&name,false),(id,&name,true),"current-forwarder",ty,cls.class_methods.get(&name));
                 cls.class_methods.insert(name, ty);
             }
         }
@@ -5608,6 +5612,7 @@ impl Analyzer {
                     if cls.class_methods.contains_key(&name) && !folded.1.contains(&name) {
                         continue;
                     }
+                    let ty=current_returns::copied((&m,&name,false),(&id,&name,true),&format!("extend:{}",m.0.as_str()),ty,cls.class_methods.get(&name));
                     cls.class_methods.insert(name.clone(), ty);
                     folded.1.insert(name);
                 }
@@ -5667,14 +5672,17 @@ impl Analyzer {
                     {
                         // The includer harvest types this spliced body itself.
                         // The copy only declares existence, never a value writer.
-                        cls.instance_methods.entry(name.clone()).or_insert_with(strict_producers::stub);
+                        let existing=cls.instance_methods.entry(name.clone()).or_insert_with(strict_producers::stub);
+                        let value=current_returns::copied((&m,name,false),(&id,name,false),&format!("concern:{}",m.0.as_str()),ty.clone(),Some(existing));
+                        if current_returns::on(){*existing=value;}
                         continue;
                     }
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
                         continue; // own/catalog entry wins
                     }
                     det::note_named("copy.concern_inst", name.as_str(), cls.instance_methods.get(name), ty);
-                    cls.instance_methods.insert(name.clone(), ty.clone());
+                    let ty=current_returns::copied((&m,name,false),(&id,name,false),&format!("concern:{}",m.0.as_str()),ty.clone(),cls.instance_methods.get(name));
+                    cls.instance_methods.insert(name.clone(), ty);
                     folded.0.insert(name.clone());
                     // `RH_FOLD`: the copy reads the module's slot.
                     fold::note_alias(&id, name, &m);
@@ -5684,7 +5692,8 @@ impl Analyzer {
                         continue;
                     }
                     det::note_named("copy.concern_class", name.as_str(), cls.class_methods.get(name), ty);
-                    cls.class_methods.insert(name.clone(), ty.clone());
+                    let ty=current_returns::copied((&m,name,true),(&id,name,true),&format!("concern:{}",m.0.as_str()),ty.clone(),cls.class_methods.get(name));
+                    cls.class_methods.insert(name.clone(), ty);
                     folded.1.insert(name.clone());
                     fold::note_alias(&id, name, &m);
                 }
@@ -5711,6 +5720,7 @@ impl Analyzer {
     /// leave the call as it was. Runs after the concern fold, so an
     /// includer's surface already carries its other concerns' methods.
     fn fold_host_surfaces(&mut self, app: &App) {
+        if current_returns::on() { current_returns::flush(&mut self.classes); return; }
         let modules: BTreeSet<&ClassId> =
             app.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
         if modules.is_empty() {
@@ -5749,7 +5759,7 @@ impl Analyzer {
         for lc in app.library_classes.iter().filter(|lc| lc.is_module) {
             let lent_before = self.host_folded.remove(&lc.name).unwrap_or_default();
             let mut lent = BTreeSet::new();
-            let mut agreed: Vec<(Symbol, Ty)> = Vec::new();
+            let mut agreed: Vec<(Symbol, Ty, Vec<ClassId>)> = Vec::new();
             // A sole includer is `self` in the module's bodies already.
             if let Some(hosts) = hosts.get(&lc.name).filter(|h| h.len() > 1) {
                 let mut called = BTreeSet::new();
@@ -5770,14 +5780,18 @@ impl Analyzer {
                     if first.is_unknown() || !answers.all(|a| a == Some(first)) {
                         continue;
                     }
-                    agreed.push((name, first.clone()));
+                    agreed.push((name, first.clone(), hosts.iter().cloned().collect()));
                 }
             }
             let cls = self.classes.entry(lc.name.clone()).or_default();
             for name in &lent_before {
+                current_returns::remove_copy((&lc.name,name,false),"host-lend:");
                 cls.instance_methods.remove(name);
             }
-            for (name, ty) in agreed {
+            for (name, mut ty, hosts) in agreed {
+                for host in hosts {
+                    ty=current_returns::copied((&host,&name,false),(&lc.name,&name,false),&format!("host-lend:{}",host.0.as_str()),ty,cls.instance_methods.get(&name));
+                }
                 det::note_named("copy.host_lend", name.as_str(), cls.instance_methods.get(&name), &ty);
                 cls.instance_methods.insert(name.clone(), ty);
                 lent.insert(name);
@@ -5978,11 +5992,16 @@ impl Analyzer {
         body_ty: Option<&Ty>,
     ) {
         producer_evidence::input(body_ty);
+        if current_returns::on() {
+            Self::insert_inferred_return(table, method, body_ty.cloned().unwrap_or_else(Ty::unresolved));
+            return;
+        }
         match body_ty {
             Some(t) if !matches!(t, Ty::Var { .. }) => {
                 Self::insert_inferred_return(table, method, t.clone());
             }
             _ => {
+                current_returns::observe_filtered(&body_ty.cloned().unwrap_or_else(Ty::unresolved));
                 if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })
                     && !(strict_producers::stubs_on() && strict_producers::is_p(t))) {
                     table.insert(method.clone(), Ty::unresolved());
