@@ -571,12 +571,13 @@ impl<'a> BodyTyper<'a> {
                 if recv.as_ref().is_some_and(scan) || args.iter().any(scan) { return true; }
                 // Core value reads and proc/lambda creation ignore a supplied
                 // block. A source-defined override is not that core protocol.
+                let target_method = name.map(Symbol::from).unwrap_or_else(|| method.clone());
                 let ignored = self.json_value_source(recv.as_ref(), method, args)
                     || (name.is_some_and(|n| matches!(n, "proc" | "lambda")) && recv.is_none())
                     || (name.is_some_and(|n| matches!(n, "freeze" | "itself" | "[]" | "dig" | "at"
                         | "first" | "last" | "second" | "third" | "fourth" | "fifth" | "sole" | "sample"))
-                        && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), method, false)
-                        && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), method, true));
+                        && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), &target_method, false)
+                        && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), &target_method, true));
                 !ignored && block.as_ref().is_some_and(|b| {
                     matches!(&*b.node, ExprNode::Lambda { body, .. }
                         if self.block_has_escaping_exit(body, false, returns, raises))
@@ -3973,6 +3974,57 @@ mod tests {
             body,
             block_style: BlockStyle::Do,
         })
+    }
+
+    #[test]
+    fn nested_exit_ownership_respects_declared_read_aliases() {
+        let names = ["freeze", "itself", "[]", "dig", "at", "first", "last",
+            "second", "third", "fourth", "fifth", "sole", "sample"];
+        let value = || synth(ExprNode::Lit { value: Literal::Str { value: "ok".into() } });
+        let selector = |name: &str| synth(ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } });
+        for class_side in [false, true] {
+            let owner = ClassId(Symbol::from("BlockReader"));
+            let child = ClassId(Symbol::from("ChildReader"));
+            let included = ClassId(Symbol::from("IncludedReader"));
+            let mixin = ClassId(Symbol::from("ReaderMethods"));
+            let mut info = ClassInfo::default();
+            let methods = if class_side { &mut info.class_methods } else { &mut info.instance_methods };
+            for name in names { methods.insert(Symbol::from(name), Ty::Str); }
+            let mut child_info = ClassInfo::default();
+            child_info.parent = Some(owner.clone());
+            let mut included_info = ClassInfo::default();
+            included_info.includes.push(mixin.clone());
+            let mut mixin_info = info.clone();
+            mixin_info.is_module = true;
+            let classes = HashMap::from([(owner.clone(), info), (child.clone(), child_info),
+                (included.clone(), included_info), (mixin, mixin_info)]);
+            let typer = BodyTyper::new(&classes);
+            let receivers = if class_side { vec![owner, child] } else { vec![owner, child, included] };
+            for id in receivers {
+                for name in names {
+                    for (method, args) in [(name, vec![]), ("send", vec![selector(name)]),
+                        ("public_send", vec![synth(ExprNode::Lit { value: Literal::Str { value: name.into() } })]),
+                        ("__send__", vec![selector(name)]),
+                        ("send", vec![selector("public_send"), selector(name)])] {
+                        for nonlocal_return in [false, true] {
+                            let mut recv = var("reader");
+                            recv.ty = Some(Ty::Class { id: id.clone(), args: vec![].into() });
+                            let exit = if nonlocal_return { ExprNode::Return { value: value() } }
+                                else { ExprNode::Break { value: Some(value()) } };
+                            let mut call = synth(ExprNode::Send {
+                                recv: Some(recv), method: Symbol::from(method), args: args.clone(),
+                                block: Some(lambda(vec![], synth(exit))), parenthesized: true,
+                            });
+                            // The source-defined method normally returns String after yielding.
+                            // Only the block's nonlocal return exits the surrounding tap.
+                            call.ty = Some(Ty::Str);
+                            assert_eq!(typer.block_has_escaping_exit(&call, false, true, true), nonlocal_return,
+                                "{id:?} {method} -> {name}, class side {class_side}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
