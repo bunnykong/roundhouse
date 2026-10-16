@@ -791,7 +791,7 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
         // gradual escape (TS `any`, Python `Any`) emit it cleanly,
         // strict targets (Rust, Go) elevate it to a Diagnostic::Error
         // at emit time.
-        Node::AnyType(_) => Ok(Ty::untyped()),
+        Node::AnyType(_) => Ok(Ty::gradual_untyped()),
         Node::OptionalType(opt) => {
             let inner = ty_from_node(&opt.type_(), ctx)?;
             Ok(union_or_single(vec![inner, Ty::Nil]))
@@ -1045,8 +1045,8 @@ fn map_class_instance(name: &str, args: Vec<Ty>) -> Ty {
         },
         // A bare `Hash` / `Array` is the unparameterized container, not a
         // class named Hash with nothing to call on it.
-        ("Hash", []) => Ty::Hash { key: std::sync::Arc::new(Ty::untyped()), value: std::sync::Arc::new(Ty::untyped()) },
-        ("Array", []) => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
+        ("Hash", []) => Ty::Hash { key: std::sync::Arc::new(Ty::gradual_untyped()), value: std::sync::Arc::new(Ty::gradual_untyped()) },
+        ("Array", []) => Ty::Array { elem: std::sync::Arc::new(Ty::gradual_untyped()) },
         _ => Ty::Class {
             id: ClassId(Symbol::new(name)),
             args: args.into(),

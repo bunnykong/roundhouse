@@ -309,7 +309,7 @@ pub(in crate::analyze) fn register(
                     Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
                     _ => None,
                 })
-                .unwrap_or_else(Ty::pending_untyped);
+                .unwrap_or_else(Ty::untyped);
             let cls = classes.entry(lc.name.clone()).or_default();
             cls.parent = lc.parent.clone();
             for (entry, ty) in [

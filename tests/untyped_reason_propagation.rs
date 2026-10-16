@@ -107,7 +107,7 @@ fn gradual_reasons_cross_distinct_owners_on_the_dirty_frontier() {
 }
 
 #[test]
-fn equal_container_branches_keep_gradual_reasons_in_both_orders() {
+fn concrete_container_projections_keep_main_in_both_orders() {
     for (pending, gradual, access) in [
         ("[cycle]", "[parse(raw)]", ".first"),
         (
@@ -139,7 +139,7 @@ fn equal_container_branches_keep_gradual_reasons_in_both_orders() {
             let rbs = declarations(&source);
             assert!(
                 rbs.lines()
-                    .any(|line| line.contains("def self.resolve:") && line.ends_with("-> untyped")),
+                    .any(|line| line.contains("def self.resolve:") && line.ends_with("-> Symbol")),
                 "pending={pending}, reversed={reversed}: {rbs}"
             );
         }
@@ -525,6 +525,27 @@ fn pending_bindings_settle_across_block_aliases_and_nested_projections() {
                 rbs.contains(&format!("def {prefix}value: () -> String")),
                 "{source}: {rbs}"
             );
+        }
+    }
+}
+
+#[test]
+fn destructuring_never_creates_gradual_provenance_from_member_types() {
+    for prefix in ["self.", ""] {
+        for body in [
+            "x, other = [\"ok\", JSON.parse(raw)]; x",
+            "other, x = [JSON.parse(raw), \"ok\"]; x",
+            "@x, @other = [\"ok\", JSON.parse(raw)]; @x",
+            "@other, @x = [JSON.parse(raw), \"ok\"]; @x",
+            "x, other = JSON.parse(raw); x",
+            "{k: JSON.parse(raw)} => {k: x}; x",
+            "{k: JSON.parse(raw)} => {k:}; k",
+            "h = {k: JSON.parse(raw)}; h => {k: x}; x",
+            "h = {k: JSON.parse(raw)}; h => {**rest}; rest[:k]",
+        ] {
+            let source = format!("class Probe\n def {prefix}value(raw)\n {body}\n end\n def {prefix}resolve(raw)\n value(raw) || \"fallback\"\n end\nend\n");
+            let rbs = declarations(&source);
+            assert!(rbs.contains(&format!("def {prefix}resolve: (untyped raw) -> String")), "{source}\n{rbs}");
         }
     }
 }

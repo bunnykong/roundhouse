@@ -142,7 +142,7 @@ fn refine_signature_block(m: &mut crate::dialect::MethodDef, block_ty: Ty) {
                 .iter()
                 .map(|p| Param {
                     name: p.name.clone(),
-                    ty: Ty::pending_untyped().into(),
+                    ty: Ty::untyped().into(),
                     kind: ParamKind::Required,
                 })
                 .chain(std::iter::once(block_param))
@@ -150,7 +150,7 @@ fn refine_signature_block(m: &mut crate::dialect::MethodDef, block_ty: Ty) {
             m.signature = Some(Ty::Fn {
                 params: placeholder_params.into(),
                 block: Some(std::sync::Arc::new(block_ty)),
-                ret: std::sync::Arc::new(Ty::pending_untyped()),
+                ret: std::sync::Arc::new(Ty::untyped()),
                 effects: crate::effect::EffectSet::default(),
             });
         }
@@ -173,14 +173,14 @@ mod tests {
     use crate::ty::{Param, ParamKind, Ty};
 
     #[test]
-    fn synthesized_signature_slots_are_pending_not_declared_gradual() {
+    fn synthesized_signature_slots_are_inferred_not_declared_gradual() {
         let mut method = forwarder_calls_each();
         method.signature = None;
         refine_signature_block(&mut method, typed_callee_block_sig());
         let Some(Ty::Fn { params, ret, .. }) = method.signature else { panic!("missing signature") };
-        assert!(ret.inference_eq(&Ty::pending_untyped()));
+        assert!(ret.inference_eq(&Ty::untyped()));
         for p in params.iter().filter(|p| !matches!(p.kind, ParamKind::Block)) {
-            assert!(p.ty.inference_eq(&Ty::pending_untyped()));
+            assert!(p.ty.inference_eq(&Ty::untyped()));
         }
     }
 

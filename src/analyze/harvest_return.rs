@@ -4,7 +4,7 @@
 //! harvest table between a concrete type and `Concrete|Untyped` every
 //! round and exhaust `FIXPOINT_CAP`. When an existing entry and a new
 //! body type share the same concrete core (after dropping top-level
-//! `Untyped`/`Var` arms), strip only pending unknown arms and keep any
+//! `Untyped`/`Var` arms), strip non-gradual unknown arms and keep any
 //! gradual `Untyped` arm (#964). Nil-only cores keep sticky
 //! `Nil|Untyped` — a full lattice join was tried and rejected because
 //! `Untyped` then `Nil` collapsed Campfire URI helpers to bare `Nil`.
@@ -22,7 +22,7 @@ use super::body;
 
 #[cfg(test)]
 fn gradual_nil() -> Ty {
-    body::union_of(Ty::Nil, Ty::untyped())
+    body::union_of(Ty::Nil, Ty::gradual_untyped())
 }
 
 /// True when stripping top-level unknown arms leaves a usable core
@@ -39,9 +39,10 @@ fn has_informative_core(ty: &Ty) -> bool {
 
 /// If two harvested returns differ only by top-level `Untyped`/`Var`
 /// arms, return the stable form to store. Non-Nil concrete cores keep
-/// the stripped type when the unknown arm is pending
+/// the stripped type when the unknown arm is Pending or Inferred
 /// (`Configuration|Pending` → `Configuration`); gradual arms survive.
-/// Nil-only cores keep `Nil|Untyped` when either side was gradual.
+/// Nil-only cores retain main's `Nil|Untyped` safety rule; the unknown
+/// is Gradual only when a whitelisted gradual value reached either side.
 fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
     let core_e = existing.clone().strip_unknown();
     let core_n = new.clone().strip_unknown();
@@ -51,7 +52,9 @@ fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
     let core_e = core_e.join_equal_reasons(&core_n).unwrap_or(core_e);
     if matches!(core_e, Ty::Nil) {
         if existing.has_unknown_arm() || new.has_unknown_arm() {
-            return Some(body::union_of(Ty::Nil, Ty::derived_untyped([existing, new])));
+            let unknown = gradual_arm(existing).or_else(|| gradual_arm(new))
+                .map(|why| Ty::Untyped { why }).unwrap_or_else(Ty::untyped);
+            return Some(body::union_of(Ty::Nil, unknown));
         }
         return Some(core_e);
     }
@@ -63,14 +66,14 @@ fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
     Some(core_e)
 }
 
-/// The reason of a top-level `untyped` arm that is not only pending.
+/// Only an explicitly admitted gradual value may keep an unknown arm sticky.
 fn gradual_arm(ty: &Ty) -> Option<crate::ty::Why> {
     let arms: &[Ty] = match ty {
         Ty::Union { variants } => variants,
         other => std::slice::from_ref(other),
     };
     arms.iter().find_map(|t| match t {
-        Ty::Untyped { why } if !why.is_pending_only() => Some(*why),
+        Ty::Untyped { why } if why.is_gradual() => Some(*why),
         _ => None,
     })
 }
@@ -81,16 +84,14 @@ fn gradual_arm(ty: &Ty) -> Option<crate::ty::Why> {
 fn untie(ty: &Ty, prior: &Ty) -> Ty {
     let go = |t: &Ty| {
         if t == prior {
-            return Ty::derived_untyped([t]);
+            return Ty::untyped();
         }
         if let (Ty::Union { variants: pv }, Ty::Union { variants: tv }) = (prior, t)
             && pv.iter().all(|v| tv.contains(v))
         {
             let mut rest: Vec<Ty> = tv.iter().filter(|v| !pv.contains(v)).map(|v| untie(v, prior)).collect();
-            if let Some(unknown) = rest.iter_mut().find(|t| matches!(t, Ty::Untyped { .. })) {
-                *unknown = Ty::derived_untyped([&*unknown, prior]);
-            } else {
-                rest.push(Ty::derived_untyped([prior]));
+            if !rest.contains(&Ty::untyped()) {
+                rest.push(Ty::untyped());
             }
             return Ty::Union { variants: rest.into() };
         }
@@ -173,7 +174,7 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
 /// Conservative insertion into the harvested-return table.
 ///
 /// RBS-sourced `Ty::Fn` stays authoritative. Same-core returns that
-/// differ only by pending unknown arms stabilize to the concrete core;
+/// differ only by non-gradual unknown arms stabilize to the concrete core;
 /// gradual arms and Nil-only cores stay gradual. An informative existing return is never
 /// replaced by bare `Untyped`/`Var`. First writes are stored as-is,
 /// including gradual unions.
@@ -224,7 +225,7 @@ mod tests {
     #[test]
     fn nil_versus_nil_or_untyped_keeps_gradual_nil() {
         let nil = Ty::Nil;
-        let gradual = body::union_of(Ty::Nil, Ty::untyped());
+        let gradual = body::union_of(Ty::Nil, Ty::gradual_untyped());
         let stable =
             stabilize_untyped_return_oscillation(&nil, &gradual).expect("nil-only cores match");
         assert_eq!(stable, gradual);
@@ -233,10 +234,10 @@ mod tests {
     #[test]
     fn a_nested_union_of_unknown_arms_is_not_informative() {
         let unknown = Ty::Union {
-            variants: vec![Ty::Union { variants: vec![Ty::untyped(), Ty::Var { var: TyVar(0) }].into() }, Ty::untyped()].into(),
+            variants: vec![Ty::Union { variants: vec![Ty::gradual_untyped(), Ty::Var { var: TyVar(0) }].into() }, Ty::gradual_untyped()].into(),
         };
         assert!(!has_informative_core(&unknown));
-        let known = Ty::Union { variants: vec![Ty::Union { variants: vec![Ty::Str, Ty::untyped()].into() }, Ty::untyped()].into() };
+        let known = Ty::Union { variants: vec![Ty::Union { variants: vec![Ty::Str, Ty::gradual_untyped()].into() }, Ty::gradual_untyped()].into() };
         assert!(has_informative_core(&known));
     }
 
@@ -248,7 +249,7 @@ mod tests {
     #[test]
     fn var_nil_versus_untyped_nil_keeps_gradual_nil() {
         let a = body::union_of(Ty::Var { var: TyVar(0) }, Ty::Nil);
-        let b = body::union_of(Ty::untyped(), Ty::Nil);
+        let b = body::union_of(Ty::gradual_untyped(), Ty::Nil);
         let stable = stabilize_untyped_return_oscillation(&a, &b).expect("same nil core");
         assert_eq!(stable, gradual_nil());
     }
@@ -281,7 +282,7 @@ mod tests {
     fn insert_preserves_first_write_of_gradual_union() {
         let method = Symbol::from("build");
         let mut table = HashMap::new();
-        let gradual = body::union_of(Ty::Str, Ty::untyped());
+        let gradual = body::union_of(Ty::Str, Ty::gradual_untyped());
         insert_inferred_return(&mut table, &method, gradual.clone());
         assert_eq!(table.get(&method), Some(&gradual));
     }
@@ -309,7 +310,7 @@ mod tests {
         let method = Symbol::from("config");
         let mut table = HashMap::new();
         insert_inferred_return(&mut table, &method, cfg());
-        insert_inferred_return(&mut table, &method, Ty::untyped());
+        insert_inferred_return(&mut table, &method, Ty::gradual_untyped());
         assert_eq!(table.get(&method), Some(&cfg()));
     }
 
@@ -325,7 +326,7 @@ mod tests {
         insert_inferred_return(
             &mut table,
             &method,
-            Ty::Union { variants: vec![Ty::untyped(), Ty::untyped()].into() },
+            Ty::Union { variants: vec![Ty::gradual_untyped(), Ty::gradual_untyped()].into() },
         );
         assert_eq!(table.get(&method), Some(&concrete));
     }
@@ -356,7 +357,7 @@ mod tests {
     fn insert_recursive_return_that_nests_its_previous_round_keeps_the_previous() {
         let method = Symbol::from("sanitize");
         let mut table = HashMap::new();
-        let first = union(vec![Ty::Str, arr(Ty::untyped())]);
+        let first = union(vec![Ty::Str, arr(Ty::gradual_untyped())]);
         insert_inferred_return(&mut table, &method, first.clone());
         insert_inferred_return(&mut table, &method, union(vec![Ty::Str, arr(first.clone())]));
         assert_eq!(table.get(&method), Some(&first));
@@ -366,13 +367,13 @@ mod tests {
     fn insert_recursive_return_flattened_into_a_union_is_cut() {
         let method = Symbol::from("sanitize");
         let mut table = HashMap::new();
-        let first = union(vec![Ty::Str, sym_hash(Ty::untyped())]);
+        let first = union(vec![Ty::Str, sym_hash(Ty::gradual_untyped())]);
         insert_inferred_return(&mut table, &method, first.clone());
-        let nested = union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(Ty::untyped()), Ty::Int]))]);
+        let nested = union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(Ty::gradual_untyped()), Ty::Int]))]);
         insert_inferred_return(&mut table, &method, nested);
-        let cut = union(vec![Ty::Str, sym_hash(union(vec![Ty::Int, Ty::untyped()]))]);
+        let cut = union(vec![Ty::Str, sym_hash(union(vec![Ty::Int, Ty::gradual_untyped()]))]);
         assert_eq!(table.get(&method), Some(&cut));
-        insert_inferred_return(&mut table, &method, union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(union(vec![Ty::Int, Ty::untyped()])), Ty::Int]))]));
+        insert_inferred_return(&mut table, &method, union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(union(vec![Ty::Int, Ty::gradual_untyped()])), Ty::Int]))]));
         assert_eq!(table.get(&method), Some(&cut));
     }
 
@@ -384,7 +385,7 @@ mod tests {
             row: crate::ty::Row { fields: [(Symbol::from("nested"), field)].into_iter().collect(), rest: None },
         };
         let mut table = HashMap::new();
-        let first = record(Ty::untyped());
+        let first = record(Ty::gradual_untyped());
         insert_inferred_return(&mut table, &method, first.clone());
         insert_inferred_return(&mut table, &method, record(first.clone()));
         assert_eq!(table.get(&method), Some(&first));
@@ -410,7 +411,7 @@ mod reason_tests {
     #[test]
     fn gradual_arm_survives_pending_and_concrete_rounds() {
         let pending = body::union_of(Ty::Sym, Ty::Var { var: TyVar(0) });
-        let gradual = body::union_of(Ty::Sym, Ty::untyped());
+        let gradual = body::union_of(Ty::Sym, Ty::gradual_untyped());
         for (first, second) in [(pending.clone(), gradual.clone()), (gradual.clone(), pending.clone())] {
             assert_eq!(stabilize_untyped_return_oscillation(&first, &second), Some(gradual.clone()));
             let method = Symbol::from("locale_for");
@@ -427,9 +428,9 @@ mod reason_tests {
 
     #[test]
     fn gradual_reason_wins_union_dedup_in_both_orders() {
-        for (a, b) in [(Ty::pending_untyped(), Ty::untyped()), (Ty::untyped(), Ty::pending_untyped())] {
+        for (a, b) in [(Ty::pending_untyped(), Ty::gradual_untyped()), (Ty::gradual_untyped(), Ty::pending_untyped())] {
             let merged = body::union_of(a.clone(), b.clone());
-            assert!(matches!(merged, Ty::Untyped { why } if !why.is_pending_only()));
+            assert!(matches!(merged, Ty::Untyped { why } if why.is_gradual()));
             let merged = body::union_many(vec![Ty::Sym, a, b]);
             assert!(gradual_arm(&merged).is_some());
         }
@@ -439,7 +440,7 @@ mod reason_tests {
     fn equal_union_write_keeps_new_gradual_evidence_through_later_pending_writes() {
         let method = Symbol::from("value");
         let pending = body::union_of(Ty::Sym, Ty::pending_untyped());
-        let gradual = body::union_of(Ty::Sym, Ty::untyped());
+        let gradual = body::union_of(Ty::Sym, Ty::gradual_untyped());
         let mut table = HashMap::new();
         insert_inferred_return(&mut table, &method, pending.clone());
         insert_inferred_return(&mut table, &method, gradual.clone());
@@ -460,7 +461,7 @@ mod reason_tests {
             },
         };
         let pending = record(vec![("name", Ty::Str), ("payload", Ty::pending_untyped())]);
-        let gradual = record(vec![("payload", Ty::untyped()), ("name", Ty::Str)]);
+        let gradual = record(vec![("payload", Ty::gradual_untyped()), ("name", Ty::Str)]);
         let before = serde_json::to_string(&pending).unwrap();
         let mut table = HashMap::new();
         insert_inferred_return(&mut table, &method, pending.clone());
@@ -469,7 +470,7 @@ mod reason_tests {
             insert_inferred_return(&mut table, &method, next);
             assert_eq!(serde_json::to_string(&table[&method]).unwrap(), before);
             let Ty::Record { row } = &table[&method] else { panic!("expected record") };
-            assert!(matches!(&row.fields[&Symbol::from("payload")], Ty::Untyped { why } if !why.is_pending_only()));
+            assert!(matches!(&row.fields[&Symbol::from("payload")], Ty::Untyped { why } if why.is_gradual()));
         }
     }
 
@@ -480,28 +481,21 @@ mod transfer_reason_tests {
     use super::*;
 
     #[test]
-    fn stabilization_cuts_preserve_only_actual_gradual_evidence() {
-        for input in [Ty::pending_untyped(), Ty::untyped()] {
-            let nilable = body::union_of(Ty::Nil, input.clone());
-            for (old, new) in [(&Ty::Nil, &nilable), (&nilable, &Ty::Nil)] {
-                let stable = stabilize_untyped_return_oscillation(old, new).unwrap();
-                assert!(stable.inference_eq(&nilable), "{stable:?}");
+    fn inferred_unknowns_follow_main_and_never_become_sticky() {
+        for unknown in [Ty::pending_untyped(), Ty::untyped()] {
+            let noisy = body::union_of(Ty::Str, unknown);
+            for (old, new) in [(&Ty::Str, &noisy), (&noisy, &Ty::Str)] {
+                assert!(stabilize_untyped_return_oscillation(old, new).unwrap().inference_eq(&Ty::Str));
             }
-            let prior = Ty::Array {
-                elem: std::sync::Arc::new(input.clone()),
-            };
-            let wrapped = Ty::Array {
-                elem: std::sync::Arc::new(prior.clone()),
-            };
-            assert!(untie(&wrapped, &prior).inference_eq(&prior));
         }
-        let prior = Ty::Array {
-            elem: std::sync::Arc::new(Ty::Str),
-        };
-        let wrapped = Ty::Array {
-            elem: std::sync::Arc::new(prior.clone()),
-        };
-        let cut = untie(&wrapped, &prior);
-        assert!(Ty::derived_untyped([&cut]).inference_eq(&Ty::pending_untyped()));
+        let gradual = body::union_of(Ty::Str, Ty::gradual_untyped());
+        assert!(stabilize_untyped_return_oscillation(&Ty::Str, &gradual).unwrap().inference_eq(&gradual));
+    }
+
+    #[test]
+    fn recursive_cuts_are_computations_even_when_the_cut_contains_gradual_data() {
+        let prior = Ty::Array { elem: Ty::gradual_untyped().into() };
+        let wrapped = Ty::Array { elem: prior.clone().into() };
+        assert!(untie(&wrapped, &prior).inference_eq(&Ty::Array { elem: Ty::untyped().into() }));
     }
 }

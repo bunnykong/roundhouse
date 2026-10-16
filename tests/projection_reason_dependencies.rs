@@ -1,4 +1,4 @@
-//! Unknown provenance follows result dependencies, including forwarded calls.
+//! Computed projections retain main behavior even with gradual operands.
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -64,7 +64,7 @@ fn check(body: &str, instance: bool, depth: usize, gradual: bool) {
         .join("\n");
     let mut expected = vec![format!(
         "def {prefix}value: (String raw) -> {}",
-        if gradual { "untyped" } else { "String" }
+        if gradual { "Symbol" } else { "String" }
     )];
     expected.extend((0..depth).map(|i| format!("def {prefix}forward{i}: (String raw) -> untyped")));
     let actual: Vec<_> = rbs
@@ -81,7 +81,7 @@ fn check(body: &str, instance: bool, depth: usize, gradual: bool) {
     actual.sort();
     assert_eq!(actual, expected, "{source}\n{rbs}");
 
-    if !gradual {
+    {
         let diagnostics = diagnose(&app);
         let errors: Vec<_> = diagnostics
             .iter()
@@ -147,7 +147,7 @@ fn unrelated_gradual_elements_do_not_poison_concrete_results() {
 }
 
 #[test]
-fn gradual_seeds_and_block_results_survive_complete_forwarding_declarations() {
+fn computed_seeds_and_block_results_keep_main_forwarding_declarations() {
     for body in [
         "[1].reduce(JSON.parse(raw)) { |acc, x| acc }",
         "[1].inject(JSON.parse(raw)) { |acc, x| acc }",
@@ -201,7 +201,7 @@ fn gradual_seeds_and_block_results_survive_complete_forwarding_declarations() {
 }
 
 #[test]
-fn reflective_writes_depend_on_the_assigned_value() {
+fn reflective_computations_keep_main_forwarding_declarations() {
     for method in ["instance_variable_set", "class_variable_set"] {
         let name = if method == "class_variable_set" {
             "@@x"

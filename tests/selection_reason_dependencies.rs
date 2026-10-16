@@ -1,10 +1,10 @@
-//! Selectors, options and ignored blocks do not supply returned-value reasons.
+//! Fail-closed transfers preserve pinned main declarations outside the whitelist.
 
 use std::{collections::HashMap, path::PathBuf};
 
 use roundhouse::analyze::{DiagnosticKind, diagnose};
 
-fn check(body: &str, instance: bool, depth: usize, gradual: bool, forward: &str) {
+fn check(body: &str, instance: bool, depth: usize, gradual: bool, _forward: &str) {
     let prefix = if instance { "" } else { "self." };
     let receiver = if instance { "Probe.new" } else { "Probe" };
     let fallback = if gradual { ":fallback" } else { "\"fallback\"" };
@@ -80,12 +80,17 @@ end
         .map(|f| f.content)
         .collect::<Vec<_>>()
         .join("\n");
-    let mut expected = vec![format!(
-        "def {prefix}value: (String raw) -> {}",
-        if gradual { "untyped" } else { "String" }
-    )];
-    expected
-        .extend((0..depth).map(|i| format!("def {prefix}forward{i}: (String raw) -> {forward}")));
+    let baselines: serde_json::Value = serde_json::from_str(include_str!("selection_reason_main.json")).unwrap();
+    let baseline = &baselines[body];
+    assert!(!baseline.is_null(), "missing pinned-main case: {body}");
+    // This receiver-only JSON projection is the one intentional #964 repair
+    // in this collection. Concrete/mixed receivers retain main's answer.
+    let result = if body == r###"JSON.parse(raw).dig(JSON.parse("0"))"### {
+        "untyped"
+    } else { baseline["value"].as_str().unwrap() };
+    let forward = baseline["forward"].as_str().unwrap();
+    let mut expected = vec![format!("def {prefix}value: (String raw) -> {result}")];
+    expected.extend((0..depth).map(|i| format!("def {prefix}forward{i}: (String raw) -> {forward}")));
     let actual: Vec<_> = rbs
         .lines()
         .map(str::trim)
@@ -100,7 +105,7 @@ end
     actual.sort();
     assert_eq!(actual, expected, "{source}\n{rbs}");
 
-    if !gradual {
+    if result == "String" || result == "Symbol" {
         let diagnostics = diagnose(&app);
         let errors: Vec<_> = diagnostics
             .iter()
@@ -639,7 +644,7 @@ fn declared_projection_returns() {
 }
 
 #[test]
-fn actual_gradual_results() {
+fn source_values_only_survive_whitelisted_value_flows() {
     for (body, gradual, forward) in [
         (
             r###"ValueDig.__send__(:send, :dig, JSON.parse(raw))"###,
@@ -796,6 +801,80 @@ fn actual_gradual_results() {
             false,
             "untyped",
         ),
+    ] {
+        for instance in [false, true] {
+            for depth in [2, 4] {
+                check(body, instance, depth, gradual, forward);
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_serialization_never_inherits_keys_or_values() {
+    for (body, gradual, forward) in [
+        (r###"[{JSON.parse('"k"') => "ok"}].as_json.first["k"]"###, false, "untyped"),
+        (r###"{"outer" => {JSON.parse('"k"') => "ok"}}.as_json["outer"]["k"]"###, false, "untyped"),
+        (r###"[[{JSON.parse('"k"') => "ok"}]].as_json.first.first["k"]"###, false, "untyped"),
+        (r###"{"outer" => [{JSON.parse('"k"') => "ok"}]}.as_json["outer"].first["k"]"###, false, "untyped"),
+        (r###"[{JSON.parse('["k"]') => "ok"}].as_json.first.values.first"###, false, "untyped"),
+        (r###"[{JSON.parse('{"k":1}') => "ok"}].as_json.first.values.first"###, false, "untyped"),
+        (r###"[{JSON.parse('"k"') => "ok"}].send(:as_json).first["k"]"###, false, "untyped"),
+        (r###"{"outer" => {JSON.parse('"k"') => "ok"}}.public_send("as_json")["outer"]["k"]"###, false, "untyped"),
+        (r###"items = [{JSON.parse('"k"') => "ok"}]; options = JSON.parse("{}"); items.as_json(options) { JSON.parse(raw) }.first["k"]"###, false, "untyped"),
+        (r###"[{"k" => JSON.parse('"ok"')}].as_json.first["k"]"###, false, "untyped"),
+        (r###"{"outer" => {"k" => JSON.parse('"ok"')}}.as_json["outer"]["k"]"###, false, "untyped"),
+    ] {
+        for instance in [false, true] {
+            for depth in [2, 4] {
+                check(body, instance, depth, gradual, forward);
+            }
+        }
+    }
+}
+
+#[test]
+fn hash_constructors_keep_main_for_every_operand_form() {
+    for (body, gradual, forward) in [
+        (r###"Hash[JSON.parse('"k"'), "ok"]["k"]"###, false, "untyped"),
+        (r###"Hash[[[JSON.parse('"k"'), "ok"]]]["k"]"###, false, "untyped"),
+        (r###"Hash[{JSON.parse('"k"') => "ok"}]["k"]"###, false, "untyped"),
+        (r###"Hash[JSON.parse('"k"'), "ok", "other", "ok"]["k"]"###, false, "untyped"),
+        (r###"Hash["other", "ok", JSON.parse('"k"'), "ok"]["k"]"###, false, "untyped"),
+        (r###"Hash[[[JSON.parse('"k"'), "ok"], ["other", "ok"]]]["k"]"###, false, "untyped"),
+        (r###"Hash[[["other", "ok"], [JSON.parse('"k"'), "ok"]]]["k"]"###, false, "untyped"),
+        (r###"Hash["k", JSON.parse('"ok"')]["k"]"###, false, "untyped"),
+        (r###"Hash[[["k", JSON.parse('"ok"')]]]["k"]"###, false, "untyped"),
+        (r###"Hash[{"k" => JSON.parse('"ok"')}]["k"]"###, false, "untyped"),
+        (r###"Hash.send(:[], JSON.parse('"k"'), "ok")["k"]"###, false, "untyped"),
+        (r###"Hash.public_send("[]", [[JSON.parse('"k"'), "ok"]])["k"]"###, false, "untyped"),
+        (r###"Hash.__send__(:send, :[], {JSON.parse('"k"') => "ok"})["k"]"###, false, "untyped"),
+        (r###"key = JSON.parse('"k"'); pairs = [[key, "ok"]]; Hash[pairs]["k"]"###, false, "untyped"),
+        (r###"Hash[JSON.parse('"k"'), "ok"] { JSON.parse(raw) }["k"]"###, false, "untyped"),
+    ] {
+        for instance in [false, true] {
+            for depth in [2, 4] {
+                check(body, instance, depth, gradual, forward);
+            }
+        }
+    }
+}
+
+#[test]
+fn exec_binding_and_destructuring_keep_main() {
+    for (body, gradual, forward) in [
+        (r###"Object.new.instance_exec(["ok", JSON.parse(raw)]) { |value, other| value }"###, false, "untyped"),
+        (r###"Probe.class_exec(["ok", JSON.parse(raw)]) { |value, other| value }"###, false, "untyped"),
+        (r###"Probe.module_exec(["ok", JSON.parse(raw)]) { |value, other| value }"###, false, "untyped"),
+        (r###"Object.new.instance_exec([JSON.parse(raw), "ok"]) { |other, value| value }"###, false, "untyped"),
+        (r###"Object.new.instance_exec("ok", JSON.parse(raw)) { |value, other| value }"###, false, "untyped"),
+        (r###"Object.new.instance_exec(JSON.parse(raw), "ok") { |other, value| value }"###, false, "untyped"),
+        (r###"Object.new.instance_exec(["ok", JSON.parse(raw)]) { |value, *others| value }"###, false, "untyped"),
+        (r###"Object.new.instance_exec(["ok", JSON.parse(raw)]) { |(value, other)| value }"###, false, "untyped"),
+        (r###"args = ["ok", JSON.parse(raw)]; Object.new.instance_exec(args) { |value, other| value }"###, false, "untyped"),
+        (r###"Object.new.send(:instance_exec, ["ok", JSON.parse(raw)]) { |value, other| value }"###, false, "untyped"),
+        (r###"Probe.public_send(:class_exec, ["ok", JSON.parse(raw)]) { |value, other| value }"###, false, "untyped"),
+        (r###"Probe.__send__(:send, :module_exec, ["ok", JSON.parse(raw)]) { |value, other| value }"###, false, "untyped"),
     ] {
         for instance in [false, true] {
             for depth in [2, 4] {

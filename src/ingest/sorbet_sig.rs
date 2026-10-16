@@ -710,7 +710,7 @@ pub(super) fn sorbet_ty(
             return None;
         }
         return match method.as_str() {
-            "untyped" => Some(Ty::untyped()),
+            "untyped" => Some(Ty::gradual_untyped()),
             // The receiver-dependent type, and the reason this whole
             // seam exists: a factory declared once on a base class
             // answers with an instance of whichever subclass called

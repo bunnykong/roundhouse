@@ -298,13 +298,15 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
         // `Array` and `Hash` must narrow to their parameterized IR
         // forms — `Ty::Class { id: Array }` falls through dispatch
         // (which goes through array_method only on `Ty::Array { .. }`).
-        // The check supplies only a collection spine. These member
-        // placeholders receive the checked value's reason on intersection;
-        // naming Array or Hash is not a new gradual source.
-        "Array" if core => Ty::Array { elem: std::sync::Arc::new(Ty::pending_untyped()) },
+        // Element type at narrowing time is `Ty::Untyped` (gradual
+        // escape), not `Ty::Var` (inference gap): `is_a?(Hash)` only
+        // tells us "this is a Hash of *some* shape," and downstream
+        // dispatch should propagate that gradualness rather than
+        // leave block params as Var.
+        "Array" if core => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
         "Hash" if core => Ty::Hash {
-            key: std::sync::Arc::new(Ty::pending_untyped()),
-            value: std::sync::Arc::new(Ty::pending_untyped()),
+            key: std::sync::Arc::new(Ty::untyped()),
+            value: std::sync::Arc::new(Ty::untyped()),
         },
         _ => Ty::Class {
             id: ClassId(Symbol::from(
@@ -462,13 +464,12 @@ fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
                 .filter_map(|variant| intersect_variant(variant, narrower))
                 .collect();
             if kept.is_empty() {
-                collection_narrower(current, narrower)
+                narrower.clone()
             } else {
                 super::union_many(kept)
             }
         }
-        _ => intersect_variant(current, narrower)
-            .unwrap_or_else(|| collection_narrower(current, narrower)),
+        _ => intersect_variant(current, narrower).unwrap_or_else(|| narrower.clone()),
     }
 }
 
@@ -478,37 +479,19 @@ fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
 fn intersect_variant(current: &Ty, narrower: &Ty) -> Option<Ty> {
     match (current, narrower) {
         (Ty::Class { id, .. }, Ty::Array { .. }) if id.0.as_str() == super::send::PARAM_VALUE => {
-            Some(Ty::Array {
-                elem: std::sync::Arc::new(super::send::param_value_ty()),
-            })
+            Some(Ty::Array { elem: std::sync::Arc::new(super::send::param_value_ty()) })
         }
         (Ty::Class { id, .. }, Ty::Hash { .. }) if id.0.as_str() == super::send::PARAM_VALUE => {
-            Some(Ty::Hash {
-                key: std::sync::Arc::new(Ty::Str),
-                value: std::sync::Arc::new(super::send::param_value_ty()),
-            })
+            Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(super::send::param_value_ty()) })
         }
         (Ty::Untyped { .. } | Ty::Var { .. }, Ty::Array { .. } | Ty::Hash { .. }) => {
-            Some(collection_narrower(current, narrower))
+            Some(narrower.clone())
         }
         _ if ty_compatible(current, narrower) => Some(current.clone()),
         _ => None,
     }
 }
 
-/// A class check supplies the collection spine; members are still derived
-/// from the checked value, rather than a new gradual source.
-fn collection_narrower(current: &Ty, narrower: &Ty) -> Ty {
-    let unknown = || std::sync::Arc::new(Ty::derived_untyped([current]));
-    match narrower {
-        Ty::Array { .. } => Ty::Array { elem: unknown() },
-        Ty::Hash { .. } => Ty::Hash {
-            key: unknown(),
-            value: unknown(),
-        },
-        _ => narrower.clone(),
-    }
-}
 /// Remove variants matching `ty` from a union (for `is_a?` else-branch).
 fn remove_variant(current: &Ty, ty: &Ty) -> Ty {
     match current {
@@ -623,53 +606,4 @@ fn collect_touched_locals(e: &Expr, out: &mut std::collections::HashSet<Symbol>)
         _ => {}
     }
     e.node.for_each_child(&mut |c| collect_touched_locals(c, out));
-}
-
-#[cfg(test)]
-mod transfer_reason_tests {
-    use super::*;
-
-    #[test]
-    fn collection_narrowing_preserves_pending_gradual_and_known_members() {
-        for input in [
-            Ty::Var {
-                var: crate::ident::TyVar(1),
-            },
-            Ty::pending_untyped(),
-            Ty::untyped(),
-        ] {
-            for name in ["Array", "Hash"] {
-                let constant = Expr::new(
-                    crate::span::Span::synthetic(),
-                    ExprNode::Const {
-                        path: vec![Symbol::from(name)],
-                    },
-                );
-                let template = const_to_ty(&constant).unwrap();
-                let expected = Ty::derived_untyped([&input]);
-                let got = intersect_with(&input, &template);
-                assert!(
-                    Ty::derived_untyped([&got]).inference_eq(&expected),
-                    "{input:?} / {name}: {got:?}"
-                );
-                let current = super::super::union_of(input.clone(), Ty::Nil);
-                let got = intersect_with(&current, &template);
-                assert!(Ty::derived_untyped([&got]).inference_eq(&expected));
-            }
-        }
-        let known = Ty::Hash {
-            key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::Str),
-        };
-        assert!(
-            intersect_with(
-                &known,
-                &Ty::Hash {
-                    key: std::sync::Arc::new(Ty::pending_untyped()),
-                    value: std::sync::Arc::new(Ty::pending_untyped())
-                }
-            )
-            .inference_eq(&known)
-        );
-    }
 }

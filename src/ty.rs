@@ -7,8 +7,9 @@
 //! every exhaustive match to handle it explicitly. Three "no type"
 //! variants mean different things: `Var` is an unsolved inference
 //! variable (a residual one surfaces as an `UnresolvedType` warning),
-//! `Untyped` is RBS `untyped` — a deliberate gradual opt-out that
-//! strict targets reject at emit — and `Bottom` is raise/never,
+//! `Untyped` preserves the public unknown shape (with an internal reason
+//! distinguishing a gradual declaration from a computed unknown or pending
+//! harvest stub), and `Bottom` is raise/never,
 //! absorbed by unions so a raising branch doesn't widen the type.
 
 use indexmap::IndexMap;
@@ -19,41 +20,27 @@ use serde::{Deserialize, Serialize};
 use crate::effect::EffectSet;
 use crate::ident::{ClassId, Symbol, TyVar};
 
-/// Why a type is `untyped`: not computed yet (`PENDING`, a placeholder for
-/// a method or accessor whose value has not been typed), or a deliberate
-/// gradual opt-out (`GRADUAL`, the default). Pending is the identity
-/// of the reason join; gradual wins. Harvest change checks and the
-/// stabilizer read it without changing value equality (#964).
+/// Internal provenance. Only explicit gradual sources may survive return
+/// stabilization. Computed unknowns retain main's behavior; Pending is reserved
+/// for the harvest's not-yet-typed return stub. Public equality ignores reasons.
 #[derive(Clone, Copy, Debug, Eq)]
 pub struct Why(u8);
 
 impl Why {
-    pub const PENDING: Why = Why(1);
+    pub const PENDING: Why = Why(0);
+    pub const INFERRED: Why = Why(1);
     pub const GRADUAL: Why = Why(2);
-    pub fn union(self, other: Why) -> Why {
-        if self.is_pending_only() && other.is_pending_only() {
-            Why::PENDING
-        } else {
-            Why::GRADUAL
-        }
-    }
-    /// Only a placeholder's reason: nothing gradual has reached it.
-    pub fn is_pending_only(self) -> bool {
-        self.0 == Self::PENDING.0
-    }
+    pub fn union(self, other: Why) -> Why { Why(self.0.max(other.0)) }
+    pub fn is_pending_only(self) -> bool { self.0 == Self::PENDING.0 }
+    pub fn is_gradual(self) -> bool { self.0 == Self::GRADUAL.0 }
 }
 
 impl Default for Why {
-    fn default() -> Why {
-        Why::GRADUAL
-    }
+    fn default() -> Why { Why::INFERRED }
 }
 
-/// The reason never takes part in equality (see [`Ty::Untyped`]).
 impl PartialEq for Why {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
+    fn eq(&self, _: &Self) -> bool { true }
 }
 
 /// The types that inhabit Roundhouse values.
@@ -149,15 +136,15 @@ pub enum Ty {
 
     Var { var: TyVar },
 
-    /// RBS `untyped` — gradual-typing escape hatch. Distinct from
+    /// Public `untyped` shape, including the gradual-typing escape hatch. Distinct from
     /// `Ty::Var` (inference gap) in intent: `Untyped` is an
     /// author-signed declaration that this position opts out of
     /// checking, while `Var` means the analyzer couldn't determine a
     /// type.
     ///
-    /// Propagation: dispatching a method on `Untyped` returns
-    /// `Untyped`, so the gradual choice flows through the IR
-    /// unconditionally.
+    /// Provenance follows a fail-closed whitelist: source declarations,
+    /// identity flows and reads from a gradual receiver retain Gradual.
+    /// Other computed unknowns keep main's stabilization behavior.
     ///
     /// Targets that admit a gradual escape hatch (TypeScript `any`,
     /// Python no-annotation, Elixir dynamic dispatch) emit `Untyped`
@@ -191,101 +178,36 @@ pub enum Ty {
 }
 
 impl Ty {
-    /// RBS `untyped` as a deliberate gradual opt-out.
-    pub const fn untyped() -> Ty {
-        Ty::Untyped { why: Why::GRADUAL }
-    }
-    /// `untyped` standing for a value not computed yet (a placeholder).
-    pub const fn pending_untyped() -> Ty {
-        Ty::Untyped { why: Why::PENDING }
-    }
+    /// An unknown computed result. Fail closed: it is never a gradual source.
+    pub const fn untyped() -> Ty { Ty::Untyped { why: Why::INFERRED } }
 
-    /// An unknown projection carries evidence from its inputs, never from
-    /// the concrete spine of a fallback. Only source contracts create Gradual.
-    pub(crate) fn derived_untyped<'a>(inputs: impl IntoIterator<Item = &'a Ty>) -> Ty {
-        let why = inputs
-            .into_iter()
-            .filter_map(Ty::unknown_reason)
-            .fold(Why::PENDING, Why::union);
-        Ty::Untyped { why }
-    }
+    /// A declared/RBS untyped, catalog-any contract, or external untyped data.
+    pub const fn gradual_untyped() -> Ty { Ty::Untyped { why: Why::GRADUAL } }
 
-    fn unknown_reason(&self) -> Option<Why> {
-        let join = |a: Option<Why>, b: Option<Why>| match (a, b) {
-            (Some(a), Some(b)) => Some(a.union(b)),
-            (a, b) => a.or(b),
-        };
+    /// Only the harvest's placeholder for a return not typed yet.
+    pub const fn pending_untyped() -> Ty { Ty::Untyped { why: Why::PENDING } }
+
+    /// Computation is not evidence of a gradual source. Preserve the exact
+    /// value shape, clearing provenance at builtin computation boundaries.
+    pub(crate) fn computed(&self) -> Ty {
         match self {
-            Ty::Untyped { why } => Some(*why),
-            Ty::Var { .. } => Some(Why::PENDING),
-            Ty::Array { elem } => elem.unknown_reason(),
-            Ty::Hash { key, value } => join(key.unknown_reason(), value.unknown_reason()),
-            Ty::Tuple { elems } | Ty::Union { variants: elems } | Ty::Class { args: elems, .. } => {
-                elems
-                    .iter()
-                    .filter_map(Ty::unknown_reason)
-                    .reduce(Why::union)
-            }
-            Ty::Record { row } => row
-                .fields
-                .values()
-                .filter_map(Ty::unknown_reason)
-                .reduce(Why::union),
-            Ty::Fn {
-                params, block, ret, ..
-            } => params
-                .iter()
-                .map(|p| &*p.ty)
-                .chain(block.iter().map(|t| &**t))
-                .chain(std::iter::once(&**ret))
-                .filter_map(Ty::unknown_reason)
-                .reduce(Why::union),
-            _ => None,
+            Ty::Untyped { .. } => Ty::untyped(),
+            Ty::Array { elem } => Ty::Array { elem: elem.computed().into() },
+            Ty::Hash { key, value } => Ty::Hash { key: key.computed().into(), value: value.computed().into() },
+            Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(Ty::computed).collect() },
+            Ty::Union { variants } => Ty::Union { variants: variants.iter().map(Ty::computed).collect() },
+            Ty::Class { id, args } => Ty::Class { id: id.clone(), args: args.iter().map(Ty::computed).collect() },
+            Ty::Record { row } => Ty::Record { row: Row {
+                fields: row.fields.iter().map(|(k, v)| (k.clone(), v.computed())).collect(),
+                rest: row.rest.clone(),
+            } },
+            Ty::Fn { params, block, ret, effects } => Ty::Fn {
+                params: params.iter().map(|p| Param { ty: p.ty.computed().into(), ..p.clone() }).collect(),
+                block: block.as_ref().map(|t| t.computed().into()),
+                ret: ret.computed().into(), effects: effects.clone(),
+            },
+            other => other.clone(),
         }
-    }
-
-    /// Keep a selected value shape while carrying unknown evidence from an
-    /// alternative input whose shape need not match it (e.g. a yielded value).
-    pub(crate) fn with_unknown_evidence(&self, input: &Ty) -> Ty {
-        fn carry(ty: &mut Ty, reason: Why) {
-            match ty {
-                Ty::Untyped { why } => *why = why.union(reason),
-                Ty::Array { elem } => carry(Arc::make_mut(elem), reason),
-                Ty::Hash { key, value } => {
-                    carry(Arc::make_mut(key), reason);
-                    carry(Arc::make_mut(value), reason);
-                }
-                Ty::Tuple { elems }
-                | Ty::Union { variants: elems }
-                | Ty::Class { args: elems, .. } => {
-                    for elem in elems.iter_mut() {
-                        carry(elem, reason);
-                    }
-                }
-                Ty::Record { row } => {
-                    for value in row.fields.values_mut() {
-                        carry(value, reason);
-                    }
-                }
-                Ty::Fn {
-                    params, block, ret, ..
-                } => {
-                    for p in params.iter_mut() {
-                        carry(Arc::make_mut(&mut p.ty), reason);
-                    }
-                    if let Some(block) = block {
-                        carry(Arc::make_mut(block), reason);
-                    }
-                    carry(Arc::make_mut(ret), reason);
-                }
-                _ => {}
-            }
-        }
-        let mut result = self.clone();
-        if let Some(reason) = input.unknown_reason() {
-            carry(&mut result, reason);
-        }
-        result
     }
 
     /// Equality for inference state: public value equality plus every
@@ -302,7 +224,7 @@ impl Ty {
         }
         match (self, other) {
             (Ty::Untyped { why: a }, Ty::Untyped { why: b }) => {
-                a.is_pending_only() == b.is_pending_only()
+                a.0 == b.0
             }
             (Ty::Array { elem: a }, Ty::Array { elem: b }) => arc_eq(a, b),
             (Ty::Hash { key: ak, value: av }, Ty::Hash { key: bk, value: bv }) => {
@@ -365,7 +287,7 @@ impl Ty {
         let changed = match (&mut joined, new) {
             (Ty::Untyped { why }, Ty::Untyped { why: other }) => {
                 let next = why.union(*other);
-                if why.is_pending_only() == next.is_pending_only() {
+                if why.0 == next.0 {
                     false
                 } else {
                     *why = next;
@@ -1030,36 +952,12 @@ pub(crate) mod reason_tests {
     }
 
     #[test]
-    fn derived_untyped_reads_unknown_evidence_at_every_type_position() {
-        for (leaf, expected) in [
-            (Ty::Var { var: TyVar(9) }, Ty::pending_untyped()),
-            (Ty::pending_untyped(), Ty::pending_untyped()),
-            (Ty::untyped(), Ty::untyped()),
-            (Ty::Str, Ty::pending_untyped()),
-        ] {
-            for (name, input) in shapes(leaf) {
-                for inputs in [vec![&input, &Ty::Nil, &Ty::Int], vec![&Ty::Str, &input]] {
-                    assert!(
-                        Ty::derived_untyped(inputs).inference_eq(&expected),
-                        "{name}: {input:?}"
-                    );
-                }
-                assert!(Ty::derived_untyped([&input, &Ty::untyped()]).inference_eq(&Ty::untyped()));
-            }
-        }
-        assert!(Ty::derived_untyped([]).inference_eq(&Ty::pending_untyped()));
-    }
-
-    #[test]
-    fn selected_shapes_carry_alternative_unknown_evidence_without_value_changes() {
-        for (name, pending) in shapes(Ty::pending_untyped()) {
-            let gradual = pending.with_unknown_evidence(&Ty::untyped());
-            assert_eq!(pending, gradual, "{name}");
-            assert!(!pending.inference_eq(&gradual), "{name}");
-            assert!(Ty::derived_untyped([&gradual]).inference_eq(&Ty::untyped()));
-            for input in [Ty::Str, Ty::pending_untyped()] {
-                assert!(pending.with_unknown_evidence(&input).inference_eq(&pending));
-                assert!(gradual.with_unknown_evidence(&input).inference_eq(&gradual));
+    fn computed_results_reset_every_unknown_position_without_changing_value_shape() {
+        for origin in [Ty::pending_untyped(), Ty::gradual_untyped(), Ty::untyped()] {
+            for ((name, input), (_, expected)) in shapes(origin).into_iter().zip(shapes(Ty::untyped())) {
+                let result = input.computed();
+                assert_eq!(result, input, "public value shape: {name}");
+                assert!(result.inference_eq(&expected), "non-source computation: {name}");
             }
         }
     }
@@ -1068,7 +966,7 @@ pub(crate) mod reason_tests {
     fn inference_equality_observes_reasons_at_every_type_position() {
         for ((name, pending), (_, gradual)) in shapes(Ty::pending_untyped())
             .into_iter()
-            .zip(shapes(Ty::untyped()))
+            .zip(shapes(Ty::gradual_untyped()))
         {
             assert_eq!(pending, gradual, "public equality: {name}");
             assert!(
@@ -1114,7 +1012,7 @@ pub(crate) mod reason_tests {
         use crate::analyze::union_of;
         for ((name, pending), (_, gradual)) in shapes(Ty::pending_untyped())
             .into_iter()
-            .zip(shapes(Ty::untyped()))
+            .zip(shapes(Ty::gradual_untyped()))
         {
             for (a, b) in [
                 (pending.clone(), gradual.clone()),
@@ -1168,9 +1066,9 @@ pub(crate) mod reason_tests {
                 rest: None,
             },
         };
-        let a = record(vec![("z", Ty::pending_untyped()), ("a", Ty::untyped())]);
-        let b = record(vec![("a", Ty::pending_untyped()), ("z", Ty::untyped())]);
-        let expected = record(vec![("a", Ty::untyped()), ("z", Ty::untyped())]);
+        let a = record(vec![("z", Ty::pending_untyped()), ("a", Ty::gradual_untyped())]);
+        let b = record(vec![("a", Ty::pending_untyped()), ("z", Ty::gradual_untyped())]);
+        let expected = record(vec![("a", Ty::gradual_untyped()), ("z", Ty::gradual_untyped())]);
         for ((name, a), ((_, b), (_, expected))) in shapes(a)
             .into_iter()
             .zip(shapes(b).into_iter().zip(shapes(expected)))
@@ -1190,7 +1088,7 @@ pub(crate) mod reason_tests {
     #[test]
     fn untyped_reason_is_invisible_to_equality_order_wire_and_rendering() {
         let pending = Ty::pending_untyped();
-        let gradual = Ty::untyped();
+        let gradual = Ty::gradual_untyped();
         assert_eq!(pending, gradual);
         assert_eq!(cmp_ty(&pending, &gradual), std::cmp::Ordering::Equal);
         for ty in [&pending, &gradual] {
@@ -1198,7 +1096,7 @@ pub(crate) mod reason_tests {
             assert_eq!(crate::emit::ruby::ty_to_rbs(ty), "untyped");
         }
         let decoded: Ty = serde_json::from_str(r#"{"kind":"untyped"}"#).unwrap();
-        assert!(matches!(decoded, Ty::Untyped { why } if !why.is_pending_only()));
+        assert!(matches!(decoded, Ty::Untyped { why } if !why.is_gradual()));
 
         let nested = |ty| Ty::Array { elem: Arc::new(ty) };
         let a = nested(pending);
@@ -1217,14 +1115,14 @@ pub(crate) mod reason_tests {
 
     #[test]
     fn reason_join_has_pending_identity_and_is_monotone() {
-        for a in [Why::PENDING, Why::GRADUAL] {
+        for a in [Why::PENDING, Why::INFERRED, Why::GRADUAL] {
             assert_eq!(a.union(Why::PENDING).0, a.0);
             assert_eq!(Why::PENDING.union(a).0, a.0);
             assert_eq!(a.union(a).0, a.0);
             assert_eq!(a.union(Why::GRADUAL).0, Why::GRADUAL.0);
-            for b in [Why::PENDING, Why::GRADUAL] {
+            for b in [Why::PENDING, Why::INFERRED, Why::GRADUAL] {
                 assert_eq!(a.union(b).0, b.union(a).0);
-                for c in [Why::PENDING, Why::GRADUAL] {
+                for c in [Why::PENDING, Why::INFERRED, Why::GRADUAL] {
                     assert_eq!(a.union(b).union(c).0, a.union(b.union(c)).0);
                 }
             }

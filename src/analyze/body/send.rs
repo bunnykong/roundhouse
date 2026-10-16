@@ -13,7 +13,7 @@
 
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::{Ty, Why};
+use crate::ty::Ty;
 
 use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 
@@ -345,20 +345,6 @@ impl<'a> BodyTyper<'a> {
         class_object_receiver: bool,
         block: &Expr,
     ) -> Ctx {
-        if !self.owns_operator(recv_ty, method, class_object_receiver) {
-            let block_method = if matches!(method.as_str(), "try" | "try!") {
-                Symbol::from("send")
-            } else { method.clone() };
-            if let Some((name, forwarded)) = literal_reflective_call(&block_method, args)
-                .filter(|(name, _)| is_enumerable_projection(name) || matches!(name.as_str(),
-                    "fetch" | "instance_eval" | "class_eval" | "module_eval"
-                    | "instance_exec" | "class_exec" | "module_exec"))
-            {
-                return self.block_ctx_for(
-                    outer, recv_ty, &name, forwarded, class_object_receiver, block,
-                );
-            }
-        }
         if crate::lower::range_enumerable::THROUGH_ARRAY.contains(&method.as_str())
             && crate::lower::range_enumerable::integer_range(recv_ty)
         {
@@ -370,7 +356,6 @@ impl<'a> BodyTyper<'a> {
             return self.block_ctx_for(outer, Some(&hash), method, args, class_object_receiver, block);
         }
         let mut new_ctx = outer.clone();
-        new_ctx.block_param_unknown = Some(projection_untyped(recv_ty, None, args));
         // Required parameters come first, so the extra ones (optional,
         // keyword, keyword rest) leave their positions alone; the Lambda
         // arm binds the extras themselves from their defaults.
@@ -379,32 +364,6 @@ impl<'a> BodyTyper<'a> {
         };
         for name in params { new_ctx.class_objects.remove(name); }
         super::forget_class_object_writes(block, &mut new_ctx);
-        // Keep existing unknown binding shapes, selecting evidence only
-        // from the values this protocol actually yields. A fetch default is
-        // ignored when there is a block; exec's other arguments do not feed
-        // a given parameter; eval yields the receiver, not source/options.
-        let yielded = match method.as_str() {
-            "fetch" if matches!(recv_ty, Some(Ty::Array { .. } | Ty::Tuple { .. } | Ty::Hash { .. })) =>
-                Some(vec![Ty::derived_untyped(args.first().and_then(|a| a.ty.as_ref()))]),
-            "instance_exec" | "class_exec" | "module_exec" =>
-                Some(args.iter().map(|arg| Ty::derived_untyped(arg.ty.as_ref())).collect()),
-            "instance_eval" | "class_eval" | "module_eval" =>
-                Some(vec![Ty::derived_untyped(recv_ty)]),
-            _ => match recv_ty {
-                Some(Ty::Class { id, .. }) if id.0.as_str() == "Time" && method.as_str() == "use_zone" =>
-                    Some(vec![]),
-                Some(Ty::Class { id, .. }) if id.0.as_str() == "Timeout" && method.as_str() == "timeout" =>
-                    Some(vec![Ty::derived_untyped(args.first().and_then(|a| a.ty.as_ref()))]),
-                _ => None,
-            },
-        };
-        if let Some(yielded) = yielded.filter(|_| !self.owns_operator(recv_ty, method, class_object_receiver)) {
-            new_ctx.block_param_unknown = Some(Ty::pending_untyped());
-            for (i, name) in params.iter().enumerate() {
-                new_ctx.local_bindings.insert(name.clone(), yielded.get(i).cloned().unwrap_or_else(Ty::pending_untyped));
-            }
-            return new_ctx;
-        }
         // `form_with model: product do |form|` / `form_for @product do
         // |f|`: the builder is parameterized by the record the form is
         // for, so `form.object` (and `form.object.errors`) answer it.
@@ -446,45 +405,17 @@ impl<'a> BodyTyper<'a> {
             }
             return new_ctx;
         }
-        // Untyped receiver: preserve its reason for every block param.
-        // Pending bindings must not become sticky Gradual evidence. Without
+        // Untyped receiver: bind every block param to `Untyped` (the
+        // gradual choice extends to the destructured params). Without
         // this, `untyped_hash.each { |k, v| ... }` would give k=Untyped
         // and v=Var since block_params_for returns a single-Untyped vec.
         if let Some(ty @ Ty::Untyped { .. }) = recv_ty {
             for name in params {
-                let bound = if is_enumerable_projection(method) {
-                    projection_untyped(Some(ty), None, args)
-                } else {
-                    ty.clone()
-                };
+                let same_value = matches!(method.as_str(), "tap" | "then" | "yield_self");
+                let bound = if same_value || gradual_yield(ty, method) { ty.clone() } else { Ty::untyped() };
                 new_ctx.local_bindings.insert(name.clone(), bound);
             }
             return new_ctx;
-        }
-        // Accumulator slots come from the seed, not from every nested
-        // unknown in the collection. In particular, an unrelated JSON
-        // element must not make a concrete accumulator gradual.
-        if matches!(method.as_str(), "reduce" | "inject" | "each_with_object" | "with_object")
-            && let Some(elem) = recv_ty.and_then(enumerable_element)
-        {
-            let seed = args.first().and_then(|arg| arg.ty.as_ref());
-            let bindings = match method.as_str() {
-                "each_with_object" | "with_object" => Some(vec![
-                    elem.clone(),
-                    seed.cloned().unwrap_or_else(Ty::pending_untyped),
-                ]),
-                "reduce" | "inject" => Some(vec![
-                    Ty::derived_untyped(seed.or(Some(&elem))),
-                    elem,
-                ]),
-                _ => None,
-            };
-            if let Some(bindings) = bindings {
-                for (name, ty) in params.iter().zip(bindings) {
-                    new_ctx.local_bindings.insert(name.clone(), ty);
-                }
-                return new_ctx;
-            }
         }
         let Some(param_tys) = self.block_params_for(recv_ty, method, class_object_receiver) else {
             return new_ctx;
@@ -602,7 +533,7 @@ impl<'a> BodyTyper<'a> {
         }
         if let Ty::Tuple { elems } = recv_ty {
             let as_array = Ty::Array {
-                elem: std::sync::Arc::new(elems.iter().cloned().reduce(union_of).unwrap_or_else(Ty::pending_untyped)),
+                elem: std::sync::Arc::new(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::untyped())),
             };
             return self.block_params_for(Some(&as_array), method, class_object_receiver);
         }
@@ -618,7 +549,7 @@ impl<'a> BodyTyper<'a> {
                 | "to_h" => Some(vec![(**elem).clone()]),
                 "each_with_index" | "with_index" => Some(vec![(**elem).clone(), Ty::Int]),
                 "each_slice" | "each_cons" => Some(vec![recv_ty.clone()]),
-                "with_object" => Some(vec![(**elem).clone(), Ty::derived_untyped([&**elem])]),
+                "with_object" => Some(vec![(**elem).clone(), Ty::untyped()]),
                 "sort_by!" | "select!" | "reject!" | "keep_if" | "delete_if" => Some(vec![(**elem).clone()]),
                 _ => None,
             },
@@ -766,14 +697,11 @@ impl<'a> BodyTyper<'a> {
             }
             // Union receivers (typically `T | Nil` from RBS optionals or
             // flow-sensitive ivar reads). Unwrap to the first concrete
-            // container variant for the value shape — `(Hash[K,V] | Nil).each
+            // container variant and recurse — `(Hash[K,V] | Nil).each
             // { |k, v| ... }` should yield `[K, V]` to the block, not
             // give up because the union confused dispatch. Skip Nil/Var
-            // variants; they don't carry block-shape information. Join
-            // unknown reasons from the other yielding arms without changing
-            // that selected shape.
+            // variants; they don't carry block-shape information.
             Ty::Union { variants } => {
-                let mut selected: Option<Vec<Ty>> = None;
                 for v in variants {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
@@ -781,22 +709,10 @@ impl<'a> BodyTyper<'a> {
                     if let Some(params) =
                         self.block_params_for(Some(v), method, class_object_receiver)
                     {
-                        if let Some(chosen) = &mut selected {
-                            for (stored, next) in chosen.iter_mut().zip(params.iter()) {
-                                if *stored == *next {
-                                    if let Some(joined) = stored.join_equal_reasons(next) {
-                                        *stored = joined;
-                                    }
-                                } else {
-                                    *stored = stored.with_unknown_evidence(next);
-                                }
-                            }
-                        } else {
-                            selected = Some(params);
-                        }
+                        return Some(params);
                     }
                 }
-                selected
+                None
             }
             // RBS-declared `untyped` receiver: a method call like
             // `untyped.each { |x| ... }` passes through with the block
@@ -811,7 +727,7 @@ impl<'a> BodyTyper<'a> {
             // as Untyped (right answer) but `k` will be missing
             // (analyzer fallback to Var); that residual is acceptable
             // — the caller has signed out of typing here.
-            Ty::Untyped { .. } => Some(vec![recv_ty.clone()]),
+            Ty::Untyped { .. } => Some(vec![if gradual_yield(recv_ty, method) { recv_ty.clone() } else { Ty::untyped() }]),
             _ => None,
         }
     }
@@ -1085,7 +1001,6 @@ impl<'a> BodyTyper<'a> {
         args: &[crate::expr::Expr],
         instance_receiver: bool,
     ) -> Ty {
-        let derived = || Ty::derived_untyped(recv_ty);
         // `Parameters` is a Hash-shaped bag: what its own class does not
         // answer (`fetch`, `each`, `map`, `count`, ...) is the Hash
         // reading over Symbol -> param value. Done here,
@@ -1137,7 +1052,7 @@ impl<'a> BodyTyper<'a> {
         // destructuring reads it as one, over the union of its slots.
         if let Some(Ty::Tuple { elems }) = recv_ty {
             let as_array = Ty::Array {
-                elem: std::sync::Arc::new(elems.iter().cloned().reduce(union_of).unwrap_or_else(Ty::pending_untyped)),
+                elem: std::sync::Arc::new(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::untyped())),
             };
             return self.dispatch(Some(&as_array), method, block_ret, args);
         }
@@ -1151,7 +1066,7 @@ impl<'a> BodyTyper<'a> {
                 return self.dispatch(Some(&of[0]), method, block_ret, args);
             }
             if id.0.as_str() == PARAM_VALUE {
-                return param_value_method(method, block_ret).unwrap_or_else(|| str_method(method));
+                return param_value_method(method, block_ret).unwrap_or_else(|| str_method(method)).computed();
             }
         }
         // `obj.class` is receiver-aware: our type system flattens the
@@ -1186,9 +1101,7 @@ impl<'a> BodyTyper<'a> {
         // `m` on the receiver's class (walking its parents and mixins);
         // otherwise the gradual answer stands — silence about a method
         // is not a claim that the class lacks it.
-        if matches!(method.as_str(), "try" | "try!")
-            && !self.owns_operator(recv_ty, method, !instance_receiver)
-        {
+        if matches!(method.as_str(), "try" | "try!") {
             // A nullable receiver (`@user.try(:username)` with `@user:
             // User?`) answers the same: `nil.try` is nil, already in the
             // union below.
@@ -1301,7 +1214,7 @@ impl<'a> BodyTyper<'a> {
             && recv_ty.is_some()
             && !self.owns_operator(recv_ty, method, !instance_receiver)
         {
-            return block_ret.cloned().unwrap_or_else(derived);
+            return block_ret.cloned().unwrap_or(Ty::untyped());
         }
         // `Model.transaction { … }` / `ActiveRecord::Base.transaction
         // { … }` returns its block's value (commit) — the registered
@@ -1341,11 +1254,6 @@ impl<'a> BodyTyper<'a> {
         // literal array iterated by a block, e.g. `as_json`; tightening
         // the dynamic case to that enumerated set is a tier-3 follow-up.)
         if matches!(method.as_str(), "send" | "public_send" | "__send__") {
-            if let Some((name, forwarded)) = literal_reflective_call(method, args)
-                .filter(|(name, _)| matches!(name.as_str(), "dig" | "try" | "try!"))
-            {
-                return self.dispatch_on(recv_ty, &name, block_ret, forwarded, instance_receiver);
-            }
             if let Some(first) = args.first() {
                 let literal_name = match &*first.node {
                     ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
@@ -1361,8 +1269,8 @@ impl<'a> BodyTyper<'a> {
                 }
             }
             return match recv_ty {
-                Some(t) => self.receiver_method_return_union(t),
-                None => projection_untyped(None, block_ret, args.get(1..).unwrap_or_default()),
+                Some(t) => self.receiver_method_return_union(t).computed(),
+                None => Ty::untyped(),
             };
         }
         // The call's arguments, under a name the `Ty::Class { id, args }`
@@ -1372,10 +1280,9 @@ impl<'a> BodyTyper<'a> {
         // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
         // don't fall through to per-type method tables that would miss.
         if let Some(ty) = universal_method(method) {
-            return if matches!(ty, Ty::Untyped { .. }) {
-                self.universal_projection_untyped(recv_ty, method, block_ret, args, instance_receiver)
-            } else {
-                ty
+            return match recv_ty {
+                Some(receiver) if gradual_projection(receiver, method) => receiver.clone(),
+                _ => ty,
             };
         }
         // Captured before the match: the `Ty::Class { id, args }` arm
@@ -1395,7 +1302,7 @@ impl<'a> BodyTyper<'a> {
             Some(ty) if method.as_str() == "with_indifferent_access" && args.is_empty()
                 && crate::analyze::indifferent::from_gradual(ty).is_some() =>
             {
-                crate::analyze::indifferent::from_gradual(ty).unwrap()
+                crate::analyze::indifferent::from_gradual(ty).unwrap().computed()
             }
             // RBS-declared gradual receiver. Method dispatch on
             // `Untyped` returns `Untyped` — the gradual choice
@@ -1416,15 +1323,9 @@ impl<'a> BodyTyper<'a> {
             //
             // Signing out of typing for a receiver is not signing out
             // of Ruby's own guarantees about the answer.
-            Some(Ty::Untyped { why }) => {
-                conversion_fallback(method, *why).unwrap_or_else(|| {
-                    if is_enumerable_projection(method) {
-                        enumerable_projection_untyped(recv_ty, method, block_ret, args)
-                    } else {
-                        Ty::Untyped { why: *why }
-                    }
-                })
-            }
+            Some(receiver @ Ty::Untyped { .. }) => conversion_fallback(method).unwrap_or_else(|| {
+                if gradual_projection(receiver, method) { receiver.clone() } else { Ty::untyped() }
+            }),
             Some(Ty::Class { id, args }) => {
                 // `GlobalID::Locator.locate(…, only: Model)` /
                 // `locate_signed(…, only: Model, for:)` — the literal
@@ -1459,7 +1360,7 @@ impl<'a> BodyTyper<'a> {
                 // any other range value flowing through dispatch.
                 if id.0.as_str() == "Range" {
                     if let Some(ty) = range_method(method, args.first()) {
-                        return ty;
+                        return ty.computed();
                     }
                     // Not answered off the Range: `lower::range_enumerable` reads these through `to_a`.
                     if crate::lower::range_enumerable::THROUGH_ARRAY.contains(&method.as_str())
@@ -1602,12 +1503,12 @@ impl<'a> BodyTyper<'a> {
                         })
                     } else {
                         match (method.as_str(), call_args) {
-                            ("new", []) => Some(crate::analyze::indifferent::of(Ty::pending_untyped())),
+                            ("new", []) => Some(crate::analyze::indifferent::of(Ty::untyped())),
                             ("new", [hash]) if block_ret.is_none() && crate::analyze::indifferent::constructor_args(call_args) => hash.ty.as_ref().and_then(crate::analyze::indifferent::from),
                             _ => None,
                         }
                     };
-                    return answer.unwrap_or_else(unknown);
+                    return answer.unwrap_or_else(unknown).computed();
                 }
                 // Not Rails' numeric or TZInfo lookups: only a zone NAME reaches the runtime port's `lookup`.
                 if id.0.as_str() == "ActiveSupport::TimeZone" && method.as_str() == "[]" {
@@ -1622,9 +1523,9 @@ impl<'a> BodyTyper<'a> {
                 }
                 if id.0.as_str() == "Jbuilder" {
                     return match method.as_str() {
-                        "array!" => Ty::Array { elem: std::sync::Arc::new(projection_untyped(recv_ty, None, &call_args[..call_args.len().min(1)])) },
+                        "array!" => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
                         "target!" => Ty::Str,
-                        "attributes!" => Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::derived_untyped(recv_ty)) },
+                        "attributes!" => Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) },
                         "cache!" | "cache_if!" | "cache_root!" => block_ret.cloned().unwrap_or(Ty::Nil),
                         "extract!" | "partial!" | "merge!" | "ignore_nil!" | "key_format!"
                         | "deep_format_keys!" | "nil!" | "null!" | "call" | "child!" => Ty::Nil,
@@ -1634,9 +1535,7 @@ impl<'a> BodyTyper<'a> {
                         // write's own value is then simply unknown.
                         "set!" => jbuilder_value(call_args.get(1)),
                         _ if block_ret.is_some() => {
-                            // Nested builder blocks write into builder state;
-                            // their ordinary return value is discarded.
-                            Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::derived_untyped(recv_ty)) }
+                            Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) }
                         }
                         _ => jbuilder_value(call_args.first()),
                     };
@@ -1813,11 +1712,11 @@ impl<'a> BodyTyper<'a> {
                     match id.0.as_str() {
                         "Hash" => {
                             return Ty::Hash {
-                                key: std::sync::Arc::new(projection_untyped(None, None, call_args)),
-                                value: std::sync::Arc::new(projection_untyped(None, None, call_args)),
+                                key: std::sync::Arc::new(Ty::untyped()),
+                                value: std::sync::Arc::new(Ty::untyped()),
                             };
                         }
-                        "Array" => return Ty::Array { elem: std::sync::Arc::new(projection_untyped(None, None, call_args)) },
+                        "Array" => return Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
                         _ => {}
                     }
                 }
@@ -1856,7 +1755,7 @@ impl<'a> BodyTyper<'a> {
                 // grow as new uses surface.
                 if id.0.as_str() == "Time" && method.as_str() == "use_zone" {
                     // Not the block's unresolved Var: that would report `use_zone` itself as the failure.
-                    return pending_or(block_ret, Ty::pending_untyped());
+                    return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::untyped());
                 }
                 if id.0.as_str() == "Time" {
                     if let Some(ty) = time_method(method) {
@@ -1921,7 +1820,7 @@ impl<'a> BodyTyper<'a> {
                         Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => {
                             if value.as_str().starts_with("float_") { Ty::Float } else { Ty::Int }
                         }
-                        Some(_) => Ty::pending_untyped(),
+                        Some(_) => Ty::untyped(),
                     };
                 }
                 // `Timeout.timeout(sec) { ... }` — block result, or raises
@@ -1931,7 +1830,10 @@ impl<'a> BodyTyper<'a> {
                 // `Opengraph::Metadata?` through it, and `render json:`
                 // picks the record's writer from that type.
                 if id.0.as_str() == "Timeout" && method.as_str() == "timeout" {
-                    return pending_or(block_ret, Ty::pending_untyped());
+                    return match block_ret {
+                        Some(ret) if !matches!(ret, Ty::Var { .. }) => ret.clone(),
+                        _ => Ty::untyped(),
+                    };
                 }
                 // `r, w, pid = PTY.spawn(env, *cmd)`: the pty's reader
                 // and writer and the child's pid. With a block — brace,
@@ -1964,7 +1866,7 @@ impl<'a> BodyTyper<'a> {
                         "generate" | "dump" | "pretty_generate" | "fast_generate" => {
                             return Ty::Str
                         }
-                        "parse" | "load" => return Ty::untyped(),
+                        "parse" | "load" => return Ty::gradual_untyped(),
                         _ => {}
                     }
                 }
@@ -1999,14 +1901,15 @@ impl<'a> BodyTyper<'a> {
                 // gradual when it says nothing more.
                 if let Some(mm) = method_missing_ty {
                     return match unwrap_fn_ret(&mm) {
-                        Ty::Var { .. } => Ty::pending_untyped(),
+                        Ty::Var { .. } => Ty::untyped(),
                         t => t,
                     };
                 }
                 unknown()
             }
             Some(Ty::Array { elem }) => {
-                let elem: &Ty = elem;
+                let computed_elem = elem.computed();
+                let elem: &Ty = &computed_elem;
                 if is_model_relation_elem(elem) && array_find(method, args, block_ret) {
                     return Ty::Array { elem: std::sync::Arc::new(elem.clone()) };
                 }
@@ -2122,7 +2025,7 @@ impl<'a> BodyTyper<'a> {
                 }
                 // An initial value decides the result type (`[1, 2].sum(0.0)` is a Float).
                 if method.as_str() == "sum" && !args.is_empty() {
-                    return sum_type(elem, block_ret, args);
+                    return Ty::untyped();
                 }
                 // `[] + [h]` is an Array of `h`: when the receiver's
                 // element is empty or not yet known, `+`, `|` and
@@ -2153,11 +2056,11 @@ impl<'a> BodyTyper<'a> {
                     return match (args, block_ret) {
                         ([_], None) => elem.clone(),
                         ([_, default], None) => match &default.ty {
-                            Some(default) if !default.is_open() => union_of(elem.clone(), default.clone()),
-                            _ => fetch_untyped(elem, block_ret, args),
+                            Some(default) if !default.is_open() => union_of(elem.clone(), default.computed()),
+                            _ => Ty::untyped(),
                         },
-                        ([_], Some(missed)) if !missed.is_open() => union_of(elem.clone(), missed.clone()),
-                        _ => fetch_untyped(elem, block_ret, args),
+                        ([_], Some(missed)) if !missed.is_open() => union_of(elem.clone(), missed.computed()),
+                        _ => Ty::untyped(),
                     };
                 }
                 if block_ret.is_none() {
@@ -2165,7 +2068,7 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
-                array_method(method, elem, block_ret, args)
+                array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope
             // call, a relation-returning class method, or (later) an
@@ -2305,10 +2208,10 @@ impl<'a> BodyTyper<'a> {
                     return t;
                 }
                 let elem = Ty::Class { id: of.clone(), args: vec![].into() };
-                array_method(method, &elem, block_ret, args)
+                array_method(method, &elem, block_ret)
             }
-            Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret, args),
-            Some(Ty::Record { row }) => record_method(method, row, args),
+            Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret, args).computed(),
+            Some(Ty::Record { row }) => record_method(method, row, args).computed(),
             // A method the app adds by reopening `String` (campfire's
             // `all_emoji?`) answers where the builtin table has nothing.
             Some(Ty::Str) if method.as_str() == "bytes" && block_ret.is_some() => Ty::Str,
@@ -2352,14 +2255,11 @@ impl<'a> BodyTyper<'a> {
             // relation) where the method is valid on `T` and the Nil case
             // is handled elsewhere at run time.
             Some(Ty::Union { variants }) => {
-                // Keep the absorbing value shape, but derive its reason for
-                // every send. Concrete arms cannot manufacture Gradual.
+                // Gradual absorption: any `Untyped` variant in the
+                // union absorbs the dispatch — the result is `Untyped`.
+                // Mirrors TypeScript's `any | T → any` semantics.
                 if variants.iter().any(|v| matches!(v, Ty::Untyped { .. })) {
-                    return if is_enumerable_projection(method) {
-                        enumerable_projection_untyped(recv_ty, method, block_ret, args)
-                    } else {
-                        Ty::derived_untyped(variants.iter())
-                    };
+                    return Ty::untyped();
                 }
                 let mut resolved: Vec<Ty> = Vec::new();
                 for v in variants {
@@ -2382,10 +2282,10 @@ impl<'a> BodyTyper<'a> {
                 // (`Str | Nil` with `join`) still errors, as it should.
                 let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
                 match resolved.len() {
-                    0 if has_var => Ty::pending_untyped(),
+                    0 if has_var => Ty::untyped(),
                     0 => unknown(),
-                    1 => resolved.into_iter().next().unwrap(),
-                    _ => union_many(resolved),
+                    1 => resolved.into_iter().next().unwrap().computed(),
+                    _ => union_many(resolved).computed(),
                 }
             }
             // Receiver type is a `Var` (inference gap) or otherwise
@@ -2394,70 +2294,7 @@ impl<'a> BodyTyper<'a> {
             // type the receiver, `rows.to_h` is a Hash and `x.to_s` is
             // a String. Falling back to these (gradual element types)
             // resolves the read instead of leaving it `Var`.
-            _ => {
-                let Ty::Untyped { why } = Ty::derived_untyped(recv_ty) else { unreachable!() };
-                conversion_fallback(method, why).unwrap_or_else(unknown)
-            }
-        }
-    }
-
-    /// Universal fallback shapes stay unknown, but an application override
-    /// supplies its own result contract: its argument may be a returned value
-    /// rather than a selector. Consult only the return, never Fn parameters.
-    fn declared_projection_reason(&self, recv: &Ty, method: &Symbol, instance: bool) -> Option<Ty> {
-        let Ty::Class { id, .. } = recv else { return None };
-        let mut current = Some(id);
-        for _ in 0..32 {
-            let cls = self.classes().get(current?)?;
-            let (first, second) = if instance {
-                (&cls.instance_methods, &cls.class_methods)
-            } else { (&cls.class_methods, &cls.instance_methods) };
-            if let Some(sig) = first.get(method).or_else(|| second.get(method)) {
-                return Some(Ty::derived_untyped([&unwrap_fn_ret(&sig.subst_self(recv))]));
-            }
-            for module in &cls.includes {
-                if let Some(ret) = self.lookup_in_module(module, method) {
-                    return Some(Ty::derived_untyped([&ret.subst_self(recv)]));
-                }
-            }
-            current = cls.parent.as_ref();
-        }
-        None
-    }
-
-    fn universal_projection_untyped(
-        &self, recv: Option<&Ty>, method: &Symbol, block: Option<&Ty>, args: &[Expr], instance: bool,
-    ) -> Ty {
-        if matches!(method.as_str(), "dig" | "try" | "try!") {
-            if let Some(Ty::Union { variants }) = recv {
-                let results: Vec<_> = variants.iter().map(|v|
-                    self.universal_projection_untyped(Some(v), method, block, args, instance)
-                ).collect();
-                return Ty::derived_untyped(results.iter());
-            }
-            if let Some(reason) = recv.and_then(|r| self.declared_projection_reason(r, method, instance)) {
-                return reason;
-            }
-            if matches!(recv, Some(Ty::Nil)) && matches!(method.as_str(), "try" | "try!") {
-                // NilClass never invokes the supplied block or target.
-                return Ty::pending_untyped();
-            }
-        }
-        match method.as_str() {
-            // Keys/indices select values. Ruby ignores a dig block.
-            "dig" => dig_untyped(recv, args.len()),
-            "try" | "try!" if args.is_empty() => pending_or(block, Ty::derived_untyped(recv)),
-            "try" | "try!" => {
-                if let Some((name, forwarded)) = literal_reflective_call(&Symbol::from("send"), args) {
-                    let result = self.dispatch_on(recv, &name, block, forwarded, instance);
-                    Ty::derived_untyped([&result])
-                } else {
-                    // A dynamic method can return its payload/block, but
-                    // the first argument only names that method.
-                    projection_untyped(recv, block, &args[1..])
-                }
-            }
-            _ => Ty::derived_untyped(recv),
+            _ => conversion_fallback(method).unwrap_or_else(unknown),
         }
     }
 
@@ -2576,7 +2413,7 @@ impl<'a> BodyTyper<'a> {
     /// (Var / primitive) carries no method table, so → `Untyped`.
     fn receiver_method_return_union(&self, recv_ty: &Ty) -> Ty {
         let Ty::Class { id, .. } = recv_ty else {
-            return Ty::derived_untyped([recv_ty]);
+            return Ty::untyped();
         };
         let mut rets: Vec<Ty> = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -2590,8 +2427,11 @@ impl<'a> BodyTyper<'a> {
                 // `-> self` on an ancestor answers the receiver, not
                 // the ancestor — substitute before the return is read.
                 let r = unwrap_fn_ret(&ty.subst_self(recv_ty));
-                // Collect all returns: an early Pending answer must not
-                // hide a genuine Gradual answer on another method.
+                // A single gradual method makes the dynamic union
+                // gradual — bail early with the absorbing type.
+                if matches!(r, Ty::Untyped { .. }) {
+                    return Ty::untyped();
+                }
                 if !r.is_open() {
                     rets.push(r);
                 }
@@ -2602,186 +2442,27 @@ impl<'a> BodyTyper<'a> {
             stack.extend(cls.includes.iter().cloned());
         }
         if rets.is_empty() {
-            Ty::derived_untyped([recv_ty])
-        } else if rets.iter().any(|r| matches!(r, Ty::Untyped { .. })) {
-            Ty::derived_untyped(rets.iter())
+            Ty::untyped()
         } else {
             union_many(rets)
         }
     }
 }
 
-/// An unmodeled projection has no independent gradual evidence.
-fn projection_untyped(recv: Option<&Ty>, block: Option<&Ty>, args: &[Expr]) -> Ty {
-    Ty::derived_untyped(
-        recv.into_iter()
-            .chain(block)
-            .chain(args.iter().filter_map(|a| a.ty.as_ref())),
-    )
-}
-
-/// Keep dig's established unknown result shape, deriving its reason from
-/// possible returned values. Walk one container per selector, excluding the
-/// keys of traversed hashes. Selectors and ignored blocks are not values.
-fn dig_untyped(recv: Option<&Ty>, depth: usize) -> Ty {
-    fn values<'a>(ty: &'a Ty, depth: usize, out: &mut Vec<&'a Ty>) {
-        if depth == 0 {
-            out.push(ty);
-            return;
-        }
-        match ty {
-            Ty::Array { elem } => values(elem, depth - 1, out),
-            Ty::Hash { value, .. } => values(value, depth - 1, out),
-            Ty::Tuple { elems } => {
-                for elem in elems { values(elem, depth - 1, out); }
-            }
-            Ty::Union { variants } => {
-                for variant in variants { values(variant, depth, out); }
-            }
-            Ty::Record { row } => {
-                for value in row.fields.values() { values(value, depth - 1, out); }
-            }
-            _ => match crate::analyze::indifferent::value_of(ty) {
-                Some(value) => values(value, depth - 1, out),
-                None => out.push(ty),
-            },
-        }
-    }
-    let mut inputs = Vec::new();
-    if let Some(recv) = recv { values(recv, depth, &mut inputs); }
-    Ty::derived_untyped(inputs)
-}
-
-/// A fetch miss returns its block, or its default when there is no block.
-/// The lookup key/index is not an operand of the returned value.
-fn fetch_untyped(elem: &Ty, block: Option<&Ty>, args: &[Expr]) -> Ty {
-    Ty::derived_untyped(std::iter::once(elem).chain(
-        block.or_else(|| args.get(1).and_then(|a| a.ty.as_ref())),
-    ))
-}
-
-/// Unknown receiver arms obey the same accumulator dependencies as known
-/// containers instead of absorbing unrelated arguments or block values.
-fn enumerable_projection_untyped(
-    recv: Option<&Ty>, method: &Symbol, block: Option<&Ty>, args: &[Expr],
-) -> Ty {
-    match method.as_str() {
-        "each_with_object" | "with_object" => object_accumulator_untyped(args),
-        "reduce" | "inject" => fold_untyped(
-            &recv.and_then(enumerable_element).unwrap_or_else(Ty::pending_untyped), block, args,
-        ),
-        "sum" => projection_untyped(block.or(recv), None, &args[..args.len().min(1)]),
-        _ => projection_untyped(recv, block, &[]),
-    }
-}
-
-/// A literal reflective alias has the same argument dependencies as its
-/// target. Consume one name per level so nested `send(:send, ...)` works.
-pub(super) fn literal_reflective_call<'e>(
-    method: &Symbol,
-    args: &'e [Expr],
-) -> Option<(Symbol, &'e [Expr])> {
-    if !matches!(method.as_str(), "send" | "public_send" | "__send__") {
-        return None;
-    }
-    let (first, rest) = args.split_first()?;
-    let name = match &*first.node {
-        ExprNode::Lit {
-            value: crate::expr::Literal::Sym { value },
-        } => value.clone(),
-        ExprNode::Lit {
-            value: crate::expr::Literal::Str { value },
-        } => Symbol::from(value.as_str()),
-        _ => return None,
-    };
-    literal_reflective_call(&name, rest).or(Some((name, rest)))
-}
-
-/// These shared transfers have audited block/argument result dependencies.
-/// Other unknown calls retain their existing contracts rather than treating
-/// arbitrary supplied arguments as evidence about the returned value.
-fn is_enumerable_projection(method: &Symbol) -> bool {
-    matches!(method.as_str(),
-        "reduce" | "inject" | "each_with_object" | "with_object"
-        | "sum" | "group_by" | "index_by")
-}
-
-/// The yielded element for the container representations using the shared
-/// Enumerable transfers. A Hash yields a key/value pair to an accumulator.
-fn enumerable_element(recv: &Ty) -> Option<Ty> {
-    match recv {
-        Ty::Untyped { .. } | Ty::Var { .. } => Some(Ty::derived_untyped([recv])),
-        Ty::Array { elem } => Some((**elem).clone()),
-        Ty::Tuple { elems } => Some(union_many(elems.to_vec())),
-        Ty::Hash { key, value } => Some(Ty::Tuple {
-            elems: vec![(**key).clone(), (**value).clone()].into(),
-        }),
-        Ty::Relation { of } => Some(Ty::Class {
-            id: of.clone(),
-            args: vec![].into(),
-        }),
-        Ty::Union { variants } => {
-            let elems: Vec<_> = variants.iter().filter_map(enumerable_element).collect();
-            (!elems.is_empty()).then(|| union_many(elems))
-        }
-        _ => None,
-    }
-}
-
-/// Retain the established unknown result shape, but only join values that
-/// can become the accumulator. Without a seed, the first element can be
-/// the result even when the block returns a constant (a singleton input).
-/// With a symbolic reducer the operation also depends on the elements.
-fn fold_untyped(elem: &Ty, block_ret: Option<&Ty>, args: &[Expr]) -> Ty {
-    if block_ret.is_none() || args.len() > 1 {
-        // Symbol/string operator names select an operation; only its
-        // operands can become the result. A supplied block is ignored.
-        Ty::derived_untyped(std::iter::once(elem).chain(
-            (args.len() > 1).then(|| args[0].ty.as_ref()).flatten(),
-        ))
-    } else {
-        Ty::derived_untyped(
-            args.first()
-                .and_then(|arg| arg.ty.as_ref())
-                .into_iter()
-                .chain(block_ret)
-                .chain(args.is_empty().then_some(elem)),
-        )
-    }
-}
-
-/// `each_with_object` ignores the block's return and returns its argument.
-fn object_accumulator_untyped(args: &[Expr]) -> Ty {
-    Ty::derived_untyped(args.first().and_then(|arg| arg.ty.as_ref()))
-}
-
-fn sum_type(elem: &Ty, block_ret: Option<&Ty>, args: &[Expr]) -> Ty {
-    let summand = block_ret.unwrap_or(elem);
-    if !args.is_empty() {
-        return projection_untyped(Some(summand), None, &args[..1]);
-    }
-    match summand {
-        Ty::Int => Ty::Int,
-        Ty::Float => Ty::Float,
-        _ => projection_untyped(Some(summand), None, args),
-    }
-}
 /// Canonical return type of a universal Ruby conversion method, used
 /// as a last resort when the receiver type is unknown. NOT placed in
 /// `universal_method` (which is consulted before per-type dispatch) so
 /// the precise per-type versions — `array.to_h → Hash[K, V]` keyed off
 /// the block, `array.to_a → Array[elem]` — still win when the receiver
-/// IS typed. Unknown elements inherit the receiver's reason: a
-/// conversion cannot invent gradual evidence while its receiver is pending.
-fn conversion_fallback(method: &Symbol, why: Why) -> Option<Ty> {
+/// IS typed. Element/value types are `Untyped` (gradual) here since
+/// there's no receiver shape to derive them from.
+fn conversion_fallback(method: &Symbol) -> Option<Ty> {
     Some(match method.as_str() {
         "to_h" => Ty::Hash {
-            key: std::sync::Arc::new(Ty::Untyped { why }),
-            value: std::sync::Arc::new(Ty::Untyped { why }),
+            key: std::sync::Arc::new(Ty::untyped()),
+            value: std::sync::Arc::new(Ty::untyped()),
         },
-        "to_a" | "to_ary" => Ty::Array {
-            elem: std::sync::Arc::new(Ty::Untyped { why }),
-        },
+        "to_a" | "to_ary" => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
         "to_s" | "to_str" => Ty::Str,
         "to_i" => Ty::Int,
         "to_f" => Ty::Float,
@@ -2789,6 +2470,7 @@ fn conversion_fallback(method: &Symbol, why: Why) -> Option<Ty> {
         _ => return None,
     })
 }
+
 // Primitive method tables --------------------------------------------
 //
 // One function per receiver-type-kind. Each maps a method name to
@@ -2965,14 +2647,14 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
         // not be an Integer; claiming Date would green-light Date-only
         // follow-ups after a send that can TypeError).
         ">>" | "<<" if args.len() == 1 => match args[0].ty.as_ref() {
-            Some(ty @ Ty::Untyped { .. }) => ty.clone(),
+            Some(Ty::Untyped { .. }) => Ty::untyped(),
             Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
             _ => return None,
         },
         // `Date + Integer` → Date. `Date + Untyped` stays gradual: the
         // operand might not be an Integer day shift, and Spinel has no `+`.
         "+" if args.len() == 1 => match args[0].ty.as_ref() {
-            Some(ty @ Ty::Untyped { .. }) => ty.clone(),
+            Some(Ty::Untyped { .. }) => Ty::untyped(),
             Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
             _ => return None,
         },
@@ -2980,8 +2662,7 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
         // we do not model structurally (gradual, like Time − Time).
         // `Date - Untyped` stays gradual for the same reason as `+`.
         "-" if args.len() == 1 => match args[0].ty.as_ref() {
-            Some(ty @ Ty::Untyped { .. }) => ty.clone(),
-            Some(Ty::Date) => Ty::untyped(),
+            Some(Ty::Date) | Some(Ty::Untyped { .. }) => Ty::untyped(),
             Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
             _ => return None,
         },
@@ -3103,10 +2784,9 @@ pub(crate) fn indexed_pluck(method: &Symbol, elem: &Ty, args: &[crate::expr::Exp
         return None;
     }
     let value = match elem {
-        Ty::Hash { value, .. } if matches!(**value, Ty::Untyped { .. }) => (**value).clone(),
+        Ty::Hash { value, .. } if **value == Ty::untyped() => Ty::untyped(),
         Ty::Hash { value, .. } => super::union_of((**value).clone(), Ty::Nil),
-        Ty::Untyped { why } => Ty::Untyped { why: *why },
-        Ty::Var { .. } => Ty::pending_untyped(),
+        Ty::Untyped { .. } | Ty::Var { .. } => Ty::untyped(),
         _ => return None,
     };
     Some(Ty::Array { elem: std::sync::Arc::new(value) })
@@ -3149,8 +2829,8 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
         ReturnKind::IntOrNil => union_of(Ty::Int, Ty::Nil),
         ReturnKind::Bool => Ty::Bool,
         ReturnKind::ArrayOfInt => Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
-        ReturnKind::ArrayOfUntyped => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
-        ReturnKind::Untyped => Ty::untyped(),
+        ReturnKind::ArrayOfUntyped => Ty::Array { elem: std::sync::Arc::new(Ty::gradual_untyped()) },
+        ReturnKind::Untyped => Ty::gradual_untyped(),
         ReturnKind::ClassRef(path) => Ty::Class {
             id: crate::ident::ClassId(Symbol::from(path)),
             args: vec![].into(),
@@ -3163,7 +2843,7 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
         },
         ReturnKind::HashStrUntyped => Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::untyped()),
+            value: std::sync::Arc::new(Ty::gradual_untyped()),
         },
         ReturnKind::ArrayOfSym => Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
         ReturnKind::Str => Ty::Str,
@@ -3188,7 +2868,7 @@ fn non_nil_elem(elem: &Ty) -> Ty {
     }
 }
 
-pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>, args: &[Expr]) -> Ty {
+pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -> Ty {
     // AR-specific dispatches go FIRST so they win over the generic
     // array methods that share a name (`find` on a relation raises, so
     // it returns Class; on a plain Array it returns `Union<elem, Nil>`).
@@ -3208,7 +2888,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>, a
             "model" => {
                 return match elem {
                     Ty::Class { .. } => elem.clone(),
-                    _ => Ty::derived_untyped([elem]),
+                    _ => Ty::untyped(),
                 };
             }
             // `arel` on a single-model relation is intercepted by the
@@ -3339,7 +3019,9 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>, a
             Ty::Array { elem: std::sync::Arc::new(elem.clone()) }
         }
         // Array `*` with an Int is array repetition (preserves Array[elem]);
-        // with a Str it's `.join(sep)`, returning Str. The emitter's classifier handles
+        // with a Str it's `.join(sep)`, returning Str. The body-typer's
+        // dispatch hands us the method name but not argument types, so
+        // we can't distinguish here — the emitter's classifier handles
         // that branch using the operand `.ty` annotations. Returning
         // Array[elem] is the safe default (join→Str case is rare and the
         // result rarely chains into further array methods).
@@ -3347,7 +3029,13 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>, a
         "any?" | "all?" | "none?" | "one?" | "empty?" | "include?" => Ty::Bool,
         // ActiveSupport `Enumerable#many?` — more than one element.
         "many?" => Ty::Bool,
-        "sum" => sum_type(elem, block_ret, args),
+        // Not the element type as-is: `[nil].sum` raises, and a non-numeric
+        // `sum` needs an initial value this arm doesn't see.
+        "sum" => match block_ret.unwrap_or(elem) {
+            Ty::Int => Ty::Int,
+            Ty::Float => Ty::Float,
+            _ => Ty::untyped(),
+        },
         "exclude?" | "intersect?" => Ty::Bool,
         // `Set` isn't parameterized, so the element type can't be carried.
         "to_set" => Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![].into() },
@@ -3359,7 +3047,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>, a
         "to_json" => Ty::Str,
         // ActiveSupport `Array#as_json`: the JSON-primitive structure,
         // an Array of whatever each element serializes to.
-        "as_json" => Ty::Array { elem: std::sync::Arc::new(Ty::derived_untyped([elem])) },
+        "as_json" => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
         "find" | "detect" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil].into(),
         },
@@ -3374,18 +3062,17 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>, a
         "with_index" => Ty::Array { elem: std::sync::Arc::new(block_ret.cloned().unwrap_or_else(|| elem.clone())) },
         // `group_by`/`index_by` (ActiveSupport) force evaluation to a Hash.
         "group_by" => Ty::Hash {
-            key: std::sync::Arc::new(projection_untyped(None, block_ret, &[])),
+            key: std::sync::Arc::new(Ty::untyped()),
             value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(elem.clone()) }),
         },
         "index_by" => Ty::Hash {
-            key: std::sync::Arc::new(projection_untyped(None, block_ret, &[])),
+            key: std::sync::Arc::new(Ty::untyped()),
             value: std::sync::Arc::new(elem.clone()),
         },
         "tally" => Ty::Hash { key: std::sync::Arc::new(elem.clone()), value: std::sync::Arc::new(Ty::Int) },
-        // Fold/accumulate — only seed and possible accumulator values count.
+        // Fold/accumulate — result type depends on the block/seed (untracked).
         // `with_object` is the enumerator's `each_with_object` (`each_cons(2).with_object([])`).
-        "inject" | "reduce" => fold_untyped(elem, block_ret, args),
-        "each_with_object" | "with_object" => object_accumulator_untyped(args),
+        "inject" | "reduce" | "each_with_object" | "with_object" => Ty::untyped(),
         "to_sentence" => Ty::Str,
         // `Array#to_h { |elem| [k, v] }` — block returns a [k, v]
         // tuple; result is Hash<k, v>. We approximate as Hash<elem, elem>
@@ -3419,7 +3106,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>, a
         // mirroring the Hash `[]=` handling.
         "[]=" | "store" => Ty::Nil,
         _ => unknown(),
-    }
+    }.computed()
 }
 
 /// Method dispatch for `Ty::Record` receivers — fixed-shape rows
@@ -3642,16 +3329,9 @@ pub(super) fn hash_method(
         // `flat_map` returns an Array (block return flattened by one);
         // we don't track the block's element type here.
         "flat_map" => Ty::Array { elem: std::sync::Arc::new(unknown()) },
-        "reduce" | "inject" => fold_untyped(&Ty::Tuple {
-            elems: vec![key.clone(), value.clone()].into(),
-        }, block_ret, args),
-        "each_with_object" => object_accumulator_untyped(args),
-        // Hash sum retains its unknown shape; the block replaces the pair
-        // as the summand, and the initial value can also determine the result.
-        "sum" => projection_untyped(block_ret.or(Some(&Ty::Tuple {
-            elems: vec![key.clone(), value.clone()].into(),
-        })), None, &args[..args.len().min(1)]),
-        "dig" => dig_untyped(Some(value), args.len().saturating_sub(1)),
+        // Folds / aggregates whose result depends on the block or seed,
+        // and nested `dig` access — gradual.
+        "reduce" | "inject" | "each_with_object" | "sum" | "dig" => Ty::untyped(),
         // Shape-neutral iteration helpers that return self (the hash)
         // for chaining (`length`/`size`/`count` are Int, handled above).
         "each_value" | "each_key" | "each_with_index" => Ty::Hash {
@@ -3700,7 +3380,7 @@ pub(super) fn hash_method(
         // nests hashes three deep.
         "to_json" | "to_s" | "inspect" => Ty::Str,
         // ActiveSupport `Hash#as_json`: string keys, JSON-primitive values.
-        "as_json" => Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::derived_untyped([value])) },
+        "as_json" => Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) },
         _ => unknown(),
     }
 }
@@ -3712,7 +3392,7 @@ pub(super) fn hash_method(
 fn jbuilder_value(arg: Option<&crate::expr::Expr>) -> Ty {
     match arg.and_then(|a| a.ty.clone()) {
         None => Ty::Nil,
-        Some(Ty::Var { .. }) => Ty::pending_untyped(),
+        Some(Ty::Var { .. }) => Ty::untyped(),
         Some(t) => t,
     }
 }
@@ -4057,25 +3737,26 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         // the gradual choice rather than bottoming out at Var.
         // Recognized universally because it's a Kernel-style addition
         // that applies to every object regardless of receiver type.
-        "try" | "try!" => Some(Ty::pending_untyped()),
+        "try" | "try!" => Some(Ty::untyped()),
         // Object#tap returns the receiver itself; the block's return
         // is ignored. Receiver-aware in spirit but `dispatch` already
         // handles the receiver outside of this universal table — we
         // return Untyped here as a no-worse-than-Var fallback that
         // doesn't pretend to know more than it does.
-        "tap" | "itself" => Some(Ty::pending_untyped()),
+        "tap" | "itself" => Some(Ty::untyped()),
         // `Hash#dig` / `Array#dig` / `Object#dig` walks a nested
-        // structure by keys/indices. Keep its opaque value shape;
-        // dispatch derives the reason by walking receiver values,
-        // excluding selector arguments and ignored block results.
-        "dig" => Some(Ty::pending_untyped()),
+        // structure by keys/indices. Receiver-aware dispatch would
+        // need the full structural shape; in practice it's used at
+        // the boundary with deeply-nested untyped data (params,
+        // JSON), where Untyped is the honest answer.
+        "dig" => Some(Ty::untyped()),
         // `presence` and `present?` are ActiveSupport's
         // blank-aware predicates. `presence` returns the receiver or
         // nil; a typed receiver is answered `T?` before this table, so
         // Untyped is the answer only for an unknown one. `present?` /
         // `blank?` are universally Bool.
         "present?" | "blank?" => Some(Ty::Bool),
-        "presence" => Some(Ty::pending_untyped()),
+        "presence" => Some(Ty::untyped()),
         _ => None,
     }
 }
@@ -4132,7 +3813,6 @@ pub(super) fn object_protocol_method(
     recv_ty: Option<&Ty>,
     method: &Symbol,
     block_ret: Option<&Ty>,
-    args: &[Expr],
     class_object: bool,
 ) -> Option<Ty> {
     // `include?` doubles as Enumerable/String membership — answer Bool even
@@ -4142,15 +3822,13 @@ pub(super) fn object_protocol_method(
         return None;
     }
     let sym_list = || Ty::Array { elem: std::sync::Arc::new(Ty::Sym) };
-    let recv = || recv_ty.cloned().unwrap_or_else(|| Ty::derived_untyped(recv_ty));
-    let block = || pending_or(block_ret, projection_untyped(recv_ty, block_ret, &[]));
+    let recv = || recv_ty.map(Ty::computed).unwrap_or(Ty::untyped());
+    let block = || block_ret.filter(|t| !matches!(t, Ty::Var { .. })).map(Ty::computed).unwrap_or(Ty::untyped());
     Some(match method.as_str() {
         // Kernel / Object reflection.
-        "instance_variable_set" | "class_variable_set" =>
-            Ty::derived_untyped(args.get(1).and_then(|arg| arg.ty.as_ref())),
-        "instance_variable_get" | "method" | "instance_method"
-        | "public_instance_method" | "const_get" | "class_variable_get"
-        | "enum_for" | "to_enum" => Ty::derived_untyped(recv_ty),
+        "instance_variable_get" | "instance_variable_set" | "method" | "instance_method"
+        | "public_instance_method" | "const_get" | "class_variable_get" | "class_variable_set"
+        | "enum_for" | "to_enum" => Ty::untyped(),
         "instance_variable_defined?" | "in?" | "method_defined?"
         | "public_method_defined?" | "private_method_defined?" | "const_defined?"
         | "class_variable_defined?" | "include?" => Ty::Bool,
@@ -4224,969 +3902,85 @@ fn param_value_method(method: &Symbol, block_ret: Option<&Ty>) -> Option<Ty> {
     })
 }
 
-/// A block's value: pending while the block is still a `Var` (#964), the
-/// fallback when there is no block.
-fn pending_or(block_ret: Option<&Ty>, fallback: Ty) -> Ty {
-    match block_ret {
-        Some(Ty::Var { .. }) => Ty::pending_untyped(),
-        Some(t) => t.clone(),
-        None => fallback,
-    }
+/// Receiver-only value reads. Keys, indices, defaults, options and blocks
+/// cannot create provenance; a concrete or mixed receiver never qualifies.
+fn gradual_projection(receiver: &Ty, method: &Symbol) -> bool {
+    matches!(receiver, Ty::Untyped { why } if why.is_gradual())
+        && matches!(method.as_str(), "[]" | "dig" | "fetch" | "first" | "last"
+            | "at" | "second" | "third" | "fourth" | "fifth" | "sole"
+            | "find" | "detect" | "min" | "max" | "sample")
+}
+
+/// A yielded collection member is the same projected value. This admits the
+/// block parameter, never the computed result of map/select or another send.
+fn gradual_yield(receiver: &Ty, method: &Symbol) -> bool {
+    matches!(receiver, Ty::Untyped { why } if why.is_gradual())
+        && matches!(method.as_str(), "each" | "each_pair" | "each_key" | "each_value"
+            | "map" | "collect" | "flat_map" | "filter_map" | "select" | "filter"
+            | "reject" | "find" | "detect" | "any?" | "all?" | "none?" | "one?")
 }
 
 #[cfg(test)]
-mod reason_tests {
-    use super::*;
-    use crate::ident::TyVar;
-    use crate::analyze::body::ClassInfo;
-    use std::collections::HashMap;
-
-    fn var() -> Ty { Ty::Var { var: TyVar(0) } }
-    fn class(name: &str) -> Ty {
-        Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() }
-    }
-    fn assert_pending(ty: &Ty) {
-        assert!(matches!(ty, Ty::Untyped { why } if why.is_pending_only()), "expected Pending, got {ty:?}");
-    }
-    fn assert_gradual(ty: &Ty) {
-        assert!(matches!(ty, Ty::Untyped { why } if !why.is_pending_only()), "expected Gradual, got {ty:?}");
-    }
-
-    #[test]
-    fn untyped_dispatch_preserves_the_receiver_reason() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        let method = Symbol::from("dig");
-        assert_pending(&typer.dispatch(Some(&Ty::pending_untyped()), &method, None, &[]));
-        assert_gradual(&typer.dispatch(Some(&Ty::untyped()), &method, None, &[]));
-        assert_eq!(typer.dispatch(Some(&Ty::pending_untyped()), &Symbol::from("to_s"), None, &[]), Ty::Str);
-    }
-
-    #[test]
-    fn universal_presence_preserves_pending_receivers() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        let method = Symbol::from("presence");
-        assert_pending(&typer.dispatch(Some(&var()), &method, None, &[]));
-        assert_pending(&typer.dispatch(Some(&Ty::pending_untyped()), &method, None, &[]));
-        assert_gradual(&typer.dispatch(Some(&Ty::untyped()), &method, None, &[]));
-        assert_eq!(typer.dispatch(Some(&var()), &Symbol::from("nil?"), None, &[]), Ty::Bool);
-    }
-
-    fn check_block_producer(owner: &str, method: &str) {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        let recv = class(owner);
-        let name = Symbol::from(method);
-        assert_pending(&typer.dispatch(Some(&recv), &name, Some(&var()), &[]));
-        assert_pending(&typer.dispatch(Some(&recv), &name, None, &[]));
-        assert_gradual(&typer.dispatch(Some(&recv), &name, Some(&Ty::untyped()), &[]));
-        assert_eq!(typer.dispatch(Some(&recv), &name, Some(&Ty::Str), &[]), Ty::Str);
-    }
-
-    #[test]
-    fn use_zone_waits_for_its_block_value() {
-        check_block_producer("Time", "use_zone");
-    }
-
-    #[test]
-    fn timeout_waits_for_its_block_value() {
-        check_block_producer("Timeout", "timeout");
-    }
-
-    #[test]
-    fn method_missing_waits_for_its_return() {
-        let mut info = ClassInfo::default();
-        info.class_methods.insert(Symbol::from("method_missing"), var());
-        let classes = HashMap::from([(ClassId(Symbol::from("Dynamic")), info)]);
-        let typer = BodyTyper::new(&classes);
-        assert_pending(&typer.dispatch(Some(&class("Dynamic")), &Symbol::from("dynamic_value"), None, &[]));
-    }
-
-    #[test]
-    fn union_of_var_receivers_waits_for_concrete_dispatch() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        let recv = Ty::Union { variants: vec![var(), Ty::Var { var: TyVar(1) }].into() };
-        // A non-universal method reaches the union-dispatch producer.
-        assert_pending(&typer.dispatch(Some(&recv), &Symbol::from("unknown_value"), None, &[]));
-    }
-
-    #[test]
-    fn conversions_of_pending_receivers_have_pending_elements() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for (receiver, pending) in [
-            (var(), true),
-            (Ty::pending_untyped(), true),
-            (Ty::untyped(), false),
-        ] {
-            for method in ["to_h", "to_a", "to_ary"] {
-                let converted = typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]);
-                let elements: Vec<&Ty> = match &converted {
-                    Ty::Hash { key, value } => vec![key, value],
-                    Ty::Array { elem } => vec![elem],
-                    _ => panic!("expected a container: {converted:?}"),
-                };
-                for element in elements {
-                    if pending {
-                        assert_pending(element);
-                    } else {
-                        assert_gradual(element);
-                    }
-                }
-            }
-            for (method, expected) in [
-                ("to_s", Ty::Str),
-                ("to_str", Ty::Str),
-                ("to_i", Ty::Int),
-                ("to_f", Ty::Float),
-                ("to_sym", Ty::Sym),
-            ] {
-                assert_eq!(
-                    typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]),
-                    expected
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn concrete_conversions_keep_precise_receiver_elements() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for leaf in [Ty::pending_untyped(), Ty::untyped(), Ty::Str] {
-            let array = Ty::Array {
-                elem: std::sync::Arc::new(leaf.clone()),
-            };
-            assert!(
-                typer
-                    .dispatch(Some(&array), &Symbol::from("to_a"), None, &[])
-                    .inference_eq(&array)
-            );
-            let hash = Ty::Hash {
-                key: std::sync::Arc::new(Ty::Sym),
-                value: std::sync::Arc::new(leaf),
-            };
-            assert!(
-                typer
-                    .dispatch(Some(&hash), &Symbol::from("to_h"), None, &[])
-                    .inference_eq(&hash)
-            );
-        }
-    }
-
-    #[test]
-    fn literal_reflective_conversion_aliases_preserve_reasons() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for receiver in [var(), Ty::pending_untyped(), Ty::untyped()] {
-            for method in [
-                "to_a", "to_ary", "to_h", "to_s", "to_str", "to_i", "to_f", "to_sym",
-            ] {
-                let expected = typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]);
-                let name = Expr::new(
-                    crate::span::Span::synthetic(),
-                    ExprNode::Lit {
-                        value: crate::expr::Literal::Sym {
-                            value: Symbol::from(method),
-                        },
-                    },
-                );
-                for alias in ["send", "public_send", "__send__"] {
-                    let actual = typer.dispatch(
-                        Some(&receiver),
-                        &Symbol::from(alias),
-                        None,
-                        std::slice::from_ref(&name),
-                    );
-                    assert!(
-                        actual.inference_eq(&expected),
-                        "{alias}({method}) on {receiver:?}: {actual:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn union_conversion_absorption_preserves_pending_only_receivers() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for unknown in [var(), Ty::pending_untyped(), Ty::untyped()] {
-            for variants in [
-                vec![unknown.clone(), Ty::Nil],
-                vec![Ty::Nil, unknown.clone()],
-            ] {
-                for other in [
-                    None,
-                    Some(var()),
-                    Some(Ty::pending_untyped()),
-                    Some(Ty::untyped()),
-                ] {
-                    let mut variants = variants.clone();
-                    if let Some(other) = other {
-                        variants.push(other);
-                    }
-                    let expected_unknown = if variants
-                        .iter()
-                        .any(|v| matches!(v, Ty::Untyped { why } if !why.is_pending_only()))
-                    {
-                        Ty::untyped()
-                    } else {
-                        Ty::pending_untyped()
-                    };
-                    let receiver = Ty::Union {
-                        variants: variants.into(),
-                    };
-                    for method in [
-                        "to_a", "to_ary", "to_h", "to_s", "to_str", "to_i", "to_f", "to_sym",
-                    ] {
-                        // Object#to_s is resolved universally before union
-                        // dispatch, and already guarantees a String.
-                        let expected = if method == "to_s" {
-                            Ty::Str
-                        } else {
-                            expected_unknown.clone()
-                        };
-                        let actual =
-                            typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]);
-                        assert!(
-                            actual.inference_eq(&expected),
-                            "{method} on {receiver:?}: {actual:?}"
-                        );
-                        let nested = Ty::Union {
-                            variants: vec![receiver.clone(), Ty::Nil].into(),
-                        };
-                        assert!(
-                            typer
-                                .dispatch(Some(&nested), &Symbol::from(method), None, &[])
-                                .inference_eq(&expected)
-                        );
-                    }
-                }
-            }
-            // A concrete contributor keeps the established absorbing answer;
-            // this fix carries reasons without refining union value shapes.
-            let array = Ty::Array {
-                elem: std::sync::Arc::new(Ty::Str),
-            };
-            for variants in [
-                vec![unknown.clone(), array.clone()],
-                vec![array.clone(), unknown.clone()],
-            ] {
-                let actual = typer.dispatch(
-                    Some(&Ty::Union {
-                        variants: variants.into(),
-                    }),
-                    &Symbol::from("to_a"),
-                    None,
-                    &[],
-                );
-                let expected = if matches!(unknown, Ty::Var { .. }) {
-                    array.clone()
-                } else {
-                    unknown.clone()
-                };
-                assert!(
-                    actual.inference_eq(&expected),
-                    "concrete array with {unknown:?}: {actual:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn indexed_pluck_preserves_unknown_element_reasons() {
-        let key = Expr::new(crate::span::Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("key") });
-        let method = Symbol::from("pluck");
-        for (input, pending) in [(var(), true), (Ty::pending_untyped(), true), (Ty::untyped(), false)] {
-            let Ty::Array { elem } = indexed_pluck(&method, &input, std::slice::from_ref(&key)).unwrap()
-            else { panic!("expected Array") };
-            if pending { assert_pending(&elem); } else { assert_gradual(&elem); }
-        }
-    }
-
-    #[test]
-    fn jbuilder_waits_for_its_value() {
-        let mut arg = Expr::new(crate::span::Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("value") });
-        arg.ty = Some(var());
-        assert_pending(&jbuilder_value(Some(&arg)));
-        arg.ty = Some(Ty::untyped());
-        assert_gradual(&jbuilder_value(Some(&arg)));
-        assert_eq!(jbuilder_value(None), Ty::Nil);
-    }
-
-    #[test]
-    fn module_protocol_waits_for_its_block_value() {
-        for name in ["module_eval", "class_exec", "instance_eval"] {
-            let method = Symbol::from(name);
-            assert_pending(&object_protocol_method(None, &method, Some(&var()), &[], true).unwrap());
-            assert_pending(&object_protocol_method(None, &method, None, &[], true).unwrap());
-            assert_eq!(object_protocol_method(None, &method, Some(&Ty::Str), &[], true), Some(Ty::Str));
-        }
-    }
-}
-
-#[cfg(test)]
-mod conversion_reason_tests {
-    use super::*;
-    #[test]
-    fn conversion_keeps_a_pending_untyped_receivers_elements_pending() {
-        let classes = std::collections::HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        let converted = typer.dispatch(
-            Some(&Ty::pending_untyped()),
-            &Symbol::from("to_a"),
-            None,
-            &[],
-        );
-        let Ty::Array { elem } = converted else {
-            panic!("not an Array")
-        };
-        assert!(
-            matches!(&*elem, Ty::Untyped { why } if why.is_pending_only()),
-            "conversion invented Gradual evidence from Pending: {elem:?}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod transfer_reason_tests {
+mod whitelist_reason_tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn unknowns() -> Vec<Ty> {
-        vec![
-            Ty::Var {
-                var: crate::ident::TyVar(1),
-            },
-            Ty::pending_untyped(),
-            Ty::untyped(),
-        ]
-    }
-    fn array(t: Ty) -> Ty {
-        Ty::Array {
-            elem: std::sync::Arc::new(t),
-        }
-    }
-    fn hash(t: Ty) -> Ty {
-        Ty::Hash {
-            key: std::sync::Arc::new(Ty::Sym),
-            value: std::sync::Arc::new(t),
-        }
-    }
-    fn expr(t: Ty) -> Expr {
-        let mut e = Expr::new(
-            crate::span::Span::synthetic(),
-            ExprNode::Lit {
-                value: crate::expr::Literal::Sym {
-                    value: Symbol::from("name"),
-                },
-            },
-        );
-        e.ty = Some(t);
-        e
-    }
     #[test]
-    fn union_dispatch_absorption_joins_only_unknown_input_reasons() {
+    fn projections_require_a_gradual_receiver_and_ignore_selectors_and_blocks() {
         let classes = HashMap::new();
         let typer = BodyTyper::new(&classes);
-        for unknown in unknowns().into_iter().skip(1) {
-            for concrete in [Ty::Nil, Ty::Str, array(Ty::Str), hash(Ty::Str)] {
-                for arms in [
-                    vec![unknown.clone(), concrete.clone()],
-                    vec![concrete.clone(), unknown.clone()],
-                    vec![
-                        Ty::Union {
-                            variants: vec![unknown.clone(), concrete.clone()].into(),
-                        },
-                        Ty::Nil,
-                    ],
-                ] {
-                    for name in ["upcase", "to_a", "to_ary", "to_h", "no_such_method"] {
-                        let recv = Ty::Union {
-                            variants: arms.clone().into(),
-                        };
-                        let got = typer.dispatch(Some(&recv), &Symbol::from(name), None, &[]);
-                        assert!(got.inference_eq(&unknown), "{recv:?}.{name} = {got:?}");
-                    }
-                }
-            }
-        }
-    }
-    #[test]
-    fn block_bindings_preserve_all_parameter_reasons() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for input in unknowns().into_iter().skip(1) {
-            for method in [
-                "each",
-                "each_pair",
-                "map",
-                "collect",
-                "flat_map",
-                "then",
-                "yield_self",
-                "tap",
-            ] {
-                let params = typer
-                    .block_params_for(Some(&input), &Symbol::from(method), false)
-                    .unwrap();
-                assert!(params[0].inference_eq(&input));
-                let block = Expr::new(
-                    crate::span::Span::synthetic(),
-                    ExprNode::Lambda {
-                        params: vec![Symbol::from("k"), Symbol::from("v")],
-                        rest_param: None,
-                        extra_params: vec![],
-                        block_param: None,
-                        body: expr(Ty::Nil),
-                        block_style: Default::default(),
-                    },
-                );
-                let ctx = typer.block_ctx_for(
-                    &Ctx::default(),
-                    Some(&input),
-                    &Symbol::from(method),
-                    &[],
-                    false,
-                    &block,
-                );
-                for name in ["k", "v"] {
-                    assert!(ctx.local_bindings[&Symbol::from(name)].inference_eq(&input));
-                }
-            }
-        }
-    }
-    #[test]
-    fn block_union_keeps_selected_shapes_and_joins_matching_reasons() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for wrap in [false, true] {
-            let p = if wrap {
-                array(array(Ty::pending_untyped()))
-            } else {
-                Ty::pending_untyped()
-            };
-            let g = if wrap {
-                array(array(Ty::untyped()))
-            } else {
-                Ty::untyped()
-            };
-            for arms in [
-                vec![p.clone(), g.clone()],
-                vec![g.clone(), p.clone()],
-                vec![p.clone(), Ty::untyped()],
-            ] {
-                let recv = Ty::Union {
-                    variants: arms.into(),
-                };
-                let got = typer
-                    .block_params_for(Some(&recv), &Symbol::from("map"), false)
-                    .unwrap();
-                assert!(Ty::derived_untyped(got.iter()).inference_eq(&Ty::untyped()));
-            }
-        }
-    }
-
-    #[test]
-    fn pending_dispatch_receivers_do_not_hide_gradual_arguments_or_blocks() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for input in unknowns() {
-            let expected = Ty::derived_untyped([&input]);
-            for receiver in [
-                Ty::pending_untyped(),
-                Ty::Union {
-                    variants: vec![array(Ty::Int), Ty::pending_untyped()].into(),
-                },
-                Ty::Union {
-                    variants: vec![Ty::pending_untyped(), hash(Ty::Int)].into(),
-                },
-            ] {
-                for method in ["reduce", "inject", "sum", "each_with_object", "with_object"] {
-                    let got = typer.dispatch(
-                        Some(&receiver),
-                        &Symbol::from(method),
-                        Some(&Ty::Str),
-                        &[expr(input.clone())],
-                    );
-                    assert!(
-                        got.inference_eq(&expected),
-                        "{receiver:?}.{method}: {got:?}"
-                    );
-                }
-                for method in ["group_by", "index_by", "reduce", "inject", "sum"] {
-                    let got =
-                        typer.dispatch(Some(&receiver), &Symbol::from(method), Some(&input), &[]);
-                    assert!(
-                        got.inference_eq(&expected),
-                        "{receiver:?}.{method}: {got:?}"
-                    );
+        for receiver in [Ty::pending_untyped(), Ty::untyped(), Ty::gradual_untyped()] {
+            for selector in [Ty::Str, Ty::pending_untyped(), Ty::gradual_untyped(),
+                Ty::Hash { key: Ty::gradual_untyped().into(), value: Ty::Str.into() }] {
+                let mut arg = Expr::new(crate::span::Span::synthetic(), ExprNode::SelfRef);
+                arg.ty = Some(selector);
+                for name in ["[]", "dig", "fetch", "first", "last", "at"] {
+                    let result = typer.dispatch(Some(&receiver), &Symbol::from(name), Some(&Ty::gradual_untyped()), &[arg.clone()]);
+                    let expected = if matches!(receiver, Ty::Untyped { why } if why.is_gradual()) {
+                        Ty::gradual_untyped()
+                    } else { Ty::untyped() };
+                    assert!(result.inference_eq(&expected), "{name}: {receiver:?} -> {result:?}");
                 }
             }
         }
     }
 
     #[test]
-    fn aggregate_reasons_follow_only_possible_result_values() {
+    fn concrete_and_mixed_builtin_receivers_never_export_gradual_members() {
         let classes = HashMap::new();
         let typer = BodyTyper::new(&classes);
-        // `with_object` is an Enumerator alias in the existing Array
-        // representation, not a method on a Hash receiver.
-        assert!(matches!(
-            typer.dispatch(
-                Some(&hash(Ty::untyped())),
-                &Symbol::from("with_object"),
-                Some(&Ty::Str),
-                &[expr(Ty::Str)],
-            ),
-            Ty::Var { .. }
-        ));
-        for input in unknowns() {
-            for nested in [
-                input.clone(),
-                array(input.clone()),
-                hash(array(input.clone())),
-            ] {
-                for receiver in [
-                    array(nested.clone()),
-                    hash(nested.clone()),
-                    Ty::Tuple {
-                        elems: vec![Ty::Int, nested.clone()].into(),
-                    },
-                ] {
-                    for method in ["reduce", "inject", "sum", "each_with_object", "with_object"] {
-                        if method == "with_object" && matches!(receiver, Ty::Hash { .. }) {
-                            continue;
-                        }
-                        let args = [expr(Ty::Str)];
-                        let got = typer.dispatch(
-                            Some(&receiver),
-                            &Symbol::from(method),
-                            Some(&Ty::Str),
-                            &args,
-                        );
-                        assert!(
-                            got.inference_eq(&Ty::pending_untyped()),
-                            "{receiver:?}.{method}: {got:?}"
-                        );
-                    }
-                    for method in ["group_by", "index_by"] {
-                        // Hash does not model these key projections; its existing
-                        // unknown fallback is outside this reason transfer.
-                        if matches!(receiver, Ty::Hash { .. }) {
-                            continue;
-                        }
-                        let got = typer.dispatch(
-                            Some(&receiver),
-                            &Symbol::from(method),
-                            Some(&Ty::Str),
-                            &[],
-                        );
-                        let Ty::Hash { key, .. } = got else {
-                            panic!("{got:?}")
-                        };
-                        assert!(key.inference_eq(&Ty::pending_untyped()));
-                    }
-                }
-                let expected = Ty::derived_untyped([&nested]);
-                for receiver in [array(Ty::Int), hash(Ty::Int)] {
-                    for method in ["reduce", "inject", "sum", "each_with_object", "with_object"] {
-                        if method == "with_object" && matches!(receiver, Ty::Hash { .. }) {
-                            continue;
-                        }
-                        let got = typer.dispatch(
-                            Some(&receiver),
-                            &Symbol::from(method),
-                            Some(&Ty::Str),
-                            &[expr(nested.clone())],
-                        );
-                        assert!(
-                            got.inference_eq(&expected),
-                            "{receiver:?}.{method}({nested:?}): {got:?}"
-                        );
-                    }
-                    for method in ["reduce", "inject", "sum"] {
-                        let got = typer.dispatch(
-                            Some(&receiver),
-                            &Symbol::from(method),
-                            Some(&nested),
-                            &[expr(Ty::Str)],
-                        );
-                        assert!(
-                            got.inference_eq(&expected),
-                            "block {nested:?}, {method}: {got:?}"
-                        );
-                    }
-                    for method in ["each_with_object", "with_object"] {
-                        if method == "with_object" && matches!(receiver, Ty::Hash { .. }) {
-                            continue;
-                        }
-                        let got = typer.dispatch(
-                            Some(&receiver),
-                            &Symbol::from(method),
-                            Some(&nested),
-                            &[expr(Ty::Str)],
-                        );
-                        assert!(
-                            got.inference_eq(&Ty::pending_untyped()),
-                            "ignored block {nested:?}: {got:?}"
-                        );
-                    }
-                }
-                for method in ["reduce", "inject"] {
-                    for args in [
-                        vec![],
-                        vec![expr(Ty::Sym)],
-                        vec![expr(Ty::Str), expr(Ty::Sym)],
-                    ] {
-                        let block = if args.is_empty() {
-                            Some(&Ty::Str)
-                        } else {
-                            None
-                        };
-                        let got = typer.dispatch(
-                            Some(&array(nested.clone())),
-                            &Symbol::from(method),
-                            block,
-                            &args,
-                        );
-                        assert!(
-                            got.inference_eq(&expected),
-                            "unseeded/operator {method}: {got:?}"
-                        );
-                    }
-                }
-                for method in ["instance_variable_set", "class_variable_set"] {
-                    for receiver in [Ty::Str, nested.clone()] {
-                        let got = object_protocol_method(
-                            Some(&receiver),
-                            &Symbol::from(method),
-                            Some(&nested),
-                            &[expr(nested.clone()), expr(Ty::Str)],
-                            true,
-                        )
-                        .unwrap();
-                        assert!(
-                            got.inference_eq(&Ty::pending_untyped()),
-                            "irrelevant name/receiver/block: {got:?}"
-                        );
-                        let got = object_protocol_method(
-                            Some(&receiver),
-                            &Symbol::from(method),
-                            None,
-                            &[expr(Ty::Sym), expr(nested.clone())],
-                            true,
-                        )
-                        .unwrap();
-                        assert!(got.inference_eq(&expected), "assigned value: {got:?}");
-                    }
-                }
+        let gradual = Ty::gradual_untyped();
+        let receivers = [
+            Ty::Array { elem: gradual.clone().into() },
+            Ty::Hash { key: gradual.clone().into(), value: gradual.clone().into() },
+            Ty::Tuple { elems: vec![Ty::Str, gradual.clone()].into() },
+            Ty::Union { variants: vec![Ty::Str, gradual.clone()].into() },
+            Ty::Class { id: ClassId(Symbol::from("Range")), args: vec![gradual.clone()].into() },
+            crate::analyze::indifferent::of(gradual.clone()),
+        ];
+        let mut arg = Expr::new(crate::span::Span::synthetic(), ExprNode::SelfRef);
+        arg.ty = Some(gradual.clone());
+        for receiver in receivers {
+            for name in ["[]", "dig", "fetch", "first", "to_a", "to_h", "as_json", "map", "reduce", "group_by"] {
+                let result = typer.dispatch(Some(&receiver), &Symbol::from(name), Some(&gradual), &[arg.clone()]);
+                assert!(result.inference_eq(&result.computed()), "{name}: {receiver:?} -> {result:?}");
             }
         }
     }
 
     #[test]
-    fn dig_reasons_exclude_each_selector_and_traversed_hash_key() {
+    fn arbitrary_sends_and_conversions_do_not_inherit_from_a_gradual_receiver() {
         let classes = HashMap::new();
         let typer = BodyTyper::new(&classes);
-        for input in unknowns() {
-            let keyed = |value| Ty::Hash {
-                key: std::sync::Arc::new(input.clone()),
-                value: std::sync::Arc::new(value),
-            };
-            for (receiver, depth) in [
-                (array(Ty::Str), 1),
-                (keyed(Ty::Str), 1),
-                (array(keyed(Ty::Str)), 2),
-                (keyed(array(keyed(Ty::Str))), 3),
-                (Ty::Tuple { elems: vec![Ty::Str, Ty::Int].into() }, 1),
-                (crate::analyze::indifferent::of(Ty::Str), 1),
-                (Ty::Union { variants: vec![array(Ty::Str), keyed(Ty::Str)].into() }, 1),
-                (Ty::Union { variants: vec![keyed(Ty::Str), array(Ty::Str)].into() }, 1),
-                (Ty::Union { variants: vec![Ty::Nil, array(Ty::Str)].into() }, 1),
-                (Ty::Record { row: crate::ty::Row {
-                    fields: [(Symbol::from("k"), Ty::Str)].into_iter().collect::<indexmap::IndexMap<_, _>>().into(),
-                    rest: None,
-                } }, 1),
-            ] {
-                let args = vec![expr(hash(array(input.clone()))); depth];
-                let result = typer.dispatch(Some(&receiver), &Symbol::from("dig"), Some(&input), &args);
-                assert!(result.inference_eq(&Ty::pending_untyped()), "{receiver:?}: {result:?}");
-            }
-            let result = hash_method(&Symbol::from("dig"), &input, &Ty::Str, Some(&input), &[expr(input.clone())]);
-            assert!(result.inference_eq(&Ty::pending_untyped()));
-            for receiver in [array(input.clone()), keyed(input.clone()), array(keyed(input.clone()))] {
-                let depth = if matches!(&receiver, Ty::Array { elem } if matches!(**elem, Ty::Hash { .. })) { 2 } else { 1 };
-                let result = typer.dispatch(Some(&receiver), &Symbol::from("dig"), Some(&Ty::Str), &vec![expr(Ty::Int); depth]);
-                assert!(result.inference_eq(&Ty::derived_untyped([&input])), "returned value: {result:?}");
+        for name in ["upcase", "to_a", "to_ary", "to_h", "as_json", "map", "reduce", "instance_exec", "class_exec", "module_exec", "unknown_call"] {
+            let result = typer.dispatch(Some(&Ty::gradual_untyped()), &Symbol::from(name), Some(&Ty::gradual_untyped()), &[]);
+            assert!(result.inference_eq(&result.computed()), "{name}: {result:?}");
+        }
+        for identity in ["freeze", "itself", "tap"] {
+            for value in [Ty::pending_untyped(), Ty::gradual_untyped()] {
+                let result = typer.dispatch(Some(&value), &Symbol::from(identity), None, &[]);
+                assert!(result.inference_eq(&value), "identity {identity}: {value:?}");
             }
         }
-        // Receiver-less reflection with no selector still must not panic.
-        let got = typer.dispatch(None, &Symbol::from("send"), Some(&Ty::untyped()), &[]);
-        assert!(got.inference_eq(&Ty::untyped()));
-    }
-
-    #[test]
-    fn json_projection_reasons_ignore_options_and_block_results() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for input in unknowns() {
-            for options in [input.clone(), hash(array(input.clone()))] {
-                for receiver in [array(Ty::Str), hash(Ty::Str)] {
-                    let got = typer.dispatch(Some(&receiver), &Symbol::from("as_json"), Some(&input), &[expr(options.clone())]);
-                    assert!(Ty::derived_untyped([&got]).inference_eq(&Ty::pending_untyped()), "{got:?}");
-                }
-            }
-            for receiver in [array(input.clone()), hash(input.clone()), array(hash(input.clone()))] {
-                let got = typer.dispatch(Some(&receiver), &Symbol::from("as_json"), Some(&Ty::Str), &[expr(Ty::Str)]);
-                assert!(Ty::derived_untyped([&got]).inference_eq(&Ty::derived_untyped([&input])));
-            }
-        }
-    }
-
-    #[test]
-    fn fetch_fallback_excludes_index_and_block_shadowed_default() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for input in unknowns() {
-            for (block, args, expected) in [
-                (None, vec![expr(input.clone()), expr(unknown())], Ty::pending_untyped()),
-                (Some(unknown()), vec![expr(input.clone())], Ty::pending_untyped()),
-                (Some(Ty::Str), vec![expr(input.clone()), expr(input.clone())], Ty::pending_untyped()),
-                (Some(input.clone()), vec![expr(Ty::Int), expr(Ty::Str)], Ty::derived_untyped([&input])),
-            ] {
-                let got = typer.dispatch(Some(&array(Ty::Str)), &Symbol::from("fetch"), block.as_ref(), &args);
-                assert!(got.inference_eq(&expected), "{args:?}/{block:?}: {got:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn ignored_object_and_constructor_blocks_supply_no_value_reason() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for input in unknowns() {
-            for method in ["instance_variable_get", "method", "instance_method", "public_instance_method",
-                "const_get", "class_variable_get", "enum_for", "to_enum"] {
-                for receiver in [Ty::Str, Ty::pending_untyped(), input.clone()] {
-                    let got = object_protocol_method(Some(&receiver), &Symbol::from(method), Some(&input), &[expr(input.clone())], true).unwrap();
-                    assert!(got.inference_eq(&Ty::derived_untyped([&receiver])), "{method}: {got:?}");
-                }
-            }
-            for method in ["dup", "clone", "extend", "remove_method", "undef_method"] {
-                let got = object_protocol_method(None, &Symbol::from(method), Some(&input), &[expr(input.clone())], true).unwrap();
-                assert!(got.inference_eq(&Ty::pending_untyped()));
-            }
-            for name in ["Array", "Hash"] {
-                let got = typer.dispatch(Some(&Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() }), &Symbol::from("[]"), Some(&input), &[expr(Ty::Str)]);
-                assert!(Ty::derived_untyped([&got]).inference_eq(&Ty::pending_untyped()));
-            }
-            let models = Ty::Union { variants: vec![
-                Ty::Class { id: ClassId(Symbol::from("First")), args: vec![].into() },
-                Ty::Class { id: ClassId(Symbol::from("Second")), args: vec![].into() },
-            ].into() };
-            let got = array_method(&Symbol::from("model"), &models, Some(&input), &[expr(input.clone())]);
-            assert!(got.inference_eq(&Ty::pending_untyped()));
-            let builder = Ty::Class { id: ClassId(Symbol::from("Jbuilder")), args: vec![].into() };
-            for method in ["array!", "attributes!", "nested"] {
-                let got = typer.dispatch(Some(&builder), &Symbol::from(method), Some(&input), &[expr(Ty::Str), expr(input.clone())]);
-                assert!(Ty::derived_untyped([&got]).inference_eq(&Ty::pending_untyped()), "{method}: {got:?}");
-            }
-            let got = typer.dispatch(Some(&builder), &Symbol::from("array!"), Some(&Ty::Str), &[expr(input.clone())]);
-            assert!(Ty::derived_untyped([&got]).inference_eq(&Ty::derived_untyped([&input])));
-        }
-    }
-
-    #[test]
-    fn selector_options_and_symbolic_operators_are_not_returned_values() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for input in unknowns() {
-            let process = Ty::Class { id: ClassId(Symbol::from("Process")), args: vec![].into() };
-            let mut unit = Expr::new(crate::span::Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("unit") });
-            unit.ty = Some(input.clone());
-            let got = typer.dispatch(Some(&process), &Symbol::from("clock_gettime"), Some(&input), &[expr(input.clone()), unit]);
-            assert!(got.inference_eq(&Ty::pending_untyped()));
-            for (name, method) in [("Time", "use_zone"), ("Timeout", "timeout")] {
-                let recv = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() };
-                let got = typer.dispatch(Some(&recv), &Symbol::from(method), Some(&unknown()), &[expr(input.clone())]);
-                assert!(got.inference_eq(&Ty::pending_untyped()));
-                let got = typer.dispatch(Some(&recv), &Symbol::from(method), Some(&input), &[expr(Ty::Int)]);
-                assert!(got.inference_eq(&Ty::derived_untyped([&input])));
-            }
-            for method in ["reduce", "inject"] {
-                for args in [vec![expr(input.clone())], vec![expr(Ty::Str), expr(input.clone())]] {
-                    let got = fold_untyped(&Ty::Str, None, &args);
-                    assert!(got.inference_eq(&Ty::pending_untyped()), "operator: {got:?}");
-                    if args.len() == 2 {
-                        let got = fold_untyped(&Ty::Str, Some(&input), &args);
-                        assert!(got.inference_eq(&Ty::pending_untyped()), "ignored block: {got:?}");
-                    }
-                    let got = typer.dispatch(Some(&array(Ty::Str)), &Symbol::from(method), None, &args);
-                    assert!(got.inference_eq(&Ty::pending_untyped()));
-                }
-            }
-            for receiver in [Ty::untyped(), Ty::pending_untyped(), Ty::Union { variants: vec![array(Ty::Str), Ty::untyped()].into() }] {
-                for method in ["each_with_object", "with_object", "reduce", "inject", "sum"] {
-                    let got = typer.dispatch(Some(&receiver), &Symbol::from(method), Some(&Ty::Str), &[expr(Ty::Str)]);
-                    assert!(got.inference_eq(&Ty::pending_untyped()), "{receiver:?}.{method}: {got:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn collection_projections_do_not_invent_gradual_evidence() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for input in unknowns() {
-            let expected = Ty::derived_untyped([&input]);
-            for receiver in [array(input.clone()), hash(input.clone())] {
-                for method in ["as_json", "reduce", "inject", "sum"] {
-                    let got =
-                        typer.dispatch(Some(&receiver), &Symbol::from(method), Some(&input), &[]);
-                    assert!(
-                        Ty::derived_untyped([&got]).inference_eq(&expected),
-                        "{receiver:?}.{method}: {got:?}"
-                    );
-                }
-            }
-            for value in [input.clone(), array(input.clone()), hash(input.clone())] {
-                let hash = hash(value);
-                let got = typer.dispatch(Some(&hash), &Symbol::from("dig"), None, &[expr(Ty::Sym)]);
-                assert!(got.inference_eq(&expected), "{hash:?}: {got:?}");
-            }
-            let got = indexed_pluck(
-                &Symbol::from("pluck"),
-                &hash(input.clone()),
-                &[expr(Ty::Sym)],
-            )
-            .unwrap();
-            assert!(Ty::derived_untyped([&got]).inference_eq(&expected));
-        }
-    }
-    #[test]
-    fn dynamic_dispatch_joins_every_method_return_before_absorbing() {
-        for input in unknowns().into_iter().skip(1) {
-            let id = ClassId(Symbol::from("Probe"));
-            let mut info = super::super::ClassInfo::default();
-            info.instance_methods
-                .insert(Symbol::from("first"), input.clone());
-            info.instance_methods
-                .insert(Symbol::from("second"), Ty::Str);
-            let classes = HashMap::from([(id.clone(), info)]);
-            let typer = BodyTyper::new(&classes);
-            let recv = Ty::Class {
-                id: id.clone(),
-                args: vec![].into(),
-            };
-            assert!(
-                typer
-                    .receiver_method_return_union(&recv)
-                    .inference_eq(&input)
-            );
-            let mut classes = classes;
-            classes
-                .get_mut(&id)
-                .unwrap()
-                .instance_methods
-                .insert(Symbol::from("third"), Ty::untyped());
-            assert!(
-                BodyTyper::new(&classes)
-                    .receiver_method_return_union(&recv)
-                    .inference_eq(&Ty::untyped())
-            );
-        }
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for input in unknowns() {
-            assert!(
-                typer
-                    .receiver_method_return_union(&input)
-                    .inference_eq(&Ty::derived_untyped([&input]))
-            );
-        }
-    }
-    #[test]
-    fn constructor_and_date_operand_fallbacks_derive_their_inputs() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        for input in unknowns() {
-            let expected = Ty::derived_untyped([&input]);
-            for name in ["Array", "Hash"] {
-                let recv = Ty::Class {
-                    id: ClassId(Symbol::from(name)),
-                    args: vec![].into(),
-                };
-                let got = typer.dispatch(
-                    Some(&recv),
-                    &Symbol::from("[]"),
-                    None,
-                    &[expr(input.clone())],
-                );
-                assert!(
-                    Ty::derived_untyped([&got]).inference_eq(&expected),
-                    "{name}: {got:?}"
-                );
-            }
-            if matches!(input, Ty::Untyped { .. }) {
-                for op in ["+", "-", ">>", "<<"] {
-                    assert!(
-                        date_method(&Symbol::from(op), &[expr(input.clone())])
-                            .unwrap()
-                            .inference_eq(&input)
-                    );
-                }
-            }
-        }
-        let indifferent = Ty::Class {
-            id: ClassId(Symbol::from(crate::analyze::indifferent::CLASS)),
-            args: vec![].into(),
-        };
-        let got = typer.dispatch(Some(&indifferent), &Symbol::from("new"), None, &[]);
-        assert!(Ty::derived_untyped([&got]).inference_eq(&Ty::pending_untyped()));
-        assert!(
-            date_method(&Symbol::from("-"), &[expr(Ty::Date)])
-                .unwrap()
-                .inference_eq(&Ty::untyped())
-        );
-        let id = ClassId(Symbol::from("Diverges"));
-        let mut info = super::super::ClassInfo::default();
-        info.instance_methods
-            .insert(Symbol::from("raise"), Ty::Bottom);
-        let classes = HashMap::from([(id.clone(), info)]);
-        let recv = Ty::Class {
-            id,
-            args: vec![].into(),
-        };
-        assert!(
-            BodyTyper::new(&classes)
-                .receiver_method_return_union(&recv)
-                .inference_eq(&Ty::pending_untyped())
-        );
-    }
-
-    #[test]
-    fn genuine_json_and_catalog_any_remain_gradual_with_pending_arguments() {
-        let classes = HashMap::new();
-        let typer = BodyTyper::new(&classes);
-        let json = Ty::Class {
-            id: ClassId(Symbol::from("JSON")),
-            args: vec![].into(),
-        };
-        let got = typer.dispatch(
-            Some(&json),
-            &Symbol::from("parse"),
-            None,
-            &[expr(Ty::pending_untyped())],
-        );
-        assert!(got.inference_eq(&Ty::untyped()));
-        assert!(
-            relation_return_on_array_repr(crate::catalog::ReturnKind::Untyped, &Ty::Str)
-                .inference_eq(&Ty::untyped())
-        );
     }
 }
