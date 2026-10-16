@@ -22,8 +22,6 @@ use crate::expr::{Expr, ExprNode, HashRest, LValue, Literal, MatchPattern};
 use crate::ident::{ClassId, Symbol, TyVar};
 use crate::ty::{Row, Ty};
 
-/// A break in a bytes block can replace the method's String result. Nested
-/// lambdas/iterators and while/until loops own their breaks independently.
 // `Class[C]` is a class object that dispatch unwraps to `C`.
 fn instance_shaped(ty: &Ty) -> bool {
     match ty {
@@ -33,13 +31,15 @@ fn instance_shaped(ty: &Ty) -> bool {
     }
 }
 
-fn bytes_block_has_escaping_break(e: &Expr) -> bool {
+/// An escaping break replaces a yielding call's normal result. Nested
+/// lambdas/iterators and while/until loops own their breaks independently.
+fn block_has_escaping_break(e: &Expr) -> bool {
     match &*e.node {
         ExprNode::Break { .. } => true,
         ExprNode::Lambda { .. } | ExprNode::While { .. } => false,
         _ => {
             let mut found = false;
-            e.node.for_each_child(&mut |child| found |= bytes_block_has_escaping_break(child));
+            e.node.for_each_child(&mut |child| found |= block_has_escaping_break(child));
             found
         }
     }
@@ -1694,7 +1694,7 @@ impl<'a> BodyTyper<'a> {
                 if recv_ty.as_ref() == Some(&Ty::Str) && method.as_str() == "bytes"
                     && let Some(b) = block.as_ref()
                     && let ExprNode::Lambda { body, .. } = &*b.node
-                    && bytes_block_has_escaping_break(body)
+                    && block_has_escaping_break(body)
                 {
                     expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
@@ -1902,6 +1902,16 @@ impl<'a> BodyTyper<'a> {
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // A block exit may replace the receiver/member/block value
+                // that normal dispatch returns. Until break values are modeled,
+                // keep the existing result shape but do not certify that value
+                // as an identity/projection flow. This also covers literal send
+                // aliases, whose dispatch has already resolved above.
+                let dispatched = if block.as_ref().is_some_and(|b| {
+                    matches!(&*b.node, ExprNode::Lambda { body, .. } if block_has_escaping_break(body))
+                }) && self.block_may_replace_value(recv_ty.as_ref(), method, args, block_ret.as_ref()) {
+                    dispatched.computed()
+                } else { dispatched };
                 let dispatched = if matches!(dispatched, Ty::Untyped { .. })
                     && self.json_value_source(recv.as_ref(), method, args) {
                     Ty::gradual_untyped()
@@ -5197,7 +5207,10 @@ fn falsy_part(ty: &Ty) -> Option<Ty> {
             }
         }
         t if never_falsy(t) => None,
-        t => Some(t.clone()),
+        // Unknown truthiness is an approximation of nil/false here, not
+        // an arbitrary value from the source. Preserve the public shape
+        // without allowing that approximation to certify a gradual flow.
+        t => Some(t.computed()),
     }
 }
 

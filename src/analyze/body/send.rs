@@ -53,6 +53,32 @@ impl<'a> BodyTyper<'a> {
         })
     }
 
+    /// Only yielding value transfers can have their normal result replaced
+    /// by a break. Value reads and identity calls that ignore blocks (dig,
+    /// first, freeze, etc.) must retain their source even with a supplied block.
+    pub(super) fn block_may_replace_value(
+        &self,
+        recv_ty: Option<&Ty>,
+        method: &Symbol,
+        args: &[Expr],
+        block_ret: Option<&Ty>,
+    ) -> bool {
+        let mut name = method.as_str();
+        let mut args = args;
+        while matches!(name, "send" | "public_send" | "__send__" | "try" | "try!") {
+            let Some(first) = args.first() else { return false };
+            name = match &*first.node {
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.as_str(),
+                ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value.as_str(),
+                _ => return false,
+            };
+            args = &args[1..];
+        }
+        matches!(name, "tap" | "then" | "yield_self" | "fetch" | "find" | "detect"
+            | "min" | "max" | "transaction")
+            || self.block_value_return(recv_ty, &Symbol::from(name), block_ret).is_some()
+    }
+
     /// `pluck(:col)` / `pick(:col)` on a relation over a known model.
     ///
     /// The class-side registration in `analyze/mod.rs` types these
