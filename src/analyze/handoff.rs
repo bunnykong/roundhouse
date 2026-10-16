@@ -70,6 +70,14 @@ pub(crate) fn reset() {
     }
 }
 
+pub(super) fn completion_values(f: &mut dyn FnMut(&mut Ty)) {
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        for t in s.prev_rets.values_mut() { f(t); }
+        for t in s.prev_params.values_mut().flatten() { f(t); }
+    });
+}
+
 /// Join every inferred return with the value it held after the previous
 /// harvest. Called after the harvest and again after the registry copies,
 /// so a copy carries the joined value.
@@ -106,6 +114,7 @@ pub(crate) fn join_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
 
 /// With the fold: only reference-mode returns join, unbounded.
 fn join_reference_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
+    if current_refret_on() { return; }
     if !super::fold::active() {
         return;
     }
@@ -136,7 +145,9 @@ fn join_reference_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
 
 /// Join every parameter row with the row it had last round.
 pub(crate) fn join_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
-    if !*JOIN {
+    // Each site already has a replaceable cell. Joining the old aggregate
+    // resurrects superseded/removed sites rather than retaining skipped callers.
+    if !*JOIN || super::parameter_conservation::row_current_on() {
         return;
     }
     if super::fold::on() {
@@ -197,6 +208,7 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
 /// [`join_rets`] for one reference-mode method (both sides), after the
 /// worklist harvested it.
 pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &ClassId, method: &Symbol) {
+    if current_refret_on() { return; }
     if !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(class, method) {
         return;
     }
@@ -223,10 +235,16 @@ pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &Cl
     });
 }
 
+fn current_refret_on() -> bool {
+    static ON: LazyLock<bool> = LazyLock::new(|| flag("RH_CUR_REFRET"));
+    *ON
+}
+
 /// [`join_params`] for one row the worklist recomputed: a reference-mode
 /// method's row joins with its previous row (`commit` records it).
 pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool) -> Option<Vec<Ty>> {
-    if !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(&key.0, &key.1) {
+    if super::parameter_conservation::row_current_on()
+        || !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(&key.0, &key.1) {
         return raw;
     }
     ST.with(|s| {
@@ -444,6 +462,23 @@ fn informative(t: &Ty) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_row_does_not_resurrect_replaced_or_removed_contributions() {
+        if !super::super::parameter_conservation::row_current_on() { return; }
+        let key = (ClassId(Symbol::from("Example")), Symbol::from("accept"),
+            crate::dialect::MethodReceiver::Instance);
+        ST.with(|s| s.borrow_mut().prev_params.insert(key.clone(), vec![Ty::Int]));
+        let mut current = HashMap::from([(key.clone(), vec![Ty::Str])]);
+        join_params(&mut current);
+        assert_eq!(current[&key], vec![Ty::Str]);
+        assert_eq!(join_param_row(&key, Some(vec![Ty::Str]), true), Some(vec![Ty::Str]));
+        current.clear();
+        join_params(&mut current);
+        assert!(current.is_empty());
+        assert_eq!(join_param_row(&key, None, true), None);
+        ST.with(|s| s.borrow_mut().prev_params.clear());
+    }
 
     fn union(v: Vec<Ty>) -> Ty {
         Ty::Union { variants: v.into() }

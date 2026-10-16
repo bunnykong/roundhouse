@@ -1,6 +1,31 @@
 //! protocol producer strictness and complete-read comparisons (spine v2 defaults).
 use crate::ty::{Provenance, Ty};
 
+pub(crate) fn seeds_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_PENDING_INPUT_SEEDS").as_deref() == Ok("1"))
+}
+
+/// An open parameter is a wait for callers, never evidence of an unknown value.
+/// This also keeps legacy Var observations out of the unresolved boundary.
+pub(crate) fn parameter_seed(t: Option<Ty>) -> Option<Ty> {
+    if seeds_on() && t.as_ref().is_none_or(|t| matches!(t, Ty::Var { .. })) {
+        Some(input_seed())
+    } else { t }
+}
+
+pub(crate) fn input_seed() -> Ty {
+    if super::completion_rerun::inputs_completed() { Ty::unresolved() }
+    else { Ty::pending_untyped() }
+}
+
+/// An omitted formal contributes no runtime value to the caller join.
+/// It must not manufacture unknown evidence beside another caller's value.
+pub(crate) fn absent_argument() -> Ty {
+    if super::canonical_unknown::source_on() { Ty::Bottom }
+    else { Ty::Var { var: crate::ident::TyVar(0) } }
+}
+
 pub(crate) fn stubs_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RH_PROVENANCE_STRICT_STUBS").as_deref() != Ok("0"))

@@ -453,6 +453,7 @@ impl ClassEntry {
         match self.family {
             Family::Lib => Ctx {
                 self_ty: Some(Ty::Class { id: self.self_id.clone(), args: vec![].into() }),
+                ivar_bindings: self.class_ivars.clone(),
                 ..Ctx::default()
             },
             _ => Ctx {
@@ -468,11 +469,13 @@ impl ClassEntry {
         let map = self.reseeded.as_ref()?;
         Some(match self.family {
             Family::Lib => Ctx {
+                writer_phase: 1,
                 self_ty: Some(Ty::Class { id: self.self_id.clone(), args: vec![].into() }),
                 ivar_bindings: map.clone(),
                 ..Ctx::default()
             },
             _ => Ctx {
+                writer_phase: 1,
                 self_ty: Some(Ty::Class { id: self.id.clone(), args: vec![].into() }),
                 ivar_bindings: map.clone(),
                 constants: self.consts.clone(),
@@ -664,6 +667,10 @@ pub(super) struct Engine {
     pub params_by_method: HashMap<ParamKey, ParamShape>,
     // parameter rows
     pub site_index: HashMap<ParamKey, BTreeMap<(u32, u32), Vec<Ty>>>,
+    pub writer_sites: BTreeMap<String, Vec<(ParamKey, Vec<Ty>)>>,
+    pub writer_index: HashMap<ParamKey, super::writers::RowCells>,
+    pub writer_revision: u64,
+    pub writer_targets: HashMap<Symbol,BTreeSet<ParamKey>>,
     pub unit_ord: Vec<u32>,
     pub fold_from: HashMap<ParamKey, Vec<ParamKey>>,
     pub fold_into: HashMap<ParamKey, Vec<ParamKey>>,
@@ -821,9 +828,12 @@ impl Engine {
 
     /// Fold the sites recorded for `key` the way `apply_param_sites` does.
     fn fold_sites(&self, key: &ParamKey) -> Option<Vec<Ty>> {
-        let sites = self.site_index.get(key)?;
+        let sites = self.site_index.get(key).into_iter().flat_map(|m|m.values());
         let mut rows = HashMap::new();
-        let observations = sites.values().map(|args| (key.clone(), args.clone())).collect();
+        let mut observations: Vec<_> = sites.map(|args| (key.clone(), args.clone())).collect();
+        if let Some(row)=self.writer_index.get(key).and_then(|cells|cells.value()) {
+            observations.push((key.clone(),row));
+        }
         super::fold_param_observations(&mut rows, observations);
         rows.remove(key)
     }
@@ -1064,6 +1074,10 @@ impl Analyzer {
             defined: Self::defined_methods(app),
             params_by_method: Self::param_shapes(app),
             site_index: HashMap::new(),
+            writer_sites: BTreeMap::new(),
+            writer_index: HashMap::new(),
+            writer_revision: u64::MAX,
+            writer_targets: HashMap::new(),
             unit_ord: Vec::new(),
             fold_from: HashMap::new(),
             fold_into: HashMap::new(),
@@ -1313,6 +1327,11 @@ impl Analyzer {
     }
 
     /// Start recording a fine typing inside a class pass.
+    /// Stable slot in the action's saved Pass A/B visiting-context sequence.
+    pub(super) fn sccq_context_ordinal(&self, unit: Option<u32>) -> Option<usize> {
+        self.sccq.as_ref().and_then(|eng|unit.map(|u|eng.units[u as usize].ctx.len()))
+    }
+
     pub(super) fn sccq_rec_begin(&self, unit: Option<u32>) {
         if unit.is_some() && self.sccq.is_some() {
             rec_begin();
@@ -1371,6 +1390,7 @@ impl Analyzer {
         &mut self,
         ci: usize,
         self_id: &ClassId,
+        class_ivars: &HashMap<Symbol, Ty>,
         concern_env: Option<&HashMap<Symbol, Ty>>,
         current_writes: Option<&HashMap<Symbol, Ty>>,
         is_current_attributes: bool,
@@ -1380,6 +1400,7 @@ impl Analyzer {
         let entry = eng.lib_entry[ci];
         let e = &mut eng.entries[entry];
         e.self_id = self_id.clone();
+        e.class_ivars = class_ivars.clone();
         e.concern_env = concern_env.cloned();
         e.current_writes = current_writes.cloned();
         e.is_current_attributes = is_current_attributes;
@@ -1559,6 +1580,7 @@ impl Analyzer {
             }
             eng.body_cache[ord] = (hash, resolved);
         }
+        affected.extend(self.sccq_writer_sites(&mut eng, true));
         for k in affected {
             match eng.fold_sites(&k) {
                 Some(row) => {
@@ -1692,6 +1714,40 @@ impl Analyzer {
             }
         }
         (from, into)
+    }
+
+    /// Replace only the evaluated sources; unvisited visiting contexts retain their cells.
+    fn sccq_writer_sites(&self, eng: &mut Engine, all: bool) -> BTreeSet<ParamKey> {
+        let mut keys=BTreeSet::new();
+        if !super::writers::on() { return keys; }
+        let reroute=eng.writer_revision!=super::writers::revision();
+        if reroute {
+            eng.writer_targets=self.writer_param_targets(&eng.defined);
+            eng.writer_revision=super::writers::revision();
+        }
+        for (source,raw) in super::writers::changed_calls(all || reroute) {
+            let resolved: Vec<_>=raw.into_iter().flat_map(|site|
+                self.resolve_writer_site(site,&eng.params_by_method,&eng.defined,&eng.writer_targets)).collect();
+            if eng.writer_sites.get(&source).is_some_and(|old|
+                old.len()==resolved.len() && old.iter().zip(&resolved).all(|((k,a),(l,b))|
+                    k==l && super::strict_producers::same_types(a,b))) { continue; }
+            let old=eng.writer_sites.remove(&source).unwrap_or_default();
+            for i in 0..old.len().max(resolved.len()) {
+                if let (Some((before,a)),Some((after,b)))=(old.get(i),resolved.get(i)) {
+                    if before==after && super::strict_producers::same_types(a,b) { continue; }
+                }
+                if let Some((key,_))=old.get(i) {
+                    if let Some(cells)=eng.writer_index.get_mut(key) { cells.remove(&(source.clone(),i)); }
+                    keys.insert(key.clone());
+                }
+                if let Some((key,args))=resolved.get(i) {
+                    eng.writer_index.entry(key.clone()).or_default().insert((source.clone(),i),args.clone());
+                    keys.insert(key.clone());
+                }
+            }
+            eng.writer_sites.insert(source,resolved);
+        }
+        keys
     }
 
     /// Recompute rows for `keys` after a unit's sites moved; mark readers of
@@ -1934,12 +1990,10 @@ impl Analyzer {
                 Family::CtrlAction => {
                     let controller = &app.controllers[unit.ci];
                     let Some(action) = controller.actions().nth(unit.mi) else { return reapplied };
+                    let _current = super::current_harvest::writer(&controller.name, &action.name, false, action.body.span);
                     let body_ty = super::tuple_return_ty(&action.body)
                         .or_else(|| super::effective_return_ty(&action.body));
-                    if let Some(body_ty) = body_ty.filter(|t| !matches!(t, Ty::Var { .. })) {
-                        let target = &mut self.classes.entry(controller.name.clone()).or_default().instance_methods;
-                        Self::insert_inferred_return(target, &action.name, body_ty);
-                    }
+                    self.harvest_action_return(app, &controller.name, &action.name, body_ty);
                 }
                 Family::CtrlClassMethod => {
                     let controller = &app.controllers[unit.ci];
@@ -1947,6 +2001,7 @@ impl Analyzer {
                         crate::dialect::ControllerBodyItem::ClassMethod { method, configuration_slot: None, .. } => Some(method),
                         _ => None,
                     }).nth(unit.mi) else { return reapplied };
+                    let _current = super::current_harvest::writer(&controller.name, &method.name, true, method.body.span);
                     let ret = self.method_return_ty(&controller.name, method);
                     let target = &mut self.classes.entry(controller.name.clone()).or_default().class_methods;
                     Self::register_method_return(target, &method.name, ret.as_ref());
@@ -2097,16 +2152,18 @@ impl Analyzer {
                     let Some(action) = controller.actions_mut().nth(mi) else { rec_end(); return };
                     // The class pass's sequence for this action: Pass A, then
                     // any Pass B sweeps or concern splice that re-typed it.
-                    for base in &seq {
+                    for (writer_context,base) in seq.iter().enumerate() {
                         let inner = self.seed_action_params(
                             base,
                             &ctrl_name,
                             origin.as_ref(),
                             &action.name,
+                            action.body.span,
                             &action.params,
                             &action.kw_params,
                             action.block_param.as_ref(),
                             action.rest_param.as_ref(),
+                            writer_context,
                         );
                         self.body_typer().analyze_expr(&mut action.body, &inner);
                     }
@@ -2244,11 +2301,11 @@ impl Analyzer {
                 hash_ty(a, &mut fp);
             }
         }
+        let mut keys = self.sccq_writer_sites(eng, false);
         if !(resolved.len() == eng.units[u as usize].sites.len()
             && resolved.iter().zip(&eng.units[u as usize].sites).all(|((k, a), (l, b))|
                 k == l && super::strict_producers::same_types(a, b))) {
             let ord = eng.unit_ord[u as usize];
-            let mut keys: BTreeSet<ParamKey> = BTreeSet::new();
             if ord != u32::MAX {
                 let old = std::mem::take(&mut eng.units[u as usize].sites);
                 for (i, (k, _)) in old.iter().enumerate() {
@@ -2273,11 +2330,11 @@ impl Analyzer {
                 }
             }
             eng.units[u as usize].sites = resolved;
-            if !keys.is_empty() {
+        }
+        if !keys.is_empty() {
                 let t_rows = std::time::Instant::now();
                 self.sccq_recompute_rows(eng, keys);
                 eng.stats.t_rows += t_rows.elapsed().as_secs_f64();
-            }
         }
         let t_sited = std::time::Instant::now();
         eng.stats.t_sites += (t_sited - t_harvested).as_secs_f64();

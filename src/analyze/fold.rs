@@ -135,9 +135,16 @@ struct State {
     /// The side table: the current value of each parameter, position and
     /// narrowing slot.
     values: HashMap<u32, Ty>,
+    /// Parameter-reference components completed at quiescence.
+    completed_reference_params: HashSet<u32>,
     /// Typing-pass counter, and the pass of each site slot's last write.
     epoch: u64,
     site_epoch: HashMap<u32, u64>,
+    /// Latest evaluation of each visiting source, joined over all its paths.
+    site_writers: HashMap<u32, BTreeMap<String, Ty>>,
+    source_sites: HashMap<String, HashSet<u32>>,
+    writing: Option<String>,
+    current_sites: HashMap<u32, Ty>,
     /// Registry copies: `fold_concern_surfaces` copies a concern's entries
     /// onto every includer each round, and dispatch on the includer finds
     /// the copy first. A copy of a reference-mode return is read as a
@@ -251,6 +258,45 @@ pub(crate) fn ret_ref(class: &ClassId, method: &Symbol, class_side: bool) -> Opt
     Some(Ty::Rec { slot })
 }
 
+/// Enumerate the declared writer before reading its row. No destination is allocated here.
+pub(super) fn declare_param(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver,
+                           index: usize, span: crate::span::Span) {
+    if active() && is_rec_method(class,method) {
+        super::parameter_views::declare(&SlotKey::Param {class:class.clone(),method:method.clone(),side,index},span);
+    }
+}
+
+/// C materialization and lifetime; V replaces only the value from current raw cells.
+pub(super) fn param_seed(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver,
+                        index: usize, span: crate::span::Span, raw: Option<Ty>, control: Option<Ty>) -> Option<Ty> {
+    if !active() || !is_rec_method(class,method) { return control; }
+    let key=SlotKey::Param {class:class.clone(),method:method.clone(),side,index};
+    let slot=if control.is_some() {Some(intern(key.clone()))} else {slot_id(&key)};
+    let raw=raw.map(|t|slot.map_or_else(||t.clone(),|slot|strip_self(t.clone(),slot)));
+    let aggregate=super::parameter_views::replace(&key,span,raw);
+    let before=slot.and_then(|id|ST.with(|s|s.borrow().values.get(&id).cloned()));
+    if !super::parameter_views::on() {
+        let out=control.map(|t|param_ref(class,method,side,index,t));
+        let after=slot.and_then(|id|ST.with(|s|s.borrow().values.get(&id).cloned()));
+        super::parameter_views::note_storage(before.clone(),after,before.is_some() && out.is_some() && super::handoff::join_on());
+        return out;
+    }
+    if let Some(slot)=slot {
+        // No old stored value enters the right hand side.
+        let value=completed_parameter_value(slot, super::parameter_views::view(aggregate));
+        super::structure::fold_write(&key,"parameter-seed");
+        ST.with(|s| {
+            let mut s=s.borrow_mut();
+            if s.values.get(&slot)!=Some(&value) { note_moved(slot,s.values.get(&slot)); }
+            s.joined.remove(&slot);
+            super::det::note("fold.param_seed",s.values.get(&slot),&value);
+            s.values.insert(slot,value.clone());
+        });
+        super::parameter_views::note_storage(before,Some(value),false);
+        control.map(|_|Ty::Rec {slot})
+    } else { None }
+}
+
 /// A read of a parameter slot, when it is in reference mode. `value` is
 /// what the body would otherwise have been seeded with.
 pub(crate) fn param_ref(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver, index: usize, value: Ty) -> Ty {
@@ -287,12 +333,12 @@ fn strip_self(t: Ty, slot: u32) -> Ty {
             let kept: Vec<Ty> =
                 variants.into_iter().filter(|v| !matches!(v, Ty::Rec { slot: s } if *s == slot)).collect();
             match kept.len() {
-                0 => Ty::pending_untyped(),
+                0 => super::completion_rerun::unavailable_read(),
                 1 => kept.into_iter().next().unwrap(),
                 _ => Ty::Union { variants: kept.into() },
             }
         }
-        Ty::Rec { slot: s } if s == slot => Ty::pending_untyped(),
+        Ty::Rec { slot: s } if s == slot => super::completion_rerun::unavailable_read(),
         other => other,
     }
 }
@@ -329,18 +375,97 @@ fn fingerprint(t: &Ty) -> u64 {
     h.finish()
 }
 
+/// Begin retyping one source. Its previous outputs stay until replaced or removed.
+pub(super) fn writer_begin(source: &str) {
+    ST.with(|s| {
+        let mut s=s.borrow_mut();
+        s.writing=Some(source.into());
+        s.current_sites.clear();
+    });
+}
+fn site_retract_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_SITE_RETRACT").as_deref() == Ok("1"))
+}
+fn writer_value(s: &mut State, slot: u32) {
+    let cells=s.site_writers.get(&slot);
+    if site_retract_on() && cells.is_none_or(|m| m.is_empty()) {
+        if s.values.contains_key(&slot) { note_moved(slot, s.values.get(&slot)); }
+        s.values.remove(&slot);
+        s.site_writers.remove(&slot);
+        s.site_epoch.remove(&slot);
+        s.joined.remove(&slot);
+        return;
+    }
+    let seed=if cells.is_some_and(|m|!m.is_empty()) { Ty::pending_untyped() } else { Ty::Bottom };
+    let value=cells.into_iter().flat_map(|m|m.values())
+        .cloned().fold(seed,super::writers::join);
+    if !s.values.get(&slot).is_some_and(|old|super::strict_producers::same(old,&value)) {
+        note_moved(slot,s.values.get(&slot));
+    }
+    super::det::note("fold.site_writers",s.values.get(&slot),&value);
+    s.joined.remove(&slot);
+    s.values.insert(slot,value);
+}
+/// Retract only outputs absent from a source that has actually been retyped.
+pub(super) fn writer_end(source: &str) {
+    ST.with(|s| {
+        let mut s=s.borrow_mut();
+        let current: HashSet<u32>=s.current_sites.keys().copied().collect();
+        let old=s.source_sites.insert(source.into(),current.clone()).unwrap_or_default();
+        for slot in old.difference(&current) {
+            if let Some(writers)=s.site_writers.get_mut(slot) { writers.remove(source); }
+            writer_value(&mut s,*slot);
+        }
+        s.writing=None;
+        s.current_sites.clear();
+    });
+}
+
 /// Accumulate `value` into a site-keyed slot (its set variable) and return
 /// the reference to it. Within one typing pass a site's values join. With
 /// `RH_FOLD_JOIN` they also join across passes; without it, the first
 /// write in a new pass replaces the last pass's value.
 fn accumulate(key: SlotKey, value: Ty) -> Ty {
+    let value = super::canonical_unknown::produced(value);
     if super::fixpoint_check::stats_on() { super::structure::fold_write(&key, "site-transfer"); }
     let slot = intern(key);
     let value = strip_self(value, slot);
-    let print = fingerprint(&value);
+    if super::writers::tracing() {
+        eprintln!("WRITER site key={:?} value={value:?} context={}",key_of(slot),super::writers::context());
+    }
     ST.with(|s| {
         let mut s = s.borrow_mut();
         let epoch = s.epoch;
+        if super::writers::on() {
+            let source=s.writing.clone().unwrap_or_else(||format!("external:{slot}"));
+            let value=if s.writing.is_some() {
+                let contribution=s.current_sites.entry(slot).or_insert_with(Ty::pending_untyped);
+                *contribution=super::writers::join(contribution.clone(),value);
+                contribution.clone()
+            } else { value };
+            let cells=s.site_writers.entry(slot).or_default();
+            if !cells.get(&source).is_some_and(|old|super::strict_producers::same(old,&value)) {
+                cells.insert(source,value);
+                writer_value(&mut s,slot);
+            }
+            s.site_epoch.insert(slot,epoch);
+            return;
+        }
+        let print = fingerprint(&value);
+        // Current rows can preserve genuine unknowns only if downstream
+        // site transfers preserve them too. Reuse the RH_SITES_CURRENT rule:
+        // a visited site replaces its cell; an unvisited site retains it.
+        if super::parameter_conservation::row_current_on() {
+            if s.values.get(&slot) != Some(&value) {
+                note_moved(slot, s.values.get(&slot));
+            }
+            s.site_epoch.insert(slot, epoch);
+            s.joined.remove(&slot);
+            super::det::note("fold.site_slot", s.values.get(&slot), &value);
+            s.values.insert(slot, value);
+            return;
+        }
         let fresh = s.site_epoch.get(&slot).is_none_or(|e| *e < epoch);
         s.site_epoch.insert(slot, epoch);
         // Joins are idempotent: a value this slot has already joined since it
@@ -631,7 +756,7 @@ pub(crate) fn head(t: &Ty, at: SiteId, classes: &HashMap<ClassId, ClassInfo>) ->
     let mut out: Vec<Ty> = Vec::new();
     push_head(t, at, classes, &mut out);
     Some(match out.len() {
-        0 => Ty::pending_untyped(),
+        0 => super::completion_rerun::unavailable_read(),
         _ => super::body::union_many(out),
     })
 }
@@ -641,7 +766,9 @@ fn push_head(t: &Ty, at: SiteId, classes: &HashMap<ClassId, ClassInfo>, out: &mu
         Ty::Rec { slot } => {
             let arms = resolve(*slot, classes, &mut HashSet::new());
             if arms.is_empty() {
-                out.push(Ty::pending_untyped());
+                if super::completion_rerun::closed_reads_on()
+                    && value_of(*slot, classes) == Some(Ty::Bottom) { out.push(Ty::Bottom); }
+                else { out.push(super::completion_rerun::unavailable_read()); }
             }
             for arm in arms {
                 out.push(shallow(arm, at));
@@ -911,7 +1038,7 @@ impl<'a> Expander<'a> {
                 if let Some(m) = self.memo.get(slot) {
                     return m.clone();
                 }
-                let Some(v) = value_of(*slot, self.classes) else { return Ty::pending_untyped() };
+                let Some(v) = value_of(*slot, self.classes) else { return super::completion_rerun::unavailable_read() };
                 self.stack.push(*slot);
                 self.depth_at.push(self.ctor);
                 let cyc_before = self.cyclic.len();
@@ -990,6 +1117,11 @@ pub(crate) fn deactivate() {
     ST.with(|s| s.borrow_mut().active = false);
 }
 
+/// Rewrite the actual stored slot values after inference, not their observers.
+pub(super) fn canonicalize_kept_vars() {
+    ST.with(|s| s.borrow_mut().values.values_mut().for_each(super::canonical_unknown::side_value));
+}
+
 /// Aggregates for the fixpoint canaries' stats line.
 pub(crate) fn stats() -> serde_json::Value {
     ST.with(|s| {
@@ -1021,6 +1153,126 @@ pub(crate) fn stats() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_unknown_rewrites_side_table_value_without_promoting_pending() {
+        ST.with(|s| *s.borrow_mut() = State::default());
+        let slot = intern(SlotKey::At { site: (1, 10, 20), step: Step::Val });
+        ST.with(|s| { s.borrow_mut().values.insert(slot, Ty::Union {
+            variants: vec![Ty::Int, Ty::Var { var: crate::ident::TyVar(0) }, Ty::pending_untyped()].into(),
+        }); });
+        canonicalize_kept_vars();
+        ST.with(|s| {
+            let s = s.borrow();
+            let Ty::Union { variants } = &s.values[&slot] else { panic!("stored union") };
+            assert!(!variants.iter().any(|t| matches!(t, Ty::Var { .. })));
+            assert!(variants.iter().any(|t| matches!(t, Ty::Untyped { why: crate::ty::Provenance::Unresolved })));
+            assert!(variants.iter().any(|t| matches!(t, Ty::Untyped { why: crate::ty::Provenance::Pending })));
+        });
+        ST.with(|s| *s.borrow_mut() = State::default());
+    }
+
+    #[test]
+    fn current_row_sites_retain_unknowns_and_replay_prior_inputs() {
+        if !super::super::parameter_conservation::row_current_on() { return; }
+        let known = Ty::Class { id: ClassId(Symbol::from("Session")), args: vec![].into() };
+        let unknown = super::super::parameter_conservation::join(known.clone(), Ty::unresolved());
+        for key in [SlotKey::At { site: (1, 10, 20), step: Step::Elem },
+                    SlotKey::Narrow { site: (1, 10, 20), filter: "truthy_session".into() }] {
+            ST.with(|s| *s.borrow_mut() = State::default());
+            for value in [known.clone(), unknown.clone(), known.clone(), unknown.clone()] {
+                new_epoch();
+                let Ty::Rec { slot } = accumulate(key.clone(), value.clone()) else { unreachable!() };
+                assert_eq!(value_of(slot, &HashMap::new()), Some(value.clone()));
+                new_epoch(); // a skipped site retains its latest contribution
+                assert_eq!(value_of(slot, &HashMap::new()), Some(value));
+            }
+        }
+        ST.with(|s| *s.borrow_mut() = State::default());
+    }
+
+
+    #[test]
+    fn writers_sites_join_paths_replace_sources_and_remove_only_retyped_absences() {
+        if !super::super::writers::on() { return; }
+        ST.with(|s|*s.borrow_mut()=State::default());
+        let key=SlotKey::At {site:(1,10,20),step:Step::Val};
+        writer_begin("first");
+        let Ty::Rec {slot}=accumulate(key.clone(),Ty::Sym) else {unreachable!()};
+        accumulate(key.clone(),Ty::Array {elem:std::sync::Arc::new(Ty::Int)});
+        writer_end("first");
+        writer_begin("second"); accumulate(key.clone(),Ty::Str); writer_end("second");
+        let read=||value_of(slot,&HashMap::new()).unwrap();
+        let expected=super::super::writers::join(Ty::Str,super::super::writers::join(Ty::Sym,Ty::Array {elem:std::sync::Arc::new(Ty::Int)}));
+        assert_eq!(read(),expected);
+        writer_begin("second"); accumulate(key.clone(),Ty::Bool); writer_end("second");
+        let expected=super::super::writers::join(Ty::Bool,super::super::writers::join(Ty::Sym,Ty::Array {elem:std::sync::Arc::new(Ty::Int)}));
+        assert_eq!(read(),expected); // skipped first retains both paths
+        writer_begin("first"); writer_end("first");
+        assert_eq!(read(),Ty::Bool); // retyped first no longer writes
+        writer_begin("second"); writer_end("second");
+        assert_eq!(value_of(slot,&HashMap::new()), if site_retract_on() { None } else { Some(Ty::Bottom) });
+        ST.with(|s|*s.borrow_mut()=State::default());
+    }
+
+    #[test]
+    fn writers_source_contract_follows_a_recursive_model_receiver() {
+        if !super::super::writers::on() || !on() { return; }
+        use crate::{expr::{Expr,ExprNode},span::Span};
+        ST.with(|s|*s.borrow_mut()=State::default());
+        let model=ClassId(Symbol::from("WriterModel"));
+        let slot=intern(SlotKey::Param {class:model.clone(),method:Symbol::from("caller"),side:crate::dialect::MethodReceiver::Instance,index:0});
+        ST.with(|s| {s.borrow_mut().values.insert(slot,Ty::Class {id:model.clone(),args:vec![].into()});});
+        let mut recv=Expr::new(Span::synthetic(),ExprNode::SelfRef); recv.ty=Some(Ty::Rec {slot});
+        let expr=Expr::new(Span::synthetic(),ExprNode::Send {recv:Some(recv),method:Symbol::from("save!"),args:vec![],block:None,parenthesized:false});
+        let classes=std::iter::once((model,ClassInfo {table:Some(crate::ident::TableRef(Symbol::from("writer_models"))),..ClassInfo::default()})).collect();
+        let backend=Ty::Class {id:ClassId(Symbol::from("ActiveRecord::Base")),args:vec![].into()};
+        let expected=super::super::writers::join(backend.clone(),Ty::Bool);
+        assert_eq!(super::super::writers::source_result(&expr,&super::super::body::Ctx::default(),&classes,backend),expected);
+        ST.with(|s|*s.borrow_mut()=State::default());
+    }
+
+    #[test]
+    fn writers_site_keeps_a_sole_pending_contribution_until_it_is_completed() {
+        if !super::super::writers::on() { return; }
+        ST.with(|s|*s.borrow_mut()=State::default());
+        let key=SlotKey::At {site:(1,10,20),step:Step::Elem};
+        writer_begin("pending-source");
+        let Ty::Rec {slot}=accumulate(key.clone(),Ty::pending_untyped()) else {unreachable!()};
+        writer_end("pending-source");
+        assert!(super::super::strict_producers::is_p(&value_of(slot,&HashMap::new()).unwrap()));
+        writer_begin("pending-source"); accumulate(key,Ty::Int); writer_end("pending-source");
+        assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Int));
+        ST.with(|s|*s.borrow_mut()=State::default());
+    }
+
+    #[test]
+    #[ignore = "RH_SITE_RETRACT=1 RH_WRITERS=1"]
+    fn site_retract_removes_only_the_last_retired_writer_and_can_recreate_the_slot() {
+        assert!(site_retract_on() && super::super::writers::on());
+        for key in [SlotKey::At {site:(1,10,20),step:Step::Val},
+                    SlotKey::Narrow {site:(1,10,20),filter:"truthy_img_src".into()}] {
+            ST.with(|s|*s.borrow_mut()=State::default());
+            writer_begin("first");
+            let Ty::Rec {slot}=accumulate(key.clone(),Ty::Int) else {unreachable!()};
+            writer_end("first");
+            writer_begin("second"); accumulate(key.clone(),Ty::Bottom); writer_end("second");
+            writer_begin("first"); writer_end("first");
+            assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Bottom),
+                "a current Bottom writer is a real cell");
+            new_epoch();
+            assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Bottom),
+                "a skipped source keeps its current contribution");
+            writer_begin("second"); writer_end("second");
+            assert_eq!(value_of(slot,&HashMap::new()),None,
+                "retiring the last writer removes the cell");
+            writer_begin("first");
+            assert_eq!(accumulate(key,Ty::Str),Ty::Rec {slot});
+            writer_end("first");
+            assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Str));
+        }
+        ST.with(|s|*s.borrow_mut()=State::default());
+    }
 
     fn union(v: Vec<Ty>) -> Ty {
         Ty::Union { variants: v.into() }
@@ -1083,6 +1335,107 @@ pub(super) fn structure_parts() -> (Vec<SlotKey>, Vec<String>, Vec<String>) {
 }
 
 // Read-only research condition classification observer. Snapshot before serialization to avoid nested borrows.
+pub(super) fn completion_values(f: &mut dyn FnMut(&mut Ty)) {
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        for t in s.values.values_mut() { f(t); }
+        if super::writers::on() {
+            for t in s.site_writers.values_mut().flat_map(|v| v.values_mut()) { f(t); }
+            for t in s.current_sites.values_mut() { f(t); }
+        }
+    });
+}
+
+/// Only a closed component made entirely of parameter references is an
+/// unpaid parameter obligation. Bottom and productive recursive containers
+/// never enter this set. Include reference-only feeders into those cycles.
+pub(super) fn complete_reference_params() -> u64 {
+    if !super::completion_rerun::on() { return 0; }
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        let mut graph = HashMap::<u32, Vec<u32>>::new();
+        for (&slot, t) in &s.values {
+            if !matches!(s.keys.get(slot as usize), Some(SlotKey::Param { .. })) { continue; }
+            let mut refs = Vec::new();
+            if reference_leaves(t, &mut refs) && !refs.is_empty() { graph.insert(slot, refs); }
+        }
+        loop {
+            let remove: Vec<_> = graph.iter().filter(|(_, refs)| refs.iter().any(|r| !graph.contains_key(r)))
+                .map(|(slot, _)| *slot).collect();
+            if remove.is_empty() { break; }
+            for slot in remove { graph.remove(&slot); }
+        }
+        let n = graph.len() as u64;
+        for slot in graph.keys() {
+            s.completed_reference_params.insert(*slot);
+            note_moved(*slot, s.values.get(slot));
+            s.values.insert(*slot, Ty::unresolved());
+            s.joined.remove(slot);
+        }
+        n
+    })
+}
+
+fn reference_leaves(t: &Ty, refs: &mut Vec<u32>) -> bool {
+    match t {
+        Ty::Rec { slot } => { refs.push(*slot); true }
+        Ty::Union { variants } if !variants.is_empty() => variants.iter().all(|t| reference_leaves(t, refs)),
+        _ => false,
+    }
+}
+fn completed_parameter_value(slot: u32, value: Ty) -> Ty {
+    if !super::completion_rerun::on() { return value; }
+    let complete = ST.with(|s| {
+        let s = s.borrow();
+        fn still_unknown(slot: u32, s: &State, seen: &mut HashSet<u32>) -> bool {
+            if !s.completed_reference_params.contains(&slot) { return false; }
+            if !seen.insert(slot) { return true; }
+            match s.values.get(&slot) {
+                Some(Ty::Untyped { .. }) => true,
+                Some(t) => {
+                    let mut refs = Vec::new();
+                    reference_leaves(t, &mut refs) && !refs.is_empty()
+                        && refs.iter().all(|r| still_unknown(*r, s, seen))
+                }
+                None => false,
+            }
+        }
+        let mut refs = Vec::new();
+        s.completed_reference_params.contains(&slot) && reference_leaves(&value, &mut refs)
+            && !refs.is_empty() && refs.iter().all(|r| still_unknown(*r, &s, &mut HashSet::new()))
+    });
+    if complete { Ty::unresolved() } else { value }
+}
+
+#[cfg(test)]
+mod current_writer_completion_tests {
+    use super::*;
+    #[test]
+    #[ignore = "RH_COMPLETE_RERUN=1"]
+    fn qt_history_reference_only_parameter_component_completes_and_stays_current() {
+        assert!(super::super::completion_rerun::on());
+        ST.with(|s| *s.borrow_mut() = State::default());
+        let key = |index| SlotKey::Param { class:ClassId(Symbol::from("Probe")), method:Symbol::from("cycle"),
+            side:crate::dialect::MethodReceiver::Instance,index };
+        let a = intern(key(0)); let b = intern(key(1)); let productive = intern(key(2)); let bottom = intern(key(3));
+        ST.with(|s| { let mut s = s.borrow_mut();
+            s.values.insert(a, Ty::Rec {slot:b}); s.values.insert(b, Ty::Rec {slot:a});
+            s.values.insert(productive, Ty::Array {elem:std::sync::Arc::new(Ty::Rec {slot:productive})});
+            s.values.insert(bottom, Ty::Bottom);
+        });
+        assert_eq!(complete_reference_params(), 2);
+        assert_eq!(value_of(a, &HashMap::new()), Some(Ty::unresolved()));
+        assert_eq!(completed_parameter_value(a, Ty::Rec {slot:b}), Ty::unresolved());
+        assert_eq!(completed_parameter_value(a, Ty::Str), Ty::Str);
+        ST.with(|s| { s.borrow_mut().values.insert(b, Ty::Str); });
+        assert_eq!(completed_parameter_value(a, Ty::Rec {slot:b}), Ty::Rec {slot:b},
+            "a newly informative referenced parameter must propagate through the completed component");
+        assert_eq!(value_of(bottom, &HashMap::new()), Some(Ty::Bottom));
+        assert!(matches!(value_of(productive, &HashMap::new()), Some(Ty::Array {..})));
+        assert_eq!(complete_reference_params(), 0);
+    }
+}
+
 pub(crate) fn contributor_values() -> Vec<(String, Ty)> {
     ST.with(|s| {
         let s = s.borrow();

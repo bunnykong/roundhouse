@@ -114,7 +114,7 @@ fn untie_memo(ty: &Ty, prior: &Ty, memo: &mut std::collections::HashMap<usize, T
 /// (`value.map { |v| sanitize(v) }`) unrolled one level more: left alone it
 /// doubles every round and never converges. The nested copy is cut to
 /// `untyped`. A scalar previous return is too weak a witness to cut on.
-fn untie_recursive_return(existing: &Ty, new: &Ty) -> Option<Ty> {
+pub(super) fn untie_recursive_return(existing: &Ty, new: &Ty) -> Option<Ty> {
     if !matches!(
         existing,
         Ty::Union { .. } | Ty::Array { .. } | Ty::Hash { .. } | Ty::Tuple { .. } | Ty::Record { .. }
@@ -136,6 +136,10 @@ enum HarvestWrite {
 fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     if matches!(existing, Ty::Fn { .. }) {
         return HarvestWrite::Keep;
+    }
+    if super::current_harvest::on() {
+        let next = super::current_harvest::publish(new);
+        return HarvestWrite::Set("harvest.current_writers", next);
     }
     if existing == &new {
         if super::strict_producers::xfer_on() && super::strict_producers::is_p(existing)
@@ -196,6 +200,14 @@ pub(super) fn insert_inferred_return(
     method: &Symbol,
     ty: Ty,
 ) {
+    if super::current_harvest::on() {
+        let existing = table.get(method).cloned().unwrap_or_else(Ty::pending_untyped);
+        if let HarvestWrite::Set(rule, next) = decide_harvested_return(&existing, ty) {
+            super::det::note_named(rule, method.as_str(), table.get(method), &next);
+            table.insert(method.clone(), next);
+        }
+        return;
+    }
     let ty = super::fixpoint_bound::bound(ty);
     match table.get(method) {
         Some(existing) if super::strict_producers::stubs_on() && super::strict_producers::is_p(existing) => {
