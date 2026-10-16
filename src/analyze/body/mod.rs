@@ -2647,7 +2647,7 @@ impl<'a> BodyTyper<'a> {
                                 continue;
                             };
                             let (si, merged) = (*si, union_of(acc.clone(), ty));
-                            if &merged == acc {
+                            if merged.inference_eq(acc) {
                                 continue;
                             }
                             nil_seed.insert(name.clone(), (si, merged.clone()));
@@ -3297,7 +3297,8 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
         return a;
     }
     if a == b {
-        // `==` ignores record field order; keep the canonical one.
+        // `==` ignores reasons and record field order; join the reasons
+        // while keeping the canonical stored order.
         return Ty::canonical_min(a, b);
     }
     // Structural join for same-shape generic containers — `Hash<A,B>
@@ -3382,9 +3383,9 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
             out.push(Ty::Array { elem });
         }
         other => match out.iter_mut().find(|v| **v == other) {
-            // An equal variant can differ in record field order; keep
-            // the canonical one so the result doesn't depend on which
-            // arrived first.
+            // Equal variants can differ in reasons and record field order.
+            // Join the reasons and choose the canonical order independently
+            // of which arrived first.
             Some(existing) => *existing = Ty::canonical_min(existing.clone(), other),
             None => out.push(other),
         },

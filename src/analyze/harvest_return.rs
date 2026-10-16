@@ -47,6 +47,7 @@ fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
     if core_e != core_n {
         return None;
     }
+    let core_e = core_e.join_equal_reasons(&core_n).unwrap_or(core_e);
     if matches!(core_e, Ty::Nil) {
         if existing.has_unknown_arm() || new.has_unknown_arm() {
             return Some(gradual_nil());
@@ -130,74 +131,6 @@ enum HarvestWrite {
     Set(Ty),
 }
 
-/// Join reasons at corresponding positions of value-equal returns. Keep
-/// the stored shape and record field order; allocate children only where
-/// a reason grows from Pending to Gradual.
-fn join_equal_return_reasons(existing: &Ty, new: &Ty) -> Option<Ty> {
-    fn join_arc(existing: &mut std::sync::Arc<Ty>, new: &Ty) -> bool {
-        if let Some(joined) = join_equal_return_reasons(existing, new) {
-            *existing = std::sync::Arc::new(joined);
-            true
-        } else {
-            false
-        }
-    }
-
-    let mut joined = existing.clone();
-    let changed = match (&mut joined, new) {
-        (Ty::Untyped { why }, Ty::Untyped { why: other }) => {
-            let next = why.union(*other);
-            if why.is_pending_only() == next.is_pending_only() {
-                false
-            } else {
-                *why = next;
-                true
-            }
-        }
-        (Ty::Array { elem }, Ty::Array { elem: other }) => join_arc(elem, other),
-        (Ty::Hash { key, value }, Ty::Hash { key: other_key, value: other_value }) => {
-            join_arc(key, other_key) | join_arc(value, other_value)
-        }
-        (Ty::Tuple { elems }, Ty::Tuple { elems: other })
-        | (Ty::Union { variants: elems }, Ty::Union { variants: other })
-        | (Ty::Class { args: elems, .. }, Ty::Class { args: other, .. }) => {
-            let mut changed = false;
-            for (i, next) in other.iter().enumerate() {
-                if let Some(ty) = join_equal_return_reasons(&elems[i], next) {
-                    elems[i] = ty;
-                    changed = true;
-                }
-            }
-            changed
-        }
-        (Ty::Record { row }, Ty::Record { row: other }) => {
-            let mut changed = false;
-            for (name, next) in &other.fields {
-                if let Some(ty) = join_equal_return_reasons(&row.fields[name], next) {
-                    row.fields.insert(name.clone(), ty);
-                    changed = true;
-                }
-            }
-            changed
-        }
-        (Ty::Fn { params, block, ret, .. }, Ty::Fn { params: other, block: other_block, ret: other_ret, .. }) => {
-            let mut changed = join_arc(ret, other_ret);
-            if let (Some(block), Some(other)) = (block, other_block) {
-                changed |= join_arc(block, other);
-            }
-            for (i, next) in other.iter().enumerate() {
-                if let Some(ty) = join_equal_return_reasons(&params[i].ty, &next.ty) {
-                    params[i].ty = std::sync::Arc::new(ty);
-                    changed = true;
-                }
-            }
-            changed
-        }
-        _ => false,
-    };
-    changed.then_some(joined)
-}
-
 /// Single merge decision for an existing harvested return vs a new body type.
 fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     if matches!(existing, Ty::Fn { .. }) {
@@ -206,20 +139,20 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
     if existing == &new {
         // Equal values can still carry new gradual evidence. The reason
         // join is monotone, with Pending as its identity (#964).
-        return match join_equal_return_reasons(existing, &new) {
+        return match existing.join_equal_reasons(&new) {
             Some(joined) => HarvestWrite::Set(joined),
             None => HarvestWrite::Keep,
         };
     }
     if let Some(untied) = untie_recursive_return(existing, &new) {
         super::fixpoint_check::note_untie_cut();
-        if existing == &untied {
+        if existing.inference_eq(&untied) {
             return HarvestWrite::Keep;
         }
         return HarvestWrite::Set(untied);
     }
     if let Some(stable) = stabilize_untyped_return_oscillation(existing, &new) {
-        if existing == &stable {
+        if existing.inference_eq(&stable) {
             return HarvestWrite::Keep;
         }
         return HarvestWrite::Set(stable);

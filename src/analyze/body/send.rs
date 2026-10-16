@@ -13,7 +13,7 @@
 
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::Ty;
+use crate::ty::{Ty, Why};
 
 use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 
@@ -1324,7 +1324,9 @@ impl<'a> BodyTyper<'a> {
             //
             // Signing out of typing for a receiver is not signing out
             // of Ruby's own guarantees about the answer.
-            Some(Ty::Untyped { why }) => conversion_fallback(method).unwrap_or(Ty::Untyped { why: *why }),
+            Some(Ty::Untyped { why }) => {
+                conversion_fallback(method, *why).unwrap_or(Ty::Untyped { why: *why })
+            }
             Some(Ty::Class { id, args }) => {
                 // `GlobalID::Locator.locate(…, only: Model)` /
                 // `locate_signed(…, only: Model, for:)` — the literal
@@ -2250,15 +2252,20 @@ impl<'a> BodyTyper<'a> {
             // relation) where the method is valid on `T` and the Nil case
             // is handled elsewhere at run time.
             Some(Ty::Union { variants }) => {
+                // Conversions recover a fixed scalar/container shape from
+                // an unknown receiver. Dispatch each arm just as for a bare
+                // receiver, preserving its element reasons before joining.
+                // Absorbing first would invent Gradual from Pending | Nil.
+                let conversion = conversion_fallback(method, Why::PENDING).is_some();
                 // Gradual absorption: any `Untyped` variant in the
                 // union absorbs the dispatch — the result is `Untyped`.
                 // Mirrors TypeScript's `any | T → any` semantics.
-                if variants.iter().any(|v| matches!(v, Ty::Untyped { .. })) {
+                if !conversion && variants.iter().any(|v| matches!(v, Ty::Untyped { .. })) {
                     return Ty::untyped();
                 }
                 let mut resolved: Vec<Ty> = Vec::new();
                 for v in variants {
-                    if matches!(v, Ty::Nil | Ty::Var { .. }) {
+                    if matches!(v, Ty::Nil) || (!conversion && matches!(v, Ty::Var { .. })) {
                         continue;
                     }
                     let r = self.dispatch_on(Some(v), method, block_ret, args, instance_receiver);
@@ -2289,11 +2296,14 @@ impl<'a> BodyTyper<'a> {
             // type the receiver, `rows.to_h` is a Hash and `x.to_s` is
             // a String. Falling back to these (gradual element types)
             // resolves the read instead of leaving it `Var`.
-            _ => match conversion_fallback(method) {
-                Some(t) if matches!(recv_ty, Some(Ty::Var { .. })) => pending_leaves(t),
-                Some(t) => t,
-                None => unknown(),
-            },
+            _ => {
+                let why = if matches!(recv_ty, Some(Ty::Var { .. })) {
+                    Why::PENDING
+                } else {
+                    Why::GRADUAL
+                };
+                conversion_fallback(method, why).unwrap_or_else(unknown)
+            }
         }
     }
 
@@ -2453,15 +2463,17 @@ impl<'a> BodyTyper<'a> {
 /// `universal_method` (which is consulted before per-type dispatch) so
 /// the precise per-type versions — `array.to_h → Hash[K, V]` keyed off
 /// the block, `array.to_a → Array[elem]` — still win when the receiver
-/// IS typed. Element/value types are `Untyped` (gradual) here since
-/// there's no receiver shape to derive them from.
-fn conversion_fallback(method: &Symbol) -> Option<Ty> {
+/// IS typed. Unknown elements inherit the receiver's reason: a
+/// conversion cannot invent gradual evidence while its receiver is pending.
+fn conversion_fallback(method: &Symbol, why: Why) -> Option<Ty> {
     Some(match method.as_str() {
         "to_h" => Ty::Hash {
-            key: std::sync::Arc::new(Ty::untyped()),
-            value: std::sync::Arc::new(Ty::untyped()),
+            key: std::sync::Arc::new(Ty::Untyped { why }),
+            value: std::sync::Arc::new(Ty::Untyped { why }),
         },
-        "to_a" | "to_ary" => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
+        "to_a" | "to_ary" => Ty::Array {
+            elem: std::sync::Arc::new(Ty::Untyped { why }),
+        },
         "to_s" | "to_str" => Ty::Str,
         "to_i" => Ty::Int,
         "to_f" => Ty::Float,
@@ -2469,7 +2481,6 @@ fn conversion_fallback(method: &Symbol) -> Option<Ty> {
         _ => return None,
     })
 }
-
 // Primitive method tables --------------------------------------------
 //
 // One function per receiver-type-kind. Each maps a method name to
@@ -3912,18 +3923,6 @@ fn pending_or(block_ret: Option<&Ty>, fallback: Ty) -> Ty {
     }
 }
 
-/// A conversion's `untyped` elements, pending because its receiver is.
-fn pending_leaves(t: Ty) -> Ty {
-    match t {
-        Ty::Hash { .. } => Ty::Hash {
-            key: std::sync::Arc::new(Ty::pending_untyped()),
-            value: std::sync::Arc::new(Ty::pending_untyped()),
-        },
-        Ty::Array { .. } => Ty::Array { elem: std::sync::Arc::new(Ty::pending_untyped()) },
-        other => other,
-    }
-}
-
 #[cfg(test)]
 mod reason_tests {
     use super::*;
@@ -4006,14 +4005,190 @@ mod reason_tests {
     fn conversions_of_pending_receivers_have_pending_elements() {
         let classes = HashMap::new();
         let typer = BodyTyper::new(&classes);
-        let converted = typer.dispatch(Some(&var()), &Symbol::from("to_h"), None, &[]);
-        let Ty::Hash { key, value } = converted else { panic!("expected Hash") };
-        assert_pending(&key);
-        assert_pending(&value);
-        let converted = typer.dispatch(Some(&var()), &Symbol::from("to_a"), None, &[]);
-        let Ty::Array { elem } = converted else { panic!("expected Array") };
-        assert_pending(&elem);
-        assert_eq!(typer.dispatch(Some(&var()), &Symbol::from("to_s"), None, &[]), Ty::Str);
+        for (receiver, pending) in [
+            (var(), true),
+            (Ty::pending_untyped(), true),
+            (Ty::untyped(), false),
+        ] {
+            for method in ["to_h", "to_a", "to_ary"] {
+                let converted = typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]);
+                let elements: Vec<&Ty> = match &converted {
+                    Ty::Hash { key, value } => vec![key, value],
+                    Ty::Array { elem } => vec![elem],
+                    _ => panic!("expected a container: {converted:?}"),
+                };
+                for element in elements {
+                    if pending {
+                        assert_pending(element);
+                    } else {
+                        assert_gradual(element);
+                    }
+                }
+            }
+            for (method, expected) in [
+                ("to_s", Ty::Str),
+                ("to_str", Ty::Str),
+                ("to_i", Ty::Int),
+                ("to_f", Ty::Float),
+                ("to_sym", Ty::Sym),
+            ] {
+                assert_eq!(
+                    typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn concrete_conversions_keep_precise_receiver_elements() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        for leaf in [Ty::pending_untyped(), Ty::untyped(), Ty::Str] {
+            let array = Ty::Array {
+                elem: std::sync::Arc::new(leaf.clone()),
+            };
+            assert!(
+                typer
+                    .dispatch(Some(&array), &Symbol::from("to_a"), None, &[])
+                    .inference_eq(&array)
+            );
+            let hash = Ty::Hash {
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(leaf),
+            };
+            assert!(
+                typer
+                    .dispatch(Some(&hash), &Symbol::from("to_h"), None, &[])
+                    .inference_eq(&hash)
+            );
+        }
+    }
+
+    #[test]
+    fn literal_reflective_conversion_aliases_preserve_reasons() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        for receiver in [var(), Ty::pending_untyped(), Ty::untyped()] {
+            for method in [
+                "to_a", "to_ary", "to_h", "to_s", "to_str", "to_i", "to_f", "to_sym",
+            ] {
+                let expected = typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]);
+                let name = Expr::new(
+                    crate::span::Span::synthetic(),
+                    ExprNode::Lit {
+                        value: crate::expr::Literal::Sym {
+                            value: Symbol::from(method),
+                        },
+                    },
+                );
+                for alias in ["send", "public_send", "__send__"] {
+                    let actual = typer.dispatch(
+                        Some(&receiver),
+                        &Symbol::from(alias),
+                        None,
+                        std::slice::from_ref(&name),
+                    );
+                    assert!(
+                        actual.inference_eq(&expected),
+                        "{alias}({method}) on {receiver:?}: {actual:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn union_conversions_keep_pending_and_gradual_element_evidence() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        for unknown in [var(), Ty::pending_untyped(), Ty::untyped()] {
+            let leaf = if matches!(unknown, Ty::Var { .. }) {
+                Ty::pending_untyped()
+            } else {
+                unknown.clone()
+            };
+            for mut variants in [
+                vec![unknown.clone(), Ty::Nil],
+                vec![Ty::Nil, unknown.clone()],
+            ] {
+                // Include a second placeholder and a concrete shape to
+                // exercise both absorption and structural container joins.
+                for other in [
+                    None,
+                    Some(var()),
+                    Some(Ty::pending_untyped()),
+                    Some(Ty::untyped()),
+                ] {
+                    if let Some(other) = other {
+                        variants.push(other);
+                    }
+                    let receiver = Ty::Union {
+                        variants: variants.clone().into(),
+                    };
+                    let expected_leaf = if variants
+                        .iter()
+                        .any(|v| matches!(v, Ty::Untyped { why } if !why.is_pending_only()))
+                    {
+                        Ty::untyped()
+                    } else {
+                        leaf.clone()
+                    };
+                    for method in ["to_a", "to_ary", "to_h"] {
+                        let actual =
+                            typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]);
+                        let expected = conversion_fallback(
+                            &Symbol::from(method),
+                            match expected_leaf {
+                                Ty::Untyped { why } => why,
+                                _ => unreachable!(),
+                            },
+                        )
+                        .unwrap();
+                        assert!(
+                            actual.inference_eq(&expected),
+                            "{method} on {receiver:?}: {actual:?}"
+                        );
+                    }
+                    for (method, expected) in [
+                        ("to_s", Ty::Str),
+                        ("to_str", Ty::Str),
+                        ("to_i", Ty::Int),
+                        ("to_f", Ty::Float),
+                        ("to_sym", Ty::Sym),
+                    ] {
+                        assert!(
+                            typer
+                                .dispatch(Some(&receiver), &Symbol::from(method), None, &[])
+                                .inference_eq(&expected)
+                        );
+                    }
+                }
+            }
+            let array = Ty::Array {
+                elem: std::sync::Arc::new(Ty::Str),
+            };
+            for variants in [
+                vec![unknown.clone(), array.clone()],
+                vec![array, unknown.clone()],
+            ] {
+                let actual = typer.dispatch(
+                    Some(&Ty::Union {
+                        variants: variants.into(),
+                    }),
+                    &Symbol::from("to_a"),
+                    None,
+                    &[],
+                );
+                let expected = Ty::Array {
+                    elem: std::sync::Arc::new(union_of(Ty::Str, leaf.clone())),
+                };
+                assert!(
+                    actual.inference_eq(&expected),
+                    "concrete array with {unknown:?}: {actual:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4045,5 +4220,28 @@ mod reason_tests {
             assert_gradual(&object_protocol_method(None, &method, None, true).unwrap());
             assert_eq!(object_protocol_method(None, &method, Some(&Ty::Str), true), Some(Ty::Str));
         }
+    }
+}
+
+#[cfg(test)]
+mod conversion_reason_tests {
+    use super::*;
+    #[test]
+    fn conversion_keeps_a_pending_untyped_receivers_elements_pending() {
+        let classes = std::collections::HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        let converted = typer.dispatch(
+            Some(&Ty::pending_untyped()),
+            &Symbol::from("to_a"),
+            None,
+            &[],
+        );
+        let Ty::Array { elem } = converted else {
+            panic!("not an Array")
+        };
+        assert!(
+            matches!(&*elem, Ty::Untyped { why } if why.is_pending_only()),
+            "conversion invented Gradual evidence from Pending: {elem:?}"
+        );
     }
 }

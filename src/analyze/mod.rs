@@ -2201,7 +2201,9 @@ impl Analyzer {
             for name in &ambiguous {
                 next.remove(name);
             }
-            if next == map && next_resolved == resolved {
+            if dirty_retype::type_maps_match(&next, &map)
+                && dirty_retype::type_maps_match(&next_resolved, &resolved)
+            {
                 break;
             }
             map = next;
@@ -3439,7 +3441,7 @@ impl Analyzer {
                         let merged = match layout_map.remove(k) {
                             Some(prev) if noise(&prev) => v.clone(),
                             Some(prev) if noise(v) => prev,
-                            Some(prev) if prev == *v => prev,
+                            Some(prev) if prev.inference_eq(v) => prev,
                             Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
                             None => v.clone(),
                         };
@@ -3538,7 +3540,7 @@ impl Analyzer {
                         let merged = match entry.remove(k) {
                             Some(prev) if noise(&prev) => v.clone(),
                             Some(prev) if noise(v) => prev,
-                            Some(prev) if prev == *v => prev,
+                            Some(prev) if prev.inference_eq(v) => prev,
                             Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
                             None => v.clone(),
                         };
@@ -3598,7 +3600,7 @@ impl Analyzer {
                             let merged = match entry.remove(k) {
                                 Some(prev) if noise(&prev) => v.clone(),
                                 Some(prev) if noise(v) => prev,
-                                Some(prev) if prev == *v => prev,
+                                Some(prev) if prev.inference_eq(v) => prev,
                                 Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
                                 None => v.clone(),
                             };
@@ -3836,7 +3838,7 @@ impl Analyzer {
                     .classes
                     .get(m)
                     .and_then(|c| c.instance_methods.get(&params_sym));
-                if old == Some(&new_ty) {
+                if old.is_some_and(|old| old.inference_eq(&new_ty)) {
                     None
                 } else {
                     Some(m.clone())
@@ -4118,7 +4120,7 @@ impl Analyzer {
                             let merged = match layout_map.remove(k) {
                                 Some(prev) if noise(&prev) => v.clone(),
                                 Some(prev) if noise(v) => prev,
-                                Some(prev) if prev == *v => prev,
+                                Some(prev) if prev.inference_eq(v) => prev,
                                 Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
                                 None => v.clone(),
                             };
@@ -4232,11 +4234,11 @@ impl Analyzer {
                         }
                         let merged = match entry.get(k) {
                             Some(prev) if noise(prev) => v.clone(),
-                            Some(prev) if prev == v => prev.clone(),
+                            Some(prev) if prev.inference_eq(v) => prev.clone(),
                             Some(prev) => crate::analyze::body::union_of(prev.clone(), v.clone()),
                             None => v.clone(),
                         };
-                        if entry.get(k) != Some(&merged) {
+                        if !entry.get(k).is_some_and(|prev| prev.inference_eq(&merged)) {
                             entry.insert(k.clone(), merged);
                             changed = true;
                         }
@@ -4667,16 +4669,21 @@ impl Analyzer {
     }
 
     fn inference_matches(&self, prev: &InferenceSig) -> bool {
-        if self.classes.len() != prev.instance.len() || self.inferred_params != prev.params {
+        if self.classes.len() != prev.instance.len()
+            || self.inferred_params.len() != prev.params.len()
+            || !self.inferred_params.iter().all(|(key, tys)| {
+                prev.params.get(key).is_some_and(|before| dirty_retype::type_rows_match(tys, before))
+            })
+        {
             return false;
         }
         for (id, cls) in &self.classes {
             match prev.instance.get(id) {
-                Some(methods) if methods == &cls.instance_methods => {}
+                Some(methods) if dirty_retype::type_maps_match(methods, &cls.instance_methods) => {}
                 _ => return false,
             }
             match prev.class_methods.get(id) {
-                Some(methods) if methods == &cls.class_methods => {}
+                Some(methods) if dirty_retype::type_maps_match(methods, &cls.class_methods) => {}
                 _ => return false,
             }
         }
@@ -8177,7 +8184,7 @@ fn collect_const_attr_writes(
                     let entry = out.entry((*target).clone()).or_default();
                     let name = Symbol::from(attr);
                     let merged = match entry.remove(&name) {
-                        Some(prev) if prev == *ty => prev,
+                        Some(prev) if prev.inference_eq(ty) => prev,
                         Some(prev) => crate::analyze::body::union_of(prev, ty.clone()),
                         None => ty.clone(),
                     };
@@ -9315,7 +9322,7 @@ fn concern_ivar_env_of(
                         continue;
                     }
                     let merged = match entry.remove(k) {
-                        Some(prev) if prev == *v => prev,
+                        Some(prev) if prev.inference_eq(v) => prev,
                         Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
                         None => v.clone(),
                     };
@@ -9601,5 +9608,148 @@ mod return_reason_tests {
         Analyzer::register_method_return(&mut table, &method, Some(&Ty::untyped()));
         assert!(matches!(table.get(&method), Some(Ty::Untyped { why }) if !why.is_pending_only()),
                 "a computed gradual body must replace the pending stub: {table:?}");
+    }
+}
+
+#[cfg(test)]
+mod reason_propagation_tests {
+    use super::*;
+
+    #[test]
+    fn nested_reason_changes_invalidate_both_return_sides_and_parameter_rows() {
+        use crate::ty::reason_tests::shapes;
+        let app = crate::ingest::ingest_app_from_tree(HashMap::from([(
+            std::path::PathBuf::from("lib/probe.rb"),
+            (0..16)
+                .map(|i| format!("class Padding{i}; end\n"))
+                .collect::<String>()
+                .into_bytes(),
+        )]))
+        .unwrap();
+        let owner = ClassId(Symbol::from("Owner"));
+        let caller = ClassId(Symbol::from("Caller"));
+        let child = ClassId(Symbol::from("Child"));
+        let inherited_caller = ClassId(Symbol::from("InheritedCaller"));
+        let includer = ClassId(Symbol::from("Includer"));
+        let method = Symbol::from("value");
+        for ((name, pending), (_, gradual)) in shapes(Ty::pending_untyped())
+            .into_iter()
+            .zip(shapes(Ty::untyped()))
+        {
+            for side in [MethodReceiver::Instance, MethodReceiver::Class] {
+                let mut analyzer = Analyzer::new(&app);
+                let mut owner_info = ClassInfo::default();
+                let table = match side {
+                    MethodReceiver::Instance => &mut owner_info.instance_methods,
+                    MethodReceiver::Class => &mut owner_info.class_methods,
+                };
+                table.insert(method.clone(), pending.clone());
+                analyzer.classes.insert(owner.clone(), owner_info);
+                analyzer.classes.insert(
+                    child.clone(),
+                    ClassInfo {
+                        parent: Some(owner.clone()),
+                        ..ClassInfo::default()
+                    },
+                );
+                analyzer.classes.insert(
+                    includer.clone(),
+                    ClassInfo {
+                        includes: vec![owner.clone()],
+                        ..ClassInfo::default()
+                    },
+                );
+                analyzer.callers_by_target.insert(
+                    (owner.clone(), method.clone()),
+                    [caller.clone()].into_iter().collect(),
+                );
+                analyzer.callers_by_target.insert(
+                    (child.clone(), method.clone()),
+                    [inherited_caller.clone()].into_iter().collect(),
+                );
+                let before = analyzer.capture_dirty_hints();
+                assert!(analyzer.inference_matches(&before.sig), "unchanged {name}");
+                let info = analyzer.classes.get_mut(&owner).unwrap();
+                let table = match side {
+                    MethodReceiver::Instance => &mut info.instance_methods,
+                    MethodReceiver::Class => &mut info.class_methods,
+                };
+                table.insert(method.clone(), gradual.clone());
+                assert!(
+                    !analyzer.inference_matches(&before.sig),
+                    "return {side:?}/{name}"
+                );
+                let dirty = analyzer
+                    .dirty_classes_for_retype(&app, &before)
+                    .expect("narrow frontier");
+                for expected in [&owner, &caller, &child, &inherited_caller, &includer] {
+                    assert!(
+                        dirty.contains(expected),
+                        "return {side:?}/{name}: missing {expected:?}"
+                    );
+                }
+
+                let key = (owner.clone(), method.clone(), side);
+                analyzer
+                    .inferred_params
+                    .insert(key.clone(), vec![Ty::Int, pending.clone()]);
+                let before = analyzer.capture_dirty_hints();
+                analyzer
+                    .inferred_params
+                    .insert(key, vec![Ty::Int, gradual.clone()]);
+                assert!(
+                    !analyzer.inference_matches(&before.sig),
+                    "params {side:?}/{name}"
+                );
+                let dirty = analyzer
+                    .dirty_classes_for_retype(&app, &before)
+                    .expect("narrow parameter frontier");
+                assert!(dirty.contains(&owner), "params {side:?}/{name}");
+                assert!(dirty.contains(&child), "inherited params {side:?}/{name}");
+                assert!(dirty.contains(&includer), "included params {side:?}/{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_reason_only_return_change_invalidates_the_inference_snapshot() {
+        let app = App::default();
+        let mut analyzer = Analyzer::new(&app);
+        let id = ClassId(Symbol::from("ReviewProbe"));
+        let method = Symbol::from("value");
+        let mut info = ClassInfo::default();
+        info.class_methods
+            .insert(method.clone(), Ty::pending_untyped());
+        analyzer.classes.insert(id.clone(), info);
+        let before = analyzer.capture_inference_sig();
+        Analyzer::register_method_return(
+            &mut analyzer.classes.get_mut(&id).unwrap().class_methods,
+            &method,
+            Some(&Ty::untyped()),
+        );
+        assert!(
+            !analyzer.inference_matches(&before),
+            "Pending -> Gradual changed a value read by subsequent harvest decisions"
+        );
+    }
+
+    #[test]
+    fn equal_container_join_preserves_gradual_evidence_in_either_order() {
+        let array = |elem| Ty::Array {
+            elem: std::sync::Arc::new(elem),
+        };
+        for (a, b) in [
+            (array(Ty::pending_untyped()), array(Ty::untyped())),
+            (array(Ty::untyped()), array(Ty::pending_untyped())),
+        ] {
+            let joined = union_of(a, b);
+            let Ty::Array { elem } = joined else {
+                panic!("not an Array")
+            };
+            assert!(
+                matches!(&*elem, Ty::Untyped { why } if !why.is_pending_only()),
+                "the computed gradual branch was dropped: {elem:?}"
+            );
+        }
     }
 }

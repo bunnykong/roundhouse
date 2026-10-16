@@ -159,11 +159,13 @@ impl Checks {
 }
 
 /// Structural hash of a type: union arms sorted and deduplicated, record
-/// fields sorted by name, inference variables' ids ignored.
+/// fields sorted by name, inference variables' ids ignored. Reasons
+/// participate because stabilization reads them even when values match.
 pub(super) fn type_hash(t: &Ty) -> u64 {
     let mut h = DefaultHasher::new();
     std::mem::discriminant(t).hash(&mut h);
     match t {
+        Ty::Untyped { why } => why.is_pending_only().hash(&mut h),
         Ty::Array { elem } => type_hash(elem).hash(&mut h),
         Ty::Hash { key, value } => {
             type_hash(key).hash(&mut h);
@@ -610,6 +612,15 @@ mod tests {
         let b = union(vec![Ty::Var { var: TyVar(7) }, Ty::Str, Ty::Int]);
         assert_eq!(type_hash(&a), type_hash(&b));
         assert_ne!(type_hash(&a), type_hash(&union(vec![Ty::Int, Ty::Str])));
+    }
+
+    #[test]
+    fn type_hash_observes_nested_inference_reasons() {
+        for ((name, pending), (_, gradual)) in crate::ty::reason_tests::shapes(Ty::pending_untyped())
+            .into_iter().zip(crate::ty::reason_tests::shapes(Ty::untyped()))
+        {
+            assert_ne!(type_hash(&pending), type_hash(&gradual), "{name}");
+        }
     }
 
     #[test]

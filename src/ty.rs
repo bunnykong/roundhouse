@@ -199,6 +199,148 @@ impl Ty {
     pub const fn pending_untyped() -> Ty {
         Ty::Untyped { why: Why::PENDING }
     }
+    /// Equality for inference state: public value equality plus every
+    /// reason read by stabilization. Wire format and public `==` still
+    /// ignore reasons; convergence and invalidation must observe them.
+    pub(crate) fn inference_eq(&self, other: &Ty) -> bool {
+        self == other && self.same_reasons(other)
+    }
+
+    /// Called only after value equality has established matching shapes.
+    fn same_reasons(&self, other: &Ty) -> bool {
+        fn arc_eq(a: &Arc<Ty>, b: &Arc<Ty>) -> bool {
+            Arc::ptr_eq(a, b) || a.same_reasons(b)
+        }
+        match (self, other) {
+            (Ty::Untyped { why: a }, Ty::Untyped { why: b }) => {
+                a.is_pending_only() == b.is_pending_only()
+            }
+            (Ty::Array { elem: a }, Ty::Array { elem: b }) => arc_eq(a, b),
+            (Ty::Hash { key: ak, value: av }, Ty::Hash { key: bk, value: bv }) => {
+                arc_eq(ak, bk) && arc_eq(av, bv)
+            }
+            (Ty::Tuple { elems: a }, Ty::Tuple { elems: b })
+            | (Ty::Union { variants: a }, Ty::Union { variants: b })
+            | (Ty::Class { args: a, .. }, Ty::Class { args: b, .. }) => {
+                a.ptr_eq(b) || a.iter().zip(b.iter()).all(|(a, b)| a.same_reasons(b))
+            }
+            (Ty::Record { row: a }, Ty::Record { row: b }) => {
+                a.fields.ptr_eq(&b.fields)
+                    || a.fields
+                        .iter()
+                        .all(|(name, a)| a.same_reasons(&b.fields[name]))
+            }
+            (
+                Ty::Fn {
+                    params: a,
+                    block: ab,
+                    ret: ar,
+                    ..
+                },
+                Ty::Fn {
+                    params: b,
+                    block: bb,
+                    ret: br,
+                    ..
+                },
+            ) => {
+                (a.ptr_eq(b) || a.iter().zip(b.iter()).all(|(a, b)| arc_eq(&a.ty, &b.ty)))
+                    && match (ab, bb) {
+                        (Some(a), Some(b)) => arc_eq(a, b),
+                        _ => true,
+                    }
+                    && arc_eq(ar, br)
+            }
+            _ => true,
+        }
+    }
+
+    /// Join reasons at corresponding positions of `==` types. Keep
+    /// the stored shape and record field order; allocate children only where
+    /// a reason grows from Pending to Gradual.
+    pub(crate) fn join_equal_reasons(&self, new: &Ty) -> Option<Ty> {
+        debug_assert_eq!(self, new);
+        if self.same_reasons(new) {
+            return None;
+        }
+        fn join_arc(existing: &mut std::sync::Arc<Ty>, new: &Ty) -> bool {
+            if let Some(joined) = existing.join_equal_reasons(new) {
+                *existing = std::sync::Arc::new(joined);
+                true
+            } else {
+                false
+            }
+        }
+
+        let mut joined = self.clone();
+        let changed = match (&mut joined, new) {
+            (Ty::Untyped { why }, Ty::Untyped { why: other }) => {
+                let next = why.union(*other);
+                if why.is_pending_only() == next.is_pending_only() {
+                    false
+                } else {
+                    *why = next;
+                    true
+                }
+            }
+            (Ty::Array { elem }, Ty::Array { elem: other }) => join_arc(elem, other),
+            (
+                Ty::Hash { key, value },
+                Ty::Hash {
+                    key: other_key,
+                    value: other_value,
+                },
+            ) => join_arc(key, other_key) | join_arc(value, other_value),
+            (Ty::Tuple { elems }, Ty::Tuple { elems: other })
+            | (Ty::Union { variants: elems }, Ty::Union { variants: other })
+            | (Ty::Class { args: elems, .. }, Ty::Class { args: other, .. }) => {
+                let mut changed = false;
+                for (i, next) in other.iter().enumerate() {
+                    if let Some(ty) = elems[i].join_equal_reasons(next) {
+                        elems[i] = ty;
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            (Ty::Record { row }, Ty::Record { row: other }) => {
+                let mut changed = false;
+                for (name, next) in &other.fields {
+                    if let Some(ty) = row.fields[name].join_equal_reasons(next) {
+                        row.fields.insert(name.clone(), ty);
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            (
+                Ty::Fn {
+                    params, block, ret, ..
+                },
+                Ty::Fn {
+                    params: other,
+                    block: other_block,
+                    ret: other_ret,
+                    ..
+                },
+            ) => {
+                let mut changed = join_arc(ret, other_ret);
+                if let (Some(block), Some(other)) = (block, other_block) {
+                    changed |= join_arc(block, other);
+                }
+                for (i, next) in other.iter().enumerate() {
+                    if let Some(ty) = params[i].ty.join_equal_reasons(&next.ty) {
+                        params[i].ty = std::sync::Arc::new(ty);
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            _ => false,
+        };
+        changed.then_some(joined)
+    }
+
     /// Replace every [`Ty::SelfInstance`] in this type with `with`.
     ///
     /// The one place the substitution lives. `dispatch` applies it as
@@ -525,19 +667,17 @@ impl Ty {
         variants.sort_by(cmp_ty_nil_last);
     }
 
-    /// Of two `==` types, the one canonical order puts first. They can
-    /// differ only in the field order of a record somewhere inside;
+    /// Of two `==` types, the one canonical order puts first, with their
+    /// reasons joined recursively. Record field order can differ too;
     /// picking by order instead of by arrival keeps a join's stored
     /// form independent of the order its inputs came in.
     pub(crate) fn canonical_min(a: Ty, b: Ty) -> Ty {
-        if let (Ty::Untyped { why: x }, Ty::Untyped { why: y }) = (&a, &b) {
-            return Ty::Untyped { why: x.union(*y) };
-        }
-        if !a.holds_record() || cmp_ty(&b, &a) != std::cmp::Ordering::Less {
-            a
+        let (chosen, other) = if !a.holds_record() || cmp_ty(&b, &a) != std::cmp::Ordering::Less {
+            (a, b)
         } else {
-            b
-        }
+            (b, a)
+        };
+        chosen.join_equal_reasons(&other).unwrap_or(chosen)
     }
 
     fn holds_record(&self) -> bool {
@@ -731,8 +871,197 @@ impl From<std::sync::Arc<Ty>> for Ty {
 }
 
 #[cfg(test)]
-mod reason_tests {
+pub(crate) mod reason_tests {
     use super::*;
+
+    /// One changed reason at every position which can hold a type,
+    /// including a mixed nested shape and two independently changed leaves.
+    pub(crate) fn shapes(leaf: Ty) -> Vec<(&'static str, Ty)> {
+        let array = |t| Ty::Array { elem: Arc::new(t) };
+        let hash = |key, value| Ty::Hash {
+            key: Arc::new(key),
+            value: Arc::new(value),
+        };
+        let record = |t| Ty::Record {
+            row: Row {
+                fields: [(Symbol::from("z"), t), (Symbol::from("a"), Ty::Int)]
+                    .into_iter()
+                    .collect(),
+                rest: Some(TyVar(7)),
+            },
+        };
+        let function = |param: Ty, block: Option<Ty>, ret: Ty| Ty::Fn {
+            params: vec![Param {
+                name: Symbol::from("value"),
+                ty: Arc::new(param),
+                kind: ParamKind::Required,
+            }]
+            .into(),
+            block: block.map(Arc::new),
+            ret: Arc::new(ret),
+            effects: EffectSet::default(),
+        };
+        vec![
+            ("bare", leaf.clone()),
+            ("array", array(leaf.clone())),
+            ("hash-key", hash(leaf.clone(), Ty::Str)),
+            ("hash-value", hash(Ty::Str, leaf.clone())),
+            ("hash-both", hash(leaf.clone(), leaf.clone())),
+            (
+                "tuple-first",
+                Ty::Tuple {
+                    elems: vec![leaf.clone(), Ty::Str].into(),
+                },
+            ),
+            (
+                "tuple-last",
+                Ty::Tuple {
+                    elems: vec![Ty::Str, leaf.clone()].into(),
+                },
+            ),
+            ("record", record(leaf.clone())),
+            (
+                "union",
+                Ty::Union {
+                    variants: vec![Ty::Sym, leaf.clone()].into(),
+                },
+            ),
+            (
+                "class",
+                Ty::Class {
+                    id: ClassId(Symbol::from("Box")),
+                    args: vec![Ty::Int, leaf.clone()].into(),
+                },
+            ),
+            ("fn-param", function(leaf.clone(), None, Ty::Str)),
+            ("fn-block", function(Ty::Int, Some(leaf.clone()), Ty::Str)),
+            ("fn-return", function(Ty::Int, None, leaf.clone())),
+            ("nested", array(hash(Ty::Str, record(array(leaf))))),
+        ]
+    }
+
+    #[test]
+    fn inference_equality_observes_reasons_at_every_type_position() {
+        for ((name, pending), (_, gradual)) in shapes(Ty::pending_untyped())
+            .into_iter()
+            .zip(shapes(Ty::untyped()))
+        {
+            assert_eq!(pending, gradual, "public equality: {name}");
+            assert!(
+                !pending.inference_eq(&gradual),
+                "inference equality: {name}"
+            );
+            assert!(
+                !gradual.inference_eq(&pending),
+                "reverse inference equality: {name}"
+            );
+            assert!(
+                pending.inference_eq(&pending.clone()),
+                "reflexivity: {name}"
+            );
+            assert!(
+                gradual.inference_eq(&gradual.clone()),
+                "reflexivity: {name}"
+            );
+            let joined = pending.join_equal_reasons(&gradual).expect(name);
+            assert!(joined.inference_eq(&gradual), "joined: {name}");
+            assert!(
+                gradual.join_equal_reasons(&pending).is_none(),
+                "monotonicity: {name}"
+            );
+            assert!(
+                pending.join_equal_reasons(&pending).is_none(),
+                "idempotence: {name}"
+            );
+        }
+        assert!(!Ty::Str.inference_eq(&Ty::Sym));
+        assert!(
+            !Ty::Tuple {
+                elems: vec![Ty::Str].into()
+            }
+            .inference_eq(&Ty::Tuple {
+                elems: vec![].into()
+            })
+        );
+    }
+
+    #[test]
+    fn equal_type_union_joins_nested_reasons_with_all_operand_shapes() {
+        use crate::analyze::union_of;
+        for ((name, pending), (_, gradual)) in shapes(Ty::pending_untyped())
+            .into_iter()
+            .zip(shapes(Ty::untyped()))
+        {
+            for (a, b) in [
+                (pending.clone(), gradual.clone()),
+                (gradual.clone(), pending.clone()),
+            ] {
+                let joined = union_of(a.clone(), b.clone());
+                assert!(joined.inference_eq(&gradual), "direct: {name}: {joined:?}");
+                // Distinct outer arms exercise flattened union dedup instead
+                // of the value-equality shortcut at the root.
+                let joined = union_of(union_of(Ty::Nil, a.clone()), union_of(b.clone(), Ty::Int));
+                let expected = union_of(union_of(Ty::Nil, gradual.clone()), Ty::Int);
+                assert!(
+                    joined.inference_eq(&expected),
+                    "union wrapped: {name}: {joined:?}"
+                );
+                for inputs in [
+                    vec![a.clone(), b.clone(), pending.clone()],
+                    vec![pending.clone(), a, b],
+                ] {
+                    assert!(
+                        inputs
+                            .into_iter()
+                            .reduce(union_of)
+                            .unwrap()
+                            .inference_eq(&gradual),
+                        "many: {name}"
+                    );
+                }
+                let right_grouped =
+                    union_of(pending.clone(), union_of(gradual.clone(), pending.clone()));
+                assert!(
+                    right_grouped.inference_eq(&gradual),
+                    "associativity: {name}"
+                );
+                assert!(
+                    pending.join_equal_reasons(&pending).is_none(),
+                    "source mutated: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_record_order_and_reason_join_are_independent() {
+        let record = |fields: Vec<(&str, Ty)>| Ty::Record {
+            row: Row {
+                fields: fields
+                    .into_iter()
+                    .map(|(k, v)| (Symbol::from(k), v))
+                    .collect(),
+                rest: None,
+            },
+        };
+        let a = record(vec![("z", Ty::pending_untyped()), ("a", Ty::untyped())]);
+        let b = record(vec![("a", Ty::pending_untyped()), ("z", Ty::untyped())]);
+        let expected = record(vec![("a", Ty::untyped()), ("z", Ty::untyped())]);
+        for ((name, a), ((_, b), (_, expected))) in shapes(a)
+            .into_iter()
+            .zip(shapes(b).into_iter().zip(shapes(expected)))
+        {
+            for (a, b) in [(a.clone(), b.clone()), (b, a)] {
+                let joined = Ty::canonical_min(a, b);
+                assert!(joined.inference_eq(&expected), "{name}");
+                assert_eq!(
+                    serde_json::to_string(&joined).unwrap(),
+                    serde_json::to_string(&expected).unwrap(),
+                    "{name}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn untyped_reason_is_invisible_to_equality_order_wire_and_rendering() {
@@ -752,8 +1081,14 @@ mod reason_tests {
         let b = nested(gradual);
         assert_eq!(a, b);
         assert_eq!(cmp_ty(&a, &b), std::cmp::Ordering::Equal);
-        assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
-        assert_eq!(crate::emit::ruby::ty_to_rbs(&a), crate::emit::ruby::ty_to_rbs(&b));
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap()
+        );
+        assert_eq!(
+            crate::emit::ruby::ty_to_rbs(&a),
+            crate::emit::ruby::ty_to_rbs(&b)
+        );
     }
 
     #[test]
