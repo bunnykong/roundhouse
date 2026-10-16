@@ -70,14 +70,25 @@ if RUBY_ENGINE == "spinel"
 
       opts = { max_nesting: false, allow_nan: true }
       opts = opts.merge(max_nesting: limit) if limit
-      opts = opts.merge(options) if options
+      # Match the supported MRI 3.4 line's bundled json 2.9.1. Later json
+      # releases merge arbitrary generator options here; 2.9 accepts strict
+      # only, and validates it after the destination's to_io conversion.
+      if options
+        unknown = options.keys.reject { |key| key == :strict }
+        unless unknown.empty?
+          label = unknown.length == 1 ? "unknown keyword: " : "unknown keywords: "
+          raise ArgumentError, label + unknown.map { |key| key.inspect }.join(", ")
+        end
+        opts = opts.merge(options)
+      end
       nesting = opts[:max_nesting]
-      # Enforce the immediate-integer range json 2.18 accepts on a 64-bit
+      # Enforce the immediate-integer range json 2.9 accepts on a 64-bit
       # host. Other Numeric values keep the bundled encoder's behavior.
       nesting = 0 unless nesting.is_a?(Integer) &&
         nesting >= -4611686018427387904 && nesting <= 4611686018427387903
       begin
-        check_dump_nesting(obj, nesting, 0) unless nesting == 0
+        strict = opts[:strict] ? true : false
+        check_dump_value(obj, nesting, 0, strict) if nesting != 0 || strict
         json = generate(obj, opts)
         return json unless anIO
         anIO.write(json)
@@ -88,16 +99,19 @@ if RUBY_ENGINE == "spinel"
       end
     end
 
-    def self.check_dump_nesting(value, limit, depth)
+    def self.check_dump_value(value, limit, depth, strict)
       if value.is_a?(Array)
-        raise ArgumentError, "exceed depth limit" if depth >= limit
-        value.each { |child| check_dump_nesting(child, limit, depth + 1) }
+        raise ArgumentError, "exceed depth limit" if limit != 0 && depth >= limit
+        value.each { |child| check_dump_value(child, limit, depth + 1, strict) }
       elsif value.is_a?(Hash)
-        raise ArgumentError, "exceed depth limit" if depth >= limit
-        value.each_value { |child| check_dump_nesting(child, limit, depth + 1) }
+        raise ArgumentError, "exceed depth limit" if limit != 0 && depth >= limit
+        value.each_value { |child| check_dump_value(child, limit, depth + 1, strict) }
+      elsif strict && !value.nil? && !value.is_a?(TrueClass) && !value.is_a?(FalseClass) &&
+          !value.is_a?(String) && !value.is_a?(Integer) && !value.is_a?(Float)
+        raise JSON::GeneratorError, value.class.to_s + " not allowed in JSON"
       end
       nil
     end
-    private_class_method :check_dump_nesting
+    private_class_method :check_dump_value
   end
 end

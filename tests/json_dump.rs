@@ -101,21 +101,43 @@ rescue ArgumentError => dump_error
 end
 "#;
 
-// json 2.18 accepts a fourth options argument. The audit's fourth-argument
-// probe raises because -1 is its nesting limit, not because of its arity.
+// The supported MRI 3.4 line bundles json 2.9.1: the fourth argument is
+// accepted, but only :strict is a valid option. In particular, an options
+// hash cannot override the positional nesting limit as it can in json 2.18.
 const OPTIONS: &str = r#"
 require "json"
+require "stringio"
 p JSON.dump({}, nil, nil, {})
-p JSON.dump([[[1]]], nil, 1, {max_nesting: false})
-p JSON.dump([1], {max_nesting: 1})
-p JSON.dump([1], nil, {max_nesting: 1})
+p JSON.dump([1], {strict: true})
+p JSON.dump([1], nil, {strict: false})
+p JSON.dump([1], nil, 1, {strict: true})
+[2, 3, 4].each do |position|
+  begin
+    if position == 2
+      JSON.dump([1], {max_nesting: 1})
+    elsif position == 3
+      JSON.dump([1], nil, {max_nesting: 1})
+    else
+      JSON.dump([[[1]]], nil, 1, {max_nesting: false})
+    end
+  rescue ArgumentError => dump_error
+    puts dump_error.class.to_s + ":" + dump_error.message
+  end
+end
+stream = StringIO.new
+begin
+  JSON.dump([1], stream, nil, {max_nesting: false, allow_nan: true})
+rescue ArgumentError => dump_error
+  puts dump_error.class.to_s + ":" + dump_error.message
+end
+p stream.string
 begin
   JSON.dump({}, nil, -1, nil)
 rescue ArgumentError => dump_error
   puts dump_error.class.to_s + ":" + dump_error.message
 end
 begin
-  JSON.dump([[1]], nil, nil, {max_nesting: 1})
+  JSON.dump([[1]], nil, 1, {strict: false})
 rescue ArgumentError => dump_error
   puts dump_error.class.to_s + ":" + dump_error.message
 end
@@ -123,6 +145,28 @@ begin
   JSON.dump({}, nil, nil, {}, nil)
 rescue ArgumentError => dump_error
   puts dump_error.class.to_s
+end
+"#;
+
+// :strict must be honored, including nested values and objects with to_json.
+// Hash keys retain json's string conversion even in strict mode.
+const STRICT: &str = r#"
+require "json"
+require "stringio"
+class JsonCustomValue
+  def to_json(state = nil)
+    '"custom"'
+  end
+end
+p JSON.dump({a: [true, nil, 1, "s"]}, strict: true)
+[JsonCustomValue.new, :value, [JsonCustomValue.new], {a: :value}].each do |value|
+  stream = StringIO.new
+  begin
+    JSON.dump(value, stream, nil, {strict: true})
+  rescue JSON::GeneratorError => dump_error
+    puts dump_error.class.to_s + ":" + dump_error.message
+  end
+  p stream.string
 end
 "#;
 
@@ -185,9 +229,9 @@ destinations.each do |destination|
     p JSON.dump(value, destination, 4)
     p JSON.dump(value, destination, 0)
     p JSON.dump(value, destination, false)
-    p JSON.dump(value, destination, {max_nesting: 4})
-    p JSON.dump(value, destination, nil, {max_nesting: 4})
-    p JSON.dump(value, destination, 1, {max_nesting: false})
+    p JSON.dump(value, destination, {strict: false})
+    p JSON.dump(value, destination, nil, {strict: true})
+    p JSON.dump(value, destination, 4, {strict: true})
   end
   begin
     JSON.dump([{"a" => [1]}], destination, 1)
@@ -228,17 +272,17 @@ require "stringio"
   value = [{"a" => [1]}]
   p JSON.dump(value, limit)
   p JSON.dump(value, nil, limit)
-  p JSON.dump(value, {max_nesting: limit})
-  p JSON.dump(value, nil, {max_nesting: limit})
-  p JSON.dump(value, nil, nil, {max_nesting: limit})
+  p JSON.dump(value, nil, limit, {strict: false})
+  p JSON.dump(value, false, limit, {strict: true})
   stream = StringIO.new
   p JSON.dump(value, stream, limit).equal?(stream)
   p stream.string
-  p JSON.dump(value, nil, 1, {max_nesting: limit})
+  p JSON.dump(value, stream, limit, {strict: false}).equal?(stream)
+  p stream.string
 end
 "#;
 
-// json 2.18 only enforces immediate Integer limits on this 64-bit target.
+// json 2.9 only enforces immediate Integer limits on this 64-bit target.
 const INTEGER_BOUNDARIES: &str = r#"
 require "json"
 require "stringio"
@@ -247,9 +291,8 @@ require "stringio"
   begin
     p JSON.dump([], limit)
     p JSON.dump([], nil, limit)
-    p JSON.dump([], {max_nesting: limit})
-    p JSON.dump([], nil, {max_nesting: limit})
-    p JSON.dump([], nil, nil, {max_nesting: limit})
+    p JSON.dump([], nil, limit, {strict: false})
+    p JSON.dump([], false, limit, {strict: true})
     stream = StringIO.new
     p JSON.dump([], stream, limit).equal?(stream)
     p stream.string
@@ -288,64 +331,152 @@ rescue => dump_error
 end
 "#;
 
-fn compare_native(script: &str) {
-    let oracle = app().run_ruby(script);
-    oracle.assert_passes();
-    let native = app().run_spinel_with_rbs(script);
+struct DumpContract {
+    name: &'static str,
+    script: &'static str,
+    golden: &'static str,
+    service: Option<(&'static str, &'static str)>,
+}
+
+impl DumpContract {
+    fn overlay(&self) -> emit_and_run::Overlay {
+        match self.service {
+            Some((path, source)) => app().write(path, source),
+            None => app(),
+        }
+    }
+}
+
+// Generated with MRI 3.4.11 / json 2.9.1, the supported unit-job oracle.
+// Native framework jobs have no Ruby prerequisite. The non-ignored oracle
+// test verifies every golden, including all application-sidecar probes.
+// Regenerate with that Ruby on PATH:
+// UPDATE_JSON_DUMP_GOLDENS=1 cargo test --locked --test json_dump cruby_dump_contracts
+const DUMP_CONTRACTS: &[DumpContract] = &[
+    DumpContract {
+        name: "io", script: IO,
+        golden: include_str!("json_dump/io.stdout"), service: None,
+    },
+    DumpContract {
+        name: "limit", script: LIMIT,
+        golden: include_str!("json_dump/limit.stdout"), service: None,
+    },
+    DumpContract {
+        name: "options", script: OPTIONS,
+        golden: include_str!("json_dump/options.stdout"), service: None,
+    },
+    DumpContract {
+        name: "strict", script: STRICT,
+        golden: include_str!("json_dump/strict.stdout"), service: None,
+    },
+    DumpContract {
+        name: "falsey", script: FALSEY,
+        golden: include_str!("json_dump/falsey.stdout"), service: None,
+    },
+    DumpContract {
+        name: "numeric_boundaries", script: NUMERIC_BOUNDARIES,
+        golden: include_str!("json_dump/numeric_boundaries.stdout"), service: None,
+    },
+    DumpContract {
+        name: "integer_boundaries", script: INTEGER_BOUNDARIES,
+        golden: include_str!("json_dump/integer_boundaries.stdout"), service: None,
+    },
+    DumpContract {
+        name: "conversion_exceptions", script: CONVERSION_EXCEPTIONS,
+        golden: include_str!("json_dump/conversion_exceptions.stdout"), service: None,
+    },
+    DumpContract {
+        name: "falsey_sidecars", script: FALSEY_SIDECARS,
+        golden: include_str!("json_dump/falsey_sidecars.stdout"),
+        service: Some(("app/services/json_probe.rb", RETURN_TYPES)),
+    },
+    DumpContract {
+        name: "destination_shapes", script: DESTINATION_SHAPES_PROBE,
+        golden: include_str!("json_dump/destination_shapes.stdout"),
+        service: Some(("app/services/json_destinations.rb", DESTINATION_SHAPES)),
+    },
+    DumpContract {
+        name: "destination_visibility", script: DESTINATION_VISIBILITY_PROBE,
+        golden: include_str!("json_dump/destination_visibility.stdout"),
+        service: Some(("app/services/json_visibility_probe.rb", DESTINATION_VISIBILITY)),
+    },
+];
+
+fn compare_native(name: &str) {
+    let contract = DUMP_CONTRACTS.iter().find(|contract| contract.name == name).unwrap();
+    let native = contract.overlay().run_spinel_with_rbs(contract.script);
     native.assert_passes();
     assert_eq!(
-        native.stdout, oracle.stdout,
-        "native JSON.dump differs from CRuby"
+        native.stdout, contract.golden,
+        "native JSON.dump differs from the CRuby golden: {name}"
     );
 }
 
 #[test]
 fn cruby_dump_contracts() {
-    for script in [IO, LIMIT, OPTIONS, FALSEY, NUMERIC_BOUNDARIES, INTEGER_BOUNDARIES, CONVERSION_EXCEPTIONS] {
-        app().run_ruby(script).assert_passes();
+    let regenerate = std::env::var("UPDATE_JSON_DUMP_GOLDENS").as_deref() == Ok("1");
+    for contract in DUMP_CONTRACTS {
+        let oracle = contract.overlay().run_ruby(contract.script);
+        oracle.assert_passes();
+        if regenerate {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/json_dump").join(format!("{}.stdout", contract.name));
+            std::fs::write(path, &oracle.stdout).unwrap();
+        } else {
+            assert_eq!(
+                oracle.stdout, contract.golden,
+                "CRuby JSON.dump golden drifted: {}", contract.name
+            );
+        }
     }
 }
 
 #[test]
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_writes_and_returns_its_destination() {
-    compare_native(IO);
+    compare_native("io");
 }
 
 #[test]
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_honors_the_nesting_limit_before_writing() {
-    compare_native(LIMIT);
+    compare_native("limit");
 }
 
 #[test]
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_distinguishes_options_from_invalid_nesting_and_arity() {
-    compare_native(OPTIONS);
+    compare_native("options");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_honors_strict_options_before_writing() {
+    compare_native("strict");
 }
 
 #[test]
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_treats_falsey_destinations_as_absent() {
-    compare_native(FALSEY);
+    compare_native("falsey");
 }
 
 #[test]
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_does_not_coerce_noninteger_limits() {
-    compare_native(NUMERIC_BOUNDARIES);
+    compare_native("numeric_boundaries");
 }
 
 #[test]
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_ignores_bignum_limits() {
-    compare_native(INTEGER_BOUNDARIES);
+    compare_native("integer_boundaries");
 }
 
 #[test]
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_preserves_conversion_exceptions() {
-    compare_native(CONVERSION_EXCEPTIONS);
+    compare_native("conversion_exceptions");
 }
 
 const RETURN_TYPES: &str = r#"
@@ -413,7 +544,7 @@ class JsonProbe
     JSON.dump([1], 1)
   end
   def self.options
-    JSON.dump([1], {max_nesting: 1})
+    JSON.dump([1], {strict: true})
   end
   def self.converted
     JSON.dump({}, JsonDestination.new)
@@ -431,10 +562,10 @@ class JsonProbe
     JSON.dump([1], false, 2)
   end
   def self.false_options
-    JSON.dump({"a" => [1]}, false, {max_nesting: 2})
+    JSON.dump({"a" => [1]}, false, {strict: false})
   end
   def self.false_fourth
-    JSON.dump([1], false, nil, {max_nesting: 2})
+    JSON.dump([1], false, nil, {strict: true})
   end
   def self.false_alias
     destination = false
@@ -548,10 +679,7 @@ fn dump_return_types_follow_the_destination() {
     }
 }
 
-#[test]
-#[ignore = "requires the native Spinel compiler; set SPINEL"]
-fn dump_falsey_returns_execute_with_application_sidecars() {
-    let script = r#"
+const FALSEY_SIDECARS: &str = r#"
 p JsonProbe.false_destination
 p JsonProbe.false_options
 p JsonProbe.false_fourth
@@ -572,12 +700,11 @@ p JsonProbe.three_way_converted(false, true)
 p JsonProbe.three_way_converted(false, false)
 p JsonProbe.three_way_converted(true, false).string
 "#;
-    let overlay = || app().write("app/services/json_probe.rb", RETURN_TYPES);
-    let oracle = overlay().run_ruby(script);
-    oracle.assert_passes();
-    let native = overlay().run_spinel_with_rbs(script);
-    native.assert_passes();
-    assert_eq!(native.stdout, oracle.stdout);
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_falsey_returns_execute_with_application_sidecars() {
+    compare_native("falsey_sidecars");
 }
 
 // Equivalent destination types must survive each expression form. Singleton
@@ -729,10 +856,7 @@ fn dump_unknown_destination_return_stays_gradual() {
     assert!(rbs.contains("def self.unknown: (untyped destination) -> untyped\n"), "{rbs}");
 }
 
-#[test]
-#[ignore = "requires the native Spinel compiler; set SPINEL"]
-fn dump_destination_shapes_execute_with_application_sidecars() {
-    let script = r#"
+const DESTINATION_SHAPES_PROBE: &str = r#"
 p JsonDestinations.local.string
 p JsonDestinations.local_absent
 p JsonDestinations.new.ivar.string
@@ -751,12 +875,11 @@ p JsonDestinations.unknown(StringIO.new).string
 p JsonDestinations.unknown(false)
 p JsonDestinations.unknown(nil)
 "#;
-    let overlay = || app().write("app/services/json_destinations.rb", DESTINATION_SHAPES);
-    let oracle = overlay().run_ruby(script);
-    oracle.assert_passes();
-    let native = overlay().run_spinel_with_rbs(script);
-    native.assert_passes();
-    assert_eq!(native.stdout, oracle.stdout);
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_destination_shapes_execute_with_application_sidecars() {
+    compare_native("destination_shapes");
 }
 
 // The consumer stays outside analysis so dump's destination remains untyped.
@@ -824,10 +947,7 @@ fn dump_destination_inference_ignores_private_conversion() {
     assert!(rbs.contains("def self.converted: () -> StringIO\n"), "{rbs}");
 }
 
-#[test]
-#[ignore = "requires the native Spinel compiler; set SPINEL"]
-fn dump_destination_visibility_executes_with_application_sidecars() {
-    let script = r#"
+const DESTINATION_VISIBILITY_PROBE: &str = r#"
 p JsonVisibilityProbe.dump(JsonPrivateConversion.new)
 p JsonVisibilityProbe.dump(JsonPrivateWriter.new)
 p JsonVisibilityProbe.dump(JsonPublicConversion.new).string
@@ -838,11 +958,9 @@ p writer.text
 p JsonVisibilityProbe.writer.text
 p JsonVisibilityProbe.converted.string
 "#;
-    let overlay = || app().write("app/services/json_visibility_probe.rb", DESTINATION_VISIBILITY);
-    let oracle = overlay().run_ruby(script);
-    oracle.assert_passes();
-    assert_eq!(oracle.stdout, "\"[1]\"\n\"[1]\"\n\"[1]\"\n\"[1]\"\ntrue\n\"[1]\"\n\"[1]\"\n\"[1]\"\n");
-    let native = overlay().run_spinel_with_rbs(script);
-    native.assert_passes();
-    assert_eq!(native.stdout, oracle.stdout);
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_destination_visibility_executes_with_application_sidecars() {
+    compare_native("destination_visibility");
 }
