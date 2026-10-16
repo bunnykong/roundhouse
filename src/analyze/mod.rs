@@ -48,6 +48,7 @@ mod filter_targets;
 pub mod graphql;
 mod harvest_return;
 pub(crate) mod strict_producers;
+mod boundary_carry;
 mod current_returns;
 pub mod producer_evidence;
 mod parameter_conservation;
@@ -198,6 +199,7 @@ pub struct Analyzer {
     /// rounds.
     sccq: Option<Box<sccq::Engine>>,
     strict_stub_originals: Vec<(ParamKey, Ty)>,
+    boundary_carry_boundary: Option<boundary_carry::Boundary>,
     /// The worklist's class passes leave model, library and controller
     /// method bodies to it.
     sccq_skip_fine: bool,
@@ -1227,6 +1229,7 @@ impl Analyzer {
             fixpoint_checks: fixpoint_check::Checks::default(),
             sccq: None,
             strict_stub_originals: Vec::new(),
+            boundary_carry_boundary: None,
             sccq_skip_fine: false,
             sccq_harvest_fine: false,
             sccq_production_end: None,
@@ -1315,6 +1318,8 @@ impl Analyzer {
 
     fn analyze_cached(&mut self, app: &mut App) {
         strict_producers::deferred_reset();
+        boundary_carry::reset();
+        self.boundary_carry_boundary=None;
         current_returns::reset(app,&mut self.classes);
         producer_evidence::reset(&app.sources);
         closure_census::start();
@@ -1457,9 +1462,11 @@ impl Analyzer {
             if std::env::var("RH_CONTRIBUTOR_VALUES").as_deref() == Ok("1") {
                 self.contributor_dump_named(app, "contributor-values-boundary.jsonl").expect("write stratum boundary");
             }
+            self.boundary_carry_freeze(app);
             self.restore_strict_stubs();
             if strict_producers::deferred_need_second() {
                 strict_producers::deferred_start_second();
+                if boundary_carry::second() { self.sccq_boundary_carry_dirty_all(); }
                 if self.sccq.is_some() { self.sccq_production_end = Some(self.capture_dirty_hints()); }
                 self.run_typing_passes(app, &dynamic_render_ivars, &existing_view_names, &module_methods,
                     &module_includes, &parent_link_by_name, TypingMode::Production { dirty: None });
@@ -1555,6 +1562,7 @@ impl Analyzer {
             eprintln!("rh-det-pre: {}", fp.det_line());
         }
         current_returns::report(&self.classes);
+        self.boundary_carry_preserve_app(app);
         self.fold_finish(app);
 
         if std::env::var("RH_PROVENANCE_ROWDUMP").as_deref() == Ok("1")
@@ -4951,7 +4959,7 @@ impl Analyzer {
             let seeded = param_ty_with_default(from_sites, param);
             let declared = self.declared_param_ty(class_id, &method.name, positional, &param.name);
             let is_declared = declared.is_some();
-            let ty = strict_producers::deferred_seed_param(prefer_declared(declared, seeded));
+            let ty = strict_producers::deferred_seed_param_at(prefer_declared(declared, seeded), boundary_carry::param_key(class_id,&method.name,method.receiver,i));
             if let Some(ty) = ty {
                 // `RH_FOLD`: a parameter of a recursive component is read
                 // by reference.
@@ -5023,7 +5031,7 @@ impl Analyzer {
                 .reduce(unify_param_ty);
             let declared = self.declared_param_ty(class_id, action_name, Some(i), name);
             let is_declared = declared.is_some();
-            let ty = strict_producers::deferred_seed_param(prefer_declared(declared, observed));
+            let ty = strict_producers::deferred_seed_param_at(prefer_declared(declared, observed), boundary_carry::param_key(class_id,action_name,MethodReceiver::Instance,i));
             if let Some(ty) = ty {
                 // `RH_FOLD`: a parameter of a recursive component is read
                 // by reference.
@@ -5043,7 +5051,7 @@ impl Analyzer {
             let declared = self.declared_param_ty(class_id, action_name, None, name);
             let default_uncomputed = default.as_ref().and_then(|d| d.ty.as_ref())
                 .is_none_or(|t| matches!(t, Ty::Var { .. } | Ty::Nil) || strict_producers::is_p(t));
-            let ty = if default_uncomputed { strict_producers::deferred_seed_param(declared) } else { declared };
+            let ty = if default_uncomputed { strict_producers::deferred_seed_param_at(declared,format!("keyword:{}:{}:{}",class_id.0.as_str(),action_name.as_str(),name.as_str())) } else { declared };
             if let Some(ty) = ty { ctx.local_bindings.insert(name.clone(), ty); }
         }
         if let Some(bp) = block_param {
@@ -5251,6 +5259,7 @@ impl Analyzer {
                 table.insert(name.clone(), ty);
             }
         }
+        self.boundary_carry_preserve();
         if let Some(before) = before {
             det::note_registry("round.registry", &before, &self.classes);
         }
@@ -6061,6 +6070,7 @@ impl Analyzer {
     /// than string fingerprints, so unification is direct: same type →
     /// keep; nil + T → T?; otherwise → union widen.
     fn unify_params_from_call_sites(&mut self, app: &App, scope: UnifyScope) {
+        let scope = if boundary_carry::second() {UnifyScope::WithViews} else {scope};
         let before = det::descent_on().then(|| self.inferred_params.clone());
         // Rebuilt from scratch every fixpoint round. The table is pure
         // derived state — a function of the types the last typing pass
@@ -6196,7 +6206,9 @@ impl Analyzer {
         fold::end_calls();
         // `RH_FOLD_JOIN`: rows join with last round's (with `RH_FOLD`, the
         // reference-mode rows).
+        if boundary_carry::second() { self.overlay_test_params(app); }
         handoff::join_params(&mut self.inferred_params);
+        self.boundary_carry_preserve();
         if let Some(before) = before {
             for (key, row) in &self.inferred_params {
                 det::note_row("round.params", before.get(key).map(Vec::as_slice), row);
@@ -6249,6 +6261,7 @@ impl Analyzer {
             self.sccq_capture_overlay(resolved);
         }
         self.apply_param_sites(test_sites, &params_by_method, &defined);
+        self.boundary_carry_preserve();
     }
 
     fn collect_test_param_sites(

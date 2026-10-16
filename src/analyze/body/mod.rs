@@ -572,7 +572,9 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        let _scope=super::boundary_carry::expr_scope(expr.span,ctx);
         let ty = self.compute(expr, ctx);
+        super::boundary_carry::observed_expr(&ty);
         expr.ty = Some(ty.clone());
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }

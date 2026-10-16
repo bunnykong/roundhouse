@@ -258,6 +258,7 @@ pub(crate) fn param_ref(class: &ClassId, method: &Symbol, side: crate::dialect::
         return value;
     }
     let key = SlotKey::Param { class: class.clone(), method: method.clone(), side, index };
+    if super::boundary_carry::retracted(&key){return value}
     super::structure::fold_write(&key, "parameter-seed");
     let slot = intern(key);
     // A slot's own top-level reference contributes nothing (X = X | A is A).
@@ -334,6 +335,7 @@ fn fingerprint(t: &Ty) -> u64 {
 /// `RH_FOLD_JOIN` they also join across passes; without it, the first
 /// write in a new pass replaces the last pass's value.
 fn accumulate(key: SlotKey, value: Ty) -> Ty {
+    if super::boundary_carry::retracted(&key){return value}
     if super::fixpoint_check::stats_on() { super::structure::fold_write(&key, "site-transfer"); }
     let slot = intern(key);
     let value = strip_self(value, slot);
@@ -1093,3 +1095,9 @@ pub(crate) fn contributor_aliases() -> Vec<(String, String)> {
     ST.with(|s| s.borrow().aliases.iter().map(|((c,m),src)|
         (format!("{}#{}",c.0.as_str(),m.as_str()),src.0.as_str().to_string())).collect())
 }
+
+pub(super) fn boundary_carry_snapshot()->Vec<(u32,SlotKey,Option<Ty>)> {
+    ST.with(|s|{let s=s.borrow();s.keys.iter().enumerate().map(|(i,k)|(i as u32,k.clone(),s.values.get(&(i as u32)).cloned())).collect()})
+}
+pub(super) fn boundary_carry_replace_values(values:HashMap<u32,Ty>){ST.with(|s|s.borrow_mut().values=values);}
+pub(super) fn boundary_carry_restore_value(id:u32,value:Ty){ST.with(|s|{s.borrow_mut().values.insert(id,value);});}

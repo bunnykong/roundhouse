@@ -88,6 +88,7 @@ pub(crate) fn deferred_deferred(site: &str) -> bool {
     STRATUM.load(Ordering::Relaxed)==1 && (deferred_defer()=="all" || (deferred_defer()=="stub" && site=="register"))
 }
 pub(crate) fn deferred_var_answer(site: &str) -> Ty {
+    if let Some(t)=super::boundary_carry::answer(site) {return t}
     if deferred_deferred(site) {
         MINTED.fetch_add(1,Ordering::Relaxed); Ty::pending_untyped()
     } else {
@@ -106,10 +107,11 @@ pub(crate) fn deferred_settled() { SETTLED.fetch_add(1,Ordering::Relaxed); }
 pub(crate) fn deferred_start_second() { set_stratum(2); STRATUM2_RAN.store(true,Ordering::Relaxed); }
 pub(crate) fn deferred_need_second() -> bool { MINTED.load(Ordering::Relaxed)>0 || RESTORED.load(Ordering::Relaxed)>0 }
 pub(crate) fn deferred_report() -> serde_json::Value {
-    serde_json::json!({"defer":deferred_defer(),"stratify":deferred_stratify(),"ndedup":deferred_ndedup(),
+    let mut out=serde_json::json!({"defer":deferred_defer(),"stratify":deferred_stratify(),"ndedup":deferred_ndedup(),
         "stratum1_pending_minted":MINTED.load(Ordering::Relaxed),"boundary_restored":RESTORED.load(Ordering::Relaxed),
         "stratum2_ran":STRATUM2_RAN.load(Ordering::Relaxed),"stratum2_unresolved":STRATUM2_UNRESOLVED.load(Ordering::Relaxed),
-        "rclosure_kept_pending":RS4_PENDING.load(Ordering::Relaxed),"settled_pending":SETTLED.load(Ordering::Relaxed)})
+        "rclosure_kept_pending":RS4_PENDING.load(Ordering::Relaxed),"settled_pending":SETTLED.load(Ordering::Relaxed)});
+    out.as_object_mut().unwrap().extend(super::boundary_carry::report().as_object().unwrap().clone());out
 }
 
 /// An unbound or placeholder parameter is a deferred input, rather than an authored unknown.
@@ -117,4 +119,10 @@ pub(crate) fn deferred_seed_param(value: Option<Ty>) -> Option<Ty> {
     if deferred_deferred("param_seed") && value.as_ref().is_none_or(|t| matches!(t, Ty::Var { .. })) {
         Some(deferred_var_answer("param_seed"))
     } else { value }
+}
+
+pub(crate) fn deferred_seed_param_at(value:Option<Ty>,key:String)->Option<Ty> {
+    if super::boundary_carry::second(){return super::boundary_carry::seed(key,value)}
+    let _scope=super::boundary_carry::scope(key);
+    deferred_seed_param(value)
 }

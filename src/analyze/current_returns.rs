@@ -868,7 +868,8 @@ pub(super) fn boundary_normalize(value: Ty) -> Ty {
         let _ = super::strict_producers::deferred_var_answer("rs4");
         return Ty::Untyped { why };
     }
-    let _ = super::strict_producers::deferred_var_answer("rs4");
+    let answer = super::strict_producers::deferred_var_answer("rs4");
+    if super::boundary_carry::second() && !matches!(answer,Ty::Untyped{why} if why==crate::ty::Provenance::Unresolved) {return answer}
     let mut why = crate::ty::Provenance::Unresolved;
     if let Ty::Union { variants } = &value {
         for v in variants {

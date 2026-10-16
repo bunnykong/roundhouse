@@ -1973,6 +1973,7 @@ impl Analyzer {
             // A reference-mode return joins with its previous
             // value here, as `fold::join_rets` does after main's harvest.
             super::handoff::join_ret_one(&mut self.classes, &unit.class, &unit.name);
+            self.boundary_carry_preserve();
             if self.slot_hash(&unit.class, &unit.name) == before {
                 break;
             }
@@ -3058,5 +3059,11 @@ mod tests {
         assert!(r.reads_class(5) && !r.reads_class(4));
         let r = Reads { wild: vec![4], ..Reads::default() };
         assert!(r.reads_class(4));
+    }
+}
+
+impl Analyzer {
+    pub(super) fn sccq_boundary_carry_dirty_all(&mut self){
+        if let Some(eng)=self.sccq.as_mut(){for u in 0..eng.units.len() as u32{eng.mark(u,2);}}
     }
 }
