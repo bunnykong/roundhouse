@@ -31,7 +31,7 @@ fn check(body: &str, instance: bool, depth: usize, gradual: bool) {
     let controller = format!(
         "class ProbesController < ActionController::Base\n def show\n  {receiver}.value(\"42\").no_such_method\n  head :ok\n end\nend\n"
     );
-    let tree = HashMap::from([
+    let mut tree = HashMap::from([
         (
             PathBuf::from("db/schema.rb"),
             b"ActiveRecord::Schema.define do\nend\n".to_vec(),
@@ -47,6 +47,13 @@ fn check(body: &str, instance: bool, depth: usize, gradual: bool) {
         ),
         (PathBuf::from("lib/probe.rb"), source.as_bytes().to_vec()),
     ]);
+    if body.contains("Item.") {
+        tree.insert(PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\n create_table :items do |t|\n t.string :name\n end\nend\n".to_vec());
+        tree.insert(
+            PathBuf::from("app/models/item.rb"),
+            b"class Item < ActiveRecord::Base\nend\n".to_vec(),
+        );
+    }
     let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);
     let rbs = roundhouse::emit::ruby::emit_library(&app)
@@ -125,6 +132,11 @@ fn unrelated_gradual_elements_do_not_poison_concrete_results() {
         "[{key: 1}, [JSON.parse(raw)]].first.inject(\"ok\") { |acc, x| acc }",
         "[JSON.parse(raw)].send(:group_by) { |x| \"ok\" }.keys.first",
         "[JSON.parse(raw)].public_send(\"index_by\") { |x| \"ok\" }.keys.first",
+        "{key: JSON.parse(raw)}.with_indifferent_access.reduce(\"ok\") { |acc, pair| acc }",
+        "{key: JSON.parse(raw)}.with_indifferent_access.each_with_object(\"ok\") { |pair, acc| pair }",
+        "Item.all.reduce(\"ok\") { |acc, item| \"ok\" }",
+        "Item.all.group_by { |item| \"ok\" }.keys.first",
+        "Item.all.each_with_object(\"ok\") { |item, acc| JSON.parse(raw) }",
     ] {
         for instance in [false, true] {
             for depth in [2, 4] {
@@ -173,6 +185,12 @@ fn gradual_seeds_and_block_results_survive_complete_forwarding_declarations() {
         "[[1], nil].first&.reduce(JSON.parse(raw)) { |acc, x| acc }",
         "[[1], {key: 1}].first.reduce(JSON.parse(raw)) { |acc, x| acc }",
         "[{key: 1}, [1]].first.inject(JSON.parse(raw)) { |acc, x| acc }",
+        "{key: 1}.with_indifferent_access.inject(JSON.parse(raw)) { |acc, pair| acc }",
+        "{key: 1}.with_indifferent_access.each_with_object(JSON.parse(raw)) { |pair, acc| pair }",
+        "Item.all.reduce(JSON.parse(raw)) { |acc, item| acc }",
+        "Item.all.inject(JSON.parse(raw)) { |acc, item| acc }",
+        "Item.all.each_with_object(JSON.parse(raw)) { |item, acc| item }",
+        "Item.all.group_by { |item| JSON.parse(raw) }.keys.first",
     ] {
         for instance in [false, true] {
             for depth in [2, 4] {
@@ -198,6 +216,7 @@ fn reflective_writes_depend_on_the_assigned_value() {
             format!("self.public_send(\"{method}\", :{name}, JSON.parse(raw))"),
             format!("self.__send__(:send, :{method}, :{name}, JSON.parse(raw))"),
             format!("{method}(:{name}, JSON.parse(raw))"),
+            format!("self.{method}(:{name}, {{key: JSON.parse(raw)}})"),
         ] {
             // class_variable_set requires a class/module object.
             for instance in if method == "class_variable_set" {
@@ -214,8 +233,18 @@ fn reflective_writes_depend_on_the_assigned_value() {
             format!("self.{method}(:{name}, \"ok\")"),
             format!("self.send(:{method}, :{name}, \"ok\")"),
             format!("self.public_send(\"{method}\", :{name}, \"ok\")"),
+            format!("name = JSON.parse('\"{name}\"'); self.{method}(name, \"ok\")"),
+            format!("self.{method}(:{name}, \"ok\") {{ JSON.parse(raw) }}"),
         ] {
             check(&body, false, 2, false);
         }
+    }
+    for body in [
+        "Object.new.instance_variable_set(:@x, JSON.parse(raw))",
+        "\"s\".instance_variable_set(:@x, JSON.parse(raw))",
+        "{}.instance_variable_set(:@x, JSON.parse(raw))",
+        "[].instance_variable_set(:@x, JSON.parse(raw))",
+    ] {
+        check(body, false, 2, true);
     }
 }
