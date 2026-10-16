@@ -4,6 +4,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn declarations(source: &str) -> String {
+    assert!(
+        ruby_prism::parse(source.as_bytes())
+            .errors()
+            .next()
+            .is_none(),
+        "invalid Ruby: {source}"
+    );
     let tree = HashMap::from([
         (
             PathBuf::from("db/schema.rb"),
@@ -190,5 +197,334 @@ fn pending_nilable_conversion_receivers_do_not_invent_gradual_elements() {
             rbs.contains("def self.value: () -> String"),
             "{conversion}: {rbs}"
         );
+    }
+}
+
+#[test]
+fn review_pending_projection_probes_keep_main_declarations() {
+    {
+        let rbs = declarations(
+            r#"module Probe
+  def self.value
+    [forward0, ["default"]].first.to_a.first || "default"
+  end
+  def self.forward0
+    forward1
+  end
+  def self.forward1
+    ["ok"]
+  end
+end
+"#,
+        );
+        let mut actual: Vec<_> = rbs
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("def "))
+            .collect();
+        actual.sort();
+        let mut expected = vec![
+            "def self.value: () -> String",
+            "def self.forward0: () -> Array[String]",
+            "def self.forward1: () -> Array[String]",
+        ];
+        expected.sort();
+        assert_eq!(actual, expected, "mixed_to_a: {rbs}");
+    }
+    {
+        let rbs = declarations(
+            r#"module Probe
+  def self.label(x)
+    x.upcase || "default"
+  end
+  def self.value
+    forward0.map { |x| label(x) }.first || "default"
+  end
+  def self.forward0
+    forward1
+  end
+  def self.forward1
+    ["ok"]
+  end
+end
+"#,
+        );
+        let mut actual: Vec<_> = rbs
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("def "))
+            .collect();
+        actual.sort();
+        let mut expected = vec![
+            "def self.label: (String x) -> String",
+            "def self.value: () -> String",
+            "def self.forward0: () -> Array[String]",
+            "def self.forward1: () -> Array[String]",
+        ];
+        expected.sort();
+        assert_eq!(actual, expected, "pending_block_helper: {rbs}");
+    }
+    {
+        let rbs = declarations(
+            r#"module Probe
+  def self.label(x)
+    x.upcase || "default"
+  end
+  def self.value
+    begin; x, y = forward0; x; end || "default"
+  end
+  def self.forward0
+    forward1
+  end
+  def self.forward1
+    ["ok"]
+  end
+end
+"#,
+        );
+        let mut actual: Vec<_> = rbs
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("def "))
+            .collect();
+        actual.sort();
+        let mut expected = vec![
+            "def self.label: (untyped x) -> untyped",
+            "def self.value: () -> String",
+            "def self.forward0: () -> Array[String]",
+            "def self.forward1: () -> Array[String]",
+        ];
+        expected.sort();
+        assert_eq!(actual, expected, "pending_multiassign: {rbs}");
+    }
+    {
+        let rbs = declarations(
+            r#"module Probe
+  def self.label(x)
+    x.upcase || "default"
+  end
+  def self.value
+    [{name: forward0}].pluck(:name).first || "default"
+  end
+  def self.forward0
+    forward1
+  end
+  def self.forward1
+    "ok"
+  end
+end
+"#,
+        );
+        let mut actual: Vec<_> = rbs
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("def "))
+            .collect();
+        actual.sort();
+        let mut expected = vec![
+            "def self.label: (untyped x) -> untyped",
+            "def self.value: () -> String",
+            "def self.forward0: () -> String",
+            "def self.forward1: () -> String",
+        ];
+        expected.sort();
+        assert_eq!(actual, expected, "pending_value_pluck: {rbs}");
+    }
+    {
+        let rbs = declarations(
+            r#"module Probe
+  def self.value
+    x = forward0
+    (x.is_a?(Hash) ? x["name"] : "none") || "fallback"
+  end
+  def self.forward0
+    forward1
+  end
+  def self.forward1
+    {"name" => "ok"}
+  end
+end
+"#,
+        );
+        let mut actual: Vec<_> = rbs
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("def "))
+            .collect();
+        actual.sort();
+        let mut expected = vec![
+            "def self.value: () -> String",
+            "def self.forward0: () -> Hash[String, String]",
+            "def self.forward1: () -> Hash[String, String]",
+        ];
+        expected.sort();
+        assert_eq!(actual, expected, "pending_narrowing: {rbs}");
+    }
+    {
+        let rbs = declarations(
+            r#"module Probe
+  def self.value
+    [forward0, "default"].first.upcase || "default"
+  end
+  def self.forward0
+    forward1
+  end
+  def self.forward1
+    "ok"
+  end
+end
+"#,
+        );
+        let mut actual: Vec<_> = rbs
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("def "))
+            .collect();
+        actual.sort();
+        let mut expected = vec![
+            "def self.value: () -> String",
+            "def self.forward0: () -> String",
+            "def self.forward1: () -> String",
+        ];
+        expected.sort();
+        assert_eq!(actual, expected, "mixed_upcase: {rbs}");
+    }
+    {
+        let rbs = declarations(
+            r#"module Probe
+  def self.value
+    [forward0, "default"].first&.upcase || "default"
+  end
+  def self.forward0
+    forward1
+  end
+  def self.forward1
+    "ok"
+  end
+end
+"#,
+        );
+        let mut actual: Vec<_> = rbs
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("def "))
+            .collect();
+        actual.sort();
+        let mut expected = vec![
+            "def self.value: () -> String",
+            "def self.forward0: () -> String",
+            "def self.forward1: () -> String",
+        ];
+        expected.sort();
+        assert_eq!(actual, expected, "mixed_safe_upcase: {rbs}");
+    }
+    {
+        let rbs = declarations(
+            r#"module Probe
+  def self.value
+    [forward0, nil].first.upcase || "default"
+  end
+  def self.forward0
+    forward1
+  end
+  def self.forward1
+    "ok"
+  end
+end
+"#,
+        );
+        let mut actual: Vec<_> = rbs
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("def "))
+            .collect();
+        actual.sort();
+        let mut expected = vec![
+            "def self.value: () -> String",
+            "def self.forward0: () -> String",
+            "def self.forward1: () -> String",
+        ];
+        expected.sort();
+        assert_eq!(actual, expected, "nilable_upcase: {rbs}");
+    }
+}
+
+#[test]
+fn pending_mixed_receivers_settle_through_aliases_orders_and_method_sides() {
+    for prefix in ["self.", ""] {
+        for reversed in [false, true] {
+            for depth in [2, 4] {
+                for (value, concrete, access) in [
+                    ("[\"ok\"]", "[\"default\"]", "to_a.first"),
+                    ("[\"ok\"]", "[\"default\"]", "to_ary.first"),
+                    (
+                        "{\"name\" => \"ok\"}",
+                        "{\"name\" => \"default\"}",
+                        "to_h[\"name\"]",
+                    ),
+                    ("\"ok\"", "\"default\"", "upcase"),
+                    ("\"ok\"", "nil", "upcase"),
+                    ("\"ok\"", "\"default\"", "&.upcase"),
+                    ("\"ok\"", "nil", "&.upcase"),
+                    ("\"ok\"", "\"default\"", "send(:upcase)"),
+                    ("\"ok\"", "\"default\"", "public_send(\"upcase\")"),
+                    ("\"ok\"", "nil", "__send__(:upcase)"),
+                ] {
+                    let pair = if reversed {
+                        format!("{concrete}, forward0")
+                    } else {
+                        format!("forward0, {concrete}")
+                    };
+                    let access = if access.starts_with("&.") {
+                        access.to_owned()
+                    } else {
+                        format!(".{access}")
+                    };
+                    let mut source = format!(
+                        "class Probe\n def {prefix}value\n receiver = [{pair}].first\n receiver{access} || \"default\"\n end\n"
+                    );
+                    for i in 0..depth {
+                        let body = if i + 1 == depth {
+                            value.to_owned()
+                        } else {
+                            format!("forward{}", i + 1)
+                        };
+                        source.push_str(&format!("def {prefix}forward{i}; {body}; end\n"));
+                    }
+                    source.push_str("end\n");
+                    let rbs = declarations(&source);
+                    assert!(
+                        rbs.contains(&format!("def {prefix}value: () -> String")),
+                        "{source}: {rbs}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pending_bindings_settle_across_block_aliases_and_nested_projections() {
+    for prefix in ["self.", ""] {
+        for body in [
+            "forward0.map { |x| label(x) }.first",
+            "forward0.collect { |x| label(x) }.first",
+            "forward0.flat_map { |x| [label(x)] }.first",
+            "forward0.each_with_index.map { |x, i| label(x) }.first",
+            "begin; x, y = forward0; label(x); end",
+            "begin; @x, @y = forward0; label(@x); end",
+            "[{name: forward0.first}].pluck(:name).first",
+            "x = forward0; x.is_a?(Array) ? x.first : \"none\"",
+            "x = forward0.first; [x, \"default\"].first.upcase",
+        ] {
+            let source = format!(
+                "class Probe\n def {prefix}label(x); x.upcase || \"default\"; end\n def {prefix}value\n {body} || \"default\"\n end\n def {prefix}forward0; forward1; end\n def {prefix}forward1; [\"ok\"]; end\n end\n"
+            );
+            let rbs = declarations(&source);
+            assert!(
+                rbs.contains(&format!("def {prefix}value: () -> String")),
+                "{source}: {rbs}"
+            );
+        }
     }
 }

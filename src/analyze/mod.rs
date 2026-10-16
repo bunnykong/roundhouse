@@ -681,14 +681,13 @@ impl Analyzer {
             // the splat form names four fields, and a second copy would
             // go stale the first time either moved.
             //
-            // `Untyped` because an `attr_*` declares no type — the same
-            // answer the emitted RBS gives it (`attr_reader title:
-            // untyped`), and the gradual escape rather than a Var so
-            // chains off the reader resolve.
+            // `attr_*` declares the reader, not the value it will hold.
+            // Keep its untyped prototype Pending until writes are known;
+            // the emitted RBS shape is unchanged.
             for name in crate::lower::model_to_library::markers::declared_attr_names(model) {
                 let writer = Symbol::from(format!("{}=", name.as_str()));
-                cls.instance_methods.entry(name).or_insert(Ty::untyped());
-                cls.instance_methods.entry(writer).or_insert(Ty::untyped());
+                cls.instance_methods.entry(name).or_insert(Ty::pending_untyped());
+                cls.instance_methods.entry(writer).or_insert(Ty::pending_untyped());
             }
             // `attachable_sgid` — the signed GlobalID an
             // `ActionText::Attachable` model mints. Registered for every
@@ -818,7 +817,7 @@ impl Analyzer {
                     for m in extension {
                         cls.assoc_extensions
                             .entry((name.clone(), m.name.clone()))
-                            .or_insert(Ty::untyped());
+                            .or_insert(Ty::pending_untyped());
                     }
                     // Flat `<name>_loaded?` — same Bool `model_to_library`
                     // synthesizes for emit. Registered here so `check`
@@ -1835,6 +1834,7 @@ impl Analyzer {
                 }
             }
             let ctx = Ctx {
+                block_param_unknown: None,
                 self_ty: None,
                 lexical_self: None,
                 ivar_bindings: HashMap::new(),
@@ -1946,7 +1946,7 @@ impl Analyzer {
                             rest_element(inferred.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default())
                         } else {
                             param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p)
-                                .unwrap_or(Ty::untyped())
+                                .unwrap_or_else(Ty::pending_untyped)
                                 .subst_self(&owner_ty)
                         };
                         // Kind must survive verbatim: the untyped
@@ -1957,7 +1957,7 @@ impl Analyzer {
                         crate::ty::Param { name: p.name.clone(), ty: ty.into(), kind: p.ty_kind() }
                     })
                     .collect();
-                let mut ret = ret.unwrap_or(Ty::untyped()).subst_self(&owner_ty);
+                let mut ret = ret.unwrap_or_else(Ty::pending_untyped).subst_self(&owner_ty);
                 // A factory that answers both `new` (receiver-dependent)
                 // and the owner by name (`Probe.config` reading back the
                 // same class) names the owner twice: `instance | Owner`.
@@ -2169,6 +2169,7 @@ impl Analyzer {
             let typer = if self.source_indexed { typer.with_const_resolver(self.const_resolver.clone()) } else { typer };
             for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
+                    block_param_unknown: None,
                     self_ty: Some(self_ty.clone()),
                     lexical_self: None,
                     ivar_bindings: HashMap::new(),
@@ -2426,11 +2427,11 @@ impl Analyzer {
                 );
             }
             // `attr_accessor :edit_user_id` virtual attributes: real
-            // ivars, untyped, absent from the schema. Seed as gradual
-            // so a direct `@edit_user_id` read resolves (don't clobber
+            // ivars, untyped, absent from the schema. Seed as Pending
+            // until writes supply evidence, so a direct `@edit_user_id` read resolves (don't clobber
             // a schema column of the same name).
             for name in collect_attr_accessor_names(&model.body) {
-                class_ivars.entry(name).or_insert(Ty::untyped());
+                class_ivars.entry(name).or_insert(Ty::pending_untyped());
             }
 
             // Phase 0: type the model's `Unknown` body items so the
@@ -2443,6 +2444,7 @@ impl Analyzer {
             // (`Int > Class { MIN_KARMA }`) and `send_dispatch_failed`
             // (`days` on `Class { NEW_USER_DAYS }`).
             let const_ctx = Ctx {
+                block_param_unknown: None,
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                 lexical_self: None,
                 ivar_bindings: class_ivars.clone(),
@@ -2460,6 +2462,7 @@ impl Analyzer {
             let class_constants = global_constants.with_own(extract_const_assignments(&model.body));
 
             let class_ctx = Ctx {
+                block_param_unknown: None,
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                 lexical_self: None,
                 ivar_bindings: class_ivars.clone(),
@@ -2521,6 +2524,7 @@ impl Analyzer {
                     reseeded.insert(name, union_ty);
                 }
                 let reseeded_ctx = Ctx {
+                    block_param_unknown: None,
                     self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                     lexical_self: None,
                     ivar_bindings: reseeded,
@@ -2570,6 +2574,7 @@ impl Analyzer {
                 args: vec![].into(),
             };
             let const_ctx = Ctx {
+                block_param_unknown: None,
                 self_ty: Some(self_ty.clone()),
                 lexical_self: None,
                 ivar_bindings: HashMap::new(),
@@ -2591,6 +2596,7 @@ impl Analyzer {
                 global_constants.with_own(extract_controller_const_assignments(&controller.body));
 
             let ctx = Ctx {
+                block_param_unknown: None,
                 self_ty: Some(self_ty.clone()),
                 lexical_self: None,
                 ivar_bindings: HashMap::new(),
@@ -3166,6 +3172,7 @@ impl Analyzer {
                             continue;
                         }
                         let base_ctx = Ctx {
+                            block_param_unknown: None,
                             self_ty: Some(meta.self_ty.clone()),
                             lexical_self: None,
                             ivar_bindings: seed,
@@ -3688,6 +3695,7 @@ impl Analyzer {
                         continue;
                     }
                     let base_ctx = Ctx {
+                        block_param_unknown: None,
                         self_ty: Some(self_ty.clone()),
                         lexical_self: None,
                         ivar_bindings: seed,
@@ -3872,6 +3880,7 @@ impl Analyzer {
                 lc.name.clone()
             };
             let class_ctx = Ctx {
+                block_param_unknown: None,
                 self_ty: Some(Ty::Class { id: self_id, args: vec![].into() }),
                 lexical_self: None,
                 ivar_bindings: HashMap::new(),
@@ -4017,6 +4026,7 @@ impl Analyzer {
                     reseeded.insert(name, seeded);
                 }
                 let reseeded_ctx = Ctx {
+                    block_param_unknown: None,
                     self_ty: class_ctx.self_ty.clone(),
                     lexical_self: None,
                     ivar_bindings: reseeded,
@@ -4636,7 +4646,7 @@ impl Analyzer {
         // vararg lands on the rest's position (see the signature stamp).
         if let Some(rest) = rest_param {
             ctx.local_bindings
-                .insert(rest.clone(), Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
+                .insert(rest.clone(), Ty::Array { elem: std::sync::Arc::new(Ty::derived_untyped(own.into_iter().chain(from_origin).flat_map(|v| v.iter()))) });
         }
         ctx
     }
@@ -6249,7 +6259,7 @@ impl Analyzer {
                         .enumerate()
                         .map(|(at, a)| {
                             if at >= spread {
-                                return Ty::untyped();
+                                return Ty::derived_untyped(args[spread..].iter().filter_map(|a| a.ty.as_ref()));
                             }
                             let t = a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
                             // Template call sites are evidence of what
@@ -7386,9 +7396,9 @@ fn block_filter_gates(call: &Expr) -> (Vec<Symbol>, Vec<Symbol>) {
 fn rest_element(observed: &[Ty]) -> Ty {
     let seen: Vec<&Ty> = observed.iter().filter(|t| !matches!(t, Ty::Var { .. })).collect();
     if seen.is_empty() || seen.iter().any(|t| matches!(t, Ty::Untyped { .. })) {
-        return Ty::untyped();
+        return Ty::derived_untyped(observed);
     }
-    seen.into_iter().cloned().reduce(unify_param_ty).unwrap_or(Ty::untyped())
+    seen.into_iter().cloned().reduce(unify_param_ty).unwrap_or_else(Ty::pending_untyped)
 }
 
 pub(crate) fn fold_param_observations(
@@ -8557,7 +8567,7 @@ pub use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 /// Collect the ivar names declared by `attr_accessor` / `attr_reader`
 /// / `attr_writer` in a model body. These are virtual attributes
 /// (`attr_accessor :edit_user_id`) — real ivars at runtime, absent
-/// from the schema, of unknown (gradual) type. Seeding them lets a
+/// from the schema, of a not-yet-observed type. Seeding them lets a
 /// direct `@edit_user_id` read in a model method resolve as `Untyped`
 /// rather than `Var`. (`register_attr_accessors` registers the
 /// reader/writer *methods*; this is the ivar-seed companion.)
@@ -8786,7 +8796,7 @@ fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<S
         }
         methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
         methods.entry(Symbol::from(format!("rich_text_{a}_loaded?"))).or_insert(Ty::Bool);
-        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::untyped());
+        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::pending_untyped());
     }
 }
 
@@ -8808,7 +8818,7 @@ fn register_plain_text_attr(
             methods.entry(Symbol::from(name)).or_insert(record.clone());
         }
         methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
-        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::untyped());
+        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::pending_untyped());
     }
 }
 
@@ -8828,11 +8838,11 @@ fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol,
         for arg in args {
             let Some(name) = symbol_arg(arg) else { continue };
             if reader {
-                methods.entry(name.clone()).or_insert(Ty::untyped());
+                methods.entry(name.clone()).or_insert(Ty::pending_untyped());
             }
             if writer {
                 let setter = Symbol::from(format!("{}=", name.as_str()));
-                methods.entry(setter).or_insert(Ty::untyped());
+                methods.entry(setter).or_insert(Ty::pending_untyped());
             }
         }
     }
@@ -9751,5 +9761,52 @@ mod reason_propagation_tests {
                 "the computed gradual branch was dropped: {elem:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod transfer_reason_tests {
+    use super::*;
+
+    #[test]
+    fn generated_accessor_prototypes_are_pending() {
+        let tree = HashMap::from([
+            (std::path::PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\n create_table :probes do |t|\n t.string :name\n end\nend\n".to_vec()),
+            (std::path::PathBuf::from("app/models/probe.rb"), b"class Probe < ApplicationRecord\n attr_accessor :label\nend\n".to_vec()),
+        ]);
+        let app = crate::ingest::ingest_app_from_tree(tree).unwrap();
+        let analyzer = Analyzer::new(&app);
+        let cls = &analyzer.classes[&ClassId(Symbol::from("Probe"))];
+        for name in ["label", "label="] {
+            assert!(cls.instance_methods[&Symbol::from(name)].inference_eq(&Ty::pending_untyped()));
+        }
+    }
+
+    #[test]
+    fn rest_observations_join_pending_gradual_and_concrete_contributors() {
+        for input in [
+            Ty::Var {
+                var: crate::ident::TyVar(1),
+            },
+            Ty::pending_untyped(),
+            Ty::untyped(),
+        ] {
+            let expected = Ty::derived_untyped([&input]);
+            for observed in [
+                vec![input.clone()],
+                vec![input.clone(), Ty::Str],
+                vec![Ty::Str, input.clone()],
+            ] {
+                if matches!(input, Ty::Var { .. }) && observed.len() > 1 {
+                    assert_eq!(rest_element(&observed), Ty::Str);
+                } else {
+                    assert!(
+                        rest_element(&observed).inference_eq(&expected),
+                        "{observed:?}"
+                    );
+                }
+            }
+        }
+        assert!(rest_element(&[]).inference_eq(&Ty::pending_untyped()));
     }
 }

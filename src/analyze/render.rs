@@ -346,7 +346,7 @@ fn interpret_render_call(
             if let Some(coll) = collection_ty {
                 // Unknown/gradual collection still binds the local —
                 // gradual element beats an unresolved bare name.
-                let elem_ty = coll.collection_elem().unwrap_or(Ty::untyped());
+                let elem_ty = coll.collection_elem().unwrap_or_else(|| Ty::derived_untyped([&coll]));
                 let local = as_name.unwrap_or_else(|| {
                     let base = name.rsplit('/').next().unwrap_or(&name);
                     Symbol::from(base.trim_start_matches('_'))
@@ -401,6 +401,48 @@ pub(super) fn resolve_partial_path(name: &str, current_view: &Symbol) -> String 
         match current.rfind('/') {
             Some(idx) => format!("{}_{}", &current[..=idx], name),
             None => format!("_{name}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod transfer_reason_tests {
+    use super::*;
+    #[test]
+    fn rendered_collection_locals_keep_the_collection_reason() {
+        let lit = |value| Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value });
+        let key = |name| {
+            lit(Literal::Sym {
+                value: Symbol::from(name),
+            })
+        };
+        for input in [
+            Ty::Var {
+                var: crate::ident::TyVar(1),
+            },
+            Ty::pending_untyped(),
+            Ty::untyped(),
+        ] {
+            let mut collection = lit(Literal::Nil);
+            collection.ty = Some(input.clone());
+            let options = Expr::new(
+                crate::span::Span::synthetic(),
+                ExprNode::Hash {
+                    entries: vec![
+                        (
+                            key("partial"),
+                            lit(Literal::Str {
+                                value: "item".to_owned(),
+                            }),
+                        ),
+                        (key("collection"), collection),
+                    ],
+                    kwargs: true,
+                },
+            );
+            let (_, locals) =
+                interpret_render_call(&[options], &Symbol::from("probes/index")).unwrap();
+            assert!(locals[&Symbol::from("item")].inference_eq(&Ty::derived_untyped([&input])));
         }
     }
 }

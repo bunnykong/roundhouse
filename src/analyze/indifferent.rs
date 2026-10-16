@@ -69,7 +69,7 @@ pub fn of(value: Ty) -> Ty {
 
 pub fn value_of(ty: &Ty) -> Option<&Ty> {
     match ty {
-        Ty::Class { id, args } if id.0.as_str() == CLASS => Some(args.first().unwrap_or(&Ty::Untyped { why: crate::ty::Why::GRADUAL })),
+        Ty::Class { id, args } if id.0.as_str() == CLASS => Some(args.first().unwrap_or(&Ty::Untyped { why: crate::ty::Why::PENDING })),
         _ => None,
     }
 }
@@ -96,7 +96,7 @@ pub fn plain(ty: &Ty) -> Ty {
     match ty {
         Ty::Class { id, args } if id.0.as_str() == CLASS => Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(plain(args.first().unwrap_or(&Ty::untyped()))),
+            value: std::sync::Arc::new(plain(args.first().unwrap_or(&Ty::pending_untyped()))),
         },
         Ty::Hash { key, value } => Ty::Hash { key: std::sync::Arc::new(plain(key)), value: std::sync::Arc::new(plain(value)) },
         Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(plain(elem)) },
@@ -120,7 +120,7 @@ pub fn mentions(ty: &Ty) -> bool {
 
 pub fn from(ty: &Ty) -> Option<Ty> {
     match ty {
-        Ty::Untyped { .. } | Ty::Nil => Some(of(Ty::untyped())),
+        Ty::Untyped { .. } | Ty::Nil => Some(of(Ty::derived_untyped([ty]))),
         Ty::Hash { key, value } if indifferent_keys(key) => Some(of(converted(value))),
         Ty::Class { .. } => value_of(ty).map(|v| of(v.clone())),
         Ty::Union { variants } => {
@@ -133,7 +133,7 @@ pub fn from(ty: &Ty) -> Option<Ty> {
                 values.push(value_of(&t)?.clone());
             }
             match values.len() {
-                0 => Some(of(Ty::untyped())),
+                0 => Some(of(Ty::derived_untyped([ty]))),
                 1 => Some(of(values.pop().unwrap())),
                 _ => Some(of(Ty::Union { variants: values.into() })),
             }
@@ -142,10 +142,10 @@ pub fn from(ty: &Ty) -> Option<Ty> {
     }
 }
 
-/// `with_indifferent_access`'s answer for a GRADUAL receiver: one whose
+/// `with_indifferent_access`'s answer for an untyped receiver: one whose
 /// alternatives are all a Hash, nil or untyped, and at least one is
 /// untyped (a json column's reader, `extras || {}`). Its values are as
-/// unknown as the receiver, so `HashWithIndifferentAccess[untyped]`.
+/// unknown as the receiver, with the same reason, so `HashWithIndifferentAccess[untyped]`.
 /// `None` for any other receiver, a typed Hash included (its own table
 /// answers it).
 pub fn from_gradual(ty: &Ty) -> Option<Ty> {
@@ -157,9 +157,9 @@ pub fn from_gradual(ty: &Ty) -> Option<Ty> {
     }
     let mut all = Vec::new();
     leaves(ty, &mut all);
-    (all.iter().any(|v| **v == Ty::untyped())
+    (all.iter().any(|v| matches!(v, Ty::Untyped { .. }))
         && all.iter().all(|v| matches!(v, Ty::Untyped { .. } | Ty::Nil | Ty::Hash { .. })))
-    .then(|| of(Ty::untyped()))
+    .then(|| of(Ty::derived_untyped([ty])))
 }
 
 fn merged_value(other: &Ty) -> Option<Ty> {
@@ -203,7 +203,7 @@ pub fn method_ty(
             "freeze" | "deep_dup" | "select" | "filter" | "reject" | "select!" | "filter!" | "reject!" | "keep_if"
             | "delete_if" | "clear" | "each" | "each_pair" | "each_key" | "each_value" => same(),
             "compact" => of(without_nil(value)),
-            "transform_values" => of(block_ret.cloned().unwrap_or(Ty::untyped())),
+            "transform_values" => of(block_ret.cloned().unwrap_or_else(|| Ty::derived_untyped([value]))),
             _ => hash_answer(method),
         },
     };
@@ -221,4 +221,55 @@ pub fn reverse_merged(defaults: &Ty, hash: &Ty) -> Option<Ty> {
 
 pub fn constructor_args(args: &[Expr]) -> bool {
     args.len() <= 1 && !args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. }))
+}
+
+#[cfg(test)]
+mod transfer_reason_tests {
+    use super::*;
+
+    #[test]
+    fn indifferent_conversions_keep_input_unknown_reasons() {
+        for input in [Ty::pending_untyped(), Ty::untyped()] {
+            let expected = Ty::derived_untyped([&input]);
+            for receiver in [
+                input.clone(),
+                Ty::Union {
+                    variants: vec![input.clone(), Ty::Nil].into(),
+                },
+                Ty::Union {
+                    variants: vec![
+                        Ty::Nil,
+                        input.clone(),
+                        Ty::Hash {
+                            key: std::sync::Arc::new(Ty::Str),
+                            value: std::sync::Arc::new(Ty::Str),
+                        },
+                    ]
+                    .into(),
+                },
+            ] {
+                for got in [from(&receiver).unwrap(), from_gradual(&receiver).unwrap()] {
+                    assert!(
+                        Ty::derived_untyped([&got]).inference_eq(&expected),
+                        "{receiver:?}: {got:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            value_of(&of(Ty::pending_untyped()))
+                .unwrap()
+                .inference_eq(&Ty::pending_untyped())
+        );
+        let bare = Ty::Class {
+            id: ClassId(Symbol::from(CLASS)),
+            args: vec![].into(),
+        };
+        assert!(
+            value_of(&bare)
+                .unwrap()
+                .inference_eq(&Ty::pending_untyped())
+        );
+        assert!(Ty::derived_untyped([&plain(&bare)]).inference_eq(&Ty::pending_untyped()));
+    }
 }

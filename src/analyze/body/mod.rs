@@ -117,6 +117,9 @@ pub struct Ctx {
     /// assignments accumulated through a `Seq`, and block parameters
     /// seeded from a receiver-aware dispatch.
     pub local_bindings: HashMap<Symbol, Ty>,
+    /// Unknown members yielded by the call whose lambda is being typed.
+    /// Consumed on entering that lambda; nested lambdas have their own inputs.
+    pub block_param_unknown: Option<Ty>,
     /// Locals whose assigned value is proven to be a class/module object.
     /// Nominal instance types alone do not establish this identity.
     pub class_objects: std::collections::HashSet<Symbol>,
@@ -578,14 +581,15 @@ impl<'a> BodyTyper<'a> {
         pattern: &MatchPattern,
         subject_ty: Option<&Ty>,
     ) -> Vec<(Symbol, Ty)> {
+        let fallback = Ty::derived_untyped(subject_ty);
         match pattern {
             MatchPattern::Value { .. } | MatchPattern::Nil => Vec::new(),
             MatchPattern::Bind { name } => {
-                vec![(name.clone(), subject_ty.cloned().unwrap_or(Ty::untyped()))]
+                vec![(name.clone(), subject_ty.cloned().unwrap_or(fallback.clone()))]
             }
             MatchPattern::Capture { pattern, name } => {
                 let mut out = self.match_pattern_bindings(pattern, subject_ty);
-                out.push((name.clone(), subject_ty.cloned().unwrap_or(Ty::untyped())));
+                out.push((name.clone(), subject_ty.cloned().unwrap_or(fallback.clone())));
                 out
             }
             // Ruby permits `_`-prefixed bindings in alternatives. A
@@ -596,23 +600,23 @@ impl<'a> BodyTyper<'a> {
             MatchPattern::Array { pre, rest, post, .. } => {
                 let mut out = Vec::new();
                 for p in pre.iter().chain(post.iter()) {
-                    out.extend(self.match_pattern_bindings(p, None));
+                    out.extend(self.match_pattern_bindings(p, Some(&fallback)));
                 }
                 if let Some(Some(name)) = rest {
-                    out.push((name.clone(), Ty::untyped()));
+                    out.push((name.clone(), fallback.clone()));
                 }
                 out
             }
             MatchPattern::Find { middle, pre_rest, post_rest, .. } => {
                 let mut out = Vec::new();
                 for p in middle {
-                    out.extend(self.match_pattern_bindings(p, None));
+                    out.extend(self.match_pattern_bindings(p, Some(&fallback)));
                 }
                 if let Some(name) = pre_rest {
-                    out.push((name.clone(), Ty::untyped()));
+                    out.push((name.clone(), fallback.clone()));
                 }
                 if let Some(name) = post_rest {
-                    out.push((name.clone(), Ty::untyped()));
+                    out.push((name.clone(), fallback.clone()));
                 }
                 out
             }
@@ -630,8 +634,8 @@ impl<'a> BodyTyper<'a> {
                 let mut out = Vec::new();
                 for (key, sub) in pairs {
                     match sub {
-                        Some(p) => out.extend(self.match_pattern_bindings(p, value_ty.as_ref())),
-                        None => out.push((key.clone(), value_ty.clone().unwrap_or(Ty::untyped()))),
+                        Some(p) => out.extend(self.match_pattern_bindings(p, value_ty.as_ref().or(Some(&fallback)))),
+                        None => out.push((key.clone(), value_ty.clone().unwrap_or(fallback.clone()))),
                     }
                 }
                 if let Some(HashRest::Collect { name }) = rest {
@@ -640,7 +644,7 @@ impl<'a> BodyTyper<'a> {
                     // need not be symbols, even though pattern keys are.
                     let rest_ty = match subject_ty {
                         Some(ty @ Ty::Hash { .. }) if constant.is_none() => ty.clone(),
-                        _ => Ty::Hash { key: std::sync::Arc::new(Ty::untyped()), value: std::sync::Arc::new(Ty::untyped()) },
+                        _ => Ty::Hash { key: std::sync::Arc::new(fallback.clone()), value: std::sync::Arc::new(fallback.clone()) },
                     };
                     out.push((name.clone(), rest_ty));
                 }
@@ -1075,7 +1079,7 @@ impl<'a> BodyTyper<'a> {
                                     });
                                 }
                                 _ => {
-                                    rescued = Some(Ty::untyped());
+                                    rescued = Some(Ty::derived_untyped(c.ty.as_ref()));
                                     break;
                                 }
                             }
@@ -1322,21 +1326,21 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
                 let mut inner = ctx.clone();
+                let unknown = inner.block_param_unknown.take().unwrap_or_else(Ty::pending_untyped);
                 for name in params.iter().chain(rest_param.iter()).chain(block_param.iter()) {
                     inner.class_objects.remove(name);
                 }
                 // Optional, keyword and keyword-rest parameters bind in the
                 // body like any local: an optional as its default's type,
                 // `**opts` as a Symbol-keyed Hash, a required keyword as
-                // untyped (no caller evidence here, the same gradual answer a
-                // block parameter gets). A default is typed in the lambda's
+                // untyped with the yielding call's reason. A default is typed in the lambda's
                 // own scope as filled so far, so it reads an earlier extra
                 // parameter (`c = b`) rather than an outer local.
                 for param in extra_params.iter_mut() {
                     let ty = match (&mut param.default, param.keyword && param.rest) {
-                        (_, true) => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) },
+                        (_, true) => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(unknown.clone()) },
                         (Some(default), false) => self.analyze_expr(default, &inner),
-                        (None, false) => Ty::untyped(),
+                        (None, false) => unknown.clone(),
                     };
                     if param.name.as_str().is_empty() {
                         continue;
@@ -1657,7 +1661,7 @@ impl<'a> BodyTyper<'a> {
                         ExprNode::Var { name, .. } => match ctx.local_bindings.get(name) {
                             Some(Ty::Nil) => None,
                             Some(ty) if forwarded_block_may_be_nil(ty) => None,
-                            _ => Some(Ty::untyped()),
+                            _ => Some(Ty::derived_untyped(ctx.local_bindings.get(name))),
                         },
                         _ => None,
                     }
@@ -2812,13 +2816,14 @@ impl<'a> BodyTyper<'a> {
                 Ty::Bottom
             }
 
-            ExprNode::ForwardArgs | ExprNode::ForwardKeywords => Ty::untyped(),
+            ExprNode::ForwardArgs | ExprNode::ForwardKeywords => Ty::derived_untyped(ctx.local_bindings.values()),
             ExprNode::ForwardKeywordsWithPairs { entries } => {
                 for (key, value) in entries.iter_mut() {
                     self.analyze_expr(key, ctx);
                     self.analyze_expr(value, ctx);
                 }
-                Ty::untyped()
+                Ty::derived_untyped(ctx.local_bindings.values().chain(
+                    entries.iter().flat_map(|(k, v)| k.ty.iter().chain(v.ty.iter()))))
             }
 
             ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
@@ -2863,7 +2868,7 @@ impl<'a> BodyTyper<'a> {
                 // no element-type signal.
                 let elem = begin_ty
                     .or(end_ty)
-                    .unwrap_or(Ty::untyped());
+                    .unwrap_or_else(Ty::pending_untyped);
                 Ty::Class {
                     id: ClassId(Symbol::from("Range")),
                     args: vec![elem].into(),
@@ -3110,7 +3115,7 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         // target gets the element model, same as `Array<of>`.
         Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
-        Some(Ty::Untyped { .. }) => Some(Ty::untyped()),
+        Some(ty @ Ty::Untyped { .. }) => Some(ty.clone()),
         _ => None,
     }
 }
@@ -5469,5 +5474,145 @@ fn set_discarded(e: &mut Expr, discarded: bool) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod transfer_reason_tests {
+    use super::*;
+
+    #[test]
+    fn opaque_callback_contracts_remain_gradual() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        for node in [
+            ExprNode::Super { args: None },
+            ExprNode::Yield { args: vec![] },
+        ] {
+            let mut expr = Expr::new(crate::span::Span::synthetic(), node);
+            assert!(
+                typer
+                    .analyze_expr(&mut expr, &Ctx::default())
+                    .inference_eq(&Ty::untyped())
+            );
+        }
+    }
+
+    #[test]
+    fn destructuring_and_nested_pattern_fallbacks_preserve_input_reasons() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        for input in [Ty::pending_untyped(), Ty::untyped()] {
+            for i in 0..3 {
+                assert!(
+                    multiassign_target_ty(&Some(input.clone()), i)
+                        .unwrap()
+                        .inference_eq(&input)
+                );
+            }
+            let bind = || MatchPattern::Bind {
+                name: Symbol::from("value"),
+            };
+            let patterns = [
+                bind(),
+                MatchPattern::Array {
+                    constant: None,
+                    pre: vec![bind()],
+                    rest: Some(Some(Symbol::from("rest"))),
+                    post: vec![],
+                },
+                MatchPattern::Hash {
+                    constant: None,
+                    pairs: vec![(Symbol::from("value"), None)],
+                    rest: Some(HashRest::Collect {
+                        name: Symbol::from("rest"),
+                    }),
+                },
+            ];
+            let constant = || {
+                Expr::new(
+                    crate::span::Span::synthetic(),
+                    ExprNode::Const {
+                        path: vec![Symbol::from("Probe")],
+                    },
+                )
+            };
+            let patterns: Vec<_> = patterns
+                .into_iter()
+                .chain([
+                    MatchPattern::Capture {
+                        pattern: Box::new(bind()),
+                        name: Symbol::from("captured"),
+                    },
+                    MatchPattern::Alt {
+                        alternatives: vec![bind(), bind()],
+                    },
+                    MatchPattern::Find {
+                        constant: None,
+                        pre_rest: Some(Symbol::from("before")),
+                        middle: vec![bind()],
+                        post_rest: Some(Symbol::from("after")),
+                    },
+                    MatchPattern::Hash {
+                        constant: Some(constant()),
+                        pairs: vec![(
+                            Symbol::from("value"),
+                            Some(MatchPattern::Array {
+                                constant: Some(constant()),
+                                pre: vec![bind()],
+                                rest: None,
+                                post: vec![],
+                            }),
+                        )],
+                        rest: None,
+                    },
+                ])
+                .collect();
+            for pattern in patterns {
+                for (_, value) in typer.match_pattern_bindings(&pattern, Some(&input)) {
+                    assert!(
+                        Ty::derived_untyped([&value]).inference_eq(&input),
+                        "{value:?}"
+                    );
+                }
+            }
+            for keyword_rest in [false, true] {
+                let mut param: crate::dialect::Param =
+                    serde_json::from_value(serde_json::json!({"name": "option"})).unwrap();
+                param.keyword = true;
+                param.rest = keyword_rest;
+                let mut lambda = Expr::new(
+                    crate::span::Span::synthetic(),
+                    ExprNode::Lambda {
+                        params: vec![],
+                        rest_param: None,
+                        extra_params: vec![param],
+                        block_param: None,
+                        body: Expr::new(
+                            crate::span::Span::synthetic(),
+                            ExprNode::Var {
+                                id: crate::ident::VarId(0),
+                                name: Symbol::from("option"),
+                            },
+                        ),
+                        block_style: Default::default(),
+                    },
+                );
+                let block_ctx = Ctx {
+                    block_param_unknown: Some(input.clone()),
+                    ..Ctx::default()
+                };
+                let got = typer.analyze_expr(&mut lambda, &block_ctx);
+                assert!(Ty::derived_untyped([&got]).inference_eq(&input));
+            }
+            let ctx = Ctx {
+                local_bindings: HashMap::from([(Symbol::from("value"), input.clone())]),
+                ..Ctx::default()
+            };
+            for node in [ExprNode::ForwardArgs, ExprNode::ForwardKeywords] {
+                let mut expr = Expr::new(crate::span::Span::synthetic(), node);
+                assert!(typer.analyze_expr(&mut expr, &ctx).inference_eq(&input));
+            }
+        }
     }
 }

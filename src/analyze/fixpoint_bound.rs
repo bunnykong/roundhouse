@@ -65,7 +65,7 @@ pub(super) fn bound(ty: Ty) -> Ty {
         // A union with more leaf arms than the node bound has no nesting
         // left to cut.
         if limit == 0 {
-            return Ty::untyped();
+            return Ty::derived_untyped([&ty]);
         }
         limit -= 1;
     }
@@ -137,7 +137,7 @@ fn cut(ty: &Ty, levels: usize) -> Ty {
         return ty.clone();
     }
     if levels == 0 {
-        return Ty::untyped();
+        return Ty::derived_untyped([ty]);
     }
     let inner = |t: &Ty| cut(t, levels - 1);
     match ty {
@@ -364,5 +364,28 @@ mod tests {
             stored = next;
         }
         panic!("the bounded unrolling never settled");
+    }
+}
+
+#[cfg(test)]
+mod transfer_reason_tests {
+    use super::*;
+
+    #[test]
+    fn size_bounds_derive_cut_reasons_from_every_subtree() {
+        for (leaf, expected) in [
+            (Ty::Str, Ty::pending_untyped()),
+            (Ty::pending_untyped(), Ty::pending_untyped()),
+            (Ty::untyped(), Ty::untyped()),
+        ] {
+            let mut input = leaf;
+            for _ in 0..MAX_DEPTH + 2 {
+                input = Ty::Array {
+                    elem: Arc::new(input),
+                };
+            }
+            let got = bound(input);
+            assert!(Ty::derived_untyped([&got]).inference_eq(&expected));
+        }
     }
 }

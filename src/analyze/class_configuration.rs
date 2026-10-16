@@ -193,13 +193,13 @@ impl Analyzer {
                                     .local_bindings
                                     .get(&p.name)
                                     .cloned()
-                                    .unwrap_or(Ty::untyped()).into(),
+                                    .unwrap_or(Ty::pending_untyped()).into(),
                             },
                             kind: p.ty_kind(),
                         })
                         .collect(),
                     block: None,
-                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or(Ty::untyped())),
+                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or(Ty::pending_untyped())),
                     effects: method.effects.clone(),
                 });
                 // Sibling class methods in this same pass call each other

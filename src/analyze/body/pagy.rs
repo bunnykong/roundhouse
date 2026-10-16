@@ -37,7 +37,7 @@ impl<'a> BodyTyper<'a> {
     /// is not a scope, or a union of different scopes.
     fn pagy_scope_ty(&self, ty: Option<&Ty>) -> Option<Ty> {
         match ty {
-            None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => Some(Ty::untyped()),
+            None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => Some(Ty::derived_untyped(ty)),
             Some(Ty::Relation { of }) => Some(Ty::Relation { of: of.clone() }),
             Some(Ty::Array { .. }) => None,
             Some(Ty::Union { variants }) => {
@@ -51,7 +51,7 @@ impl<'a> BodyTyper<'a> {
                         },
                     }
                 }
-                Some(closed.unwrap_or(Ty::untyped()))
+                Some(closed.unwrap_or_else(|| Ty::derived_untyped(variants.iter())))
             }
             _ => None,
         }
@@ -129,7 +129,7 @@ impl<'a> BodyTyper<'a> {
         match args {
             [] => {
                 refuse("`pagy` needs a collection".into(), refusal);
-                return Some(result(Ty::untyped()));
+                return Some(result(Ty::derived_untyped(scope_ty)));
             }
             [first, ..] if matches!(&*first.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } }) => {
                 refuse(
@@ -138,7 +138,7 @@ impl<'a> BodyTyper<'a> {
                         .into(),
                     refusal,
                 );
-                return Some(result(Ty::untyped()));
+                return Some(result(Ty::derived_untyped(scope_ty)));
             }
             _ => {}
         }
@@ -202,6 +202,35 @@ impl<'a> BodyTyper<'a> {
                 ),
             });
         }
-        Some(result(records.unwrap_or(Ty::untyped())))
+        Some(result(records.unwrap_or_else(|| Ty::derived_untyped(scope_ty))))
+    }
+}
+
+#[cfg(test)]
+mod transfer_reason_tests {
+    use super::*;
+
+    #[test]
+    fn framework_scope_projection_carries_pending_and_gradual_inputs() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        for input in [
+            Ty::Var { var: TyVar(1) },
+            Ty::pending_untyped(),
+            Ty::untyped(),
+        ] {
+            let expected = Ty::derived_untyped([&input]);
+            let got = typer.pagy_scope_ty(Some(&input)).unwrap();
+            assert!(got.inference_eq(&expected));
+            let union = Ty::Union {
+                variants: vec![input.clone(), expected.clone()].into(),
+            };
+            assert!(
+                typer
+                    .pagy_scope_ty(Some(&union))
+                    .unwrap()
+                    .inference_eq(&expected)
+            );
+        }
     }
 }

@@ -20,6 +20,7 @@ use crate::ty::Ty;
 
 use super::body;
 
+#[cfg(test)]
 fn gradual_nil() -> Ty {
     body::union_of(Ty::Nil, Ty::untyped())
 }
@@ -50,7 +51,7 @@ fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
     let core_e = core_e.join_equal_reasons(&core_n).unwrap_or(core_e);
     if matches!(core_e, Ty::Nil) {
         if existing.has_unknown_arm() || new.has_unknown_arm() {
-            return Some(gradual_nil());
+            return Some(body::union_of(Ty::Nil, Ty::derived_untyped([existing, new])));
         }
         return Some(core_e);
     }
@@ -80,14 +81,16 @@ fn gradual_arm(ty: &Ty) -> Option<crate::ty::Why> {
 fn untie(ty: &Ty, prior: &Ty) -> Ty {
     let go = |t: &Ty| {
         if t == prior {
-            return Ty::untyped();
+            return Ty::derived_untyped([t]);
         }
         if let (Ty::Union { variants: pv }, Ty::Union { variants: tv }) = (prior, t)
             && pv.iter().all(|v| tv.contains(v))
         {
             let mut rest: Vec<Ty> = tv.iter().filter(|v| !pv.contains(v)).map(|v| untie(v, prior)).collect();
-            if !rest.contains(&Ty::untyped()) {
-                rest.push(Ty::untyped());
+            if let Some(unknown) = rest.iter_mut().find(|t| matches!(t, Ty::Untyped { .. })) {
+                *unknown = Ty::derived_untyped([&*unknown, prior]);
+            } else {
+                rest.push(Ty::derived_untyped([prior]));
             }
             return Ty::Union { variants: rest.into() };
         }
@@ -470,4 +473,35 @@ mod reason_tests {
         }
     }
 
+}
+
+#[cfg(test)]
+mod transfer_reason_tests {
+    use super::*;
+
+    #[test]
+    fn stabilization_cuts_preserve_only_actual_gradual_evidence() {
+        for input in [Ty::pending_untyped(), Ty::untyped()] {
+            let nilable = body::union_of(Ty::Nil, input.clone());
+            for (old, new) in [(&Ty::Nil, &nilable), (&nilable, &Ty::Nil)] {
+                let stable = stabilize_untyped_return_oscillation(old, new).unwrap();
+                assert!(stable.inference_eq(&nilable), "{stable:?}");
+            }
+            let prior = Ty::Array {
+                elem: std::sync::Arc::new(input.clone()),
+            };
+            let wrapped = Ty::Array {
+                elem: std::sync::Arc::new(prior.clone()),
+            };
+            assert!(untie(&wrapped, &prior).inference_eq(&prior));
+        }
+        let prior = Ty::Array {
+            elem: std::sync::Arc::new(Ty::Str),
+        };
+        let wrapped = Ty::Array {
+            elem: std::sync::Arc::new(prior.clone()),
+        };
+        let cut = untie(&wrapped, &prior);
+        assert!(Ty::derived_untyped([&cut]).inference_eq(&Ty::pending_untyped()));
+    }
 }

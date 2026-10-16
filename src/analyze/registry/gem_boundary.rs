@@ -227,7 +227,7 @@ fn prune_ty(ty: &Ty, resolve: &dyn Fn(&ClassId) -> Option<ClassId>) -> Ty {
                 id,
                 args: args.iter().map(|a| prune_ty(a, resolve)).collect(),
             },
-            None => Ty::untyped(),
+            None => Ty::derived_untyped([ty]),
         },
         Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(prune_ty(elem, resolve)) },
         Ty::Hash { key, value } => Ty::Hash {
