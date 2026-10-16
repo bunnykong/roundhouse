@@ -549,3 +549,61 @@ fn destructuring_never_creates_gradual_provenance_from_member_types() {
         }
     }
 }
+
+#[test]
+fn schema_json_metadata_is_not_a_gradual_value_source() {
+    for column in ["json", "jsonb"] {
+        for prefix in ["self.", ""] {
+            for depth in [2, 4] {
+                // Pinned-main helper returns. A schema describes storage, not
+                // the value returned by an overriding getter or a writer.
+                for (body, forward) in [
+                    ("Item.new.payload", "String"),
+                    ("Item.new.send(:payload)", "String"),
+                    ("Item.new.public_send(\"payload\")", "String"),
+                    ("item = Item.new; item.__send__(:payload)", "String"),
+                    ("Item.new.send(:payload=, \"ok\")", "untyped"),
+                    ("Item.new.public_send(\"payload=\", \"ok\")", "untyped"),
+                    ("Item.new.__send__(:send, :payload=, \"ok\")", "untyped"),
+                    ("Item.new.label", "untyped"),
+                    ("Item.new.attribute_value", "String"),
+                    ("Item.send(:[], :payload)", "untyped"),
+                ] {
+                    let mut source = format!("class Probe\n def {prefix}value\n forward0 || \"fallback\"\n end\n");
+                    for i in 0..depth {
+                        let tail = if i + 1 == depth { body.to_owned() } else { format!("forward{}", i + 1) };
+                        source.push_str(&format!("def {prefix}forward{i}; {tail}; end\n"));
+                    }
+                    source.push_str("end\n");
+                    let receiver = if prefix.is_empty() { "Probe.new" } else { "Probe" };
+                    let tree = HashMap::from([
+                        (PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\n get \"/probe\", to: \"probes#show\"\nend\n".to_vec()),
+                        (PathBuf::from("app/controllers/probes_controller.rb"), format!("class ProbesController < ActionController::Base\n def show\n  {receiver}.value.no_such_method\n end\nend\n").into_bytes()),
+                        (PathBuf::from("db/schema.rb"), format!("ActiveRecord::Schema.define do\n create_table :items do |t|\n t.{column} :payload\n end\nend\n").into_bytes()),
+                        (PathBuf::from("app/models/item.rb"), b"class Item < ActiveRecord::Base\n def payload; payload0; end\n def payload0; payload1; end\n def payload1; \"ok\"; end\n def label; @payload || \"fallback\"; end\n def attribute_value; read_attribute(:payload) || \"fallback\"; end\n def self.[](key); \"ok\"; end\nend\n".to_vec()),
+                        (PathBuf::from("lib/probe.rb"), source.as_bytes().to_vec()),
+                    ]);
+                    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+                    roundhouse::session::analyze_and_lower(&mut app);
+                    let diagnostics = roundhouse::analyze::diagnose(&app);
+                    let errors: Vec<_> = diagnostics.iter().filter(|d| matches!(&d.kind,
+                        roundhouse::analyze::DiagnosticKind::SendDispatchFailed { method, .. }
+                            if method.as_str() == "no_such_method")).collect();
+                    assert_eq!(errors.len(), 1, "{column}: {source}\n{diagnostics:?}");
+                    let file = &app.sources[errors[0].span.file.0 as usize - 1];
+                    assert_eq!(file.path, "app/controllers/probes_controller.rb");
+                    assert_eq!(file.line_col(errors[0].span.start), (3, 3));
+                    let rbs = roundhouse::emit::ruby::emit_library(&app).into_iter()
+                        .filter(|f| f.path == PathBuf::from("sig/app/models/probe.rbs"))
+                        .map(|f| f.content).collect::<String>();
+                    let mut actual: Vec<_> = rbs.lines().map(str::trim).filter(|l| l.starts_with("def ")).collect();
+                    actual.sort();
+                    let mut expected = vec![format!("def {prefix}value: () -> String")];
+                    expected.extend((0..depth).map(|i| format!("def {prefix}forward{i}: () -> {forward}")));
+                    expected.sort();
+                    assert_eq!(actual, expected, "{column}: {source}\n{rbs}");
+                }
+            }
+        }
+    }
+}

@@ -248,3 +248,22 @@ fn reflective_computations_keep_main_forwarding_declarations() {
         check(body, false, 2, true);
     }
 }
+
+#[test]
+fn catalog_callback_fallbacks_are_computations_not_gradual_sources() {
+    for body in [
+        "Item.new.with_lock { \"ok\" }",
+        "Item.new.with_lock(JSON.parse('\"FOR UPDATE\"')) { \"ok\" }",
+        "Item.new.with_lock(requires_new: JSON.parse(\"true\")) { \"ok\" }",
+        "Item.new.send(:with_lock) { \"ok\" }",
+        "Item.new.public_send(\"with_lock\") { \"ok\" }",
+        "Item.new.__send__(:send, :with_lock) { \"ok\" }",
+        "item = Item.new; item.with_lock { \"ok\" }",
+    ] {
+        for instance in [false, true] {
+            for depth in [2, 4] {
+                check(body, instance, depth, false);
+            }
+        }
+    }
+}

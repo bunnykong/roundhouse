@@ -275,8 +275,13 @@ impl Analyzer {
             // return_kind automatically enables it for type
             // inference downstream.
             use crate::catalog::{AR_CATALOG, ReceiverContext, ReturnKind};
-            let instantiate =
-                |kind: ReturnKind| -> Ty { instantiate_return_kind(kind, &model.name) };
+            let instantiate = |kind: ReturnKind, name: &str, side: MethodReceiver| -> Ty {
+                if source_method(app, &model.name, name, side) {
+                    instantiate_return_kind(kind, &model.name)
+                } else {
+                    instantiate_catalog_return_kind(kind, &model.name, name)
+                }
+            };
             for entry in AR_CATALOG {
                 if entry.receiver != ReceiverContext::Class {
                     continue;
@@ -286,7 +291,7 @@ impl Analyzer {
                     continue;
                 }
                 let Some(kind) = entry.return_kind else { continue };
-                cls.class_methods.insert(Symbol::from(entry.name), instantiate(kind));
+                cls.class_methods.insert(Symbol::from(entry.name), instantiate(kind, entry.name, MethodReceiver::Class));
             }
             // AR class-side framework methods not yet in the catalog.
             // `Model.transaction { ... }` runs the block in a DB
@@ -742,7 +747,7 @@ impl Analyzer {
                     }
                     self_ty.clone()
                 } else {
-                    instantiate(kind)
+                    instantiate(kind, entry.name, MethodReceiver::Instance)
                 };
                 cls.instance_methods.insert(Symbol::from(entry.name), ret);
             }
@@ -4862,11 +4867,10 @@ impl Analyzer {
                 if let Some(kind) =
                     body_tail_terminal_kind(&method.body, class_id, &scope_names)
                 {
-                    Self::insert_inferred_return(
-                        target,
-                        &method.name,
-                        instantiate_return_kind(kind, class_id),
-                    );
+                    let summary = instantiate_return_kind(kind, class_id);
+                    let summary = ret.as_ref().filter(|ret| **ret == summary)
+                        .and_then(|ret| summary.join_equal_reasons(ret)).unwrap_or(summary);
+                    Self::insert_inferred_return(target, &method.name, summary);
                     self.classes
                         .entry(class_id.clone())
                         .or_default()
@@ -6798,9 +6802,30 @@ fn descends_from_active_record(
 /// is the model being seeded) and Relation-receiver dispatch in
 /// `body/send.rs` (where "Self" denotes the relation's *element* model
 /// — `Relation { of }`'s `of`).
-pub(crate) fn instantiate_return_kind(
+/// A result-kind descriptor is metadata, not evidence of a value source.
+pub(crate) fn instantiate_return_kind(kind: crate::catalog::ReturnKind, self_id: &ClassId) -> Ty {
+    instantiate_return_kind_with_untyped(kind, self_id, Ty::untyped())
+}
+
+/// The catalog's data-producing any contracts. Unknown callback/computation
+/// summaries (for example with_lock) are not source opt-outs.
+pub(crate) fn catalog_untyped(method: &str) -> Ty {
+    match method {
+        "pluck" | "pick" | "attributes_before_type_cast" => Ty::gradual_untyped(),
+        _ => Ty::untyped(),
+    }
+}
+
+pub(crate) fn instantiate_catalog_return_kind(
+    kind: crate::catalog::ReturnKind, self_id: &ClassId, method: &str,
+) -> Ty {
+    instantiate_return_kind_with_untyped(kind, self_id, catalog_untyped(method))
+}
+
+fn instantiate_return_kind_with_untyped(
     kind: crate::catalog::ReturnKind,
     self_id: &ClassId,
+    untyped: Ty,
 ) -> Ty {
     use crate::catalog::ReturnKind;
     let self_ty = || Ty::Class { id: self_id.clone(), args: vec![].into() };
@@ -6817,7 +6842,7 @@ pub(crate) fn instantiate_return_kind(
         },
         ReturnKind::HashStrUntyped => Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::gradual_untyped()),
+            value: std::sync::Arc::new(untyped.clone()),
         },
         ReturnKind::ArrayOfSym => Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
         ReturnKind::Str => Ty::Str,
@@ -6827,8 +6852,8 @@ pub(crate) fn instantiate_return_kind(
         },
         ReturnKind::RelationOfSelf => Ty::Relation { of: self_id.clone() },
         ReturnKind::ArrayOfInt => Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
-        ReturnKind::ArrayOfUntyped => Ty::Array { elem: std::sync::Arc::new(Ty::gradual_untyped()) },
-        ReturnKind::Untyped => Ty::gradual_untyped(),
+        ReturnKind::ArrayOfUntyped => Ty::Array { elem: std::sync::Arc::new(untyped.clone()) },
+        ReturnKind::Untyped => untyped.clone(),
     }
 }
 
@@ -9773,5 +9798,32 @@ mod declared_source_reason_tests {
         );
         let ctx = analyzer.seed_method_params(&Ctx::default(), &class.name, method, false);
         assert!(ctx.local_bindings[&Symbol::from("x")].inference_eq(&Ty::gradual_untyped()));
+    }
+}
+
+#[cfg(test)]
+mod catalog_source_reason_tests {
+    use super::*;
+
+    #[test]
+    fn return_kind_metadata_requires_an_admitted_data_producer() {
+        use crate::catalog::ReturnKind;
+        let owner = ClassId(Symbol::from("Item"));
+        for kind in [ReturnKind::Untyped, ReturnKind::ArrayOfUntyped, ReturnKind::HashStrUntyped] {
+            let summary = instantiate_return_kind(kind, &owner);
+            assert!(summary.inference_eq(&summary.computed()));
+            for method in ["with_lock", "map", "as_json", "instance_exec", "new", "future_callback"] {
+                let result = instantiate_catalog_return_kind(kind, &owner, method);
+                assert!(result.inference_eq(&result.computed()), "{method}: {result:?}");
+            }
+        }
+        for (method, kind, expected) in [
+            ("pick", ReturnKind::Untyped, Ty::gradual_untyped()),
+            ("pluck", ReturnKind::ArrayOfUntyped, Ty::Array { elem: Ty::gradual_untyped().into() }),
+            ("attributes_before_type_cast", ReturnKind::HashStrUntyped,
+                Ty::Hash { key: Ty::Str.into(), value: Ty::gradual_untyped().into() }),
+        ] {
+            assert!(instantiate_catalog_return_kind(kind, &owner, method).inference_eq(&expected));
+        }
     }
 }

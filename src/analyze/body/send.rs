@@ -1123,7 +1123,7 @@ impl<'a> BodyTyper<'a> {
                             // receiver's class: `try(:instance)` on a
                             // subclass answers the subclass.
                             let ty = ty.subst_self(&Ty::Class { id: id.clone(), args: Vec::new().into() });
-                            return union_of(unwrap_fn_ret(&ty), Ty::Nil);
+                            return union_of(unwrap_fn_ret(&ty), Ty::Nil).computed();
                         }
                         depth += 1;
                         if depth > 32 {
@@ -1642,7 +1642,8 @@ impl<'a> BodyTyper<'a> {
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {
-                        return unwrap_fn_ret(&subst(ty));
+                        let result = unwrap_fn_ret(&subst(ty));
+                        return if instance_side { result } else { result.computed() };
                     }
                     // Mixed-in modules (`include IntervalHelper`)
                     // contribute their instance methods to this class.
@@ -1651,7 +1652,8 @@ impl<'a> BodyTyper<'a> {
                     // module between the class and its superclass.
                     for module_id in &cls.includes {
                         if let Some(ty) = self.lookup_in_module(module_id, method) {
-                            return subst(&ty);
+                            let result = subst(&ty);
+                            return if instance_side { result } else { result.computed() };
                         }
                     }
                     // Class-object sends only consult class-side
@@ -1866,7 +1868,10 @@ impl<'a> BodyTyper<'a> {
                         "generate" | "dump" | "pretty_generate" | "fast_generate" => {
                             return Ty::Str
                         }
-                        "parse" | "load" => return Ty::gradual_untyped(),
+                        "parse" | "load" => return if !instance_receiver
+                            && !self.classes().get(id).is_some_and(|c| c.app_declared) {
+                            Ty::gradual_untyped()
+                        } else { Ty::untyped() },
                         _ => {}
                     }
                 }
@@ -2068,7 +2073,7 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
-                array_method(method, elem, block_ret)
+                array_method(method, elem, block_ret).computed()
             }
             // Relation-typed receiver — a chain started from a scope
             // call, a relation-returning class method, or (later) an
@@ -2110,7 +2115,7 @@ impl<'a> BodyTyper<'a> {
                     crate::catalog::ReceiverContext::Relation,
                 ) {
                     if let Some(kind) = entry.return_kind {
-                        return crate::analyze::instantiate_return_kind(kind, of);
+                        return crate::analyze::instantiate_catalog_return_kind(kind, of, method.as_str());
                     }
                 }
                 // Not only the element model's own scopes: one inherited from an abstract base answers on the subclass's relation.
@@ -2208,7 +2213,7 @@ impl<'a> BodyTyper<'a> {
                     return t;
                 }
                 let elem = Ty::Class { id: of.clone(), args: vec![].into() };
-                array_method(method, &elem, block_ret)
+                array_method(method, &elem, block_ret).computed()
             }
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret, args).computed(),
             Some(Ty::Record { row }) => record_method(method, row, args).computed(),
@@ -2817,8 +2822,9 @@ fn is_model_relation_elem(elem: &Ty) -> bool {
 /// `crate::analyze::instantiate_return_kind` instead. `SelfOrNil` uses
 /// `union_of`, not a literal `Union`, so a union element flattens
 /// instead of nesting.
-fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) -> Ty {
+fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty, _method: &Symbol) -> Ty {
     use crate::catalog::ReturnKind;
+    let untyped = Ty::untyped();
     match kind {
         ReturnKind::SelfType => elem.clone(),
         ReturnKind::RelationOfSelf | ReturnKind::ArrayOfSelf => {
@@ -2829,8 +2835,8 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
         ReturnKind::IntOrNil => union_of(Ty::Int, Ty::Nil),
         ReturnKind::Bool => Ty::Bool,
         ReturnKind::ArrayOfInt => Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
-        ReturnKind::ArrayOfUntyped => Ty::Array { elem: std::sync::Arc::new(Ty::gradual_untyped()) },
-        ReturnKind::Untyped => Ty::gradual_untyped(),
+        ReturnKind::ArrayOfUntyped => Ty::Array { elem: std::sync::Arc::new(untyped.clone()) },
+        ReturnKind::Untyped => untyped.clone(),
         ReturnKind::ClassRef(path) => Ty::Class {
             id: crate::ident::ClassId(Symbol::from(path)),
             args: vec![].into(),
@@ -2843,7 +2849,7 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
         },
         ReturnKind::HashStrUntyped => Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::gradual_untyped()),
+            value: std::sync::Arc::new(untyped.clone()),
         },
         ReturnKind::ArrayOfSym => Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
         ReturnKind::Str => Ty::Str,
@@ -2911,7 +2917,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             crate::catalog::ReceiverContext::Relation,
         ) {
             if let Some(kind) = entry.return_kind {
-                return relation_return_on_array_repr(kind, elem);
+                return relation_return_on_array_repr(kind, elem, method);
             }
         }
     }
@@ -3952,6 +3958,7 @@ mod whitelist_reason_tests {
         let gradual = Ty::gradual_untyped();
         let receivers = [
             Ty::Array { elem: gradual.clone().into() },
+            Ty::Array { elem: Ty::Class { id: ClassId(Symbol::from("PlainObject")), args: vec![gradual.clone()].into() }.into() },
             Ty::Hash { key: gradual.clone().into(), value: gradual.clone().into() },
             Ty::Tuple { elems: vec![Ty::Str, gradual.clone()].into() },
             Ty::Union { variants: vec![Ty::Str, gradual.clone()].into() },
@@ -3961,7 +3968,7 @@ mod whitelist_reason_tests {
         let mut arg = Expr::new(crate::span::Span::synthetic(), ExprNode::SelfRef);
         arg.ty = Some(gradual.clone());
         for receiver in receivers {
-            for name in ["[]", "dig", "fetch", "first", "to_a", "to_h", "as_json", "map", "reduce", "group_by"] {
+            for name in ["[]", "dig", "fetch", "first", "to_a", "to_h", "as_json", "map", "reduce", "group_by", "pick", "pluck"] {
                 let result = typer.dispatch(Some(&receiver), &Symbol::from(name), Some(&gradual), &[arg.clone()]);
                 assert!(result.inference_eq(&result.computed()), "{name}: {receiver:?} -> {result:?}");
             }
@@ -3980,6 +3987,47 @@ mod whitelist_reason_tests {
             for value in [Ty::pending_untyped(), Ty::gradual_untyped()] {
                 let result = typer.dispatch(Some(&value), &Symbol::from(identity), None, &[]);
                 assert!(result.inference_eq(&value), "identity {identity}: {value:?}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_receiver_reason_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn source_contracts_require_matching_method_sides_and_runtime_json_receivers() {
+        let owner = ClassId(Symbol::from("ValueProvider"));
+        let host = ClassId(Symbol::from("IncludedHost"));
+        let mut provider = crate::analyze::ClassInfo::default();
+        provider.instance_methods.insert(Symbol::from("value"), Ty::gradual_untyped());
+        let mut included = crate::analyze::ClassInfo::default();
+        included.includes.push(owner.clone());
+        let classes = HashMap::from([(owner.clone(), provider), (host.clone(), included)]);
+        let typer = BodyTyper::new(&classes);
+        for id in [owner, host] {
+            for instance in [false, true] {
+                let receiver = Ty::Class { id: id.clone(), args: vec![].into() };
+                let result = typer.dispatch_on(Some(&receiver), &Symbol::from("value"), None, &[], instance);
+                let expected = if instance { Ty::gradual_untyped() } else { Ty::untyped() };
+                assert!(result.inference_eq(&expected), "{id:?}/{instance}: {result:?}");
+            }
+        }
+        for app_declared in [false, true] {
+            let mut json = crate::analyze::ClassInfo::default();
+            json.app_declared = app_declared;
+            let id = ClassId(Symbol::from("JSON"));
+            let classes = HashMap::from([(id.clone(), json)]);
+            let typer = BodyTyper::new(&classes);
+            for instance in [false, true] {
+                let receiver = Ty::Class { id: id.clone(), args: vec![].into() };
+                for name in ["parse", "load"] {
+                    let result = typer.dispatch_on(Some(&receiver), &Symbol::from(name), None, &[], instance);
+                    let expected = if !instance && !app_declared { Ty::gradual_untyped() } else { Ty::untyped() };
+                    assert!(result.inference_eq(&expected), "{name}/{app_declared}/{instance}: {result:?}");
+                }
             }
         }
     }
