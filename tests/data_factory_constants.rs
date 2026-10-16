@@ -90,7 +90,7 @@ end
         analyzer.inferred_param_types(
             &ClassId(Symbol::from("FactoryExamples::State")),
             &Symbol::from("initialize"),
-        ),
+        ).as_deref(),
         Some(&[Ty::Str][..]),
     );
 }
