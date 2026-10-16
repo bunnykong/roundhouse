@@ -570,6 +570,7 @@ impl<'a> BodyTyper<'a> {
                 let kernel_call = recv.is_none() || recv.as_ref().is_some_and(|r| {
                     matches!(&*r.node, ExprNode::Const { path } if path.iter()
                         .map(Symbol::as_str).filter(|p| !p.is_empty()).eq(["Kernel"]))
+                        && matches!(r.ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "Kernel")
                         && self.const_resolver.as_ref().is_some_and(|r| !r.has_source_namespace("Kernel"))
                 });
                 let ordinary_raise = kernel_call && matches!(method.as_str(), "raise" | "fail")
@@ -580,9 +581,31 @@ impl<'a> BodyTyper<'a> {
                 // Core value reads and proc/lambda creation ignore a supplied
                 // block. A source-defined override is not that core protocol.
                 let target_method = name.map(Symbol::from).unwrap_or_else(|| method.clone());
+                // Missing class members are provisional during harvest. Only a
+                // positive builtin receiver can certify a block-ignoring read;
+                // otherwise an early round could seed sticky Gradual provenance
+                // before a source-defined yielding override is registered.
+                let builtin_name = match recv.as_ref().and_then(|r| r.ty.as_ref()) {
+                    Some(Ty::Array { .. } | Ty::Tuple { .. }) => Some("Array"),
+                    Some(Ty::Hash { .. } | Ty::Record { .. }) => Some("Hash"),
+                    Some(Ty::Str) => Some("String"),
+                    Some(Ty::Int) => Some("Integer"),
+                    Some(Ty::Float) => Some("Float"),
+                    Some(Ty::Bool) => Some("TrueClass"),
+                    Some(Ty::Nil) => Some("NilClass"),
+                    Some(Ty::Time) => Some("Time"),
+                    Some(Ty::Date) => Some("Date"),
+                    Some(Ty::Fn { .. }) => Some("Proc"),
+                    _ => None,
+                };
+                let literal_receiver = recv.as_ref().is_some_and(|r| matches!(&*r.node,
+                    ExprNode::Array { .. } | ExprNode::Hash { .. } | ExprNode::Lit { .. } | ExprNode::Lambda { .. }));
+                let builtin_receiver = literal_receiver && builtin_name.is_some_and(|name| !self.const_resolver.as_ref()
+                    .is_some_and(|resolver| resolver.has_source_namespace(name)
+                        || (name == "TrueClass" && resolver.has_source_namespace("FalseClass"))));
                 let ignored = self.json_value_source(recv.as_ref(), method, args)
-                    || (name.is_some_and(|n| matches!(n, "proc" | "lambda")) && recv.is_none())
-                    || (name.is_some_and(|n| matches!(n, "freeze" | "itself" | "[]" | "dig" | "at"
+                    || (name.is_some_and(|n| matches!(n, "proc" | "lambda")) && recv.is_some() && kernel_call)
+                    || (builtin_receiver && name.is_some_and(|n| matches!(n, "freeze" | "itself" | "[]" | "dig" | "at"
                         | "first" | "last" | "second" | "third" | "fourth" | "fifth" | "sole" | "sample"))
                         && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), &target_method, false)
                         && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), &target_method, true));

@@ -25,7 +25,13 @@ fn source(case: &serde_json::Value, instance: bool, depth: usize) -> String {
         };
         source.push_str(&format!(" def {prefix}forward{i}(raw)\n  {body}\n end\n"));
     }
+    if let Some(support) = case["inline_support"].as_str() {
+        source.push_str(support);
+    }
     source.push_str("end\n");
+    if let Some(support) = case["support"].as_str() {
+        source.push_str(support);
+    }
     source
 }
 
@@ -166,6 +172,11 @@ fn safe_navigation_and_boolean_falsy_arms_do_not_admit_data() {
 fn nonlocal_returns_unwinds_and_local_exit_controls() {
     check_group("nonlocal-exit");
     check_group("local-exit-control");
+}
+
+#[test]
+fn declared_read_overrides_are_not_provisionally_block_ignoring() {
+    check_group("declared-override");
 }
 
 #[test]
