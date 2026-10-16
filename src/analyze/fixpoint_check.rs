@@ -165,7 +165,10 @@ pub(super) fn type_hash(t: &Ty) -> u64 {
     let mut h = DefaultHasher::new();
     std::mem::discriminant(t).hash(&mut h);
     match t {
-        Ty::Untyped { why } => why.is_pending_only().hash(&mut h),
+        Ty::Untyped { why } => {
+            why.is_pending_only().hash(&mut h);
+            why.is_gradual().hash(&mut h);
+        },
         Ty::Array { elem } => type_hash(elem).hash(&mut h),
         Ty::Hash { key, value } => {
             type_hash(key).hash(&mut h);
@@ -616,10 +619,15 @@ mod tests {
 
     #[test]
     fn type_hash_observes_nested_inference_reasons() {
-        for ((name, pending), (_, gradual)) in crate::ty::reason_tests::shapes(Ty::pending_untyped())
-            .into_iter().zip(crate::ty::reason_tests::shapes(Ty::untyped()))
-        {
-            assert_ne!(type_hash(&pending), type_hash(&gradual), "{name}");
+        let reasons = [Ty::pending_untyped(), Ty::untyped(), Ty::gradual_untyped()];
+        for (i, left) in reasons.iter().enumerate() {
+            for right in &reasons[i + 1..] {
+                for ((name, left), (_, right)) in crate::ty::reason_tests::shapes(left.clone())
+                    .into_iter().zip(crate::ty::reason_tests::shapes(right.clone()))
+                {
+                    assert_ne!(type_hash(&left), type_hash(&right), "{name}: {left:?} vs {right:?}");
+                }
+            }
         }
     }
 
