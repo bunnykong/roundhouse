@@ -4120,7 +4120,7 @@ mod reason_tests {
                     if let Some(other) = other {
                         variants.push(other);
                     }
-                    let expected = if variants
+                    let expected_unknown = if variants
                         .iter()
                         .any(|v| matches!(v, Ty::Untyped { why } if !why.is_pending_only()))
                     {
@@ -4134,6 +4134,13 @@ mod reason_tests {
                     for method in [
                         "to_a", "to_ary", "to_h", "to_s", "to_str", "to_i", "to_f", "to_sym",
                     ] {
+                        // Object#to_s is resolved universally before union
+                        // dispatch, and already guarantees a String.
+                        let expected = if method == "to_s" {
+                            Ty::Str
+                        } else {
+                            expected_unknown.clone()
+                        };
                         let actual =
                             typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]);
                         assert!(
