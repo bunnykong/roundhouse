@@ -346,7 +346,9 @@ impl<'a> BodyTyper<'a> {
         block: &Expr,
     ) -> Ctx {
         if !self.owns_operator(recv_ty, method, class_object_receiver) {
-            if let Some((name, forwarded)) = literal_reflective_call(method, args) {
+            if let Some((name, forwarded)) = literal_reflective_call(method, args)
+                .filter(|(name, _)| is_enumerable_projection(name))
+            {
                 return self.block_ctx_for(
                     outer, recv_ty, &name, forwarded, class_object_receiver, block,
                 );
@@ -419,7 +421,12 @@ impl<'a> BodyTyper<'a> {
         // and v=Var since block_params_for returns a single-Untyped vec.
         if let Some(ty @ Ty::Untyped { .. }) = recv_ty {
             for name in params {
-                new_ctx.local_bindings.insert(name.clone(), projection_untyped(Some(ty), None, args));
+                let bound = if is_enumerable_projection(method) {
+                    projection_untyped(Some(ty), None, args)
+                } else {
+                    ty.clone()
+                };
+                new_ctx.local_bindings.insert(name.clone(), bound);
             }
             return new_ctx;
         }
@@ -1374,7 +1381,13 @@ impl<'a> BodyTyper<'a> {
             // Signing out of typing for a receiver is not signing out
             // of Ruby's own guarantees about the answer.
             Some(Ty::Untyped { why }) => {
-                conversion_fallback(method, *why).unwrap_or_else(derived)
+                conversion_fallback(method, *why).unwrap_or_else(|| {
+                    if is_enumerable_projection(method) {
+                        derived()
+                    } else {
+                        Ty::Untyped { why: *why }
+                    }
+                })
             }
             Some(Ty::Class { id, args }) => {
                 // `GlobalID::Locator.locate(…, only: Model)` /
@@ -2304,7 +2317,11 @@ impl<'a> BodyTyper<'a> {
                 // Keep the absorbing value shape, but derive its reason for
                 // every send. Concrete arms cannot manufacture Gradual.
                 if variants.iter().any(|v| matches!(v, Ty::Untyped { .. })) {
-                    return derived();
+                    return if is_enumerable_projection(method) {
+                        derived()
+                    } else {
+                        Ty::derived_untyped(variants.iter())
+                    };
                 }
                 let mut resolved: Vec<Ty> = Vec::new();
                 for v in variants {
@@ -2525,6 +2542,15 @@ pub(super) fn literal_reflective_call<'e>(
         _ => return None,
     };
     literal_reflective_call(&name, rest).or(Some((name, rest)))
+}
+
+/// These shared transfers have audited block/argument result dependencies.
+/// Other unknown calls retain their existing contracts rather than treating
+/// arbitrary supplied arguments as evidence about the returned value.
+fn is_enumerable_projection(method: &Symbol) -> bool {
+    matches!(method.as_str(),
+        "reduce" | "inject" | "each_with_object" | "with_object"
+        | "sum" | "group_by" | "index_by")
 }
 
 /// The yielded element for the container representations using the shared
@@ -3969,7 +3995,7 @@ pub(super) fn object_protocol_method(
             Ty::derived_untyped(args.get(1).and_then(|arg| arg.ty.as_ref())),
         "instance_variable_get" | "method" | "instance_method"
         | "public_instance_method" | "const_get" | "class_variable_get"
-        | "enum_for" | "to_enum" => projection_untyped(recv_ty, block_ret, args),
+        | "enum_for" | "to_enum" => projection_untyped(recv_ty, block_ret, &[]),
         "instance_variable_defined?" | "in?" | "method_defined?"
         | "public_method_defined?" | "private_method_defined?" | "const_defined?"
         | "class_variable_defined?" | "include?" => Ty::Bool,

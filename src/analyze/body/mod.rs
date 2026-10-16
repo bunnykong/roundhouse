@@ -2069,6 +2069,7 @@ impl<'a> BodyTyper<'a> {
                 // `Module` subclass's own implicit-self Module protocol is a
                 // class-object receiver too.
                 let (protocol_method, protocol_args) = send::literal_reflective_call(method, args)
+                    .filter(|(name, _)| matches!(name.as_str(), "instance_variable_set" | "class_variable_set"))
                     .unwrap_or_else(|| (method.clone(), args.as_slice()));
                 let class_object_receiver = class_object_receiver
                     || (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
