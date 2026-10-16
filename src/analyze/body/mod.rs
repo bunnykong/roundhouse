@@ -518,6 +518,33 @@ impl<'a> BodyTyper<'a> {
         self
     }
 
+    /// Prove the value-producing parser call from its receiver expression,
+    /// never from a computed Class descriptor (JSON.class is not JSON).
+    fn json_value_source(&self, recv: Option<&Expr>, method: &Symbol, args: &[Expr]) -> bool {
+        let Some(recv) = recv else { return false };
+        let ExprNode::Const { path } = &*recv.node else { return false };
+        if !self.const_resolver.as_ref().is_some_and(|resolver| {
+            !resolver.has_source_namespace("JSON")
+                && path.iter().filter(|part| !part.as_str().is_empty())
+                    .map(Symbol::as_str).eq(["JSON"])
+                && matches!(recv.ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "JSON")
+        }) {
+            return false;
+        }
+        let mut method = method.as_str();
+        let mut args = args;
+        while matches!(method, "send" | "public_send" | "__send__") {
+            let Some(first) = args.first() else { return false };
+            method = match &*first.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.as_str(),
+                _ => return false,
+            };
+            args = &args[1..];
+        }
+        matches!(method, "parse" | "load")
+    }
+
     /// Analyze an expression: compute its type, populate `expr.ty`,
     /// return the computed type. Recurses into sub-expressions, which
     /// in turn get their `ty` populated. After typing, runs a
@@ -1875,6 +1902,10 @@ impl<'a> BodyTyper<'a> {
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                let dispatched = if matches!(dispatched, Ty::Untyped { .. })
+                    && self.json_value_source(recv.as_ref(), method, args) {
+                    Ty::gradual_untyped()
+                } else { dispatched };
                 // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too, which it would bind to its first member.
                 if method.as_str() == "new"
                     && expr.diagnostic.is_none()

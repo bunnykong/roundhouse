@@ -607,3 +607,35 @@ fn schema_json_metadata_is_not_a_gradual_value_source() {
         }
     }
 }
+
+#[test]
+fn json_sources_require_the_parser_value_receiver_not_a_class_descriptor() {
+    for prefix in ["self.", ""] {
+        for depth in [2, 4] {
+            for (body, expected) in [
+                ("JSON.parse(raw)", "untyped"),
+                ("::JSON.load(raw)", "untyped"),
+                ("JSON.send(:parse, raw)", "untyped"),
+                ("JSON.public_send(\"load\", raw)", "untyped"),
+                ("JSON.__send__(:send, :parse, raw)", "untyped"),
+                ("JSON.class.parse(raw)", "String"),
+                ("JSON.class.load(raw)", "String"),
+                ("JSON.class.send(:parse, raw)", "String"),
+                ("JSON.class.__send__(:public_send, :load, raw)", "String"),
+            ] {
+                let mut source = format!(
+                    "class Probe\n def {prefix}value(raw)\n forward0(raw) || \"fallback\"\n end\n"
+                );
+                for i in 0..depth {
+                    let body = if i + 1 == depth { body.to_owned() }
+                        else { format!("forward{}(raw)", i + 1) };
+                    source.push_str(&format!("def {prefix}forward{i}(raw)\n {body}\n end\n"));
+                }
+                source.push_str("end\n");
+                let rbs = declarations(&source);
+                assert!(rbs.contains(&format!("def {prefix}value: (untyped raw) -> {expected}")),
+                    "prefix={prefix:?}, depth={depth}, body={body}: {rbs}");
+            }
+        }
+    }
+}

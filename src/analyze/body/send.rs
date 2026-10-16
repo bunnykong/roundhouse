@@ -1868,10 +1868,7 @@ impl<'a> BodyTyper<'a> {
                         "generate" | "dump" | "pretty_generate" | "fast_generate" => {
                             return Ty::Str
                         }
-                        "parse" | "load" => return if !instance_receiver
-                            && !self.classes().get(id).is_some_and(|c| c.app_declared) {
-                            Ty::gradual_untyped()
-                        } else { Ty::untyped() },
+                        "parse" | "load" => return Ty::untyped(),
                         _ => {}
                     }
                 }
@@ -4025,7 +4022,7 @@ mod source_receiver_reason_tests {
                 let receiver = Ty::Class { id: id.clone(), args: vec![].into() };
                 for name in ["parse", "load"] {
                     let result = typer.dispatch_on(Some(&receiver), &Symbol::from(name), None, &[], instance);
-                    let expected = if !instance && !app_declared { Ty::gradual_untyped() } else { Ty::untyped() };
+                    let expected = Ty::untyped(); // Type metadata alone is not a parser value source.
                     assert!(result.inference_eq(&expected), "{name}/{app_declared}/{instance}: {result:?}");
                 }
             }
