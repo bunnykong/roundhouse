@@ -2252,20 +2252,23 @@ impl<'a> BodyTyper<'a> {
             // relation) where the method is valid on `T` and the Nil case
             // is handled elsewhere at run time.
             Some(Ty::Union { variants }) => {
-                // Conversions recover a fixed scalar/container shape from
-                // an unknown receiver. Dispatch each arm just as for a bare
-                // receiver, preserving its element reasons before joining.
-                // Absorbing first would invent Gradual from Pending | Nil.
-                let conversion = conversion_fallback(method, Why::PENDING).is_some();
-                // Gradual absorption: any `Untyped` variant in the
-                // union absorbs the dispatch — the result is `Untyped`.
-                // Mirrors TypeScript's `any | T → any` semantics.
-                if !conversion && variants.iter().any(|v| matches!(v, Ty::Untyped { .. })) {
+                // Keep the existing union result shape. A conversion of
+                // only pending receivers (possibly nilable) is still pending;
+                // absorption must not manufacture a computed gradual value.
+                if variants.iter().any(|v| matches!(v, Ty::Untyped { .. })) {
+                    let pending_only = variants.iter().all(|v| match v {
+                        Ty::Untyped { why } => why.is_pending_only(),
+                        Ty::Var { .. } | Ty::Nil => true,
+                        _ => false,
+                    });
+                    if pending_only && conversion_fallback(method, Why::PENDING).is_some() {
+                        return Ty::pending_untyped();
+                    }
                     return Ty::untyped();
                 }
                 let mut resolved: Vec<Ty> = Vec::new();
                 for v in variants {
-                    if matches!(v, Ty::Nil) || (!conversion && matches!(v, Ty::Var { .. })) {
+                    if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
                     let r = self.dispatch_on(Some(v), method, block_ret, args, instance_receiver);
@@ -4099,78 +4102,63 @@ mod reason_tests {
     }
 
     #[test]
-    fn union_conversions_keep_pending_and_gradual_element_evidence() {
+    fn union_conversion_absorption_preserves_pending_only_receivers() {
         let classes = HashMap::new();
         let typer = BodyTyper::new(&classes);
         for unknown in [var(), Ty::pending_untyped(), Ty::untyped()] {
-            let leaf = if matches!(unknown, Ty::Var { .. }) {
-                Ty::pending_untyped()
-            } else {
-                unknown.clone()
-            };
-            for mut variants in [
+            for variants in [
                 vec![unknown.clone(), Ty::Nil],
                 vec![Ty::Nil, unknown.clone()],
             ] {
-                // Include a second placeholder and a concrete shape to
-                // exercise both absorption and structural container joins.
                 for other in [
                     None,
                     Some(var()),
                     Some(Ty::pending_untyped()),
                     Some(Ty::untyped()),
                 ] {
+                    let mut variants = variants.clone();
                     if let Some(other) = other {
                         variants.push(other);
                     }
-                    let receiver = Ty::Union {
-                        variants: variants.clone().into(),
-                    };
-                    let expected_leaf = if variants
+                    let expected = if variants
                         .iter()
                         .any(|v| matches!(v, Ty::Untyped { why } if !why.is_pending_only()))
                     {
                         Ty::untyped()
                     } else {
-                        leaf.clone()
+                        Ty::pending_untyped()
                     };
-                    for method in ["to_a", "to_ary", "to_h"] {
+                    let receiver = Ty::Union {
+                        variants: variants.into(),
+                    };
+                    for method in [
+                        "to_a", "to_ary", "to_h", "to_s", "to_str", "to_i", "to_f", "to_sym",
+                    ] {
                         let actual =
                             typer.dispatch(Some(&receiver), &Symbol::from(method), None, &[]);
-                        let expected = conversion_fallback(
-                            &Symbol::from(method),
-                            match expected_leaf {
-                                Ty::Untyped { why } => why,
-                                _ => unreachable!(),
-                            },
-                        )
-                        .unwrap();
                         assert!(
                             actual.inference_eq(&expected),
                             "{method} on {receiver:?}: {actual:?}"
                         );
-                    }
-                    for (method, expected) in [
-                        ("to_s", Ty::Str),
-                        ("to_str", Ty::Str),
-                        ("to_i", Ty::Int),
-                        ("to_f", Ty::Float),
-                        ("to_sym", Ty::Sym),
-                    ] {
+                        let nested = Ty::Union {
+                            variants: vec![receiver.clone(), Ty::Nil].into(),
+                        };
                         assert!(
                             typer
-                                .dispatch(Some(&receiver), &Symbol::from(method), None, &[])
+                                .dispatch(Some(&nested), &Symbol::from(method), None, &[])
                                 .inference_eq(&expected)
                         );
                     }
                 }
             }
+            // A concrete contributor keeps the established absorbing answer;
+            // this fix carries reasons without refining union value shapes.
             let array = Ty::Array {
                 elem: std::sync::Arc::new(Ty::Str),
             };
             for variants in [
                 vec![unknown.clone(), array.clone()],
-                vec![array, unknown.clone()],
+                vec![array.clone(), unknown.clone()],
             ] {
                 let actual = typer.dispatch(
                     Some(&Ty::Union {
@@ -4180,8 +4168,10 @@ mod reason_tests {
                     None,
                     &[],
                 );
-                let expected = Ty::Array {
-                    elem: std::sync::Arc::new(union_of(Ty::Str, leaf.clone())),
+                let expected = if matches!(unknown, Ty::Var { .. }) {
+                    array.clone()
+                } else {
+                    Ty::untyped()
                 };
                 assert!(
                     actual.inference_eq(&expected),
