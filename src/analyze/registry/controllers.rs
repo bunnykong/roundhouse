@@ -21,6 +21,17 @@ pub(in crate::analyze) fn register(
     app: &App,
     route_helper_names: &[String],
 ) {
+    // Response-return (`RH_RESPONSE_RETURNS=1`): Rails' response calls answer a value,
+    // never nil, and app code reads it (a helper whose last call is
+    // `render`, `render … and return`). `render` answers the rendered body,
+    // a String from every built-in renderer; `redirect_to` the redirect body
+    // String (to Rails 7.1) or the status Integer (7.2 on); `head` true;
+    // `respond_to` the chosen format block's value, or nil for a format with
+    // no block. Unset keeps the spine's nil, which is the emitted runtime's
+    // answer (`insert_baseline_controller_methods`), not Rails'.
+    let rails_returns = std::env::var("RH_RESPONSE_RETURNS").as_deref() == Ok("1");
+    let response = |rails: Ty| if rails_returns { rails } else { Ty::Nil };
+    let str_or_int = || Ty::Union { variants: vec![Ty::Str, Ty::Int].into() };
     // `ActionController::Base.helpers` — the view-helper proxy a model
     // or library reaches for to build paths/URLs outside a request
     // (`ActionController::Base.helpers.image_url(...)` in user.rb). The
@@ -175,15 +186,15 @@ pub(in crate::analyze) fn register(
         classes.insert(session_id.clone(), session);
         app_ctrl.class_methods.insert(Symbol::from("session"), Ty::Class { id: session_id, args: vec![].into() });
     }
-    app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
+    app_ctrl.class_methods.insert(Symbol::from("render"), response(Ty::Str));
     // Rails answers the rendered String and writes no response; the
     // lowerer turns the call into the bare `Views::…` call, which is
     // that String. Typing it lets the ivar an action stores it in reach
     // a template (campfire's `@message_html`).
     app_ctrl.class_methods.insert(Symbol::from("render_to_string"), Ty::Str);
-    app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
-    app_ctrl.class_methods.insert(Symbol::from("redirect_back_or_to"), Ty::Nil);
-    app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
+    app_ctrl.class_methods.insert(Symbol::from("redirect_to"), response(str_or_int()));
+    app_ctrl.class_methods.insert(Symbol::from("redirect_back_or_to"), response(str_or_int()));
+    app_ctrl.class_methods.insert(Symbol::from("head"), response(Ty::Bool));
     // Rails' implicit forgery check — also a known filter target so
     // `filter_targets::framework_methods` keeps it (and analyzer
     // dispatch on a bare call resolves).
@@ -302,7 +313,7 @@ pub(in crate::analyze) fn register(
                 id: ClassId(Symbol::from("ActionController::MimeResponds::Collector")),
                 args: vec![].into(),
             },
-            Ty::Nil,
+            response(Ty::Union { variants: vec![Ty::Str, Ty::Int, Ty::Bool, Ty::Nil].into() }),
         ),
     );
     // `request` is an ActionDispatch::Request with the surface an app
