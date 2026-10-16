@@ -1936,10 +1936,7 @@ impl Analyzer {
                     let Some(action) = controller.actions().nth(unit.mi) else { return reapplied };
                     let body_ty = super::tuple_return_ty(&action.body)
                         .or_else(|| super::effective_return_ty(&action.body));
-                    if let Some(body_ty) = body_ty.filter(|t| !matches!(t, Ty::Var { .. })) {
-                        let target = &mut self.classes.entry(controller.name.clone()).or_default().instance_methods;
-                        Self::insert_inferred_return(target, &action.name, body_ty);
-                    }
+                    self.harvest_action_return(app, &controller.name, &action.name, body_ty);
                 }
                 Family::CtrlClassMethod => {
                     let controller = &app.controllers[unit.ci];

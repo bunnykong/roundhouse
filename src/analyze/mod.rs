@@ -47,6 +47,7 @@ pub(crate) mod forwarding;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
+pub mod strict_stub_completion;
 pub(crate) mod strict_producers;
 pub mod producer_evidence;
 mod parameter_conservation;
@@ -197,6 +198,8 @@ pub struct Analyzer {
     /// rounds.
     sccq: Option<Box<sccq::Engine>>,
     strict_stub_originals: Vec<(ParamKey, Ty)>,
+    strict_stub_completion: strict_stub_completion::Tracker,
+    strict_stub_completion_census: Option<serde_json::Value>,
     /// The worklist's class passes leave model, library and controller
     /// method bodies to it.
     sccq_skip_fine: bool,
@@ -1177,7 +1180,8 @@ impl Analyzer {
         // emission. Register their real identities and declarations before
         // source typing; inferred returns converge in the same registry as
         // ordinary application methods.
-        test_module::register(&mut classes, app);
+        let mut strict_stub_completion = strict_stub_completion::Tracker::default();
+        test_module::register(&mut classes, app, &mut strict_stub_completion);
         for declaration in &app.library_classes {
             if let Some(info) = classes.get_mut(&declaration.name) { info.is_module = declaration.is_module; }
         }
@@ -1226,6 +1230,8 @@ impl Analyzer {
             fixpoint_checks: fixpoint_check::Checks::default(),
             sccq: None,
             strict_stub_originals: Vec::new(),
+            strict_stub_completion,
+            strict_stub_completion_census: None,
             sccq_skip_fine: false,
             sccq_harvest_fine: false,
             sccq_production_end: None,
@@ -1322,6 +1328,8 @@ impl Analyzer {
         fold::reset();
         slots::reset();
         self.strict_stub_originals.clear();
+        self.strict_stub_completion.reset_completions();
+        self.strict_stub_completion_census = None;
         if strict_producers::stubs_on() {
             for key in Self::defined_methods(app) {
                 let Some(cls) = self.classes.get_mut(&key.0) else { continue };
@@ -1330,6 +1338,7 @@ impl Analyzer {
                     MethodReceiver::Class => &mut cls.class_methods,
                 };
                 if let Some(stub @ Ty::Untyped { .. }) = table.get_mut(&key.1) {
+                    self.strict_stub_completion.minted(strict_stub_completion::INITIAL, &key.0, &key.1, key.2);
                     self.strict_stub_originals.push((key, stub.clone()));
                     *stub = Ty::pending_untyped();
                 }
@@ -1833,6 +1842,13 @@ impl Analyzer {
     /// as "never returns". Each type settles on its own, so the walk's
     /// order does not matter.
     fn settle_pending(&mut self, app: &mut App) {
+        if fixpoint_check::stats_on() || strict_stub_completion::on() || cfg!(test) {
+            let census = self.strict_stub_completion.census(self, app);
+            if fixpoint_check::stats_on() {
+                eprintln!("rh-strict-stub-completion: {}", census);
+            }
+            self.strict_stub_completion_census = Some(census);
+        }
         if !(handoff::settle_on() || fold::on() || strict_producers::stubs_on() || strict_producers::xfer_on()) {
             return;
         }
@@ -5389,17 +5405,9 @@ impl Analyzer {
                 let _writer = errgate::writer(class_id, &action.name, false);
                 let _evidence = producer_evidence::writer(class_id, &action.name, false, action.body.span);
                 producer_evidence::input(action.body.ty.as_ref());
-                let Some(body_ty) =
-                    tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
-                else {
-                    continue;
-                };
-                if matches!(body_ty, Ty::Var { .. }) {
-                    continue;
-                }
-                let target =
-                    &mut self.classes.entry(class_id.clone()).or_default().instance_methods;
-                Self::insert_inferred_return(target, &action.name, body_ty);
+                let body_ty = tuple_return_ty(&action.body)
+                    .or_else(|| effective_return_ty(&action.body));
+                self.harvest_action_return(app, class_id, &action.name, body_ty);
             }
         }
 
@@ -5667,7 +5675,10 @@ impl Analyzer {
                     {
                         // The includer harvest types this spliced body itself.
                         // The copy only declares existence, never a value writer.
-                        cls.instance_methods.entry(name.clone()).or_insert_with(strict_producers::stub);
+                        cls.instance_methods.entry(name.clone()).or_insert_with(|| {
+                            self.strict_stub_completion.minted(strict_stub_completion::SPLICED, &id, name, MethodReceiver::Instance);
+                            strict_producers::stub()
+                        });
                         continue;
                     }
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
