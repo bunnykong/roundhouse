@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "On latest-writer-returns-20261015-campfire, latest-writer cells pass the two Campfire fixtures but reproduce descents. The result remains inconclusive because of the collector gap and incomplete registry coverage. Larger-app order independence remains open."
-  facts: [F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "Deferring Unresolved remains inconclusive because required evidence is unavailable. Deduplication fails to remove its targeted events. Boundary carry fails settlement and forbidden-event gates. General order independence remains open."
+  facts: [F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Require a frozen collector and complete registry coverage before judging the replacement law on larger apps."
+  next: "Retain the evidence gaps and failed predictions when judging any new, separately frozen condition."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "latest-writer-returns 7909e786000bae64931e4e0c51c4c163ca14f241 (recorded 53d8b458); response-return-values f0bf3d7f950756682a6d60da6a659d633f4eea4a (recorded a1911d95)"
-    lab: "4302d0374af625fc505b11c585ea9b36baeca8d1; two separate response-return and writer-replacement conditions"
-    runner: "Saved reductions and focused native recipes at lab 4302d0374af625fc505b11c585ea9b36baeca8d1"
+    compiler: "deferred-unresolved 564a537c88d9aed740d7eab8aa22b63475d84885; boundary-row-carry b0b2cd145f8128d9c9597e70076eb7b04304823e"
+    lab: "455fdb93b22c1d4151e13bc97dcf1232c0f729b5; separate negative or inconclusive conditions"
+    runner: "Saved reductions and focused native recipes at lab 455fdb93b22c1d4151e13bc97dcf1232c0f729b5"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "On response-return-values-20261015-stabilization-off, no non-nil value is lost across 23 declared pairs with stabilization off. The 24 ownership witnesses admit String and 72 customization rows hold. This bounded response repair does not establish ownership or whole-analyzer soundness."
-  facts: [F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "The literal-current-writes condition rejects witnessed Chatwoot Integer and nil values admitted by its control. The writer set misses nested element writes, killing this repair. Whole-analyzer soundness remains open."
+  facts: [F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Keep response contracts tied to runtime witnesses and explicit stabilization settings; retain uncovered renderer and format-block behavior."
+  next: "Require runtime admission witnesses for narrowed literal values, including nested writes."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "response-return-values f0bf3d7f950756682a6d60da6a659d633f4eea4a (recorded a1911d95); latest-writer-returns 7909e786000bae64931e4e0c51c4c163ca14f241 (recorded 53d8b458)"
-    lab: "4302d0374af625fc505b11c585ea9b36baeca8d1; two separate response-return and writer-replacement conditions"
+    compiler: "literal-current-writes 15b142ddcb10c11a7e5c9a97107a7f5b9dc5cbbf"
+    lab: "455fdb93b22c1d4151e13bc97dcf1232c0f729b5; separate negative or inconclusive conditions"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,36 +84,36 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "The response-return repair unblocks the 24 witnessed ownership slots while preserving 72 customization rows with stabilization off. Latest-writer replacement remains inconclusive with reproduced descents and partial coverage. The earlier excluded-value results retain their scope."
-  facts: [F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
+  stands: "Literal feedback excludes real heatmap values. Deferral is inconclusive, its deduplication variant is killed, and boundary carry is killed. These type changes do not establish a precision improvement."
+  facts: [F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Check admitted Ruby values under explicit observer settings and complete populations before treating changed types as improvements."
+  next: "Keep runtime admission and the frozen evidence gates beside any claim of improved types."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "response-return-values f0bf3d7f950756682a6d60da6a659d633f4eea4a (recorded a1911d95); latest-writer-returns 7909e786000bae64931e4e0c51c4c163ca14f241 (recorded 53d8b458)"
-    lab: "4302d0374af625fc505b11c585ea9b36baeca8d1; two separate response-return and writer-replacement conditions"
-    runner: "Saved reductions and focused native recipes at lab 4302d0374af625fc505b11c585ea9b36baeca8d1"
+    compiler: "literal-current-writes 15b142ddcb10c11a7e5c9a97107a7f5b9dc5cbbf; deferred-unresolved 564a537c88d9aed740d7eab8aa22b63475d84885; boundary-row-carry b0b2cd145f8128d9c9597e70076eb7b04304823e"
+    lab: "455fdb93b22c1d4151e13bc97dcf1232c0f729b5; separate negative or inconclusive conditions"
+    runner: "Saved reductions and focused native recipes at lab 455fdb93b22c1d4151e13bc97dcf1232c0f729b5"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "On latest-writer-returns-20261015-campfire, each declared writer keeps its latest result, but descents reproduce and the collector gap leaves the verdict inconclusive. No chronological replay or latency result follows."
-  facts: [F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
+  stands: "Deferral and boundary carry do not establish a correct update law: mandatory evidence is unavailable in the first result, and settlement and publication gates fail in the second. No latency or chronological replay result follows."
+  facts: [F66, F67, F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Require complete writer coverage, a frozen collector and exact cold comparisons before claiming incremental correctness."
+  next: "Require complete evidence and passing settlement and publication gates before claiming an incremental update law."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "latest-writer-returns 7909e786000bae64931e4e0c51c4c163ca14f241 (recorded 53d8b458)"
-    lab: "4302d0374af625fc505b11c585ea9b36baeca8d1; two separate response-return and writer-replacement conditions"
-    runner: "Saved reductions and focused native recipes at lab 4302d0374af625fc505b11c585ea9b36baeca8d1"
+    compiler: "deferred-unresolved 564a537c88d9aed740d7eab8aa22b63475d84885; boundary-row-carry b0b2cd145f8128d9c9597e70076eb7b04304823e"
+    lab: "455fdb93b22c1d4151e13bc97dcf1232c0f729b5; separate negative or inconclusive conditions"
+    runner: "Saved reductions and focused native recipes at lab 455fdb93b22c1d4151e13bc97dcf1232c0f729b5"
 - id: typed-recursion
   name: Typed recursion
   brief: frontiers/typed-recursion.md
