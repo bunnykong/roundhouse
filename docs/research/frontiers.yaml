@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "Strict-stub completion adds no varying rows at four V0A0 schedules on four apps. Mastodon parameter variance falls from 240 rows to 236. This scoped result does not establish general order independence."
-  facts: [F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "Current writer values make all ten Forem value tables equal across four schedules at V0A0 and V1A1, but the candidate loses runtime values. Routing follow-ups reintroduce variance and retain an audited failure. General order independence with soundness remains open."
+  facts: [F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Test other observer settings under a separately frozen condition."
+  next: "Require runtime admission beside schedule equality; preserve the weakened review and failed follow-ups."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "strict-stub-completion 44c5c3af44dd0269376e4755473ef0dff884a413 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
-    lab: "7a70d6c0cab671c9fe3a4bb956708c6bb343bf92; strict-stub completion, four apps, V0A0"
-    runner: "Standard quick-test checker and saved bounded replay at lab 7a70d6c0cab671c9fe3a4bb956708c6bb343bf92"
+    compiler: "history-free-current-values 4a80f31d27c624039a58e81f275fdc8664d21c93 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "f881fde5cad2ab99aed03326127887eed3782b71; equality gain with runtime losses and weakened review"
+    runner: "Quick-test reports, runtime membership and cause replay at lab f881fde5cad2ab99aed03326127887eed3782b71"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "Strict-stub completion restores admission of F68's four OAuth URL witnesses at all four V0A0 schedules. Zero narrowings remain after separate cycle equality checks; 23 Mastodon Pending leaves remain. Whole-analyzer soundness stays open."
-  facts: [F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "History-free current values improve equality but reject 61 new runtime-loss rows at audited unset V0A0: Campfire 1, Forem 6, Chatwoot 44 and Mastodon 10. One inherited mismatch is excluded. Many other rows are unaudited; no complete routing repair is established."
+  facts: [F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Retain runtime witnesses and investigate the remaining Pending leaves before broadening the claim."
+  next: "Keep the two demonstrated unknown-receiver omissions separate from any unproven dominant-cause claim."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "strict-stub-completion 44c5c3af44dd0269376e4755473ef0dff884a413 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
-    lab: "7a70d6c0cab671c9fe3a4bb956708c6bb343bf92; strict-stub completion, four apps, V0A0"
+    compiler: "history-free-current-values 4a80f31d27c624039a58e81f275fdc8664d21c93 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "f881fde5cad2ab99aed03326127887eed3782b71; equality gain with runtime losses and weakened review"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,36 +84,36 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "Strict-stub completion repairs the four witnessed OAuth losses without narrowings or newly varying rows on the tested four-app V0A0 grid. Mastodon parameter variance falls by four; the original checker retains two cycles needing separate proof."
-  facts: [F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
+  stands: "The candidate gains Forem equality from six tables to ten and Chatwoot from five to six, but excludes real runtime values. Its narrowing set differs from the earlier current-call candidate. Equality is not a sound precision improvement."
+  facts: [F71, F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Keep exact runtime admission, missing-data qualifications and schedule identities beside precision claims."
+  next: "Require runtime-admission evidence for narrowed rows and retain incomplete classification counts."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "strict-stub-completion 44c5c3af44dd0269376e4755473ef0dff884a413 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
-    lab: "7a70d6c0cab671c9fe3a4bb956708c6bb343bf92; strict-stub completion, four apps, V0A0"
-    runner: "Standard quick-test checker and saved bounded replay at lab 7a70d6c0cab671c9fe3a4bb956708c6bb343bf92"
+    compiler: "history-free-current-values 4a80f31d27c624039a58e81f275fdc8664d21c93 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "f881fde5cad2ab99aed03326127887eed3782b71; equality gain with runtime losses and weakened review"
+    runner: "Quick-test reports, runtime membership and cause replay at lab f881fde5cad2ab99aed03326127887eed3782b71"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "A later informative result replaces early Unresolved in the strict-stub completion rule. The four-app V0A0 result repairs the OAuth witnesses but establishes no general incremental update law, latency result or chronological replay result."
-  facts: [F70, F69, F68, F66, F67, F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
+  stands: "Current writer and site values reduce some schedule variance, but runtime losses and failed routing follow-ups remain. No correct general incremental update law, latency result or chronological replay result follows."
+  facts: [F71, F70, F69, F68, F66, F67, F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Require a separately frozen update experiment before claiming an incremental law."
+  next: "Treat current-value storage as a tested condition with counterexamples, not a completed update law."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "strict-stub-completion 44c5c3af44dd0269376e4755473ef0dff884a413 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
-    lab: "7a70d6c0cab671c9fe3a4bb956708c6bb343bf92; strict-stub completion, four apps, V0A0"
-    runner: "Standard quick-test checker and saved bounded replay at lab 7a70d6c0cab671c9fe3a4bb956708c6bb343bf92"
+    compiler: "history-free-current-values 4a80f31d27c624039a58e81f275fdc8664d21c93 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "f881fde5cad2ab99aed03326127887eed3782b71; equality gain with runtime losses and weakened review"
+    runner: "Quick-test reports, runtime membership and cause replay at lab f881fde5cad2ab99aed03326127887eed3782b71"
 - id: typed-recursion
   name: Typed recursion
   brief: frontiers/typed-recursion.md
