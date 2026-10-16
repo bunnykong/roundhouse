@@ -564,7 +564,15 @@ impl<'a> BodyTyper<'a> {
                 }
                 // Both ordinary and literal-reflective never-returning calls
                 // can unwind to a rescue outside the yielding call.
-                let ordinary_raise = matches!(name, Some("raise" | "fail"))
+                // A literal String constructs RuntimeError only for a direct
+                // Kernel raise/fail. Reflective dispatch can fail visibility
+                // checks, and an arbitrary receiver can implement another ABI.
+                let kernel_call = recv.is_none() || recv.as_ref().is_some_and(|r| {
+                    matches!(&*r.node, ExprNode::Const { path } if path.iter()
+                        .map(Symbol::as_str).filter(|p| !p.is_empty()).eq(["Kernel"]))
+                        && self.const_resolver.as_ref().is_some_and(|r| !r.has_source_namespace("Kernel"))
+                });
+                let ordinary_raise = kernel_call && matches!(method.as_str(), "raise" | "fail")
                     && matches!(call_args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Str));
                 if (raises || !ordinary_raise) && (matches!(e.ty, Some(Ty::Bottom))
                     || matches!(name, Some("raise" | "fail" | "throw"))) { return true; }
@@ -3974,6 +3982,34 @@ mod tests {
             body,
             block_style: BlockStyle::Do,
         })
+    }
+
+    #[test]
+    fn local_rescue_does_not_certify_reflective_or_receiver_specific_raises() {
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let message = || {
+            let mut expr = synth(ExprNode::Lit { value: Literal::Str { value: "x".into() } });
+            expr.ty = Some(Ty::Str);
+            expr
+        };
+        let selector = |name: &str| synth(ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } });
+        for method in ["raise", "fail"] {
+            let mut direct = send(None, method, vec![message()]);
+            direct.ty = Some(Ty::Bottom);
+            assert!(!typer.block_has_escaping_exit(&direct, true, true, false));
+            let mut receiver_call = send(Some(var("receiver")), method, vec![message()]);
+            receiver_call.ty = Some(Ty::Bottom);
+            assert!(typer.block_has_escaping_exit(&receiver_call, true, true, false));
+            for (alias, args) in [("send", vec![selector(method), message()]),
+                ("public_send", vec![selector(method), message()]),
+                ("__send__", vec![selector(method), message()]),
+                ("send", vec![selector("public_send"), selector(method), message()])] {
+                let mut call = send(None, alias, args);
+                call.ty = Some(Ty::Bottom);
+                assert!(typer.block_has_escaping_exit(&call, true, true, false), "{alias} {method}");
+            }
+        }
     }
 
     #[test]
