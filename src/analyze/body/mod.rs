@@ -59,6 +59,14 @@ use const_resolution::ResolvedConstant;
 mod narrowing;
 mod pagy;
 mod send;
+
+/// Literal aliases whose universal result transfers use application contracts.
+/// Keep parameter observations and caller invalidation on the actual callee.
+pub(super) fn literal_projection_call<'e>(method: &Symbol, args: &'e [Expr]) -> Option<(Symbol, &'e [Expr])> {
+    send::literal_reflective_call(method, args)
+        .filter(|(name, _)| matches!(name.as_str(), "dig" | "try" | "try!"))
+}
+
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::{indexed_pluck, string_answers};
 

@@ -6212,6 +6212,12 @@ impl Analyzer {
     ) {
         match &*expr.node {
             ExprNode::Send { recv, method, args, block, .. } => {
+                // The audited universal projections may be overridden by
+                // application methods. Literal aliases must observe those
+                // methods' actual parameters and caller dependencies too.
+                let projection = body::literal_projection_call(method, args);
+                let method = projection.as_ref().map(|(name, _)| name).unwrap_or(method);
+                let args = projection.as_ref().map(|(_, values)| *values).unwrap_or(args);
                 // Resolve the receiver class: an explicit receiver
                 // typed as a class, or — for an implicit-self call
                 // (`period(query)` inside a controller) — the

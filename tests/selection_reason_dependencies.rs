@@ -21,6 +21,31 @@ fn check(body: &str, instance: bool, depth: usize, gradual: bool, forward: &str)
         ));
     }
     source.push_str("end\n");
+    if body.contains("Dig") {
+        source.push_str(
+            r###"class ValueDig
+ def self.dig(value); value; end
+ def dig(value); value; end
+ def self.try(value); value; end
+ def try(value); value; end
+end
+class ConstantDig
+ def self.dig(value); "ok"; end
+ def dig(value); "ok"; end
+ def self.try(value); "ok"; end
+ def try(value); "ok"; end
+end
+class ChildDig < ValueDig
+end
+module DigValue
+ def dig(value); value; end
+end
+class IncludedDig
+ include DigValue
+end
+"###,
+        );
+    }
     assert!(
         ruby_prism::parse(source.as_bytes())
             .errors()
@@ -465,6 +490,18 @@ fn yielded_parameter_dependencies() {
 #[test]
 fn ignored_predicate_and_iteration_results() {
     for (body, gradual, forward) in [
+        (r###"nil.try { JSON.parse(raw) }"###, false, "untyped"),
+        (r###"nil.try! { JSON.parse(raw) }"###, false, "untyped"),
+        (
+            r###"nil.try(:dig, JSON.parse(raw)) { JSON.parse(raw) }"###,
+            false,
+            "untyped",
+        ),
+        (
+            r###"nil.send(:try!, :dig, JSON.parse(raw)) { JSON.parse(raw) }"###,
+            false,
+            "untyped",
+        ),
         (
             r###"["ok"].select { JSON.parse(raw) }.first"###,
             false,
@@ -558,8 +595,108 @@ fn constructors_and_symbolic_folds() {
 }
 
 #[test]
+fn declared_projection_returns() {
+    for (body, gradual, forward) in [
+        (
+            r###"ConstantDig.__send__(:send, :dig, JSON.parse(raw))"###,
+            false,
+            "untyped",
+        ),
+        (
+            r###"ConstantDig.send(:try, JSON.parse(raw))"###,
+            false,
+            "untyped",
+        ),
+        (r###"ConstantDig.dig(JSON.parse(raw))"###, false, "untyped"),
+        (
+            r###"ConstantDig.new.dig(JSON.parse(raw))"###,
+            false,
+            "untyped",
+        ),
+        (
+            r###"ConstantDig.send(:dig, JSON.parse(raw))"###,
+            false,
+            "untyped",
+        ),
+        (
+            r###"ConstantDig.new.public_send("dig", JSON.parse(raw))"###,
+            false,
+            "untyped",
+        ),
+        (r###"ConstantDig.try(JSON.parse(raw))"###, false, "untyped"),
+        (
+            r###"ConstantDig.new.try(JSON.parse(raw))"###,
+            false,
+            "untyped",
+        ),
+    ] {
+        for instance in [false, true] {
+            for depth in [2, 4] {
+                check(body, instance, depth, gradual, forward);
+            }
+        }
+    }
+}
+
+#[test]
 fn actual_gradual_results() {
     for (body, gradual, forward) in [
+        (
+            r###"ValueDig.__send__(:send, :dig, JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
+        (
+            r###"ValueDig.send(:try, JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
+        (
+            r###"ValueDig.new.__send__(:send, :try, JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
+        (
+            r###"IncludedDig.new.__send__(:send, :dig, JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
+        (r###"ValueDig.dig(JSON.parse(raw))"###, true, "untyped"),
+        (r###"ValueDig.new.dig(JSON.parse(raw))"###, true, "untyped"),
+        (
+            r###"ValueDig.send(:dig, JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
+        (
+            r###"ValueDig.new.public_send("dig", JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
+        (r###"ChildDig.dig(JSON.parse(raw))"###, true, "untyped"),
+        (r###"ChildDig.new.dig(JSON.parse(raw))"###, true, "untyped"),
+        (
+            r###"IncludedDig.new.dig(JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
+        (r###"ValueDig.try(JSON.parse(raw))"###, true, "untyped"),
+        (r###"ValueDig.new.try(JSON.parse(raw))"###, true, "untyped"),
+        (
+            r###"[ValueDig.new, nil].first&.dig(JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
+        (
+            r###"[ValueDig.new, ConstantDig.new].first.dig(JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
+        (
+            r###"[ConstantDig.new, ValueDig.new].first.dig(JSON.parse(raw))"###,
+            true,
+            "untyped",
+        ),
         (
             r###"Object.new.instance_exec(JSON.parse(raw), "ok") { |value, other| value }"###,
             true,

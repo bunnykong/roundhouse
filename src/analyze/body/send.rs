@@ -1186,7 +1186,9 @@ impl<'a> BodyTyper<'a> {
         // `m` on the receiver's class (walking its parents and mixins);
         // otherwise the gradual answer stands — silence about a method
         // is not a claim that the class lacks it.
-        if matches!(method.as_str(), "try" | "try!") {
+        if matches!(method.as_str(), "try" | "try!")
+            && !self.owns_operator(recv_ty, method, !instance_receiver)
+        {
             // A nullable receiver (`@user.try(:username)` with `@user:
             // User?`) answers the same: `nil.try` is nil, already in the
             // union below.
@@ -1339,6 +1341,11 @@ impl<'a> BodyTyper<'a> {
         // literal array iterated by a block, e.g. `as_json`; tightening
         // the dynamic case to that enumerated set is a tier-3 follow-up.)
         if matches!(method.as_str(), "send" | "public_send" | "__send__") {
+            if let Some((name, forwarded)) = literal_reflective_call(method, args)
+                .filter(|(name, _)| matches!(name.as_str(), "dig" | "try" | "try!"))
+            {
+                return self.dispatch_on(recv_ty, &name, block_ret, forwarded, instance_receiver);
+            }
             if let Some(first) = args.first() {
                 let literal_name = match &*first.node {
                     ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
@@ -1366,27 +1373,7 @@ impl<'a> BodyTyper<'a> {
         // don't fall through to per-type method tables that would miss.
         if let Some(ty) = universal_method(method) {
             return if matches!(ty, Ty::Untyped { .. }) {
-                match method.as_str() {
-                    // Keys/indices select values; they are never the values.
-                    // Ruby ignores a block passed to dig.
-                    "dig" => dig_untyped(recv_ty, args.len()),
-                    "try" | "try!" if args.is_empty() =>
-                        pending_or(block_ret, Ty::derived_untyped(recv_ty)),
-                    // The first argument names the method. The remaining
-                    // arguments and block can supply that method's result.
-                    "try" | "try!" => {
-                        if let Some((name, forwarded)) =
-                            literal_reflective_call(&Symbol::from("send"), args)
-                        {
-                            let result = self.dispatch(recv_ty, &name, block_ret, forwarded);
-                            Ty::derived_untyped([&result])
-                        } else {
-                            projection_untyped(recv_ty, block_ret, &args[1..])
-                        }
-                    }
-                    // Receiver identity/presence ignores ordinary block values.
-                    _ => Ty::derived_untyped(recv_ty),
-                }
+                self.universal_projection_untyped(recv_ty, method, block_ret, args, instance_receiver)
             } else {
                 ty
             };
@@ -2411,6 +2398,66 @@ impl<'a> BodyTyper<'a> {
                 let Ty::Untyped { why } = Ty::derived_untyped(recv_ty) else { unreachable!() };
                 conversion_fallback(method, why).unwrap_or_else(unknown)
             }
+        }
+    }
+
+    /// Universal fallback shapes stay unknown, but an application override
+    /// supplies its own result contract: its argument may be a returned value
+    /// rather than a selector. Consult only the return, never Fn parameters.
+    fn declared_projection_reason(&self, recv: &Ty, method: &Symbol, instance: bool) -> Option<Ty> {
+        let Ty::Class { id, .. } = recv else { return None };
+        let mut current = Some(id);
+        for _ in 0..32 {
+            let cls = self.classes().get(current?)?;
+            let (first, second) = if instance {
+                (&cls.instance_methods, &cls.class_methods)
+            } else { (&cls.class_methods, &cls.instance_methods) };
+            if let Some(sig) = first.get(method).or_else(|| second.get(method)) {
+                return Some(Ty::derived_untyped([&unwrap_fn_ret(&sig.subst_self(recv))]));
+            }
+            for module in &cls.includes {
+                if let Some(ret) = self.lookup_in_module(module, method) {
+                    return Some(Ty::derived_untyped([&ret.subst_self(recv)]));
+                }
+            }
+            current = cls.parent.as_ref();
+        }
+        None
+    }
+
+    fn universal_projection_untyped(
+        &self, recv: Option<&Ty>, method: &Symbol, block: Option<&Ty>, args: &[Expr], instance: bool,
+    ) -> Ty {
+        if matches!(method.as_str(), "dig" | "try" | "try!") {
+            if let Some(Ty::Union { variants }) = recv {
+                let results: Vec<_> = variants.iter().map(|v|
+                    self.universal_projection_untyped(Some(v), method, block, args, instance)
+                ).collect();
+                return Ty::derived_untyped(results.iter());
+            }
+            if let Some(reason) = recv.and_then(|r| self.declared_projection_reason(r, method, instance)) {
+                return reason;
+            }
+            if matches!(recv, Some(Ty::Nil)) && matches!(method.as_str(), "try" | "try!") {
+                // NilClass never invokes the supplied block or target.
+                return Ty::pending_untyped();
+            }
+        }
+        match method.as_str() {
+            // Keys/indices select values. Ruby ignores a dig block.
+            "dig" => dig_untyped(recv, args.len()),
+            "try" | "try!" if args.is_empty() => pending_or(block, Ty::derived_untyped(recv)),
+            "try" | "try!" => {
+                if let Some((name, forwarded)) = literal_reflective_call(&Symbol::from("send"), args) {
+                    let result = self.dispatch_on(recv, &name, block, forwarded, instance);
+                    Ty::derived_untyped([&result])
+                } else {
+                    // A dynamic method can return its payload/block, but
+                    // the first argument only names that method.
+                    projection_untyped(recv, block, &args[1..])
+                }
+            }
+            _ => Ty::derived_untyped(recv),
         }
     }
 
