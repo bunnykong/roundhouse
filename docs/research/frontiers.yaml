@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "Response-return composition preserves all 34 schedule-equal table sets across five apps. No larger-app gain follows; the profile still includes strict stubs that exclude witnessed Chatwoot values. General order independence remains open."
-  facts: [F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "Strict-stub completion adds no varying rows at four V0A0 schedules on four apps. Mastodon parameter variance falls from 240 rows to 236. This scoped result does not establish general order independence."
+  facts: [F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Require runtime admission as well as schedule equality for any new condition."
+  next: "Test other observer settings under a separately frozen condition."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "fixpoint-spine e6e974a63707363f725df032ceb8b3500539df84; strict-producer-reasons db7ca9228d032a410356950b370901c2228e594d"
-    lab: "c2726941c27673182f734ca0b2fed525f28fb92c; strict-stub runtime loss and response composition"
-    runner: "Saved reductions and portable witnesses at lab c2726941c27673182f734ca0b2fed525f28fb92c"
+    compiler: "strict-stub-completion 44c5c3af44dd0269376e4755473ef0dff884a413 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "7a70d6c0cab671c9fe3a4bb956708c6bb343bf92; strict-stub completion, four apps, V0A0"
+    runner: "Standard quick-test checker and saved bounded replay at lab 7a70d6c0cab671c9fe3a4bb956708c6bb343bf92"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "Strict stubs exclude real OAuth URL Strings in four Chatwoot rows; nine IMAP changes preserve runtime sets and none widens. The response-return integration profile retains this loss. F56 remains a Campfire result."
-  facts: [F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "Strict-stub completion restores admission of F68's four OAuth URL witnesses at all four V0A0 schedules. Zero narrowings remain after separate cycle equality checks; 23 Mastodon Pending leaves remain. Whole-analyzer soundness stays open."
+  facts: [F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Require every Pending stub to complete before treating it as an identity at quiescence."
+  next: "Retain runtime witnesses and investigate the remaining Pending leaves before broadening the claim."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "strict-producer-reasons db7ca9228d032a410356950b370901c2228e594d; fixpoint-spine e6e974a63707363f725df032ceb8b3500539df84"
-    lab: "c2726941c27673182f734ca0b2fed525f28fb92c; strict-stub runtime loss and response composition"
+    compiler: "strict-stub-completion 44c5c3af44dd0269376e4755473ef0dff884a413 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "7a70d6c0cab671c9fe3a4bb956708c6bb343bf92; strict-stub completion, four apps, V0A0"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,36 +84,36 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "Four strict-stub narrowings reject real URL Strings; nine other changes preserve runtime sets. Response-return composition confirms its checks but adds no schedule-equal tables on larger apps. Neither result establishes a general precision gain."
-  facts: [F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
+  stands: "Strict-stub completion repairs the four witnessed OAuth losses without narrowings or newly varying rows on the tested four-app V0A0 grid. Mastodon parameter variance falls by four; the original checker retains two cycles needing separate proof."
+  facts: [F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Keep runtime witnesses and exact table memberships beside claims of improved types."
+  next: "Keep exact runtime admission, missing-data qualifications and schedule identities beside precision claims."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "strict-producer-reasons db7ca9228d032a410356950b370901c2228e594d; fixpoint-spine e6e974a63707363f725df032ceb8b3500539df84"
-    lab: "c2726941c27673182f734ca0b2fed525f28fb92c; strict-stub runtime loss and response composition"
-    runner: "Saved reductions and portable witnesses at lab c2726941c27673182f734ca0b2fed525f28fb92c"
+    compiler: "strict-stub-completion 44c5c3af44dd0269376e4755473ef0dff884a413 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "7a70d6c0cab671c9fe3a4bb956708c6bb343bf92; strict-stub completion, four apps, V0A0"
+    runner: "Standard quick-test checker and saved bounded replay at lab 7a70d6c0cab671c9fe3a4bb956708c6bb343bf92"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "The response-return integration preserves equality memberships but retains the strict-stub soundness loss. It establishes no correct incremental update law, latency result or chronological replay result."
-  facts: [F69, F68, F66, F67, F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
+  stands: "A later informative result replaces early Unresolved in the strict-stub completion rule. The four-app V0A0 result repairs the OAuth witnesses but establishes no general incremental update law, latency result or chronological replay result."
+  facts: [F70, F69, F68, F66, F67, F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Require complete producer evidence and runtime admission before claiming an incremental update law."
+  next: "Require a separately frozen update experiment before claiming an incremental law."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "fixpoint-spine e6e974a63707363f725df032ceb8b3500539df84; strict-producer-reasons db7ca9228d032a410356950b370901c2228e594d"
-    lab: "c2726941c27673182f734ca0b2fed525f28fb92c; strict-stub runtime loss and response composition"
-    runner: "Saved reductions and portable witnesses at lab c2726941c27673182f734ca0b2fed525f28fb92c"
+    compiler: "strict-stub-completion 44c5c3af44dd0269376e4755473ef0dff884a413 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "7a70d6c0cab671c9fe3a4bb956708c6bb343bf92; strict-stub completion, four apps, V0A0"
+    runner: "Standard quick-test checker and saved bounded replay at lab 7a70d6c0cab671c9fe3a4bb956708c6bb343bf92"
 - id: typed-recursion
   name: Typed recursion
   brief: frontiers/typed-recursion.md
