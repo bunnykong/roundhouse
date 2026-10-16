@@ -353,7 +353,7 @@ struct Census {
 
 fn holds_untyped(t: &Ty) -> bool {
     match t {
-        Ty::Untyped => true,
+        Ty::Untyped { .. } => true,
         Ty::Array { elem } => holds_untyped(elem),
         Ty::Hash { key, value } => holds_untyped(key) || holds_untyped(value),
         Ty::Tuple { elems } => elems.iter().any(holds_untyped),
@@ -374,7 +374,7 @@ impl Census {
         match &e.ty {
             Some(t) => {
                 self.typed += 1;
-                self.bare_untyped += u64::from(matches!(t, Ty::Untyped));
+                self.bare_untyped += u64::from(matches!(t, Ty::Untyped { .. }));
                 self.untyped_anywhere += u64::from(holds_untyped(t));
             }
             None => self.missing += 1,
@@ -728,7 +728,7 @@ end
     fn untyped_is_found_at_any_depth() {
         let deep = Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::Untyped])) }),
+            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::untyped()])) }),
         };
         assert!(holds_untyped(&deep));
         assert!(!holds_untyped(&Ty::Array { elem: std::sync::Arc::new(Ty::Int) }));

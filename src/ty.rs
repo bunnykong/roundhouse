@@ -19,6 +19,38 @@ use serde::{Deserialize, Serialize};
 use crate::effect::EffectSet;
 use crate::ident::{ClassId, Symbol, TyVar};
 
+/// Why a type is `untyped`: not computed yet (`PENDING`, a placeholder for
+/// a method or accessor whose value has not been typed), or a deliberate
+/// gradual opt-out (`GRADUAL`, the default). Merged by union, gradual
+/// winning. Only the harvest stabilizer reads it (#964).
+#[derive(Clone, Copy, Debug, Eq)]
+pub struct Why(u8);
+
+impl Why {
+    pub const PENDING: Why = Why(1);
+    pub const GRADUAL: Why = Why(2);
+    pub fn union(self, other: Why) -> Why {
+        Why(self.0 | other.0)
+    }
+    /// Only a placeholder's reason: nothing gradual has reached it.
+    pub fn is_pending_only(self) -> bool {
+        self.0 == Self::PENDING.0
+    }
+}
+
+impl Default for Why {
+    fn default() -> Why {
+        Why::GRADUAL
+    }
+}
+
+/// The reason never takes part in equality (see [`Ty::Untyped`]).
+impl PartialEq for Why {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 /// The types that inhabit Roundhouse values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -128,7 +160,13 @@ pub enum Ty {
     /// elevate any reachable `Untyped` to an emit-time error via the
     /// diagnostic pipeline — the gradual escape only survives
     /// emission for targets that explicitly accept it.
-    Untyped,
+    Untyped {
+        /// Why this position is `untyped` (S2a, #964). Carried, never
+        /// compared: equality, ordering, serialization and rendering
+        /// ignore it, so carrying it cannot move a value.
+        #[serde(skip)]
+        why: Why,
+    },
 
     /// The bottom type — values of this type don't exist at runtime
     /// because the expression diverges (`raise`, `return`, `next`,
@@ -148,6 +186,14 @@ pub enum Ty {
 }
 
 impl Ty {
+    /// RBS `untyped` as a deliberate gradual opt-out.
+    pub const fn untyped() -> Ty {
+        Ty::Untyped { why: Why::GRADUAL }
+    }
+    /// `untyped` standing for a value not computed yet (a placeholder).
+    pub const fn pending_untyped() -> Ty {
+        Ty::Untyped { why: Why::PENDING }
+    }
     /// Replace every [`Ty::SelfInstance`] in this type with `with`.
     ///
     /// The one place the substitution lives. `dispatch` applies it as
@@ -273,7 +319,7 @@ impl Ty {
     /// declaration the last word rather than a hint.
     pub fn mentions_unknown(&self) -> bool {
         match self {
-            Ty::Var { .. } | Ty::Untyped => true,
+            Ty::Var { .. } | Ty::Untyped { .. } => true,
             Ty::Class { args, .. } => args.iter().any(Ty::mentions_unknown),
             Ty::Array { elem } => elem.mentions_unknown(),
             Ty::Hash { key, value } => key.mentions_unknown() || value.mentions_unknown(),
@@ -300,7 +346,7 @@ impl Ty {
     /// are *known* types, so sites that also treat those as noise use
     /// their own `matches!` and must not be folded into this predicate.
     pub fn is_unknown(&self) -> bool {
-        matches!(self, Ty::Var { .. } | Ty::Untyped)
+        matches!(self, Ty::Var { .. } | Ty::Untyped { .. })
     }
 
     /// The element type of a collection-shaped type: `Array[T]` → `T`,
@@ -451,12 +497,12 @@ impl Ty {
             Ty::Union { variants } => {
                 let kept: Vec<Ty> = variants.into_iter().filter(|v| !v.is_unknown()).collect();
                 match kept.len() {
-                    0 => Ty::Untyped,
+                    0 => Ty::untyped(),
                     1 => kept.into_iter().next().unwrap(),
                     _ => Ty::Union { variants: kept.into() },
                 }
             }
-            Ty::Var { .. } => Ty::Untyped,
+            Ty::Var { .. } => Ty::untyped(),
             other => other,
         }
     }
@@ -531,7 +577,7 @@ fn ty_tag(ty: &Ty) -> u8 {
         Ty::Class { .. } => 14,
         Ty::Fn { .. } => 15,
         Ty::Var { .. } => 16,
-        Ty::Untyped => 17,
+        Ty::Untyped { .. } => 17,
         Ty::Bottom => 18,
         Ty::Nil => 19,
     }
@@ -673,5 +719,32 @@ pub enum ParamKind {
 impl From<std::sync::Arc<Ty>> for Ty {
     fn from(value: std::sync::Arc<Ty>) -> Self {
         std::sync::Arc::unwrap_or_clone(value)
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::*;
+
+    #[test]
+    fn untyped_reason_is_invisible_to_equality_order_wire_and_rendering() {
+        let pending = Ty::pending_untyped();
+        let gradual = Ty::untyped();
+        assert_eq!(pending, gradual);
+        assert_eq!(cmp_ty(&pending, &gradual), std::cmp::Ordering::Equal);
+        for ty in [&pending, &gradual] {
+            assert_eq!(serde_json::to_string(ty).unwrap(), r#"{"kind":"untyped"}"#);
+            assert_eq!(crate::emit::ruby::ty_to_rbs(ty), "untyped");
+        }
+        let decoded: Ty = serde_json::from_str(r#"{"kind":"untyped"}"#).unwrap();
+        assert!(matches!(decoded, Ty::Untyped { why } if !why.is_pending_only()));
+
+        let nested = |ty| Ty::Array { elem: Arc::new(ty) };
+        let a = nested(pending);
+        let b = nested(gradual);
+        assert_eq!(a, b);
+        assert_eq!(cmp_ty(&a, &b), std::cmp::Ordering::Equal);
+        assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
+        assert_eq!(crate::emit::ruby::ty_to_rbs(&a), crate::emit::ruby::ty_to_rbs(&b));
     }
 }
