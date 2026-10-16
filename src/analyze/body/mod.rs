@@ -567,14 +567,14 @@ impl<'a> BodyTyper<'a> {
                 // A literal String constructs RuntimeError only for a direct
                 // Kernel raise/fail. Reflective dispatch can fail visibility
                 // checks, and an arbitrary receiver can implement another ABI.
-                let kernel_call = recv.is_none() || recv.as_ref().is_some_and(|r| {
+                let kernel_call = recv.as_ref().is_some_and(|r| {
                     matches!(&*r.node, ExprNode::Const { path } if path.iter()
                         .map(Symbol::as_str).filter(|p| !p.is_empty()).eq(["Kernel"]))
                         && matches!(r.ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "Kernel")
                         && self.const_resolver.as_ref().is_some_and(|r| !r.has_source_namespace("Kernel"))
                 });
                 let ordinary_raise = kernel_call && matches!(method.as_str(), "raise" | "fail")
-                    && matches!(call_args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Str));
+                    && matches!(call_args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Str { .. } }));
                 if (raises || !ordinary_raise) && (matches!(e.ty, Some(Ty::Bottom))
                     || matches!(name, Some("raise" | "fail" | "throw"))) { return true; }
                 if recv.as_ref().is_some_and(scan) || args.iter().any(scan) { return true; }
@@ -603,9 +603,12 @@ impl<'a> BodyTyper<'a> {
                 let builtin_receiver = literal_receiver && builtin_name.is_some_and(|name| !self.const_resolver.as_ref()
                     .is_some_and(|resolver| resolver.has_source_namespace(name)
                         || (name == "TrueClass" && resolver.has_source_namespace("FalseClass"))));
+                let inherited_identity = matches!(name, Some("freeze" | "itself"));
+                let inherited_reopening = inherited_identity && self.const_resolver.as_ref().is_some_and(|resolver|
+                    ["BasicObject", "Object", "Kernel"].iter().any(|name| resolver.has_source_namespace(name)));
                 let ignored = self.json_value_source(recv.as_ref(), method, args)
                     || (name.is_some_and(|n| matches!(n, "proc" | "lambda")) && recv.is_some() && kernel_call)
-                    || (builtin_receiver && name.is_some_and(|n| matches!(n, "freeze" | "itself" | "[]" | "dig" | "at"
+                    || (builtin_receiver && !inherited_reopening && name.is_some_and(|n| matches!(n, "freeze" | "itself" | "[]" | "dig" | "at"
                         | "first" | "last" | "second" | "third" | "fourth" | "fifth" | "sole" | "sample"))
                         && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), &target_method, false)
                         && !self.owns_operator(recv.as_ref().and_then(|r| r.ty.as_ref()), &target_method, true));
@@ -4020,7 +4023,7 @@ mod tests {
         for method in ["raise", "fail"] {
             let mut direct = send(None, method, vec![message()]);
             direct.ty = Some(Ty::Bottom);
-            assert!(!typer.block_has_escaping_exit(&direct, true, true, false));
+            assert!(typer.block_has_escaping_exit(&direct, true, true, false));
             let mut receiver_call = send(Some(var("receiver")), method, vec![message()]);
             receiver_call.ty = Some(Ty::Bottom);
             assert!(typer.block_has_escaping_exit(&receiver_call, true, true, false));

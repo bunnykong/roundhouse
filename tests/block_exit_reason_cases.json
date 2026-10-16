@@ -3187,7 +3187,7 @@
   {
     "id": "local-exit-control-00",
     "group": "local-exit-control",
-    "body": "JSON.parse(raw).tap { begin; raise \"x\"; rescue; \"ignored\"; end }",
+    "body": "JSON.parse(raw).tap { begin; Kernel.raise \"x\"; rescue; \"ignored\"; end }",
     "gradual": true,
     "raw": "[42,43]",
     "runtime": true,
@@ -3202,7 +3202,7 @@
   {
     "id": "local-exit-control-01",
     "group": "local-exit-control",
-    "body": "JSON.parse(raw).tap { begin; raise \"x\"; rescue RuntimeError; \"ignored\"; end }",
+    "body": "JSON.parse(raw).tap { begin; Kernel.raise \"x\"; rescue RuntimeError; \"ignored\"; end }",
     "gradual": true,
     "raw": "[42,43]",
     "runtime": true,
@@ -3307,7 +3307,7 @@
   {
     "id": "local-exit-control-08",
     "group": "local-exit-control",
-    "body": "JSON.parse(raw).tap { begin; raise \"x\"; rescue; next \"ignored\"; end }",
+    "body": "JSON.parse(raw).tap { begin; Kernel.raise \"x\"; rescue; next \"ignored\"; end }",
     "gradual": true,
     "raw": "[42,43]",
     "runtime": true,
@@ -4259,6 +4259,58 @@
     "expected_type": "String",
     "expected_value": "ok",
     "inline_support": " def self.lambda; yield; \"ignored\"; end\n def lambda; yield; \"ignored\"; end\n",
+    "main_value": "String",
+    "main_forward": "untyped"
+  },
+  {
+    "id": "declared-override-67",
+    "group": "declared-override",
+    "body": "begin; JSON.parse(raw).tap { begin; raise(\"x\"); rescue RuntimeError; \"ignored\"; end }; rescue Exception; \"ok\"; end",
+    "gradual": false,
+    "raw": "[42,43]",
+    "runtime": false,
+    "expected_type": "String",
+    "expected_value": "ok",
+    "inline_support": " def self.raise(message); Kernel.raise Exception, \"outer\"; end\n def raise(message); Kernel.raise Exception, \"outer\"; end\n",
+    "main_value": "String",
+    "main_forward": "untyped"
+  },
+  {
+    "id": "declared-override-68",
+    "group": "declared-override",
+    "body": "begin; JSON.parse(raw).tap { begin; fail(\"x\"); rescue RuntimeError; \"ignored\"; end }; rescue Exception; \"ok\"; end",
+    "gradual": false,
+    "raw": "[42,43]",
+    "runtime": false,
+    "expected_type": "String",
+    "expected_value": "ok",
+    "inline_support": " def self.fail(message); Kernel.raise Exception, \"outer\"; end\n def fail(message); Kernel.raise Exception, \"outer\"; end\n",
+    "main_value": "String",
+    "main_forward": "untyped"
+  },
+  {
+    "id": "declared-override-69",
+    "group": "declared-override",
+    "body": "JSON.parse(raw).tap { [1].freeze { return \"ok\" } }",
+    "gradual": false,
+    "raw": "[42,43]",
+    "runtime": false,
+    "expected_type": "String",
+    "expected_value": "ok",
+    "support": "class Object\n def freeze; yield; \"ignored\"; end\nend\n",
+    "main_value": "String",
+    "main_forward": "untyped"
+  },
+  {
+    "id": "declared-override-70",
+    "group": "declared-override",
+    "body": "JSON.parse(raw).tap { [1].itself { return \"ok\" } }",
+    "gradual": false,
+    "raw": "[42,43]",
+    "runtime": false,
+    "expected_type": "String",
+    "expected_value": "ok",
+    "support": "class Object\n def itself; yield; \"ignored\"; end\nend\n",
     "main_value": "String",
     "main_forward": "untyped"
   }
