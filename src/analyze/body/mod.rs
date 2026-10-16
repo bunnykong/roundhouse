@@ -2068,12 +2068,17 @@ impl<'a> BodyTyper<'a> {
                 // so it matches the same class/instance table preference. A
                 // `Module` subclass's own implicit-self Module protocol is a
                 // class-object receiver too.
+                let (protocol_method, protocol_args) = send::literal_reflective_call(method, args)
+                    .unwrap_or_else(|| (method.clone(), args.as_slice()));
                 let class_object_receiver = class_object_receiver
                     || (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
-                        && send::is_module_protocol(method) && self.self_is_module_instance(ctx));
+                        && send::is_module_protocol(&protocol_method) && self.self_is_module_instance(ctx));
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped { .. }) && self.inquirers.is_some()
-                    && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
-                    && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
+                    && (recv.is_some() || (ctx.self_ty.is_some()
+                        && (send::is_module_protocol(&protocol_method)
+                            || protocol_method.as_str() == "instance_variable_set")))
+                    && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver)
+                    && !self.owns_operator(recv_ty.as_ref(), &protocol_method, class_object_receiver) {
                     let class_object = class_object_receiver;
                     // `include?` is Module's ancestor check AND String/Enumerable
                     // membership. Refuse Module protocol only for true Module-only
@@ -2082,20 +2087,20 @@ impl<'a> BodyTyper<'a> {
                     // String / Array receivers fall through to membership → Bool, and
                     // so does a value typed `Class` or `Module`, which is a module
                     // object and answers Module#include? itself.
-                    let module_only = send::is_module_protocol(method)
-                        && (method.as_str() != "include?"
+                    let module_only = send::is_module_protocol(&protocol_method)
+                        && (protocol_method.as_str() != "include?"
                             || matches!(&recv_ty, Some(Ty::Class { id, .. })
                                 if !matches!(id.0.as_str(), "Class" | "Module")));
                     if module_only && !class_object
-                        && !self.owns_operator(recv_ty.as_ref(), method, false) {
+                        && !self.owns_operator(recv_ty.as_ref(), &protocol_method, false) {
                         expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from("Module protocol"),
-                            detail: format!("{} requires a proven class/module object receiver", method),
+                            detail: format!("{} requires a proven class/module object receiver", protocol_method),
                         });
                         return dispatched;
                     }
-                    if let Some(t) = send::object_protocol_method(recv_ty.as_ref(), method, block_ret.as_ref(), class_object) {
+                    if let Some(t) = send::object_protocol_method(recv_ty.as_ref(), &protocol_method, block_ret.as_ref(), protocol_args, class_object) {
                         return t;
                     }
                 }

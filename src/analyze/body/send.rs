@@ -345,6 +345,13 @@ impl<'a> BodyTyper<'a> {
         class_object_receiver: bool,
         block: &Expr,
     ) -> Ctx {
+        if !self.owns_operator(recv_ty, method, class_object_receiver) {
+            if let Some((name, forwarded)) = literal_reflective_call(method, args) {
+                return self.block_ctx_for(
+                    outer, recv_ty, &name, forwarded, class_object_receiver, block,
+                );
+            }
+        }
         if crate::lower::range_enumerable::THROUGH_ARRAY.contains(&method.as_str())
             && crate::lower::range_enumerable::integer_range(recv_ty)
         {
@@ -412,18 +419,38 @@ impl<'a> BodyTyper<'a> {
         // and v=Var since block_params_for returns a single-Untyped vec.
         if let Some(ty @ Ty::Untyped { .. }) = recv_ty {
             for name in params {
-                new_ctx.local_bindings.insert(name.clone(), ty.clone());
+                new_ctx.local_bindings.insert(name.clone(), projection_untyped(Some(ty), None, args));
             }
             return new_ctx;
         }
-        let Some(mut param_tys) = self.block_params_for(recv_ty, method, class_object_receiver) else {
+        // Accumulator slots come from the seed, not from every nested
+        // unknown in the collection. In particular, an unrelated JSON
+        // element must not make a concrete accumulator gradual.
+        if matches!(method.as_str(), "reduce" | "inject" | "each_with_object" | "with_object")
+            && let Some(elem) = recv_ty.and_then(enumerable_element)
+        {
+            let seed = args.first().and_then(|arg| arg.ty.as_ref());
+            let bindings = match method.as_str() {
+                "each_with_object" | "with_object" => Some(vec![
+                    elem.clone(),
+                    seed.cloned().unwrap_or_else(Ty::pending_untyped),
+                ]),
+                "reduce" | "inject" => Some(vec![
+                    Ty::derived_untyped(seed.or(Some(&elem))),
+                    elem,
+                ]),
+                _ => None,
+            };
+            if let Some(bindings) = bindings {
+                for (name, ty) in params.iter().zip(bindings) {
+                    new_ctx.local_bindings.insert(name.clone(), ty);
+                }
+                return new_ctx;
+            }
+        }
+        let Some(param_tys) = self.block_params_for(recv_ty, method, class_object_receiver) else {
             return new_ctx;
         };
-        if method.as_str() == "with_object" {
-            if let Some(ty @ Ty::Untyped { .. }) = param_tys.get_mut(1) {
-                *ty = projection_untyped(recv_ty, None, args);
-            }
-        }
         for (name, ty) in params.iter().zip(param_tys.iter()) {
             new_ctx.local_bindings.insert(name.clone(), ty.clone());
         }
@@ -1347,7 +1374,7 @@ impl<'a> BodyTyper<'a> {
             // Signing out of typing for a receiver is not signing out
             // of Ruby's own guarantees about the answer.
             Some(Ty::Untyped { why }) => {
-                conversion_fallback(method, *why).unwrap_or(Ty::Untyped { why: *why })
+                conversion_fallback(method, *why).unwrap_or_else(derived)
             }
             Some(Ty::Class { id, args }) => {
                 // `GlobalID::Locator.locate(…, only: Model)` /
@@ -2044,7 +2071,7 @@ impl<'a> BodyTyper<'a> {
                 }
                 // An initial value decides the result type (`[1, 2].sum(0.0)` is a Float).
                 if method.as_str() == "sum" && !args.is_empty() {
-                    return derived();
+                    return sum_type(elem, block_ret, args);
                 }
                 // `[] + [h]` is an Array of `h`: when the receiver's
                 // element is empty or not yet known, `+`, `|` and
@@ -2087,7 +2114,7 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
-                array_method(method, elem, block_ret)
+                array_method(method, elem, block_ret, args)
             }
             // Relation-typed receiver — a chain started from a scope
             // call, a relation-returning class method, or (later) an
@@ -2227,7 +2254,7 @@ impl<'a> BodyTyper<'a> {
                     return t;
                 }
                 let elem = Ty::Class { id: of.clone(), args: vec![].into() };
-                array_method(method, &elem, block_ret)
+                array_method(method, &elem, block_ret, args)
             }
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret, args),
             Some(Ty::Record { row }) => record_method(method, row, args),
@@ -2277,7 +2304,7 @@ impl<'a> BodyTyper<'a> {
                 // Keep the absorbing value shape, but derive its reason for
                 // every send. Concrete arms cannot manufacture Gradual.
                 if variants.iter().any(|v| matches!(v, Ty::Untyped { .. })) {
-                    return Ty::derived_untyped(variants.iter());
+                    return derived();
                 }
                 let mut resolved: Vec<Ty> = Vec::new();
                 for v in variants {
@@ -2476,6 +2503,85 @@ fn projection_untyped(recv: Option<&Ty>, block: Option<&Ty>, args: &[Expr]) -> T
             .chain(block)
             .chain(args.iter().filter_map(|a| a.ty.as_ref())),
     )
+}
+
+/// A literal reflective alias has the same argument dependencies as its
+/// target. Consume one name per level so nested `send(:send, ...)` works.
+pub(super) fn literal_reflective_call<'e>(
+    method: &Symbol,
+    args: &'e [Expr],
+) -> Option<(Symbol, &'e [Expr])> {
+    if !matches!(method.as_str(), "send" | "public_send" | "__send__") {
+        return None;
+    }
+    let (first, rest) = args.split_first()?;
+    let name = match &*first.node {
+        ExprNode::Lit {
+            value: crate::expr::Literal::Sym { value },
+        } => value.clone(),
+        ExprNode::Lit {
+            value: crate::expr::Literal::Str { value },
+        } => Symbol::from(value.as_str()),
+        _ => return None,
+    };
+    literal_reflective_call(&name, rest).or(Some((name, rest)))
+}
+
+/// The yielded element for the container representations using the shared
+/// Enumerable transfers. A Hash yields a key/value pair to an accumulator.
+fn enumerable_element(recv: &Ty) -> Option<Ty> {
+    match recv {
+        Ty::Untyped { .. } | Ty::Var { .. } => Some(Ty::derived_untyped([recv])),
+        Ty::Array { elem } => Some((**elem).clone()),
+        Ty::Tuple { elems } => Some(union_many(elems.to_vec())),
+        Ty::Hash { key, value } => Some(Ty::Tuple {
+            elems: vec![(**key).clone(), (**value).clone()].into(),
+        }),
+        Ty::Relation { of } => Some(Ty::Class {
+            id: of.clone(),
+            args: vec![].into(),
+        }),
+        Ty::Union { variants } => {
+            let elems: Vec<_> = variants.iter().filter_map(enumerable_element).collect();
+            (!elems.is_empty()).then(|| union_many(elems))
+        }
+        _ => None,
+    }
+}
+
+/// Retain the established unknown result shape, but only join values that
+/// can become the accumulator. Without a seed, the first element can be
+/// the result even when the block returns a constant (a singleton input).
+/// With a symbolic reducer the operation also depends on the elements.
+fn fold_untyped(elem: &Ty, block_ret: Option<&Ty>, args: &[Expr]) -> Ty {
+    if block_ret.is_none() || args.len() > 1 {
+        projection_untyped(Some(elem), None, args)
+    } else {
+        Ty::derived_untyped(
+            args.first()
+                .and_then(|arg| arg.ty.as_ref())
+                .into_iter()
+                .chain(block_ret)
+                .chain(args.is_empty().then_some(elem)),
+        )
+    }
+}
+
+/// `each_with_object` ignores the block's return and returns its argument.
+fn object_accumulator_untyped(args: &[Expr]) -> Ty {
+    Ty::derived_untyped(args.first().and_then(|arg| arg.ty.as_ref()))
+}
+
+fn sum_type(elem: &Ty, block_ret: Option<&Ty>, args: &[Expr]) -> Ty {
+    let summand = block_ret.unwrap_or(elem);
+    if !args.is_empty() {
+        return projection_untyped(Some(summand), None, args);
+    }
+    match summand {
+        Ty::Int => Ty::Int,
+        Ty::Float => Ty::Float,
+        _ => projection_untyped(Some(summand), None, args),
+    }
 }
 /// Canonical return type of a universal Ruby conversion method, used
 /// as a last resort when the receiver type is unknown. NOT placed in
@@ -2899,7 +3005,7 @@ fn non_nil_elem(elem: &Ty) -> Ty {
     }
 }
 
-pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -> Ty {
+pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>, args: &[Expr]) -> Ty {
     // AR-specific dispatches go FIRST so they win over the generic
     // array methods that share a name (`find` on a relation raises, so
     // it returns Class; on a plain Array it returns `Union<elem, Nil>`).
@@ -3050,9 +3156,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             Ty::Array { elem: std::sync::Arc::new(elem.clone()) }
         }
         // Array `*` with an Int is array repetition (preserves Array[elem]);
-        // with a Str it's `.join(sep)`, returning Str. The body-typer's
-        // dispatch hands us the method name but not argument types, so
-        // we can't distinguish here — the emitter's classifier handles
+        // with a Str it's `.join(sep)`, returning Str. The emitter's classifier handles
         // that branch using the operand `.ty` annotations. Returning
         // Array[elem] is the safe default (join→Str case is rare and the
         // result rarely chains into further array methods).
@@ -3060,13 +3164,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "any?" | "all?" | "none?" | "one?" | "empty?" | "include?" => Ty::Bool,
         // ActiveSupport `Enumerable#many?` — more than one element.
         "many?" => Ty::Bool,
-        // Not the element type as-is: `[nil].sum` raises, and a non-numeric
-        // `sum` needs an initial value this arm doesn't see.
-        "sum" => match block_ret.unwrap_or(elem) {
-            Ty::Int => Ty::Int,
-            Ty::Float => Ty::Float,
-            _ => projection_untyped(Some(elem), block_ret, &[]),
-        },
+        "sum" => sum_type(elem, block_ret, args),
         "exclude?" | "intersect?" => Ty::Bool,
         // `Set` isn't parameterized, so the element type can't be carried.
         "to_set" => Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![].into() },
@@ -3093,17 +3191,18 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "with_index" => Ty::Array { elem: std::sync::Arc::new(block_ret.cloned().unwrap_or_else(|| elem.clone())) },
         // `group_by`/`index_by` (ActiveSupport) force evaluation to a Hash.
         "group_by" => Ty::Hash {
-            key: std::sync::Arc::new(projection_untyped(Some(elem), block_ret, &[])),
+            key: std::sync::Arc::new(projection_untyped(None, block_ret, &[])),
             value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(elem.clone()) }),
         },
         "index_by" => Ty::Hash {
-            key: std::sync::Arc::new(projection_untyped(Some(elem), block_ret, &[])),
+            key: std::sync::Arc::new(projection_untyped(None, block_ret, &[])),
             value: std::sync::Arc::new(elem.clone()),
         },
         "tally" => Ty::Hash { key: std::sync::Arc::new(elem.clone()), value: std::sync::Arc::new(Ty::Int) },
-        // Fold/accumulate — result type depends on the block/seed (untracked).
+        // Fold/accumulate — only seed and possible accumulator values count.
         // `with_object` is the enumerator's `each_with_object` (`each_cons(2).with_object([])`).
-        "inject" | "reduce" | "each_with_object" | "with_object" => projection_untyped(Some(elem), block_ret, &[]),
+        "inject" | "reduce" => fold_untyped(elem, block_ret, args),
+        "each_with_object" | "with_object" => object_accumulator_untyped(args),
         "to_sentence" => Ty::Str,
         // `Array#to_h { |elem| [k, v] }` — block returns a [k, v]
         // tuple; result is Hash<k, v>. We approximate as Hash<elem, elem>
@@ -3360,9 +3459,16 @@ pub(super) fn hash_method(
         // `flat_map` returns an Array (block return flattened by one);
         // we don't track the block's element type here.
         "flat_map" => Ty::Array { elem: std::sync::Arc::new(unknown()) },
-        // Folds / aggregates whose result depends on the block or seed,
-        // and nested `dig` access — gradual.
-        "reduce" | "inject" | "each_with_object" | "sum" | "dig" => Ty::derived_untyped(
+        "reduce" | "inject" => fold_untyped(&Ty::Tuple {
+            elems: vec![key.clone(), value.clone()].into(),
+        }, block_ret, args),
+        "each_with_object" => object_accumulator_untyped(args),
+        // Hash sum retains its unknown shape; the block replaces the pair
+        // as the summand, and the initial value can also determine the result.
+        "sum" => projection_untyped(block_ret.or(Some(&Ty::Tuple {
+            elems: vec![key.clone(), value.clone()].into(),
+        })), None, args),
+        "dig" => Ty::derived_untyped(
             [key, value].into_iter().chain(block_ret).chain(args.iter().filter_map(|a| a.ty.as_ref()))),
         // Shape-neutral iteration helpers that return self (the hash)
         // for chaining (`length`/`size`/`count` are Int, handled above).
@@ -3845,6 +3951,7 @@ pub(super) fn object_protocol_method(
     recv_ty: Option<&Ty>,
     method: &Symbol,
     block_ret: Option<&Ty>,
+    args: &[Expr],
     class_object: bool,
 ) -> Option<Ty> {
     // `include?` doubles as Enumerable/String membership — answer Bool even
@@ -3858,9 +3965,11 @@ pub(super) fn object_protocol_method(
     let block = || pending_or(block_ret, projection_untyped(recv_ty, block_ret, &[]));
     Some(match method.as_str() {
         // Kernel / Object reflection.
-        "instance_variable_get" | "instance_variable_set" | "method" | "instance_method"
-        | "public_instance_method" | "const_get" | "class_variable_get" | "class_variable_set"
-        | "enum_for" | "to_enum" => projection_untyped(recv_ty, block_ret, &[]),
+        "instance_variable_set" | "class_variable_set" =>
+            Ty::derived_untyped(args.get(1).and_then(|arg| arg.ty.as_ref())),
+        "instance_variable_get" | "method" | "instance_method"
+        | "public_instance_method" | "const_get" | "class_variable_get"
+        | "enum_for" | "to_enum" => projection_untyped(recv_ty, block_ret, args),
         "instance_variable_defined?" | "in?" | "method_defined?"
         | "public_method_defined?" | "private_method_defined?" | "const_defined?"
         | "class_variable_defined?" | "include?" => Ty::Bool,
@@ -4231,9 +4340,9 @@ mod reason_tests {
     fn module_protocol_waits_for_its_block_value() {
         for name in ["module_eval", "class_exec", "instance_eval"] {
             let method = Symbol::from(name);
-            assert_pending(&object_protocol_method(None, &method, Some(&var()), true).unwrap());
-            assert_pending(&object_protocol_method(None, &method, None, true).unwrap());
-            assert_eq!(object_protocol_method(None, &method, Some(&Ty::Str), true), Some(Ty::Str));
+            assert_pending(&object_protocol_method(None, &method, Some(&var()), &[], true).unwrap());
+            assert_pending(&object_protocol_method(None, &method, None, &[], true).unwrap());
+            assert_eq!(object_protocol_method(None, &method, Some(&Ty::Str), &[], true), Some(Ty::Str));
         }
     }
 }
@@ -4396,6 +4505,204 @@ mod transfer_reason_tests {
                     .block_params_for(Some(&recv), &Symbol::from("map"), false)
                     .unwrap();
                 assert!(Ty::derived_untyped(got.iter()).inference_eq(&Ty::untyped()));
+            }
+        }
+    }
+
+    #[test]
+    fn pending_dispatch_receivers_do_not_hide_gradual_arguments_or_blocks() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        for input in unknowns() {
+            let expected = Ty::derived_untyped([&input]);
+            for receiver in [
+                Ty::pending_untyped(),
+                Ty::Union {
+                    variants: vec![array(Ty::Int), Ty::pending_untyped()].into(),
+                },
+                Ty::Union {
+                    variants: vec![Ty::pending_untyped(), hash(Ty::Int)].into(),
+                },
+            ] {
+                for method in ["reduce", "inject", "sum", "each_with_object", "with_object"] {
+                    let got = typer.dispatch(
+                        Some(&receiver),
+                        &Symbol::from(method),
+                        Some(&Ty::Str),
+                        &[expr(input.clone())],
+                    );
+                    assert!(
+                        got.inference_eq(&expected),
+                        "{receiver:?}.{method}: {got:?}"
+                    );
+                }
+                for method in ["group_by", "index_by", "reduce", "inject", "sum"] {
+                    let got =
+                        typer.dispatch(Some(&receiver), &Symbol::from(method), Some(&input), &[]);
+                    assert!(
+                        got.inference_eq(&expected),
+                        "{receiver:?}.{method}: {got:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_reasons_follow_only_possible_result_values() {
+        let classes = HashMap::new();
+        let typer = BodyTyper::new(&classes);
+        // `with_object` is an Enumerator alias in the existing Array
+        // representation, not a method on a Hash receiver.
+        assert!(matches!(
+            typer.dispatch(
+                Some(&hash(Ty::untyped())),
+                &Symbol::from("with_object"),
+                Some(&Ty::Str),
+                &[expr(Ty::Str)],
+            ),
+            Ty::Var { .. }
+        ));
+        for input in unknowns() {
+            for nested in [
+                input.clone(),
+                array(input.clone()),
+                hash(array(input.clone())),
+            ] {
+                for receiver in [
+                    array(nested.clone()),
+                    hash(nested.clone()),
+                    Ty::Tuple {
+                        elems: vec![Ty::Int, nested.clone()].into(),
+                    },
+                ] {
+                    for method in ["reduce", "inject", "sum", "each_with_object", "with_object"] {
+                        if method == "with_object" && matches!(receiver, Ty::Hash { .. }) {
+                            continue;
+                        }
+                        let args = [expr(Ty::Str)];
+                        let got = typer.dispatch(
+                            Some(&receiver),
+                            &Symbol::from(method),
+                            Some(&Ty::Str),
+                            &args,
+                        );
+                        assert!(
+                            got.inference_eq(&Ty::pending_untyped()),
+                            "{receiver:?}.{method}: {got:?}"
+                        );
+                    }
+                    for method in ["group_by", "index_by"] {
+                        // Hash does not model these key projections; its existing
+                        // unknown fallback is outside this reason transfer.
+                        if matches!(receiver, Ty::Hash { .. }) {
+                            continue;
+                        }
+                        let got = typer.dispatch(
+                            Some(&receiver),
+                            &Symbol::from(method),
+                            Some(&Ty::Str),
+                            &[],
+                        );
+                        let Ty::Hash { key, .. } = got else {
+                            panic!("{got:?}")
+                        };
+                        assert!(key.inference_eq(&Ty::pending_untyped()));
+                    }
+                }
+                let expected = Ty::derived_untyped([&nested]);
+                for receiver in [array(Ty::Int), hash(Ty::Int)] {
+                    for method in ["reduce", "inject", "sum", "each_with_object", "with_object"] {
+                        if method == "with_object" && matches!(receiver, Ty::Hash { .. }) {
+                            continue;
+                        }
+                        let got = typer.dispatch(
+                            Some(&receiver),
+                            &Symbol::from(method),
+                            Some(&Ty::Str),
+                            &[expr(nested.clone())],
+                        );
+                        assert!(
+                            got.inference_eq(&expected),
+                            "{receiver:?}.{method}({nested:?}): {got:?}"
+                        );
+                    }
+                    for method in ["reduce", "inject", "sum"] {
+                        let got = typer.dispatch(
+                            Some(&receiver),
+                            &Symbol::from(method),
+                            Some(&nested),
+                            &[expr(Ty::Str)],
+                        );
+                        assert!(
+                            got.inference_eq(&expected),
+                            "block {nested:?}, {method}: {got:?}"
+                        );
+                    }
+                    for method in ["each_with_object", "with_object"] {
+                        if method == "with_object" && matches!(receiver, Ty::Hash { .. }) {
+                            continue;
+                        }
+                        let got = typer.dispatch(
+                            Some(&receiver),
+                            &Symbol::from(method),
+                            Some(&nested),
+                            &[expr(Ty::Str)],
+                        );
+                        assert!(
+                            got.inference_eq(&Ty::pending_untyped()),
+                            "ignored block {nested:?}: {got:?}"
+                        );
+                    }
+                }
+                for method in ["reduce", "inject"] {
+                    for args in [
+                        vec![],
+                        vec![expr(Ty::Sym)],
+                        vec![expr(Ty::Str), expr(Ty::Sym)],
+                    ] {
+                        let block = if args.is_empty() {
+                            Some(&Ty::Str)
+                        } else {
+                            None
+                        };
+                        let got = typer.dispatch(
+                            Some(&array(nested.clone())),
+                            &Symbol::from(method),
+                            block,
+                            &args,
+                        );
+                        assert!(
+                            got.inference_eq(&expected),
+                            "unseeded/operator {method}: {got:?}"
+                        );
+                    }
+                }
+                for method in ["instance_variable_set", "class_variable_set"] {
+                    for receiver in [Ty::Str, nested.clone()] {
+                        let got = object_protocol_method(
+                            Some(&receiver),
+                            &Symbol::from(method),
+                            Some(&nested),
+                            &[expr(nested.clone()), expr(Ty::Str)],
+                            true,
+                        )
+                        .unwrap();
+                        assert!(
+                            got.inference_eq(&Ty::pending_untyped()),
+                            "irrelevant name/receiver/block: {got:?}"
+                        );
+                        let got = object_protocol_method(
+                            Some(&receiver),
+                            &Symbol::from(method),
+                            None,
+                            &[expr(Ty::Sym), expr(nested.clone())],
+                            true,
+                        )
+                        .unwrap();
+                        assert!(got.inference_eq(&expected), "assigned value: {got:?}");
+                    }
+                }
             }
         }
     }
