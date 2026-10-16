@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "On fixpoint-spine-20261015-ea3ec744, the integrated repairs pass the bounded kits and Campfire reason comparisons. The partition law still fails, and larger apps retain F55's value equalities."
-  facts: [F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "On latest-writer-returns-20261015-campfire, latest-writer cells pass the two Campfire fixtures but reproduce descents. The result remains inconclusive because of the collector gap and incomplete registry coverage. Larger-app order independence remains open."
+  facts: [F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Repair partition and replay failures, then repeat complete value and reason comparisons on the larger apps."
+  next: "Require a frozen collector and complete registry coverage before judging the replacement law on larger apps."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "fixpoint-spine 14ee6a88c63f36a2b4ed7f8dae31ecd4e4dd3d58 (recorded 369d963d1866d404dc6976ed2b77e6a934a131f6)"
-    lab: "751d62e764beefcd8ba819c4ec403f6181576e7d; fixpoint-spine-20261015-ea3ec744"
-    runner: "Saved F62 reduction and focused native recipes at lab 751d62e764beefcd8ba819c4ec403f6181576e7d"
+    compiler: "latest-writer-returns 7909e786000bae64931e4e0c51c4c163ca14f241 (recorded 53d8b458); response-return-values f0bf3d7f950756682a6d60da6a659d633f4eea4a (recorded a1911d95)"
+    lab: "4302d0374af625fc505b11c585ea9b36baeca8d1; two separate response-return and writer-replacement conditions"
+    runner: "Saved reductions and focused native recipes at lab 4302d0374af625fc505b11c585ea9b36baeca8d1"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "Ownership-runtime-values-20261015-f78d995f confirms excluded runtime values in 578 repeated row observations and an already-too-narrow render/redirect/respond model. The direct respond_to Nil registration is distinct from RBS void conversion. Declared-contributor-join-20261015-ea3ec744 has a local fixed-contribution floor but fails schedule/alias gates. Closure application and sampled writer membership remain bounded checks."
-  facts: [F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "On response-return-values-20261015-stabilization-off, no non-nil value is lost across 23 declared pairs with stabilization off. The 24 ownership witnesses admit String and 72 customization rows hold. This bounded response repair does not establish ownership or whole-analyzer soundness."
+  facts: [F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Retain actual runtime exclusions and explicit test-double/reachability limits. Require public-input exports and runtime/emission coverage before any whole-analyzer soundness claim."
+  next: "Keep response contracts tied to runtime witnesses and explicit stabilization settings; retain uncovered renderer and format-block behavior."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
-    lab: "0730e7f3402b1f37d15c875570b072c760248363; six separate October 15 later evening conditions"
+    compiler: "response-return-values f0bf3d7f950756682a6d60da6a659d633f4eea4a (recorded a1911d95); latest-writer-returns 7909e786000bae64931e4e0c51c4c163ca14f241 (recorded 53d8b458)"
+    lab: "4302d0374af625fc505b11c585ea9b36baeca8d1; two separate response-return and writer-replacement conditions"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,36 +84,36 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "On ownership-runtime-values-20261015-f78d995f, 578 repeated observations exclude witnessed values while 900 narrowings agree with finite collaborators; remaining guarded, boundary and unwitnessed classes stay separate. Strict-producer-reasons-20261015-ea3ec744 removes the bounded Campfire reason residual but fails larger-app parity. The row-attribution condition exposes overlapping history and premature-label sensitivities without establishing a safe repair."
-  facts: [F61, F56, F59, F58, F57, F60, F55, F52]
+  stands: "The response-return repair unblocks the 24 witnessed ownership slots while preserving 72 customization rows with stabilization off. Latest-writer replacement remains inconclusive with reproduced descents and partial coverage. The earlier excluded-value results retain their scope."
+  facts: [F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Interpret changed types as admitted Ruby values and preserve uncertainty that protects actual returns. Distinguish exact reason equality, source guards, finite collaborators and method-boundary counterexamples."
+  next: "Check admitted Ruby values under explicit observer settings and complete populations before treating changed types as improvements."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
-    lab: "0730e7f3402b1f37d15c875570b072c760248363; six separate October 15 later evening conditions"
-    runner: "Saved receipt reductions and explicit native recipes at lab 0730e7f3402b1f37d15c875570b072c760248363"
+    compiler: "response-return-values f0bf3d7f950756682a6d60da6a659d633f4eea4a (recorded a1911d95); latest-writer-returns 7909e786000bae64931e4e0c51c4c163ca14f241 (recorded 53d8b458)"
+    lab: "4302d0374af625fc505b11c585ea9b36baeca8d1; two separate response-return and writer-replacement conditions"
+    runner: "Saved reductions and focused native recipes at lab 4302d0374af625fc505b11c585ea9b36baeca8d1"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
   status: open
-  stands: "On fixpoint-spine-20261015-ea3ec744, reflective bounds are repaired, but writer partition and repeated-round failures remain. This adds no chronological replay or latency result."
-  facts: [F62, F60, F59, F56, F61, F54, F50, F48, F39]
+  stands: "On latest-writer-returns-20261015-campfire, each declared writer keeps its latest result, but descents reproduce and the collector gap leaves the verdict inconclusive. No chronological replay or latency result follows."
+  facts: [F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
   skills:
     - Incremental computation
     - Rust performance
     - serialization
-  next: "Require partition and replay laws, complete current evidence and exact cold shadows before claiming incremental correctness."
+  next: "Require complete writer coverage, a frozen collector and exact cold comparisons before claiming incremental correctness."
   check: frontiers/incremental.md#the-check
   check_public: public
   pins:
-    compiler: "fixpoint-spine 14ee6a88c63f36a2b4ed7f8dae31ecd4e4dd3d58 (recorded 369d963d1866d404dc6976ed2b77e6a934a131f6)"
-    lab: "751d62e764beefcd8ba819c4ec403f6181576e7d; fixpoint-spine-20261015-ea3ec744"
-    runner: "Saved F62 reduction and focused native recipes at lab 751d62e764beefcd8ba819c4ec403f6181576e7d"
+    compiler: "latest-writer-returns 7909e786000bae64931e4e0c51c4c163ca14f241 (recorded 53d8b458)"
+    lab: "4302d0374af625fc505b11c585ea9b36baeca8d1; two separate response-return and writer-replacement conditions"
+    runner: "Saved reductions and focused native recipes at lab 4302d0374af625fc505b11c585ea9b36baeca8d1"
 - id: typed-recursion
   name: Typed recursion
   brief: frontiers/typed-recursion.md
