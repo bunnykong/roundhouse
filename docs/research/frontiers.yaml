@@ -24,8 +24,8 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "With F74's strict guard and F75's binding projection, Campfire, Forem, Chatwoot and Mastodon all have 10/10 schedule-equal tables at V0A0, Mastodon also across twelve schedules. The base candidate still loses runtime values and both binding tables miss 45 reachable bindings, so sound order independence remains open."
-  facts: [F75, F74, F73, F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "With F74's strict guard, F75's binding projection and F76's strict catalog, Campfire, Forem, Chatwoot and Mastodon all have 10/10 schedule-equal tables at V0A0, Mastodon also across twelve schedules. One Chatwoot reason row's provenance still depends on the schedule, the base candidate still loses runtime values and both binding tables miss 45 reachable bindings, so sound order independence remains open."
+  facts: [F76, F75, F74, F73, F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
@@ -34,9 +34,9 @@
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "research/binding-projection-f2597823 9ae77664fe2e36da1b4f8b96a90cc53839aa3c77 (snapshot of f2597823, over the 48155b34 and 66c06f52 snapshots, on upstream a5d73fdf); research/main-port-strict-pending-guard-7bd46672 7bd46672796c5fa2cd1de6759f3c3a5483efc7f7 on upstream main 1c84d346361237ef9a99b6c01cead7c340532330"
-    lab: "c4c03a6c23af66bbd8a7fd9ba7a97827f03f1138; binding projection with corrected audit, strict pending guard and mutation-writer census"
-    runner: "V0A0 quick-test reports, binding audit tables and CRuby witnesses at lab c4c03a6c23af66bbd8a7fd9ba7a97827f03f1138"
+    compiler: "research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f (snapshot of 5a6f535e, on the F75 and earlier snapshots from upstream a5d73fdf); research/main-port-strict-pending-guard-7bd46672 7bd46672796c5fa2cd1de6759f3c3a5483efc7f7 on upstream main 1c84d346361237ef9a99b6c01cead7c340532330"
+    lab: "68975f077cbaff34c168278d2a2d90cd6a309062; strict catalog, binding projection, strict pending guard and mutation-writer census"
+    runner: "V0A0 quick-test reports, law-harness tables and CRuby witnesses at lab 68975f077cbaff34c168278d2a2d90cd6a309062"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,8 +58,8 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "Mutation-site writers lose witnessed values in 21 rows on all four schedules; counting unproved rows as possible losses, at most 2,202 of 4,652 narrowings (47.3%) lose values at 95% confidence. The strict guard and the binding projection add no witnessed loss, but both binding tables miss 45 bindings that Ruby reaches."
-  facts: [F75, F74, F73, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "Mutation-site writers lose witnessed values in 21 rows on all four schedules; counting unproved rows as possible losses, at most 2,202 of 4,652 narrowings (47.3%) lose values at 95% confidence. The guard, the binding projection and the strict catalog add no witnessed loss, but both binding tables miss 45 reachable bindings and older catalog gaps remain, such as `Int + Float` typed `Int`."
+  facts: [F76, F75, F74, F73, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
@@ -68,8 +68,8 @@
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "research/binding-projection-f2597823 9ae77664fe2e36da1b4f8b96a90cc53839aa3c77 and research/mutation-writers-66c06f52 18fcc75d611fc7fc7a5dfc00b4d0fd2fbea124a6 (snapshots of f2597823 and 66c06f52 on upstream a5d73fdf)"
-    lab: "c4c03a6c23af66bbd8a7fd9ba7a97827f03f1138; binding projection, strict guard and mutation-writer census with CRuby witnesses"
+    compiler: "research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f and research/mutation-writers-66c06f52 18fcc75d611fc7fc7a5dfc00b4d0fd2fbea124a6 (snapshots of 5a6f535e and 66c06f52 on upstream a5d73fdf)"
+    lab: "68975f077cbaff34c168278d2a2d90cd6a309062; strict catalog, binding projection, strict guard and mutation-writer census with CRuby witnesses"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
