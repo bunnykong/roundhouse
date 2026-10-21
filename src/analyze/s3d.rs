@@ -105,6 +105,13 @@ impl Tracker {
         if let Some(kind) = kind {
             *self.completions.entry(kind).or_default() += 1;
         }
+        if super::current_harvest::on() {
+            if !matches!(outcome, Completion::Stub | Completion::AbsentSpliced) {
+                super::harvest_return::insert_inferred_return(table, name,
+                    body.unwrap_or_else(super::strict_producers::input_seed));
+            }
+            return;
+        }
         if let Some(ty) = body.filter(|t| !matches!(t, Ty::Var { .. })) {
             // Completion is a first result, not a permanent signature. A later
             // informative body takes the ordinary harvest path and replaces it.

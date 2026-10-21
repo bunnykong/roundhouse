@@ -2067,6 +2067,7 @@ impl Analyzer {
                 Family::CtrlAction => {
                     let controller = &app.controllers[unit.ci];
                     let Some(action) = controller.actions().nth(unit.mi) else { return reapplied };
+                    let _current = super::current_harvest::writer(&controller.name, &action.name, false, action.body.span);
                     let body_ty = super::tuple_return_ty(&action.body)
                         .or_else(|| super::effective_return_ty(&action.body));
                     self.harvest_action_return(app, &controller.name, &action.name, body_ty);
@@ -2077,6 +2078,7 @@ impl Analyzer {
                         crate::dialect::ControllerBodyItem::ClassMethod { method, configuration_slot: None, .. } => Some(method),
                         _ => None,
                     }).nth(unit.mi) else { return reapplied };
+                    let _current = super::current_harvest::writer(&controller.name, &method.name, true, method.body.span);
                     let ret = self.method_return_ty(&controller.name, method);
                     let target = &mut self.classes.entry(controller.name.clone()).or_default().class_methods;
                     Self::register_method_return(target, &method.name, ret.as_ref());

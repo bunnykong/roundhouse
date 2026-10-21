@@ -203,6 +203,7 @@ impl Analyzer {
         fold::completion_values(&mut |t| add("side-table", t));
         handoff::completion_values(&mut |t| add("handoff", t));
         param_views::completion_values(&mut |t| add("parameter-writer", t));
+        current_harvest::completion_values(&mut |t| add("return-writer", t));
         writers::completion_values(&mut |t| add("call-writer", t));
         if let Some(eng) = self.sccq.as_mut() {
             for row in eng.writer_index.values_mut() {

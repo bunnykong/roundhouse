@@ -221,6 +221,7 @@ impl Analyzer {
                         .entry(controller.name.clone())
                         .or_default()
                         .class_methods;
+                    let _current = super::current_harvest::writer(&controller.name, &method.name, true, method.body.span);
                     Self::insert_inferred_return(table, &method.name, ret);
                 }
             }

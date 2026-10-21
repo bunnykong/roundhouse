@@ -54,6 +54,9 @@ mod private_calls;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
+mod current_harvest;
+#[cfg(test)]
+mod qt_whole2_tests;
 pub mod s3d;
 pub(crate) mod strict_producers;
 pub mod producer_evidence;
@@ -152,6 +155,8 @@ pub struct Analyzer {
     /// from "a copy the fold wrote last iteration" (overwritten so each
     /// fixpoint round's refinement of the module's returns propagates).
     concern_folded: HashMap<ClassId, (BTreeSet<Symbol>, BTreeSet<Symbol>)>,
+    /// Syntax-declared return owners; concern-copy history cannot revoke ownership.
+    source_return_owners: BTreeSet<ParamKey>,
     /// Method names the host fold copied onto each MODULE from its
     /// includers (see `fold_host_surfaces`). Kept out of what the
     /// concern fold copies back down, and rewritten every round.
@@ -1270,6 +1275,7 @@ impl Analyzer {
                 .collect(),
             adapter,
             concern_folded: HashMap::new(),
+            source_return_owners: Self::defined_methods(app),
             host_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
             inquirers: inquiry::inquirer_methods(app),
@@ -1378,6 +1384,7 @@ impl Analyzer {
         completion_rerun::reset();
         let completion_source = completion_rerun::on().then(|| app.clone());
         producer_evidence::reset(&app.sources);
+        current_harvest::reset(app);
         s4_census::start();
         self.fixpoint_checks = fixpoint_check::Checks::start();
         // Before any signature is copied. Anonymous `**` / `...` cannot
@@ -1890,6 +1897,7 @@ impl Analyzer {
         det::report();
         self.report_errgate(app);
         producer_evidence::report();
+        current_harvest::report();
     }
 
     /// With the add-only rules or the fold, what is still pending when
@@ -5647,6 +5655,12 @@ impl Analyzer {
     /// consumer — dispatch, `ide::members_of`, completion — sees the
     /// mixed-in surface identically.
 
+    fn own_return(&self, class: &ClassId, method: &Symbol, side: MethodReceiver) -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("RH_OWN_RETURNS").as_deref() == Ok("1"))
+            && self.source_return_owners.contains(&(class.clone(), method.clone(), side))
+    }
+
     /// `extend Mod` in a class body: Mod's INSTANCE methods become the
     /// class's singleton methods (`extend TrackCurrent` gives `User.current`,
     /// `User.with_current`). Folded the way an `include`d module's surface
@@ -5711,9 +5725,12 @@ impl Analyzer {
                         queue.push(n);
                     }
                 }
+                let own: BTreeSet<_> = inst.keys().filter(|name|
+                    self.own_return(&id, name, MethodReceiver::Class)).cloned().collect();
                 let folded = self.concern_folded.entry(id.clone()).or_default();
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
+                    if own.contains(&name) { continue; }
                     if cls.class_methods.contains_key(&name) && !folded.1.contains(&name) {
                         continue;
                     }
@@ -5768,9 +5785,14 @@ impl Analyzer {
                         queue.push(n.clone());
                     }
                 }
+                let own_inst: BTreeSet<_> = inst.keys().filter(|name|
+                    self.own_return(&id, name, MethodReceiver::Instance)).cloned().collect();
+                let own_class: BTreeSet<_> = class_side.keys().filter(|name|
+                    self.own_return(&id, name, MethodReceiver::Class)).cloned().collect();
                 let folded = self.concern_folded.entry(id.clone()).or_default();
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
+                    if own_inst.contains(name) { continue; }
                     if spliced_own_on()
                         && app.concern_spliced_actions.get(&id).is_some_and(|m| m.contains_key(name))
                     {
@@ -5792,6 +5814,7 @@ impl Analyzer {
                     fold::note_alias(&id, name, &m);
                 }
                 for (name, ty) in class_side {
+                    if own_class.contains(name) { continue; }
                     if cls.class_methods.contains_key(name) && !folded.1.contains(name) {
                         continue;
                     }
@@ -6090,6 +6113,11 @@ impl Analyzer {
         body_ty: Option<&Ty>,
     ) {
         producer_evidence::input(body_ty);
+        if current_harvest::on() {
+            Self::insert_inferred_return(table, method,
+                body_ty.cloned().unwrap_or_else(strict_producers::input_seed));
+            return;
+        }
         match body_ty {
             Some(t) if !matches!(t, Ty::Var { .. }) => {
                 Self::insert_inferred_return(table, method, t.clone());

@@ -383,8 +383,20 @@ pub(super) fn writer_begin(source: &str) {
         s.current_sites.clear();
     });
 }
+fn site_retract_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_SITE_RETRACT").as_deref() == Ok("1"))
+}
 fn writer_value(s: &mut State, slot: u32) {
     let cells=s.site_writers.get(&slot);
+    if site_retract_on() && cells.is_none_or(|m| m.is_empty()) {
+        if s.values.contains_key(&slot) { note_moved(slot, s.values.get(&slot)); }
+        s.values.remove(&slot);
+        s.site_writers.remove(&slot);
+        s.site_epoch.remove(&slot);
+        s.joined.remove(&slot);
+        return;
+    }
     let seed=if cells.is_some_and(|m|!m.is_empty()) { Ty::pending_untyped() } else { Ty::Bottom };
     let value=cells.into_iter().flat_map(|m|m.values())
         .cloned().fold(seed,super::writers::join);
@@ -1196,7 +1208,7 @@ mod tests {
         writer_begin("first"); writer_end("first");
         assert_eq!(read(),Ty::Bool); // retyped first no longer writes
         writer_begin("second"); writer_end("second");
-        assert_eq!(read(),Ty::Bottom);
+        assert_eq!(value_of(slot,&HashMap::new()), if site_retract_on() { None } else { Some(Ty::Bottom) });
         ST.with(|s|*s.borrow_mut()=State::default());
     }
 
@@ -1228,6 +1240,34 @@ mod tests {
         assert!(super::super::strict_producers::is_p(&value_of(slot,&HashMap::new()).unwrap()));
         writer_begin("pending-source"); accumulate(key,Ty::Int); writer_end("pending-source");
         assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Int));
+        ST.with(|s|*s.borrow_mut()=State::default());
+    }
+
+    #[test]
+    #[ignore = "RH_SITE_RETRACT=1 RH_WRITERS=1"]
+    fn site_retract_removes_only_the_last_retired_writer_and_can_recreate_the_slot() {
+        assert!(site_retract_on() && super::super::writers::on());
+        for key in [SlotKey::At {site:(1,10,20),step:Step::Val},
+                    SlotKey::Narrow {site:(1,10,20),filter:"truthy_img_src".into()}] {
+            ST.with(|s|*s.borrow_mut()=State::default());
+            writer_begin("first");
+            let Ty::Rec {slot}=accumulate(key.clone(),Ty::Int) else {unreachable!()};
+            writer_end("first");
+            writer_begin("second"); accumulate(key.clone(),Ty::Bottom); writer_end("second");
+            writer_begin("first"); writer_end("first");
+            assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Bottom),
+                "a current Bottom writer is a real cell");
+            new_epoch();
+            assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Bottom),
+                "a skipped source keeps its current contribution");
+            writer_begin("second"); writer_end("second");
+            assert_eq!(value_of(slot,&HashMap::new()),None,
+                "retiring the last writer removes the cell");
+            writer_begin("first");
+            assert_eq!(accumulate(key,Ty::Str),Ty::Rec {slot});
+            writer_end("first");
+            assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Str));
+        }
         ST.with(|s|*s.borrow_mut()=State::default());
     }
 
