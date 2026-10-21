@@ -47,6 +47,19 @@ struct State {
     revision: u64,
 }
 thread_local! { static ST: RefCell<State> = RefCell::new(State::default()); }
+pub(super) fn completion_values(f: &mut dyn FnMut(&mut Ty)) {
+    if !on() { return; }
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        fn site(site: &mut SendSite, f: &mut dyn FnMut(&mut Ty)) {
+            site.2.iter_mut().for_each(&mut *f);
+            for (_, t) in &mut site.3.keys { f(t); }
+            if let Some(t) = &mut site.3.splat { f(t); }
+        }
+        for calls in s.calls.values_mut() { for call in calls { site(call, f); } }
+        for call in &mut s.pending_calls { site(call, f); }
+    });
+}
 pub(super) fn reset(app: &crate::App) {
     let mut state = State::default();
     let includes: HashMap<_, _> = app
@@ -498,6 +511,10 @@ pub(super) struct RowCells {
     tree: Vec<Option<Vec<Ty>>>,
 }
 impl RowCells {
+    pub(super) fn completion_values(&mut self, f: &mut dyn FnMut(&mut Ty)) {
+        for t in self.rows.iter_mut().flatten().flatten() { f(t); }
+        self.rebuild();
+    }
     fn combine(a: Option<&Vec<Ty>>, b: Option<&Vec<Ty>>) -> Option<Vec<Ty>> {
         match (a, b) {
             (None, None) => None,

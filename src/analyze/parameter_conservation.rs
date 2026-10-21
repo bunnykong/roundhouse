@@ -48,6 +48,11 @@ fn pending_only(t: &Ty) -> bool {
 
 // C5 L3: initialization is a join with the fresh (pending) cell; no first-arrival rule.
 pub(super) fn initialize(observed: Ty) -> Ty {
+    // Bottom is an already-computed non-returning argument, not an unpaid
+    // input. Joining the fresh Pending seed would recreate it on every replay.
+    if super::route_static::strict_on() && matches!(observed, Ty::Bottom) {
+        return Ty::Bottom;
+    }
     if pident() {
         join(Ty::pending_untyped(), observed)
     } else if matches!(observed, Ty::Bottom) {

@@ -1375,6 +1375,8 @@ impl Analyzer {
     }
 
     fn analyze_cached(&mut self, app: &mut App) {
+        completion_rerun::reset();
+        let completion_source = completion_rerun::on().then(|| app.clone());
         producer_evidence::reset(&app.sources);
         s4_census::start();
         self.fixpoint_checks = fixpoint_check::Checks::start();
@@ -1795,6 +1797,11 @@ impl Analyzer {
                 TypingMode::ViewsAndTests,
             )
         });
+        if let Some(source) = completion_source.as_ref() {
+            self.type_direct_helper_bodies(app);
+            self.type_rails_application_body(app);
+            self.complete_rerun(app, source, &round_inputs);
+        }
         // Effects are a function of the converged typed trees, not of
         // the fixpoint. Collecting inside every typing round walked
         // the same bodies two or three times per round for no harvest
@@ -2772,13 +2779,13 @@ impl Analyzer {
             }
             for name in collect_attr_accessor_names(&model.body) {
                 let seed = if strict_producers::stubs_on() && own_assignments.contains_key(&name) {
-                    Ty::pending_untyped()
+                    strict_producers::input_seed()
                 } else { Ty::unresolved() };
                 class_ivars.entry(name).or_insert(seed);
             }
             if strict_producers::seeds_on() {
                 for name in own_assignments.keys() {
-                    class_ivars.entry(name.clone()).or_insert_with(Ty::pending_untyped);
+                    class_ivars.entry(name.clone()).or_insert_with(strict_producers::input_seed);
                 }
             }
 
@@ -8583,7 +8590,8 @@ fn collect_direct_send_sites(
                         .collect(),
                 };
                 if writers::on() && !args.is_empty() && recv.as_ref().is_some_and(|r|
-                    r.ty.as_ref().is_none_or(|t|writers::unknown_receiver(t,classes))) {
+                    if route_static::strict_on() { route_static::strict_receiver(r.ty.as_ref(),classes) }
+                    else { r.ty.as_ref().is_none_or(|t|writers::unknown_receiver(t,classes)) }) {
                     recv_classes.push(writers::unknown_receiver_class());
                 }
                 let site_recv = match recv.as_ref().map(|r| &*r.node) {
@@ -9228,7 +9236,7 @@ fn pending_ivar_seeds<'a>(bodies: impl Iterator<Item = &'a Expr>) -> HashMap<Sym
         match &*e.node {
             ExprNode::Assign { target: LValue::Ivar { name }, .. }
             | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
-                out.insert(name.clone(), Ty::pending_untyped());
+                out.insert(name.clone(), strict_producers::input_seed());
             }
             _ => {}
         }

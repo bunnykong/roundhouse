@@ -3,9 +3,137 @@
 use super::*;
 use std::{collections::BTreeMap, sync::Arc};
 
+thread_local! { static INPUTS_COMPLETED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+pub(super) fn reset() { INPUTS_COMPLETED.with(|x| x.set(false)); }
+pub(super) fn inputs_completed() -> bool { INPUTS_COMPLETED.with(|x| x.get()) }
+pub(super) fn begin_completion() { INPUTS_COMPLETED.with(|x| x.set(true)); }
+
 pub(super) fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RH_COMPLETE_RERUN").as_deref() == Ok("1"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Each case owns a fresh process because analyzer feature flags are cached.
+    fn child(name: &str) -> bool {
+        if std::env::var("RH_COMPLETE_TEST").as_deref() == Ok(name) { return true; }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("analyze::completion_rerun::tests::{name}"), "--nocapture"])
+            .env("RH_COMPLETE_TEST", name)
+            .envs([
+                ("RH_RS5", "1"), ("RH_COMPLETE_RERUN", "1"),
+                ("RH_S6_PARAM_VIEWS", "1"), ("RH_VIEW_KEEP", "known"),
+                ("RH_SCHED", "sccq"), ("RH_FOLD", "1"), ("RH_FOLD_JOIN", "1"),
+                ("RH_FOLD_TAIL", "1"), ("RH_FOLD_SLOTS", "1"),
+                ("RH_C4_NO_STABILIZE", "1"), ("RH_C4_SPLICED_OWN", "1"),
+                ("RH_C5_READER_VIEW", "1"), ("RH_C5_LIFT", "1"),
+                ("RH_C5_NORM", "1"), ("RH_C5_PIDENT", "1"),
+                ("RH_C5_CONGRUENT", "1"), ("RH_C5_STRICT_STUBS", "1"),
+                ("RH_C5_STRICT_XFER", "1"), ("RH_P2_PARAM_CONSERVE", "1"),
+            ]).output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr));
+        let events: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr).lines()
+            .filter_map(|line| line.strip_prefix("rh-complete: "))
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert!(events.iter().any(|e| e["phase"] == "completion-round"), "case must exercise rerun");
+        let safety = events.iter().find(|e| e["phase"] == "settlement-safety-net").unwrap();
+        assert_eq!(safety["total"], 0, "completion must close before final settlement: {events:?}");
+        false
+    }
+    fn source(ruby: &str) -> App {
+        crate::ingest::survey::activate();
+        crate::ingest::app::ingest_app_from_tree(HashMap::from([
+            (std::path::PathBuf::from("app/models/completion_harness.rb"), ruby.as_bytes().to_vec())
+        ])).unwrap()
+    }
+    fn owner() -> ClassId { ClassId(Symbol::from("CompletionHarness")) }
+    fn assert_closed(analyzer: &mut Analyzer, app: &mut App) {
+        let pending = analyzer.pending_state(app, None);
+        assert_eq!(pending.values().sum::<u64>(), 0, "all stored Pending must close: {pending:?}");
+    }
+    fn string_admitted(t: &Ty) -> bool {
+        match t {
+            Ty::Str | Ty::Untyped { .. } | Ty::Var { .. } => true,
+            Ty::Union { variants } => variants.iter().any(string_admitted),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn never_completed_stub_recovers_nested_hash_unknown() {
+        if !child("never_completed_stub_recovers_nested_hash_unknown") { return; }
+        let mut app = source(r#"
+class CompletionHarness
+  def render(payload)
+    payload
+  end
+  def create
+    render(json: {success: true, url: oauth_client.auth_code.authorize_url})
+  end
+end
+"#);
+        let mut analyzer = Analyzer::new(&app);
+        // A declaration with no usable body harvest, as in F68's spliced stub.
+        analyzer.classes.get_mut(&owner()).unwrap().instance_methods
+            .insert(Symbol::from("oauth_client"), Ty::pending_untyped());
+        analyzer.analyze(&mut app);
+        let row = analyzer.inferred_param_types(&owner(), &Symbol::from("render")).unwrap();
+        let Ty::Hash { value, .. } = &row[0] else { panic!("outer hash: {row:?}") };
+        let Ty::Hash { value, .. } = &**value else { panic!("nested hash: {row:?}") };
+        assert!(string_admitted(value), "OAuth String leaf was lost: {row:?}");
+        let mut completed = false;
+        fold::visit(value, &mut |t| completed |= matches!(t, Ty::Untyped { why }
+            if why.effective() == crate::ty::Provenance::Unresolved));
+        assert!(completed, "the never-completed writer must contribute real unknown evidence: {row:?}");
+        drop(row);
+        assert_closed(&mut analyzer, &mut app);
+    }
+
+    #[test]
+    fn parameter_without_callers_completes_unknown() {
+        if !child("parameter_without_callers_completes_unknown") { return; }
+        assert!(strict_producers::is_p(&strict_producers::parameter_seed(None).unwrap()));
+        let mut app = source("class CompletionHarness\n def orphan(value)\n {answer: value}\n end\nend\n");
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        let ret = &analyzer.classes[&owner()].instance_methods[&Symbol::from("orphan")];
+        let Ty::Hash { value, .. } = ret else { panic!("orphan return: {ret:?}") };
+        assert!(matches!(&**value, Ty::Untyped { why } if why.effective() == crate::ty::Provenance::Unresolved),
+            "unobserved entry parameter must complete to unknown: {ret:?}");
+        assert_closed(&mut analyzer, &mut app);
+    }
+
+    #[test]
+    fn later_information_replaces_pending_seed() {
+        if !child("later_information_replaces_pending_seed") { return; }
+        let mut app = source(r#"
+class CompletionHarness
+  def echo(value)
+    value
+  end
+  def early
+    echo(late)
+  end
+  def late
+    "ready"
+  end
+  def never_called(value)
+    value
+  end
+end
+"#);
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        let row = analyzer.inferred_param_types(&owner(), &Symbol::from("echo")).unwrap();
+        assert_eq!(row[0], Ty::Str, "a completed caller must supersede its premature seed");
+        assert_eq!(analyzer.classes[&owner()].instance_methods[&Symbol::from("early")], Ty::Str);
+        drop(row);
+        assert_closed(&mut analyzer, &mut app);
+    }
 }
 
 /// Preserve structure and reason-only changes; normal wire equality ignores them.
@@ -73,8 +201,16 @@ impl Analyzer {
             }
         }
         fold::completion_values(&mut |t| add("side-table", t));
+        handoff::completion_values(&mut |t| add("handoff", t));
         param_views::completion_values(&mut |t| add("parameter-writer", t));
+        writers::completion_values(&mut |t| add("call-writer", t));
         if let Some(eng) = self.sccq.as_mut() {
+            for row in eng.writer_index.values_mut() {
+                row.completion_values(&mut |t| add("engine-writer", t));
+            }
+            for calls in eng.writer_sites.values_mut() {
+                for (_, row) in calls { for t in row { add("engine-writer-site", t); } }
+            }
             for row in eng.base_rows.values_mut() { for t in row { add("engine-parameter", t); } }
             for rows in eng.site_index.values_mut() {
                 for row in rows.values_mut() { for t in row { add("engine-site", t); } }
@@ -109,5 +245,71 @@ impl Analyzer {
         let counts = self.pending_state(app, None);
         eprintln!("rh-complete: {}", serde_json::json!({"phase":phase,
             "pending":counts,"total":counts.values().sum::<u64>()}));
+    }
+
+    /// Pending identity may already have erased a dependency. Conservatively
+    /// dirty every consumer and replay source/signed seeds, not inferred stamps.
+    pub(super) fn complete_rerun(&mut self, app: &mut App, source: &App,
+        inputs: &fixpoint_check::RoundInputs<'_>)
+    {
+        let mut rounds = 0;
+        let mut closed = true;
+        for round in 1..=3 {
+            let reference_params = fold::complete_reference_params();
+            let mut counts = self.pending_state(app, Some(crate::ty::Provenance::Unresolved));
+            counts.insert("reference-only-parameter", reference_params);
+            let total = counts.values().sum::<u64>();
+            // Strict top routing opens only after the pending computation phase.
+            let open_routes = round == 1 && route_static::strict_on();
+            if total == 0 && !open_routes { break; }
+            rounds += 1;
+            begin_completion();
+
+            // Discard all cached consumer trees and read contexts. The registry,
+            // rows and fold cells above are the completed producer decisions.
+            *app = source.clone();
+            self.sccq = None;
+            self.sccq_production_end = None;
+            self.sccq_last_global = None;
+            self.sccq_skip_fine = false;
+            self.sccq_harvest_fine = false;
+            self.sccq_ctrl_pending = None;
+            self.controller_action_meta_cache.clear();
+            self.view_seeds = None;
+            let mut end = LoopEnd::RanToCap;
+            let mut iterations = 0;
+            // Reuse the existing global-round limit; this is a fresh phase,
+            // with all source bodies dirty, including views and test helpers.
+            for pass in 0..12 {
+                iterations += 1;
+                let before = self.capture_dirty_hints();
+                self.run_typing_passes(app, inputs.dynamic_render_ivars,
+                    inputs.existing_view_names, inputs.module_methods,
+                    inputs.module_includes, inputs.parent_link_by_name,
+                    TypingMode::Production { dirty: None });
+                self.run_typing_passes(app, inputs.dynamic_render_ivars,
+                    inputs.existing_view_names, inputs.module_methods,
+                    inputs.module_includes, inputs.parent_link_by_name,
+                    TypingMode::ViewsAndTests);
+                self.type_direct_helper_bodies(app);
+                self.type_rails_application_body(app);
+                self.harvest_returns_to_registry(app, true);
+                self.unify_params_from_call_sites(app, UnifyScope::WithViews);
+                self.overlay_test_params(app);
+                let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
+                if self.inference_matches(&before.sig) && self.block_value_matches(&before) && side_stable {
+                    end = LoopEnd::Settled(pass);
+                    break;
+                }
+            }
+            closed = matches!(end, LoopEnd::Settled(_));
+            self.fixpoint_rounds.absorb = end;
+            eprintln!("rh-complete: {}", serde_json::json!({"phase":"completion-round",
+                "round":round,"completed":counts,"total":total,"all_consumers_dirty":true,
+                "retype_iterations":iterations,"closed":closed}));
+        }
+        let pending = self.pending_state(app, None);
+        eprintln!("rh-complete: {}", serde_json::json!({"phase":"completion-finished",
+            "rounds":rounds,"pending":pending,"total":pending.values().sum::<u64>(),"closed":closed}));
     }
 }

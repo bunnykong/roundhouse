@@ -10,8 +10,13 @@ pub(crate) fn seeds_on() -> bool {
 /// This also keeps legacy Var observations out of the unresolved boundary.
 pub(crate) fn parameter_seed(t: Option<Ty>) -> Option<Ty> {
     if seeds_on() && t.as_ref().is_none_or(|t| matches!(t, Ty::Var { .. })) {
-        Some(Ty::pending_untyped())
+        Some(input_seed())
     } else { t }
+}
+
+pub(crate) fn input_seed() -> Ty {
+    if super::completion_rerun::inputs_completed() { Ty::unresolved() }
+    else { Ty::pending_untyped() }
 }
 
 pub(crate) fn stubs_on() -> bool {

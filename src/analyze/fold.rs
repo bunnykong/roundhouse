@@ -135,6 +135,8 @@ struct State {
     /// The side table: the current value of each parameter, position and
     /// narrowing slot.
     values: HashMap<u32, Ty>,
+    /// Parameter-reference components completed at quiescence.
+    completed_reference_params: HashSet<u32>,
     /// Typing-pass counter, and the pass of each site slot's last write.
     epoch: u64,
     site_epoch: HashMap<u32, u64>,
@@ -281,7 +283,7 @@ pub(super) fn param_seed(class: &ClassId, method: &Symbol, side: crate::dialect:
     }
     if let Some(slot)=slot {
         // No old stored value enters the right hand side.
-        let value=super::param_views::view(aggregate);
+        let value=completed_parameter_value(slot, super::param_views::view(aggregate));
         super::structure::fold_write(&key,"parameter-seed");
         ST.with(|s| {
             let mut s=s.borrow_mut();
@@ -1291,7 +1293,104 @@ pub(super) fn structure_parts() -> (Vec<SlotKey>, Vec<String>, Vec<String>) {
 
 // Read-only S2 classification observer. Snapshot before serialization to avoid nested borrows.
 pub(super) fn completion_values(f: &mut dyn FnMut(&mut Ty)) {
-    ST.with(|s| { for t in s.borrow_mut().values.values_mut() { f(t); } });
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        for t in s.values.values_mut() { f(t); }
+        if super::writers::on() {
+            for t in s.site_writers.values_mut().flat_map(|v| v.values_mut()) { f(t); }
+            for t in s.current_sites.values_mut() { f(t); }
+        }
+    });
+}
+
+/// Only a closed component made entirely of parameter references is an
+/// unpaid parameter obligation. Bottom and productive recursive containers
+/// never enter this set. Include reference-only feeders into those cycles.
+pub(super) fn complete_reference_params() -> u64 {
+    if !super::completion_rerun::on() { return 0; }
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        let mut graph = HashMap::<u32, Vec<u32>>::new();
+        for (&slot, t) in &s.values {
+            if !matches!(s.keys.get(slot as usize), Some(SlotKey::Param { .. })) { continue; }
+            let mut refs = Vec::new();
+            if reference_leaves(t, &mut refs) && !refs.is_empty() { graph.insert(slot, refs); }
+        }
+        loop {
+            let remove: Vec<_> = graph.iter().filter(|(_, refs)| refs.iter().any(|r| !graph.contains_key(r)))
+                .map(|(slot, _)| *slot).collect();
+            if remove.is_empty() { break; }
+            for slot in remove { graph.remove(&slot); }
+        }
+        let n = graph.len() as u64;
+        for slot in graph.keys() {
+            s.completed_reference_params.insert(*slot);
+            note_moved(*slot, s.values.get(slot));
+            s.values.insert(*slot, Ty::unresolved());
+            s.joined.remove(slot);
+        }
+        n
+    })
+}
+
+fn reference_leaves(t: &Ty, refs: &mut Vec<u32>) -> bool {
+    match t {
+        Ty::Rec { slot } => { refs.push(*slot); true }
+        Ty::Union { variants } if !variants.is_empty() => variants.iter().all(|t| reference_leaves(t, refs)),
+        _ => false,
+    }
+}
+fn completed_parameter_value(slot: u32, value: Ty) -> Ty {
+    if !super::completion_rerun::on() { return value; }
+    let complete = ST.with(|s| {
+        let s = s.borrow();
+        fn still_unknown(slot: u32, s: &State, seen: &mut HashSet<u32>) -> bool {
+            if !s.completed_reference_params.contains(&slot) { return false; }
+            if !seen.insert(slot) { return true; }
+            match s.values.get(&slot) {
+                Some(Ty::Untyped { .. }) => true,
+                Some(t) => {
+                    let mut refs = Vec::new();
+                    reference_leaves(t, &mut refs) && !refs.is_empty()
+                        && refs.iter().all(|r| still_unknown(*r, s, seen))
+                }
+                None => false,
+            }
+        }
+        let mut refs = Vec::new();
+        s.completed_reference_params.contains(&slot) && reference_leaves(&value, &mut refs)
+            && !refs.is_empty() && refs.iter().all(|r| still_unknown(*r, &s, &mut HashSet::new()))
+    });
+    if complete { Ty::unresolved() } else { value }
+}
+
+#[cfg(test)]
+mod qt_whole_completion_tests {
+    use super::*;
+    #[test]
+    #[ignore = "RH_COMPLETE_RERUN=1"]
+    fn qt_history_reference_only_parameter_component_completes_and_stays_current() {
+        assert!(super::super::completion_rerun::on());
+        ST.with(|s| *s.borrow_mut() = State::default());
+        let key = |index| SlotKey::Param { class:ClassId(Symbol::from("Probe")), method:Symbol::from("cycle"),
+            side:crate::dialect::MethodReceiver::Instance,index };
+        let a = intern(key(0)); let b = intern(key(1)); let productive = intern(key(2)); let bottom = intern(key(3));
+        ST.with(|s| { let mut s = s.borrow_mut();
+            s.values.insert(a, Ty::Rec {slot:b}); s.values.insert(b, Ty::Rec {slot:a});
+            s.values.insert(productive, Ty::Array {elem:std::sync::Arc::new(Ty::Rec {slot:productive})});
+            s.values.insert(bottom, Ty::Bottom);
+        });
+        assert_eq!(complete_reference_params(), 2);
+        assert_eq!(value_of(a, &HashMap::new()), Some(Ty::unresolved()));
+        assert_eq!(completed_parameter_value(a, Ty::Rec {slot:b}), Ty::unresolved());
+        assert_eq!(completed_parameter_value(a, Ty::Str), Ty::Str);
+        ST.with(|s| { s.borrow_mut().values.insert(b, Ty::Str); });
+        assert_eq!(completed_parameter_value(a, Ty::Rec {slot:b}), Ty::Rec {slot:b},
+            "a newly informative referenced parameter must propagate through the completed component");
+        assert_eq!(value_of(bottom, &HashMap::new()), Some(Ty::Bottom));
+        assert!(matches!(value_of(productive, &HashMap::new()), Some(Ty::Array {..})));
+        assert_eq!(complete_reference_params(), 0);
+    }
 }
 
 pub(crate) fn s2_values() -> Vec<(String, Ty)> {

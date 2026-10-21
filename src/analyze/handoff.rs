@@ -70,6 +70,14 @@ pub(crate) fn reset() {
     }
 }
 
+pub(super) fn completion_values(f: &mut dyn FnMut(&mut Ty)) {
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        for t in s.prev_rets.values_mut() { f(t); }
+        for t in s.prev_params.values_mut().flatten() { f(t); }
+    });
+}
+
 /// Join every inferred return with the value it held after the previous
 /// harvest. Called after the harvest and again after the registry copies,
 /// so a copy carries the joined value.

@@ -23,6 +23,29 @@ pub(super) fn top_on() -> bool {
     *ON && super::writers::on()
 }
 
+pub(super) fn strict_on() -> bool {
+    static ON: LazyLock<bool> =
+        LazyLock::new(|| std::env::var("RH_ROUTE_STRICT").as_deref() == Ok("1"));
+    *ON && top_on()
+}
+
+/// A pending computation is not evidence of a dynamic receiver. The second
+/// phase replays every consumer before genuine unknowns can publish top.
+pub(super) fn strict_receiver(t: Option<&Ty>, classes: &HashMap<ClassId, super::ClassInfo>) -> bool {
+    if !super::completion_rerun::inputs_completed() { return false; }
+    fn unknown(t: &Ty, classes: &HashMap<ClassId, super::ClassInfo>, seen: &mut BTreeSet<u32>) -> bool {
+        match t {
+            Ty::Untyped { why } => matches!(why.effective(),
+                crate::ty::Provenance::Unresolved | crate::ty::Provenance::Gradual),
+            Ty::Union { variants } => variants.iter().any(|t| unknown(t, classes, seen)),
+            Ty::Rec { slot } if seen.insert(*slot) => super::fold::value_of(*slot, classes)
+                .is_some_and(|t| unknown(&t, classes, seen)),
+            _ => false,
+        }
+    }
+    t.is_some_and(|t| unknown(t, classes, &mut BTreeSet::new()))
+}
+
 #[derive(Default)]
 pub(super) struct Index {
     exact: HashMap<(Symbol, usize), BTreeSet<ParamKey>>,
@@ -281,13 +304,40 @@ impl Index {
             .map(|m| (&m.name, m.parent.as_ref()))
             .collect();
         let base = ClassId(Symbol::from("ActiveRecord::Base"));
-        for owner in app
+        let mut owners: BTreeSet<_> = app
             .models
             .iter()
             .filter(|m| super::descends_from_active_record(&m.name, &parents))
-            .map(|m| &m.name)
-            .chain(classes.contains_key(&base).then_some(&base))
-        {
+            .map(|m| m.name.clone())
+            .chain(classes.contains_key(&base).then_some(base.clone())).collect();
+        if strict_on() {
+            // The registry's association return can name an alias that has no
+            // Model or ClassInfo of its own (M192's ActiveRelationship). Freeze
+            // those nominal destinations too, before inference has run.
+            for model in &app.models {
+                let Some(info) = classes.get(&model.name) else { continue; };
+                let mut names: BTreeSet<_> = model.associations().map(|a| a.name().clone()).collect();
+                let mut queue = super::model_includes(model);
+                let mut seen = BTreeSet::new();
+                while let Some(module) = queue.pop() {
+                    if !seen.insert(module.clone()) { continue; }
+                    if let Some(c) = classes.get(&module) { queue.extend(c.includes.iter().cloned()); }
+                    if let Some(items) = app.concern_model_items.get(&module) {
+                        for item in items {
+                            if let crate::dialect::ModelBodyItem::Association { assoc, .. } = item {
+                                names.insert(assoc.name().clone());
+                            }
+                        }
+                    }
+                }
+                for name in names {
+                    if let Some(t) = info.instance_methods.get(&name) {
+                        owners.extend(super::class_ids_for_call_receiver(t));
+                    }
+                }
+            }
+        }
+        for owner in &owners {
             for entry in crate::catalog::AR_CATALOG {
                 let side = if entry.receiver == crate::catalog::ReceiverContext::Instance {
                     MethodReceiver::Instance
@@ -378,7 +428,7 @@ impl Index {
                 current = class
                     .parent
                     .as_ref()
-                    .map(|p| analyzer.lexical_parent(&id, p));
+                    .cloned();
             }
             for (declared, bounds) in contracts {
                 if !modules.contains(&declared.0) {
@@ -569,6 +619,14 @@ impl Index {
         while row.last().is_some_and(super::strict_producers::is_p) {
             row.pop();
         }
+        // A keyword can leave an interior positional hole. An omitted argument
+        // is a computed absence, not an unpaid input or a real unknown writer.
+        // Keep trailing formals absent and retained holes as the empty value.
+        if strict_on() {
+            for t in &mut row {
+                if super::strict_producers::is_p(t) { *t = Ty::Bottom; }
+            }
+        }
         row
     }
 }
@@ -596,6 +654,9 @@ mod tests {
             anonymous_forward: false,
         }
     }
+    fn expected_absent_argument() -> Ty {
+        if strict_on() { Ty::Bottom } else { Ty::pending_untyped() }
+    }
     fn with_shape(index: &mut Index, key: &ParamKey, slots: &[(&str, ParamKind)]) {
         index.insert(
             key.clone(),
@@ -612,6 +673,119 @@ mod tests {
             }],
         );
     }
+    #[test]
+    #[ignore = "RH_WRITERS=1 RH_ROUTE_TOP=1 RH_ROUTE_STRICT=1"]
+    fn strict_routes_wait_for_completion_and_require_real_unknowns() {
+        assert!(strict_on());
+        let classes = HashMap::new();
+        super::super::completion_rerun::reset();
+        for t in [Ty::pending_untyped(), Ty::unresolved(), Ty::gradual(), Ty::Var {var:crate::ident::TyVar(0)}] {
+            assert!(!strict_receiver(Some(&t), &classes));
+        }
+        assert!(!strict_receiver(None, &classes));
+        super::super::completion_rerun::begin_completion();
+        assert!(strict_receiver(Some(&Ty::unresolved()), &classes));
+        assert!(strict_receiver(Some(&Ty::gradual()), &classes));
+        assert!(!strict_receiver(Some(&Ty::pending_untyped()), &classes));
+        assert!(!strict_receiver(Some(&Ty::Var {var:crate::ident::TyVar(0)}), &classes));
+        assert!(!strict_receiver(None, &classes));
+        assert!(!strict_receiver(Some(&Ty::Str), &classes));
+        let mixed = Ty::Union {variants: vec![Ty::Str, Ty::pending_untyped()].into()};
+        assert!(!strict_receiver(Some(&mixed), &classes));
+        let mixed = Ty::Union {variants: vec![Ty::Str, Ty::unresolved()].into()};
+        assert!(strict_receiver(Some(&mixed), &classes));
+        super::super::completion_rerun::reset();
+    }
+
+    #[test]
+    #[ignore = "RH_WRITERS=1 RH_ROUTE_TOP=1 RH_ROUTE_STRICT=1"]
+    fn strict_routes_omitted_arguments_are_absent_without_erasing_known_callers() {
+        assert!(strict_on());
+        let mut index = Index::default();
+        let target = key("Target", "write");
+        with_shape(&mut index, &target, &[
+            ("value", ParamKind::Required),
+            ("omitted", ParamKind::Optional),
+            ("mode", ParamKind::Keyword { required: false }),
+            ("absent", ParamKind::Keyword { required: false }),
+            ("block", ParamKind::Block),
+        ]);
+        let mut kw = keywords();
+        kw.group = true;
+        kw.keys.push((Symbol::from("mode"), Ty::Str));
+        super::super::completion_rerun::reset();
+        let before = index.resolve_top(&target.1, 2, &kw).remove(0).1;
+        assert_eq!(before.len(), 3);
+        assert_eq!(before[1], Ty::Bottom);
+        super::super::completion_rerun::begin_completion();
+        let after = index.resolve_top(&target.1, 2, &kw).remove(0).1;
+        assert_eq!(after, vec![Ty::unresolved(), Ty::Bottom, Ty::unresolved()]);
+        let mut callers = super::super::writers::RowCells::default();
+        callers.insert(("known".into(), 0), vec![Ty::Int, Ty::Str, Ty::Sym]);
+        callers.insert(("unknown".into(), 0), after);
+        assert_eq!(callers.value().unwrap()[1], Ty::Str,
+            "an omitted argument must not turn a known caller's contribution into an unknown");
+        super::super::completion_rerun::reset();
+    }
+
+    #[test]
+    #[ignore = "whole-rule research flags"]
+    fn strict_routes_late_known_receiver_keeps_its_concrete_argument() {
+        assert!(strict_on());
+        assert!(super::super::completion_rerun::on());
+        crate::ingest::survey::activate();
+        let mut app = crate::ingest::app::ingest_app_from_tree(HashMap::from([
+            (std::path::PathBuf::from("app/models/source.rb"), b"class Source < ActiveRecord::Base\n def early\n late.write(\"ready\")\n end\n def late\n Target.new\n end\n def orphan(value)\n value\n end\nend\n".to_vec()),
+            (std::path::PathBuf::from("app/models/target.rb"), b"class Target < ActiveRecord::Base\n def write(value)\n value\n end\nend\n".to_vec()),
+        ])).unwrap();
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        assert!(super::super::completion_rerun::inputs_completed());
+        let row = analyzer.inferred_param_types(&ClassId(Symbol::from("Target")), &Symbol::from("write")).unwrap();
+        assert_eq!(row[0], Ty::Str, "a temporary unknown receiver must not leave top: {row:?}");
+        drop(row);
+        assert_eq!(analyzer.pending_state(&mut app, None).values().sum::<u64>(), 0);
+    }
+
+    #[test]
+    #[ignore = "whole-rule research flags"]
+    fn strict_routes_computed_bottom_argument_does_not_regenerate_pending() {
+        assert!(strict_on());
+        assert_eq!(super::super::parameter_conservation::initialize(Ty::Bottom), Ty::Bottom);
+        crate::ingest::survey::activate();
+        let mut app = crate::ingest::app::ingest_app_from_tree(HashMap::from([
+            (std::path::PathBuf::from("app/models/bottom_harness.rb"),
+             b"class BottomHarness < ActiveRecord::Base\n def export_data\n raise 'Override in subclass'\n end\n def send_export\n send_data(export_data, filename: 'data.csv')\n end\n def send_data(data, options)\n nil\n end\nend\n".to_vec()),
+        ])).unwrap();
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        let row = analyzer.inferred_param_types(&ClassId(Symbol::from("BottomHarness")), &Symbol::from("send_data")).unwrap();
+        assert_eq!(row[0], Ty::Bottom, "non-returning call arguments cannot manufacture Pending: {row:?}");
+        drop(row);
+        assert_eq!(analyzer.pending_state(&mut app, None).values().sum::<u64>(), 0);
+    }
+
+    #[test]
+    #[ignore = "RH_WRITERS=1 RH_ROUTE_TOP=1 RH_ROUTE_STRICT=1"]
+    fn strict_routes_freeze_association_alias_missing_from_class_registry() {
+        assert!(strict_on());
+        crate::ingest::survey::activate();
+        let app = crate::ingest::app::ingest_app_from_tree(HashMap::from([
+            (std::path::PathBuf::from("app/models/account.rb"),
+             b"class Account < ActiveRecord::Base\n include AccountAssociations\nend\n".to_vec()),
+            (std::path::PathBuf::from("app/models/concerns/account_associations.rb"),
+             b"module AccountAssociations\n extend ActiveSupport::Concern\n included do\n has_many :active_relationships\n end\nend\n".to_vec()),
+        ])).unwrap();
+        let analyzer = Analyzer::new(&app);
+        let alias = ClassId(Symbol::from("ActiveRelationship"));
+        assert!(!analyzer.classes.contains_key(&alias));
+        let dest = (alias, Symbol::from("reorder"), MethodReceiver::Instance);
+        let rows = analyzer.static_routes.resolve_top(&dest.1, 1, &keywords());
+        let row = &rows.iter().find(|(key, _)| key == &dest)
+            .expect("M192's alias must be a frozen AR destination").1;
+        assert_eq!(row, &vec![Ty::unresolved()]);
+    }
+
     #[test]
     fn top_routes_only_bind_compatible_formals_and_keep_omitted_optionals_empty() {
         let mut index = Index::default();
@@ -662,8 +836,8 @@ mod tests {
         kw.keys[0].1 = Ty::Str;
         let b = index.resolve_top(&target.1, 1, &kw);
         assert_eq!(a, b);
-        assert!(super::super::strict_producers::is_p(&a[0].1[0]));
-        assert!(super::super::strict_producers::is_p(&a[0].1[1]));
+        assert_eq!(a[0].1[0], expected_absent_argument());
+        assert_eq!(a[0].1[1], expected_absent_argument());
         assert_eq!(
             a[0].1[2].provenance(),
             Some(crate::ty::Provenance::Unresolved)
@@ -688,7 +862,7 @@ mod tests {
             ],
         );
         let rows = index.resolve_top(&target.1, 1, &keywords());
-        assert!(super::super::strict_producers::is_p(&rows[0].1[0]));
+        assert_eq!(rows[0].1[0], expected_absent_argument());
         assert_eq!(&rows[0].1[1..3], &[Ty::unresolved(), Ty::unresolved()]);
         let mut kw = keywords();
         kw.opaque_arity = true;
@@ -718,7 +892,7 @@ mod tests {
         kw.group = true;
         kw.opaque_keywords = true;
         let a = index.resolve_top(&target.1, 1, &kw);
-        assert!(super::super::strict_producers::is_p(&a[0].1[0]));
+        assert_eq!(a[0].1[0], expected_absent_argument());
         assert!(
             a[0].1[1..]
                 .iter()
