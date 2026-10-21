@@ -68,11 +68,13 @@ fn writer(span: Span, sources: &[String]) -> String {
         .0
         .checked_sub(1)
         .and_then(|i| sources.get(i as usize));
+    let context=if super::writers::on() { super::writers::source().unwrap_or_else(||"formal".into()) } else { String::new() };
     format!(
-        "{}:{}-{}",
+        "{}:{}-{}{}",
         path.map(String::as_str).unwrap_or("<synthetic>"),
         span.start,
-        span.end
+        span.end,
+        if context.is_empty() { String::new() } else {format!("|{context}")}
     )
 }
 fn identity(key: &SlotKey, span: Span, sources: &[String]) -> String {
@@ -130,6 +132,11 @@ pub(super) fn replace(key: &SlotKey, span: Span, raw: Option<Ty>) -> Ty {
             d.absent.insert(w.clone());
         } else {
             d.absent.remove(&w);
+        }
+        if super::writers::on() && raw.is_none() {
+            d.cells.remove(&w);
+            d.aggregate=aggregate(d.cells.values());
+            return d.aggregate.clone();
         }
         let t = raw.unwrap_or_else(Ty::pending_untyped);
         let superseded = d.cells.get(&w).is_some_and(|old| !same(old, &t));
@@ -392,3 +399,32 @@ pub(super) fn report(classes: &HashMap<ClassId, ClassInfo>) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+    use crate::ident::Symbol;
+    #[test]
+    fn writers_parameter_views_keep_contexts_and_replace_only_the_current_formal() {
+        if !super::super::writers::on() || !on() { return; }
+        reset(&[]);
+        let key=SlotKey::Param {class:ClassId(Symbol::from("Callee")),method:Symbol::from("call"),side:crate::dialect::MethodReceiver::Instance,index:0};
+        let span=Span {file:crate::span::FileId(1),start:10,end:20};
+        let context=|name:&str|super::super::body::Ctx {self_ty:Some(Ty::Class {id:ClassId(Symbol::from(name)),args:vec![].into()}),..Default::default()};
+        let first=context("First");let second=context("Second");
+        {
+            let _visit=super::super::writers::enter(span,&first);
+            assert_eq!(replace(&key,span,Some(Ty::Int)),Ty::Int);
+        }
+        {
+            let _visit=super::super::writers::enter(span,&second);
+            assert_eq!(replace(&key,span,Some(Ty::Str)),current_join(Ty::Int,Ty::Str));
+        }
+        {
+            let _visit=super::super::writers::enter(span,&first);
+            assert_eq!(replace(&key,span,Some(Ty::Bool)),current_join(Ty::Bool,Ty::Str));
+            assert_eq!(replace(&key,span,None),Ty::Str);
+        }
+        reset(&[]);
+    }
+}

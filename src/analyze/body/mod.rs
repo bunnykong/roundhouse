@@ -116,6 +116,10 @@ impl ConstScope {
 /// block body, Seq walk with new ivar/local bindings).
 #[derive(Clone, Default)]
 pub struct Ctx {
+    /// Stable definition/includer identity, including for generated body wrappers.
+    pub writer_source: Option<std::sync::Arc<str>>,
+    /// Pass A and the reseeded pass are both live producers (Pass A feeds ivar flow).
+    pub writer_phase: u8,
     pub self_ty: Option<Ty>,
     /// What `self_ty` was before a self binding (`T.bind(self, T)`,
     /// `#: self as T`) replaced it for the rest of a body. Names in a
@@ -756,7 +760,9 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        let _writer_visit = super::writers::enter(expr.span, ctx);
         let ty = self.compute(expr, ctx);
+        let ty = super::writers::source_result(expr,ctx,self.classes().raw(),ty);
         expr.ty = Some(ty.clone());
         // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
         if expr.diagnostic().is_none()
@@ -774,6 +780,7 @@ impl<'a> BodyTyper<'a> {
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
         diagnostic::detect_diagnostic(expr);
+        super::writers::capture(expr, ctx, self.classes().raw());
         ty
     }
 
@@ -2212,9 +2219,9 @@ impl<'a> BodyTyper<'a> {
                 // returns. Same fact the harvest declares for a setter's
                 // return; typed here too so a body that ends in one
                 // (`Current.instance.session = value`) agrees with it.
-                // An argument the typer could not resolve (Var) or only
-                // resolved gradually (Untyped) says nothing the writer's
-                // registered answer does not say better — campfire's
+                // RH_WRITERS conserves unknown RHS values too: a storage
+                // column's declared type cannot replace a Ruby assignment's value.
+                // In the control, an unresolved RHS falls back to the registered answer — campfire's
                 // `self.join_code = generate_join_code` keeps the
                 // column's String rather than the generator's untyped.
                 if recv.is_some()
@@ -2224,7 +2231,7 @@ impl<'a> BodyTyper<'a> {
                     if let Some(t) = args[0]
                         .ty
                         .clone()
-                        .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped { .. }))
+                        .filter(|t| super::writers::on() || !matches!(t, Ty::Var { .. } | Ty::Untyped { .. }))
                     {
                         return t;
                     }

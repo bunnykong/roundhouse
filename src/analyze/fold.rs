@@ -138,6 +138,11 @@ struct State {
     /// Typing-pass counter, and the pass of each site slot's last write.
     epoch: u64,
     site_epoch: HashMap<u32, u64>,
+    /// Latest evaluation of each visiting source, joined over all its paths.
+    site_writers: HashMap<u32, BTreeMap<String, Ty>>,
+    source_sites: HashMap<String, HashSet<u32>>,
+    writing: Option<String>,
+    current_sites: HashMap<u32, Ty>,
     /// Registry copies: `fold_concern_surfaces` copies a concern's entries
     /// onto every includer each round, and dispatch on the includer finds
     /// the copy first. A copy of a reference-mode return is read as a
@@ -368,6 +373,41 @@ fn fingerprint(t: &Ty) -> u64 {
     h.finish()
 }
 
+/// Begin retyping one source. Its previous outputs stay until replaced or removed.
+pub(super) fn writer_begin(source: &str) {
+    ST.with(|s| {
+        let mut s=s.borrow_mut();
+        s.writing=Some(source.into());
+        s.current_sites.clear();
+    });
+}
+fn writer_value(s: &mut State, slot: u32) {
+    let cells=s.site_writers.get(&slot);
+    let seed=if cells.is_some_and(|m|!m.is_empty()) { Ty::pending_untyped() } else { Ty::Bottom };
+    let value=cells.into_iter().flat_map(|m|m.values())
+        .cloned().fold(seed,super::writers::join);
+    if !s.values.get(&slot).is_some_and(|old|super::strict_producers::same(old,&value)) {
+        note_moved(slot,s.values.get(&slot));
+    }
+    super::det::note("fold.site_writers",s.values.get(&slot),&value);
+    s.joined.remove(&slot);
+    s.values.insert(slot,value);
+}
+/// Retract only outputs absent from a source that has actually been retyped.
+pub(super) fn writer_end(source: &str) {
+    ST.with(|s| {
+        let mut s=s.borrow_mut();
+        let current: HashSet<u32>=s.current_sites.keys().copied().collect();
+        let old=s.source_sites.insert(source.into(),current.clone()).unwrap_or_default();
+        for slot in old.difference(&current) {
+            if let Some(writers)=s.site_writers.get_mut(slot) { writers.remove(source); }
+            writer_value(&mut s,*slot);
+        }
+        s.writing=None;
+        s.current_sites.clear();
+    });
+}
+
 /// Accumulate `value` into a site-keyed slot (its set variable) and return
 /// the reference to it. Within one typing pass a site's values join. With
 /// `RH_FOLD_JOIN` they also join across passes; without it, the first
@@ -376,10 +416,28 @@ fn accumulate(key: SlotKey, value: Ty) -> Ty {
     if super::fixpoint_check::stats_on() { super::structure::fold_write(&key, "site-transfer"); }
     let slot = intern(key);
     let value = strip_self(value, slot);
-    let print = fingerprint(&value);
+    if super::writers::tracing() {
+        eprintln!("WRITER site key={:?} value={value:?} context={}",key_of(slot),super::writers::context());
+    }
     ST.with(|s| {
         let mut s = s.borrow_mut();
         let epoch = s.epoch;
+        if super::writers::on() {
+            let source=s.writing.clone().unwrap_or_else(||format!("external:{slot}"));
+            let value=if s.writing.is_some() {
+                let contribution=s.current_sites.entry(slot).or_insert_with(Ty::pending_untyped);
+                *contribution=super::writers::join(contribution.clone(),value);
+                contribution.clone()
+            } else { value };
+            let cells=s.site_writers.entry(slot).or_default();
+            if !cells.get(&source).is_some_and(|old|super::strict_producers::same(old,&value)) {
+                cells.insert(source,value);
+                writer_value(&mut s,slot);
+            }
+            s.site_epoch.insert(slot,epoch);
+            return;
+        }
+        let print = fingerprint(&value);
         // Current rows can preserve genuine unknowns only if downstream
         // site transfers preserve them too. Reuse the RH_SITES_CURRENT rule:
         // a visited site replaces its cell; an unvisited site retains it.
@@ -1116,6 +1174,60 @@ mod tests {
         ST.with(|s| *s.borrow_mut() = State::default());
     }
 
+
+    #[test]
+    fn writers_sites_join_paths_replace_sources_and_remove_only_retyped_absences() {
+        if !super::super::writers::on() { return; }
+        ST.with(|s|*s.borrow_mut()=State::default());
+        let key=SlotKey::At {site:(1,10,20),step:Step::Val};
+        writer_begin("first");
+        let Ty::Rec {slot}=accumulate(key.clone(),Ty::Sym) else {unreachable!()};
+        accumulate(key.clone(),Ty::Array {elem:std::sync::Arc::new(Ty::Int)});
+        writer_end("first");
+        writer_begin("second"); accumulate(key.clone(),Ty::Str); writer_end("second");
+        let read=||value_of(slot,&HashMap::new()).unwrap();
+        let expected=super::super::writers::join(Ty::Str,super::super::writers::join(Ty::Sym,Ty::Array {elem:std::sync::Arc::new(Ty::Int)}));
+        assert_eq!(read(),expected);
+        writer_begin("second"); accumulate(key.clone(),Ty::Bool); writer_end("second");
+        let expected=super::super::writers::join(Ty::Bool,super::super::writers::join(Ty::Sym,Ty::Array {elem:std::sync::Arc::new(Ty::Int)}));
+        assert_eq!(read(),expected); // skipped first retains both paths
+        writer_begin("first"); writer_end("first");
+        assert_eq!(read(),Ty::Bool); // retyped first no longer writes
+        writer_begin("second"); writer_end("second");
+        assert_eq!(read(),Ty::Bottom);
+        ST.with(|s|*s.borrow_mut()=State::default());
+    }
+
+    #[test]
+    fn writers_source_contract_follows_a_recursive_model_receiver() {
+        if !super::super::writers::on() || !on() { return; }
+        use crate::{expr::{Expr,ExprNode},span::Span};
+        ST.with(|s|*s.borrow_mut()=State::default());
+        let model=ClassId(Symbol::from("WriterModel"));
+        let slot=intern(SlotKey::Param {class:model.clone(),method:Symbol::from("caller"),side:crate::dialect::MethodReceiver::Instance,index:0});
+        ST.with(|s| {s.borrow_mut().values.insert(slot,Ty::Class {id:model.clone(),args:vec![].into()});});
+        let mut recv=Expr::new(Span::synthetic(),ExprNode::SelfRef); recv.ty=Some(Ty::Rec {slot});
+        let expr=Expr::new(Span::synthetic(),ExprNode::Send {recv:Some(recv),method:Symbol::from("save!"),args:vec![],block:None,parenthesized:false});
+        let classes=std::iter::once((model,ClassInfo {table:Some(crate::ident::TableRef(Symbol::from("writer_models"))),..ClassInfo::default()})).collect();
+        let backend=Ty::Class {id:ClassId(Symbol::from("ActiveRecord::Base")),args:vec![].into()};
+        let expected=super::super::writers::join(backend.clone(),Ty::Bool);
+        assert_eq!(super::super::writers::source_result(&expr,&super::super::body::Ctx::default(),&classes,backend),expected);
+        ST.with(|s|*s.borrow_mut()=State::default());
+    }
+
+    #[test]
+    fn writers_site_keeps_a_sole_pending_contribution_until_it_is_completed() {
+        if !super::super::writers::on() { return; }
+        ST.with(|s|*s.borrow_mut()=State::default());
+        let key=SlotKey::At {site:(1,10,20),step:Step::Elem};
+        writer_begin("pending-source");
+        let Ty::Rec {slot}=accumulate(key.clone(),Ty::pending_untyped()) else {unreachable!()};
+        writer_end("pending-source");
+        assert!(super::super::strict_producers::is_p(&value_of(slot,&HashMap::new()).unwrap()));
+        writer_begin("pending-source"); accumulate(key,Ty::Int); writer_end("pending-source");
+        assert_eq!(value_of(slot,&HashMap::new()),Some(Ty::Int));
+        ST.with(|s|*s.borrow_mut()=State::default());
+    }
 
     fn union(v: Vec<Ty>) -> Ty {
         Ty::Union { variants: v.into() }

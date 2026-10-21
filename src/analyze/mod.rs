@@ -59,6 +59,7 @@ pub(crate) mod strict_producers;
 pub mod producer_evidence;
 mod parameter_conservation;
 mod param_views;
+mod writers;
 mod canon_var;
 mod fixpoint_bound;
 mod fixpoint_check;
@@ -1377,6 +1378,7 @@ impl Analyzer {
         handoff::reset();
         fold::reset();
         param_views::reset(&app.sources);
+        writers::reset(app);
         slots::reset();
         self.strict_stub_originals.clear();
         self.s3d.reset_completions();
@@ -2144,6 +2146,8 @@ impl Analyzer {
                 }
             }
             let ctx = Ctx {
+                writer_source: None,
+                    writer_phase: 0,
                 self_ty: None,
                 lexical_self: None,
                 ivar_bindings: HashMap::new(),
@@ -2480,6 +2484,8 @@ impl Analyzer {
             let typer = if self.source_indexed { typer.with_const_resolver(self.const_resolver.clone()) } else { typer };
             for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
+                    writer_source: None,
+                    writer_phase: 0,
                     self_ty: Some(self_ty.clone()),
                     lexical_self: None,
                     ivar_bindings: HashMap::new(),
@@ -2772,6 +2778,8 @@ impl Analyzer {
             // (`Int > Class { MIN_KARMA }`) and `send_dispatch_failed`
             // (`days` on `Class { NEW_USER_DAYS }`).
             let const_ctx = Ctx {
+                writer_source: None,
+                    writer_phase: 0,
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                 lexical_self: None,
                 ivar_bindings: class_ivars.clone(),
@@ -2797,6 +2805,8 @@ impl Analyzer {
             let class_constants = global_constants.with_own(own_consts);
 
             let class_ctx = Ctx {
+                writer_source: None,
+                    writer_phase: 0,
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                 lexical_self: None,
                 ivar_bindings: class_ivars.clone(),
@@ -2897,6 +2907,8 @@ impl Analyzer {
                     sccq_reseeded = Some(reseeded.clone());
                 }
                 let reseeded_ctx = Ctx {
+                    writer_source: None,
+                    writer_phase: 1,
                     self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                     lexical_self: None,
                     ivar_bindings: reseeded,
@@ -2957,6 +2969,8 @@ impl Analyzer {
                 args: vec![].into(),
             };
             let const_ctx = Ctx {
+                writer_source: None,
+                    writer_phase: 0,
                 self_ty: Some(self_ty.clone()),
                 lexical_self: None,
                 ivar_bindings: HashMap::new(),
@@ -2979,6 +2993,8 @@ impl Analyzer {
                 global_constants.with_own(extract_controller_const_assignments(&controller.body));
 
             let ctx = Ctx {
+                writer_source: None,
+                    writer_phase: 0,
                 self_ty: Some(self_ty.clone()),
                 lexical_self: None,
                 ivar_bindings: HashMap::new(),
@@ -3030,6 +3046,7 @@ impl Analyzer {
                         &action.kw_params,
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
+                        0,
                     );
                     self.analyze_action_defaults(action, &mctx, &ctrl_id, origin);
                     self.body_typer().analyze_expr(&mut action.body, &mctx);
@@ -3524,6 +3541,8 @@ impl Analyzer {
                             continue;
                         }
                         let base_ctx = Ctx {
+                            writer_source: None,
+                    writer_phase: 0,
                             self_ty: Some(meta.self_ty.clone()),
                             lexical_self: None,
                             ivar_bindings: seed,
@@ -3552,6 +3571,7 @@ impl Analyzer {
                             &action.kw_params,
                             action.block_param.as_ref(),
                             action.rest_param.as_ref(),
+                            self.sccq_context_ordinal(unit).unwrap_or(sweep + 1),
                         );
                         self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
@@ -4052,6 +4072,8 @@ impl Analyzer {
                         continue;
                     }
                     let base_ctx = Ctx {
+                        writer_source: None,
+                    writer_phase: 0,
                         self_ty: Some(self_ty.clone()),
                         lexical_self: None,
                         ivar_bindings: seed,
@@ -4079,6 +4101,7 @@ impl Analyzer {
                         &action.kw_params,
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
+                        self.sccq_context_ordinal(unit).unwrap_or(3),
                     );
                     self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
@@ -4244,6 +4267,8 @@ impl Analyzer {
             };
             let sccq_self_id = self_id.clone();
             let class_ctx = Ctx {
+                writer_source: None,
+                    writer_phase: 0,
                 self_ty: Some(Ty::Class { id: self_id, args: vec![].into() }),
                 lexical_self: None,
                 ivar_bindings: HashMap::new(),
@@ -4413,6 +4438,8 @@ impl Analyzer {
                     sccq_reseeded = Some(reseeded.clone());
                 }
                 let reseeded_ctx = Ctx {
+                    writer_source: None,
+                    writer_phase: 1,
                     self_ty: class_ctx.self_ty.clone(),
                     lexical_self: None,
                     ivar_bindings: reseeded,
@@ -4904,6 +4931,11 @@ impl Analyzer {
         let raw_observed = self.inferred_params.get(&key);
         let observed = raw_observed.map(|row| c5_reader_row(row));
         let mut ctx = base.clone();
+        if writers::on() {
+            let source: std::sync::Arc<str>=format!("method:{class_id:?}:{:?}:{:?}:{:?}",method.name,method.receiver,method.body.span).into();
+            writers::declare_owner(&source,class_id,&method.name);
+            ctx.writer_source=Some(source);
+        }
         ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
         ctx.instance_body = !ctx.class_side;
         // Class-method bodies named after a first-class model DSL
@@ -4996,6 +5028,7 @@ impl Analyzer {
         kw_params: &[(Symbol, Option<crate::expr::Expr>)],
         block_param: Option<&Symbol>,
         rest_param: Option<&Symbol>,
+        writer_context: usize,
     ) -> Ctx {
         let own = self.inferred_params.get(&(class_id.clone(), action_name.clone(), MethodReceiver::Instance))
             .map(|row| c5_reader_row(row));
@@ -5003,6 +5036,11 @@ impl Analyzer {
             .and_then(|m| self.inferred_params.get(&(m.clone(), action_name.clone(), MethodReceiver::Instance)))
             .map(|row| c5_reader_row(row));
         let mut ctx = base.clone();
+        if writers::on() {
+            let source: std::sync::Arc<str>=format!("action:{class_id:?}:{action_name:?}:{definition_span:?}:context:{writer_context}").into();
+            writers::declare_owner(&source,class_id,action_name);
+            ctx.writer_source=Some(source);
+        }
         ctx.instance_body = true;
         for (i, name) in params.fields.keys().enumerate() {
             if self.declared_untyped_param(class_id, action_name, Some(i), name) {
@@ -6183,7 +6221,27 @@ impl Analyzer {
             bodies.push((None, static_from, sites.len()));
             self.sccq_rebuild_sites(app, &bodies, &sites);
         }
-        self.apply_param_sites(sites, &params_by_method, &defined);
+        if writers::on() {
+            let targets=self.writer_param_targets(&defined);
+            let mut observations: Vec<_>=sites.into_iter().filter_map(|site|
+                self.resolve_param_site(site,&params_by_method,&defined)).collect();
+            for (owner,sites) in writers::owned_calls() {
+                for (key,row) in sites.into_iter().flat_map(|site|self.resolve_writer_site(site,&params_by_method,&defined,&targets)) {
+                    if let Some((class,method))=&owner {
+                        fold::record_call(class,method,(key.0.clone(),key.1.clone()));
+                        if let Some(origin)=fold::alias_of(&key.0,&key.1) {
+                            fold::record_call(class,method,(origin,key.1.clone()));
+                        }
+                    }
+                    observations.push((key,row));
+                }
+            }
+            // The bound is not distributive: join all current writers first,
+            // exactly as the worklist's fold_sites does.
+            fold_param_observations(&mut self.inferred_params,observations);
+        } else {
+            self.apply_param_sites(sites, &params_by_method, &defined);
+        }
         // Production signatures keep their production callers' shape.
         // Fold before adding test-owned observations: a same-named test
         // helper must not feed an included production concern either.
@@ -6294,12 +6352,44 @@ impl Analyzer {
         params_by_method: &HashMap<ParamKey, ParamShape>,
         defined: &BTreeSet<ParamKey>,
     ) -> Option<(ParamKey, Vec<Ty>)> {
+        if writers::unknown_class(&class_id) { return None; }
         let key = self.resolve_param_key(class_id, method, recv, defined)?;
+        if writers::tracing() && (key.1.as_str() == "preview" || key.0.0.as_str() == "Comment" && key.1.as_str() == "includes") {
+            eprintln!("WRITER row key={key:?} sources={:?} args={arg_tys:?} kw={kw_tys:?}",kw_tys.sources);
+        }
         let sources = kw_tys.sources.clone();
         let positional = !kw_tys.group;
         let arg_tys = Self::place_keyword_args(params_by_method.get(&key), arg_tys, kw_tys);
         producer_evidence::parameter_destination(&key, &sources, positional, &arg_tys);
         Some((key, arg_tys))
+    }
+
+    /// Unknown receivers remain live writers. Route their current arguments to
+    /// every compatible named destination, rather than treating unknown as no call.
+    fn writer_param_targets(&self, defined: &BTreeSet<ParamKey>) -> HashMap<Symbol,BTreeSet<ParamKey>> {
+        let mut out: HashMap<Symbol,BTreeSet<ParamKey>>=HashMap::new();
+        for key in defined { out.entry(key.1.clone()).or_default().insert(key.clone()); }
+        for (class,method,recv) in writers::targets() {
+            if let Some(key)=self.resolve_param_key(class,method,recv,defined) {
+                out.entry(key.1.clone()).or_default().insert(key);
+            }
+        }
+        out
+    }
+    fn resolve_writer_site(&self, site: SendSite, shapes: &HashMap<ParamKey,ParamShape>,
+        defined: &BTreeSet<ParamKey>, targets: &HashMap<Symbol,BTreeSet<ParamKey>>) -> Vec<(ParamKey,Vec<Ty>)> {
+        // A zero-argument call writes no parameter slot. The ordinary walk
+        // still owns the native empty-vector presence records.
+        if site.2.is_empty() { return Vec::new(); }
+        if !writers::unknown_class(&site.0) { return self.resolve_param_site(site,shapes,defined).into_iter().collect(); }
+        let (_,method,args,kwargs,_)=site;
+        targets.get(&method).into_iter().flatten().map(|key| {
+            let row=Self::place_keyword_args(shapes.get(key),args.clone(),kwargs.clone());
+            if writers::tracing() && matches!(method.as_str(),"preview"|"includes") {
+                eprintln!("WRITER unknown-route key={key:?} span={:?} args={row:?}",kwargs.span);
+            }
+            (key.clone(),row)
+        }).collect()
     }
 
     fn resolve_param_key(
@@ -6794,185 +6884,13 @@ impl Analyzer {
     ) {
         match &*expr.node {
             ExprNode::Send { recv, method, args, block, .. } => {
-                // Resolve the receiver class: an explicit receiver
-                // typed as a class, or — for an implicit-self call
-                // (`period(query)` inside a controller) — the
-                // enclosing class. The latter is what lets a sibling
-                // method's params be inferred from its self-call sites.
-                // A bare send with NO enclosing class is a template
-                // body (`errors_for(comment)` in a view): Rails mixes
-                // every app helper into every view, so the helper
-                // index is the dispatch — attributing the site to the
-                // defining helper module is what lets helper params
-                // unify from their template call sites.
-                let mut via_helper_index = false;
-                // Expand Relation / Union / Array elem the way dispatch
-                // chases — the reverse call graph now decides retype,
-                // so Class-only receivers would leave callers of
-                // `records.first.foo` off the frontier.
-                let recv_classes: Vec<ClassId> = match recv {
-                    // `RH_FOLD`: through references, each slot once.
-                    Some(r) => r
-                        .ty
-                        .as_ref()
-                        .map(|t| {
-                            fold::receiver_classes(t, &self.classes)
-                                .unwrap_or_else(|| class_ids_for_call_receiver(t))
-                        })
-                        .unwrap_or_default(),
-                    None => self_class
-                        .cloned()
-                        .or_else(|| {
-                            via_helper_index = true;
-                            helpers.get(method).cloned()
-                        })
-                        .into_iter()
-                        .collect(),
-                };
-                let site_recv = match recv.as_ref().map(|r| &*r.node) {
-                    None | Some(ExprNode::SelfRef) if class_body => SiteRecv::Class,
-                    Some(ExprNode::Const { .. }) => SiteRecv::Class,
-                    Some(ExprNode::Send { method: m, args, .. }) if m.as_str() == "class" && args.is_empty() => {
-                        SiteRecv::DotClass
-                    }
-                    _ => SiteRecv::Instance,
-                };
-                let sources = producer_evidence::parameter_call(
-                    self_class, &recv_classes, method, &format!("{site_recv:?}"), expr.span, args,
-                );
-                if !recv_classes.is_empty() {
-                    // Past a `*list` the positions are unknown: its elements land wherever its length puts them.
-                    let spread = args.iter().position(|a| matches!(&*a.node, ExprNode::Splat { .. })).unwrap_or(args.len());
-                    let arg_tys: Vec<Ty> = args
-                        .iter()
-                        .enumerate()
-                        .map(|(at, a)| {
-                            if at >= spread {
-                                return Ty::gradual();
-                            }
-                            let t = parameter_conservation::argument(a);
-                            // Template call sites are evidence of what
-                            // callers pass; an `Untyped` arg there
-                            // (`errors_for f.object`) means the CALLER's
-                            // type is unknown — no evidence — not that
-                            // the param accepts anything. Recording it
-                            // as Untyped would absorb the whole union
-                            // (gradual absorption in dispatch) and erase
-                            // the typed sites' information. Scoped to
-                            // the helper channel; explicit-receiver and
-                            // own-class channels keep their semantics.
-                            if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
-                                Ty::Var { var: crate::ident::TyVar(0) }
-                            } else {
-                                t
-                            }
-                        })
-                        .collect();
-                    // The trailing `kwargs: true` hash, harvested by
-                    // NAME. Only literal-symbol keys: a `**splat` or a
-                    // computed key says nothing about which parameter
-                    // the value binds to, and one such key disqualifies
-                    // the whole hash (an incomplete map would place
-                    // some keywords and silently drop the rest).
-                    let keys = match args.last().map(|a| &*a.node) {
-                        Some(ExprNode::Hash { entries, kwargs: true }) => {
-                            let mut pairs = Vec::with_capacity(entries.len());
-                            let mut all_sym = true;
-                            for (k, v) in entries {
-                                match &*k.node {
-                                    ExprNode::Lit { value: Literal::Sym { value } } => {
-                                        let t = parameter_conservation::argument(v);
-                                        let t = if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
-                                            Ty::Var { var: crate::ident::TyVar(0) }
-                                        } else {
-                                            t
-                                        };
-                                        pairs.push((value.clone(), t));
-                                    }
-                                    _ => {
-                                        all_sym = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            if all_sym { pairs } else { Vec::new() }
-                        }
-                        // The anonymous packet is merged after these
-                        // pairs, so it can overwrite every explicit key.
-                        // Keep the group as unknown keyword evidence below
-                        // instead of inferring the explicit values as final.
-                        _ => Vec::new(),
-                    };
-                    // Whether the last argument is the call's keyword
-                    // group at all: a `k: v` list or one with a
-                    // `**splat`, never a positional `{…}` literal.
-                    let group = matches!(
-                        args.last().map(|a| &*a.node),
-                        Some(ExprNode::Hash { kwargs: true, .. }
-                            | ExprNode::KeywordSplat { .. }
-                            | ExprNode::ForwardKeywords
-                            | ExprNode::ForwardKeywordsWithPairs { .. })
-                    );
-                    // The splat merges over the literal, so each literal
-                    // key may take the splat's value too.
-                    let (keys, splat) = match args.last().map(|a| &*a.node) {
-                        Some(ExprNode::KeywordSplat { value }) => keyword_splat(value)
-                            .map_or((keys, None), |(pairs, v)| {
-                                let joined = pairs
-                                    .into_iter()
-                                    .map(|(k, t)| (k, union_of(t, v.clone())))
-                                    .collect();
-                                (joined, Some(v))
-                            }),
-                        Some(ExprNode::ForwardKeywordsWithPairs { .. }) => {
-                            // The opaque forwarded packet merges after the
-                            // literal entries and can override each key.
-                            // Its values are unavailable, so the signature
-                            // binder leaves named parameters uninferred.
-                            (Vec::new(), None)
-                        }
-                        _ => (keys, None),
-                    };
-                    let anonymous_forward = matches!(
-                        args.last().map(|a| &*a.node),
-                        Some(ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. })
-                    );
-                    let kw_tys = SiteKeywords { group, keys, splat, anonymous_forward, sources };
-                    // `Klass.new(a, b)` hands its arguments to
-                    // `initialize` — that is all `Class#new` does with
-                    // them — so the site is evidence for the
-                    // constructor's params too. Recorded under `new`
-                    // alone, `initialize` was seeded with nothing and
-                    // every `@x = x` it made came out untyped: lobsters'
-                    // `StoriesPaginator.new(scope, …)` passed a typed
-                    // `Relation[Story]` and the paginator's `@scope`
-                    // still answered `Array[untyped]` to every caller.
-                    // Only a CONSTANT receiver: an instance answering
-                    // `new` is some other method entirely.
-                    let record_initialize = method.as_str() == "new"
-                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
-                    let observed_from = out.len();
-                    for class_id in recv_classes {
-                        if record_initialize
-                            && !self.data_factories_without_custom_initialize.contains(&class_id)
-                        {
-                            out.push((
-                                class_id.clone(),
-                                Symbol::from("initialize"),
-                                arg_tys.clone(),
-                                kw_tys.clone(),
-                                SiteRecv::Instance,
-                            ));
-                        }
-                        out.push((class_id, method.clone(), arg_tys.clone(), kw_tys.clone(), site_recv));
-                    }
-                    if fixpoint_check::stats_on() {
-                        for site in &out[observed_from..] {
-                            if let Some((key, args)) = structure::with_params(|defined, shapes| {
-                                self.resolve_param_site(site.clone(), shapes, defined)
-                            }) {
-                                structure::param_site(&key, args.len(), &expr.span, self_class);
-                            }
+                let observed_from = out.len();
+                collect_direct_send_sites(expr, self_class, class_body, helpers, &self.classes,
+                    &self.data_factories_without_custom_initialize, out);
+                if fixpoint_check::stats_on() {
+                    for site in &out[observed_from..] {
+                        if let Some((key, args)) = structure::with_params(|defined, shapes| self.resolve_param_site(site.clone(), shapes, defined)) {
+                            structure::param_site(&key, args.len(), &expr.span, self_class);
                         }
                     }
                 }
@@ -8588,7 +8506,7 @@ fn keyword_splat(value: &Expr) -> Option<(Vec<(Symbol, Ty)>, Ty)> {
 // Keyed by side, not by `(class, name)`: `def self.get` and `def get` are two methods whose rows must not mix.
 pub(super) type ParamKey = (ClassId, Symbol, MethodReceiver);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum SiteRecv {
     Instance,
     Class,
@@ -8596,11 +8514,197 @@ enum SiteRecv {
     DotClass,
 }
 
+/// One typed send's observations, shared by the source walk and writer capture.
+fn collect_direct_send_sites(
+    expr: &Expr, self_class: Option<&ClassId>, class_body: bool,
+    helpers: &HashMap<Symbol, ClassId>, classes: &HashMap<ClassId, ClassInfo>,
+    factories: &std::collections::HashSet<ClassId>, out: &mut Vec<SendSite>,
+) {
+    let ExprNode::Send { recv, method, args, .. } = &*expr.node else { return };
+        // Resolve the receiver class: an explicit receiver
+                // typed as a class, or — for an implicit-self call
+                // (`period(query)` inside a controller) — the
+                // enclosing class. The latter is what lets a sibling
+                // method's params be inferred from its self-call sites.
+                // A bare send with NO enclosing class is a template
+                // body (`errors_for(comment)` in a view): Rails mixes
+                // every app helper into every view, so the helper
+                // index is the dispatch — attributing the site to the
+                // defining helper module is what lets helper params
+                // unify from their template call sites.
+                let mut via_helper_index = false;
+                // Expand Relation / Union / Array elem the way dispatch
+                // chases — the reverse call graph now decides retype,
+                // so Class-only receivers would leave callers of
+                // `records.first.foo` off the frontier.
+                let mut recv_classes: Vec<ClassId> = match recv {
+                    // `RH_FOLD`: through references, each slot once.
+                    Some(r) => r
+                        .ty
+                        .as_ref()
+                        .map(|t| {
+                            fold::receiver_classes(t, classes)
+                                .unwrap_or_else(|| class_ids_for_call_receiver(t))
+                        })
+                        .unwrap_or_default(),
+                    None => self_class
+                        .cloned()
+                        .or_else(|| {
+                            via_helper_index = true;
+                            helpers.get(method).cloned()
+                        })
+                        .into_iter()
+                        .collect(),
+                };
+                if writers::on() && !args.is_empty() && recv.as_ref().is_some_and(|r|
+                    r.ty.as_ref().is_none_or(|t|writers::unknown_receiver(t,classes))) {
+                    recv_classes.push(writers::unknown_receiver_class());
+                }
+                let site_recv = match recv.as_ref().map(|r| &*r.node) {
+                    None | Some(ExprNode::SelfRef) if class_body => SiteRecv::Class,
+                    Some(ExprNode::Const { .. }) => SiteRecv::Class,
+                    Some(ExprNode::Send { method: m, args, .. }) if m.as_str() == "class" && args.is_empty() => {
+                        SiteRecv::DotClass
+                    }
+                    _ => SiteRecv::Instance,
+                };
+                let sources = producer_evidence::parameter_call(
+                    self_class, &recv_classes, method, &format!("{site_recv:?}"), expr.span, args,
+                );
+                if !recv_classes.is_empty() {
+                    // Preserve main's unknown positions after a positional splat.
+                    let spread = args.iter().position(|a| matches!(&*a.node, ExprNode::Splat { .. })).unwrap_or(args.len());
+                    let arg_tys: Vec<Ty> = args
+                        .iter()
+                        .enumerate()
+                        .map(|(at, a)| {
+                            if at >= spread { return Ty::gradual(); }
+                            let t = parameter_conservation::argument(a);
+                            // Template call sites are evidence of what
+                            // callers pass; an `Untyped` arg there
+                            // (`errors_for f.object`) means the CALLER's
+                            // type is unknown — no evidence — not that
+                            // the param accepts anything. Recording it
+                            // as Untyped would absorb the whole union
+                            // (gradual absorption in dispatch) and erase
+                            // the typed sites' information. Scoped to
+                            // the helper channel; explicit-receiver and
+                            // own-class channels keep their semantics.
+                            if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
+                                Ty::Var { var: crate::ident::TyVar(0) }
+                            } else {
+                                t
+                            }
+                        })
+                        .collect();
+                    // The trailing `kwargs: true` hash, harvested by
+                    // NAME. Only literal-symbol keys: a `**splat` or a
+                    // computed key says nothing about which parameter
+                    // the value binds to, and one such key disqualifies
+                    // the whole hash (an incomplete map would place
+                    // some keywords and silently drop the rest).
+                    let keys = match args.last().map(|a| &*a.node) {
+                        Some(ExprNode::Hash { entries, kwargs: true }) => {
+                            let mut pairs = Vec::with_capacity(entries.len());
+                            let mut all_sym = true;
+                            for (k, v) in entries {
+                                match &*k.node {
+                                    ExprNode::Lit { value: Literal::Sym { value } } => {
+                                        let t = parameter_conservation::argument(v);
+                                        let t = if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
+                                            Ty::Var { var: crate::ident::TyVar(0) }
+                                        } else {
+                                            t
+                                        };
+                                        pairs.push((value.clone(), t));
+                                    }
+                                    _ => {
+                                        all_sym = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if all_sym { pairs } else { Vec::new() }
+                        }
+                        // The anonymous packet is merged after these
+                        // pairs, so it can overwrite every explicit key.
+                        // Keep the group as unknown keyword evidence below
+                        // instead of inferring the explicit values as final.
+                        _ => Vec::new(),
+                    };
+                    // Whether the last argument is the call's keyword
+                    // group at all: a `k: v` list or one with a
+                    // `**splat`, never a positional `{…}` literal.
+                    let group = matches!(
+                        args.last().map(|a| &*a.node),
+                        Some(ExprNode::Hash { kwargs: true, .. }
+                            | ExprNode::KeywordSplat { .. }
+                            | ExprNode::ForwardKeywords
+                            | ExprNode::ForwardKeywordsWithPairs { .. })
+                    );
+                    // The splat merges over the literal, so each literal
+                    // key may take the splat's value too.
+                    let (keys, splat) = match args.last().map(|a| &*a.node) {
+                        Some(ExprNode::KeywordSplat { value }) => keyword_splat(value)
+                            .map_or((keys, None), |(pairs, v)| {
+                                let joined = pairs
+                                    .into_iter()
+                                    .map(|(k, t)| (k, union_of(t, v.clone())))
+                                    .collect();
+                                (joined, Some(v))
+                            }),
+                        Some(ExprNode::ForwardKeywordsWithPairs { .. }) => {
+                            // The opaque forwarded packet merges after the
+                            // literal entries and can override each key.
+                            // Its values are unavailable, so the signature
+                            // binder leaves named parameters uninferred.
+                            (Vec::new(), None)
+                        }
+                        _ => (keys, None),
+                    };
+                    let anonymous_forward = matches!(
+                        args.last().map(|a| &*a.node),
+                        Some(ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. })
+                    );
+                    let kw_tys = SiteKeywords { group, keys, splat, anonymous_forward, sources, span: expr.span };
+                    // `Klass.new(a, b)` hands its arguments to
+                    // `initialize` — that is all `Class#new` does with
+                    // them — so the site is evidence for the
+                    // constructor's params too. Recorded under `new`
+                    // alone, `initialize` was seeded with nothing and
+                    // every `@x = x` it made came out untyped: lobsters'
+                    // `StoriesPaginator.new(scope, …)` passed a typed
+                    // `Relation[Story]` and the paginator's `@scope`
+                    // still answered `Array[untyped]` to every caller.
+                    // Only a CONSTANT receiver: an instance answering
+                    // `new` is some other method entirely.
+                    let record_initialize = method.as_str() == "new"
+                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
+
+                    for class_id in recv_classes {
+                        if record_initialize
+                            && !factories.contains(&class_id)
+                        {
+                            out.push((
+                                class_id.clone(),
+                                Symbol::from("initialize"),
+                                arg_tys.clone(),
+                                kw_tys.clone(),
+                                SiteRecv::Instance,
+                            ));
+                        }
+                        out.push((class_id, method.clone(), arg_tys.clone(), kw_tys.clone(), site_recv));
+                    }
+                }
+
+}
+
 type SendSite = (ClassId, Symbol, Vec<Ty>, SiteKeywords, SiteRecv);
 
 /// A call's trailing keyword arguments as `collect_send_sites` saw them.
 #[derive(Clone, Debug)]
 struct SiteKeywords {
+    span: crate::span::Span,
     /// Raw source writer candidates for audit only; never affects routing.
     sources: Vec<String>,
     /// The last argument is the keyword group (`k: v` or `**splat`).
