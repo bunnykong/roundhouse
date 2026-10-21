@@ -756,3 +756,6 @@ fn collect_touched_locals(e: &Expr, out: &mut std::collections::HashSet<Symbol>)
     }
     e.node.for_each_child(&mut |c| collect_touched_locals(c, out));
 }
+
+#[cfg(test)]
+pub(crate) mod operator_law_tests;

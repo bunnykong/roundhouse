@@ -5751,3 +5751,6 @@ fn set_discarded(e: &mut Expr, discarded: bool) {
 
 #[cfg(test)]
 mod card5_tests;
+
+#[cfg(test)]
+mod operator_laws;

@@ -17,6 +17,25 @@ use crate::ty::Ty;
 
 use super::{BodyTyper, ClassInfo, Ctx, union_many, union_of, unknown};
 
+fn strict_catalog_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_STRICT_CATALOG").as_deref() == Ok("1"))
+}
+
+/// Wait only for an entirely Pending operand, not a known container's children.
+fn strict_catalog_pending(ty: &Ty) -> bool {
+    strict_catalog_on() && crate::analyze::strict_producers::only_pending(ty)
+}
+
+fn strict_catalog_arg(args: &[Expr]) -> bool {
+    args.iter().any(|arg| arg.ty.as_ref().is_some_and(strict_catalog_pending))
+}
+
+fn strict_catalog_count(method: &Symbol, args: &[Expr]) -> bool {
+    matches!(method.as_str(), "first" | "last" | "take" | "sample")
+        && args.len() == 1 && strict_catalog_arg(args)
+}
+
 impl<'a> BodyTyper<'a> {
     /// `record[:column]` / `read_attribute(:column)` (and their writer
     /// twins) are schema-indexed APIs.  The generic ActiveRecord catalog
@@ -1038,6 +1057,11 @@ impl<'a> BodyTyper<'a> {
                 }
             }
         }
+        // A receiver is needed even by conversions: P.to_h must not seed a
+        // Hash into a cycle before the receiver's value has been discovered.
+        if recv_ty.is_some_and(strict_catalog_pending) {
+            return Ty::pending_untyped();
+        }
         // `Parameters` is a Hash-shaped bag: what its own class does not
         // answer (`fetch`, `each`, `map`, `count`, ...) is the Hash
         // reading over Symbol -> param value. Done here,
@@ -1510,12 +1534,15 @@ impl<'a> BodyTyper<'a> {
                 // catalog's `first`/`last` (a model or a library class
                 // registered with the same surface); any other class's
                 // `first(x)` is its own method.
-                if counted_first_last(method, call_args)
+                if (counted_first_last(method, call_args) || strict_catalog_count(method, call_args))
                     && self
                         .classes()
                         .get(id)
                         .is_some_and(|c| c.class_methods.contains_key(method))
                 {
+                    if strict_catalog_count(method, call_args) {
+                        return Ty::pending_untyped();
+                    }
                     return Ty::Array {
                         elem: std::sync::Arc::new(Ty::Class { id: id.clone(), args: vec![].into() }),
                     };
@@ -2068,6 +2095,10 @@ impl<'a> BodyTyper<'a> {
                         };
                     }
                 }
+                // The argument chooses scalar versus collection overloads.
+                if strict_catalog_count(method, args) {
+                    return Ty::pending_untyped();
+                }
                 if counted_first_last(method, args) {
                     return Ty::Array { elem: std::sync::Arc::new(elem.clone()) };
                 }
@@ -2143,6 +2174,9 @@ impl<'a> BodyTyper<'a> {
             Some(Ty::Relation { of }) => {
                 if let Some(t) = self.column_projection(of, method, args) {
                     return t;
+                }
+                if strict_catalog_count(method, args) {
+                    return Ty::pending_untyped();
                 }
                 if counted_first_last(method, args) || array_find(method, args, block_ret) {
                     return Ty::Array {
@@ -2292,6 +2326,12 @@ impl<'a> BodyTyper<'a> {
                 unknown()
             }
             // Not the operand's own type: Integer and Float coerce a BigDecimal operand into a BigDecimal result.
+            Some(Ty::Int | Ty::Float)
+                if matches!(method.as_str(), "+" | "-" | "*" | "/")
+                    && args.first().and_then(|a| a.ty.as_ref()).is_some_and(strict_catalog_pending) =>
+            {
+                Ty::pending_untyped()
+            }
             Some(Ty::Int | Ty::Float)
                 if matches!(method.as_str(), "+" | "-" | "*" | "/")
                     && matches!(args.first().and_then(|a| a.ty.as_ref()), Some(t) if is_bigdecimal(t)) =>
@@ -2703,6 +2743,9 @@ fn date_constructor(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
         "current" | "yesterday" | "tomorrow" => vec![],
         _ => return None,
     };
+    if strict_catalog_arg(args) {
+        return Some(Ty::pending_untyped());
+    }
     let accepts = |actual: Option<&Ty>, expected: &Ty| match actual {
         None | Some(Ty::Var { .. } | Ty::Untyped { .. }) => true,
         // Not only an exact String: a request parameter's other arms (nil, an Array, nested params) raise in Rails too, as `Time.parse` accepts.
@@ -2718,6 +2761,9 @@ fn date_constructor(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
 }
 
 fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
+    if method.as_str() == "in_time_zone" && args.len() == 1 && strict_catalog_arg(args) {
+        return Some(Ty::pending_untyped());
+    }
     let date = || Ty::Date;
     let time = || Ty::Time;
     // Known Integer (or not-yet-typed). Untyped is excluded for day-shift
@@ -2849,6 +2895,9 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
 fn sub_array_slice(method: &Symbol, args: &[crate::expr::Expr], elem: &Ty) -> Option<Ty> {
     if !matches!(method.as_str(), "[]" | "slice") {
         return None;
+    }
+    if matches!(args.len(), 1 | 2) && strict_catalog_arg(args) {
+        return Some(Ty::pending_untyped());
     }
     let range_index = args.len() == 1
         && matches!(
@@ -3273,6 +3322,11 @@ pub(super) fn hash_method(
     block_ret: Option<&Ty>,
     args: &[Expr],
 ) -> Ty {
+    if method.as_str() == "deep_merge" && args.len() == 1
+        && block_ret.is_none() && strict_catalog_arg(args)
+    {
+        return Ty::pending_untyped();
+    }
     if let Some(t)=crate::analyze::mutation_writers::hash_result(method.as_str(),key,value,args,block_ret) {return t;}
     match method.as_str() {
         "[]" => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
@@ -3925,6 +3979,9 @@ pub(super) fn object_protocol_method(
     block_ret: Option<&Ty>,
     class_object: bool,
 ) -> Option<Ty> {
+    if recv_ty.is_some_and(strict_catalog_pending) {
+        return Some(Ty::pending_untyped());
+    }
     // `include?` doubles as Enumerable/String membership — answer Bool even
     // without a proven Module receiver. Other Module-protocol names still
     // require a class/module object.
@@ -4011,3 +4068,6 @@ fn param_value_method(method: &Symbol, block_ret: Option<&Ty>) -> Option<Ty> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+pub(crate) mod operator_law_tests;
