@@ -400,6 +400,11 @@ const DUMP_CONTRACTS: &[DumpContract] = &[
         golden: include_str!("json_dump/destination_visibility.stdout"),
         service: Some(("app/services/json_visibility_probe.rb", DESTINATION_VISIBILITY)),
     },
+    DumpContract {
+        name: "included_visibility", script: INCLUDED_VISIBILITY_PROBE,
+        golden: include_str!("json_dump/included_visibility.stdout"),
+        service: Some(("app/services/json_included_visibility_probe.rb", INCLUDED_VISIBILITY)),
+    },
 ];
 
 fn compare_native(name: &str) {
@@ -932,6 +937,18 @@ class JsonVisibilityProbe
   def self.converted
     JSON.dump([1], JsonPublicConversion.new)
   end
+  def self.private_conversion
+    JSON.dump([1], JsonPrivateConversion.new)
+  end
+  def self.private_conversion_with_limit
+    JSON.dump([1], JsonPrivateConversion.new, 2)
+  end
+  def self.private_writer
+    JSON.dump([1], JsonPrivateWriter.new)
+  end
+  def self.private_writer_with_limit
+    JSON.dump([1], JsonPrivateWriter.new, 2)
+  end
 end
 "#;
 
@@ -945,6 +962,9 @@ fn dump_destination_inference_ignores_private_conversion() {
     assert!(rbs.contains("def self.dump: (untyped destination) -> untyped\n"), "{rbs}");
     assert!(rbs.contains("def self.writer: () -> JsonPrivateConversionWriter\n"), "{rbs}");
     assert!(rbs.contains("def self.converted: () -> StringIO\n"), "{rbs}");
+    for method in ["private_conversion", "private_conversion_with_limit", "private_writer", "private_writer_with_limit"] {
+        assert!(rbs.contains(&format!("def self.{method}: () -> untyped\n")), "{rbs}");
+    }
 }
 
 const DESTINATION_VISIBILITY_PROBE: &str = r#"
@@ -957,10 +977,175 @@ p JsonVisibilityProbe.dump(writer).equal?(writer)
 p writer.text
 p JsonVisibilityProbe.writer.text
 p JsonVisibilityProbe.converted.string
+p JsonVisibilityProbe.private_conversion
+begin
+  JsonVisibilityProbe.private_conversion_with_limit
+rescue NoMethodError => dump_error
+  puts dump_error.class.to_s
+end
+p JsonVisibilityProbe.private_writer
 "#;
 
 #[test]
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_destination_visibility_executes_with_application_sidecars() {
     compare_native("destination_visibility");
+}
+
+// The review's exact counterexample: the fold must not turn a private
+// conversion into a public one merely by copying its return onto Host.
+const INCLUDED_VISIBILITY: &str = r#"
+require "json"
+require "stringio"
+module HiddenDump
+  private
+  def to_io
+    StringIO.new
+  end
+end
+class Host
+  include HiddenDump
+end
+module HiddenWrite
+  private
+  def write(text)
+    raise "private writer called"
+  end
+end
+class PrivateWriteHost
+  include HiddenWrite
+end
+module ProtectedWrite
+  protected
+  def write(text)
+    raise "protected writer called"
+  end
+end
+class ProtectedWriteHost
+  include ProtectedWrite
+end
+module NestedHiddenDump
+  include HiddenDump
+  def marker
+    true
+  end
+end
+class NestedHost
+  include NestedHiddenDump
+end
+module VisibleDumpBase
+  def to_io
+    StringIO.new
+  end
+end
+module PrivateDumpOverride
+  include VisibleDumpBase
+  private
+  def to_io
+    StringIO.new
+  end
+end
+class PrivateOverrideHost
+  include PrivateDumpOverride
+end
+module PrivateOverrideRelay
+  include PrivateDumpOverride
+  def marker
+    true
+  end
+end
+class RelayedPrivateOverrideHost
+  include PrivateOverrideRelay
+end
+class PublicWriteHost
+  include HiddenDump
+  attr_reader :text
+  def initialize
+    @text = +""
+  end
+  def write(text)
+    @text << text
+    text.bytesize
+  end
+  def flush
+    nil
+  end
+end
+class JsonIncludedVisibilityProbe
+  def self.hidden
+    JSON.dump([1], Host.new)
+  end
+  def self.hidden_with_limit
+    JSON.dump([1], Host.new, 2)
+  end
+  def self.private_writer
+    JSON.dump([1], PrivateWriteHost.new)
+  end
+  def self.private_writer_with_limit
+    JSON.dump([1], PrivateWriteHost.new, 2)
+  end
+  def self.protected_writer
+    JSON.dump([1], ProtectedWriteHost.new)
+  end
+  def self.protected_writer_with_limit
+    JSON.dump([1], ProtectedWriteHost.new, 2)
+  end
+  def self.nested
+    JSON.dump([1], NestedHost.new)
+  end
+  def self.nested_with_limit
+    JSON.dump([1], NestedHost.new, 2)
+  end
+  def self.private_override
+    JSON.dump([1], PrivateOverrideHost.new)
+  end
+  def self.private_override_with_limit
+    JSON.dump([1], PrivateOverrideHost.new, 2)
+  end
+  def self.relayed_private_override
+    JSON.dump([1], RelayedPrivateOverrideHost.new)
+  end
+  def self.public_writer
+    JSON.dump([1], PublicWriteHost.new)
+  end
+end
+"#;
+
+#[test]
+fn dump_included_destination_visibility_stays_gradual() {
+    let (emitted, errors) = app()
+        .write("app/services/json_included_visibility_probe.rb", INCLUDED_VISIBILITY)
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let rbs = std::fs::read_to_string(emitted.join("app/models/json_included_visibility_probe.rbs")).unwrap();
+    for method in [
+        "hidden", "hidden_with_limit", "private_writer", "private_writer_with_limit",
+        "protected_writer", "protected_writer_with_limit", "nested", "nested_with_limit",
+        "private_override", "private_override_with_limit",
+        "relayed_private_override",
+    ] {
+        assert!(rbs.contains(&format!("def self.{method}: () -> untyped\n")), "{rbs}");
+    }
+    assert!(rbs.contains("def self.public_writer: () -> PublicWriteHost\n"), "{rbs}");
+}
+
+const INCLUDED_VISIBILITY_PROBE: &str = r#"
+p Host.new.respond_to?(:to_io)
+p PrivateWriteHost.new.respond_to?(:write)
+p ProtectedWriteHost.new.respond_to?(:write)
+p JsonIncludedVisibilityProbe.hidden
+begin
+  JsonIncludedVisibilityProbe.hidden_with_limit
+rescue NoMethodError => dump_error
+  puts dump_error.class.to_s
+end
+p JsonIncludedVisibilityProbe.private_writer
+p JsonIncludedVisibilityProbe.protected_writer
+p JsonIncludedVisibilityProbe.public_writer.text
+"#;
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_included_destination_visibility_executes_with_application_sidecars() {
+    compare_native("included_visibility");
 }

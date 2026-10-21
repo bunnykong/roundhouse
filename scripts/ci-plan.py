@@ -190,6 +190,14 @@ ACTIVE_JOB_PAYLOAD_INPUTS = {
     "runtime/spinel/global_id_locator.rb",
     "runtime/spinel/base64.rb",
 }
+JSON_DUMP_INPUTS = {
+    "runtime/spinel/json_impl.rb",
+    "runtime/spinel/json_impl.rbs",
+    "src/analyze/body/send.rs",
+    "src/analyze/body/mod.rs",
+    "src/analyze/mod.rs",
+    "src/analyze/registry/stdlib.rs",
+}
 # Inputs of the PostgreSQL Db gate (tests/spinel_pg_db.rs): the shim, its
 # RBS, the contract and time parsing it compiles with, and the cases.
 PG_DB_INPUTS = {
@@ -527,6 +535,8 @@ def native_coverage(path):
         suites.update(owned_tests)
     if path in ACTIVE_JOB_PAYLOAD_INPUTS or path.startswith("tests/active_job_payload/"):
         suites.add("active_job_payload")
+    if path in JSON_DUMP_INPUTS or path.startswith("tests/json_dump/"):
+        suites.add("json_dump")
     if path in SIDEKIQ_PUSH_INPUTS or path.startswith("tests/sidekiq_push/"):
         suites.add("sidekiq_push")
     if (

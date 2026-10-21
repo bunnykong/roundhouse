@@ -1051,31 +1051,36 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
-    fn json_dump_responds_to(&self, io: &Ty, method: &Symbol, class_object: bool) -> bool {
+    fn json_dump_responds_to(&self, io: &Ty, method: &Symbol, class_object: bool) -> Option<bool> {
         use crate::dialect::{MethodReceiver, MethodVisibility};
-        fn lookup(typer: &BodyTyper<'_>, id: &ClassId, method: &Symbol, side: MethodReceiver, depth: usize) -> Option<bool> {
-            if depth >= 32 { return None; }
-            let class = typer.classes().get(id)?;
+        fn lookup(typer: &BodyTyper<'_>, id: &ClassId, method: &Symbol, side: MethodReceiver, depth: usize) -> Result<Option<MethodVisibility>, ()> {
+            if depth >= 32 { return Err(()); }
+            let class = typer.classes().get(id).ok_or(())?;
             let own = match side {
                 MethodReceiver::Class => &class.class_methods,
                 MethodReceiver::Instance => &class.instance_methods,
             };
             if own.contains_key(method) {
-                return Some(class.method_visibility.get(&(side, method.clone()))
-                    .copied().unwrap_or_default() == MethodVisibility::Public);
+                // A return-type entry alone does not prove public visibility.
+                return class.method_visibility.get(&(side, method.clone()))
+                    .copied().map(Some).ok_or(());
             }
             if side == MethodReceiver::Instance {
                 for module in class.includes.iter().rev() {
-                    if let Some(public) = lookup(typer, module, method, side, depth + 1) {
-                        return Some(public);
+                    if let Some(visibility) = lookup(typer, module, method, side, depth + 1)? {
+                        return Ok(Some(visibility));
                     }
                 }
             }
-            class.parent.as_ref().and_then(|parent| lookup(typer, parent, method, side, depth + 1))
+            match &class.parent {
+                Some(parent) => lookup(typer, parent, method, side, depth + 1),
+                None => Ok(None),
+            }
         }
-        let Ty::Class { id, .. } = io else { return false };
+        let Ty::Class { id, .. } = io else { return Some(false) };
         let side = if class_object { MethodReceiver::Class } else { MethodReceiver::Instance };
-        lookup(self, id, method, side, 0) == Some(true)
+        lookup(self, id, method, side, 0)
+            .map(|visibility| visibility == Some(MethodVisibility::Public)).ok()
     }
 
     fn json_dump_return_ty(&self, io: &Ty, class_object: bool) -> Ty {
@@ -1092,16 +1097,19 @@ impl<'a> BodyTyper<'a> {
             Ty::Class { .. } => {
                 let conversion = Symbol::from("to_io");
                 let writer = Symbol::from("write");
+                let converts = self.json_dump_responds_to(io, &conversion, class_object);
                 if !class_object
-                    && (self.json_dump_responds_to(io, &conversion, true)
-                        || self.json_dump_responds_to(io, &writer, true))
+                    && (self.json_dump_responds_to(io, &conversion, true) != Some(false)
+                        || self.json_dump_responds_to(io, &writer, true) != Some(false))
                 {
                     // A nominal type can have lost class-object provenance (for
                     // example through an ivar), even when both sides define the
                     // protocol. Keep that ambiguity gradual rather than claiming
                     // either side's concrete native return representation.
                     Ty::Untyped
-                } else if self.json_dump_responds_to(io, &conversion, class_object) {
+                } else if converts.is_none() {
+                    Ty::Untyped
+                } else if converts == Some(true) {
                     let converted = self.dispatch_on(Some(io), &conversion, None, &[], !class_object);
                     // Conversion happens exactly once. Both nil and false select
                     // no-IO mode; true raises rather than returning successfully.
@@ -1110,14 +1118,14 @@ impl<'a> BodyTyper<'a> {
                         // Spinel cannot unbox a dynamic return as singleton(C).
                         // Keep class-object destinations in their boxed form.
                         Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => Ty::Untyped,
-                        Ty::Class { .. } if self.json_dump_responds_to(ty, &writer, true) => Ty::Untyped,
+                        Ty::Class { .. } if self.json_dump_responds_to(ty, &writer, true) != Some(false) => Ty::Untyped,
                         ty => ty.clone(),
                     };
                     match converted {
                         Ty::Union { variants } => super::union_many(variants.iter().map(result).collect()),
                         ty => result(&ty),
                     }
-                } else if self.json_dump_responds_to(io, &writer, class_object) {
+                } else if self.json_dump_responds_to(io, &writer, class_object) == Some(true) {
                     if class_object {
                         // The facade's dynamic return must stay boxed for a
                         // class object; a singleton RBS return cannot unbox it.
@@ -4114,6 +4122,34 @@ pub(crate) const PARAM_VALUE: &str = "Roundhouse::ParamValue";
 
 pub(crate) fn param_value_ty() -> Ty {
     Ty::Class { id: crate::ident::ClassId(Symbol::from(PARAM_VALUE)), args: vec![].into() }
+}
+
+#[cfg(test)]
+mod json_dump_tests {
+    use super::*;
+    use crate::analyze::ClassInfo;
+    use crate::dialect::{MethodReceiver, MethodVisibility};
+    use std::collections::HashMap;
+
+    #[test]
+    fn missing_protocol_visibility_does_not_publish_a_destination_type() {
+        let id = ClassId(Symbol::from("ExternalDestination"));
+        let destination = Ty::Class { id: id.clone(), args: vec![].into() };
+        for method in ["to_io", "write"] {
+            let mut info = ClassInfo::default();
+            info.instance_methods.insert(Symbol::from(method), Ty::Nil);
+            // An unknown conversion cannot be skipped in favor of a
+            // public writer: it might change the returned destination.
+            info.instance_methods.insert(Symbol::from("write"), Ty::Int);
+            if method == "to_io" {
+                info.method_visibility.insert(
+                    (MethodReceiver::Instance, Symbol::from("write")), MethodVisibility::Public,
+                );
+            }
+            let classes = HashMap::from([(id.clone(), info)]);
+            assert_eq!(BodyTyper::new(&classes).json_dump_return_ty(&destination, false), Ty::Untyped);
+        }
+    }
 }
 
 // Not `permit`/`to_unsafe_h`/`require`: ActionController::Parameters methods no ruby-family runtime Hash answers.

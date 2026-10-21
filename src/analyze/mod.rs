@@ -5151,6 +5151,7 @@ impl Analyzer {
         let module_ids: std::collections::HashSet<&ClassId> =
             app.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
         for (id, modules) in wanted {
+            let mut copied_visibility = HashMap::new();
             let mut queue = modules;
             let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
             let mut qi = 0;
@@ -5162,6 +5163,7 @@ impl Analyzer {
                 }
                 let Some(module) = self.classes.get(&m) else { continue };
                 let inst = module.instance_methods.clone();
+                let visibility = module.method_visibility.clone();
                 for n in module.includes.clone() {
                     if seen.insert(n.clone()) {
                         queue.push(n);
@@ -5174,6 +5176,11 @@ impl Analyzer {
                         continue;
                     }
                     cls.class_methods.insert(name.clone(), ty);
+                    cls.copy_method_visibility(
+                        crate::dialect::MethodReceiver::Class, &name,
+                        visibility.get(&(crate::dialect::MethodReceiver::Instance, name.clone())).copied(),
+                        &mut copied_visibility,
+                    );
                     folded.1.insert(name);
                 }
             }
@@ -5181,7 +5188,10 @@ impl Analyzer {
     }
 
     fn fold_concern_surfaces(&mut self, app: &App) {
-        type Surface = (HashMap<Symbol, Ty>, HashMap<Symbol, Ty>, Vec<ClassId>);
+        type Surface = (
+            HashMap<Symbol, Ty>, HashMap<Symbol, Ty>, Vec<ClassId>,
+            HashMap<(crate::dialect::MethodReceiver, Symbol), crate::dialect::MethodVisibility>,
+        );
         let module_surfaces: HashMap<ClassId, Surface> = app
             .library_classes
             .iter()
@@ -5195,7 +5205,7 @@ impl Analyzer {
                 if let Some(lent) = self.host_folded.get(&lc.name) {
                     inst.retain(|name, _| !lent.contains(name));
                 }
-                Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone())))
+                Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone(), cls.method_visibility.clone())))
             })
             .collect();
         if module_surfaces.is_empty() {
@@ -5209,6 +5219,7 @@ impl Analyzer {
             .map(|(id, c)| (id.clone(), c.includes.clone()))
             .collect();
         for (id, includes) in targets {
+            let mut copied_visibility = HashMap::new();
             // Transitive closure over module includes.
             let mut queue = includes;
             let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
@@ -5216,7 +5227,7 @@ impl Analyzer {
             while qi < queue.len() {
                 let m = queue[qi].clone();
                 qi += 1;
-                let Some((inst, class_side, nested)) = module_surfaces.get(&m) else {
+                let Some((inst, class_side, nested, visibility)) = module_surfaces.get(&m) else {
                     continue;
                 };
                 for n in nested {
@@ -5231,6 +5242,11 @@ impl Analyzer {
                         continue; // own/catalog entry wins
                     }
                     cls.instance_methods.insert(name.clone(), ty.clone());
+                    let key = (crate::dialect::MethodReceiver::Instance, name.clone());
+                    cls.copy_method_visibility(
+                        crate::dialect::MethodReceiver::Instance, name,
+                        visibility.get(&key).copied(), &mut copied_visibility,
+                    );
                     folded.0.insert(name.clone());
                 }
                 for (name, ty) in class_side {
@@ -5238,6 +5254,11 @@ impl Analyzer {
                         continue;
                     }
                     cls.class_methods.insert(name.clone(), ty.clone());
+                    let key = (crate::dialect::MethodReceiver::Class, name.clone());
+                    cls.copy_method_visibility(
+                        crate::dialect::MethodReceiver::Class, name,
+                        visibility.get(&key).copied(), &mut copied_visibility,
+                    );
                     folded.1.insert(name.clone());
                 }
             }

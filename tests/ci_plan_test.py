@@ -189,6 +189,22 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], ["framework_tests_spinel"])
                 self.assertEqual(plan["archives"], [])
 
+    def test_json_dump_inputs_select_native_comparisons(self):
+        for path in [
+            "runtime/spinel/json_impl.rb",
+            "runtime/spinel/json_impl.rbs",
+            "src/analyze/body/send.rs",
+            "src/analyze/body/mod.rs",
+            "src/analyze/mod.rs",
+            "src/analyze/registry/stdlib.rs",
+            "tests/json_dump.rs",
+            "tests/json_dump/included_visibility.stdout",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("json_dump", plan["spinel_tests"])
+                self.assertTrue(set(ci.CORE + ["spinel-framework"]).issubset(plan["jobs"]))
+
     def test_missing_plan_output_fails_gates_without_crashing(self):
         with (
             patch.dict(os.environ, {"CI_PLAN": "", "CI_NEEDS": "{}"}, clear=False),

@@ -240,7 +240,8 @@ pub struct ClassInfo {
     pub block_value_methods: std::collections::HashSet<Symbol>,
     /// Methods callable on an instance: `post.title`, `post.destroy`.
     pub instance_methods: HashMap<Symbol, Ty>,
-    /// Source visibility for public-only protocol checks such as JSON.dump.
+    /// Known visibility for public-only protocol checks such as JSON.dump.
+    /// Carried with copied mixin methods; absence means unknown.
     pub method_visibility: HashMap<(crate::dialect::MethodReceiver, Symbol), crate::dialect::MethodVisibility>,
     /// AccessorKind per method — lets the body-typer flag Method
     /// dispatches so emitters add parens. AttributeReader/Writer
@@ -325,6 +326,28 @@ impl ClassInfo {
     /// handling (#558) so a per-column check can't drift between them.
     pub fn has_schema_column(&self, name: &Symbol) -> bool {
         self.attributes.fields.contains_key(name)
+    }
+
+    pub(super) fn copy_method_visibility(
+        &mut self,
+        side: crate::dialect::MethodReceiver,
+        name: &Symbol,
+        visibility: Option<crate::dialect::MethodVisibility>,
+        copied: &mut HashMap<(crate::dialect::MethodReceiver, Symbol), Option<crate::dialect::MethodVisibility>>,
+    ) {
+        let key = (side, name.clone());
+        let known = copied.entry(key.clone()).or_insert(visibility);
+        // A transitive surface can overwrite a nearer override during the
+        // return-type fold. Conflicting visibility cannot prove publicity;
+        // once unknown, another copy must not make it public again.
+        if *known != visibility {
+            *known = None;
+        }
+        if let Some(visibility) = *known {
+            self.method_visibility.insert(key, visibility);
+        } else {
+            self.method_visibility.remove(&key);
+        }
     }
 }
 

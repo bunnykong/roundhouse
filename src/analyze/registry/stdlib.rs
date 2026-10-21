@@ -1267,16 +1267,21 @@ fn register_stdlib_class(
     class_methods: &[(&str, Ty)],
     instance_methods: &[(&str, Ty)],
 ) {
+    use crate::dialect::{MethodReceiver, MethodVisibility};
     let cls = classes.entry(ClassId(Symbol::from(name))).or_default();
     for (m, ty) in class_methods {
         cls.class_methods
             .entry(Symbol::from(*m))
             .or_insert_with(|| ty.clone());
+        cls.method_visibility.entry((MethodReceiver::Class, Symbol::from(*m)))
+            .or_insert(MethodVisibility::Public);
     }
     for (m, ty) in instance_methods {
         cls.instance_methods
             .entry(Symbol::from(*m))
             .or_insert_with(|| ty.clone());
+        cls.method_visibility.entry((MethodReceiver::Instance, Symbol::from(*m)))
+            .or_insert(MethodVisibility::Public);
     }
 }
 
