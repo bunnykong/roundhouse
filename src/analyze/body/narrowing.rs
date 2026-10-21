@@ -548,6 +548,12 @@ fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
 /// Array/Hash spine matches go through [`ty_compatible`] (same owner as
 /// else-branch [`remove_variant`]) rather than a duplicated match arm.
 fn intersect_variant(current: &Ty, narrower: &Ty) -> Option<Ty> {
+    static STRICT_GUARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *STRICT_GUARD.get_or_init(|| std::env::var("RH_STRICT_GUARD").as_deref() == Ok("1"))
+        && crate::analyze::strict_producers::is_p(current)
+    {
+        return Some(current.clone());
+    }
     match (current, narrower) {
         (Ty::Class { id, .. }, Ty::Array { .. }) if id.0.as_str() == super::send::PARAM_VALUE => {
             Some(Ty::Array { elem: std::sync::Arc::new(super::send::param_value_ty()) })
