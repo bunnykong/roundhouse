@@ -1262,6 +1262,11 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
             // lowering, which is what turns the `M.where` it writes
             // into a seeded Relation. See the module.
             crate::lower::records_to_relation_arg::rewrite_test_classes(&mut test_lcs, app);
+            for lc in &mut test_lcs {
+                for method in &mut lc.methods {
+                    crate::lower::group_count::rewrite(&mut method.body);
+                }
+            }
             library::apply_scope_lowering(&mut test_lcs, app);
             // A route-helper argument as the helper's SIGNATURE takes
             // it, as app bodies get it: a String-typed segment (a slug,

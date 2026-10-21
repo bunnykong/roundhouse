@@ -118,7 +118,7 @@ pub fn group_in_relation_chain(expr: &Expr) -> Option<GroupedCount<'_>> {
     }
 }
 
-fn rewrite(expr: &mut Expr) {
+pub(crate) fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
     rewrite_node(expr);
 }

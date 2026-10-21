@@ -1761,7 +1761,11 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // declares no scopes. Otherwise `Widget.order(...)` reaches no method
     // and `Widget.where.not(...)` reaches Base.where with no argument.
     // Keep the whole-app gate consistent with the per-body gate below.
-    let mut wants_model_chain = false;
+    // Emitted tests and their inner classes are supplied in `lcs`, not
+    // app hook bodies. Their queries must admit the same lowering pass.
+    let mut wants_model_chain = lcs.iter().flat_map(|lc| &lc.methods).any(|method| {
+        crate::lower::scope_chain::mentions_model_chain_start(&method.body, &models)
+    });
     crate::lower::for_each_hook_body_ref(app, &mut |body| {
         wants_model_chain = wants_model_chain
             || crate::lower::scope_chain::mentions_model_chain_start(body, &models);
