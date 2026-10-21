@@ -3912,7 +3912,7 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         // A reference nobody unfolded reads as `untyped`.
         Some(Ty::Rec { slot }) => Some(if crate::analyze::strict_producers::xfer_on()
             && crate::analyze::fold::value_of(*slot, &HashMap::new()).is_none() {
-                Ty::pending_untyped()
+                crate::analyze::completion_rerun::unavailable_read()
             } else { Ty::unresolved() }),
         _ => None,
     }

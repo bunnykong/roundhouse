@@ -72,6 +72,8 @@ fn completion_reference_reads_do_not_recreate_pending_and_keep_computed_bottom()
     fold::add_rec_methods(vec![(class.clone(),method.clone())]);
     let reference=fold::ret_ref(&class,&method,false).unwrap();
     assert_eq!(fold::head(&reference,(1,1,2),&HashMap::new()),Some(Ty::unresolved()));
+    assert_eq!(body::multiassign_target_ty(&Some(reference.clone()),0),Some(Ty::unresolved()),
+        "the registry-free destructuring harvest cannot recreate Pending after completion");
     let mut info=body::ClassInfo::default();info.instance_methods.insert(method,Ty::Bottom);
     assert_eq!(fold::head(&reference,(1,1,2),&HashMap::from([(class,info)])),Some(Ty::Bottom));
 }

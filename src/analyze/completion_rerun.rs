@@ -26,6 +26,11 @@ pub(super) fn on() -> bool {
 
 fn tracing() -> bool { std::env::var("RH_REPLAY_TRACE").as_deref() == Ok("1") }
 
+fn retype_limit() -> usize {
+    std::env::var("RH_REPLAY_CAP").ok().and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| (1..=128).contains(n)).unwrap_or(12)
+}
+
 fn trace_finished(analyzer: &Analyzer, app: &mut App) {
     if !tracing() { return; }
     let bindings: BTreeMap<_, _> = analyzer.refined_action_bindings.iter().flat_map(|(slot, values)|
@@ -350,9 +355,10 @@ impl Analyzer {
             let mut end = LoopEnd::RanToCap;
             let mut iterations = 0;
             let mut seen = Vec::new();
-            // Reuse the existing global-round limit; this is a fresh phase,
-            // with all source bodies dirty, including views and test helpers.
-            for pass in 0..12 {
+            // Default to the existing limit. The quick-test override measures
+            // the observed provenance-only tail after the structural work closes.
+            let limit = retype_limit();
+            for pass in 0..limit {
                 iterations += 1;
                 let before = self.capture_dirty_hints();
                 let trace_before = tracing().then(|| snapshot(self));
@@ -384,7 +390,7 @@ impl Analyzer {
             self.fixpoint_rounds.absorb = end;
             eprintln!("rh-complete: {}", serde_json::json!({"phase":"completion-round",
                 "round":round,"completed":counts,"total":total,"all_consumers_dirty":true,
-                "retype_iterations":iterations,"closed":closed}));
+                "retype_iterations":iterations,"retype_limit":limit,"closed":closed}));
         }
         let pending = self.pending_state(app, None);
         trace_finished(self,app);
