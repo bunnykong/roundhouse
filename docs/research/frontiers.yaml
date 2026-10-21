@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "Integrated current writers give Campfire/Forem/Chatwoot/Mastodon 10/9/10/5 equal tables across four V0A0 schedules, but lose runtime values, including two newly stable Chatwoot rows. Sound general order independence remains open."
-  facts: [F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "A strict class guard keeps Pending inputs pending and makes all ten Mastodon value tables schedule-equal: 5/10 to 10/10 on F73's candidate across four V0A0 schedules, and on a port to upstream main across twelve. Forem and Chatwoot stay at 9/10 and 24 Mastodon rows widen. The base candidate still loses runtime values, so sound order independence remains open."
+  facts: [F74, F73, F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Check runtime admission beside equality and account for witnessed container mutations."
+  next: "Classify the twelve structural identities on main, and make controller bindings equal without new runtime losses."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "integrated-current-writers 991ec4b356a21cf53271737124533c617e01e847 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
-    lab: "7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6; unsound equality gain, stratified census and upheld light check"
-    runner: "V0A0 quick-test reports, exact census arithmetic and runtime membership at lab 7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6"
+    compiler: "unpublished: strict guard 48155b34 over F73 candidate 66c06f52 (F72 source f9a7e620); main port 7bd46672 over upstream main 1c84d346361237ef9a99b6c01cead7c340532330"
+    lab: "f60bfeca5a4c53702e57d8c83e96679a692fc579; strict pending guard tables and mutation-writer census"
+    runner: "V0A0 quick-test reports, twelve-schedule main tables and CRuby witnesses at lab f60bfeca5a4c53702e57d8c83e96679a692fc579"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "The integrated candidate is unsound: 54 new losses among 135 sampled narrowed rows, plus two targeted Chatwoot losses. Six inherited errors are separate. Exact stratified intervals and 6,096 unadjudicated rows limit the claim."
-  facts: [F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "Mutation-site writers lose witnessed values in 21 rows on all four schedules; counting unproved rows as possible losses, at most 2,202 of 4,652 narrowings (47.3%) lose values at 95% confidence. The strict guard adds no witnessed loss and keeps these losses."
+  facts: [F73, F74, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Retain mutation counterexamples and sample boundaries; the saved 300-check regression gate does not certify soundness."
+  next: "Repair the routing and container contributions behind the 21 losses, then rerun the census before claiming sound equality."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "integrated-current-writers 991ec4b356a21cf53271737124533c617e01e847 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
-    lab: "7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6; unsound equality gain, stratified census and upheld light check"
+    compiler: "unpublished: mutation-site writers 66c06f52 over F72 source f9a7e620; strict guard 48155b34"
+    lab: "f60bfeca5a4c53702e57d8c83e96679a692fc579; mutation-writer census with minimal CRuby witnesses"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,19 +84,19 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "Chatwoot gains ten equal tables from five and Forem nine from six, but narrowed containers reject real values. Sample rates are row estimates within fixed strata, not a sound precision gain."
-  facts: [F72, F71, F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
+  stands: "The strict guard narrows no value set and widens 24 Mastodon rows, a precision cost for the pinned callers. F73's candidate loses witnessed values in 21 narrowed rows, so its equality gains are not sound precision gains."
+  facts: [F74, F73, F72, F71, F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Require runtime membership and exact sampling scope beside each narrowing claim."
+  next: "Recover the 24 widened rows without a Pending seed, and keep runtime membership beside each narrowing claim."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "integrated-current-writers 991ec4b356a21cf53271737124533c617e01e847 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
-    lab: "7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6; unsound equality gain, stratified census and upheld light check"
-    runner: "V0A0 quick-test reports, exact census arithmetic and runtime membership at lab 7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6"
+    compiler: "unpublished: strict guard 48155b34 over F73 candidate 66c06f52 (F72 source f9a7e620); main port 7bd46672 over upstream main 1c84d346361237ef9a99b6c01cead7c340532330"
+    lab: "f60bfeca5a4c53702e57d8c83e96679a692fc579; strict pending guard tables and mutation-writer census"
+    runner: "V0A0 quick-test reports, twelve-schedule main tables and CRuby witnesses at lab f60bfeca5a4c53702e57d8c83e96679a692fc579"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
