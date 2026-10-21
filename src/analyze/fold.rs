@@ -380,6 +380,19 @@ fn accumulate(key: SlotKey, value: Ty) -> Ty {
     ST.with(|s| {
         let mut s = s.borrow_mut();
         let epoch = s.epoch;
+        // Current rows can preserve genuine unknowns only if downstream
+        // site transfers preserve them too. Reuse the RH_SITES_CURRENT rule:
+        // a visited site replaces its cell; an unvisited site retains it.
+        if super::parameter_conservation::row_current_on() {
+            if s.values.get(&slot) != Some(&value) {
+                note_moved(slot, s.values.get(&slot));
+            }
+            s.site_epoch.insert(slot, epoch);
+            s.joined.remove(&slot);
+            super::det::note("fold.site_slot", s.values.get(&slot), &value);
+            s.values.insert(slot, value);
+            return;
+        }
         let fresh = s.site_epoch.get(&slot).is_none_or(|e| *e < epoch);
         s.site_epoch.insert(slot, epoch);
         // Joins are idempotent: a value this slot has already joined since it
@@ -1060,6 +1073,26 @@ pub(crate) fn stats() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_row_sites_retain_unknowns_and_replay_prior_inputs() {
+        if !super::super::parameter_conservation::row_current_on() { return; }
+        let known = Ty::Class { id: ClassId(Symbol::from("Session")), args: vec![].into() };
+        let unknown = super::super::parameter_conservation::join(known.clone(), Ty::unresolved());
+        for key in [SlotKey::At { site: (1, 10, 20), step: Step::Elem },
+                    SlotKey::Narrow { site: (1, 10, 20), filter: "truthy_session".into() }] {
+            ST.with(|s| *s.borrow_mut() = State::default());
+            for value in [known.clone(), unknown.clone(), known.clone(), unknown.clone()] {
+                new_epoch();
+                let Ty::Rec { slot } = accumulate(key.clone(), value.clone()) else { unreachable!() };
+                assert_eq!(value_of(slot, &HashMap::new()), Some(value.clone()));
+                new_epoch(); // a skipped site retains its latest contribution
+                assert_eq!(value_of(slot, &HashMap::new()), Some(value));
+            }
+        }
+        ST.with(|s| *s.borrow_mut() = State::default());
+    }
+
 
     fn union(v: Vec<Ty>) -> Ty {
         Ty::Union { variants: v.into() }

@@ -600,3 +600,40 @@ fn c4_normal_form() {
     }
     println!("C4-NORMAL-FORM {}", json!({"norm": std::env::var("RH_C5_NORM").unwrap_or_else(|_| "1".into()), "counts": c}));
 }
+
+// Run with RH_ROW_CURRENT=1 RH_VIEW_KEEP=known. Exercise the M461 source
+// hash: one concrete option beside a quote expression still typed as Var.
+#[test]
+fn current_row_reader_keeps_unknown_quote_value() {
+    if !row_current_on() { return; }
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::VarId;
+    use crate::span::Span;
+    let typed = |node, ty| {
+        let mut e = Expr::new(Span::synthetic(), node);
+        e.ty = Some(ty);
+        e
+    };
+    let key = |name: &str| typed(ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } }, Ty::Sym);
+    let quote = typed(ExprNode::Var { id: VarId(1), name: Symbol::from("quote") }, Ty::Var { var: TyVar(0) });
+    let flag = typed(ExprNode::Lit { value: Literal::Bool { value: true } }, Ty::Bool);
+    let options = typed(ExprNode::Hash { entries: vec![(key("quoted_status"), quote), (key("multiline"), flag)], kwargs: true },
+        Ty::Hash { key: Arc::new(Ty::Sym), value: Arc::new(join(Ty::Bool, Ty::Var { var: TyVar(0) })) });
+    let viewed = crate::analyze::view_param_ty(argument(&options));
+    let Ty::Hash { value, .. } = viewed else { panic!("options must remain a hash") };
+    assert!(contains(&value, &Value::Nil), "unknown quote must admit nil");
+    assert!(contains(&value, &Value::Int), "unknown quote must admit arbitrary Ruby values");
+    assert!(origins(&value).iter().any(|s| s.ends_with(":Unresolved")));
+}
+
+#[test]
+fn current_row_does_not_promote_empty_literal_holes() {
+    if !row_current_on() { return; }
+    use crate::expr::{Expr, ExprNode};
+    let t = Ty::Hash { key: Arc::new(Ty::Var { var: TyVar(0) }), value: Arc::new(Ty::Var { var: TyVar(0) }) };
+    let mut empty = Expr::new(crate::span::Span::synthetic(), ExprNode::Hash { entries: vec![], kwargs: false });
+    empty.ty = Some(t.clone());
+    assert_eq!(argument(&empty), t);
+    let t = hash(join(Ty::Bool, Ty::pending_untyped()));
+    assert_eq!(crate::analyze::view_param_ty(t), hash(Ty::Bool));
+}

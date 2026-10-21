@@ -136,7 +136,9 @@ fn join_reference_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
 
 /// Join every parameter row with the row it had last round.
 pub(crate) fn join_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
-    if !*JOIN {
+    // Each site already has a replaceable cell. Joining the old aggregate
+    // resurrects superseded/removed sites rather than retaining skipped callers.
+    if !*JOIN || super::parameter_conservation::row_current_on() {
         return;
     }
     if super::fold::on() {
@@ -226,7 +228,8 @@ pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &Cl
 /// [`join_params`] for one row the worklist recomputed: a reference-mode
 /// method's row joins with its previous row (`commit` records it).
 pub(crate) fn join_param_row(key: &MethodKey, raw: Option<Vec<Ty>>, commit: bool) -> Option<Vec<Ty>> {
-    if !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(&key.0, &key.1) {
+    if super::parameter_conservation::row_current_on()
+        || !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(&key.0, &key.1) {
         return raw;
     }
     ST.with(|s| {
@@ -444,6 +447,23 @@ fn informative(t: &Ty) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_row_does_not_resurrect_replaced_or_removed_contributions() {
+        if !super::super::parameter_conservation::row_current_on() { return; }
+        let key = (ClassId(Symbol::from("Example")), Symbol::from("accept"),
+            crate::dialect::MethodReceiver::Instance);
+        ST.with(|s| s.borrow_mut().prev_params.insert(key.clone(), vec![Ty::Int]));
+        let mut current = HashMap::from([(key.clone(), vec![Ty::Str])]);
+        join_params(&mut current);
+        assert_eq!(current[&key], vec![Ty::Str]);
+        assert_eq!(join_param_row(&key, Some(vec![Ty::Str]), true), Some(vec![Ty::Str]));
+        current.clear();
+        join_params(&mut current);
+        assert!(current.is_empty());
+        assert_eq!(join_param_row(&key, None, true), None);
+        ST.with(|s| s.borrow_mut().prev_params.clear());
+    }
 
     fn union(v: Vec<Ty>) -> Ty {
         Ty::Union { variants: v.into() }

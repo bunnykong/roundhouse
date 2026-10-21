@@ -6836,7 +6836,7 @@ impl Analyzer {
                             if at >= spread {
                                 return Ty::gradual();
                             }
-                            let t = a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
+                            let t = parameter_conservation::argument(a);
                             // Template call sites are evidence of what
                             // callers pass; an `Untyped` arg there
                             // (`errors_for f.object`) means the CALLER's
@@ -6867,10 +6867,7 @@ impl Analyzer {
                             for (k, v) in entries {
                                 match &*k.node {
                                     ExprNode::Lit { value: Literal::Sym { value } } => {
-                                        let t = v
-                                            .ty
-                                            .clone()
-                                            .unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
+                                        let t = parameter_conservation::argument(v);
                                         let t = if via_helper_index && !parameter_conservation::on() && matches!(t, Ty::Untyped { .. }) {
                                             Ty::Var { var: crate::ident::TyVar(0) }
                                         } else {
