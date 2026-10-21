@@ -222,6 +222,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             test_extras,
             &crate::lower::routes::helper_id_segments(app),
         );
+        // Resolve helper ancestry independently of test-file emission order.
+        for lowered in &test_lowered {
+            library::register_classes(&lowered.inner_classes);
+        }
         for lowered in &test_lowered {
             let name = lowered.test_class.name.0.as_str();
             let last = name.rsplit("::").next().unwrap_or(name);

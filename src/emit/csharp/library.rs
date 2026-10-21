@@ -159,6 +159,10 @@ pub fn emit_test_class(
 
     let mut out = String::new();
 
+    // Helpers are not ordinary models. Register the whole group before
+    // emitting any member, including children declared before their parent.
+    register_class_hierarchy(inner_classes);
+
     // Inner helper classes declared inline in the test file (a non-test
     // model/controller paired with the `*Test` class). Ingest lifts them onto
     // the module's `inner_classes`; emit them ahead of the test class so its

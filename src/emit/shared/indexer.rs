@@ -78,4 +78,43 @@ mod tests {
             assert_eq!(keys.inherited("Base"), None);
         }
     }
+
+    #[test]
+    fn registered_helpers_keep_qualified_and_concrete_ancestor_keys() {
+        for spelling in ["String", "Integer", "String | Symbol", "Symbol | String"] {
+            let source = br#"module Helpers
+  class Root
+    def [](key)
+      nil
+    end
+    def []=(key, value)
+      nil
+    end
+  end
+  class Child < Helpers::Root
+    def [](key)
+      nil
+    end
+  end
+end
+"#;
+            let rbs = format!(r#"module Helpers
+  class Root
+    def []: (({spelling}) key) -> untyped
+    def []=: (({spelling}) key, untyped value) -> untyped
+  end
+  class Child < Helpers::Root
+    def []: (untyped key) -> untyped
+  end
+end
+"#);
+            let mut classes = crate::runtime_src::parse_library_with_rbs(source, &rbs, "helpers.rb").unwrap();
+            classes.reverse();
+            let mut keys = IndexerKeys::default();
+            keys.register(&classes);
+            let expected = keys.classes["Helpers::Root"].1.as_ref();
+            assert!(expected.is_some(), "{spelling}");
+            assert_eq!(keys.inherited("Helpers::Child"), expected, "{spelling}");
+        }
+    }
 }
