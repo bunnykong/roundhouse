@@ -50,6 +50,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // conformance, throwing methods, object accessors) before that entry
     // renders, so call sites resolve regardless of order.
     expr::reset_registries();
+    library::reset_indexer_keys();
     // `processAction` is the dispatch boundary the server catches at —
     // its Base declaration carries `throws` by contract so the throwing
     // controller overrides are legal.

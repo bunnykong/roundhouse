@@ -74,7 +74,6 @@ pub fn csharp_ty(t: &Ty) -> String {
             }
         }
 
-        Ty::Union { .. } if t.is_stringish() => "string".to_string(),
         Ty::Union { variants } => render_union(variants),
 
         Ty::Class { id, args } => render_class(id.0.as_str(), args),
@@ -180,5 +179,27 @@ pub fn has_untyped(t: &Ty) -> bool {
             params.iter().any(|p| has_untyped(&p.ty)) || has_untyped(ret)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_symbol_unions_preserve_dynamic_boundaries_in_nested_types() {
+        let key = Ty::Union { variants: vec![Ty::Str, Ty::Sym].into() };
+        for ty in [
+            key.clone(),
+            Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() },
+            Ty::Union { variants: vec![key.clone(), Ty::Nil].into() },
+            Ty::Union { variants: vec![key.clone(), Ty::Int].into() },
+        ] {
+            assert_eq!(csharp_ty(&ty), "object?");
+        }
+        assert_eq!(csharp_ty(&Ty::Array { elem: key.clone().into() }), "List<object?>");
+        assert_eq!(csharp_ty(&Ty::Hash { key: Ty::Str.into(), value: key.clone().into() }),
+            "Dictionary<string, object?>");
+        assert_eq!(csharp_ty(&Ty::Tuple { elems: vec![key, Ty::Str].into() }), "(object?, string)");
     }
 }

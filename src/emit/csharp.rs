@@ -44,6 +44,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     // Reset the per-emit registries.
     expr::reset_class_hierarchy();
+    library::reset_indexer_keys();
     expr::reset_object_accessors();
     expr::reset_method_params();
 

@@ -3116,9 +3116,32 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     }
 }
 
+// A merged native indexer shares one key type between its reader and
+// writer. Keep both bodies on String dispatch; a String | Symbol parameter
+// remains dynamic on the soft-strict targets.
+fn index_name_ty() -> Ty {
+    Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() }
+}
+
+fn index_name_string(name: &Symbol) -> Expr {
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(with_ty(var_ref(name.clone()), index_name_ty())),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        Ty::Str,
+    )
+}
+
 fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     let name = Symbol::from("name");
-    let name_ty = Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() };
+    let name_ty = index_name_ty();
 
     // Patterns match the PUBLIC column name; bodies read the storage
     // ivar (`@col_raw` for timestamps). Date instead uses its native
@@ -3173,19 +3196,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         Expr::new(
             Span::synthetic(),
             ExprNode::Case {
-                scrutinee: with_ty(
-                    Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Send {
-                            recv: Some(with_ty(var_ref(name.clone()), name_ty.clone())),
-                            method: Symbol::from("to_s"),
-                            args: vec![],
-                            block: None,
-                            parenthesized: false,
-                        },
-                    ),
-                    Ty::Str,
-                ),
+                scrutinee: index_name_string(&name),
                 arms,
             },
         )
@@ -3501,7 +3512,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
             };
             crate::expr::Arm {
                 pattern: crate::expr::Pattern::Lit {
-                    value: Literal::Sym { value: c.name.clone() },
+                    value: Literal::Str { value: c.name.as_str().to_string() },
                 },
                 guard: None,
                 body,
@@ -3535,7 +3546,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
         Expr::new(
             Span::synthetic(),
             ExprNode::Case {
-                scrutinee: var_ref(name.clone()),
+                scrutinee: index_name_string(&name),
                 arms,
             },
         )
@@ -3574,7 +3585,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
         params: vec![Param::positional(name.clone()), Param::positional(value.clone())],
         body,
         signature: Some(fn_sig(
-            vec![(name, Ty::Sym), (value, value_ty)],
+            vec![(name, index_name_ty()), (value, value_ty)],
             return_ty,
         )),
         effects: EffectSet::default(),

@@ -36,24 +36,32 @@ raise "Integer column loses its type" unless record.column("visits") == 7
 raise "nil column read differs" unless Widget.new.column("email").nil?
 raise "unknown String key changes behavior" unless record.column("missing").nil?
 raise "unknown Symbol key changes behavior" unless record.column(:missing).nil?
+record[key] = "updated"
+raise "String write differs from its read" unless record.column(:email) == "updated"
+record[:email] = "symbol"
+raise "Symbol write regresses" unless record.column(key) == "symbol"
+record["visits"] = 9
+raise "Integer write loses its type" unless record.column(:visits) == 9
+record["email"] = nil
+raise "nil write differs from its read" unless record.column(key).nil?
 "#,
         )
         .assert_passes();
 
-    // Both targets represent Ruby Symbols as Strings. Base and its
-    // generated overrides must keep the same native indexer key type.
+    // String | Symbol stays dynamic on these soft-strict targets so
+    // parameter-derived keys still compile. Base and its overrides agree.
     for (target, base, model, declaration) in [
         (
             roundhouse::project::BuildTarget::CSharp,
             "app/runtime/ActiveRecordBase.cs",
             "app/models/Widget.cs",
-            "this[string ",
+            "this[object? ",
         ),
         (
             roundhouse::project::BuildTarget::Swift,
             "Sources/App/ActiveRecordBase.swift",
             "Sources/App/app/models/Widget.swift",
-            "subscript(name: String)",
+            "subscript(name: Any?)",
         ),
     ] {
         let (emitted, errors) = app()
