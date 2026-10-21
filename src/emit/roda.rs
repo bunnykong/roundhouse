@@ -357,36 +357,48 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                                 validation.attribute
                             ));
                         }
-                        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
+                        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank } => {
                             let helper =
                                 if *only_integer { "validates_integer" } else { "validates_numeric" };
+                            // Sequel's helpers skip nil under `allow_nil:` and
+                            // `blank_object?` (nil, false, whitespace-only
+                            // Strings, empty collections: Rails' `blank?`)
+                            // under `allow_blank:`, on every helper the rule
+                            // emits.
+                            let mut opts = String::new();
+                            if *allow_nil == Some(true) {
+                                opts.push_str(", allow_nil: true");
+                            }
+                            if *allow_blank == Some(true) {
+                                opts.push_str(", allow_blank: true");
+                            }
                             validate_lines.push(format!(
-                                "    {helper} :{}",
+                                "    {helper} :{}{opts}",
                                 validation.attribute
                             ));
                             // `validates_numeric` ignores `:greater_than`.
                             // `validates_operator` is the comparison Sequel runs.
                             if let Some(n) = gt {
                                 validate_lines.push(format!(
-                                    "    validates_operator :>, {n}, :{}",
+                                    "    validates_operator :>, {n}, :{}{opts}",
                                     validation.attribute
                                 ));
                             }
                             if let Some(n) = lt {
                                 validate_lines.push(format!(
-                                    "    validates_operator :<, {n}, :{}",
+                                    "    validates_operator :<, {n}, :{}{opts}",
                                     validation.attribute
                                 ));
                             }
                             if let Some(n) = gte {
                                 validate_lines.push(format!(
-                                    "    validates_operator :>=, {n}, :{}",
+                                    "    validates_operator :>=, {n}, :{}{opts}",
                                     validation.attribute
                                 ));
                             }
                             if let Some(n) = lte {
                                 validate_lines.push(format!(
-                                    "    validates_operator :<=, {n}, :{}",
+                                    "    validates_operator :<=, {n}, :{}{opts}",
                                     validation.attribute
                                 ));
                             }

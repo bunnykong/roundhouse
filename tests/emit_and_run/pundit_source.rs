@@ -37,12 +37,14 @@ end
 
 const ARTICLE_POLICY: &str = "class ArticlePolicy < ApplicationPolicy
   def edit?
-    user == \"admin\"
+    user == \"admin\" && record.class.exists?(id: record.id)
   end
 
   class Scope < ApplicationPolicy::Scope
     def resolve
-      user == \"admin\" ? scope.all : scope.where(title: \"Published\")
+      return scope.none if user == \"nobody\"
+      return scope.all if user == \"admin\"
+      scope.where(title: \"Published\").or(scope.where.not(title: \"Hidden draft\"))
     end
   end
 end
@@ -112,6 +114,8 @@ _, body = get("/articles")
 check("index as anyone", [body.include?("Published"), body.include?("Hidden draft")], [true, false])
 _, body = get("/articles", "user=admin")
 check("index as admin", [body.include?("Published"), body.include?("Hidden draft")], [true, true])
+_, body = get("/articles", "user=nobody")
+check("index as nobody", [body.include?("Published"), body.include?("Hidden draft")], [false, false])
 check("rooted name", RoundhouseConstants.safe_constantize("::ArticlePolicy"), ArticlePolicy)
 puts "ok"
 "##,

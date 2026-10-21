@@ -671,6 +671,13 @@ pub enum ValidationRule {
         gte: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lte: Option<f64>,
+        /// `allow_nil:` / `allow_blank:`, from the validator's own hash
+        /// or the call (the hash wins). `None` is unset: Rails then
+        /// validates a nil or blank value like any other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_blank: Option<bool>,
     },
     Inclusion {
         values: Vec<Literal>,

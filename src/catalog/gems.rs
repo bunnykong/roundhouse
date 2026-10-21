@@ -422,7 +422,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
     },
     // Faraday — the HTTP client. Ruby and JRuby run the real gem (the
     // emitted Gemfile declares it on demand, `gems::RUNTIME_GEMS`);
-    // every other target refuses each reference (`lower::faraday`).
+    // every other target refuses each reference (`lower::ruby_family_gems`).
     // Responses and bodies are the gem's own objects, so they stay
     // `Untyped` past the shapes below.
     GemClass {
@@ -523,6 +523,48 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass { name: "Faraday::TimeoutError", class_methods: &[], instance_methods: FARADAY_ERROR },
     GemClass { name: "Faraday::SSLError", class_methods: &[], instance_methods: FARADAY_ERROR },
     GemClass { name: "Faraday::ParsingError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    // Retryable — a block retried on an exception. As Faraday: the real
+    // gem on ruby and jruby, refused elsewhere (`lower::ruby_family_gems`).
+    GemClass {
+        name: "Retryable",
+        class_methods: &[("retryable", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    // JWT — token encode/decode (the jwt gem). As Faraday: the real gem
+    // on ruby and jruby, refused elsewhere (`lower::ruby_family_gems`).
+    // `decode` answers `[payload, header]`, both the gem's Hashes.
+    GemClass {
+        name: "JWT",
+        class_methods: &[("encode", GemTy::Str), ("decode", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "JWT::Claims",
+        class_methods: &[("verify_payload!", GemTy::Untyped), ("valid_payload?", GemTy::Bool)],
+        instance_methods: &[],
+    },
+    GemClass { name: "JWT::JWK", class_methods: &[], instance_methods: &[] },
+    GemClass {
+        name: "JWT::JWK::Set",
+        class_methods: &[],
+        instance_methods: &[("keys", GemTy::Untyped), ("export", GemTy::Untyped), ("select!", GemTy::Untyped), ("filter!", GemTy::Untyped)],
+    },
+    GemClass { name: "JWT::EncodeError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::DecodeError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::VerificationError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::ExpiredSignature", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::IncorrectAlgorithm", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::ImmatureSignature", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidIssuerError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidIatError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidAudError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidSubError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidCritError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidJtiError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::InvalidPayload", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::MissingRequiredClaim", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::Base64DecodeError", class_methods: &[], instance_methods: JWT_ERROR },
+    GemClass { name: "JWT::JWKError", class_methods: &[], instance_methods: JWT_ERROR },
 ];
 
 const FARADAY_FILE_PART: &[(&str, GemTy)] = &[
@@ -542,3 +584,5 @@ const FARADAY_ERROR: &[(&str, GemTy)] = &[
     ("wrapped_exception", GemTy::Untyped),
     ("backtrace", GemTy::Untyped),
 ];
+
+const JWT_ERROR: &[(&str, GemTy)] = &[("message", GemTy::Str), ("to_s", GemTy::Str)];

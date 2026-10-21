@@ -72,6 +72,8 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "faraday",
     "faraday/multipart",
     "faraday/retry",
+    "retryable",
+    "jwt",
 ];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
@@ -89,7 +91,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 20] = [
+    const RUNTIME_GEMS: [(Marker, &str); 22] = [
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -177,7 +179,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // ruby-vips) already asked of the machine.
         (Marker::AnyText(&[VARIATION_MARKER]), "ruby-vips"),
         // The HTTP client an app calls. The real gem runs on this lane;
-        // the strict targets refuse it (`lower::faraday`). `Constant`
+        // the strict targets refuse it (`lower::ruby_family_gems`). `Constant`
         // matches `Faraday.new` / `Faraday::…` / `rescue Faraday`; the
         // `AnyText` needles catch bare value uses (`CLIENT = Faraday`,
         // `register(Faraday)`) that `names_constant` skips — without
@@ -203,6 +205,10 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
             Marker::AnyText(&["Faraday::Retry", "request :retry", "request(:retry"]),
             "faraday-retry",
         ),
+        // Retryable and JWT, as Faraday: the real gems on this lane,
+        // refused on the strict targets (`lower::ruby_family_gems`).
+        (Marker::Constant("Retryable"), "retryable"),
+        (Marker::Constant("JWT"), "jwt"),
     ];
     &RUNTIME_GEMS
 }
@@ -592,13 +598,14 @@ const FATES: &[(&str, GemFate)] = &[
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("friendly_id", GemFate::Modeled), // lower/friendly_id + registry: friendly_id/friendly/to_param, Relation#friendly_find (slugged [+history] finder only; slug generation on save, :scoped/:finders/:simple_i18n unmodeled)
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
-    ("faraday", GemFate::Modeled),     // catalog/gems: Faraday; the real gem on ruby and jruby, lower/faraday refuses every other target
+    ("faraday", GemFate::Modeled),     // catalog/gems: Faraday; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("faraday-multipart", GemFate::Modeled), // catalog/gems: Faraday::Multipart, as faraday
     ("faraday-retry", GemFate::Modeled), // request :retry, as faraday
     ("htmlentities", GemFate::Modeled), // catalog/gems: HTMLEntities
     ("image_processing", GemFate::Modeled), // active_storage variants seam
     ("inertia_rails", GemFate::Modeled), // ingest/inertia: render inertia:, inertia_share; runtime action_controller/inertia
     ("invisible_captcha", GemFate::Modeled), // before_action + spam? on subtitle honeypot only
+    ("jwt", GemFate::Modeled),         // catalog/gems: JWT; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
     ("mocha", GemFate::Modeled),       // lower/mocha bridge
@@ -611,6 +618,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("pushover", GemFate::Modeled),    // catalog/gems: Pushover
     ("rack-mini-profiler", GemFate::Modeled), // catalog/gems: Rack::MiniProfiler
     ("representable", GemFate::Modeled), // ingest/representable: Decorator + JSON, property/collection subset
+    ("retryable", GemFate::Modeled),   // catalog/gems: Retryable; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target
     ("rotp", GemFate::Modeled),        // catalog/gems: ROTP::*
     ("rqrcode", GemFate::Modeled),     // catalog/gems: RQRCode::QRCode
     ("ruby-vips", GemFate::Modeled),   // active_storage variants seam

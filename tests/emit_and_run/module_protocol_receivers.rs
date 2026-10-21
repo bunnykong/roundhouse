@@ -3,7 +3,9 @@
 //! guard and `String#constantize`. Each used to stop `check` with
 //! "requires a proven class/module object receiver" (forem's liquid tags,
 //! counter_culture's `self.class.include?`, aasm's invokers, discourse's
-//! `Class.new(base).tap { it.class_eval(&block) }`).
+//! `Class.new(base).tap { it.class_eval(&block) }`). A class object
+//! handed to a constructor and read back from its ivar or reader is
+//! one too (aasm's `AASM::Base#klass`).
 
 use super::emit_and_run;
 
@@ -29,6 +31,10 @@ const PROBE: &str = r#"class ProtocolProbe
   def self.named(name)
     name.to_s.constantize.const_defined?(:VALID_CONTEXTS)
   end
+
+  def self.holder
+    ClassHolder.new(self)
+  end
 end
 
 class FlaggedProbe < ProtocolProbe
@@ -36,15 +42,64 @@ class FlaggedProbe < ProtocolProbe
 end
 "#;
 
+const HOLDER: &str = r#"class ClassHolder
+  attr_reader :klass
+
+  def initialize(klass)
+    @klass = klass
+  end
+
+  def contexts?
+    klass.const_defined?(:VALID_CONTEXTS)
+  end
+
+  def answers?(name)
+    @klass.method_defined?(name)
+  end
+
+  def self.for_probe
+    ClassHolder.new(ProtocolProbe)
+  end
+end
+
+class DefaultHolder
+  def initialize(klass = ProtocolProbe)
+    @klass = klass
+  end
+
+  def contexts?
+    @klass.const_defined?(:VALID_CONTEXTS)
+  end
+end
+
+class KeywordHolder
+  def initialize(klass:)
+    @klass = klass
+  end
+
+  def answers?(name)
+    @klass.method_defined?(name)
+  end
+
+  def self.for_probe
+    KeywordHolder.new(klass: FlaggedProbe)
+  end
+end
+"#;
+
 fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .write("app/models/concerns/flagged.rb", "module Flagged\n  def flag\n    true\n  end\nend\n")
         .write("app/models/protocol_probe.rb", PROBE)
+        .write("app/models/class_holder.rb", HOLDER)
 }
 
 const ASSERTIONS: &str = r##"got = [ProtocolProbe.new.contexts, ProtocolProbe.new.flagged?, FlaggedProbe.new.flagged?, ProtocolProbe.tapped,
-       ProtocolProbe.callable?(ProtocolProbe), ProtocolProbe.callable?(3), ProtocolProbe.named("ProtocolProbe")]
-raise got.inspect unless got == [[:post], false, true, "ProtocolProbe", true, false, true]
+       ProtocolProbe.callable?(ProtocolProbe), ProtocolProbe.callable?(3), ProtocolProbe.named("ProtocolProbe"),
+       ProtocolProbe.holder.contexts?, ClassHolder.for_probe.answers?(:contexts), FlaggedProbe.holder.answers?(:flag),
+       ClassHolder.for_probe.answers?(:missing), DefaultHolder.new.contexts?, DefaultHolder.new(KeywordHolder).contexts?,
+       KeywordHolder.for_probe.answers?(:flag)]
+raise got.inspect unless got == [[:post], false, true, "ProtocolProbe", true, false, true, true, true, true, false, true, false, true]
 puts "module protocol passed"
 "##;
 

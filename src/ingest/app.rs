@@ -2324,6 +2324,7 @@ end
     }
     super::model_delegate::lower_model_delegates(&mut app);
     super::on_load_reopen::drain_pending(&mut app);
+    gap_numericality_allow_on_untyped(&mut app);
     app.const_resolver = const_resolver;
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
@@ -2469,6 +2470,78 @@ fn walk_binary_assets<V: Vfs + ?Sized>(vfs: &V, root: &Path, dir: &Path, app: &m
         let rel = entry.strip_prefix(root).unwrap_or(&entry);
         app.binary_assets
             .push((rel.to_string_lossy().replace('\\', "/"), bytes));
+    }
+}
+
+/// `numericality:` with `allow_nil:` / `allow_blank:` on an attribute the
+/// model does not type as a number (no Integer/Float column: an
+/// `attr_accessor` of an `ActiveModel::Model` form, fed request Strings)
+/// stays the reported gap. The lowered check does not parse a String
+/// number (#1158), so on such an attribute it would reject `"30"` where
+/// Rails accepts it. The whole `validates` call is refused, as an ingest
+/// refusal is. Run after the concern splice, when every model's
+/// validations and columns are known.
+fn gap_numericality_allow_on_untyped(app: &mut App) {
+    use crate::dialect::{ModelBodyItem, ValidationRule};
+    let mut gaps: Vec<(crate::span::Span, String)> = Vec::new();
+    for model in &mut app.models {
+        let numeric = |attr: &crate::ident::Symbol| {
+            let ty = model.attributes.fields.get(attr);
+            let inner = match ty {
+                Some(crate::ty::Ty::Union { variants }) => {
+                    variants.iter().find(|v| !matches!(v, crate::ty::Ty::Nil)).cloned()
+                }
+                other => other.cloned(),
+            };
+            matches!(inner, Some(crate::ty::Ty::Int | crate::ty::Ty::Float))
+        };
+        let mut refused: Vec<(usize, crate::span::Span, String)> = Vec::new();
+        for (i, item) in model.body.iter().enumerate() {
+            let ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if numeric(&validation.attribute) {
+                continue;
+            }
+            for rule in &validation.rules {
+                if let ValidationRule::Numericality { allow_nil, allow_blank, .. } = rule {
+                    let option = if *allow_blank == Some(true) {
+                        "allow_blank"
+                    } else if *allow_nil == Some(true) {
+                        "allow_nil"
+                    } else {
+                        continue;
+                    };
+                    refused.push((i, item.span(), format!("validates :{}, numericality: {option}:", validation.attribute.as_str())));
+                }
+            }
+        }
+        // The whole `validates` call goes, as an ingest refusal
+        // (`ParsedValidates::Gap`) does: every Validation item it produced
+        // shares its span (one per attribute, and per-rule `if:`/`unless:`
+        // splits), so a `presence:` beside the numericality is not kept.
+        let calls: std::collections::HashSet<(crate::span::FileId, u32, u32)> =
+            refused.iter().map(|(_, span, _)| (span.file, span.start, span.end)).collect();
+        model.body.retain(|item| {
+            !matches!(item, ModelBodyItem::Validation { .. }) || {
+                let span = item.span();
+                !calls.contains(&(span.file, span.start, span.end))
+            }
+        });
+        for (_, span, construct) in refused {
+            gaps.push((span, construct));
+        }
+    }
+    for (span, construct) in gaps {
+        let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
+        let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(
+            span,
+            None,
+            construct,
+            "an untyped attribute's String input is not parsed as a number (#1158); emitting the check would reject input Rails accepts",
+        );
+        diagnostic.severity = crate::diagnostic::Severity::Warning;
+        let message = diagnostic.message.clone();
+        super::prism::push(diagnostic);
+        survey::record(&IngestError::Unsupported { file, message });
     }
 }
 

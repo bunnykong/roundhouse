@@ -81,7 +81,7 @@ pub(super) fn push_validate_method(
                             super::RuntimeRelation::Absent => Vec::new(),
                         }
                     } else {
-                        validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty)
+                        validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty, runtime_relation)
                     };
                     if v.if_cond.is_some() || v.unless_cond.is_some() {
                         let body = if produced.len() == 1 {
@@ -568,7 +568,13 @@ fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders) -> Expr {
 /// `attr`. Each helper is `<helper>(:attr, @attr [, kwargs])` — the value
 /// is passed positionally so the runtime helper sees a concretely-typed
 /// `value` parameter (no block-yield, no `instance_variable_get`).
-fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule, attr_ty: Option<&Ty>) -> Vec<Expr> {
+fn validation_rule_to_calls(
+    msgs: Messages,
+    attr: &Symbol,
+    rule: &ValidationRule,
+    attr_ty: Option<&Ty>,
+    runtime_relation: super::RuntimeRelation,
+) -> Vec<Expr> {
     match rule {
         ValidationRule::Presence => vec![inline_presence_check(msgs, attr, attr_ty)],
         ValidationRule::Absence => vec![inline_absence_check(msgs, attr)],
@@ -584,8 +590,28 @@ fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule
         ValidationRule::Format { pattern, flags } => {
             vec![inline_format_check(msgs, attr, pattern, flags)]
         }
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
-            inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte)
+        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, allow_nil, allow_blank } => {
+            let checks = inline_numericality_check(msgs, attr, *only_integer, *gt, *lt, *gte, *lte);
+            // Rails skips the validator for a nil value under allow_nil
+            // and a blank one under allow_blank (EachValidator#validate).
+            let skip = if *allow_blank == Some(true) {
+                Some(numericality_blank_cond(attr, runtime_relation))
+            } else if *allow_nil == Some(true) {
+                Some(send(ivar(attr), "nil?", vec![]))
+            } else {
+                None
+            };
+            match skip {
+                Some(cond) => vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond,
+                        then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                        else_branch: seq(checks),
+                    },
+                )],
+                None => checks,
+            }
         }
         ValidationRule::Inclusion { values, range } => {
             vec![inline_inclusion_check(msgs, attr, values, range.as_ref())]
@@ -893,6 +919,42 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>) ->
         let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
         return if_with_nil_else(cond, push_err);
     }
+    let cond = blank_cond(attr, attr_ty);
+    // `errors << "attr can't be blank"`
+    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
+    // The wrapping `if cond then push_err end` (Nil else).
+    if_with_nil_else(cond, push_err)
+}
+
+/// `allow_blank:`'s skip for a numericality rule. On the ruby family the
+/// uncast writer can store the raw input, so a whitespace-only String (and
+/// `false`) is blank, as Rails reads it: `@attr.nil? || @attr == false ||
+/// @attr.to_s.strip.empty?` (`to_s`, the spelling Spinel takes). A strict
+/// target's numeric field is never a String or `false`, so blank is
+/// `nil?` there, which every target compiles. Narrower than the presence
+/// check's test, which is unchanged.
+fn numericality_blank_cond(attr: &Symbol, runtime_relation: super::RuntimeRelation) -> Expr {
+    let value = ivar(attr);
+    let nil = send(value.clone(), "nil?", vec![]);
+    match runtime_relation {
+        super::RuntimeRelation::Present => {
+            let falsy = send(
+                value.clone(),
+                "==",
+                vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: false } })],
+            );
+            let empty = send(send(send(value, "to_s", vec![]), "strip", vec![]), "empty?", vec![]);
+            bool_op(BoolOpKind::Or, bool_op(BoolOpKind::Or, nil, falsy), empty)
+        }
+        super::RuntimeRelation::Absent => nil,
+    }
+}
+
+/// The presence check's blank test, `@attr.nil?` or empty by the
+/// column's type: a String or Array column's `empty?`, else the
+/// generic `is_a?(String)` / `is_a?(Array)` form. Shared with
+/// `numericality:`'s `allow_blank:` skip so "blank" means one thing.
+fn blank_cond(attr: &Symbol, attr_ty: Option<&Ty>) -> Expr {
     let attr_ivar = ivar(attr);
     // `@attr.nil?`
     let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
@@ -945,10 +1007,7 @@ fn inline_presence_check(msgs: Messages, attr: &Symbol, attr_ty: Option<&Ty>) ->
             )
         }
     };
-    // `errors << "attr can't be blank"`
-    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), "blank", &Default::default()));
-    // The wrapping `if cond then push_err end` (Nil else).
-    if_with_nil_else(cond, push_err)
+    cond
 }
 
 /// Inline `validates :attr, absence: true` — the negation of presence.

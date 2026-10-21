@@ -70,6 +70,24 @@ fn required_files<V: Vfs + ?Sized>(vfs: &V, gem: &Path, name: &str) -> Result<BT
             }
         }
     }
+    // An engine's app/ is no require target: Rails puts it on the host's load paths, so it is the gem's code too
+    if super::app::declares_rails_engine(vfs, &lib) {
+        let mut dirs = vec![gem.join("app")];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = vfs.read_dir(&dir) else { continue };
+            for entry in entries {
+                // A link could reach outside the gem, or back into it
+                if vfs.is_symlink(&entry) {
+                    continue;
+                }
+                if vfs.is_dir(&entry) {
+                    dirs.push(entry);
+                } else if let Ok(rel) = entry.strip_prefix(gem) {
+                    seen.insert(rel.to_path_buf());
+                }
+            }
+        }
+    }
     Ok(seen)
 }
 
@@ -262,6 +280,36 @@ mod tests {
         let lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.0)\n\nDEPENDENCIES\n  widgets\n");
         let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("current"), Some(&lock), &["widgets".to_string()]).unwrap();
         assert_eq!(gems[0].files.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_engine_gem_brings_its_app_dir_and_a_library_does_not() {
+        let root = std::env::temp_dir().join(format!("rh-source-gems-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        write("app/.bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n");
+        let gems = "app/vendor/bundle/ruby/3.4.0/gems";
+        write(&format!("{gems}/auth-1.0/lib/auth.rb"), "require \"auth/rails\"\n");
+        write(&format!("{gems}/auth-1.0/lib/auth/rails.rb"), "module Auth\n  class Engine < ::Rails::Engine\n  end\nend\n");
+        write(&format!("{gems}/auth-1.0/app/controllers/auth/sessions_controller.rb"), "class Auth::SessionsController\nend\n");
+        write(&format!("{gems}/auth-1.0/app/views/auth/sessions/new.html.erb"), "<p>sign in</p>\n");
+        write(&format!("{gems}/plain-1.0/lib/plain.rb"), "module Plain\nend\n");
+        write(&format!("{gems}/plain-1.0/app/models/plain/thing.rb"), "class Plain::Thing\nend\n");
+        write("outside/secret.rb", "SECRET = 1\n");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("outside"), root.join(format!("{gems}/auth-1.0/app/linked"))).unwrap();
+        let lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    auth (1.0)\n    plain (1.0)\n\nDEPENDENCIES\n  auth\n  plain\n");
+        let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["auth".to_string(), "plain".to_string()]).unwrap();
+        let files = |i: usize| gems[i].files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
+        assert!(files(0).contains(&"app/controllers/auth/sessions_controller.rb".to_string()), "{:?}", files(0));
+        assert!(files(0).contains(&"app/views/auth/sessions/new.html.erb".to_string()), "{:?}", files(0));
+        assert!(!files(0).iter().any(|f| f.contains("linked") || f.contains("secret")), "{:?}", files(0));
+        assert_eq!(files(1), vec!["lib/plain.rb"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

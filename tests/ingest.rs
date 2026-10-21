@@ -3541,3 +3541,324 @@ end
     assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "self.default_scope keeps the gap");
     assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 }
+
+/// `inclusion: { in: NAME }` folds a list constant with each element's
+/// kind kept; a computed list (`in: ->(r) { … }`) stays the reported gap.
+#[test]
+fn inclusion_in_a_list_constant_folds_with_its_kinds() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w(open approved).freeze
+  KINDS = %i[a b]
+  validates :mode, inclusion: { in: MODES }
+  validates :kind, inclusion: { in: KINDS }
+  validates :tier, inclusion: { in: ->(w) { w.class::MODES } }
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    let rule = |attr: &str| rules.iter().find(|v| v.attribute.as_str() == attr).copied();
+    assert!(
+        matches!(rule("mode").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Inclusion { values, range: None }])
+            if values == &vec![Literal::Str { value: "open".into() }, Literal::Str { value: "approved".into() }]),
+        "{:?}", rule("mode")
+    );
+    assert!(
+        matches!(rule("kind").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::Inclusion { values, .. }])
+            if matches!(values.as_slice(), [Literal::Sym { .. }, Literal::Sym { .. }])),
+        "{:?}", rule("kind")
+    );
+    assert!(rule("tier").is_none(), "a lambda list stays a gap: {rules:?}");
+    assert!(warnings.iter().any(|w| w.contains("validates :tier, inclusion: in:")), "{warnings:?}");
+}
+
+/// A list constant reassigned to something ingest can't fold no longer
+/// carries the earlier list (#1143's last-write rule): the inclusion stays
+/// the reported gap.
+#[test]
+fn an_unfoldable_list_reassignment_drops_the_earlier_list() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w(open approved)
+  MODES = load_modes
+  validates :mode, inclusion: { in: MODES }
+end
+"#,
+    );
+    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "mode"), "no stale list");
+    assert!(warnings.iter().any(|w| w.contains("validates :mode, inclusion: in:")), "{warnings:?}");
+}
+
+/// A constant assigned more than once in the class body is not folded
+/// at all, whichever write comes last. Rails reads the constant as it
+/// stands when `validates` runs, so a reassignment after the macro
+/// (`MODES = %w[closed]` below it) leaves the validation on the first
+/// value, and one before it on the second. The fold sees the whole body
+/// at once and knows neither, so both validations stay the reported gap
+/// rather than validating against the wrong value. Ruby warns "already
+/// initialized constant" for each such write.
+#[test]
+fn a_constant_assigned_twice_is_not_folded() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w[open]
+  NAME_LIMIT = 5
+  TITLE_LIMIT = 5
+  TITLE_LIMIT = 10
+  validates :mode, inclusion: { in: MODES }
+  validates :name, length: { maximum: NAME_LIMIT }
+  validates :title, length: { maximum: TITLE_LIMIT }
+  MODES = %w[closed]
+  NAME_LIMIT = 10
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["mode", "name", "title"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+    }
+    for gap in [
+        "validates :mode, inclusion: in:",
+        "validates :name, length: maximum:",
+        "validates :title, length: maximum:",
+    ] {
+        assert!(warnings.iter().any(|w| w.contains(gap)), "{gap}: {warnings:?}");
+    }
+}
+
+/// A compound write (`-=`, `+=`, `||=`, `&&=`) to a constant is a write
+/// too: `MODES -= %w[closed]` after `validates` leaves Rails validating
+/// against the list as it stood at the macro, which the fold can't
+/// tell apart from the result. The name is unfoldable, as for a plain
+/// second write.
+#[test]
+fn a_compound_constant_write_is_a_second_write() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  MODES = %w[open closed]
+  NAME_LIMIT = 5
+  TITLE_LIMIT = 5
+  validates :mode, inclusion: { in: MODES }
+  validates :name, length: { maximum: NAME_LIMIT }
+  validates :title, length: { maximum: TITLE_LIMIT }
+  MODES -= %w[closed]
+  NAME_LIMIT += 5
+  TITLE_LIMIT ||= 10
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["mode", "name", "title"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+    }
+    for gap in [
+        "validates :mode, inclusion: in:",
+        "validates :name, length: maximum:",
+        "validates :title, length: maximum:",
+    ] {
+        assert!(warnings.iter().any(|w| w.contains(gap)), "{gap}: {warnings:?}");
+    }
+}
+
+/// `exclusion: { in: NAME }` reads a list constant too: inclusion and
+/// exclusion share `parse_set`.
+#[test]
+fn exclusion_in_a_list_constant_folds() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  RESERVED = %w[admin root].freeze
+
+  validates :name, exclusion: { in: RESERVED }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let rule = rules.iter().find(|v| v.attribute.as_str() == "name").unwrap_or_else(|| panic!("no rule for name: {rules:?}"));
+    assert!(
+        matches!(rule.rules.as_slice(), [roundhouse::dialect::ValidationRule::Exclusion { values, range: None }] if values.len() == 2),
+        "{:?}", rule.rules
+    );
+}
+
+/// A constant folds only when its one write is a plain top-level
+/// `NAME = …` and nothing else in the class body, at any depth, writes
+/// it or calls a possibly-mutating method on it. A write under `if`, an
+/// append (`<<`), a `push`, or a `concat` in a method body changes what
+/// Rails validates against, so each of those stays the reported gap; a
+/// read (`include?`, `freeze`) leaves the constant foldable.
+#[test]
+fn a_nested_write_or_a_mutation_makes_a_constant_unfoldable() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  NESTED = %w[a b]
+  if ENV["WIDGET_MODES"]
+    NESTED = %w[c]
+  end
+  APPENDED = %w[a b]
+  APPENDED << "c"
+  PUSHED = %w[a b]
+  PUSHED.push("c")
+  IN_METHOD = %w[a b]
+  READ = %w[a b].freeze
+
+  validates :nested, inclusion: { in: NESTED }
+  validates :appended, inclusion: { in: APPENDED }
+  validates :pushed, inclusion: { in: PUSHED }
+  validates :in_method, inclusion: { in: IN_METHOD }
+  validates :read, inclusion: { in: READ }
+
+  def self.widen!
+    IN_METHOD.concat(%w[c])
+  end
+
+  def readable?(value)
+    READ.include?(value) && READ.frozen?
+  end
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["nested", "appended", "pushed", "in_method"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains(&format!("validates :{attr}, inclusion: in:"))),
+            "{attr}: {warnings:?}"
+        );
+    }
+    assert!(
+        rules.iter().any(|v| v.attribute.as_str() == "read"
+            && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Inclusion { values, .. }] if values.len() == 2)),
+        "a read-only constant still folds: {rules:?}"
+    );
+}
+
+/// A mutation reaches a constant through anything that may be the same
+/// object: another constant assigned from it (either way round, `.freeze`
+/// included), a receiver chain rooted at it (`CHAINED.to_a << "c"`), or a
+/// variable holding it. Each of those leaves the list unfoldable; an alias
+/// nothing mutates (`COPY = KEPT`) leaves both foldable.
+#[test]
+fn a_mutation_through_an_alias_or_a_chain_makes_a_constant_unfoldable() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  ALIASED = %w[a b]
+  ALIAS = ALIASED
+  ALIAS << "c"
+  FROZEN = %w[a b]
+  FROZEN_ALIAS = FROZEN.freeze
+  FROZEN_ALIAS.push("c")
+  BACKWARD = %w[a b]
+  BACKWARD_ALIAS = BACKWARD
+  BACKWARD << "c"
+  CHAINED = %w[a b]
+  CHAINED.to_a << "c"
+  HELD = %w[a b]
+  KEPT = %w[a b]
+  COPY = KEPT
+
+  validates :aliased, inclusion: { in: ALIASED }
+  validates :frozen, inclusion: { in: FROZEN }
+  validates :backward, inclusion: { in: BACKWARD_ALIAS }
+  validates :chained, inclusion: { in: CHAINED }
+  validates :held, inclusion: { in: HELD }
+  validates :kept, inclusion: { in: KEPT }
+  validates :copy, inclusion: { in: COPY }
+
+  def self.widen!
+    list = HELD
+    list << "c"
+  end
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["aliased", "frozen", "backward", "chained", "held"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains(&format!("validates :{attr}, inclusion: in:"))),
+            "{attr}: {warnings:?}"
+        );
+    }
+    for attr in ["kept", "copy"] {
+        assert!(
+            rules.iter().any(|v| v.attribute.as_str() == attr
+                && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Inclusion { values, .. }] if values.len() == 2)),
+            "{attr} still folds: {rules:?}"
+        );
+    }
+}
+
+/// A call on a fresh value computed from a constant is not a mutation of
+/// it: `(FIELDS_LIMIT - used).times` and `MODES.map(&:upcase) << "x"`
+/// leave both constants foldable.
+#[test]
+fn a_call_on_a_value_computed_from_a_constant_keeps_it_foldable() {
+    let (model, _, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  FIELDS_LIMIT = 4
+  MODES = %w[a b]
+
+  validates :fields, length: { maximum: FIELDS_LIMIT }
+  validates :mode, inclusion: { in: MODES }
+
+  def pad(used)
+    (FIELDS_LIMIT - used).times { nil }
+    MODES.map(&:upcase) << "x"
+  end
+end
+"#,
+    );
+    let rules = validation_rules(&model);
+    assert!(
+        rules.iter().any(|v| v.attribute.as_str() == "fields"
+            && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Length { max: Some(4), .. }])),
+        "{rules:?}"
+    );
+    assert!(rules.iter().any(|v| v.attribute.as_str() == "mode"), "{rules:?}");
+}
+
+/// The taint rules cover String pieces of an interpolated regex or String
+/// constant: a piece mutated in place (`PIECE << "x"` before the regex is
+/// built, so Ruby's regex reads `[a-z]+x`) leaves every constant built from
+/// it unfoldable, directly or through an interpolated String chain.
+#[test]
+fn a_mutated_string_piece_leaves_the_interpolated_regex_unfoldable() {
+    let (model, warnings, _) = ingest_widget(
+        r##"
+class Widget < ApplicationRecord
+  PIECE = "[a-z]+"
+  PIECE << "x"
+  NAME_RE = /\A#{PIECE}\z/
+  BASE = "[a-z]"
+  BASE.concat("+")
+  PAT = "#{BASE}y"
+  CODE_RE = /\A#{PAT}\z/
+  KEPT = "[0-9]+"
+  KEPT_RE = /\A#{KEPT}\z/
+
+  validates :name, format: { with: NAME_RE }
+  validates :code, format: { with: CODE_RE }
+  validates :kept, format: { with: KEPT_RE }
+end
+"##,
+    );
+    let rules = validation_rules(&model);
+    for attr in ["name", "code"] {
+        assert!(rules.iter().all(|v| v.attribute.as_str() != attr), "no folded rule for {attr}: {rules:?}");
+        assert!(warnings.iter().any(|w| w.contains(&format!("validates :{attr}, format: with:"))), "{attr}: {warnings:?}");
+    }
+    assert!(
+        rules.iter().any(|v| v.attribute.as_str() == "kept"
+            && matches!(v.rules.as_slice(), [roundhouse::dialect::ValidationRule::Format { pattern, .. }] if pattern == r"\A[0-9]+\z")),
+        "an untouched piece still folds: {rules:?}"
+    );
+}

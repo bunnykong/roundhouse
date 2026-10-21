@@ -174,7 +174,7 @@ pub mod relation_residue;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod oj;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod faraday;
+pub mod ruby_family_gems;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod gem_refusal;
 pub mod constantize;

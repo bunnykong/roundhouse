@@ -197,7 +197,7 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
         ValidationRule::Format { pattern, flags } => {
             out.push(Check::Format { pattern: pattern.clone(), flags: flags.clone() });
         }
-        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
+        ValidationRule::Numericality { only_integer, gt, lt, gte, lte, .. } => {
             if *only_integer {
                 out.push(Check::OnlyInteger);
             }

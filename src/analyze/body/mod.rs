@@ -33,6 +33,13 @@ fn instance_shaped(ty: &Ty) -> bool {
     }
 }
 
+fn singleton_shaped(ty: &Ty) -> bool {
+    match ty {
+        Ty::Union { variants } => !variants.is_empty() && variants.iter().all(singleton_shaped),
+        _ => super::singleton_of(Some(ty)).is_some(),
+    }
+}
+
 fn bytes_block_has_escaping_break(e: &Expr) -> bool {
     match &*e.node {
         ExprNode::Break { .. } => true,
@@ -1018,7 +1025,7 @@ impl<'a> BodyTyper<'a> {
     /// as Ruby runs it, but a write through it (`define_method`) would land
     /// on whichever subclass it is, which no method table here can follow.
     fn answers_module_queries(&self, expr: &Expr, ty: Option<&Ty>, ctx: &Ctx) -> bool {
-        if self.is_class_object(expr, ctx) {
+        if self.is_class_object(expr, ctx) || ty.is_some_and(singleton_shaped) {
             return true;
         }
         match &*expr.node {
@@ -2424,7 +2431,7 @@ impl<'a> BodyTyper<'a> {
                 }
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
-                    let gap = match recv_ty.as_ref() {
+                    let gap = match super::singleton_of(recv_ty.as_ref()).or(recv_ty.as_ref()) {
                         Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "ActiveModel::Errors" | "ActiveModel::Error") => Some(id.0.as_str()),
                         Some(Ty::Class { id, .. })
                             if matches!(id.0.as_str(), "Rails" | "ActiveRecord::Base")

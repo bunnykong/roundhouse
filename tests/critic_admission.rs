@@ -175,6 +175,14 @@ fn an_overridden_then_does_not_yield_the_class() {
 }
 
 #[test]
+fn a_held_class_answers_queries_not_writes() {
+    let holder = "class Holder\n  def initialize(klass)\n    @klass = klass\n  end\n\n  def go\n    @klass.define_method(:x) { 1 }\n  end\n\n  def self.make\n    Holder.new(Probe).go\n  end\nend\n";
+    refuses_with("Holder.make", "Module protocol", &[("app/models/holder.rb", holder)]);
+    let mixed = "class Holder\n  def initialize(klass)\n    @klass = klass\n  end\n\n  def go\n    @klass.const_defined?(:X)\n  end\n\n  def self.make\n    Holder.new(Probe).go\n    Holder.new(Probe.new).go\n  end\nend\n";
+    refuses_with("Holder.make", "Module protocol", &[("app/models/holder.rb", mixed)]);
+}
+
+#[test]
 fn unused_unresolved_model_include_is_not_silent() {
     refuses_with("1", "GhostModule", &[("app/models/probe.rb", "class Probe < ApplicationRecord\n  include GhostModule\nend\n")]);
 }

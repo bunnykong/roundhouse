@@ -609,7 +609,7 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
-          gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry
+          gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt
           gem install --no-document activerecord -v '~> 8.1.0'
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8

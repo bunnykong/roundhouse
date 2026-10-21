@@ -48,6 +48,48 @@ fn attribute_macro_refusals(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+// One error at each declaration, not one per helper call: the helpers stay typed so their callers still infer
+fn devise_refusals(app: &App) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if app.gem_lock.as_ref().is_some_and(|lock| lock.is_in_repo("devise") || lock.is_source("devise")) {
+        return out;
+    }
+    // A concern's declaration is spliced into each includer: one refusal per written site, naming every model
+    let mut sites: Vec<(crate::span::Span, Vec<&str>)> = Vec::new();
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, .. } = &*expr.node else { continue };
+            if method.as_str() != "devise" {
+                continue;
+            }
+            match sites.iter_mut().find(|(span, _)| *span == expr.span) {
+                Some((_, models)) => models.push(model.name.0.as_str()),
+                None => sites.push((expr.span, vec![model.name.0.as_str()])),
+            }
+        }
+    }
+    for (span, models) in sites {
+        let scopes: Vec<String> = models
+            .iter()
+            .map(|name| crate::naming::snake_case(name.rsplit("::").next().unwrap_or("")))
+            .collect();
+        let named: Vec<String> = models.iter().map(|name| format!("`{name}`")).collect();
+        let helpers: Vec<String> = scopes.iter().map(|scope| format!("`current_{scope}`")).collect();
+        out.push(Diagnostic::unsupported(
+            span,
+            None,
+            "devise",
+            format!(
+                "`devise` on {}: {}, the `_signed_in?` and `authenticate_..!` helpers, `sign_in` and the rest are typed so their callers infer, but no target ships Devise or Warden, so each call reaches no method at run time",
+                named.join(", "),
+                helpers.join(", ")
+            ),
+        ));
+    }
+    out
+}
+
 /// Walk an analyzed `App` collecting every position where typing failed
 /// in a way that matters for downstream typed emission. Does not modify
 /// the IR — purely a read pass.
@@ -151,6 +193,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     out.extend(attribute_macro_refusals(app));
+    out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));
     // A filter's return value is Rails' to discard (`around_action
