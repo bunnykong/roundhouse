@@ -57,6 +57,8 @@ mod harvest_return;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod precision;
+mod sccq;
+mod det;
 mod fixpoint_rounds;
 pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
 mod dirty_retype;
@@ -185,6 +187,22 @@ pub struct Analyzer {
     fixpoint_rounds: FixpointRounds,
     /// What the opt-in fixpoint canaries saw (`fixpoint_check`).
     fixpoint_checks: fixpoint_check::Checks,
+    /// `RH_SCHED=sccq`: the ordered worklist. `None` runs main's global
+    /// rounds.
+    sccq: Option<Box<sccq::Engine>>,
+    /// The worklist's class passes leave model, library and controller
+    /// method bodies to it.
+    sccq_skip_fine: bool,
+    /// The global harvest registers the worklist's units only for the
+    /// initial typings; afterwards each evaluation harvests its own.
+    sccq_harvest_fine: bool,
+    /// The state the worklist's production bodies were last typed against.
+    sccq_production_end: Option<DirtyHints>,
+    /// The by-name constant scope the last class pass built.
+    sccq_last_global: Option<body::ConstScope>,
+    /// Controllers the last worklist class pass retyped and the next global
+    /// harvest owes (`None` = every controller).
+    sccq_ctrl_pending: Option<std::collections::HashSet<ClassId>>,
 }
 
 use dirty_retype::{DirtyHints, InferenceSig, dirty_classes_for_retype};
@@ -1237,6 +1255,12 @@ impl Analyzer {
             controller_action_meta_cache: HashMap::new(),
             fixpoint_rounds: FixpointRounds::default(),
             fixpoint_checks: fixpoint_check::Checks::default(),
+            sccq: None,
+            sccq_skip_fine: false,
+            sccq_harvest_fine: false,
+            sccq_production_end: None,
+            sccq_last_global: None,
+            sccq_ctrl_pending: None,
         }
     }
 
@@ -1399,6 +1423,14 @@ impl Analyzer {
             .map(|c| (c.name.clone(), c.parent.clone()))
             .collect();
 
+        if sccq::sched_sccq() {
+            det::reset();
+            self.sccq_init(app);
+            // The state before any typing: the initial pass harvests each
+            // model as it goes, so later slots differ from what earlier
+            // typings in the same pass read.
+            self.sccq_production_end = Some(self.capture_dirty_hints());
+        }
         crate::timings::phase("typing passes (initial)", || {
             self.run_typing_passes(
                 app,
@@ -1428,8 +1460,24 @@ impl Analyzer {
         // `with_pagination_info` → `get` → `paginate` → the
         // `get_from_cache` block → its return → the destructuring, which
         // settles on round 9.
+        let round_inputs = fixpoint_check::RoundInputs {
+            dynamic_render_ivars: &dynamic_render_ivars,
+            existing_view_names: &existing_view_names,
+            module_methods: &module_methods,
+            module_includes: &module_includes,
+            parent_link_by_name: &parent_link_by_name,
+        };
         let mut prev_hints = self.capture_dirty_hints();
+        // `RH_SCHED=sccq`: the ordered worklist settles production inside
+        // main's round loop and stopping criterion.
+        if self.sccq.is_some() {
+            rounds.production = self.sccq_phase(app, &round_inputs, false);
+            prev_hints = self.capture_dirty_hints();
+        }
         for round in 0..FIXPOINT_CAP {
+            if self.sccq.is_some() {
+                break;
+            }
             crate::timings::phase(format_args!("round {round}: harvest returns"), || {
                 self.harvest_returns_to_registry(app, false)
             });
@@ -1470,13 +1518,6 @@ impl Analyzer {
                 )
             });
         }
-        let round_inputs = fixpoint_check::RoundInputs {
-            dynamic_render_ivars: &dynamic_render_ivars,
-            existing_view_names: &existing_view_names,
-            module_methods: &module_methods,
-            module_includes: &module_includes,
-            parent_link_by_name: &parent_link_by_name,
-        };
         if fixpoint_check::verify_on() {
             self.verify_round(app, &round_inputs, fixpoint_check::Loop::Production, None);
             prev_hints = self.capture_dirty_hints();
@@ -1560,7 +1601,11 @@ impl Analyzer {
                 production_view_params.as_mut(),
             );
         }
-        if !self.inference_matches(&production_sig) {
+        if self.sccq.is_some() {
+            // The worklist settles the absorb rounds too, whether or not the
+            // view and test rounds moved production signatures.
+            rounds.absorb = self.sccq_phase(app, &round_inputs, true);
+        } else if !self.inference_matches(&production_sig) {
             rounds.absorb = LoopEnd::RanToCap;
             let mut absorb_hints = self.capture_dirty_hints();
             // The view/test rounds above moved signatures that
@@ -1716,6 +1761,7 @@ impl Analyzer {
 
         self.stamp_inferred_method_signatures(app);
         self.report_fixpoint_checks(app);
+        if self.sccq.is_some() { det::report(); }
     }
 
     /// Type the bodies of `direct :name do |…| … end` helpers, with the
@@ -2278,6 +2324,9 @@ impl Analyzer {
         });
         self.typed_constants = resolved_values;
         let global_constants = body::ConstScope::global(fallback);
+        if self.sccq.is_some() {
+            self.sccq_last_global = Some(global_constants.clone());
+        }
         match mode {
             TypingMode::Production { dirty } => {
                 self.type_production_bodies(
@@ -2419,7 +2468,7 @@ impl Analyzer {
         // each one before controllers so a round carries model returns
         // into controller bodies. Dispatch reads the registry.
         let _typing_models = crate::timings::begin("typing: models");
-        for model in &mut app.models {
+        for (model_ci, model) in app.models.iter_mut().enumerate() {
             // A model the round did not move feeds nothing but the
             // registry, and the harvest at the top of the round already
             // wrote what its (unchanged) trees say. Nothing below is a
@@ -2490,7 +2539,14 @@ impl Analyzer {
                 }
             }
             // Own constants layered over the global registry (own shadows).
-            let class_constants = global_constants.with_own(extract_const_assignments(&model.body));
+            let own_consts = extract_const_assignments(&model.body);
+            let sccq_own_consts: Option<Vec<(Symbol, Ty)>> = self.sccq.is_some().then(|| {
+                let mut v: Vec<(Symbol, Ty)> =
+                    own_consts.iter().map(|(k, t)| (k.clone(), t.clone())).collect();
+                v.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                v
+            });
+            let class_constants = global_constants.with_own(own_consts);
 
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
@@ -2503,15 +2559,48 @@ impl Analyzer {
                 annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
             };
 
+            // `RH_SCHED=sccq`: the worklist owns this model's bodies; a class pass
+            // only refreshes the contexts they are typed in.
+            if self.sccq_skip_fine {
+                let flow = self.sccq_flow_ivars(sccq::Family::ModelMethod, model_ci);
+                let reseeded = (!flow.is_empty()).then(|| {
+                    let mut reseeded = class_ivars.clone();
+                    let initialized = ivars_initialized_by(model.methods());
+                    for (name, ty) in flow {
+                        let union_ty = if initialized.contains(&name) && !ty.is_open() {
+                            ty
+                        } else {
+                            crate::analyze::body::union_of(ty, Ty::Nil)
+                        };
+                        reseeded.insert(name, union_ty);
+                    }
+                    reseeded
+                });
+                self.sccq_store_model(
+                    model_ci,
+                    &class_ivars,
+                    sccq_own_consts.unwrap_or_default(),
+                    &global_constants,
+                    reseeded.as_ref(),
+                );
+                continue;
+            }
+            let sccq_class_ivars = self.sccq.is_some().then(|| class_ivars.clone());
+
             // Pass A: type every method body with only `@attributes`
             // seeded. Assignments inside bodies (e.g. `@_comments = ...`
             // in a memoizing getter) populate `value.ty` on those
             // assignments, which Pass B harvests.
-            for scope in model.scopes_mut() {
+            for (si, scope) in model.scopes_mut().enumerate() {
+                let unit = self.sccq_model_unit(model_ci, si, true);
+                self.sccq_rec_begin(unit);
                 self.body_typer().analyze_expr(&mut scope.body, &class_ctx);
+                self.sccq_rec_end(unit, true, Some(&scope.body));
             }
             let model_name = model.name.clone();
-            for method in model.methods_mut() {
+            for (mi, method) in model.methods_mut().enumerate() {
+                let unit = self.sccq_model_unit(model_ci, mi, false);
+                self.sccq_rec_begin(unit);
                 // A default is part of the parameter's type. Typed before
                 // seeding so `value = nil` is `Nil` when no call site has
                 // said otherwise, and a later site can union with it.
@@ -2522,6 +2611,7 @@ impl Analyzer {
                 }
                 let mctx = self.seed_method_params(&class_ctx, &model_name, method, true);
                 self.body_typer().analyze_expr(&mut method.body, &mctx);
+                self.sccq_rec_end(unit, true, Some(&method.body));
             }
 
             // Pass B: gather every ivar assignment across the model's
@@ -2538,6 +2628,7 @@ impl Analyzer {
                 extract_ivar_assignments(&scope.body, &mut flow_ivars);
             }
 
+            let mut sccq_reseeded: Option<HashMap<Symbol, Ty>> = None;
             if !flow_ivars.is_empty() {
                 // Re-seed ctx with discovered ivars alongside @attributes.
                 // Memoizing ivars become `Union<T, Nil>` to reflect that
@@ -2554,6 +2645,9 @@ impl Analyzer {
                     };
                     reseeded.insert(name, union_ty);
                 }
+                if self.sccq.is_some() {
+                    sccq_reseeded = Some(reseeded.clone());
+                }
                 let reseeded_ctx = Ctx {
                     self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![].into() }),
                     lexical_self: None,
@@ -2565,13 +2659,23 @@ impl Analyzer {
                     annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                 };
 
-                for scope in model.scopes_mut() {
+                for (si, scope) in model.scopes_mut().enumerate() {
+                    let unit = self.sccq_model_unit(model_ci, si, true);
+                    self.sccq_rec_begin(unit);
                     self.body_typer().analyze_expr(&mut scope.body, &reseeded_ctx);
+                    self.sccq_rec_end(unit, false, None);
                 }
-                for method in model.methods_mut() {
+                for (mi, method) in model.methods_mut().enumerate() {
+                    let unit = self.sccq_model_unit(model_ci, mi, false);
+                    self.sccq_rec_begin(unit);
                     let mctx = self.seed_method_params(&reseeded_ctx, &model_name, method, true);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    self.sccq_rec_end(unit, false, None);
                 }
+            }
+            if let Some(class_ivars) = sccq_class_ivars {
+                self.sccq_store_model(model_ci, &class_ivars, sccq_own_consts.unwrap_or_default(),
+                                      &global_constants, sccq_reseeded.as_ref());
             }
             self.harvest_one_model(model);
         }
@@ -2580,7 +2684,7 @@ impl Analyzer {
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
         let _typing_controllers_a = crate::timings::begin("typing: controllers A");
-        for controller in &mut app.controllers {
+        for (ctrl_ci, controller) in app.controllers.iter_mut().enumerate() {
             // A controller the round did not move still has to produce
             // its metadata: Phase B resolves a dirty child's filters by
             // walking its ancestors' entries, and the view channel is
@@ -2660,12 +2764,14 @@ impl Analyzer {
             let ctrl_id = controller.name.clone();
             let spliced_from = app.concern_spliced_actions.get(&ctrl_id).cloned();
             if retype {
-                for action in controller.actions_mut() {
+                for (ai, action) in controller.actions_mut().enumerate() {
                     // A concern method spliced into this controller carries
                     // its call-site observations under the MODULE's key
                     // (`fold_concern_param_sites`), whichever includer the
                     // sites were in.
                     let origin = spliced_from.as_ref().and_then(|m| m.get(&action.name));
+                    let unit = self.sccq_ctrl_unit(ctrl_ci, ai, false);
+                    self.sccq_rec_begin(unit);
                     let mctx = self.seed_action_params(
                         &ctx,
                         &ctrl_id,
@@ -2678,6 +2784,7 @@ impl Analyzer {
                     );
                     self.analyze_action_defaults(action, &mctx, &ctrl_id, origin);
                     self.body_typer().analyze_expr(&mut action.body, &mctx);
+                    self.sccq_rec_end_ctx(unit, true, &ctx);
                 }
             }
 
@@ -2686,12 +2793,14 @@ impl Analyzer {
             // ivars into a view; typing them is what resolves their own
             // bodies and their harvested return types.
             if retype {
-                for method in controller.body.iter_mut().filter_map(|item| match item {
+                for (mi, method) in controller.body.iter_mut().filter_map(|item| match item {
                     ControllerBodyItem::ClassMethod { method, configuration_slot: None, .. } => {
                         Some(method)
                     }
                     _ => None,
-                }) {
+                }).enumerate() {
+                    let unit = self.sccq_ctrl_unit(ctrl_ci, mi, true);
+                    self.sccq_rec_begin(unit);
                     for p in &mut method.params {
                         if let Some(default) = &mut p.default {
                             self.body_typer().analyze_expr(default, &ctx);
@@ -2699,6 +2808,7 @@ impl Analyzer {
                     }
                     let mctx = self.seed_method_params(&ctx, &ctrl_id, method, false);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    self.sccq_rec_end_ctx(unit, true, &ctx);
                 }
             }
 
@@ -2887,7 +2997,7 @@ impl Analyzer {
         // closest definition wins on name conflicts (mirrors Ruby
         // method-resolution order).
         let _typing_controllers_b = crate::timings::begin("typing: controllers B");
-        for controller in &mut app.controllers {
+        for (ctrl_ci, controller) in app.controllers.iter_mut().enumerate() {
             let ctrl_name = controller.name.clone();
             let Some(meta) = meta_by_name.get(&ctrl_name) else { continue };
             // Same gate as Phase A, for the same reason: the chained
@@ -3150,7 +3260,7 @@ impl Analyzer {
                 // method (routed action or private helper) is re-analyzed
                 // so cross-method ivar reads resolve.
                 if retype && (!controller_wide.is_empty() || !chained_filters.is_empty()) {
-                    for action in controller.actions_mut() {
+                    for (ai, action) in controller.actions_mut().enumerate() {
                         let mut seed = controller_wide.clone();
                         // Overlay the action's precise before_action seed:
                         // for an action that actually runs the filter, the
@@ -3181,6 +3291,8 @@ impl Analyzer {
                             .concern_spliced_actions
                             .get(&ctrl_name)
                             .and_then(|m| m.get(&action.name));
+                        let unit = self.sccq_ctrl_unit(ctrl_ci, ai, false);
+                        self.sccq_rec_begin(unit);
                         let inner_ctx = self.seed_action_params(
                             &base_ctx,
                             &ctrl_name,
@@ -3193,6 +3305,7 @@ impl Analyzer {
                         );
                         self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                    self.sccq_rec_end_ctx(unit, false, &base_ctx);
                     }
                 }
 
@@ -3655,7 +3768,7 @@ impl Analyzer {
         if !app.concern_spliced_actions.is_empty() {
             let _typing_concerns = crate::timings::begin("typing: concern splice");
             let origins = app.concern_spliced_actions.clone();
-            for controller in &mut app.controllers {
+            for (ctrl_ci, controller) in app.controllers.iter_mut().enumerate() {
                 let Some(by_method) = origins.get(&controller.name) else { continue };
                 if dirty.is_some_and(|d| !d.contains(&controller.name)) {
                     continue;
@@ -3670,7 +3783,7 @@ impl Analyzer {
                 // established — this pass must only ever add.
                 let class_constants =
                     global_constants.with_own(extract_controller_const_assignments(&controller.body));
-                for action in controller.actions_mut() {
+                for (ai, action) in controller.actions_mut().enumerate() {
                     let Some(module) = by_method.get(&action.name) else { continue };
                     let Some(from_concern) = concern_ivar_env.get(module) else { continue };
                     let mut seed = own_env.clone();
@@ -3704,6 +3817,8 @@ impl Analyzer {
                         .concern_spliced_actions
                         .get(&ctrl_name)
                         .and_then(|m| m.get(&action.name));
+                    let unit = self.sccq_ctrl_unit(ctrl_ci, ai, false);
+                    self.sccq_rec_begin(unit);
                     let inner_ctx = self.seed_action_params(
                         &base_ctx,
                         &ctrl_name,
@@ -3716,6 +3831,7 @@ impl Analyzer {
                     );
                     self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                    self.sccq_rec_end_ctx(unit, false, &base_ctx);
                 }
             }
         }
@@ -3851,7 +3967,8 @@ impl Analyzer {
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::new();
 
         let _typing_library = crate::timings::begin("typing: library");
-        for lc in &mut app.library_classes {
+        let sccq_skip = self.sccq_skip_fine;
+        for (lc_ci, lc) in app.library_classes.iter_mut().enumerate() {
             if let Some(row) = mailer_with_params.get(&lc.name) {
                 self.classes
                     .entry(lc.name.clone())
@@ -3874,6 +3991,7 @@ impl Analyzer {
             } else {
                 lc.name.clone()
             };
+            let sccq_self_id = self_id.clone();
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: self_id, args: vec![].into() }),
                 lexical_self: None,
@@ -3893,7 +4011,14 @@ impl Analyzer {
                         self.body_typer().analyze_expr(value, &class_ctx);
                     }
                 }
-                for method in &mut lc.methods {
+                for (mi, method) in lc.methods.iter_mut().enumerate() {
+                    // `RH_SCHED=sccq`: the worklist owns these bodies after the
+                    // initial pass.
+                    if sccq_skip {
+                        continue;
+                    }
+                    let unit = self.sccq_lib_unit(lc_ci, mi);
+                    self.sccq_rec_begin(unit);
                     // A default is an expression of the class body too, and
                     // its type is half of what an optional parameter IS:
                     // `for_user = Current.user` is a User whenever the
@@ -3910,12 +4035,18 @@ impl Analyzer {
                         }
                     }
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    self.sccq_rec_end(unit, true, Some(&method.body));
                 }
             }
 
             let mut flow_ivars: HashMap<Symbol, Ty> = HashMap::new();
-            for method in &lc.methods {
-                extract_ivar_assignments(&method.body, &mut flow_ivars);
+            if sccq_skip {
+                // The engine's cached Pass A trees stand in for the bodies.
+                flow_ivars = self.sccq_flow_ivars(sccq::Family::Lib, lc_ci);
+            } else {
+                for method in &lc.methods {
+                    extract_ivar_assignments(&method.body, &mut flow_ivars);
+                }
             }
             // A CONTROLLER CONCERN's ivars are the includer's. Its
             // methods run on the controller and read what the
@@ -3964,7 +4095,7 @@ impl Analyzer {
                     .map(crate::naming::snake_case)
                     .collect::<Vec<_>>()
                     .join("/");
-                for method in &lc.methods {
+                for (mi, method) in lc.methods.iter().enumerate() {
                     if method.receiver != crate::dialect::MethodReceiver::Instance
                         || method.kind != crate::dialect::AccessorKind::Method
                         || method.name.as_str() == "initialize"
@@ -3972,7 +4103,13 @@ impl Analyzer {
                         continue;
                     }
                     let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
-                    extract_ivar_assignments(&method.body, &mut ivars);
+                    // `RH_SCHED=sccq`: the Pass A tree, as a retyping class pass sees it.
+                    let walked = if sccq_skip {
+                        self.sccq_pass_a_tree(lc_ci, mi).unwrap_or(&method.body)
+                    } else {
+                        &method.body
+                    };
+                    extract_ivar_assignments(walked, &mut ivars);
                     // Back-fill from the class-wide flow set, nil-widened:
                     // mailers set shared ivars in `before_action` filters
                     // (`set_instance` → `@instance`), which the ingest
@@ -3996,6 +4133,7 @@ impl Analyzer {
             }
 
             let initialized = ivars_initialized_by(lc.methods.iter());
+            let mut sccq_reseeded: Option<HashMap<Symbol, Ty>> = None;
             if retype && !flow_ivars.is_empty() {
                 let mut reseeded: HashMap<Symbol, Ty> = HashMap::new();
                 for (name, ty) in flow_ivars {
@@ -4020,6 +4158,9 @@ impl Analyzer {
                     };
                     reseeded.insert(name, seeded);
                 }
+                if self.sccq.is_some() {
+                    sccq_reseeded = Some(reseeded.clone());
+                }
                 let reseeded_ctx = Ctx {
                     self_ty: class_ctx.self_ty.clone(),
                     lexical_self: None,
@@ -4029,10 +4170,19 @@ impl Analyzer {
                     query_class_objects: Default::default(),
                     constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false,
                 };
-                for method in &mut lc.methods {
+                for (mi, method) in lc.methods.iter_mut().enumerate() {
+                    if sccq_skip { break; }
+                    let unit = self.sccq_lib_unit(lc_ci, mi);
+                    self.sccq_rec_begin(unit);
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    self.sccq_rec_end(unit, false, None);
                 }
+            }
+            if retype && self.sccq.is_some() {
+                self.sccq_store_lib(lc_ci, &sccq_self_id, concern_ivar_env.get(&lc_name),
+                                    current_attribute_writes.get(&lc_name), is_current_attributes,
+                                    sccq_reseeded.as_ref());
             }
         }
         drop(_typing_library);
@@ -4852,6 +5002,19 @@ impl Analyzer {
         let scope_names: std::collections::HashSet<Symbol> =
             model.scopes().map(|s| s.name.clone()).collect();
         for method in model.methods() {
+            self.harvest_model_method(class_id, &scope_names, method);
+        }
+    }
+
+    /// One model method's share of [`Self::harvest_one_model`] (the worklist
+    /// harvests each query unit on its own).
+    fn harvest_model_method(
+        &mut self,
+        class_id: &ClassId,
+        scope_names: &std::collections::HashSet<Symbol>,
+        method: &crate::dialect::MethodDef,
+    ) {
+        {
             let ret = self.method_return_ty(class_id, method);
             let target = match method.receiver {
                 crate::dialect::MethodReceiver::Instance => {
@@ -4870,7 +5033,7 @@ impl Analyzer {
             // This is what lets `Story.recent.for_user(u)`
             // delegate `for_user` on the relation receiver.
             if method.receiver == crate::dialect::MethodReceiver::Class
-                && body_tail_yields_relation(&method.body, class_id, &scope_names)
+                && body_tail_yields_relation(&method.body, class_id, scope_names)
             {
                 Self::insert_inferred_return(
                     target,
@@ -4882,7 +5045,7 @@ impl Analyzer {
                     .or_default()
                     .relation_derived
                     .insert(method.name.clone());
-                continue;
+                return;
             }
             // …and the half that TERMINATES the chain rather than
             // extending it: `def self.original; order(:created_at)
@@ -4894,7 +5057,7 @@ impl Analyzer {
             // return a record.
             if method.receiver == crate::dialect::MethodReceiver::Class {
                 if let Some(kind) =
-                    body_tail_terminal_kind(&method.body, class_id, &scope_names)
+                    body_tail_terminal_kind(&method.body, class_id, scope_names)
                 {
                     Self::insert_inferred_return(
                         target,
@@ -4906,36 +5069,49 @@ impl Analyzer {
                         .or_default()
                         .relation_derived
                         .insert(method.name.clone());
-                    continue;
+                    return;
                 }
             }
             Self::register_method_return(target, &method.name, ret.as_ref());
         }
     }
 
+    /// One library method's harvest (see [`Self::harvest_method_returns`]).
+    fn harvest_lib_method(&mut self, class_id: &ClassId, method: &crate::dialect::MethodDef) {
+        let ret = self.method_return_ty(class_id, method);
+        let target = match method.receiver {
+            crate::dialect::MethodReceiver::Instance => {
+                &mut self.classes.entry(class_id.clone()).or_default().instance_methods
+            }
+            crate::dialect::MethodReceiver::Class => {
+                &mut self.classes.entry(class_id.clone()).or_default().class_methods
+            }
+        };
+        // Register method existence even when the body can't be
+        // typed: these classes are now ingested (their `def`s are
+        // real), so a call resolves to the inferred return or to
+        // Untyped (gradual) rather than "no known method". Unlike an
+        // unregistered class, this doesn't mask a typo — the method
+        // has to be defined in the file to land here.
+        Self::register_method_return(target, &method.name, ret.as_ref());
+    }
+
     fn harvest_method_returns(&mut self, app: &App, harvest_tests: bool) {
+        // The worklist harvests its units as it evaluates them; main's
+        // global harvest covers them only for the initial typings.
+        let fine = self.sccq.is_none() || self.sccq_harvest_fine;
         for model in &app.models {
-            self.harvest_one_model(model);
+            if fine {
+                self.harvest_one_model(model);
+            }
         }
         for lc in &app.library_classes {
+            if !fine {
+                continue;
+            }
             let class_id = &lc.name;
             for method in &lc.methods {
-                let ret = self.method_return_ty(class_id, method);
-                let target = match method.receiver {
-                    crate::dialect::MethodReceiver::Instance => {
-                        &mut self.classes.entry(class_id.clone()).or_default().instance_methods
-                    }
-                    crate::dialect::MethodReceiver::Class => {
-                        &mut self.classes.entry(class_id.clone()).or_default().class_methods
-                    }
-                };
-                // Register method existence even when the body can't be
-                // typed: these classes are now ingested (their `def`s are
-                // real), so a call resolves to the inferred return or to
-                // Untyped (gradual) rather than "no known method". Unlike an
-                // unregistered class, this doesn't mask a typo — the method
-                // has to be defined in the file to land here.
-                Self::register_method_return(target, &method.name, ret.as_ref());
+                self.harvest_lib_method(class_id, method);
             }
         }
         if harvest_tests {
@@ -4959,6 +5135,12 @@ impl Analyzer {
         // no class-receiver variant).
         for controller in &app.controllers {
             let class_id = &controller.name;
+            // `RH_SCHED=sccq`: a controller's typings are harvested one-to-one —
+            // by the engine for its own evaluations, here for the last
+            // class pass's.
+            if !fine && !self.sccq_ctrl_harvest_due(class_id) {
+                continue;
+            }
             // Class-side methods register like a library class's: the
             // method exists whether or not its body can be typed, so a
             // call to it resolves to the inferred return or to Untyped
@@ -5584,16 +5766,20 @@ impl Analyzer {
         // already knows the class it is walking, so the edges are the
         // slice of sites it appended. See `record_callers`.
         self.callers_by_target.clear();
-        for model in &app.models {
-            for method in model.methods() {
+        // `RH_SCHED=sccq` keeps each body's slice of sites (canonical order).
+        let mut bodies: Vec<(Option<u32>, usize, usize)> = Vec::new();
+        for (ci, model) in app.models.iter().enumerate() {
+            for (mi, method) in model.methods().enumerate() {
                 let from = sites.len();
                 self.collect_send_sites(&method.body, Some(&model.name), method.receiver == MethodReceiver::Class, helpers, &mut sites);
                 self.record_callers(&model.name, &sites[from..]);
+                bodies.push((self.sccq_model_unit(ci, mi, false), from, sites.len()));
             }
-            for scope_item in model.scopes() {
+            for (si, scope_item) in model.scopes().enumerate() {
                 let from = sites.len();
                 self.collect_send_sites(&scope_item.body, Some(&model.name), true, helpers, &mut sites);
                 self.record_callers(&model.name, &sites[from..]);
+                bodies.push((self.sccq_model_unit(ci, si, true), from, sites.len()));
             }
             // A block-form lifecycle hook (`after_create_commit -> {
             // room.receive(self) }`) is a method body that only becomes
@@ -5607,32 +5793,47 @@ impl Analyzer {
                     let from = sites.len();
                     self.collect_send_sites(body, Some(&model.name), false, helpers, &mut sites);
                     self.record_callers(&model.name, &sites[from..]);
+                    bodies.push((None, from, sites.len()));
                 }
             }
         }
-        for lc in &app.library_classes {
-            for method in &lc.methods {
+        for (ci, lc) in app.library_classes.iter().enumerate() {
+            for (mi, method) in lc.methods.iter().enumerate() {
                 let from = sites.len();
                 self.collect_send_sites(&method.body, Some(&lc.name), method.receiver == MethodReceiver::Class, helpers, &mut sites);
                 self.record_callers(&lc.name, &sites[from..]);
+                bodies.push((self.sccq_lib_unit(ci, mi), from, sites.len()));
             }
         }
-        for controller in &app.controllers {
-            for action in controller.actions() {
+        for (ci, controller) in app.controllers.iter().enumerate() {
+            for (ai, action) in controller.actions().enumerate() {
                 let from = sites.len();
-                let defaults = action.opt_params.iter().map(|(_, d)| d).chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref()));
+                let defaults = action.opt_params.iter().map(|(_, d)| d)
+                    .chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref()));
                 for body in defaults.chain(std::iter::once(&action.body)) {
                     self.collect_send_sites(body, Some(&controller.name), false, helpers, &mut sites);
                 }
                 self.record_callers(&controller.name, &sites[from..]);
+                bodies.push((self.sccq_ctrl_unit(ci, ai, false), from, sites.len()));
             }
-            for method in controller.class_methods() {
+            let mut typed = 0usize;
+            for item in &controller.body {
+                let crate::dialect::ControllerBodyItem::ClassMethod { method, configuration_slot, .. } = item
+                else { continue };
                 let from = sites.len();
                 for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
                     self.collect_send_sites(default, Some(&controller.name), true, helpers, &mut sites);
                 }
                 self.collect_send_sites(&method.body, Some(&controller.name), true, helpers, &mut sites);
                 self.record_callers(&controller.name, &sites[from..]);
+                // Only the class methods Pass A types are query units.
+                let unit = if configuration_slot.is_none() {
+                    typed += 1;
+                    self.sccq_ctrl_unit(ci, typed - 1, true)
+                } else {
+                    None
+                };
+                bodies.push((unit, from, sites.len()));
             }
             // A class-body macro call (`preload_site_configs %w[a], only:
             // :show`) is the call site that types the class method.
@@ -5641,9 +5842,11 @@ impl Analyzer {
                     let from = sites.len();
                     self.collect_send_sites(expr, Some(&controller.name), true, helpers, &mut sites);
                     self.record_callers(&controller.name, &sites[from..]);
+                    bodies.push((None, from, sites.len()));
                 }
             }
         }
+        let static_from = sites.len();
         // WithViews: param sites only — no `record_callers` (no ClassId).
         if matches!(scope, UnifyScope::WithViews) {
             for view in &app.views {
@@ -5654,6 +5857,12 @@ impl Analyzer {
             }
         }
 
+        if self.sccq.is_some() {
+            // Controllers, views and seeds are walked bodies the engine does
+            // not own: one slice each, in walk order.
+            bodies.push((None, static_from, sites.len()));
+            self.sccq_rebuild_sites(app, &bodies, &sites);
+        }
         self.apply_param_sites(sites, &params_by_method, &defined);
         // Production signatures keep their production callers' shape.
         // Fold before adding test-owned observations: a same-named test
@@ -5678,6 +5887,11 @@ impl Analyzer {
         let params_by_method = Self::param_shapes(app);
         let defined = Self::defined_methods(app);
         let test_sites = self.collect_test_param_sites(app, helpers);
+        if self.sccq.is_some() {
+            let resolved = test_sites.iter().cloned()
+                .filter_map(|site| self.resolve_param_site(site, &params_by_method, &defined)).collect();
+            self.sccq_capture_overlay(resolved);
+        }
         self.apply_param_sites(test_sites, &params_by_method, &defined);
     }
 
@@ -5705,14 +5919,10 @@ impl Analyzer {
         }).collect()
     }
 
-    fn apply_param_sites(
-        &mut self,
-        sites: Vec<SendSite>,
-        params_by_method: &HashMap<ParamKey, ParamShape>,
-        defined: &BTreeSet<ParamKey>,
-    ) {
-        let mut observations = Vec::new();
-        for (class_id, method, arg_tys, kw_tys, recv) in sites {
+    /// Resolve one site exactly as main's parameter pass does.
+    fn resolve_param_site(&self, site: SendSite, params_by_method: &HashMap<ParamKey, ParamShape>,
+                          defined: &BTreeSet<ParamKey>) -> Option<(ParamKey, Vec<Ty>)> {
+        let (class_id, method, arg_tys, kw_tys, recv) = site;
             // `Job.perform_later(x)` runs `Job#perform(x)`: ActiveJob serializes the arguments and hands them back as they were.
             let method = match method.as_str() {
                 "perform_later" | "perform_now"
@@ -5732,10 +5942,23 @@ impl Analyzer {
             } else {
                 self.inherited_param_owner(defined, class_id, &method, None)
             };
-            let Some(side) = Self::param_side(defined, &class_id, &method, recv) else { continue };
+            let Some(side) = Self::param_side(defined, &class_id, &method, recv) else { return None };
             let key = (class_id, method, side);
             let arg_tys = Self::place_keyword_args(params_by_method.get(&key), arg_tys, kw_tys);
-            observations.push((key, arg_tys));
+            Some((key, arg_tys))
+    }
+
+    fn apply_param_sites(
+        &mut self,
+        sites: Vec<SendSite>,
+        params_by_method: &HashMap<ParamKey, ParamShape>,
+        defined: &BTreeSet<ParamKey>,
+    ) {
+        let mut observations = Vec::new();
+        for site in sites {
+            if let Some(observation) = self.resolve_param_site(site, params_by_method, defined) {
+                observations.push(observation);
+            }
         }
         fold_param_observations(&mut self.inferred_params, observations);
     }

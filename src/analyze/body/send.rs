@@ -2550,6 +2550,7 @@ impl<'a> BodyTyper<'a> {
                 continue;
             }
             let Some(cls) = self.classes().get(&cid) else { continue };
+            crate::analyze::sccq::rec_wild(cls.sccq_idx);
             for ty in cls.instance_methods.values() {
                 // `-> self` on an ancestor answers the receiver, not
                 // the ancestor — substitute before the return is read.

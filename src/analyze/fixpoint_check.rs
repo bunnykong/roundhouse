@@ -86,6 +86,8 @@ pub(super) fn verify_on() -> bool {
     *VERIFY
 }
 
+pub(super) fn stats_on() -> bool { *STATS }
+
 static BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 static BOUND_CUTS: AtomicU64 = AtomicU64::new(0);
 
@@ -590,8 +592,9 @@ impl Analyzer {
                 line["native_digest"] = serde_json::json!(native.digests());
                 line["native_entries"] = serde_json::json!(native.sizes());
                 line["observer_contract"] = serde_json::json!({
-                    "schema": "main-s2-v1", "scheduler": "main",
-                    "shuffle_supported": false, "side_table": "absent-on-main",
+                    "schema": "main-s2-v1",
+                    "scheduler": if self.sccq.is_some() { "sccq" } else { "main" },
+                    "shuffle_supported": self.sccq.is_some(), "side_table": "absent-on-main",
                     "provenance": false, "declarations": false, "structure": false,
                 });
                 native.s2_projection()
@@ -619,6 +622,9 @@ impl Analyzer {
             });
             line["harvest_untie_cut"] =
                 serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+        }
+        if *STATS {
+            if let Some(worklist) = self.sccq_stats() { line["worklist"] = worklist; }
         }
         if super::precision::on() {
             line["precision"] = serde_json::json!(super::precision::census(app));
