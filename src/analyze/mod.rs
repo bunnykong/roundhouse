@@ -61,6 +61,7 @@ mod writers;
 mod mutation_writers;
 mod route_static;
 mod canon_var;
+mod cb_project;
 mod completion_rerun;
 mod fixpoint_bound;
 mod fixpoint_check;
@@ -1339,6 +1340,9 @@ impl Analyzer {
     }
 
     fn analyze_cached(&mut self, app: &mut App) {
+        if cb_project::on() {
+            self.refined_action_bindings.clear();
+        }
         completion_rerun::reset();
         let completion_source = completion_rerun::on().then(|| app.clone());
         producer_evidence::reset(&app.sources);
@@ -1858,6 +1862,9 @@ impl Analyzer {
         self.settle_pending(app);
 
         canon_var::finish(self, app);
+        if cb_project::on() {
+            self.refined_action_bindings = cb_project::project(app);
+        }
         mutation_writers::report();
 
         self.stamp_inferred_method_signatures(app);
@@ -3660,7 +3667,7 @@ impl Analyzer {
             // only names this controller actually defines are recorded;
             // an inherited entry stays attributed to the class that
             // owns it.
-            {
+            if !cb_project::on() {
                 let own: BTreeSet<Symbol> =
                     controller.actions().map(|a| a.name.clone()).collect();
                 for (name, ivars) in &chained_bindings {
