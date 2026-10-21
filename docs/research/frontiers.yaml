@@ -24,19 +24,19 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "A strict class guard keeps Pending inputs pending and makes all ten Mastodon value tables schedule-equal: 5/10 to 10/10 on F73's candidate across four V0A0 schedules, and on a port to upstream main across twelve. Forem and Chatwoot stay at 9/10 and 24 Mastodon rows widen. The base candidate still loses runtime values, so sound order independence remains open."
-  facts: [F74, F73, F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "With F74's strict guard and F75's binding projection, Campfire, Forem, Chatwoot and Mastodon all have 10/10 schedule-equal tables at V0A0, Mastodon also across twelve schedules. The base candidate still loses runtime values and both binding tables miss 45 reachable bindings, so sound order independence remains open."
+  facts: [F75, F74, F73, F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Classify the twelve structural identities on main, and make controller bindings equal without new runtime losses."
+  next: "Classify the twelve structural identities on main, cover the 45 missed bindings and recover the 104 lost binding values; then check V1A1 and Discourse."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "unpublished: strict guard 48155b34 over F73 candidate 66c06f52 (F72 source f9a7e620); main port 7bd46672 over upstream main 1c84d346361237ef9a99b6c01cead7c340532330"
-    lab: "f60bfeca5a4c53702e57d8c83e96679a692fc579; strict pending guard tables and mutation-writer census"
-    runner: "V0A0 quick-test reports, twelve-schedule main tables and CRuby witnesses at lab f60bfeca5a4c53702e57d8c83e96679a692fc579"
+    compiler: "unpublished: binding projection f2597823 over strict guard 48155b34 and F73 candidate 66c06f52; main port 7bd46672 over upstream main 1c84d346361237ef9a99b6c01cead7c340532330"
+    lab: "9a1e71a7cecec77f1801e87aeeff4576bb97b5a4; binding projection with corrected audit, strict pending guard and mutation-writer census"
+    runner: "V0A0 quick-test reports, binding audit tables and CRuby witnesses at lab 9a1e71a7cecec77f1801e87aeeff4576bb97b5a4"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "Mutation-site writers lose witnessed values in 21 rows on all four schedules; counting unproved rows as possible losses, at most 2,202 of 4,652 narrowings (47.3%) lose values at 95% confidence. The strict guard adds no witnessed loss and keeps these losses."
-  facts: [F73, F74, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "Mutation-site writers lose witnessed values in 21 rows on all four schedules; counting unproved rows as possible losses, at most 2,202 of 4,652 narrowings (47.3%) lose values at 95% confidence. The strict guard and the binding projection add no witnessed loss, but both binding tables miss 45 bindings that Ruby reaches."
+  facts: [F75, F74, F73, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Repair the routing and container contributions behind the 21 losses, then rerun the census before claiming sound equality."
+  next: "Repair the routing and container contributions behind the 21 losses and cover the 45 missed bindings, then rerun the census before claiming sound equality."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "unpublished: mutation-site writers 66c06f52 over F72 source f9a7e620; strict guard 48155b34"
-    lab: "f60bfeca5a4c53702e57d8c83e96679a692fc579; mutation-writer census with minimal CRuby witnesses"
+    compiler: "unpublished: binding projection f2597823 over strict guard 48155b34 and mutation-site writers 66c06f52 (F72 source f9a7e620)"
+    lab: "9a1e71a7cecec77f1801e87aeeff4576bb97b5a4; binding projection, strict guard and mutation-writer census with CRuby witnesses"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,19 +84,19 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "The strict guard narrows no value set and widens 24 Mastodon rows, a precision cost for the pinned callers. F73's candidate loses witnessed values in 21 narrowed rows, so its equality gains are not sound precision gains."
-  facts: [F74, F73, F72, F71, F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
+  stands: "The binding projection adds 472 reachable bindings but makes 104 known values partly or fully Unresolved, 95 in Chatwoot; the strict guard widens 24 Mastodon rows. F73's candidate loses witnessed values in 21 narrowed rows, so its equality gains are not sound precision gains."
+  facts: [F75, F74, F73, F72, F71, F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Recover the 24 widened rows without a Pending seed, and keep runtime membership beside each narrowing claim."
+  next: "Recover the 104 binding values and the 24 widened rows without a Pending seed, and keep runtime membership beside each narrowing claim."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "unpublished: strict guard 48155b34 over F73 candidate 66c06f52 (F72 source f9a7e620); main port 7bd46672 over upstream main 1c84d346361237ef9a99b6c01cead7c340532330"
-    lab: "f60bfeca5a4c53702e57d8c83e96679a692fc579; strict pending guard tables and mutation-writer census"
-    runner: "V0A0 quick-test reports, twelve-schedule main tables and CRuby witnesses at lab f60bfeca5a4c53702e57d8c83e96679a692fc579"
+    compiler: "unpublished: binding projection f2597823 over strict guard 48155b34 and F73 candidate 66c06f52; main port 7bd46672 over upstream main 1c84d346361237ef9a99b6c01cead7c340532330"
+    lab: "9a1e71a7cecec77f1801e87aeeff4576bb97b5a4; binding projection with corrected audit, strict pending guard and mutation-writer census"
+    runner: "V0A0 quick-test reports, binding audit tables and CRuby witnesses at lab 9a1e71a7cecec77f1801e87aeeff4576bb97b5a4"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
