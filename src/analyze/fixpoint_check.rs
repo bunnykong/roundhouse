@@ -709,8 +709,8 @@ impl Analyzer {
                 line["observer_contract"] = serde_json::json!({
                     "schema": "main-s2-v1",
                     "scheduler": if self.sccq.is_some() { "sccq" } else { "main" },
-                    "shuffle_supported": self.sccq.is_some(), "side_table": "absent-on-main",
-                    "provenance": false, "declarations": false, "structure": false,
+                    "shuffle_supported": self.sccq.is_some(), "side_table": if super::fold::on() { "present" } else { "absent-on-main" },
+                    "provenance": true, "declarations": super::producer_evidence::on(), "structure": true,
                 });
                 native.s2_projection()
             } else {
@@ -718,6 +718,7 @@ impl Analyzer {
             };
             if *S2_VALUES {
                 self.s2_dump(app, &fp).expect("write S2 value rows");
+                s6_flush();
             }
             line["digest"] = serde_json::json!(fp.digests());
             line["entries"] = serde_json::json!(fp.sizes());
@@ -949,9 +950,24 @@ end
 }
 
 
-/// Native main types have no recursive-slot identities to rewrite.
-fn s2_ty(t: &Ty) -> serde_json::Value {
-    serde_json::to_value(t).expect("serialize S2 type")
+pub(super) fn s2_ty(t: &Ty) -> serde_json::Value {
+    fn symbolic(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.get("kind").and_then(|x| x.as_str()) == Some("rec") {
+                    if let Some(slot) = m.get("slot").and_then(|x| x.as_u64()) {
+                        m.insert("slot".into(), serde_json::json!(format!("{:?}", super::fold::key_of(slot as u32))));
+                    }
+                }
+                for x in m.values_mut() { symbolic(x); }
+            }
+            serde_json::Value::Array(xs) => for x in xs { symbolic(x); },
+            _ => {}
+        }
+    }
+    let mut v = serde_json::to_value(t).unwrap();
+    symbolic(&mut v);
+    v
 }
 
 impl Analyzer {
@@ -975,6 +991,7 @@ impl Analyzer {
                 value("params",format!("{}{sep}{}[{i}]",id.0.as_str(),m.as_str()),t);
             }
         }
+        for (key,t) in super::fold::s2_values() { value("side_table",key,&t); }
         for (id,(bindings,_)) in &self.controller_action_meta_cache {
             for (method,bs) in bindings { for (k,t) in bs {
                 value("controller_cache",format!("{}#{}:binding:{}",id.0.as_str(),method.as_str(),k.as_str()),t);
@@ -1022,6 +1039,32 @@ impl Analyzer {
             let key=format!("{body}:occurrence:{n}"); *n+=1;
             expr(root,"ir",&key,&mut Vec::new(),&mut emit);
         });
+        for (key,module) in super::fold::s2_aliases() {
+            emit(serde_json::json!({"part":"aliases","key":key,"module":module}));
+        }
         out.flush()
     }
+}
+
+thread_local! {
+    static S6_TRACE: std::cell::RefCell<Option<std::io::BufWriter<std::fs::File>>> = const { std::cell::RefCell::new(None) };
+    static S6_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+pub(super) fn s6_trace(mut value: serde_json::Value) {
+    if std::env::var("RH_S2_VALUES").as_deref() != Ok("1") { return; }
+    use std::io::Write;
+    let seq = S6_SEQ.with(|x| { let n=x.get()+1; x.set(n); n });
+    value["sequence"] = seq.into();
+    S6_TRACE.with(|x| {
+        let mut x=x.borrow_mut();
+        if x.is_none() {
+            let path=std::path::PathBuf::from(std::env::var_os("RH_STRUCT_DUMP").unwrap()).with_file_name("focus.jsonl");
+            *x=Some(std::io::BufWriter::new(std::fs::File::create(path).unwrap()));
+        }
+        let f=x.as_mut().unwrap(); serde_json::to_writer(&mut *f,&value).unwrap(); writeln!(f).unwrap();
+    });
+}
+fn s6_flush() {
+    use std::io::Write;
+    S6_TRACE.with(|x| { if let Some(f)=x.borrow_mut().as_mut() { f.flush().unwrap(); } });
 }
