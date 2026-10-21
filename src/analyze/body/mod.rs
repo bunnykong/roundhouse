@@ -763,6 +763,7 @@ impl<'a> BodyTyper<'a> {
         let _writer_visit = super::writers::enter(expr.span, ctx);
         let ty = self.compute(expr, ctx);
         let ty = super::writers::source_result(expr,ctx,self.classes().raw(),ty);
+        let ty = super::canon_var::produced(ty);
         expr.ty = Some(ty.clone());
         // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
         if expr.diagnostic().is_none()
@@ -1531,8 +1532,8 @@ impl<'a> BodyTyper<'a> {
                     });
                 }
                 Ty::Hash {
-                    key: std::sync::Arc::new(key_ty.unwrap_or_else(unknown)),
-                    value: std::sync::Arc::new(value_ty.unwrap_or_else(unknown)),
+                    key: std::sync::Arc::new(key_ty.unwrap_or_else(super::strict_producers::absent_argument)),
+                    value: std::sync::Arc::new(value_ty.unwrap_or_else(super::strict_producers::absent_argument)),
                 }
             }
 
@@ -1563,7 +1564,7 @@ impl<'a> BodyTyper<'a> {
                         None => et,
                     });
                 }
-                Ty::Array { elem: std::sync::Arc::new(elem_ty.unwrap_or_else(unknown)) }
+                Ty::Array { elem: std::sync::Arc::new(elem_ty.unwrap_or_else(super::strict_producers::absent_argument)) }
             }
 
             ExprNode::StringInterp { parts } => {

@@ -15,17 +15,37 @@ fn on() -> bool {
 }
 
 fn canonical(t: &Ty, memo: &mut HashMap<usize, Ty>) -> Ty {
+    rewrite(t, memo, false)
+}
+
+pub(super) fn source_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_UNK_AT_SOURCE").as_deref() == Ok("1"))
+}
+
+/// A completed transfer's unknown is evidence, not a future computation.
+/// Lookup internals may still use Var as a no-answer sentinel; it cannot
+/// escape the producer into an annotation or a fold writer cell.
+pub(super) fn produced(t: Ty) -> Ty {
+    if !source_on() { return t; }
+    let mut has_var = false;
+    super::fold::visit(&t, &mut |v| has_var |= matches!(v, Ty::Var { .. }));
+    if has_var { rewrite(&t, &mut HashMap::new(), true) } else { t }
+}
+
+fn rewrite(t: &Ty, memo: &mut HashMap<usize, Ty>, at_source: bool) -> Ty {
     let key = t as *const Ty as usize;
     if let Some(done) = memo.get(&key) {
         return done.clone();
     }
-    let mut go = |t: &Ty| canonical(t, memo);
+    let mut go = |t: &Ty| rewrite(t, memo, at_source);
     let out = match t {
+        Ty::Var { .. } if at_source => Ty::unresolved(),
         Ty::Union { variants } => {
             let kept_unknown = variants.iter().any(|v| matches!(v, Ty::Var { .. }))
-                && variants
+                && (at_source || variants
                     .iter()
-                    .any(|v| !v.is_unknown() && !matches!(v, Ty::Bottom));
+                    .any(|v| !v.is_unknown() && !matches!(v, Ty::Bottom)));
             let mut changed = kept_unknown;
             let mut next_variants = Vec::new();
             for v in variants {
@@ -116,8 +136,18 @@ fn canonical(t: &Ty, memo: &mut HashMap<usize, Ty>) -> Ty {
 }
 
 fn stored(t: &mut Ty) {
-    *t = canonical(t, &mut HashMap::new());
+    let next = canonical(t, &mut HashMap::new());
+    if !crate::wire_ty::storage_types(std::slice::from_ref(t), std::slice::from_ref(&next)) {
+        CHANGED.with(|n| n.set(n.get() + 1));
+        if source_on() { CHANGED.with(|n| {
+            if n.get() <= 16 { eprintln!("rh-canon-var-change: {}",serde_json::json!({
+                "before":format!("{t:?}"),"after":format!("{next:?}")})); }
+        }); }
+    }
+    *t = next;
 }
+
+thread_local! { static CHANGED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
 fn expr(e: &mut Expr) {
     if let Some(t) = &mut e.ty {
@@ -128,7 +158,9 @@ fn expr(e: &mut Expr) {
 
 pub(super) fn finish(analyzer: &mut Analyzer, app: &mut App) {
     if on() {
+        CHANGED.with(|n| n.set(0));
         rewrite_storage(analyzer, app);
+        if source_on() { CHANGED.with(|n| eprintln!("rh-canon-var: {{\"changed_values\":{}}}", n.get())); }
     }
 }
 

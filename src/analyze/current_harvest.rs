@@ -54,6 +54,7 @@ pub(super) fn writer(c: &ClassId, m: &Symbol, side: bool, span: Span) -> Guard {
     Guard(Some(ST.with(|s| s.borrow_mut().current.replace(current))))
 }
 pub(super) fn publish(mut new: Ty) -> Ty {
+    new = super::canon_var::produced(new);
     ST.with(|s| {
         let mut s = s.borrow_mut();
         let Some((slot, declaration)) = s.current.clone() else {
@@ -137,7 +138,8 @@ mod tests {
         super::super::Analyzer::register_method_return(&mut table, &name, Some(&Ty::Int));
         let var = Ty::Var {var:crate::ident::TyVar(0)};
         super::super::Analyzer::register_method_return(&mut table, &name, Some(&var));
-        assert_eq!(table[&name], var, "a current ambiguous result must replace the same writer's old Int");
+        assert_eq!(table[&name], if super::super::canon_var::source_on() { Ty::unresolved() } else { var },
+            "a current ambiguous result must replace the same writer's old Int");
         super::super::Analyzer::register_method_return(&mut table, &name, None);
         assert!(super::super::strict_producers::is_p(&table[&name]),
             "a current missing result must record its wait instead of retaining history");

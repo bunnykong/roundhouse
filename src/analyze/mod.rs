@@ -57,6 +57,8 @@ mod harvest_return;
 mod current_harvest;
 #[cfg(test)]
 mod qt_whole2_tests;
+#[cfg(test)]
+mod qt_whole3_tests;
 pub mod s3d;
 pub(crate) mod strict_producers;
 pub mod producer_evidence;
@@ -6790,8 +6792,10 @@ impl Analyzer {
     ) -> Vec<Ty> {
         if let Some(shape) = shape.filter(|s| s.keywords_by_kind || kw.anonymous_forward) {
             if kw.group {
+                let opaque = (canon_var::source_on() && (kw.opaque_keywords || kw.anonymous_forward))
+                    .then(Ty::unresolved);
                 if let Some(placed) =
-                    Self::bind_keyword_group(shape, &arg_tys, &kw.keys, kw.splat.as_ref())
+                    Self::bind_keyword_group(shape, &arg_tys, &kw.keys, kw.splat.as_ref().or(opaque.as_ref()))
                 {
                     return placed;
                 }
@@ -6807,7 +6811,8 @@ impl Analyzer {
             if let Some(shape) = shape {
                 for (observed, (_, kind)) in arg_tys.iter_mut().zip(&shape.slots) {
                     if matches!(kind, ParamKind::Keyword { .. }) {
-                        *observed = Ty::Var { var: crate::ident::TyVar(0) };
+                        *observed = if canon_var::source_on() && kw.group { Ty::unresolved() }
+                            else { strict_producers::absent_argument() };
                     }
                 }
             }
@@ -6847,7 +6852,10 @@ impl Analyzer {
         }
         arg_tys.pop();
         if arg_tys.len() < params.len() {
-            arg_tys.resize(params.len(), Ty::Var { var: crate::ident::TyVar(0) });
+            arg_tys.extend(params.iter().skip(arg_tys.len()).map(|(_, kind)| {
+                if canon_var::source_on() && matches!(kind, ParamKind::Block) { Ty::unresolved() }
+                else { strict_producers::absent_argument() }
+            }));
         }
         for (k, t) in kw_tys {
             if let Some(i) = slot_of(&k) {
@@ -6888,10 +6896,10 @@ impl Analyzer {
             return None;
         }
         let (hash, positionals) = arg_tys.split_last()?;
-        let unseen = Ty::Var {
-            var: crate::ident::TyVar(0),
-        };
-        let mut out = vec![unseen; params.len()];
+        let mut out: Vec<_> = params.iter().map(|(_, kind)| {
+            if canon_var::source_on() && matches!(kind, ParamKind::Block) { Ty::unresolved() }
+            else { strict_producers::absent_argument() }
+        }).collect();
         let positional_slots = params
             .iter()
             .enumerate()
@@ -6925,6 +6933,15 @@ impl Analyzer {
         }
         if let (Some(i), false) = (rest, has_named) {
             out[i] = hash.clone();
+        }
+        if canon_var::source_on() && has_named {
+            if let Some(i) = rest {
+                let value = keys.iter().filter(|(key, _)| !params.iter().any(|(n, kind)| n == key && is_named(kind)))
+                    .map(|(_, t)| t.clone()).fold(Ty::Bottom, parameter_conservation::join);
+                let value = splat.map_or(value.clone(), |v| parameter_conservation::join(value, v.clone()));
+                let key = if splat.is_some() { Ty::unresolved() } else { Ty::Sym };
+                out[i] = Ty::Hash { key: std::sync::Arc::new(key), value: std::sync::Arc::new(value) };
+            }
         }
         Some(out)
     }

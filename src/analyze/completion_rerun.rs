@@ -8,9 +8,79 @@ pub(super) fn reset() { INPUTS_COMPLETED.with(|x| x.set(false)); }
 pub(super) fn inputs_completed() -> bool { INPUTS_COMPLETED.with(|x| x.get()) }
 pub(super) fn begin_completion() { INPUTS_COMPLETED.with(|x| x.set(true)); }
 
+pub(super) fn closed_reads_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_REPLAY_CLOSED_READS").as_deref() == Ok("1"))
+}
+
+/// A reference still without a productive answer in the completion phase
+/// is a real unknown; reading it must not recreate an unpaid obligation.
+pub(super) fn unavailable_read() -> Ty {
+    if closed_reads_on() { strict_producers::input_seed() } else { Ty::pending_untyped() }
+}
+
 pub(super) fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RH_COMPLETE_RERUN").as_deref() == Ok("1"))
+}
+
+fn tracing() -> bool { std::env::var("RH_REPLAY_TRACE").as_deref() == Ok("1") }
+
+fn trace_finished(analyzer: &Analyzer, app: &mut App) {
+    if !tracing() { return; }
+    let bindings: BTreeMap<_, _> = analyzer.refined_action_bindings.iter().flat_map(|(slot, values)|
+        values.iter().map(move |(name, t)| (format!("{slot:?}/{name}"),format!("{t:?}")))).collect();
+    eprintln!("rh-replay-bindings: {}",serde_json::json!(bindings));
+    let mut returns = BTreeMap::new();
+    for (c, info) in &analyzer.classes {
+        for (side, table) in [("#",&info.instance_methods),(".",&info.class_methods)] {
+            for (m, t) in table {
+                let mut t=t.clone();let n=pending(&mut t,None);
+                if n>0 { returns.insert(format!("{}{side}{}",c.0,m),format!("{t:?}")); }
+            }
+        }
+    }
+    fn visit(e: &mut Expr, out: &mut Vec<serde_json::Value>) {
+        if let Some(t)=&mut e.ty {
+            let n=pending(t,None);
+            if n>0 && out.len()<64 { out.push(serde_json::json!({"span":e.span,"pending":n,"type":format!("{t:?}")})); }
+        }
+        e.node.for_each_child_mut(&mut |e| visit(e,out));
+    }
+    let mut ir=Vec::new();
+    crate::lower::for_each_emit_body_mut(app,&mut |e| visit(e,&mut ir));
+    eprintln!("rh-replay-pending: {}",serde_json::json!({"returns":returns,"ir":ir}));
+}
+
+fn snapshot(analyzer: &Analyzer) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (c, info) in &analyzer.classes {
+        for (side, table) in [("#", &info.instance_methods), (".", &info.class_methods)] {
+            for (m, t) in table { out.insert(format!("return:{}{side}{}", c.0, m), format!("{t:?}")); }
+        }
+    }
+    for (k, row) in &analyzer.inferred_params { out.insert(format!("param:{k:?}"), format!("{row:?}")); }
+    for (k, t) in fold::s2_values() { out.insert(format!("side:{k}"), format!("{t:?}")); }
+    for (k, bindings) in &analyzer.refined_action_bindings {
+        for (name, t) in bindings { out.insert(format!("binding:{k:?}/{name}"), format!("{t:?}")); }
+    }
+    out
+}
+
+fn trace(round: usize, pass: usize, before: &BTreeMap<String, String>, after: &BTreeMap<String, String>,
+    seen: &mut Vec<BTreeMap<String, String>>, inference: bool, blocks: bool, side: bool) {
+    let keys: std::collections::BTreeSet<_> = before.keys().chain(after.keys()).collect();
+    let changed: Vec<_> = keys.into_iter().filter(|k| before.get(*k) != after.get(*k)).collect();
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for key in &changed { *counts.entry(key.split(':').next().unwrap()).or_default() += 1; }
+    let short = |v: Option<&String>| v.map(|v| v.chars().take(1600).collect::<String>());
+    let examples: Vec<_> = changed.iter().take(24).map(|k| serde_json::json!({
+        "key":k,"before":short(before.get(*k)),"after":short(after.get(*k))})).collect();
+    let repeated = seen.iter().rposition(|s| s == after);
+    eprintln!("rh-replay: {}", serde_json::json!({"round":round,"pass":pass+1,
+        "inference_stable":inference,"blocks_stable":blocks,"side_stable":side,
+        "changed":counts,"examples":examples,"repeats_pass":repeated}));
+    seen.push(after.clone());
 }
 
 #[cfg(test)]
@@ -279,11 +349,13 @@ impl Analyzer {
             self.view_seeds = None;
             let mut end = LoopEnd::RanToCap;
             let mut iterations = 0;
+            let mut seen = Vec::new();
             // Reuse the existing global-round limit; this is a fresh phase,
             // with all source bodies dirty, including views and test helpers.
             for pass in 0..12 {
                 iterations += 1;
                 let before = self.capture_dirty_hints();
+                let trace_before = tracing().then(|| snapshot(self));
                 self.run_typing_passes(app, inputs.dynamic_render_ivars,
                     inputs.existing_view_names, inputs.module_methods,
                     inputs.module_includes, inputs.parent_link_by_name,
@@ -298,7 +370,12 @@ impl Analyzer {
                 self.unify_params_from_call_sites(app, UnifyScope::WithViews);
                 self.overlay_test_params(app);
                 let side_stable = fold::side_stable(|| fold::bindings_fp(&self.refined_action_bindings));
-                if self.inference_matches(&before.sig) && self.block_value_matches(&before) && side_stable {
+                let inference_stable = self.inference_matches(&before.sig);
+                let blocks_stable = self.block_value_matches(&before);
+                if let Some(before) = trace_before {
+                    trace(round, pass, &before, &snapshot(self), &mut seen, inference_stable, blocks_stable, side_stable);
+                }
+                if inference_stable && blocks_stable && side_stable {
                     end = LoopEnd::Settled(pass);
                     break;
                 }
@@ -310,6 +387,7 @@ impl Analyzer {
                 "retype_iterations":iterations,"closed":closed}));
         }
         let pending = self.pending_state(app, None);
+        trace_finished(self,app);
         eprintln!("rh-complete: {}", serde_json::json!({"phase":"completion-finished",
             "rounds":rounds,"pending":pending,"total":pending.values().sum::<u64>(),"closed":closed}));
     }

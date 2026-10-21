@@ -29,6 +29,12 @@ pub(super) fn strict_on() -> bool {
     *ON && top_on()
 }
 
+pub(super) fn hwia_on() -> bool {
+    static ON: LazyLock<bool> =
+        LazyLock::new(|| std::env::var("RH_HWIA_ROUTES").as_deref() == Ok("1"));
+    *ON
+}
+
 /// A pending computation is not evidence of a dynamic receiver. The second
 /// phase replays every consumer before genuine unknowns can publish top.
 pub(super) fn strict_receiver(t: Option<&Ty>, classes: &HashMap<ClassId, super::ClassInfo>) -> bool {
@@ -393,6 +399,26 @@ impl Index {
                     let required = if period == "period" { 2 } else { 1 };
                     index.insert(key, Some((required, Some(required + 1))));
                 }
+            }
+        }
+        if hwia_on() {
+            // HWIA is a structural builtin in body::send, with no ClassInfo
+            // catalog methods. Unknown receivers can reach that same surface.
+            // Freeze its argument shapes here rather than depending on a
+            // previous concrete call having discovered a destination.
+            let owner = ClassId(Symbol::from(super::indifferent::CLASS));
+            for (name, min, max) in [
+                ("[]", 1, Some(1)), ("fetch", 1, Some(2)),
+                ("key?", 1, Some(1)), ("has_key?", 1, Some(1)),
+                ("include?", 1, Some(1)), ("member?", 1, Some(1)), ("delete", 1, Some(1)),
+                ("dig", 1, None), ("values_at", 0, None), ("slice", 0, None),
+                ("except", 0, None), ("without", 0, None),
+                ("[]=", 2, Some(2)), ("store", 2, Some(2)),
+                ("merge", 1, Some(1)), ("update", 1, Some(1)), ("merge!", 1, Some(1)),
+                ("reverse_merge", 1, Some(1)), ("with_defaults", 1, Some(1)),
+            ] {
+                let key = (owner.clone(), Symbol::from(name), MethodReceiver::Instance);
+                if !source.contains(&key) { index.insert(key, Some((min, max))); }
             }
         }
         index

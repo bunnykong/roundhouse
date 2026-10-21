@@ -19,6 +19,13 @@ pub(crate) fn input_seed() -> Ty {
     else { Ty::pending_untyped() }
 }
 
+/// An omitted formal contributes no runtime value to the caller join.
+/// It must not manufacture unknown evidence beside another caller's value.
+pub(crate) fn absent_argument() -> Ty {
+    if super::canon_var::source_on() { Ty::Bottom }
+    else { Ty::Var { var: crate::ident::TyVar(0) } }
+}
+
 pub(crate) fn stubs_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RH_C5_STRICT_STUBS").as_deref() == Ok("1"))

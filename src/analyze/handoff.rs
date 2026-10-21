@@ -114,6 +114,7 @@ pub(crate) fn join_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
 
 /// With the fold: only reference-mode returns join, unbounded.
 fn join_reference_rets(classes: &mut HashMap<ClassId, ClassInfo>) {
+    if current_refret_on() { return; }
     if !super::fold::active() {
         return;
     }
@@ -207,6 +208,7 @@ fn join_reference_params(params: &mut HashMap<MethodKey, Vec<Ty>>) {
 /// [`join_rets`] for one reference-mode method (both sides), after the
 /// worklist harvested it.
 pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &ClassId, method: &Symbol) {
+    if current_refret_on() { return; }
     if !super::fold::active() || !*JOIN || !super::fold::in_reference_mode(class, method) {
         return;
     }
@@ -231,6 +233,11 @@ pub(crate) fn join_ret_one(classes: &mut HashMap<ClassId, ClassInfo>, class: &Cl
             s.prev_rets.insert(key, joined);
         }
     });
+}
+
+fn current_refret_on() -> bool {
+    static ON: LazyLock<bool> = LazyLock::new(|| flag("RH_CUR_REFRET"));
+    *ON
 }
 
 /// [`join_params`] for one row the worklist recomputed: a reference-mode

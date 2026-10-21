@@ -333,12 +333,12 @@ fn strip_self(t: Ty, slot: u32) -> Ty {
             let kept: Vec<Ty> =
                 variants.into_iter().filter(|v| !matches!(v, Ty::Rec { slot: s } if *s == slot)).collect();
             match kept.len() {
-                0 => Ty::pending_untyped(),
+                0 => super::completion_rerun::unavailable_read(),
                 1 => kept.into_iter().next().unwrap(),
                 _ => Ty::Union { variants: kept.into() },
             }
         }
-        Ty::Rec { slot: s } if s == slot => Ty::pending_untyped(),
+        Ty::Rec { slot: s } if s == slot => super::completion_rerun::unavailable_read(),
         other => other,
     }
 }
@@ -427,6 +427,7 @@ pub(super) fn writer_end(source: &str) {
 /// `RH_FOLD_JOIN` they also join across passes; without it, the first
 /// write in a new pass replaces the last pass's value.
 fn accumulate(key: SlotKey, value: Ty) -> Ty {
+    let value = super::canon_var::produced(value);
     if super::fixpoint_check::stats_on() { super::structure::fold_write(&key, "site-transfer"); }
     let slot = intern(key);
     let value = strip_self(value, slot);
@@ -755,7 +756,7 @@ pub(crate) fn head(t: &Ty, at: SiteId, classes: &HashMap<ClassId, ClassInfo>) ->
     let mut out: Vec<Ty> = Vec::new();
     push_head(t, at, classes, &mut out);
     Some(match out.len() {
-        0 => Ty::pending_untyped(),
+        0 => super::completion_rerun::unavailable_read(),
         _ => super::body::union_many(out),
     })
 }
@@ -765,7 +766,9 @@ fn push_head(t: &Ty, at: SiteId, classes: &HashMap<ClassId, ClassInfo>, out: &mu
         Ty::Rec { slot } => {
             let arms = resolve(*slot, classes, &mut HashSet::new());
             if arms.is_empty() {
-                out.push(Ty::pending_untyped());
+                if super::completion_rerun::closed_reads_on()
+                    && value_of(*slot, classes) == Some(Ty::Bottom) { out.push(Ty::Bottom); }
+                else { out.push(super::completion_rerun::unavailable_read()); }
             }
             for arm in arms {
                 out.push(shallow(arm, at));
@@ -1035,7 +1038,7 @@ impl<'a> Expander<'a> {
                 if let Some(m) = self.memo.get(slot) {
                     return m.clone();
                 }
-                let Some(v) = value_of(*slot, self.classes) else { return Ty::pending_untyped() };
+                let Some(v) = value_of(*slot, self.classes) else { return super::completion_rerun::unavailable_read() };
                 self.stack.push(*slot);
                 self.depth_at.push(self.ctor);
                 let cyc_before = self.cyclic.len();
