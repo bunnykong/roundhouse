@@ -59,6 +59,12 @@ pub mod producer_evidence;
 mod parameter_conservation;
 mod fixpoint_bound;
 mod fixpoint_check;
+mod s4_census;
+#[cfg(test)]
+mod s4_closures;
+#[cfg(test)]
+#[allow(dead_code)]
+mod writer_laws;
 mod precision;
 mod det;
 mod detfp;
@@ -1353,6 +1359,7 @@ impl Analyzer {
 
     fn analyze_cached(&mut self, app: &mut App) {
         producer_evidence::reset(&app.sources);
+        s4_census::start();
         self.fixpoint_checks = fixpoint_check::Checks::start();
         // Before any signature is copied. Anonymous `**` / `...` cannot
         // survive flattened keywords, and `check` does not lower.
@@ -9017,19 +9024,72 @@ pub fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     extract_ivar_assignments_in(expr, out, &ivar_set::IvarNameEnv::NONE);
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum S4Mode {
+    #[default]
+    Legacy,
+    Entrances,
+    Apply,
+}
+
+impl S4Mode {
+    fn parse(entrances: Option<&str>, apply: Option<&str>) -> Self {
+        if apply == Some("1") { Self::Apply }
+        else if entrances == Some("1") { Self::Entrances }
+        else { Self::Legacy }
+    }
+    fn env() -> Self {
+        static MODE: std::sync::LazyLock<S4Mode> = std::sync::LazyLock::new(||
+            S4Mode::parse(std::env::var("RH_S4_ENTRANCES").ok().as_deref(),
+                          std::env::var("RH_S4_APPLY").ok().as_deref()));
+        *MODE
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum S4Tag {
+    #[default]
+    Legacy,
+    Entrance,
+    Applied(&'static str),
+}
+
 pub(crate) fn extract_ivar_assignments_in(
-    expr: &Expr,
-    out: &mut HashMap<Symbol, Ty>,
-    env: &ivar_set::IvarNameEnv<'_>,
+    expr: &Expr, out: &mut HashMap<Symbol, Ty>, env: &ivar_set::IvarNameEnv<'_>,
 ) {
-    let mut walk = IvarWalk::default();
+    extract_ivar_assignments_mode(expr, out, env, S4Mode::env());
+}
+
+pub(crate) fn extract_ivar_assignments_mode(
+    expr: &Expr, out: &mut HashMap<Symbol, Ty>, env: &ivar_set::IvarNameEnv<'_>, mode: S4Mode,
+) {
+    let census = mode != S4Mode::Legacy && fixpoint_check::stats_on();
+    let before = census.then(|| out.clone());
+    let walk = extract_ivar_walk(expr, out, env, mode);
+    if let Some(before) = before {
+        let mut legacy = before.clone();
+        extract_ivar_walk(expr, &mut legacy, env, S4Mode::Legacy);
+        let mut entrances = before;
+        if mode == S4Mode::Apply {
+            extract_ivar_walk(expr, &mut entrances, env, S4Mode::Entrances);
+        } else {
+            entrances.clone_from(out);
+        }
+        s4_census::note(out, &legacy, &entrances, &walk);
+    }
+}
+
+fn extract_ivar_walk(
+    expr: &Expr, out: &mut HashMap<Symbol, Ty>, env: &ivar_set::IvarNameEnv<'_>, mode: S4Mode,
+) -> IvarWalk {
+    let mut walk = IvarWalk { mode, ..IvarWalk::default() };
     walk_ivar_assignments(expr, out, env, &mut walk);
     // `[]=` writes join once the walk has seen every assignment, so a
     // write that comes before the `{}` seed (or before the class
     // instance that owns `[]=`) gives the same slot as one after it
     // (#617).
     let mut index_writes: std::collections::BTreeMap<Symbol, Ty> = std::collections::BTreeMap::new();
-    for (name, value) in walk.index_writes {
+    for (name, value) in std::mem::take(&mut walk.index_writes) {
         let joined = match index_writes.remove(&name) {
             Some(prev) => crate::analyze::body::union_of(prev, value),
             None => value,
@@ -9044,16 +9104,23 @@ pub(crate) fn extract_ivar_assignments_in(
     // all of its writes are joined: `bound` doesn't distribute over the
     // join, so bounding after each write made the slot depend on the
     // order of its writes (#617).
-    for name in walk.touched {
-        if let Some(ty) = out.remove(&name) {
-            out.insert(name, fixpoint_bound::bound(ty));
+    for name in &walk.touched {
+        if let Some(ty) = out.remove(name) {
+            out.insert(name.clone(), fixpoint_bound::bound(ty));
         }
     }
+    walk
 }
 
 /// What a walk of one body collects besides the slots themselves.
 #[derive(Default)]
 struct IvarWalk {
+    mode: S4Mode,
+    tag: S4Tag,
+    new_writes: BTreeSet<Symbol>,
+    applied_writes: BTreeSet<Symbol>,
+    reflective: BTreeSet<Symbol>,
+    sites: Vec<(crate::span::Span, S4Tag, Symbol)>,
     /// Ivars the walk assigned, bounded once at the end.
     touched: BTreeSet<Symbol>,
     /// `@ivar[k] = v` value types, joined into their slots at the end.
@@ -9068,6 +9135,7 @@ fn walk_ivar_assignments(
 ) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            if walk.mode != S4Mode::Legacy { walk_ivar_now(value, out, env, walk); }
             if let Some(ty) = value.ty.clone() {
                 // Union with existing entry so repeated assignments to
                 // the same ivar accumulate (rather than the last write
@@ -9078,6 +9146,7 @@ fn walk_ivar_assignments(
                 };
                 out.insert(name.clone(), merged);
                 walk.touched.insert(name.clone());
+                s4_note_write(expr, name, walk);
             }
         }
         // Short-circuit compound assignment to an ivar (`@x ||= y`,
@@ -9085,6 +9154,7 @@ fn walk_ivar_assignments(
         // a plain assignment so a controller's `@story ||= Story.find(..)`
         // still flows its type to before_action seeds and views.
         ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
+            if walk.mode != S4Mode::Legacy { walk_ivar_now(value, out, env, walk); }
             if let Some(ty) = value.ty.clone() {
                 let merged = match out.remove(name) {
                     Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),
@@ -9092,6 +9162,7 @@ fn walk_ivar_assignments(
                 };
                 out.insert(name.clone(), merged);
                 walk.touched.insert(name.clone());
+                s4_note_write(expr, name, walk);
             }
         }
         // `@a, @b = expr` — destructuring assignment. Each ivar target
@@ -9112,6 +9183,7 @@ fn walk_ivar_assignments(
                         };
                         out.insert(name.clone(), merged);
                         walk.touched.insert(name.clone());
+                s4_note_write(expr, name, walk);
                     }
                 }
             }
@@ -9128,6 +9200,7 @@ fn walk_ivar_assignments(
             if let ExprNode::Ivar { name } = &*recv.node {
                 if let Some(v_ty) = &value.ty {
                     walk.index_writes.push((name.clone(), v_ty.clone()));
+                    s4_note_write(expr, name, walk);
                 }
             }
             walk_ivar_assignments(recv, out, env, walk);
@@ -9146,6 +9219,7 @@ fn walk_ivar_assignments(
             if let ExprNode::Ivar { name } = &*recv.node {
                 if let Some(v_ty) = &args[1].ty {
                     walk.index_writes.push((name.clone(), v_ty.clone()));
+                    s4_note_write(expr, name, walk);
                 }
             }
             walk_ivar_assignments(recv, out, env, walk);
@@ -9165,7 +9239,11 @@ fn walk_ivar_assignments(
         // Assign arm never sees it. Fold a statically resolvable name
         // here so the controller→view channel harvests the write.
         ExprNode::Send { recv, method, args, block, .. } => {
-            ivar_set::harvest_ivar_set(recv, method, args, env, out);
+            if let Some(name) = ivar_set::harvest_ivar_set(recv, method, args, env, out) {
+                walk.reflective.insert(name.clone());
+                if walk.mode != S4Mode::Legacy { walk.touched.insert(name.clone()); }
+                s4_note_write(expr, &name, walk);
+            }
             if let Some(r) = recv {
                 walk_ivar_assignments(r, out, env, walk);
             }
@@ -9247,8 +9325,192 @@ fn walk_ivar_assignments(
             walk_ivar_assignments(value, out, env, walk);
             walk_ivar_assignments(body, out, env, walk);
         }
+        ExprNode::Array { .. } | ExprNode::Hash { .. } | ExprNode::ForwardKeywordsWithPairs { .. }
+        | ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. } if walk.mode != S4Mode::Legacy => {
+            walk_ivar_now(expr, out, env, walk);
+        }
         _ => {}
     }
+}
+
+fn s4_note_write(expr: &Expr, name: &Symbol, walk: &mut IvarWalk) {
+    if walk.tag == S4Tag::Legacy { return; }
+    walk.new_writes.insert(name.clone());
+    if matches!(walk.tag, S4Tag::Applied(_)) { walk.applied_writes.insert(name.clone()); }
+    walk.sites.push((expr.span, walk.tag, name.clone()));
+}
+
+fn is_closure_constructor(expr: &Expr) -> bool {
+    let ExprNode::Send { recv, method, args, block: Some(block), .. } = &*expr.node else { return false };
+    if !args.is_empty() || !matches!(&*block.node, ExprNode::Lambda { .. }) { return false; }
+    match (recv, method.as_str()) {
+        (None, "lambda" | "proc") => true,
+        (Some(recv), "new") => matches!(&*recv.node, ExprNode::Const { path }
+            if path.len() == 1 && path[0].as_str() == "Proc"),
+        _ => false,
+    }
+}
+
+fn closure_body(expr: &Expr) -> Option<&Expr> {
+    match &*expr.node {
+        ExprNode::Lambda { body, .. } => Some(body),
+        ExprNode::Send { block: Some(block), .. } if is_closure_constructor(expr) => {
+            let ExprNode::Lambda { body, .. } = &*block.node else { unreachable!() };
+            Some(body)
+        }
+        _ => None,
+    }
+}
+
+fn rebinds_self_elsewhere(recv: &Option<Expr>, method: &Symbol) -> bool {
+    match method.as_str() {
+        "instance_exec" | "instance_eval" => recv.as_ref().is_some_and(|r|
+            !matches!(&*r.node, ExprNode::SelfRef)),
+        "class_exec" | "class_eval" | "module_exec" | "module_eval" => true,
+        "new" => recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path }
+            if path.len() == 1 && matches!(path[0].as_str(), "Class" | "Module" | "Struct"))),
+        "define" => recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path }
+            if path.len() == 1 && path[0].as_str() == "Data")),
+        _ => false,
+    }
+}
+
+fn s4_apply(body: &Expr, kind: &'static str, out: &mut HashMap<Symbol, Ty>,
+            env: &ivar_set::IvarNameEnv<'_>, walk: &mut IvarWalk) {
+    if walk.mode != S4Mode::Apply { return; }
+    let old = walk.tag;
+    if !matches!(old, S4Tag::Applied(_)) { walk.tag = S4Tag::Applied(kind); }
+    walk_ivar_now(body, out, env, walk);
+    walk.tag = old;
+}
+
+/// New evaluated regions are entered without changing any legacy walk's order.
+/// Closure effects are selected by their immediate consumer, never by a Lambda's ancestry.
+fn walk_ivar_now(expr: &Expr, out: &mut HashMap<Symbol, Ty>,
+                 env: &ivar_set::IvarNameEnv<'_>, walk: &mut IvarWalk) {
+    let old = walk.tag;
+    if old == S4Tag::Legacy { walk.tag = S4Tag::Entrance; }
+    match &*expr.node {
+        ExprNode::Lambda { .. } => {},
+        ExprNode::Array { elements, .. } => {
+            for e in elements { walk_ivar_now(e, out, env, walk); }
+        }
+        ExprNode::Hash { entries, kwargs } => {
+            for (k, v) in entries {
+                walk_ivar_now(k, out, env, walk);
+                if *kwargs && let Some(body) = closure_body(v) {
+                    s4_apply(body, "argument", out, env, walk);
+                } else { walk_ivar_now(v, out, env, walk); }
+            }
+        }
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (k, v) in entries {
+                walk_ivar_now(k, out, env, walk);
+                if let Some(body) = closure_body(v) { s4_apply(body, "argument", out, env, walk); }
+                else { walk_ivar_now(v, out, env, walk); }
+            }
+        }
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => walk_ivar_now(value, out, env, walk),
+        ExprNode::Assign { target: LValue::Ivar { name }, value }
+        | ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
+            walk_ivar_now(value, out, env, walk);
+            if let Some(ty) = value.ty.clone() {
+                let merged = match out.remove(name) { Some(prev) => body::join_ivar_slot(prev, ty), None => ty };
+                out.insert(name.clone(), merged);
+                walk.touched.insert(name.clone());
+                s4_note_write(expr, name, walk);
+            }
+        }
+        ExprNode::MultiAssign { targets, value } => {
+            for (i, target) in targets.iter().enumerate() {
+                if let LValue::Ivar { name } = target
+                    && let Some(ty) = body::multiassign_target_ty(&value.ty, i) {
+                    let merged = match out.remove(name) { Some(prev) => body::join_ivar_slot(prev, ty), None => ty };
+                    out.insert(name.clone(), merged);
+                    walk.touched.insert(name.clone());
+                    s4_note_write(expr, name, walk);
+                }
+            }
+            walk_ivar_now(value, out, env, walk);
+        }
+        ExprNode::Assign { target: LValue::Index { recv, index }, value }
+        | ExprNode::OpAssign { target: LValue::Index { recv, index }, value, .. } => {
+            if let ExprNode::Ivar { name } = &*recv.node && let Some(ty) = &value.ty {
+                walk.index_writes.push((name.clone(), ty.clone()));
+                s4_note_write(expr, name, walk);
+            }
+            walk_ivar_now(recv, out, env, walk);
+            walk_ivar_now(index, out, env, walk);
+            walk_ivar_now(value, out, env, walk);
+        }
+        ExprNode::Send { recv, method, args, block, .. } => {
+            let receiver_body = if matches!(method.as_str(), "call" | "yield" | "[]" | "===") {
+                recv.as_ref().and_then(closure_body)
+            } else { None };
+            if receiver_body.is_none() && let Some(r) = recv { walk_ivar_now(r, out, env, walk); }
+            for a in args {
+                if closure_body(a).is_none() { walk_ivar_now(a, out, env, walk); }
+            }
+            if let Some(name) = ivar_set::harvest_ivar_set(recv, method, args, env, out) {
+                walk.reflective.insert(name.clone());
+                walk.touched.insert(name.clone());
+                s4_note_write(expr, &name, walk);
+            }
+            if method.as_str() == "[]=" && args.len() == 2
+                && let Some(r) = recv && let ExprNode::Ivar { name } = &*r.node
+                && let Some(ty) = &args[1].ty {
+                walk.index_writes.push((name.clone(), ty.clone()));
+                s4_note_write(expr, name, walk);
+            }
+            if let Some(body) = receiver_body { s4_apply(body, "receiver", out, env, walk); }
+            for a in args {
+                if let Some(body) = closure_body(a) { s4_apply(body, "argument", out, env, walk); }
+            }
+            if let Some(b) = block {
+                if let Some(body) = closure_body(b) {
+                    if !is_closure_constructor(expr) && !rebinds_self_elsewhere(recv, method) {
+                        s4_apply(body, "block", out, env, walk);
+                    }
+                } else { walk_ivar_now(b, out, env, walk); }
+            }
+        }
+        ExprNode::Seq { exprs } => for e in exprs { walk_ivar_now(e, out, env, walk); },
+        ExprNode::If { cond, then_branch, else_branch } => {
+            walk_ivar_now(cond, out, env, walk);
+            walk_ivar_now(then_branch, out, env, walk);
+            walk_ivar_now(else_branch, out, env, walk);
+        }
+        ExprNode::While { cond, body, .. } => {
+            walk_ivar_now(cond, out, env, walk); walk_ivar_now(body, out, env, walk);
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            walk_ivar_now(expr, out, env, walk); walk_ivar_now(fallback, out, env, walk);
+        }
+        ExprNode::Case { arms, .. } => for a in arms { walk_ivar_now(&a.body, out, env, walk); },
+        ExprNode::BoolOp { left, right, .. } => {
+            walk_ivar_now(left, out, env, walk); walk_ivar_now(right, out, env, walk);
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            walk_ivar_now(body, out, env, walk);
+            for r in rescues { walk_ivar_now(&r.body, out, env, walk); }
+            if let Some(e) = else_branch { walk_ivar_now(e, out, env, walk); }
+            if let Some(e) = ensure { walk_ivar_now(e, out, env, walk); }
+        }
+        ExprNode::Return { value } => walk_ivar_now(value, out, env, walk),
+        ExprNode::Assign { target: LValue::Var { .. }, value }
+        | ExprNode::OpAssign { target: LValue::Var { .. }, value, .. } => {
+            if let Some(body) = closure_body(value) { s4_apply(body, "local", out, env, walk); }
+            else { walk_ivar_now(value, out, env, walk); }
+        }
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => walk_ivar_now(value, out, env, walk),
+        ExprNode::Let { value, body, .. } => {
+            if let Some(body) = closure_body(value) { s4_apply(body, "local", out, env, walk); }
+            else { walk_ivar_now(value, out, env, walk); }
+            walk_ivar_now(body, out, env, walk);
+        }
+        _ => {},
+    }
+    walk.tag = old;
 }
 
 /// Widen an ivar's Hash value-type with the joined value type of the

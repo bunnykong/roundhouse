@@ -367,3 +367,8 @@ mod tests {
         panic!("the bounded unrolling never settled");
     }
 }
+
+#[cfg(test)]
+mod writer_law_tests;
+#[cfg(test)]
+mod writer_law_partitions;

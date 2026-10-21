@@ -1,4 +1,4 @@
-//! CARD-5b's opt-in producer strictness and complete-read comparisons.
+//! CARD-5b producer strictness and complete-read comparisons (opt-in port).
 use crate::ty::{Provenance, Ty};
 
 pub(crate) fn stubs_on() -> bool {

@@ -766,6 +766,7 @@ impl Analyzer {
         if super::precision::on() {
             line["precision"] = serde_json::json!(super::precision::census(app));
         }
+        if let Some(s4) = super::s4_census::report(app) { line["s4"] = s4; }
         eprintln!("rh-fixpoint: {line}");
     }
 }
