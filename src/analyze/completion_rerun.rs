@@ -280,6 +280,7 @@ impl Analyzer {
         param_views::completion_values(&mut |t| add("parameter-writer", t));
         current_harvest::completion_values(&mut |t| add("return-writer", t));
         writers::completion_values(&mut |t| add("call-writer", t));
+        super::mutation_writers::completion_values(&mut |t| add("mutation-writer", t));
         if let Some(eng) = self.sccq.as_mut() {
             for row in eng.writer_index.values_mut() {
                 row.completion_values(&mut |t| add("engine-writer", t));

@@ -760,29 +760,33 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
-        let _writer_visit = super::writers::enter(expr.span, ctx);
-        let ty = self.compute(expr, ctx);
-        let ty = super::writers::source_result(expr,ctx,self.classes().raw(),ty);
-        let ty = super::canon_var::produced(ty);
-        expr.ty = Some(ty.clone());
-        // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
-        if expr.diagnostic().is_none()
-            && let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
-            && method.as_str() == "record_timestamps="
-            && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Bool { value: true } }))
-            && self.is_model_class(recv.ty.as_ref())
-        {
-            expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
-                target: None,
-                construct: Symbol::from("record_timestamps"),
-                detail: "turning a model's timestamp stamping off is not modeled: its saves would still stamp them (`upsert_all(…, record_timestamps: false)` is)".to_string(),
-            }));
+        let mutation_visit = super::mutation_writers::enter(expr,ctx);
+        loop {
+            let _writer_visit = super::writers::enter(expr.span, ctx);
+            let ty = self.compute(expr, ctx);
+            let ty = super::mutation_writers::produced(expr,ctx,self.classes().raw(),ty);
+            let ty = super::writers::source_result(expr,ctx,self.classes().raw(),ty);
+            let ty = super::canon_var::produced(ty);
+            expr.ty = Some(ty.clone());
+            // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
+            if expr.diagnostic().is_none()
+                && let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
+                && method.as_str() == "record_timestamps="
+                && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Bool { value: true } }))
+                && self.is_model_class(recv.ty.as_ref())
+            {
+                expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    target: None,
+                    construct: Symbol::from("record_timestamps"),
+                    detail: "turning a model's timestamp stamping off is not modeled: its saves would still stamp them (`upsert_all(…, record_timestamps: false)` is)".to_string(),
+                }));
+            }
+            expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
+            if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
+            diagnostic::detect_diagnostic(expr);
+            super::writers::capture(expr, ctx, self.classes().raw());
+            if !mutation_visit.again() { return ty; }
         }
-        expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
-        if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
-        diagnostic::detect_diagnostic(expr);
-        super::writers::capture(expr, ctx, self.classes().raw());
-        ty
     }
 
     /// Pattern-side expressions use ordinary expression/constant resolution;
@@ -1512,7 +1516,7 @@ impl<'a> BodyTyper<'a> {
                 // Honor it instead of falling back to `Hash<Var, Var>`
                 // — strict targets need the concrete shape, and the
                 // surrounding declaration already constrains the type.
-                if entries.is_empty() {
+                if entries.is_empty() && !super::mutation_writers::on() {
                     if let Some(t @ Ty::Hash { .. }) = expr.ty.as_ref() {
                         return t.clone();
                     }
@@ -1542,7 +1546,7 @@ impl<'a> BodyTyper<'a> {
                 // `Ty::Array<T>` from `with_ty` (or from
                 // `propagate_expected_to_empty_container`) takes
                 // precedence over the `Var`-defaulted inference.
-                if elements.is_empty() {
+                if elements.is_empty() && !super::mutation_writers::on() {
                     if let Some(t @ Ty::Array { .. }) = expr.ty.as_ref() {
                         return t.clone();
                     }
@@ -3083,7 +3087,7 @@ impl<'a> BodyTyper<'a> {
                     // Partial write visibility is unsound; whole-subtree
                     // visibility is what makes the refinement a fact.
                     let mut hash_writes: Vec<(bool, Symbol, Ty)> = Vec::new();
-                    collect_hash_index_writes(e, &mut hash_writes);
+                    if !super::mutation_writers::on() { collect_hash_index_writes(e, &mut hash_writes); }
                     // Array accumulator writes anywhere in this statement —
                     // `arr << x` / `arr.push(x)`, including nested in a loop,
                     // branch, or block (`while { acc << x }`, `items.each {
@@ -3098,7 +3102,7 @@ impl<'a> BodyTyper<'a> {
                     // union the observed element into an existing one). Only
                     // bindings that already exist as `Array[_]` are touched.
                     let mut pushes: Vec<(bool, Symbol, Ty)> = Vec::new();
-                    collect_array_pushes(e, &mut pushes);
+                    if !super::mutation_writers::on() { collect_array_pushes(e, &mut pushes); }
                     // Apply the hash writes collected above. Deferred to
                     // here so both collections finish while the `&mut
                     // exprs[i]` borrow is live, leaving it dead before

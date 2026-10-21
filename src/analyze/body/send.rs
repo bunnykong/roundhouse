@@ -2213,6 +2213,7 @@ impl<'a> BodyTyper<'a> {
                 if method.as_str() == "sum" && !args.is_empty() {
                     return Ty::unresolved();
                 }
+                if let Some(t)=crate::analyze::mutation_writers::array_result(method.as_str(),elem,args,block_ret) {return t;}
                 // `[] + [h]` is an Array of `h`: when the receiver's
                 // element is empty or not yet known, `+`, `|` and
                 // `concat` take the argument's. A known receiver element
@@ -3409,6 +3410,7 @@ pub(super) fn hash_method(
     block_ret: Option<&Ty>,
     args: &[Expr],
 ) -> Ty {
+    if let Some(t)=crate::analyze::mutation_writers::hash_result(method.as_str(),key,value,args,block_ret) {return t;}
     match method.as_str() {
         "[]" => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         // `h[k] = v` returns the assigned value in Ruby, but here we

@@ -65,6 +65,7 @@ pub mod producer_evidence;
 mod parameter_conservation;
 mod param_views;
 mod writers;
+mod mutation_writers;
 mod route_static;
 mod canon_var;
 mod completion_rerun;
@@ -1398,6 +1399,7 @@ impl Analyzer {
         fold::reset();
         param_views::reset(&app.sources);
         writers::reset(app);
+        mutation_writers::reset();
         slots::reset();
         self.strict_stub_originals.clear();
         self.s3d.reset_completions();
@@ -1822,6 +1824,7 @@ impl Analyzer {
         // reads it for private-helper params). Published AFTER the
         // fixpoint on purpose: mid-loop copies would carry a round's
         // under-informed answers.
+        mutation_writers::apply_parameters(&mut self.inferred_params);
         app.inferred_method_params = self
             .inferred_params
             .keys()
@@ -1888,6 +1891,7 @@ impl Analyzer {
         self.settle_pending(app);
 
         canon_var::finish(self, app);
+        mutation_writers::report();
 
         self.stamp_inferred_method_signatures(app);
         self.report_fixpoint_checks(app);
@@ -4971,6 +4975,7 @@ impl Analyzer {
         if writers::on() {
             let source: std::sync::Arc<str>=format!("method:{class_id:?}:{:?}:{:?}:{:?}",method.name,method.receiver,method.body.span).into();
             writers::declare_owner(&source,class_id,&method.name);
+            mutation_writers::declare(&source,key.clone(),method.params.iter().map(|p|p.name.clone()).collect());
             ctx.writer_source=Some(source);
         }
         ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
@@ -5011,13 +5016,14 @@ impl Analyzer {
             } else {
                 param_ty_with_default(observed.as_ref().and_then(|v| v.get(i)).cloned(), param)
             };
-            let seeded = strict_producers::parameter_seed(seeded);
+            let seeded = strict_producers::parameter_seed(seeded).map(|t|mutation_writers::parameter_value(&key,i,t));
             let declared = self.declared_param_ty(class_id, &method.name, positional, &param.name);
             let is_declared = declared.is_some();
             let control = prefer_declared(declared, seeded);
             let ty = if is_declared { control } else {
                 fold::declare_param(class_id,&method.name,method.receiver,i,method.body.span);
-                let raw=strict_producers::parameter_seed(param_ty_with_default(raw_observed.and_then(|row|row.get(i)).cloned(),param));
+                let raw=strict_producers::parameter_seed(param_ty_with_default(raw_observed.and_then(|row|row.get(i)).cloned(),param))
+                    .map(|t|mutation_writers::parameter_value(&key,i,t));
                 fold::param_seed(class_id,&method.name,method.receiver,i,method.body.span,raw,control)
             };
             if let Some(ty)=strict_producers::parameter_seed(ty) {ctx.local_bindings.insert(param.name.clone(),ty);}
@@ -5077,6 +5083,8 @@ impl Analyzer {
         if writers::on() {
             let source: std::sync::Arc<str>=format!("action:{class_id:?}:{action_name:?}:{definition_span:?}:context:{writer_context}").into();
             writers::declare_owner(&source,class_id,action_name);
+            mutation_writers::declare(&source,(class_id.clone(),action_name.clone(),MethodReceiver::Instance),
+                params.fields.keys().cloned().chain(kw_params.iter().map(|(n,_)|n.clone())).collect());
             ctx.writer_source=Some(source);
         }
         ctx.instance_body = true;
@@ -6313,6 +6321,7 @@ impl Analyzer {
         // `RH_FOLD_JOIN`: rows join with last round's (with `RH_FOLD`, the
         // reference-mode rows).
         handoff::join_params(&mut self.inferred_params);
+        mutation_writers::apply_parameters(&mut self.inferred_params);
         if let Some(before) = before {
             for (key, row) in &self.inferred_params {
                 det::note_row("round.params", before.get(key).map(Vec::as_slice), row);
