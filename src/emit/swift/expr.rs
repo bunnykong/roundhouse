@@ -880,21 +880,19 @@ pub(super) fn begin_method(body: &Expr, returns_value: bool) {
     count_assigns(body, &mut counts, &mut nil_types, &mut mutated);
     DECLARED.with(|d| d.borrow_mut().clear());
 
-    // Var-hoist (Kotlin's scan_hoist): a local FIRST assigned inside a
-    // nested scope but assigned more than once needs a typed `var`
-    // declaration at the method top — Swift scopes the nested decl to
-    // its branch.
-    let mut hoist_info: HashMap<String, (usize, usize, Option<crate::ty::Ty>)> = HashMap::new();
-    scan_hoist(body, 0, &mut hoist_info);
+    // Var-hoist (`emit::shared::hoist`, shared with Kotlin): a local
+    // FIRST assigned inside a nested scope but assigned more than once
+    // needs a typed `var` declaration at the method top — Swift scopes
+    // the nested decl to its branch. The type is the first non-nil one.
     let mut hoisted: Vec<(String, String, String)> = Vec::new();
-    for (n, (first_depth, count, ty)) in hoist_info {
-        if first_depth > 0 && count > 1 {
-            let (st, d) = hoist_decl(ty.as_ref());
-            DECLARED.with(|dset| {
-                dset.borrow_mut().insert(n.clone());
-            });
-            hoisted.push((n, st, d));
-        }
+    for h in crate::emit::shared::hoist::hoisted_locals(body) {
+        let n = camel(&h.name);
+        let ty = h.tys.iter().flatten().next();
+        let (st, d) = hoist_decl(ty);
+        DECLARED.with(|dset| {
+            dset.borrow_mut().insert(n.clone());
+        });
+        hoisted.push((n, st, d));
     }
     hoisted.sort();
     HOISTED.with(|h| *h.borrow_mut() = hoisted);
@@ -991,56 +989,6 @@ pub(super) fn container_scan(e: &Expr) -> HashMap<String, String> {
     let mut out = HashMap::new();
     scan_container_types(e, &mut out);
     out
-}
-
-/// Hoist-scan walk: branch bodies (If/While/Case/Lambda) are depth+1,
-/// Seq and conditions stay at the current depth.
-fn scan_hoist(
-    e: &Expr,
-    depth: usize,
-    info: &mut HashMap<String, (usize, usize, Option<crate::ty::Ty>)>,
-) {
-    match &*e.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            let cn = camel(name.as_str());
-            let entry = info.entry(cn).or_insert((depth, 0, None));
-            entry.1 += 1;
-            if entry.2.is_none() {
-                if let Some(t) = value.ty.as_ref() {
-                    if !matches!(t, crate::ty::Ty::Nil) {
-                        entry.2 = Some(t.clone());
-                    }
-                }
-            }
-            scan_hoist(value, depth, info);
-        }
-        ExprNode::Seq { exprs } => {
-            for x in exprs {
-                scan_hoist(x, depth, info);
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            scan_hoist(cond, depth, info);
-            scan_hoist(then_branch, depth + 1, info);
-            scan_hoist(else_branch, depth + 1, info);
-        }
-        ExprNode::While { cond, body, .. } => {
-            scan_hoist(cond, depth, info);
-            scan_hoist(body, depth + 1, info);
-        }
-        ExprNode::Case { scrutinee, arms } => {
-            scan_hoist(scrutinee, depth, info);
-            for a in arms {
-                scan_hoist(&a.body, depth + 1, info);
-            }
-        }
-        ExprNode::Lambda { body, .. } => scan_hoist(body, depth + 1, info),
-        _ => {
-            for c in children(e) {
-                scan_hoist(c, depth, info);
-            }
-        }
-    }
 }
 
 /// Declaration type + default for a hoisted local.
@@ -1223,7 +1171,7 @@ pub fn emit_expr(e: &Expr) -> String {
 /// append is amortized O(1)); mirrors `kotlin::expr::try_string_builder`.
 /// Non-hinted sites fall through to the normal walkers.
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         crate::expr::IrHint::MutableStringLiteral => None, // emitted as the plain literal
         crate::expr::IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -1505,9 +1453,67 @@ fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("\"{}\"", escape_str(value)),
         // No symbol type in Swift → string.
         Literal::Sym { value } => format!("\"{}\"", escape_str(value.as_str())),
-        Literal::Regex { pattern, .. } => {
-            format!("try! NSRegularExpression(pattern: \"{}\")", escape_str(pattern))
+        Literal::Regex { pattern, flags } => {
+            let options = swift_regex_options(flags);
+            if options.is_empty() {
+                format!("try! NSRegularExpression(pattern: \"{}\")", escape_str(pattern))
+            } else {
+                format!(
+                    "try! NSRegularExpression(pattern: \"{}\", options: [{options}])",
+                    escape_str(pattern)
+                )
+            }
         }
+    }
+}
+
+/// Ruby regex flags this build can reproduce exactly: `i` →
+/// `.caseInsensitive`. Ruby's `m` (dot-matches-newline) is
+/// `.dotMatchesLineSeparators`. Ruby's `^`/`$` are always line
+/// anchors, so a flagged `m` also adds `.anchorsMatchLines`. Any
+/// other flag character stays an ingest-time gap, so none reaches
+/// here.
+fn swift_regex_options(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
+    let mut parts: Vec<&str> = Vec::new();
+    if bits.ignore_case {
+        parts.push(".caseInsensitive");
+    }
+    if bits.dot_matches_newline {
+        parts.push(".dotMatchesLineSeparators");
+        parts.push(".anchorsMatchLines");
+    }
+    parts.join(", ")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(swift_regex_options("m"), ".dotMatchesLineSeparators, .anchorsMatchLines");
+    }
+
+    use super::{emit_literal, swift_regex_options};
+    use crate::expr::Literal;
+
+    #[test]
+    fn no_flags_drop_the_options_argument() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "".into() };
+        assert_eq!(emit_literal(&lit), r#"try! NSRegularExpression(pattern: "a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_maps_to_case_insensitive() {
+        assert_eq!(swift_regex_options("i"), ".caseInsensitive");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine_in_the_options_array() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
+        assert_eq!(
+            emit_literal(&lit),
+            r#"try! NSRegularExpression(pattern: "a.b", options: [.caseInsensitive, .dotMatchesLineSeparators, .anchorsMatchLines])"#
+        );
     }
 }
 
@@ -2551,9 +2557,14 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
 }
 
 fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr) -> String {
+    // A local the block declares is the block's own (Ruby scopes it the
+    // same way), so a sibling block assigning the same name declares its
+    // own too. See `emit::shared::hoist`.
+    let outer = DECLARED.with(|d| d.borrow().clone());
     IN_LAMBDA.with(|d| *d.borrow_mut() += 1);
     let body_s = emit_expr(body);
     IN_LAMBDA.with(|d| *d.borrow_mut() -= 1);
+    DECLARED.with(|d| *d.borrow_mut() = outer);
     if params.is_empty() {
         format!("{{ {body_s} }}")
     } else {
@@ -2632,6 +2643,10 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
 
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses a

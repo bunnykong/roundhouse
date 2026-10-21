@@ -23,6 +23,8 @@ use crate::span::{SourceFile, Span};
 use crate::ty::Ty;
 
 pub(crate) const CONSTRUCTOR_KEYWORD_ARGUMENTS: &str = "constructor keyword arguments";
+/// `def` at expression position (in a block or a method body), stamped by ingest.
+pub(crate) const NESTED_DEF: &str = "nested def";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostic {
@@ -216,12 +218,30 @@ impl Diagnostic {
                 "`field :{}` is declared `null: false` but can resolve to nil; when it does, the response carries an error and nulls its parent",
                 field.as_str()
             ),
-            DiagnosticKind::UnconsumedInitializer { owner, statement, location } => format!(
-                "`{}` ({}, {}) is read by no recognizer: it has no effect on the compiled app",
+            DiagnosticKind::UnconsumedInitializer { owner, statement, location, holder } => format!(
+                "`{}` ({}, {}) is read by no recognizer: it has no effect on the compiled app; {}",
                 statement.as_str(),
                 owner.as_str(),
-                location.as_str()
+                location.as_str(),
+                Self::holder_text(holder.as_str())
             ),
+        }
+    }
+
+    /// What an unconsumed initializer's `holder` says about the drop.
+    fn holder_text(holder: &str) -> String {
+        match holder {
+            "rails" => "it is Rails behaviour the running app answers without".to_string(),
+            "rails-boot-only" => "it is a Rails setting for building, loading or logging the app, which the running app does not need".to_string(),
+            "app" => "it is the app's own boot code".to_string(),
+            "unknown" => "its owner is unknown".to_string(),
+            gem => match gem.strip_prefix("gem:").and_then(|g| g.rsplit_once(':')) {
+                Some((names, fate)) => format!(
+                    "it belongs to the gem `{}` ({fate})",
+                    names.replace('|', "` or `")
+                ),
+                None => format!("it belongs to {gem}"),
+            },
         }
     }
 
@@ -521,5 +541,7 @@ pub enum DiagnosticKind {
     /// initializer`, `engine SourceMonitor::Engine class body`, …),
     /// `statement` its head (`SourceMonitor.configure`), `location` the
     /// `path:line:col` it starts at.
-    UnconsumedInitializer { owner: Symbol, statement: Symbol, location: Symbol },
+    /// `holder` is who the statement belongs to
+    /// ([`crate::ingest::initializer_ledger::Holder::label`]).
+    UnconsumedInitializer { owner: Symbol, statement: Symbol, location: Symbol, holder: Symbol },
 }

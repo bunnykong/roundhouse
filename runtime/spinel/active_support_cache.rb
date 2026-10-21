@@ -80,7 +80,11 @@ module ActiveSupport
         @lock = Mutex.new
       end
 
-      def read(name)
+      # `options` is Rails' entry-options Hash; none is modeled (see the
+      # header), so a call carrying one raises rather than being read
+      # with it ignored. `nil` or `{}` is the call Jbuilder makes.
+      def read(name, options = nil)
+        MemoryStore.reject_options(options)
         key = ActiveSupport::Cache.expanded_key(name)
         _, value = @lock.synchronize { read_locked(key) }
         MemoryStore.copy(value)
@@ -91,7 +95,8 @@ module ActiveSupport
         @lock.synchronize { @data.key?(key) }
       end
 
-      def write(name, value)
+      def write(name, value, options = nil)
+        MemoryStore.reject_options(options)
         key = ActiveSupport::Cache.expanded_key(name)
         payload = MemoryStore.copy(value)
         @lock.synchronize do
@@ -195,6 +200,11 @@ module ActiveSupport
         raise ArgumentError, "MemoryStore cannot safely copy this value type"
       end
 
+      def self.reject_options(options)
+        return nil if options.nil? || options.empty?
+        raise ArgumentError, "MemoryStore does not carry entry options (#{options.keys.join(", ")})"
+      end
+
       def self.bytes(value)
         return 0 if value.nil?
         value.is_a?(String) ? value.bytesize : value.to_s.bytesize
@@ -223,6 +233,47 @@ module ActiveSupport
           break if @cache_size <= target_size
           delete_locked(key)
         end
+      end
+    end
+
+    # A store that keeps nothing. `fetch` and `fetch_str` still answer
+    # the block, and they do not write it. A subclass of `Rails::Cache`,
+    # so it can stand in for `Rails.cache`.
+    class NullStore < Rails::Cache
+      def read(name, options = nil)
+        nil
+      end
+
+      def write(name, value, options = nil)
+        true
+      end
+
+      def fetch(name)
+        yield
+      end
+
+      def delete(name)
+        false
+      end
+
+      def exist?(name)
+        false
+      end
+
+      def clear
+        nil
+      end
+
+      def read_str(key)
+        nil
+      end
+
+      def write_str(key, value, ttl)
+        value
+      end
+
+      def fetch_str(key, ttl)
+        yield
       end
     end
   end

@@ -297,6 +297,8 @@ mod tests {
             foreign_key: sym(fk),
             foreign_key_explicit: false,
             through: None,
+            source: None,
+            class_explicit: false,
             dependent: Dependent::None,
             as_interface: None,
             scope: None,

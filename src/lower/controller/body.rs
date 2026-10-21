@@ -196,8 +196,7 @@ fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool, breadth: For
         ty: expr.ty.clone(),
         effects: expr.effects.clone(),
         leading_blank_line: expr.leading_blank_line,
-        diagnostic: expr.diagnostic.clone(),
-        hint: expr.hint,
+        cold: expr.cold.clone(),
         decisions: expr.decisions,
     }
 }
@@ -656,6 +655,7 @@ pub(crate) fn mime_for_format(fmt: &str) -> &'static str {
         // Mastodon's `custom_css#show` — Rails' own Mime::Type
         // registration for `:css`, no charset.
         "css" => "text/css",
+        "md" => "text/markdown; charset=utf-8",
         _ => "text/html; charset=utf-8",
     }
 }
@@ -1024,6 +1024,9 @@ const RESPONSE_TERMINALS: &[&str] = &[
     "send_data",
     "send_file",
     "render_inertia_json",
+    // Always responds: 409 + X-Inertia-Location, or a 302. Without this
+    // the implicit `head :no_content` runs second and raises.
+    "inertia_location",
 ];
 
 /// Rails' HTTP auth helpers that render the 401 challenge when the

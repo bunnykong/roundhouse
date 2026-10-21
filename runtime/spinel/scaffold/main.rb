@@ -42,6 +42,19 @@ module Main
     end
   end
 
+  # Rails' `request.path_parameters`: the route's captures, with the
+  # controller and action the request was dispatched to. The
+  # controller's own `path_parameters` and params keep the captures alone.
+  def self.route_parameters(controller, matched)
+    out = {}
+    matched.path_params.each { |k, v| out[k] = v }
+    # The dispatched controller and action win over a capture of the same
+    # name: Rails dispatches by these two, so they name what ran.
+    out["controller"] = controller.controller_path
+    out["action"] = matched.action.to_s
+    out
+  end
+
   # The controller's params, built the way Rails builds them
   # (`ActionDispatch::Http::Parameters#parameters`): the body's params,
   # the query string's merged over them, the route's path captures over
@@ -209,6 +222,11 @@ module Main
       return nil
     end
     res.headers["Content-Type"] = Main.asset_content_type(path)
+    # `config.public_file_server.headers`, as ActionDispatch::Static
+    # sends them on every public/ and /assets/ file.
+    Rails.application.public_file_server_headers.each do |name, value|
+      res.headers[name] = value
+    end
     res.send_file(disk)
     nil
   end
@@ -476,7 +494,11 @@ module Main
     request_obj.remote_ip = req.remote_host
     request_obj.referer = req.req_headers.fetch("referer", "")
     request_obj.host = req.req_headers.fetch("host", "localhost")
-    request_obj.path_parameters = matched.path_params
+    request_obj.path_parameters = Main.route_parameters(controller, matched)
+    # The controller's params, copied into the request's own slot (as
+    # `Request.for` copies, see runtime/action_dispatch/request.rb):
+    # `request.filtered_parameters` reads them.
+    params.each { |k, v| request_obj.params[k] = v }
     fmt_name = "html"
     fmt_name = "json" if request_format == :json
     fmt_name = "rss" if request_format == :rss
@@ -500,7 +522,15 @@ module Main
     # includes `X-Forwarded-Proto`, CSRF/origin/fetch metadata, auth, and
     # content type; keeping one mapping avoids a drifting header allowlist.
     req.req_headers.each do |name, value|
-      request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value
+      request_obj.env[ActionDispatch::Http::Headers.env_name_from_header(name)] = value
+    end
+    # config.assume_ssl: TLS ends at a proxy that forwards plain http.
+    # Rails' AssumeSSL marks the request https before the action, so
+    # secure cookies and absolute redirects use https.
+    if AppEnvironment.serving_assume_ssl?
+      request_obj.env["HTTPS"] = "on"
+      request_obj.env["HTTP_X_FORWARDED_PROTO"] = "https"
+      request_obj.env["rack.url_scheme"] = "https"
     end
     # `user_agent` is ALSO a separate reader slot. The overlay twin's
     # `user_agent` reads `@env["HTTP_USER_AGENT"]`; the shared runtime's
@@ -611,6 +641,7 @@ module Main
     # changes all three.
     controller.commit_cache_control!
     controller.commit_conditional_get!(req.verb, req.req_headers.fetch("if-none-match", ""))
+    controller.commit_default_headers!
 
     res.status = controller.status
     # The layout wrap happens at the controller's render call sites

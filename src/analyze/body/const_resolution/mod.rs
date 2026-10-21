@@ -14,7 +14,7 @@ use rubydex::diagnostic::{Diagnostic as RubydexDiagnostic, Rule};
 use rubydex::indexing::local_graph::LocalGraph;
 use rubydex::indexing::{IndexerBackend, LanguageId, build_local_graph};
 use rubydex::model::built_in::BUILT_IN_URI;
-use rubydex::model::declaration::Declaration;
+use rubydex::model::declaration::{Ancestor, Declaration};
 use rubydex::model::document::Document as RubydexDocument;
 use rubydex::model::definitions::{Definition, Receiver};
 use rubydex::model::graph::Graph;
@@ -56,6 +56,10 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("Float", "MAX", || Ty::Float),
     ("Float", "MIN", || Ty::Float),
     ("IO", "NULL", || Ty::Str),
+    // `Regexp.new(selector, Regexp::IGNORECASE)` — lobsters' domain selectors.
+    ("Regexp", "IGNORECASE", || Ty::Int),
+    ("Regexp", "EXTENDED", || Ty::Int),
+    ("Regexp", "MULTILINE", || Ty::Int),
     ("File", "NULL", || Ty::Str),
     // `File.open(path, File::RDWR | File::CREAT, 0644)` and
     // `file.flock(File::LOCK_EX | File::LOCK_NB)` — campfire's WAL
@@ -80,6 +84,10 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("File", "PATH_SEPARATOR", || Ty::Str),
     ("File", "NOFOLLOW", || Ty::Int),
     ("File", "NONBLOCK", || Ty::Int),
+    ("File", "NOCTTY", || Ty::Int),
+    ("File", "SYNC", || Ty::Int),
+    ("File", "DSYNC", || Ty::Int),
+    ("File", "BINARY", || Ty::Int),
     ("Encoding", "UTF_8", encoding_ty),
     ("Encoding", "BINARY", encoding_ty),
     ("Encoding", "ASCII_8BIT", encoding_ty),
@@ -91,6 +99,19 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("OpenSSL::SSL", "VERIFY_PEER", || Ty::Int),
 ];
 
+/// Ruby's top-level value Consts: `STDERR.puts "…"` (discourse's
+/// warnings) reads the process's own stream, which `$stderr` is only
+/// until something reassigns it.
+const CORE_TOP_CONSTS: &[&str] = &["STDIN", "STDOUT", "STDERR"];
+
+/// `if RUBY_VERSION >= "2.7.1"` (aasm, hashie): the running Ruby's own
+/// version, which a compile-time answer would freeze to the wrong one.
+const CORE_TOP_STR_CONSTS: &[&str] = &["RUBY_VERSION"];
+
+fn io_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() }
+}
+
 /// Classes that own rows in `CORE_VALUE_CONSTS`, with their RBS parents.
 const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
     ("Float", "Numeric"),
@@ -98,6 +119,7 @@ const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
     ("File", "IO"),
     ("Encoding", "Object"),
     ("OpenSSL::SSL", "Object"),
+    ("Regexp", "Object"),
 ];
 
 fn encoding_ty() -> Ty {
@@ -135,6 +157,14 @@ fn core_rbs() -> &'static str {
             }
             out.push_str("end\n");
         }
+        for name in CORE_TOP_CONSTS {
+            out.push_str(name);
+            out.push_str(": IO\n");
+        }
+        for name in CORE_TOP_STR_CONSTS {
+            out.push_str(name);
+            out.push_str(": String\n");
+        }
         out
     })
     .as_str()
@@ -142,6 +172,12 @@ fn core_rbs() -> &'static str {
 
 /// The type of a value constant `core_rbs()` declares, as Ruby defines it.
 fn core_value_type(name: &str) -> Option<Ty> {
+    if CORE_TOP_CONSTS.contains(&name.trim_start_matches("Object::")) {
+        return Some(io_ty());
+    }
+    if CORE_TOP_STR_CONSTS.contains(&name.trim_start_matches("Object::")) {
+        return Some(Ty::Str);
+    }
     CORE_VALUE_CONSTS.iter().find_map(|(owner, field, ty)| {
         let need = owner.len() + 2 + field.len();
         (name.len() == need
@@ -167,6 +203,9 @@ pub(super) enum ResolvedConstant {
 struct FileAnswers {
     /// Keyed by the byte offset where each written constant name starts.
     references: HashMap<u32, Option<ResolvedConstant>>,
+    class_references: HashSet<u32>,
+    /// Canonical class/module body owners, keyed by the end of their header name.
+    namespace_bodies: HashMap<u32, ClassId>,
     /// Each constant definition as (offset where its name ends, name,
     /// declaration), sorted by offset.
     constants: Vec<(u32, Box<str>, DeclarationId)>,
@@ -174,8 +213,15 @@ struct FileAnswers {
     constant_classes: IdentityHashMap<DeclarationId, ClassId>,
     namespace_definitions: HashSet<Box<str>>,
     class_definitions: HashSet<Box<str>>,
+    /// Each `class`/`module` definition as (full name, start, end): the
+    /// byte range of the whole definition, keyword through `end`.
+    class_bodies: Vec<(Box<str>, u32, u32)>,
     alias_definitions: HashSet<Box<str>>,
     runtime_namespace_aliases: HashMap<Box<str>, Box<str>>,
+    /// Source-only factory admission facts; they do not alter name resolution.
+    sole_namespaces: HashSet<Box<str>>,
+    singleton_methods: HashMap<Box<str>, HashSet<Box<str>>>,
+    singleton_owners: HashSet<Box<str>>,
 }
 
 pub(crate) struct ConstResolver {
@@ -185,9 +231,13 @@ pub(crate) struct ConstResolver {
     /// Each source class or module that others are nested in by name,
     /// with those nested ones (`A` to `A::B` and `A::B::C`).
     nested_namespaces: HashMap<Box<str>, Vec<Box<str>>>,
+    /// The names `has_source_namespace` answers yes for, gathered once.
+    source_namespaces: HashSet<Box<str>>,
     /// Includes paths, full text and order because answers use file IDs
     /// and byte offsets. Retain no second copy of the source snapshot.
     source_fingerprint: u64,
+    /// Complete, canonical ancestry from the same graph, for source admission.
+    class_ancestry: HashMap<ClassId, Vec<ClassId>>,
 }
 
 fn is_indexed(source: &SourceFile) -> bool {
@@ -382,6 +432,64 @@ fn is_assigned_value(graph: &Graph, declaration: &Declaration) -> bool {
     assigned
 }
 
+/// Where each class and module is defined, and what its ancestors are,
+/// read from Rubydex alone. A scoped fractal build asks this before it
+/// ingests anything, to decide which files to ingest.
+#[derive(Debug, Default)]
+pub struct DefinitionIndex {
+    /// Fully qualified name -> the source paths that define it
+    /// (`class`/`module` bodies, reopenings included), sorted.
+    pub files: HashMap<Box<str>, Vec<String>>,
+    /// Fully qualified name -> its resolved ancestors, nearest first,
+    /// itself excluded. A gem's ancestor that left the chain incomplete
+    /// ends it.
+    pub ancestors: HashMap<Box<str>, Vec<Box<str>>>,
+}
+
+/// Index `sources` with Rubydex and keep only [`DefinitionIndex`]'s
+/// answers. Cheaper than ingest: it parses each file once for constants
+/// and resolves names, and keeps nothing else.
+pub(crate) fn definition_index(sources: &[SourceFile]) -> DefinitionIndex {
+    let mut graph = crate::timings::phase("rubydex: index", || index_sources(sources));
+    crate::timings::phase("rubydex: resolve", || Resolver::new(&mut graph).resolve());
+    let app_paths: HashSet<&str> = sources.iter().map(|source| source.path.as_str()).collect();
+    let mut index = DefinitionIndex::default();
+    for declaration in graph.declarations().values() {
+        let Some(namespace) = declaration.as_namespace() else { continue };
+        let name: Box<str> = hoisted_name(declaration.name()).as_ref().into();
+        let mut paths: Vec<String> = declaration
+            .definitions()
+            .iter()
+            .filter_map(|id| graph.definitions().get(id))
+            .filter(|definition| matches!(definition, Definition::Class(_) | Definition::Module(_)))
+            .filter_map(|definition| graph.documents().get(definition.uri_id()))
+            .map(|document| document.uri())
+            .filter(|uri| app_paths.contains(uri))
+            .map(str::to_string)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        let mut ancestors = Vec::new();
+        for ancestor in namespace.ancestors() {
+            let Ancestor::Complete(id) = ancestor else { break };
+            let Some(ancestor) = graph.declarations().get(id) else { continue };
+            let ancestor: Box<str> = hoisted_name(ancestor.name()).as_ref().into();
+            if ancestor != name && !ancestors.contains(&ancestor) {
+                ancestors.push(ancestor);
+            }
+        }
+        if !paths.is_empty() {
+            index.files.entry(name.clone()).or_default().extend(paths);
+        }
+        index.ancestors.entry(name).or_default().extend(ancestors);
+    }
+    for paths in index.files.values_mut() {
+        paths.sort();
+        paths.dedup();
+    }
+    index
+}
+
 impl ConstResolver {
     /// Index real Ruby app sources with their original 1-based file IDs.
     pub(crate) fn from_app_sources(sources: &[SourceFile]) -> Self {
@@ -389,18 +497,58 @@ impl ConstResolver {
         // Rubydex resolves all source references after every file enters
         // its graph, including declarations in later files.
         crate::timings::phase("rubydex: resolve", || Resolver::new(&mut graph).resolve());
+        // Match ingest and reference answers even for singleton-class nesting.
+        let class_ancestry = graph.declarations().values().filter_map(|declaration| {
+            let namespace = declaration.as_namespace()?;
+            if namespace.kind() != "Class" { return None; }
+            let mut ancestors = vec![ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref()))];
+            for ancestor in namespace.ancestors() {
+                // Mutation reachability needs the known edges even when a
+                // gem superclass leaves the rest of the ancestry incomplete.
+                let Ancestor::Complete(id) = ancestor else { continue };
+                let Some(ancestor) = graph.declarations().get(id) else { continue };
+                if matches!(ancestor.kind(), "Class" | "Module") {
+                    let id = ClassId(Symbol::from(hoisted_name(ancestor.name()).as_ref()));
+                    if !ancestors.contains(&id) { ancestors.push(id); }
+                }
+            }
+            Some((ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())), ancestors))
+        }).collect();
         let files = crate::timings::phase("rubydex: answers", || collect_answers(&graph, sources));
         drop(graph);
         let mut declared: Vec<&str> = files.iter().flatten().flat_map(|file| file.class_definitions.iter().map(|name| name.as_ref())).collect();
         declared.sort_unstable();
         declared.dedup();
         let nested_namespaces = nested_namespaces_index(&declared);
-        Self { files, nested_namespaces, source_fingerprint: source_fingerprint(sources) }
+        let class_definitions: HashSet<&str> = declared.into_iter().collect();
+        let mut source_namespaces: HashSet<Box<str>> = files.iter().flatten()
+            .flat_map(|file| file.namespace_definitions.iter().cloned()).collect();
+        for (alias, target) in files.iter().flatten().flat_map(|file| file.runtime_namespace_aliases.iter()) {
+            if class_definitions.contains(alias.as_ref()) {
+                source_namespaces.insert(target.clone());
+            }
+        }
+        Self { files, nested_namespaces, source_namespaces, source_fingerprint: source_fingerprint(sources), class_ancestry }
     }
 
     fn file(&self, file: FileId) -> Option<&FileAnswers> {
         let index = file.0.checked_sub(1)?;
         self.files.get(index as usize)?.as_ref()
+    }
+
+    /// Every `class`/`module` definition in the app, as (fully qualified
+    /// name, span of the whole definition), reopenings included, in file
+    /// order. A definition's span contains the definitions nested in it.
+    pub(crate) fn class_bodies(&self) -> Vec<(Box<str>, Span)> {
+        let mut out = Vec::new();
+        for (index, file) in self.files.iter().enumerate() {
+            let Some(file) = file else { continue };
+            for (name, start, end) in &file.class_bodies {
+                out.push((name.clone(), Span { file: FileId(index as u32 + 1), start: *start, end: *end }));
+            }
+        }
+        out.sort_by_key(|(_, span)| (span.file.0, span.start));
+        out
     }
 
     /// Every constant (fully qualified) `file` declares: its classes and
@@ -446,6 +594,23 @@ impl ConstResolver {
             .map(Option::as_ref)
     }
 
+    /// App and runtime sources define this reference; RBI declarations do
+    /// not enter this graph and cannot establish source ownership.
+    pub(crate) fn has_definition(&self, span: Span, path: &[Symbol]) -> bool {
+        self.reference(span, path).is_some_and(|resolved| resolved.is_some())
+    }
+
+    /// Exact resolved source names for declaration edges without expression
+    /// spans. The borrowed identifiers remain owned by this snapshot.
+    pub(crate) fn defined_names(&self) -> HashSet<&str> {
+        self.files.iter().flatten().flat_map(|file| file.references.values()).filter_map(|resolved| {
+            match resolved.as_ref()? {
+                ResolvedConstant::Namespace { class, .. } => Some(class.0.as_str()),
+                ResolvedConstant::Value { name, .. } => Some(name.0.as_str()),
+            }
+        }).collect()
+    }
+
     /// Exact source-resolved namespace, also used by ingest admission gates
     /// that must distinguish lexical namesakes from the activated concern.
     pub(crate) fn namespace(&self, span: Span, path: &[Symbol]) -> Option<&ClassId> {
@@ -453,6 +618,12 @@ impl ConstResolver {
             ResolvedConstant::Namespace { class, .. } => Some(class),
             ResolvedConstant::Value { .. } => None,
         }
+    }
+
+    /// A declaration header is not a constant reference. Its body still runs
+    /// on the resolved namespace, including qualified reopenings and aliases.
+    pub(in crate::analyze) fn namespace_body(&self, span: Span) -> Option<&ClassId> {
+        self.file(span.file)?.namespace_bodies.get(&span.end)
     }
 
     /// The fully qualified declaration a reference resolves to, whether a
@@ -499,19 +670,38 @@ impl ConstResolver {
     }
 
     pub(crate) fn has_source_namespace(&self, name: &str) -> bool {
-        self.files.iter().flatten().any(|file| file.namespace_definitions.contains(name))
-            || self.files.iter().flatten().any(|file| {
-                file.runtime_namespace_aliases.iter().any(|(alias, target)| {
-                    target.as_ref() == name && self.files.iter().flatten()
-                        .any(|source| source.class_definitions.contains(alias.as_ref()))
-                })
-            })
+        self.source_namespaces.contains(name)
     }
 
     pub(crate) fn is_runtime_class(&self, span: Span, path: &[Symbol], name: &str) -> bool {
         matches!(self.reference(span, path),
             Some(Some(ResolvedConstant::Namespace { class, runtime: true }))
                 if class.0.as_str() == name)
+    }
+
+    pub(in crate::analyze) fn sole_namespace(&self, file: FileId, name: &str) -> bool {
+        self.file(file).is_some_and(|file| file.sole_namespaces.contains(name))
+    }
+
+    pub(in crate::analyze) fn is_class_namespace(&self, span: Span, path: &[Symbol]) -> bool {
+        path.last().and_then(|name| span.end.checked_sub(name.as_str().len() as u32))
+            .is_some_and(|start| self.file(span.file).is_some_and(|file| file.class_references.contains(&start)))
+    }
+
+    pub(in crate::analyze) fn has_source_singleton_body(&self, owner: &str) -> bool {
+        self.files.iter().flatten().any(|file| {
+            file.singleton_owners.contains(owner) || file.singleton_methods.contains_key(owner)
+        })
+    }
+
+    pub(in crate::analyze) fn source_singleton_method(&self, owner: &str, method: &str) -> bool {
+        self.files.iter().flatten().any(|file| {
+            file.singleton_methods.get(owner).is_some_and(|methods| methods.contains(method))
+        })
+    }
+
+    pub(in crate::analyze) fn class_ancestry(&self, name: &ClassId) -> Option<&[ClassId]> {
+        self.class_ancestry.get(name).map(Vec::as_slice)
     }
 }
 
@@ -706,15 +896,19 @@ fn answer_file(
     } else {
         HashSet::new()
     };
+    // Positions a whole-path reference filled, which an exact one replaces.
+    let mut path_keys = HashSet::new();
     for reference_id in document.constant_references() {
         let Some(reference) = graph.constant_references().get(reference_id) else {
             continue;
         };
         let offset = reference.offset();
         // A superclass or mixin reference spans its whole `A::B` path,
-        // so it starts at the same offset as the `A` reference. Only a
-        // reference whose span is exactly its written name belongs to
-        // that offset.
+        // so it starts at the same offset as the `A` reference. Its
+        // answer belongs to where its final name starts, which is where
+        // `reference` looks for an IR span covering the whole path; a
+        // reference whose span is exactly its written name keeps its
+        // own start.
         let written = source
             .text
             .get(offset.start() as usize..offset.end() as usize);
@@ -722,19 +916,35 @@ fn answer_file(
             .names()
             .get(reference.name_id())
             .and_then(|name| graph.strings().get(name.str()));
-        if !name.is_some_and(|name| written == Some(name.as_str())) {
+        let Some((key, exact)) = name.and_then(|name| {
+            let (name, written) = (name.as_str(), written?);
+            if written == name {
+                Some((offset.start(), true))
+            } else {
+                let prefix = written.strip_suffix(name)?;
+                prefix.ends_with("::").then(|| (offset.end() - name.len() as u32, false))
+            }
+        }) else {
+            continue;
+        };
+        // A path reference only fills its final name's position; the
+        // reference that Rubydex recorded there itself, if any, wins.
+        if !exact && answers.references.contains_key(&key) {
             continue;
         }
-        if parenthesized_receivers.contains(&offset.start())
+        if exact && parenthesized_receivers.contains(&offset.start())
             && let Some(target) = resolved_namespace(graph, *reference.name_id())
                 .filter(|target| is_runtime_declaration(graph, target))
         {
-            answers.namespace_definitions.insert(target.name().into());
+            answers.namespace_definitions.insert(hoisted_name(target.name()).into());
         }
         let target = graph
             .name_id_to_declaration_id(*reference.name_id())
             .and_then(|id| graph.declarations().get(id).map(|decl| (*id, decl)))
             .map(|(id, declaration)| {
+                if declaration.kind() == "Class" {
+                    answers.class_references.insert(key);
+                }
                 if declaration.as_namespace().is_some() && !is_assigned_value(graph, declaration) {
                     let (class, runtime) = class_cache.entry(id).or_insert_with(|| {
                         (
@@ -778,12 +988,15 @@ fn answer_file(
                     ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime, runtime_decl }
                 }
             });
-        match answers.references.entry(offset.start()) {
+        match answers.references.entry(key) {
             Entry::Vacant(slot) => {
+                if !exact {
+                    path_keys.insert(key);
+                }
                 slot.insert(target);
             }
             Entry::Occupied(mut slot) => {
-                if slot.get().is_none() && target.is_some() {
+                if (exact && path_keys.remove(&key)) || (slot.get().is_none() && target.is_some()) {
                     slot.insert(target);
                 }
             }
@@ -791,6 +1004,16 @@ fn answer_file(
     }
     for definition_id in document.definitions() {
         let definition = graph.definitions().get(definition_id);
+        if let Some(definition @ (Definition::Class(_) | Definition::Module(_))) = definition
+            && let Some(offset) = definition.name_offset()
+            && let Some(id) = graph.definition_to_declaration_id(definition)
+            && let Some(declaration) = graph.declarations().get(&graph.resolve_alias(id).unwrap_or(*id))
+        {
+            answers.namespace_bodies.insert(
+                offset.end(),
+                ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())),
+            );
+        }
         if let Some(name) = definition
             .filter(|definition| matches!(definition,
                 Definition::Class(_) | Definition::Module(_) | Definition::Constant(_) | Definition::ConstantAlias(_)))
@@ -806,36 +1029,62 @@ fn answer_file(
                 let owner = parent.and_then(|id| graph.name_id_to_declaration_id(*id))
                     .and_then(|id| graph.declarations().get(id));
                 let full = owner.map_or_else(|| written.to_string(), |owner| format!("{}::{}", hoisted_name(owner.name()), written.as_str()));
-                if matches!(definition, Some(Definition::Class(_) | Definition::Module(_))) {
+                if let Some(class @ (Definition::Class(_) | Definition::Module(_))) = definition {
                     answers.class_definitions.insert(full.clone().into());
+                    let offset = class.offset();
+                    answers.class_bodies.push((full.clone().into(), offset.start(), offset.end()));
                 }
                 if let Some(Definition::ConstantAlias(alias)) = definition {
                     answers.alias_definitions.insert(full.clone().into());
                     if let Some(target) = resolved_namespace(graph, *alias.target_name_id())
                         .filter(|target| is_runtime_declaration(graph, target))
                     {
-                        answers.runtime_namespace_aliases.insert(full.clone().into(), target.name().into());
+                        answers.runtime_namespace_aliases.insert(full.clone().into(), hoisted_name(target.name()).into());
                     }
                 }
                 answers.namespace_definitions.insert(full.into());
+            }
+            if let Some(declaration) = definition
+                .and_then(|definition| graph.definition_to_declaration_id(definition))
+                .and_then(|id| graph.declarations().get(id))
+                && declaration.definitions().len() == 1
+                && declaration.kind() == "Class"
+                && !is_runtime_declaration(graph, declaration)
+            {
+                answers.sole_namespaces.insert(hoisted_name(declaration.name()).into());
             }
         }
         if let Some(Definition::SingletonClass(singleton)) = definition
             && let Some(ParentScope::Attached(receiver)) = graph.names().get(singleton.name_id())
                 .map(|name| name.parent_scope())
             && let Some(target) = resolved_namespace(graph, *receiver)
-                .filter(|target| is_runtime_declaration(graph, target))
         {
-            answers.namespace_definitions.insert(target.name().into());
+            answers.singleton_owners.insert(hoisted_name(target.name()).into());
+            if is_runtime_declaration(graph, target) {
+                answers.namespace_definitions.insert(hoisted_name(target.name()).into());
+            }
         }
         if let Some(Definition::Method(method)) = definition {
+            let owner = match method.receiver() {
+                Some(Receiver::ConstantReceiver(receiver)) => resolved_namespace(graph, *receiver),
+                Some(Receiver::SelfReceiver(receiver)) => graph.definitions().get(receiver)
+                    .and_then(|definition| graph.definition_to_declaration_id(definition))
+                    .and_then(|id| graph.declarations().get(id)),
+                None => None,
+            };
+            if let Some(owner) = owner
+                && let Some(name) = graph.strings().get(method.str_id())
+            {
+                answers.singleton_methods.entry(hoisted_name(owner.name()).into()).or_default()
+                    .insert(name.as_str().trim_end_matches("()").into());
+            }
             if let Some(Receiver::ConstantReceiver(receiver)) = method.receiver()
                 && graph.strings().get(method.str_id()).is_some_and(|name| name.as_str() == "define()")
                 && let Some(target) = resolved_namespace(graph, *receiver)
                     .filter(|target| is_runtime_declaration(graph, target))
             {
                 // A named singleton definition can override a core factory without a class reopen.
-                answers.namespace_definitions.insert(target.name().into());
+                answers.namespace_definitions.insert(hoisted_name(target.name()).into());
             }
         }
         let (name_id, offset) = match definition {
@@ -862,6 +1111,74 @@ fn answer_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn singleton_namespace_answers_use_hoisted_names() {
+        let sources = vec![SourceFile {
+            path: "app/services/outer.rb".into(),
+            text: "\
+class Outer
+  class << self
+    class << self
+      module M; end
+      class Base; end
+      class Parent < Base
+        include M
+        def self.inherited(child); end
+      end
+      class BodyOwner; end
+      class << BodyOwner; end
+      Factory = Class.new
+      Parent
+    end
+  end
+end
+".into(),
+        }];
+        let resolver = ConstResolver::from_app_sources(&sources);
+        assert_eq!(resolved_name(&resolver, &sources, 0, "Parent"), "Outer::Parent");
+        let ancestry = resolver.class_ancestry(&ClassId(Symbol::from("Outer::Parent"))).unwrap();
+        for name in ["Outer::Parent", "Outer::Base", "Outer::M"] {
+            assert!(ancestry.contains(&ClassId(Symbol::from(name))), "{name}: {ancestry:?}");
+        }
+        for (header, owner) in [("class Parent", "Outer::Parent"), ("module M", "Outer::M")] {
+            let end = (sources[0].text.find(header).unwrap() + header.len()) as u32;
+            assert_eq!(resolver.namespace_body(Span { file: FileId(1), start: 0, end }),
+                Some(&ClassId(Symbol::from(owner))));
+        }
+        assert!(resolver.sole_namespace(FileId(1), "Outer::Factory"));
+        assert!(resolver.has_source_singleton_body("Outer::BodyOwner"));
+        assert!(resolver.source_singleton_method("Outer::Parent", "inherited"));
+    }
+
+    #[test]
+    fn source_namespace_index_matches_original_file_and_runtime_alias_scan() {
+        for reopen in [false, true] {
+            let mut sources = vec![
+                SourceFile { path: "nested.rb".into(), text: "module Catalog\n class Reader; end\nend\n".into() },
+                SourceFile { path: "alias.rb".into(), text: "DataAlias = Data\nValue = 3\n".into() },
+            ];
+            if reopen {
+                sources.push(SourceFile { path: "reopen.rb".into(), text: "class DataAlias\n def marker; 1; end\nend\n".into() });
+            }
+            let resolver = ConstResolver::from_app_sources(&sources);
+            let mut queries = vec!["Catalog", "Catalog::Reader", "DataAlias", "Data", "Value", "Missing"];
+            queries.extend(resolver.files.iter().flatten().flat_map(|file|
+                file.namespace_definitions.iter().map(|name| name.as_ref())));
+            queries.extend(resolver.files.iter().flatten().flat_map(|file|
+                file.runtime_namespace_aliases.values().map(|name| name.as_ref())));
+            for name in queries {
+                let scanned = resolver.files.iter().flatten().any(|file| file.namespace_definitions.contains(name))
+                    || resolver.files.iter().flatten().any(|file| {
+                        file.runtime_namespace_aliases.iter().any(|(alias, target)| {
+                            target.as_ref() == name && resolver.files.iter().flatten()
+                                .any(|source| source.class_definitions.contains(alias.as_ref()))
+                        })
+                    });
+                assert_eq!(resolver.has_source_namespace(name), scanned, "{name}, reopen={reopen}");
+            }
+        }
+    }
 
     #[test]
     fn prepared_answers_require_the_same_paths_text_and_file_order() {
@@ -955,14 +1272,14 @@ mod tests {
             let mut expr = make(file);
             typer.analyze_expr(&mut expr, &Ctx::default());
             assert!(
-                expr.diagnostic.is_some(),
+                expr.diagnostic().is_some(),
                 "source FileId({file}) cannot use a generated fallback"
             );
         }
         let mut generated = make(99);
         generated.decisions |= crate::expr::GENERATED_CONST_REF;
         typer.analyze_expr(&mut generated, &Ctx::default());
-        assert!(generated.diagnostic.is_none());
+        assert!(generated.diagnostic().is_none());
         assert!(matches!(generated.ty, Some(crate::ty::Ty::Class { .. })));
     }
 
@@ -1001,5 +1318,25 @@ mod tests {
             }
             _ => panic!("ActiveRecord::SignedId::SALT must resolve to the runtime value"),
         }
+    }
+
+    /// A superclass or mixin path is one Rubydex reference spanning the
+    /// whole `A::B`. Its answer is where an IR span covering that path
+    /// looks, the final name, while the `A` reference keeps its own.
+    #[test]
+    fn superclass_and_mixin_paths_answer_at_their_final_name() {
+        let text = "module A\n  class B; end\n  module H; end\nend\nclass X < A::B\n  include A::H\nend\nclass Y < ::A::B; end\n";
+        let sources = vec![SourceFile { path: "x.rb".into(), text: text.into() }];
+        let resolver = ConstResolver::from_app_sources(&sources);
+        let path = |written: &str| -> Vec<Symbol> { written.split("::").filter(|s| !s.is_empty()).map(Symbol::from).collect() };
+        let at = |needle: &str, written: &str| {
+            let start = text.find(needle).unwrap() + needle.len() - written.len();
+            let span = Span { file: FileId(1), start: start as u32, end: (start + written.len()) as u32 };
+            resolver.namespace(span, &path(written)).map(|class| class.0.to_string())
+        };
+        assert_eq!(at("X < A::B", "A::B").as_deref(), Some("A::B"));
+        assert_eq!(at("include A::H", "A::H").as_deref(), Some("A::H"));
+        assert_eq!(at("Y < ::A::B", "::A::B").as_deref(), Some("A::B"));
+        assert_eq!(at("X < A", "A").as_deref(), Some("A"));
     }
 }

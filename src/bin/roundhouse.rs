@@ -37,6 +37,7 @@ fn usage() -> &'static str {
     "\
 Usage: roundhouse --target LANG [INPUT] [-o OUT]
        roundhouse --site [INPUT] [-o OUT]
+       roundhouse --target fractal [--class NAME]... [--whole-app] [--report PATH] [INPUT] [-o OUT]
        roundhouse --archives LANG,LANG [INPUT] [-o OUT]
        roundhouse check [--continue] [--inventory PATH] [--hotspots] [APP]
        roundhouse lsp
@@ -60,6 +61,21 @@ Options:
                          swift, typescript, typescript-worker, ruby, jruby,
                          spinel
                        Default INPUT=.  Default OUT=./out/<lang>/
+                       `fractal` keeps the app on Rails: the output is an
+                       overlay for the app's root holding only the files
+                       it generates (specialized variants of the methods
+                       of the classes named with --class), empty when
+                       there are none.
+      --class NAME     With --target fractal: a class or module to
+                       specialize, by its full name (`Shop`,
+                       `Admin::Report`). Repeatable. Every definition of it
+                       is selected (Rubydex). No --class emits nothing.
+                       Only the files defining these classes, and what
+                       the registered passes say they need, are ingested.
+      --whole-app      With --target fractal: ingest and analyze the
+                       whole app instead, as a pass that needs it does.
+      --report PATH    With --target fractal: write the build's decisions
+                       (selection, methods, variants, declines) as JSON.
       --site           Build all targets + landing-page assets.
                        Default INPUT=fixtures/real-blog  Default OUT=./_site/
       --archives LIST  Build only comma-separated targets' browse archives.
@@ -116,6 +132,15 @@ fn cli() -> ExitCode {
             println!("roundhouse {}", roundhouse::version::describe());
             ExitCode::SUCCESS
         }
+        Ok(Action::Fractal { classes, input, out, survey, report, whole_app }) => {
+            match run_fractal(&classes, &input, &out, survey, report.as_deref(), whole_app) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("roundhouse: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Ok(Action::Transpile { target, input, out, allow_unsupported, survey }) => {
             match run_transpile(target, &input, &out, allow_unsupported, survey) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -162,6 +187,14 @@ enum Action {
         input: PathBuf,
         out: PathBuf,
     },
+    Fractal {
+        classes: Vec<String>,
+        input: PathBuf,
+        out: PathBuf,
+        survey: bool,
+        report: Option<PathBuf>,
+        whole_app: bool,
+    },
     Archives {
         targets: Vec<BuildTarget>,
         input: PathBuf,
@@ -176,6 +209,10 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
     let mut out: Option<PathBuf> = None;
     let mut allow_unsupported = false;
     let mut survey = false;
+    let mut fractal = false;
+    let mut classes: Vec<String> = Vec::new();
+    let mut report: Option<PathBuf> = None;
+    let mut whole_app = false;
     let mut positional: Vec<String> = Vec::new();
 
     let mut iter = args.into_iter();
@@ -199,14 +236,24 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
                 let v = iter
                     .next()
                     .ok_or_else(|| format!("{arg} requires a value"))?;
-                target = Some(parse_target(&v)?);
+                if v == "fractal" {
+                    fractal = true;
+                } else {
+                    target = Some(parse_target(&v)?);
+                }
             }
+            "--class" => classes.push(iter.next().ok_or("--class requires a class name")?),
+            "--whole-app" => whole_app = true,
+            "--report" => report = Some(PathBuf::from(iter.next().ok_or("--report requires a path")?)),
             "-o" | "--output" => {
                 let v = iter
                     .next()
                     .ok_or_else(|| format!("{arg} requires a value"))?;
                 out = Some(PathBuf::from(v));
             }
+            "--target=fractal" => fractal = true,
+            s if s.starts_with("--class=") => classes.push(s["--class=".len()..].to_string()),
+            s if s.starts_with("--report=") => report = Some(PathBuf::from(&s["--report=".len()..])),
             s if s.starts_with("--target=") => {
                 target = Some(parse_target(&s["--target=".len()..])?);
             }
@@ -228,6 +275,22 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
         ));
     }
 
+    if fractal {
+        if target.is_some() || site || archives.is_some() || allow_unsupported {
+            return Err("--target fractal cannot be combined with another --target, --site, --archives or --allow-unsupported".into());
+        }
+        return Ok(Action::Fractal {
+            classes,
+            input: positional.pop().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")),
+            out: out.unwrap_or_else(|| PathBuf::from("out/fractal")),
+            survey,
+            report,
+            whole_app,
+        });
+    }
+    if !classes.is_empty() || report.is_some() || whole_app {
+        return Err("--class, --whole-app and --report are only meaningful with --target fractal".into());
+    }
     if let Some(targets) = archives {
         if target.is_some() || site || allow_unsupported || survey {
             return Err("--archives cannot be combined with --target, --site, --survey or --allow-unsupported".into());
@@ -276,6 +339,94 @@ fn parse_target(s: &str) -> Result<BuildTarget, String> {
             Err(format!("unknown target '{s}'. Valid: {valid}"))
         }
     }
+}
+
+/// `--target fractal`: decide what to ingest (the selected classes and
+/// what the passes need, or the whole app), ingest and analyze it (no
+/// lowerings: Rails keeps running the app), plan the build, and write
+/// the overlay of what the plan generates.
+fn run_fractal(
+    classes: &[String],
+    input: &std::path::Path,
+    out: &std::path::Path,
+    survey: bool,
+    report_path: Option<&std::path::Path>,
+    whole_app: bool,
+) -> Result<(), String> {
+    use roundhouse::emit::fractal;
+    if !input.exists() {
+        return Err(format!("input {} does not exist", input.display()));
+    }
+    let passes = fractal::pass::registered();
+    let passes: Vec<&dyn fractal::Pass> = passes.iter().map(|p| p.as_ref()).collect();
+    let root = input.canonicalize().map_err(|e| format!("input {}: {e}", input.display()))?;
+    let ingest = fractal::scope::decide(&root, classes, &passes, whole_app)?;
+    if survey {
+        roundhouse::ingest::survey::activate();
+    }
+    let (app_result, parse_diags) = roundhouse::ingest::prism::scope(|| match &ingest {
+        fractal::Ingest::WholeApp { reason } => {
+            eprintln!("roundhouse: fractal: ingesting the whole app ({reason})");
+            ingest_app(input)
+        }
+        fractal::Ingest::Files { files, indexed } => {
+            eprintln!(
+                "roundhouse: fractal: ingesting {} file(s) the selection and passes need (Rubydex indexed {indexed}); --whole-app reads everything",
+                files.len()
+            );
+            let fs = roundhouse::vfs::FsVfs::new();
+            let vfs = roundhouse::vfs::ScopedVfs::new(&fs, files.iter().cloned());
+            roundhouse::ingest::app::ingest_app_with_vfs(&vfs, &root)
+        }
+    });
+    let gaps = if survey { roundhouse::ingest::survey::drain() } else { Vec::new() };
+    let mut app = match app_result {
+        Ok(app) => app,
+        Err(e) => {
+            for d in &parse_diags {
+                eprintln!("roundhouse: {}", d.render(&[]));
+            }
+            if !gaps.is_empty() {
+                eprintln!();
+                eprint!("{}", roundhouse::ingest::survey::render_report(&gaps));
+            } else if !survey {
+                eprintln!("roundhouse: hint: re-run with --survey to record unsupported constructs and keep going");
+            }
+            return Err(format!("ingest {}: {e}", input.display()));
+        }
+    };
+    // A file with a syntax error or a recorded gap is still copied as the
+    // app wrote it, but its IR holds placeholders, so none of its methods
+    // gets a variant. Warnings say nothing about a file's IR.
+    let mut untrusted: Vec<String> = Vec::new();
+    for d in parse_diags.iter().filter(|d| d.severity == Severity::Error) {
+        eprintln!("roundhouse: {}", d.render(&app.sources));
+        if let Some(source) = (d.span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) {
+            untrusted.push(source.path.clone());
+        }
+    }
+    if !gaps.is_empty() {
+        eprintln!();
+        eprint!("{}", roundhouse::ingest::survey::render_report(&gaps));
+        eprintln!("roundhouse: {} ingest gap(s) recorded; their files keep the app's code", gaps.len());
+        for gap in &gaps {
+            if let roundhouse::ingest::IngestError::Unsupported { file, .. } | roundhouse::ingest::IngestError::Parse { file, .. } = gap {
+                untrusted.push(file.clone());
+            }
+        }
+    }
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let plan = fractal::plan(&app, input, classes, &untrusted, &passes)?;
+    for line in plan.report.render().lines() {
+        eprintln!("roundhouse: {line}");
+    }
+    if let Some(path) = report_path {
+        let json = serde_json::to_string_pretty(&plan.report).map_err(|e| format!("report: {e}"))?;
+        std::fs::write(path, json + "\n").map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    let written = fractal::write(out, &plan)?;
+    eprintln!("roundhouse: emitted {written} file(s) to {} (fractal overlay; every other file is the app's own)", out.display());
+    Ok(())
 }
 
 fn run_transpile(
@@ -383,9 +534,12 @@ fn run_transpile(
     // identifies its gem and the defining source has a matching literal
     // top-level require. Keep check's source diagnostic and all strict-target
     // refusals unchanged.
-    if target == BuildTarget::Ruby {
-        let supported_includes = roundhouse::gems::statically_resolved_external_includes(&app);
-        let external_namespaces = roundhouse::gems::locked_external_gem_namespaces(&app);
+    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        let (external_namespaces, supported_includes) = if target == BuildTarget::Ruby {
+            (roundhouse::gems::locked_external_gem_namespaces(&app), roundhouse::gems::statically_resolved_external_includes(&app))
+        } else {
+            (roundhouse::gems::native_extension_gem_namespaces(&app), Default::default())
+        };
         analyze_diags.retain(|diagnostic| match &diagnostic.kind {
             roundhouse::diagnostic::DiagnosticKind::Unsupported {
                 construct, detail, ..
@@ -439,11 +593,26 @@ fn run_transpile(
     // Each gap still degrades to a stub in the emitted output, so a
     // single run surfaces the whole inventory instead of dying on the
     // first one.
-    let (files_result, mut diags) =
+    let emit = || {
         roundhouse::emit::diagnostics::scope(|| match &whole_route {
             Some(wr) => project::futamura_target_files(&app, input, Some(wr)),
             None => project::target_files(&app, input, target),
-        });
+        })
+    };
+    let audit = std::env::var_os("ROUNDHOUSE_AUDIT").is_some();
+    // Not recorded on every run: the record clones each rendered class's IR, which only the audit reads.
+    let ((files_result, mut diags), rendered) =
+        if audit { roundhouse::emit::ruby::record_rendered(emit) } else { (emit(), Vec::new()) };
+    if audit
+        && let Ok(files) = &files_result
+    {
+        let started = std::time::Instant::now();
+        let findings = roundhouse::emit::audit::audit(&rendered, files);
+        for d in &findings {
+            eprintln!("{}", d.render(&app.sources));
+        }
+        eprintln!("roundhouse: audit: {} send(s) resolve to no emitted method ({:?})", findings.len(), started.elapsed());
+    }
 
     // Same attribution pass as `analyze_diags` above, run again here:
     // model-to-library lowering (where an unresolved `alias` is caught,

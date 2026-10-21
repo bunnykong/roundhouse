@@ -15,6 +15,26 @@ require_relative "../test_helper"
 class ViewHelpersExtTest < Minitest::Test
   include ActionView
 
+  # Rails emits nothing until a policy is configured, and emits
+  # `<meta name="csp-nonce" />` with no content attribute when the
+  # policy has no nonce generator (campfire's hash policy). Measured
+  # against Action View 8.1's `tag("meta")`, which omits a nil content.
+  # The harness does not load Current or ContentSecurityPolicy, and
+  # `Rails.application` is a fresh object, so the positive case sets
+  # the module flag the helper reads beside the app policy.
+  def test_csp_meta_tag_is_empty_when_the_app_has_no_policy
+    ViewHelpers.csp_policy_for_test = false
+    assert_nil Rails.application.content_security_policy
+    assert_equal "", ViewHelpers.csp_meta_tag
+  end
+
+  def test_csp_meta_tag_names_the_nonce_slot_when_a_policy_is_configured
+    ViewHelpers.csp_policy_for_test = true
+    assert_equal %(<meta name="csp-nonce" />), ViewHelpers.csp_meta_tag
+  ensure
+    ViewHelpers.csp_policy_for_test = false
+  end
+
   # The plain form. Note the closing ` />`: `hidden_field_tag` goes
   # through Rails' legacy `tag()` spelling, unlike `image_tag` beside it
   # in the runtime, which closes `>`. The id is the NAME sanitized —
@@ -107,6 +127,27 @@ class ViewHelpersExtTest < Minitest::Test
                  ViewHelpers.sanitize_allowing(
                    "<div>hello <strong>bold</strong><br>next</div>",
                    ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  # The one newline the parser drops after a <pre>/<listing> start tag
+  # (LF, CR or CRLF; kept tag or stripped), and only that one.
+  def test_sanitize_allowing_drops_the_newline_after_a_pre_start_tag
+    t = ["pre", "div", "listing"]
+    assert_equal "<pre>\n\nfirst</pre>", ViewHelpers.sanitize_allowing("<pre>\n\n\nfirst</pre>", t, [])
+    assert_equal "<pre>x</pre>", ViewHelpers.sanitize_allowing("<PRE class=a>\nx</PRE>", t, [])
+    assert_equal "<pre>\nx</pre>", ViewHelpers.sanitize_allowing("<pre>\r\n\nx</pre>", t, [])
+    assert_equal "<pre>x</pre>", ViewHelpers.sanitize_allowing("<pre>\rx</pre>", t, [])
+    assert_equal "<pre> \nx</pre>", ViewHelpers.sanitize_allowing("<pre> \nx</pre>", t, [])
+    assert_equal "<listing>l</listing>", ViewHelpers.sanitize_allowing("<listing>\nl</listing>", t, [])
+    assert_equal "x", ViewHelpers.sanitize_allowing("<pre>\nx</pre>", [], [])
+    assert_equal "<p>\nx</p>", ViewHelpers.sanitize_allowing("<p>\nx</p>", ["p"], [])
+  end
+
+  # `sanitize(html, tags:, attributes:)` lowers to `sanitize_with`: the
+  # caller's lists, the same engine.
+  def test_sanitize_with_uses_the_callers_lists
+    assert_equal %(<a href="/x">x</a> y),
+                 ViewHelpers.sanitize_with(%(<a href="/x" onclick="e()">x</a> <em>y</em>), ["a"], ["href"])
   end
 
   # Attribute scrub: allowed names stay in source order, the rest go,

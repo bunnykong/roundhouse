@@ -29,6 +29,11 @@
 # (LocalSecret treats "" as unset) and a secret inherited from the
 # parent process would sign the vectors with a different key.
 ENV["SECRET_KEY_BASE"] = "roundhouse-test-secret"
+# Rails' own test_helper opens with `ENV["RAILS_ENV"] ||= "test"`, and
+# boot.rb parks it as `Rails.env`. Without it a test process reads as
+# development: `Rails.env.test?` gates (campfire's WAL checkpointer
+# `start(enabled: !Rails.env.test?)`) take the serving branch.
+ENV["RAILS_ENV"] = "test" if ENV["RAILS_ENV"].nil?
 require_relative "../runtime/base64"
 require_relative "../runtime/json_impl"
 require_relative "../runtime/db"
@@ -742,6 +747,26 @@ module ActionCable
     def assert_no_broadcasts(stream, &block)
       assert_broadcasts(stream, 0, &block)
     end
+
+    # `assert_broadcast_on stream, data`: some broadcast to `stream` —
+    # during the block, or so far in this test without one — carries
+    # `data`. Compared as Rails compares it, after a JSON round trip:
+    # `data` goes through the same encoder a broadcast does, and both
+    # sides are parsed, so key order and symbol keys do not matter. The
+    # log holds each publish as its JSON text on this tree.
+    def assert_broadcast_on(stream, data, &block)
+      entries =
+        if block
+          capture_broadcasts_on(stream, &block)
+        else
+          Broadcasts.log.select { |entry| entry[:stream] == stream }
+        end
+      want = JSON.parse(ActionCable.payload_json(data))
+      payloads = entries.map { |entry| entry[:payload] }.compact
+      return if payloads.any? { |payload| JSON.parse(payload.to_s) == want }
+      raise "assert_broadcast_on failed: no broadcast to #{stream.inspect} carried #{JSON.generate(want)}; " \
+            "got #{payloads.inspect}"
+    end
   end
 end
 
@@ -925,8 +950,9 @@ end
 # (`SchemaSetup.reset!` if defined).
 # What `skip` raises. Minitest's own is `Minitest::Skip < Exception`,
 # deliberately outside StandardError so a test's `rescue => e` cannot
-# swallow it; same rule here, and the autorun shim rescues this arm
-# BEFORE its `rescue Exception` so a skip is never counted a failure.
+# swallow it; same rule here. The autorun shim's `rescue Exception`
+# treats an exception whose class name is `TestSkipped` as a skip, so
+# a framework file that never loads this helper still runs.
 class TestSkipped < Exception
 end
 
@@ -938,22 +964,13 @@ end
 # The runtime fragment-caches message partials in its own store; these
 # give the test the settings it reads and restores. A fresh
 # `ActiveSupport::Cache::MemoryStore` (runtime/active_support_cache.rb) is
-# a `Rails::Cache`, so it can stand in for `Rails.cache` here.
+# a `Rails::Cache`, so it can stand in for `Rails.cache` here. The
+# third knob, `ActionView::PartialRenderer.collection_cache`, is the
+# runtime's own (runtime/action_controller_fragment_caching.rb): the
+# store cached collections really read.
 module Rails
   def self.cache=(store)
     @cache_store = store
-  end
-end
-
-module ActionView
-  class PartialRenderer
-    def self.collection_cache
-      @collection_cache
-    end
-
-    def self.collection_cache=(store)
-      @collection_cache = store
-    end
   end
 end
 
@@ -965,25 +982,10 @@ ActionController::Base.perform_caching = false
 
 # ---- Query assertions ------------------------------------------------
 #
-# Rails' `ActiveSupport::Notifications.subscribed(callback,
-# "sql.active_record") { … }` and the `ActiveRecord::Assertions::
-# QueryAssertions` built on it, over `Db.capture_sql`, which records
-# every statement a prepare/exec issues and skips a query-cache replay,
-# as Rails' counter skips CACHE events. The callback gets Rails' five
-# arguments; the payload carries `:sql` and `:name` ("SQL", since the
-# runtime does not name its queries). Called after the block rather than
-# during it, which no test can tell: they collect, then inspect.
-module ActiveSupport
-  module Notifications
-    def self.subscribed(callback, name, &block)
-      return block.call unless name == "sql.active_record"
-      result = nil
-      statements = Db.capture_sql { result = block.call }
-      statements.each { |sql| callback.call(name, nil, nil, nil, { sql: sql, name: "SQL" }) }
-      result
-    end
-  end
-end
+# `ActiveSupport::Notifications.subscribed` lives in
+# runtime/ruby/active_support_notifications.rb. SQL for that name drains
+# `Db.capture_sql` after the block. QueryAssertions below read the same
+# log directly and skip schema statements.
 
 module ActiveRecord
   module Assertions
@@ -1035,6 +1037,15 @@ module ActiveRecord
 end
 
 class TestBase
+  # Rails wraps each example in a non-joinable transaction
+  # (`use_transactional_tests`, default true) so a nested `save` or
+  # `destroy` is a SAVEPOINT. Campfire's room-destroy test counts those
+  # releases. A class that must see a real COMMIT sets this false
+  # (`MessageCreationCommitTest`).
+  def self.use_transactional_tests
+    true
+  end
+
   # Rails puts both of these on `ActiveSupport::TestCase` itself, so a
   # test that never writes `include ActiveJob::TestHelper` still has
   # `perform_enqueued_jobs` — campfire's `User::BotTest` is exactly
@@ -1188,6 +1199,18 @@ class TestBase
     ensure
       travel_back
     end
+  end
+
+  # Rails' `stub_const`, for the sites `lower::stub_const` could not
+  # make static: a stub that changes the constant's type (`TIME_LIMIT =
+  # 10` stubbed with `0.2`), or one whose owner the pass did not find.
+  # This tree resolves constants at build time and has no `const_set`,
+  # so the stub cannot take effect; the test FAILS, saying so, rather
+  # than running its block against the unstubbed value. The CRuby tree
+  # replaces this with the real helper (test_support_cruby.rb).
+  def stub_const(mod, constant, _value)
+    raise "stub_const(#{mod}, #{constant.inspect}) has no compiled form here: " \
+          "the stub changes the constant's type, or names a constant the lowering could not find"
   end
 
   # Minitest's `assert_nothing_raised`: the block runs, and an exception
@@ -2312,6 +2335,16 @@ module RequestDispatch
     else
       body = selector_or_root.to_s
       selector = content_or_opts
+      content_or_opts = opts
+      opts = nil
+    end
+    # Rails' substitution values: a `?` in an attribute predicate
+    # (`"#row[data-n=?]", value`) takes the argument after the selector,
+    # and the equality test, if any, is the argument after that. Read as
+    # the content string instead, the value was looked for in the
+    # element's text and the predicate matched a literal "?".
+    if selector.to_s.include?("=?]") && content_or_opts.is_a?(String)
+      selector = selector.to_s.sub("=?]", "=\"#{content_or_opts}\"]")
       content_or_opts = opts
       opts = nil
     end

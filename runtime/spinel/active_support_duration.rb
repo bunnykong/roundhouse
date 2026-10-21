@@ -172,6 +172,10 @@ module ActiveSupport
       @seconds <=> (other.is_a?(Duration) ? other.seconds : other)
     end
 
+    def coerce(other)
+      [other, @seconds]
+    end
+
     def <(other)
       (self <=> other) < 0
     end

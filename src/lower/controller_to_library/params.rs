@@ -132,45 +132,14 @@ pub struct ParamsSpec {
 #[derive(Clone, Debug, Default)]
 pub struct ParamsSpecs {
     specs: Vec<ParamsSpec>,
-    /// Names of `has_one` / `has_many` associations declared with a
-    /// `primary_key:` other than `id` (see [`Self::mark_keyed_associations`]).
-    keyed_assocs: std::collections::HashSet<Symbol>,
     /// Resources a model is named after (with a table), so the model
     /// lowering gives it the typed `update_from_<x>` variants. `None`
-    /// until [`Self::mark_model_resources`] is told the models: a caller
-    /// that lowers controllers without them keeps every rename.
-    model_resources: Option<std::collections::HashSet<Symbol>>,
+    /// until `typed_update::mark_model_resources` is told the models: a
+    /// caller that lowers controllers without them keeps every rename.
+    pub(super) model_resources: Option<std::collections::HashSet<Symbol>>,
 }
 
 impl ParamsSpecs {
-    /// Record which resources name a model with a table: only those get
-    /// the typed update variants (`model_to_library`'s
-    /// `push_update_typed_variants`). An empty model list leaves the
-    /// set unknown.
-    pub fn mark_model_resources(
-        &mut self,
-        models: &[crate::dialect::Model],
-        schema: Option<&crate::schema::Schema>,
-    ) {
-        let Some(schema) = schema else { return };
-        if models.is_empty() {
-            return;
-        }
-        self.model_resources = Some(
-            models
-                .iter()
-                .filter(|m| schema.tables.contains_key(&m.table.0))
-                .map(|m| Symbol::from(crate::naming::snake_case(m.name.0.as_str())))
-                .collect(),
-        );
-    }
-
-    /// Whether some model defines `spec`'s typed update variants (true
-    /// when the models are not known).
-    pub fn has_typed_update(&self, spec: &ParamsSpec) -> bool {
-        self.model_resources.as_ref().is_none_or(|set| set.contains(&spec.resource))
-    }
-
     pub fn iter(&self) -> std::slice::Iter<'_, ParamsSpec> {
         self.specs.iter()
     }
@@ -211,27 +180,6 @@ impl ParamsSpecs {
     /// `scan_create_demand` matches them — `snake_case(Model) ==
     /// resource` — so `:user` finds `User` and a list permitting
     /// `:avatar` on it types that field as a file.
-    /// Record the association names whose foreign key matches an owner
-    /// column other than `id` (`primary_key:`). The parent-ivar rewrite
-    /// (`@article.comments.build` -> `Comment.new(article_id:
-    /// @article.id)`) derives the foreign key from the ivar's name and
-    /// reads `.id`, which is wrong for these, so it declines them and
-    /// the typed association seed (which reads the declaration) handles
-    /// the call instead.
-    pub fn mark_keyed_associations(&mut self, models: &[crate::dialect::Model]) {
-        for model in models {
-            for assoc in model.associations() {
-                if crate::lower::assoc_primary_key::custom_primary_key(assoc).is_some() {
-                    self.keyed_assocs.insert(assoc.name().clone());
-                }
-            }
-        }
-    }
-
-    pub fn is_keyed_assoc(&self, name: &Symbol) -> bool {
-        self.keyed_assocs.contains(name)
-    }
-
     pub fn mark_file_fields(&mut self, models: &[crate::dialect::Model]) {
         for spec in &mut self.specs {
             let Some(model) = models
@@ -325,8 +273,7 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
     let mut specs: Vec<ParamsSpec> = Vec::new();
     for c in controllers {
         for action in c.actions() {
-            let tail = body_tail(&action.body);
-            collect_from_expr(&action.body, tail, &c.name, &mut index, &mut specs);
+            collect_from_expr(&action.body, &c.name, &mut index, &mut specs);
         }
     }
     assign_class_ids(&mut specs);
@@ -454,7 +401,6 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 file_fields: std::collections::BTreeSet::new(),
             })
             .collect(),
-        keyed_assocs: Default::default(),
         model_resources: None,
     }
 }
@@ -510,7 +456,6 @@ fn record(
 
 fn collect_from_expr(
     expr: &Expr,
-    tail: &Expr,
     controller: &ClassId,
     index: &mut BTreeMap<(Symbol, Vec<Symbol>), usize>,
     specs: &mut Vec<ParamsSpec>,
@@ -529,11 +474,7 @@ fn collect_from_expr(
             }
         }
     }
-    let found = if std::ptr::eq(expr, tail) {
-        match_reverse_merge(expr).or_else(|| match_permit_call_full(expr))
-    } else {
-        match_permit_call_full(expr)
-    };
+    let found = match_reverse_merge(expr).or_else(|| match_permit_call_full(expr));
     if let Some((resource, fields, nested)) = found {
         warn_nested_keys(&resource, &nested, controller, expr.span);
         record(resource, fields, controller, expr.span, Wants::default(), index, specs);
@@ -543,7 +484,7 @@ fn collect_from_expr(
         // register a second, narrower class for the same call site.
         return;
     }
-    walk_children(expr, &mut |c| collect_from_expr(c, tail, controller, index, specs));
+    walk_children(expr, &mut |c| collect_from_expr(c, controller, index, specs));
 }
 
 /// Record the NON-SCALAR permit keys this pass drops.
@@ -697,14 +638,12 @@ pub fn model_update_name(spec: &ParamsSpec, bang: bool) -> Symbol {
 /// First permit list in `expr`, in the same pre-order the collector
 /// uses — the way a `<resource>_params` helper body names its spec.
 pub fn first_permit_in(body: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
-    first_permit_at(body, body_tail(body))
+    first_permit_at(body)
 }
 
-fn first_permit_at(expr: &Expr, tail: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
-    if std::ptr::eq(expr, tail) {
-        if let Some((resource, fields, _)) = match_reverse_merge(expr) {
-            return Some((resource, fields));
-        }
+fn first_permit_at(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
+    if let Some((resource, fields, _)) = match_reverse_merge(expr) {
+        return Some((resource, fields));
     }
     if let Some(found) = match_permit_call(expr) {
         return Some(found);
@@ -712,7 +651,7 @@ fn first_permit_at(expr: &Expr, tail: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
     let mut found = None;
     walk_children(expr, &mut |c| {
         if found.is_none() {
-            found = first_permit_at(c, tail);
+            found = first_permit_at(c);
         }
     });
     found
@@ -933,69 +872,6 @@ fn build_params_object(
     with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty)
 }
 
-/// Each method's name with the type of the value its typed body
-/// answers (its last statement's).
-pub(super) fn helper_answers(methods: &[MethodDef]) -> std::collections::HashMap<Symbol, Option<Ty>> {
-    methods.iter().map(|m| (m.name.clone(), body_tail(&m.body).ty.clone())).collect()
-}
-
-/// `record.update(x)` / `update!(x)` where `x` is TYPED as a params
-/// class no model has a typed update variant for (#856): Rails' `update`
-/// takes the attribute Hash, which is `x.to_attrs`. Runs on a typed
-/// body, so a helper that answers a Hash (`permitted.to_h.except(:k)`)
-/// is left as written, and the class is the one the call site holds
-/// (a controller-qualified list, not the resource's canonical one).
-/// Each class read this way is added to `wanted`.
-///
-/// `answers` is each of the controller's own methods' typed body value
-/// ([`helper_answers`]): a call to one of them counts only when its body
-/// answers the params class, whatever its signature declares.
-pub(super) fn hand_update_the_attrs(
-    body: &mut Expr,
-    specs: &ParamsSpecs,
-    answers: &std::collections::HashMap<Symbol, Option<Ty>>,
-    wanted: &mut std::collections::BTreeSet<ClassId>,
-) {
-    body.node.for_each_child_mut(&mut |c| hand_update_the_attrs(c, specs, answers, wanted));
-    let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &mut *body.node else {
-        return;
-    };
-    if !matches!(method.as_str(), "update" | "update!") || args.len() != 1 {
-        return;
-    }
-    let Some(Ty::Class { id, .. }) = args[0].ty.as_ref() else { return };
-    let Some(spec) = specs.by_class(id) else { return };
-    if let ExprNode::Send { recv, method: helper, args: helper_args, block: None, .. } = &*args[0].node {
-        let own = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && helper_args.is_empty();
-        if own {
-            if let Some(answer) = answers.get(helper) {
-                if !matches!(answer, Some(Ty::Class { id: a, .. }) if a == id) {
-                    return;
-                }
-            }
-        }
-    }
-    if specs.has_typed_update(spec) {
-        return;
-    }
-    let class_id = spec.class_id.clone();
-    let value = std::mem::replace(&mut args[0], expr(ExprNode::Lit { value: Literal::Nil }, None));
-    let span = value.span;
-    let mut attrs = expr(
-        ExprNode::Send {
-            recv: Some(value),
-            method: Symbol::from("to_attrs"),
-            args: Vec::new(),
-            block: None,
-            parenthesized: false,
-        },
-        Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
-    );
-    attrs.span = span;
-    args[0] = attrs;
-    wanted.insert(class_id);
-}
-
 pub fn helper_spec_map<'a, 'b, I>(
     actions: I,
     specs: &'a ParamsSpecs,
@@ -1126,9 +1002,10 @@ fn match_permit_call_full(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbo
 
 /// Form 4: `{ field: expr, … }.merge(<permit-chain>)`, ingest's spelling
 /// of `<permit-chain>.reverse_merge(field: expr, …)`. The defaults' keys
-/// join the fields as Form 3's do. Callers match it only at a method
-/// body's tail (see [`body_tail`]): the rewrite is a statement Seq, and
-/// the tail of a params helper is where one can stand.
+/// join the fields as Form 3's do. The rewrite is a statement Seq, like
+/// Form 3's, so it stands wherever Form 3's does: a params helper's tail,
+/// a local's value (`attrs = <chain>.reverse_merge(...)`) or a call's
+/// argument.
 fn match_reverse_merge(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbol>)> {
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
         return None;
@@ -1149,7 +1026,7 @@ fn match_reverse_merge(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbol>)
 
 /// The expression a body returns: the last statement, through nested Seqs
 /// and an explicit `return`.
-fn body_tail(body: &Expr) -> &Expr {
+pub(super) fn body_tail(body: &Expr) -> &Expr {
     match &*body.node {
         ExprNode::Seq { exprs } if !exprs.is_empty() => body_tail(&exprs[exprs.len() - 1]),
         ExprNode::Return { value } => body_tail(value),
@@ -1438,8 +1315,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
                         ty: Some(Ty::Bool),
                         effects: EffectSet::default(),
                         leading_blank_line: false,
-                        diagnostic: None,
-                        hint: None,
+                        cold: None,
                         decisions: 0,
                     },
                 },
@@ -1462,8 +1338,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
             ty: Some(Ty::Nil),
             effects: EffectSet::default(),
             leading_blank_line: false,
-            diagnostic: None,
-            hint: None,
+            cold: None,
             decisions: 0,
         });
     }
@@ -1473,8 +1348,7 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
         ty: Some(Ty::Nil),
         effects: EffectSet::default(),
         leading_blank_line: false,
-        diagnostic: None,
-        hint: None,
+        cold: None,
         decisions: 0,
     };
     MethodDef {
@@ -1508,8 +1382,7 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
         ty: Some(field_ty.clone()),
         effects: EffectSet::default(),
         leading_blank_line: false,
-        diagnostic: None,
-        hint: None,
+        cold: None,
         decisions: 0,
     };
     MethodDef {
@@ -1615,8 +1488,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
         ty: Some(field_ty.clone()),
         effects: EffectSet::default(),
         leading_blank_line: false,
-        diagnostic: None,
-        hint: None,
+        cold: None,
         decisions: 0,
     };
     let body = Expr {
@@ -1628,8 +1500,7 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
         ty: Some(field_ty.clone()),
         effects: EffectSet::default(),
         leading_blank_line: false,
-        diagnostic: None,
-        hint: None,
+        cold: None,
         decisions: 0,
     };
     MethodDef {
@@ -2008,15 +1879,14 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
 
 /// Node + type, with the boilerplate every synthesized `Expr` here
 /// repeats.
-fn expr(node: ExprNode, ty: Option<Ty>) -> Expr {
+pub(super) fn expr(node: ExprNode, ty: Option<Ty>) -> Expr {
     Expr {
         span: Span::synthetic(),
         node: Box::new(node),
         ty,
         effects: EffectSet::default(),
         leading_blank_line: false,
-        diagnostic: None,
-        hint: None,
+        cold: None,
         decisions: 0,
     }
 }
@@ -2071,8 +1941,7 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
         ty: Some(hash_ty.clone()),
         effects: EffectSet::default(),
         leading_blank_line: false,
-        diagnostic: None,
-        hint: None,
+        cold: None,
         decisions: 0,
     };
     let ret_ty = hash_ty;
@@ -2210,9 +2079,9 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
                 return Some(build_from_raw_merge(&spec.class_id, entries, e.span, arg));
             }
         }
-        // Reverse-merge form (Form 4), at the body's tail only. Under an
-        // explicit `return` the statements replace the `return`, which
-        // moves onto the final `_p`.
+        // Reverse-merge form (Form 4). Under an explicit `return` at the
+        // body's tail the statements replace the `return`, which moves
+        // onto the final `_p`.
         let defaults = |e: &Expr| -> Option<Expr> {
             let (resource, fields, _) = match_reverse_merge(e)?;
             let ExprNode::Send { recv: Some(recv), args, .. } = &*e.node else { unreachable!() };
@@ -2232,10 +2101,8 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
                 }
             }
         }
-        if std::ptr::eq(e, tail) {
-            if let Some(seq) = defaults(e) {
-                return Some(seq);
-            }
+        if let Some(seq) = defaults(e) {
+            return Some(seq);
         }
         let (resource, fields) = match_permit_call(e)?;
         let spec = specs.find(&resource, &fields)?;
@@ -2313,7 +2180,7 @@ fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span
             span,
             ExprNode::Assign {
                 target: LValue::Attr { recv: p(()), name: name.clone() },
-                value: v.clone(),
+                value: param_string_literal(v).unwrap_or_else(|| v.clone()),
             },
         ));
         stmts.push(Expr::new(
@@ -2326,6 +2193,25 @@ fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span
     }
     stmts.push(p(()));
     Expr::new(span, ExprNode::Seq { exprs: stmts })
+}
+
+/// A literal merged value as the String a request would carry for it:
+/// every field of a `<Resource>Params` is a String (the model's typed
+/// factory casts it as it casts the request's), so `status: 0` is
+/// `"0"`, `role: :owner` is `"owner"`. A literal of another type in a
+/// String field is a type error on a strict target, and Spinel
+/// miscompiles it. Any other value is left as written.
+fn param_string_literal(v: &Expr) -> Option<Expr> {
+    let text = match &*v.node {
+        ExprNode::Lit { value: Literal::Int { value } } => value.to_string(),
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+        ExprNode::Lit { value: Literal::Bool { value } } => value.to_string(),
+        _ => return None,
+    };
+    Some(crate::lower::typing::with_ty(
+        Expr::new(v.span, ExprNode::Lit { value: Literal::Str { value: text } }),
+        Ty::Str,
+    ))
 }
 
 /// The factory's argument for the permit chain `chain`: `@params`, or,
@@ -2562,8 +2448,7 @@ fn try_rewrite_typed_bracket(
         ty: Some(slot_ty.clone()),
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
-        diagnostic: None,
-        hint: None,
+        cold: None,
         decisions: 0,
     })
 }

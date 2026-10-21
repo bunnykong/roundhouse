@@ -193,6 +193,25 @@ pub fn compile_raw_mapped(source: &str) -> (String, Vec<ErbSegment>) {
     (out, map)
 }
 
+/// A `.ruby` template (Rails' `:source.to_proc` handler): the source is
+/// Ruby whose value is the body, appended unescaped: the `<%== %>`
+/// spelling, `raw((…))`, around the whole file. The source is
+/// copied byte for byte, so one segment maps it back.
+pub fn compile_ruby_mapped(source: &str) -> (String, Vec<ErbSegment>) {
+    let mut out = String::from("_buf = \"\"\n_buf = _buf + (raw((\n");
+    let c_start = out.len();
+    out.push_str(source);
+    let c_end = out.len();
+    out.push_str("\n))).to_s\n_buf\n");
+    let map = vec![ErbSegment {
+        c_start: c_start as u32,
+        c_end: c_end as u32,
+        e_start: 0,
+        e_end: source.len() as u32,
+    }];
+    (out, map)
+}
+
 /// As [`compile_erb`], plus the segment table that maps compiled-Ruby
 /// byte ranges back to template byte ranges (see [`ErbSegment`]).
 /// View ingest uses it to translate spans so diagnostics and source

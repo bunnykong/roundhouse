@@ -58,7 +58,7 @@ impl<'a> BodyTyper<'a> {
     /// The class-side registration in `analyze/mod.rs` types these
     /// `Array<Untyped>` because "column type unknowable from the name
     /// alone" — true of the METHOD, false of the CALL. Here the column
-    /// is a Symbol literal and the model is known, so the schema
+    /// is a literal Symbol or String and the model is known, so the schema
     /// answers: `sessions.pluck(:ip_address)` is `Array[Str]`, not an
     /// open var.
     ///
@@ -70,10 +70,8 @@ impl<'a> BodyTyper<'a> {
     /// strict target cannot compile ([[feedback_types_are_performance_
     /// avoid_bags]]).
     ///
-    /// MULTI-COLUMN `pluck(:a, :b)` is not claimed: Rails answers an
-    /// Array of tuples, which is `Ty::Array<Ty::Array<...>>` only if
-    /// the columns share a type. The registered `Array<Untyped>`
-    /// stands for that form.
+    /// Multiple columns produce a tuple in argument order, preserving
+    /// each column's type even when the columns have different types.
     fn column_projection(
         &self,
         model: &ClassId,
@@ -83,18 +81,73 @@ impl<'a> BodyTyper<'a> {
         if !matches!(method.as_str(), "pluck" | "pick") {
             return None;
         }
-        let [arg] = args else { return None };
-        let ExprNode::Lit { value: crate::expr::Literal::Sym { value: col } } = &*arg.node else {
+        if args.is_empty() {
             return None;
-        };
+        }
         let cls = self.classes().get(model)?;
-        let col_ty = cls.instance_methods.get(col)?.clone();
+        let columns = args
+            .iter()
+            .map(|arg| {
+                let name = match &*arg.node {
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.clone(),
+                    ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Symbol::from(value.as_str()),
+                    _ => return None,
+                };
+                let name = crate::schema::pluck_argument(
+                    name,
+                    cls.attributes.fields.contains_key(&Symbol::from("id")),
+                    cls.primary_key.as_ref(),
+                );
+                if cls.attributes.fields.is_empty() {
+                    cls.instance_methods.get(&name).cloned()
+                } else {
+                    cls.attributes.fields.get(&name).cloned()
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let col_ty = if columns.len() == 1 {
+            columns.into_iter().next()?
+        } else {
+            Ty::Tuple { elems: columns.into() }
+        };
         Some(match method.as_str() {
             // `pick` is `pluck(...).first` — the column value, or nil
             // when the relation is empty.
             "pick" => Ty::Union { variants: vec![col_ty, Ty::Nil].into() },
             _ => Ty::Array { elem: std::sync::Arc::new(col_ty) },
         })
+    }
+
+    pub(super) fn reader_projection(&self, recv: &Ty, columns: &[Symbol]) -> Option<Ty> {
+        let id = match recv {
+            Ty::Array { elem } => match elem.as_ref() {
+                Ty::Class { id, .. } => id,
+                _ => return None,
+            },
+            Ty::Relation { of } => of,
+            Ty::Union { variants } => {
+                let projected = variants.iter().map(|ty| self.reader_projection(ty, columns))
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(union_many(projected));
+            }
+            _ => return None,
+        };
+        let fields = columns.iter().map(|name| {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let class = self.classes().get(current?)?;
+                if let Some(ty) = class.instance_methods.get(name) {
+                    return Some(match ty {
+                        Ty::Fn { ret, .. } => ret.as_ref().clone(),
+                        value => value.clone(),
+                    });
+                }
+                current = class.parent.as_ref();
+            }
+            None
+        }).collect::<Option<Vec<_>>>()?;
+        let elem = if fields.len() == 1 { fields.into_iter().next()? } else { Ty::Tuple { elems: fields.into() } };
+        Some(Ty::Array { elem: std::sync::Arc::new(elem) })
     }
 
     /// Rails' per-column dynamic finders (`find_by_<attr>`,
@@ -362,8 +415,13 @@ impl<'a> BodyTyper<'a> {
         let ExprNode::Lambda { params, .. } = &*block.node else {
             return new_ctx;
         };
-        for name in params { new_ctx.class_objects.remove(name); }
+        for name in params { new_ctx.class_objects.remove(name); new_ctx.query_class_objects.remove(name); }
         super::forget_class_object_writes(block, &mut new_ctx);
+        if class_object_receiver && matches!(method.as_str(), "tap" | "then" | "yield_self")
+            && !self.owns_operator(recv_ty, method, true)
+        {
+            if let Some(name) = params.first() { *self.block_class_param.borrow_mut() = Some(name.clone()); }
+        }
         // `form_with model: product do |form|` / `form_for @product do
         // |f|`: the builder is parameterized by the record the form is
         // for, so `form.object` (and `form.object.errors`) answer it.
@@ -965,6 +1023,19 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    fn source_ancestor(&self, of: &ClassId, method: &Symbol) -> Option<ClassId> {
+        let mut current = self.classes().get(of)?.parent.clone();
+        for _ in 0..32 {
+            let id = current?;
+            let cls = self.classes().get(&id)?;
+            if cls.source_class_methods.contains(method) {
+                return Some(id);
+            }
+            current = cls.parent.clone();
+        }
+        None
+    }
+
     fn defines_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {
@@ -1277,9 +1348,13 @@ impl<'a> BodyTyper<'a> {
         // runtime site) answers the function's declared return. Only
         // a `Ty::Fn` receiver claims this; anything else keeps its
         // own `call` (a callable app class, an untyped proc).
-        if method.as_str() == "call" {
+        if matches!(method.as_str(), "call" | "[]") {
             if let Some(Ty::Fn { ret, .. }) = recv_ty {
-                return (**ret).clone();
+                // Not left a type variable: `call` is known, and what the body answers is the body's own sends' to report.
+                return match &**ret {
+                    Ty::Var { .. } => Ty::Untyped,
+                    ret => ret.clone(),
+                };
             }
         }
         // `then` / `yield_self` are the receiver-identity pair's mirror:
@@ -1438,6 +1513,12 @@ impl<'a> BodyTyper<'a> {
                 // (`SCORE_RANGE_TO_HIDE.include?(score)`, `.first`) and
                 // any other range value flowing through dispatch.
                 if id.0.as_str() == "Range" {
+                    if method.as_str() == "new" && args.is_empty() && (2..=3).contains(&call_args.len())
+                        && !call_args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. }))
+                    {
+                        let elem = call_args[0].ty.clone().or_else(|| call_args[1].ty.clone()).unwrap_or(Ty::Untyped);
+                        return Ty::Class { id: id.clone(), args: vec![elem].into() };
+                    }
                     if let Some(ty) = range_method(method, args.first()) {
                         return ty;
                     }
@@ -1463,6 +1544,32 @@ impl<'a> BodyTyper<'a> {
                 }
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_date" {
                     return Ty::Union { variants: vec![Ty::Date, Ty::Nil].into() };
+                }
+                // Interval-column reader. Storage is whole seconds of text;
+                // the value is the Ruby-family Duration class.
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_interval" {
+                    return Ty::Union {
+                        variants: vec![
+                            Ty::Class {
+                                id: crate::ident::ClassId(crate::ident::Symbol::from("ActiveSupport::Duration")),
+                                args: vec![].into(),
+                            },
+                            Ty::Nil,
+                        ].into(),
+                    };
+                }
+                // Write side of an interval column: a Duration becomes its
+                // whole-second count. A string or nil can fail to parse.
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "format_db_interval" {
+                    let plain_duration = matches!(
+                        call_args.first().and_then(|a| a.ty.as_ref()),
+                        Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveSupport::Duration"
+                    );
+                    return if plain_duration {
+                        Ty::Int
+                    } else {
+                        Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }
+                    };
                 }
                 // The Date calendar intrinsics `time_calendar` lowers to.
                 if id.0.as_str() == "ActiveSupport" {
@@ -1718,6 +1825,34 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
+                        // Same projection the relation arm uses. A source
+                        // `def self.pluck` / `pick` declines only this
+                        // class send; `Model.all.pluck` is still the
+                        // relation method.
+                        let source_here = cls.source_class_methods.contains(method);
+                        let source_ancestor = self.source_ancestor(id, method);
+                        if cid == id
+                            && !source_here
+                            && source_ancestor.is_none()
+                            && let Some(projected) = self.column_projection(id, method, call_args)
+                        {
+                            return projected;
+                        }
+                        // The catalog seed lives on every model, so the
+                        // walk stops here even when the source method is
+                        // an ancestor's. That ancestor's harvested return
+                        // is the call.
+                        if cid == id
+                            && !source_here
+                            && let Some(defined) = source_ancestor
+                            && let Some(ancestor_ty) = self
+                                .classes()
+                                .get(&defined)
+                                .and_then(|ancestor| ancestor.class_methods.get(method))
+                            && !gradual_array(ancestor_ty)
+                        {
+                            return unwrap_fn_ret(&subst(ancestor_ty));
+                        }
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {
@@ -2734,6 +2869,7 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
             Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
             _ => return None,
         },
+        "+" | "-" if args.len() == 1 && crate::lower::time_calendar::date_calendar_duration(&args[0]).is_some() => date(),
         // `Date + Integer` → Date. `Date + Untyped` stays gradual: the
         // operand might not be an Integer day shift, and Spinel has no `+`.
         "+" if args.len() == 1 => match args[0].ty.as_ref() {
@@ -2805,19 +2941,6 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
     })
 }
 
-/// `first(n)` / `last(n)` — the COUNTED form. Ruby's `Array#first(n)`,
-/// Rails' `Relation#last(n)` and `Model.first(n)` all answer an Array of
-/// up to n elements, where the bare form answers one element or nil.
-/// Every method table here is keyed by name alone and so typed the
-/// counted form as `elem | nil`; campfire's searches controller then
-/// carried `Message?` for `reachable_messages.search(q).last(100)`, the
-/// controller ivar joined that with the other branch's `Message.none`,
-/// and the emitted view signature — which the LOWERER got right
-/// (`last_n`, declared `Array[untyped]`) — disagreed with the analyzer
-/// about the same value. Gated on one non-block argument that is an
-/// Integer (or not yet typed): `first { … }` and `first` stay as they
-/// were. Mirrors `lower::scope_chain::counted_terminal`, which renames
-/// the call for the runtime for the same reason.
 /// `Array#[]` / `slice` return a *sub-array* (`Array<elem> | Nil`) when
 /// indexed by a `Range` or a `(start, length)` pair, but a single
 /// *element* (`elem | Nil`) for a lone integer. `array_method` sees only
@@ -2838,16 +2961,29 @@ fn sub_array_slice(method: &Symbol, args: &[crate::expr::Expr], elem: &Ty) -> Op
     })
 }
 
-fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
-    // `take(n)` is the same counted terminal as `first(n)`: the Rails
-    // tutorial seeds with `User.order(:created_at).take(6)` and then
-    // `.each`es the result.
-    matches!(method.as_str(), "first" | "last" | "take" | "sample")
-        && args.len() == 1
-        && matches!(
-            args[0].ty.as_ref(),
-            None | Some(Ty::Int) | Some(Ty::Untyped) | Some(Ty::Var { .. })
-        )
+/// `first(n)` / `last(n)` — the counted form. Ruby's `Array#first(n)`,
+/// Rails' `Relation#last(n)` and `Model.first(n)` all answer an Array of
+/// up to n elements, where the bare form answers one element or nil.
+/// The name and arity come from [`crate::catalog::counted_relation_terminal`],
+/// which `scope_chain::counted_terminal` and
+/// `relation_counted_terminal` read too. `take(n)` / `sample(n)` are
+/// counted here only; the runtime does not rename them. This dispatch
+/// does not see the block node, so a block is not part of the question
+/// — the renamers pass it and then refuse.
+pub(crate) fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
+    // `take(n)` / `sample(n)` answer an Array too. They are not the
+    // relation rename: the runtime keeps those names. `first` / `last`
+    // go through the shared predicate so the renamers cannot spell a
+    // different arity.
+    let [arg] = args else { return false };
+    if !matches!(
+        arg.ty.as_ref(),
+        None | Some(Ty::Int) | Some(Ty::Untyped) | Some(Ty::Var { .. })
+    ) {
+        return false;
+    }
+    crate::catalog::counted_relation_terminal(method.as_str(), args.len(), false).is_some()
+        || matches!(method.as_str(), "take" | "sample")
 }
 
 fn array_find(method: &Symbol, args: &[crate::expr::Expr], block_ret: Option<&Ty>) -> bool {
@@ -2930,6 +3066,7 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
         },
         ReturnKind::ArrayOfSym => Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
         ReturnKind::Str => Ty::Str,
+        ReturnKind::StrOrNil => union_of(Ty::Str, Ty::Nil),
     }
 }
 
@@ -3494,9 +3631,14 @@ pub(crate) fn string_answers(method: &Symbol) -> bool {
 }
 
 pub(super) fn str_method(method: &Symbol) -> Ty {
+    // The mirrored kernel lives in `catalog::string_kernel`. This
+    // ladder keeps every other String method.
+    if let Some(ty) = crate::catalog::string_kernel::return_ty(method.as_str()) {
+        return ty;
+    }
     match method.as_str() {
-        "length" | "size" | "bytesize" => Ty::Int,
-        "upcase" | "downcase" | "strip" | "chomp" | "chop" | "reverse" | "to_s"
+        "bytesize" => Ty::Int,
+        "chomp" | "chop" | "reverse" | "to_s"
         | "capitalize" | "swapcase" | "squeeze" | "dup" | "clone"
         | "tr" | "tr_s" | "delete" | "gsub" | "sub" | "lstrip" | "rstrip"
         | "delete_prefix" | "delete_suffix"
@@ -3514,7 +3656,6 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // on a String is a shape the transpiled targets do not all
         // lower). Both answer a String whatever the width.
         | "rjust" | "ljust" | "center" => Ty::Str,
-        "to_i" => Ty::Int,
         "to_f" => Ty::Float,
         "to_sym" | "intern" => Ty::Sym,
         // Case-insensitive comparison: `casecmp` returns -1/0/1 (Int),
@@ -3557,8 +3698,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // template names; `unpack1` its first element.
         "unpack" => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
         "unpack1" => Ty::Untyped,
-        "empty?" | "blank?" | "present?" | "include?" | "start_with?"
-        | "end_with?" | "match?" => Ty::Bool,
+        "blank?" | "present?" | "match?" => Ty::Bool,
         // ActiveSupport `Object#presence_in(collection)` — the receiver
         // when the collection includes it, else nil. campfire's
         // `params.require(:user)[:role].presence_in(%w[ member
@@ -3763,6 +3903,18 @@ pub(super) fn float_method(method: &Symbol) -> Ty {
 /// `parse_app_signatures` stores full function types
 /// (`Ty::Fn { ret: ..., .. }`). Dispatch wants the return-type form
 /// in both cases.
+/// `[]` harvests as `Array[Var]`, the same gradual answer as the
+/// catalog `Array[Untyped]` seed. A caller learns nothing from the swap.
+/// A real return (`7`, an `Array[Str]`) is not this.
+fn gradual_array(ty: &Ty) -> bool {
+    match ty {
+        Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Array { elem } => matches!(elem.as_ref(), Ty::Untyped | Ty::Var { .. }),
+        Ty::Fn { ret, .. } => gradual_array(ret),
+        _ => false,
+    }
+}
+
 fn unwrap_fn_ret(ty: &Ty) -> Ty {
     match ty {
         Ty::Fn { ret, .. } => (**ret).clone(),
@@ -3890,6 +4042,15 @@ pub(super) fn is_module_protocol(method: &Symbol) -> bool {
         | "method_defined?" | "public_method_defined?" | "private_method_defined?"
         | "const_defined?" | "include?" | "instance_methods" | "public_instance_methods"
         | "private_instance_methods" | "remove_method" | "undef_method")
+}
+
+/// The Module protocol names that only read a class, which a strict emit has no class object to answer.
+pub(super) fn is_module_query(method: &Symbol) -> bool {
+    matches!(method.as_str(),
+        "const_defined?" | "const_get" | "constants" | "method_defined?" | "public_method_defined?"
+        | "private_method_defined?" | "instance_method" | "public_instance_method" | "instance_methods"
+        | "public_instance_methods" | "private_instance_methods" | "include?" | "class_variable_get"
+        | "class_variable_defined?")
 }
 
 pub(super) fn object_protocol_method(

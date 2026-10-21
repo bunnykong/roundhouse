@@ -38,6 +38,7 @@ module ActiveSupport
     def seconds: () -> Integer
     def ==: (untyped other) -> bool
     def <=>: (untyped other) -> (Integer | nil)
+    def coerce: (untyped other) -> Array[untyped]
     def <: (untyped other) -> bool
     def <=: (untyped other) -> bool
     def >: (untyped other) -> bool

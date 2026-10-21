@@ -239,6 +239,8 @@ fn parse_sequel_association(
                 foreign_key,
                 foreign_key_explicit,
                 through: None,
+                source: None,
+                class_explicit: false,
                 dependent,
                 as_interface: None,
                 scope: order_expr,
@@ -461,6 +463,8 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                     .map(|attribute| Validation {
                         attribute,
                         rules: vec![ValidationRule::Presence],
+                        if_cond: None,
+                        unless_cond: None,
                     })
                     .collect()
             })
@@ -488,6 +492,8 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                             message: message.clone(),
                             allow_nil: None,
                         }],
+                        if_cond: None,
+                        unless_cond: None,
                     })
                     .collect()
             })

@@ -17,6 +17,7 @@ module Users
     rule(:login) do
       key.failure(:taken, who: %w[admin root]) if value == "adm"
       base.failure(:closed) if value == "zzz"
+      key.failure(:hashy) if value == "hsh"
     end
   end
 

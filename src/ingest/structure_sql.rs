@@ -420,9 +420,11 @@ fn parse_column_def(
 /// `pg_catalog.character varying` is not a qualified built-in spelling.
 /// Quoted qualified names are also rejected because type normalization
 /// lowercases their contents without preserving SQL identifier case.
-/// Other aliases (`inet`, `interval`, enums, `citext`, and fixed
-/// `character`) also normalize to text-like types without portable text
-/// semantics. A text typmod is marked because this IR does not retain it.
+/// Other aliases (`inet`, enums, `citext`, and fixed `character`) also
+/// normalize to text-like types without portable text semantics.
+/// `interval` is `ColumnType::Interval`, not text, and stays marked here
+/// so a generated expression cannot treat it as a string operand.
+/// A text typmod is marked because this IR does not retain it.
 fn has_nonportable_text_source_type(
     type_phrase: &str,
     enum_types: &HashSet<String>,
@@ -534,7 +536,8 @@ fn resolve_column_type(type_phrase: &str, enum_types: &HashSet<String>) -> Optio
         "jsonb" => ColumnType::Jsonb,
         "uuid" => ColumnType::Uuid,
         "inet" | "cidr" | "macaddr" | "macaddr8" => ColumnType::String { limit: None },
-        "interval" => ColumnType::String { limit: None },
+        // Same column as schema.rb `t.interval`, including `interval(6)`.
+        "interval" => ColumnType::Interval,
         other if enum_types.contains(other) => ColumnType::String { limit: None },
         _ => return None,
     })
@@ -1658,6 +1661,8 @@ CREATE INDEX widgets_payload_idx ON widgets USING public.gin (payload);"#;
         assert!(matches!(resolve_column_type("json", &enums), Some(ColumnType::Json)));
         assert!(matches!(resolve_column_type("jsonb", &enums), Some(ColumnType::Jsonb)));
         assert!(matches!(resolve_column_type("uuid", &enums), Some(ColumnType::Uuid)));
+        assert!(matches!(resolve_column_type("interval", &enums), Some(ColumnType::Interval)));
+        assert!(matches!(resolve_column_type("interval(6)", &enums), Some(ColumnType::Interval)));
         assert!(matches!(
             resolve_column_type("numeric(10,2)", &enums),
             Some(ColumnType::Decimal { precision: None, scale: None })

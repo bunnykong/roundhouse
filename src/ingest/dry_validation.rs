@@ -171,6 +171,9 @@ struct Cx<'a> {
     constants: &'a HashMap<String, Expr>,
     classes: &'a HashSet<String>,
     structs: &'a HashMap<String, Option<String>>,
+    /// Each class's parent, resolved: a constant is found on the ancestors
+    /// after the lexical scopes.
+    parents: &'a HashMap<String, String>,
 }
 
 pub(super) fn lower_dry_validation(
@@ -219,7 +222,23 @@ pub(super) fn lower_dry_validation(
     let no_structs: HashMap<String, Option<String>> = HashMap::new();
     // A type is named by a class or by a constant holding one.
     let type_names: HashSet<String> = names.iter().cloned().chain(constants.keys().cloned()).collect();
-    let cx = Cx { names: &type_names, types_modules: &types_modules, constants: &constants, classes: &classes, structs: &no_structs };
+    let parents: HashMap<String, String> = app
+        .library_classes
+        .iter()
+        .filter_map(|lc| {
+            let name = lc.name.0.as_str();
+            let written = lc.parent.as_ref()?.0.as_str().trim_start_matches("::");
+            Some((name.to_string(), resolve(name, written, &names)?))
+        })
+        .collect();
+    let cx = Cx {
+        names: &type_names,
+        types_modules: &types_modules,
+        constants: &constants,
+        classes: &classes,
+        structs: &no_structs,
+        parents: &parents,
+    };
     // `Dry::Schema.Params do ... end` constants, read where they stand; one
     // naming another once that one is read.
     let mut schemas: HashMap<String, Result<Schema, String>> = HashMap::new();
@@ -257,29 +276,55 @@ pub(super) fn lower_dry_validation(
         chain
     };
 
-    // Each contract's own schema, or why it is not read.
+    // Each contract's own schema, or why it is not read. Round by round:
+    // a contract naming another's `.schema` reads once that one has.
     let mut own: HashMap<String, Contract> = HashMap::new();
     let mut refused: HashMap<String, String> = HashMap::new();
-    for name in parent_of.keys() {
-        let lc = app.library_classes.iter().find(|lc| lc.name.0.as_str() == name).expect("listed");
-        if let Some(reason) = configs.get(name).and_then(|c| c.refused.clone()) {
-            refused.insert(name.clone(), reason);
-            continue;
-        }
-        // A rule may call the contract's own methods, an ancestor's too.
-        let methods: HashSet<String> = chain_of(name)
-            .iter()
-            .filter_map(|n| app.library_classes.iter().find(|lc| lc.name.0.as_str() == n))
-            .flat_map(|lc| lc.methods.iter().map(|m| m.name.as_str().to_string()))
-            .collect();
-        match read_contract(lc, &cx, &schemas_read, &methods) {
-            Ok(contract) => {
-                own.insert(name.clone(), contract);
-            }
-            Err(reason) => {
+    let mut schemas_all = schemas_read.clone();
+    let mut pending: Vec<String> = parent_of.keys().cloned().collect();
+    pending.sort();
+    let mut last: HashMap<String, String> = HashMap::new();
+    loop {
+        let before = pending.len();
+        let mut still = Vec::new();
+        for name in pending {
+            let lc = app.library_classes.iter().find(|lc| lc.name.0.as_str() == name).expect("listed");
+            if let Some(reason) = configs.get(&name).and_then(|c| c.refused.clone()) {
                 refused.insert(name.clone(), reason);
+                continue;
+            }
+            // A rule may call the contract's own methods, an ancestor's too.
+            let methods: HashSet<String> = chain_of(&name)
+                .iter()
+                .filter_map(|n| app.library_classes.iter().find(|lc| lc.name.0.as_str() == n))
+                .flat_map(|lc| lc.methods.iter().map(|m| m.name.as_str().to_string()))
+                .collect();
+            match read_contract(lc, &cx, &schemas_all, &methods) {
+                Ok(contract) => {
+                    own.insert(name.clone(), contract);
+                }
+                Err(reason) => {
+                    last.insert(name.clone(), reason);
+                    still.push(name);
+                }
             }
         }
+        for name in parent_of.keys() {
+            let chain = chain_of(name);
+            if chain.iter().all(|n| own.contains_key(n))
+                && let Some(schema) = merged_schema(&chain, &own)
+            {
+                schemas_all.insert(format!("{name}.schema"), schema);
+            }
+        }
+        pending = still;
+        if pending.len() == before || pending.is_empty() {
+            break;
+        }
+    }
+    for name in pending {
+        let reason = last.remove(&name).unwrap_or_default();
+        refused.insert(name, reason);
     }
     // A schema is inherited, and so is the `call` it makes: a refused
     // contract under a lowered one would answer its parent's, and one over
@@ -311,23 +356,8 @@ pub(super) fn lower_dry_validation(
             continue;
         }
         let chain = chain_of(name);
-        let mut schema: Option<Schema> = None;
-        let mut rules: Vec<RuleDecl> = Vec::new();
-        for n in &chain {
-            if let Some(c) = own.get(n) {
-                rules.extend(c.rules.iter().cloned());
-            }
-            if let Some(Contract { schema: Some(s), .. }) = own.get(n) {
-                match &mut schema {
-                    None => schema = Some(s.clone()),
-                    Some(acc) => {
-                        acc.processor = s.processor;
-                        acc.extend(s);
-                    }
-                }
-            }
-        }
-        let schema = schema.expect("has a schema");
+        let rules: Vec<RuleDecl> = chain.iter().filter_map(|n| own.get(n)).flat_map(|c| c.rules.iter().cloned()).collect();
+        let schema = merged_schema(&chain, &own).expect("has a schema");
         let messages = messages_for(&chain, &configs, &constants, read_file, "dry_validation");
         let methods: HashSet<String> = chain
             .iter()
@@ -403,6 +433,24 @@ pub(super) fn lower_dry_validation(
         app.library_classes.extend(stand_ins(&used));
     }
     Ok(())
+}
+
+/// A contract's schema along its chain: a child's keys after its parent's,
+/// its processor over theirs.
+fn merged_schema(chain: &[String], own: &HashMap<String, Contract>) -> Option<Schema> {
+    let mut schema: Option<Schema> = None;
+    for n in chain {
+        if let Some(Contract { schema: Some(s), .. }) = own.get(n) {
+            match &mut schema {
+                None => schema = Some(s.clone()),
+                Some(acc) => {
+                    acc.processor = s.processor;
+                    acc.extend(s);
+                }
+            }
+        }
+    }
+    schema
 }
 
 /// `Dry::Schema.Params do ... end`, `.JSON`, `.define`: the processor and
@@ -648,24 +696,43 @@ fn schema_ref<'a>(
     cx: &Cx<'_>,
     schemas: &'a HashMap<String, Schema>,
 ) -> Result<&'a Schema, String> {
-    let ExprNode::Const { path } = &*expr.node else {
-        return Err(format!("schema `{}`", crate::emit::ruby::emit_expr(expr)));
+    // `OtherContract.schema`: that contract's, published once read.
+    let (path, suffix) = match &*expr.node {
+        ExprNode::Const { path } => (path, ""),
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if method.as_str() == "schema" && args.is_empty() =>
+        {
+            match &*recv.node {
+                ExprNode::Const { path } => (path, ".schema"),
+                _ => return Err(format!("schema `{}`", crate::emit::ruby::emit_expr(expr))),
+            }
+        }
+        _ => return Err(format!("schema `{}`", crate::emit::ruby::emit_expr(expr))),
     };
+    let absolute = path.first().is_some_and(|s| s.as_str().is_empty());
     let written: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
     let name = written.join("::");
-    let candidates: Vec<String> = {
+    // Lexically outward, then up the owner's ancestors, as Ruby looks.
+    let candidates: Vec<String> = if absolute {
+        vec![name.clone()]
+    } else {
         let mut out = vec![format!("{owner}::{name}")];
         let mut scope: Vec<&str> = owner.split("::").collect();
         while !scope.is_empty() {
             scope.pop();
             out.push(if scope.is_empty() { name.clone() } else { format!("{}::{name}", scope.join("::")) });
         }
+        let mut ancestor = cx.parents.get(owner);
+        while let Some(a) = ancestor {
+            out.push(format!("{a}::{name}"));
+            ancestor = cx.parents.get(a);
+        }
         out
     };
     candidates
         .iter()
-        .find_map(|c| schemas.get(c))
-        .ok_or_else(|| format!("schema `{name}`"))
+        .find_map(|c| schemas.get(&format!("{c}{suffix}")))
+        .ok_or_else(|| format!("schema `{name}{suffix}`"))
 }
 
 fn read_schema(
@@ -836,6 +903,19 @@ fn dry_primitive(base: &super::dry_types::Base) -> Option<&'static str> {
         Base::Strict("Hash") => "hash?",
         Base::Strict("Array") => "array?",
         Base::Instance(_) => "type?",
+        // `Instance(A) | Instance(B)`: either type, one message per side.
+        Base::Sum(members)
+            if members.iter().all(|m| {
+                matches!(m.base, Base::Instance(_))
+                    && !m.optional
+                    && m.default.is_none()
+                    && m.enumeration.is_none()
+                    && m.constraints.is_empty()
+                    && m.fallback.is_none()
+            }) =>
+        {
+            "type_sum"
+        }
         Base::Nominal => "",
         _ => return None,
     })
@@ -976,10 +1056,37 @@ fn read_rule(
                 "filled" => Macro::Filled,
                 _ => Macro::Maybe,
             };
+            // A schema where the type goes (`filled(AddressContract.schema)`):
+            // a Hash of its keys. `X.schema` can be nothing else, so its
+            // failure is the reason; a constant may be a type instead, and
+            // the schema's failure is the reason only if it is not.
+            let as_schema = match spec.map(|s| &*s.node) {
+                Some(ExprNode::Send { method, args, .. }) if method.as_str() == "schema" && args.is_empty() => {
+                    Some(schema_ref(spec.unwrap(), owner, cx, schemas))
+                }
+                Some(ExprNode::Const { .. }) => match schema_ref(spec.unwrap(), owner, cx, schemas) {
+                    Ok(found) => Some(Ok(found)),
+                    Err(reason) => ty_of(spec).is_err().then_some(Err(reason)),
+                },
+                _ => None,
+            };
+            if let Some(referenced) = as_schema {
+                let mut schema = referenced?.clone();
+                if let Some(s) = nested_block(block)? {
+                    schema.extend(&s);
+                }
+                return Ok(Rule { macro_, ty: Ty::Coerced("hash"), preds, nested: Some(Nested::Hash(schema)), type_first: false });
+            }
             let ty = ty_of(spec)?;
-            let nested = match nested_block(block)? {
-                Some(schema) if matches!(ty, Ty::Coerced("hash")) => Some(Nested::Hash(schema)),
-                Some(_) => return Err(format!("a block on `{macro_name}` of another type")),
+            let mut preds = preds;
+            // A block on a hash holds its keys; on anything else, more
+            // predicates (`value(:string) { min_size?(2) }`).
+            let nested = match block {
+                Some(b) if matches!(ty, Ty::Coerced("hash")) => nested_block(Some(b))?.map(Nested::Hash),
+                Some(b) => {
+                    preds.extend(predicate_block(b)?);
+                    None
+                }
                 None => None,
             };
             Ok(Rule { macro_, ty, preds, nested, type_first: false })
@@ -1203,6 +1310,12 @@ impl Messages {
         Messages { data, root: format!("{locale}.{namespace}.errors"), namespace }
     }
 
+    /// The word joining the messages of a sum's sides.
+    fn or_word(&self) -> String {
+        let locale = self.root.split('.').next().unwrap_or("en");
+        self.data.get(&format!("{locale}.{}.or", self.namespace)).cloned().unwrap_or_else(|| "or".into())
+    }
+
     /// The template for `predicate` on the key `path`, as dry-schema's
     /// lookup paths find it.
     fn template(&self, predicate: &str, path: &str, arg_type: &str, val_type: &str) -> Option<&str> {
@@ -1254,33 +1367,57 @@ fn flat_yaml(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// A Ruby String literal of `template`, its `%{token}`s interpolated from
-/// the expressions given.
-fn interpolated(template: &str, tokens: &HashMap<String, String>) -> String {
+/// A Ruby String literal of a message template, as dry-schema's YAML
+/// backend makes one: it turns `%` into `#` and evaluates `"#{text}"`, so
+/// a token (`%{num}`) is interpolated from the expression given, `#@x`
+/// and `#@@x` read nothing (nil), `#$x` reads the global and any other
+/// `#{...}` is Ruby, run where the message is built.
+/// ponytail: a backslash stays literal; the gem would read it as an
+/// escape, which a message file has not been seen to rely on.
+fn template_literal(template: &str, tokens: &HashMap<String, String>) -> String {
+    let text = template.replace('%', "#");
+    let ident = |s: &str| s.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(s.len());
     let mut out = String::from("\"");
-    let mut rest = template;
-    while let Some(at) = rest.find("%{") {
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find('#') {
         out.push_str(&escape(&rest[..at]));
-        let after = &rest[at + 2..];
-        let Some(end) = after.find('}') else {
-            out.push_str(&escape(&rest[at..]));
-            rest = "";
-            break;
-        };
-        let token = &after[..end];
-        match tokens.get(token) {
-            Some(expr) => out.push_str(&format!("#{{{expr}}}")),
-            None => out.push_str(&escape(&format!("%{{{token}}}"))),
+        let after = &rest[at + 1..];
+        if let Some(body) = after.strip_prefix('{')
+            && let Some(end) = body.find('}')
+        {
+            let inner = &body[..end];
+            match tokens.get(inner) {
+                Some(expr) => out.push_str(&format!("#{{{expr}}}")),
+                None => out.push_str(&format!("#{{{inner}}}")),
+            }
+            rest = &body[end + 1..];
+        } else if let Some(name) = after.strip_prefix("@@").or_else(|| after.strip_prefix('@'))
+            && ident(name) > 0
+        {
+            rest = &name[ident(name)..];
+        } else if let Some(name) = after.strip_prefix('$')
+            && ident(name) > 0
+        {
+            out.push_str(&format!("#{{${}}}", &name[..ident(name)]));
+            rest = &name[ident(name)..];
+        } else {
+            out.push_str("\\#");
+            rest = after;
         }
-        rest = &after[end + 1..];
     }
     out.push_str(&escape(rest));
     out.push('"');
     out
 }
 
+/// A Ruby String literal of `text` as written: nothing in it interpolates.
+fn literal(text: &str) -> String {
+    format!("\"{}\"", escape(text))
+}
+
 fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace("#{", "\\#{")
+    // Every `#`: `#@ivar`, `#@@cvar` and `#$global` interpolate too.
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('#', "\\#")
 }
 
 /// What generates one class's methods.
@@ -1324,14 +1461,11 @@ impl Gen<'_> {
                         .map(|(k, v)| (k.replace("size", "num"), v.clone()))
                         .collect();
                     tokens.extend(mapped);
-                    interpolated(t, &tokens)
+                    template_literal(t, &tokens)
                 }
                 None => format!(
                     "raise(::Dry::Schema::MissingMessageError, {})",
-                    interpolated(
-                        &format!("Message template for :{path} under \"\" was not found"),
-                        &HashMap::new()
-                    )
+                    literal(&format!("Message template for :{path} under \"\" was not found"))
                 ),
             }
         };
@@ -1399,7 +1533,7 @@ impl Gen<'_> {
     /// `base`), its tokens interpolated.
     fn failure_message(&mut self, failure: Failure<'_>) -> String {
         let (id, tokens) = match failure.message {
-            FailureMessage::Text(text) => return interpolated(text, &HashMap::new()),
+            FailureMessage::Text(text) => return literal(text),
             FailureMessage::Id(id, tokens) => (id, tokens),
         };
         let tokens: HashMap<String, String> = tokens
@@ -1415,16 +1549,13 @@ impl Gen<'_> {
                 .map(str::to_string),
         };
         match template {
-            Some(t) => interpolated(&t, &tokens),
+            Some(t) => template_literal(&t, &tokens),
             None => format!(
                 "raise(::Dry::Validation::MissingMessageError, {})",
-                interpolated(
-                    &format!(
-                        "Message template for :{id} under \"{}\" was not found",
-                        failure.path.map(|p| p.join(".")).unwrap_or_default()
-                    ),
-                    &HashMap::new()
-                )
+                literal(&format!(
+                    "Message template for :{id} under \"{}\" was not found",
+                    failure.path.map(|p| p.join(".")).unwrap_or_default()
+                ))
             ),
         }
     }
@@ -1561,6 +1692,26 @@ impl Gen<'_> {
                             ExprNode::Const { path: vec![Symbol::from(class.trim_start_matches("::"))] },
                         ));
                         conds.push((format!("{value}.is_a?({class})"), self.message("type?", path, &[("type", &class_expr)], value)));
+                    }
+                    (Some("type_sum"), Base::Sum(members)) => {
+                        let classes: Vec<&str> = members
+                            .iter()
+                            .filter_map(|m| match &m.base {
+                                Base::Instance(c) => Some(c.as_str()),
+                                _ => None,
+                            })
+                            .collect();
+                        let test = classes.iter().map(|c| format!("{value}.is_a?({c})")).collect::<Vec<_>>().join(" || ");
+                        let messages: Vec<String> = classes
+                            .iter()
+                            .map(|c| {
+                                let class_expr = parse_expr(c).expect("a class name parses");
+                                self.message("type?", path, &[("type", &class_expr)], value)
+                            })
+                            .collect();
+                        let or = self.messages.or_word();
+                        let joined = messages.join(&format!(" + \" {} \" + ", escape(&or)));
+                        conds.push((format!("({test})"), format!("({joined})")));
                     }
                     (Some(""), _) | (None, _) => {}
                     (Some(p), _) => {

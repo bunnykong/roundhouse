@@ -104,6 +104,9 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
         for (_, value) in &mut tm.constants {
             walk_postorder(value, &mut |e| {
                 super::try_guard::rewrite_node(e, &try_definers, &try_parents);
+                // Crystal no longer rewrites this spelling at print time,
+                // and `for_each_test_body` does not reach constants.
+                super::time_calendar::ground_crystal_time_bridge(e);
             });
         }
         for ic in &mut tm.inner_classes {
@@ -111,6 +114,7 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
                 walk_postorder(&mut m.body, &mut |e| {
                     super::webmock::rewrite_node(e);
                     super::try_guard::rewrite_node(e, &try_definers, &try_parents);
+                    super::time_calendar::ground_crystal_time_bridge(e);
                 });
             }
         }
@@ -160,6 +164,18 @@ pub fn apply_fused_pre_tag_rewrites(app: &mut App) {
                 }
                 ModelBodyItem::Callback { callback, .. } => {
                     if let Some(cond) = &mut callback.condition {
+                        walk_postorder(cond, &mut |e| {
+                            super::attribute_aliases::rewrite_node(e, &models, true);
+                        });
+                    }
+                }
+                ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &mut validation.if_cond {
+                        walk_postorder(cond, &mut |e| {
+                            super::attribute_aliases::rewrite_node(e, &models, true);
+                        });
+                    }
+                    if let Some(cond) = &mut validation.unless_cond {
                         walk_postorder(cond, &mut |e| {
                             super::attribute_aliases::rewrite_node(e, &models, true);
                         });
@@ -394,7 +410,7 @@ fn rewrite_mid_node(
         }
     }
     if !enum_map.is_empty() {
-        super::enum_symbols::rewrite_node(e, enum_map);
+        super::enum_symbols::rewrite_node(e, enum_map, enclosing);
     }
     if !json_map.is_empty() {
         super::has_json::rewrite_node(e, json_map);
@@ -449,7 +465,7 @@ fn rewrite_hook_node(
     super::save_without_validation::rewrite_node(e);
     super::random_formatter::rewrite_node(e);
     super::number_to_fs::rewrite_node(e);
-    super::string_inflections::rewrite_node(e);
+    super::string_core_ext::rewrite_fused_node(e);
     super::to_json::rewrite_node(e);
     super::preloader::rewrite_node(e);
     super::bigdecimal::rewrite_node(e);
@@ -498,7 +514,7 @@ fn rewrite_view_node(
     super::array_ordinal::rewrite_node(e);
     super::random_formatter::rewrite_node(e);
     super::number_to_fs::rewrite_node(e);
-    super::string_inflections::rewrite_node(e);
+    super::string_core_ext::rewrite_fused_node(e);
     super::to_json::rewrite_node(e);
     super::preloader::rewrite_node(e);
     super::bigdecimal::rewrite_node(e);

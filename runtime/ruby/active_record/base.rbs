@@ -116,6 +116,7 @@ module ActiveRecord
     # the app's keys and no wider.
     def id: () -> Integer
     def id=: (Integer) -> Integer
+    def _primary_key_value: () -> Integer
     def to_param: () -> String
 
     # Error message accumulator populated by the lowerer-emitted
@@ -229,6 +230,15 @@ module ActiveRecord
     # the trailing assignment.
     def mark_persisted!: () -> void
 
+    # cache_key / cache_version / cache_key_with_version — see
+    # connection.rb's Base reopen, NOT this file: base.rb is transpiled
+    # into every strict target's runtime (runtime_loader.rs's per-stem
+    # tables), and `self[:updated_at]` there compiles to each target's
+    # untyped-value representation (Rust: `serde_json::Value`), which
+    # has no `.to_i` — roundhouse PR #1034's compare(rust)/
+    # compare-extra(kotlin,swift)/smoke(rust)/smoke-extra(swift)
+    # failures.
+
     # Class-level CRUD — delegate to the adapter. Returns Base
     # nominally; per-target emit can refine to the actual subclass
     # via cast at the call site (RBS's `instance` / `self` self-type
@@ -274,6 +284,8 @@ module ActiveRecord
     # self either way (idempotent on already-destroyed records).
     def save: () -> bool
     def save_after_validation: () -> bool
+    def _save_committed: (bool was_new) -> void
+    def _destroy_committed: () -> void
     def _insert_row: () -> bool
     def save!: () -> Base
     def destroy: () -> Base

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::dialect::Action;
 use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
+use crate::lower::scope_chain::{AssocBuildTarget, AssocRegistry};
 use crate::span::Span;
 use crate::ty::Ty;
 
@@ -101,7 +102,7 @@ pub(super) fn partial_view_call_with_record(
     for n in &contract.closure {
         view_args.push(lookup(n).unwrap_or_else(|| ivar(n.as_str(), span)));
     }
-    view_args.extend(contract.extras_args(lookup, || nil_expr(span), span));
+    view_args.extend(contract.extras_args(lookup, |_| None, None, || nil_expr(span), span));
     Some(Expr::new(
         span,
         ExprNode::Send {
@@ -392,6 +393,9 @@ pub(super) fn rewrite_render_to_views(
                             _ => rest.push((k.clone(), v.clone())),
                         }
                     }
+                    if body.as_ref().is_some_and(|(_, ct)| *ct == Some("application/json")) {
+                        refuse_serializer_options(&mut rest);
+                    }
                     if name.is_none() {
                         // Non-template render: `render html: X, layout:
                         // "application"` → `render(X, layout: …)` (the
@@ -506,6 +510,7 @@ pub(super) fn rewrite_render_to_views(
             // going to exist (CodeRabbit 4277530506).
             let css_qualified = is_css
                 && view_ivars.contains_key(&(render_module.clone(), format!("{}_css", view_method.as_str())));
+            let is_md = render_kwargs_have_format(args, "md");
             // A feed branch (`format.rss { render action: "stories" }`):
             // the format-qualified template (`stories.rss.builder` →
             // `stories_rss`) when there is one, else a format-AGNOSTIC
@@ -528,6 +533,8 @@ pub(super) fn rewrite_render_to_views(
                 format!("{}_css", view_method.as_str())
             } else if is_js {
                 format!("{}_js", view_method.as_str())
+            } else if is_md {
+                format!("{}_md", view_method.as_str())
             } else if is_json {
                 // Same reason the two above are qualified: the contract
                 // is keyed by the FORMAT-QUALIFIED stem. Asking for the
@@ -555,7 +562,7 @@ pub(super) fn rewrite_render_to_views(
             // that is right there. Same trap the `svg` note above
             // describes, entered from the other side.
             let mut json_only = false;
-            if contract.is_none() && !is_json && !is_turbo_stream && !is_svg && !is_css {
+            if contract.is_none() && !is_json && !is_turbo_stream && !is_svg && !is_css && !is_md {
                 let json_stem = format!("{}_json", view_method.as_str());
                 if let Some(c) = view_ivars.get(&(render_module.clone(), json_stem)) {
                     contract = Some(c);
@@ -601,7 +608,7 @@ pub(super) fn rewrite_render_to_views(
             let mut subclass_hook: Option<Symbol> = None;
             if contract.is_none() {
                 let mut stems: Vec<(String, bool)> = vec![(contract_stem.clone(), false)];
-                if !is_json && !is_turbo_stream && !is_svg && !is_css {
+                if !is_json && !is_turbo_stream && !is_svg && !is_css && !is_md {
                     stems.push((format!("{}_json", view_method.as_str()), true));
                 }
                 'stems: for (stem, via_json_only) in stems {
@@ -700,6 +707,11 @@ pub(super) fn rewrite_render_to_views(
                     (
                         Symbol::from(format!("{}_js", view_method.as_str())),
                         Some(crate::lower::controller::body::mime_for_format("js")),
+                    )
+                } else if is_md {
+                    (
+                        Symbol::from(format!("{}_md", view_method.as_str())),
+                        Some(crate::lower::controller::body::mime_for_format("md")),
                     )
                 } else if let Some(f) = feed_fmt {
                     // The feed's MIME either way; the method is the
@@ -933,6 +945,44 @@ fn html_escape_call(value: &Expr) -> Expr {
     )
 }
 
+/// active_model_serializers' `render json:` options. The runtime
+/// `render(body, status:, content_type:, location:)` takes none of
+/// them, so passed through they raised `ArgumentError (unknown
+/// keywords)` on the first request, and the body would have been the
+/// value's own `to_json` rather than the serializer's. Rendering through
+/// the serializer is not modelled: each such render is an error residue
+/// (it keeps the route with Rails), and its keywords are not emitted.
+const SERIALIZER_OPTIONS: [&str; 4] = ["serializer", "each_serializer", "adapter", "root"];
+
+///
+/// The residue sits on the option's key, inside the action alone: the
+/// render call's own start is shared by the controller's synthesized
+/// methods (`controller_name`, …) every route reaches, so anchored there
+/// it would keep the controller's other actions with Rails too.
+fn refuse_serializer_options(rest: &mut Vec<(Expr, Expr)>) {
+    let key_of = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => SERIALIZER_OPTIONS.iter().position(|o| *o == value.as_str()),
+        _ => None,
+    };
+    let Some((first, span)) = rest.iter().filter_map(|(k, _)| key_of(k).map(|i| (i, k.span))).min_by_key(|(i, _)| *i) else {
+        return;
+    };
+    rest.retain(|(k, _)| key_of(k).is_none());
+    let option = SERIALIZER_OPTIONS[first];
+    let mut d = crate::lower::residue_diagnostic(
+        "controller_render",
+        "render_json_serializer",
+        span,
+        "serializer_render_not_modelled",
+        format!(
+            "`render json:` with `{option}:` is not lowered: rendering through an active_model_serializers \
+             serializer is not modelled, and the runtime `render` takes no serializer options"
+        ),
+    );
+    d.severity = crate::diagnostic::Severity::Error;
+    crate::emit::diagnostics::push(d);
+}
+
 /// `json_render_encode`, with a value that may be a String at run time sent as it is (`JsonRender.body`).
 fn json_render_body(value: &Expr) -> Expr {
     let mut encoded = json_render_encode(value);
@@ -1112,19 +1162,38 @@ fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Spa
 // to children of the parent. Spinel doesn't have association proxies;
 // the parent linkage has to be made explicit at the call site.
 //
-//   @x = @parent.<assoc>.build(<args>)
+//   @x = @parent.<assoc>.build(<args>)   (or `.new(<args>)`)
 //   ─────────────────────────────────────────────────────────────────
 //   attrs = <args>.to_h
-//   attrs[:<parent>_id] = @parent.id
-//   @x = <Singular>.new(attrs)
+//   attrs[:<foreign_key>] = @parent.id
+//   @x = <Target>.new(attrs)
 //
 //   @x = @parent.<assoc>.find(<args>)
 //   ─────────────────────────────────────────────────────────────────
-//   @x = <Singular>.find(<args>)
-//   if @x.<parent>_id != @parent.id
+//   @x = <Target>.find(<args>)
+//   if @x.<foreign_key> != @parent.id
 //     head(:not_found)
 //     return
 //   end
+//
+// <Target> and <foreign_key> are the class and foreign key of the
+// declaration the parent's model reads (its own, else its nearest
+// superclass's; the last one when a model declares the name twice, as
+// with a concern's `has_many` and the model's own after the `include`).
+// A parent of no known model reads the declaration of the model its name
+// gives, when that model has the association, else the one every
+// declarer agrees on. An association no model declares keeps the
+// name-derived form (`<Singular>`, `<parent>_id`). One declared in a way
+// this call cannot reproduce (a scope that changes what it builds or
+// finds), one whose extension defines this call (`find`, `build`, …), or
+// one the parent's model does not declare (or, for a parent typed as a
+// union of models, does not declare alike) is left as written.
+//
+// A `.new` here is one `association_new` left as written. Where the
+// extension defines `build`, the proxy's `new` is Rails' own `build`
+// still, so it expands as one; an extension defining `new` declines it,
+// and a read not analyzed as the target's collection is left alone, as
+// `association_new` leaves it.
 //
 // One Assign expands to a Seq of multiple Exprs — the outer Seq the
 // emitter walks for line-per-statement output flattens implicitly.
@@ -1134,6 +1203,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
     expr: &Expr,
     privs: &[Action],
     params_specs: &ParamsSpecs,
+    assocs: &AssocRegistry,
 ) -> Expr {
     let helper_specs = super::params::helper_spec_map(privs, params_specs);
     map_expr(expr, &|e| {
@@ -1159,7 +1229,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
             return None;
         };
         let kind = match outer_method.as_str() {
-            "build" => AssocKind::Build,
+            "build" | "new" => AssocKind::Build,
             // Rails' `create` on an association is `build` + save, over
             // an attribute HASH. A typed params object handed to the
             // runtime's `create` would be indexed like a Hash and
@@ -1199,14 +1269,31 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         let ExprNode::Ivar { name: parent_name } = &*inner_recv.node else {
             return None;
         };
-        // The foreign key below comes from the ivar's name and the
-        // parent's value from `.id`; an association keyed on another
-        // owner column (`primary_key:`) needs the declaration instead.
-        if params_specs.is_keyed_assoc(assoc_method) {
+        // The class and foreign key come from the declaration
+        // (`class_name:`, `foreign_key:`) the parent's analyzed class
+        // (or, untyped, its name) reads, the parent's value from `.id`.
+        // A declaration that expansion cannot reproduce (`primary_key:`,
+        // `through:`, `as:`, a scope that changes what this call builds
+        // or finds), an extension method by this call's name, or a
+        // parent model without the association (any of a union's) is
+        // declined, and the typed association seed handles or refuses
+        // the call instead.
+        let (model_class, fk) = match assocs.build_target(inner_recv, assoc_method, outer_method) {
+            AssocBuildTarget::Declared { target, foreign_key } => {
+                (target.0.as_str().to_string(), foreign_key.as_str().to_string())
+            }
+            AssocBuildTarget::Declined => return None,
+            AssocBuildTarget::Undeclared if outer_method.as_str() == "new" => return None,
+            AssocBuildTarget::Undeclared => (
+                crate::naming::singularize_camelize(assoc_method.as_str()),
+                format!("{}_id", parent_name.as_str()),
+            ),
+        };
+        // `association_new`'s guard, for the `.new` it left: a method
+        // named like an association may return an unrelated class.
+        if outer_method.as_str() == "new" && !reads_collection_of(outer_recv, &model_class) {
             return None;
         }
-        let model_class = crate::naming::singularize_camelize(assoc_method.as_str());
-        let fk = format!("{}_id", parent_name.as_str());
         Some(match kind {
             AssocKind::Build => {
                 let lhs = lhs.expect("checked above");
@@ -1214,6 +1301,9 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                     return Some(expand_build_bare(&model_class, &fk, parent_name, lhs, e.span));
                 }
                 if let Some(spec) = match_params_helper(&outer_args[0], &helper_specs, params_specs) {
+                    if !has_typed_factory(&model_class, spec) {
+                        return None;
+                    }
                     return Some(expand_build_typed(
                         &model_class,
                         &fk,
@@ -1232,6 +1322,9 @@ pub(super) fn rewrite_assoc_through_parent_typed(
             AssocKind::Create { bang } => {
                 let lhs = lhs.expect("checked above");
                 let spec = match_params_helper(&outer_args[0], &helper_specs, params_specs)?;
+                if !has_typed_factory(&model_class, spec) {
+                    return None;
+                }
                 expand_create_typed(
                     &model_class,
                     &fk,
@@ -1282,7 +1375,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                         value: Expr::new(
                             e.span,
                             ExprNode::Send {
-                                recv: Some(const_path(&[&model_class], e.span)),
+                                recv: Some(model_const(&model_class, e.span)),
                                 method: Symbol::from("find_by"),
                                 args: vec![Expr::new(
                                     e.span,
@@ -1342,6 +1435,26 @@ fn match_params_helper<'a>(
     helper_specs.get(method).copied()
 }
 
+/// Whether `<model_class>.<factory>` exists for this params class: the
+/// model lowerer synthesizes the typed factories only on the model a
+/// list's resource names, so `has_many :comments, class_name:
+/// "Feedback"` building from `comment_params` has none to call.
+fn has_typed_factory(model_class: &str, spec: &ParamsSpec) -> bool {
+    crate::naming::snake_case(model_class) == spec.resource.as_str()
+}
+
+/// Whether `read` is analyzed as a collection of `model_class`, the
+/// reader of an association to it.
+fn reads_collection_of(read: &Expr, model_class: &str) -> bool {
+    match read.ty.as_ref().map(Ty::peel_nilable) {
+        Some(Ty::Array { elem }) => {
+            matches!(elem.peel_nilable(), Ty::Class { id, .. } if id.0.as_str() == model_class)
+        }
+        Some(Ty::Relation { of }) => of.0.as_str() == model_class,
+        _ => false,
+    }
+}
+
 enum AssocKind {
     Build,
     /// `@parent.<assoc>.create!(<params>)` — `Build` plus the save it
@@ -1374,7 +1487,7 @@ pub(super) fn expand_build_typed(
     let from_params_call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(const_path(&[model_class], span)),
+            recv: Some(model_const(model_class, span)),
             method: factory,
             args: vec![arg.clone()],
             block: None,
@@ -1464,7 +1577,7 @@ fn expand_build_bare(
     let new_call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(const_path(&[model_class], span)),
+            recv: Some(model_const(model_class, span)),
             method: Symbol::from("new"),
             args: vec![],
             block: None,
@@ -1510,11 +1623,18 @@ pub(super) fn expand_build(
     // The `.to_h` wrap is added by the params-helpers pass when <arg>
     // is a `<x>_params` call — keeping the two concerns separate avoids
     // double-wrapping if <arg> already has `.to_h` for some reason.
+    // A braceless keyword hash (`comments.new(body: nil)`) needs its
+    // braces as an assignment's right-hand side, or the emitted
+    // `attrs = body: nil` is a syntax error.
+    let mut value = arg.clone();
+    if let ExprNode::Hash { kwargs, .. } = &mut *value.node {
+        *kwargs = false;
+    }
     let attrs_assign = Expr::new(
         span,
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: Symbol::from("attrs") },
-            value: arg.clone(),
+            value,
         },
     );
 
@@ -1549,7 +1669,7 @@ pub(super) fn expand_build(
     let new_call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(const_path(&[model_class], span)),
+            recv: Some(model_const(model_class, span)),
             method: Symbol::from("new"),
             args: vec![attrs_var],
             block: None,
@@ -1582,7 +1702,7 @@ pub(super) fn expand_find(
     let find_call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(const_path(&[model_class], span)),
+            recv: Some(model_const(model_class, span)),
             method: Symbol::from("find"),
             args: vec![arg.clone()],
             block: None,
@@ -1784,9 +1904,9 @@ pub(super) fn rewrite_update_to_typed_variant(
         // The variant exists only on the model the resource is named
         // after. With none (a record wrapped under another key), the
         // call stays Rails' `update` / `update!`; once the body is typed,
-        // `params::hand_update_the_attrs` gives it the attribute Hash
+        // `typed_update::hand_update_the_attrs` gives it the attribute Hash
         // when the argument turns out to be the params object (#856).
-        if !params_specs.has_typed_update(spec) {
+        if !super::typed_update::has_typed_update(params_specs, spec) {
             return None;
         }
         Some(Expr::new(
@@ -2358,7 +2478,7 @@ fn polymorphic_path(ivar_name: &Symbol, span: Span) -> Expr {
 /// The `Rails.application.routes.url_helpers` receiver chain — Rails'
 /// spelling for reaching a path helper from somewhere with no helper
 /// mixin (a model, a job, a test body).
-fn is_rails_url_helpers_chain(e: &Expr) -> bool {
+pub(crate) fn is_rails_url_helpers_chain(e: &Expr) -> bool {
     let mut node = &*e.node;
     for step in ["url_helpers", "routes", "application"] {
         let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = node else {
@@ -2858,6 +2978,12 @@ pub(crate) fn const_path(segments: &[&str], span: Span) -> Expr {
             path: segments.iter().map(|s| Symbol::from(*s)).collect(),
         },
     )
+}
+
+/// A model class as a constant, one path segment per `::`-separated
+/// name (`class_name: "Push::Subscription"`).
+fn model_const(model_class: &str, span: Span) -> Expr {
+    const_path(&model_class.split("::").collect::<Vec<_>>(), span)
 }
 
 /// Like `const_path`, but stamps `Ty::Class` so the emit-time

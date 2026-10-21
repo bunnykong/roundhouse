@@ -1,0 +1,13 @@
+module ActiveRecord
+  module Type
+    class String
+      def cast: (untyped value) -> String?
+      def deserialize: (untyped value) -> String?
+    end
+
+    class Integer
+      def cast: (untyped value) -> Integer?
+      def deserialize: (untyped value) -> Integer?
+    end
+  end
+end

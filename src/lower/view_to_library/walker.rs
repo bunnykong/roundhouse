@@ -167,9 +167,9 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             )]
         }
         // Conditional branching at the template level. Cond goes
-        // through `rewrite_predicates` so Rails-style `.present?` /
-        // `.any?` / `.none?` / `.blank?` collapse to the
-        // `.empty?`-based forms spinel's runtime expects.
+        // through `rewrite_predicates`: `.blank?` / `.present?` become
+        // `(recv || "").empty?`, and `.any?` / `.none?` / `.empty?`
+        // become collection `empty?`.
         ExprNode::If { cond, then_branch, else_branch } => {
             let then_seq = walk_body(then_branch, ctx);
             let then_body = if then_seq.len() == 1 {
@@ -912,97 +912,49 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             // gets, through the same `named_partial_call` — a second
             // partial resolver here would be a second set of rules to
             // keep in step.
-            if let (2, None) = (sa.len(), block.as_ref()) {
-                if let ExprNode::Hash { entries, .. } = &*sa[1].node {
-                    // `partial:` alone renders once. `collection:` is
-                    // Rails' "once per element" — campfire's
-                    // `accounts/users/index.turbo_stream.erb` writes
-                    // `turbo_stream.replace :next_page_container,
-                    // partial: "…/user", collection: @page.records,
-                    // as: :user`. Treating that as a single render
-                    // would keep only the first element, so the
-                    // collection walks into a capture accumulator and
-                    // the captured String is the fragment.
-                    let understood = entries.iter().all(|(k, _)| {
-                        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-                            if matches!(value.as_str(), "partial" | "locals" | "collection" | "as"))
-                    });
-                    let opt = |name: &str| {
-                        entries.iter().find_map(|(k, v)| match &*k.node {
-                            ExprNode::Lit { value: Literal::Sym { value } }
-                                if value.as_str() == name =>
-                            {
-                                Some(v)
-                            }
-                            _ => None,
-                        })
-                    };
-                    let partial = opt("partial").and_then(|p| match &*p.node {
-                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
-                        _ => None,
-                    });
-                    // Absent `locals:`/`as:` is fine. A supplied value
-                    // that is not a hash / name literal cannot be
-                    // lowered — dropping it would render the partial
-                    // under the wrong local. Decline the whole call.
-                    let locals = match opt("locals") {
-                        None => Some(None),
-                        Some(l) => match &*l.node {
-                            ExprNode::Hash { entries, .. } => Some(Some(
-                                entries
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), rewrite_helpers_in_expr(v, ctx)))
-                                    .collect::<Vec<_>>(),
-                            )),
-                            _ => None,
-                        },
-                    };
-                    let collection = opt("collection").map(|c| rewrite_helpers_in_expr(c, ctx));
-                    let as_name = match opt("as") {
-                        None => Some(None),
-                        Some(a) => match &*a.node {
-                            ExprNode::Lit { value: Literal::Sym { value } } => {
-                                Some(Some(value.as_str().to_string()))
-                            }
-                            ExprNode::Lit { value: Literal::Str { value } } => {
-                                Some(Some(value.clone()))
-                            }
-                            _ => None,
-                        },
-                    };
-                    if let (true, Some(partial), Some(locals), Some(as_name)) =
-                        (understood, partial, locals, as_name)
-                    {
-                        if let Some(coll) = collection {
-                            if let Some(out) = turbo_stream_collection_fragment(
-                                method.as_str(),
-                                &sa[0],
-                                &partial,
-                                coll,
-                                as_name.as_deref(),
-                                locals.as_deref(),
-                                ctx,
-                            ) {
-                                return out;
-                            }
-                        } else if as_name.is_none() {
-                            if let Some(html) = super::partial::named_partial_call(
-                                &partial,
-                                None,
-                                locals.as_deref(),
-                                ctx,
-                            ) {
-                                return vec![accumulator_append_call(
-                                    super::helpers::turbo_stream_fragment_call(
-                                        method.as_str(),
-                                        super::helpers::turbo_stream_target(&sa[0], ctx),
-                                        html,
-                                    ),
-                                    ctx,
-                                )];
-                            }
-                        }
+            if let Some(ts) = block
+                .is_none()
+                .then(|| super::helpers::turbo_stream_partial(recv.as_ref(), method.as_str(), sa))
+                .flatten()
+            {
+                let locals = ts.locals.map(|entries| {
+                    entries
+                        .iter()
+                        .map(|(k, v)| (k.clone(), rewrite_helpers_in_expr(v, ctx)))
+                        .collect::<Vec<_>>()
+                });
+                // `partial:` alone renders once. `collection:` is
+                // Rails' "once per element" — campfire's
+                // `accounts/users/index.turbo_stream.erb` writes
+                // `turbo_stream.replace :next_page_container,
+                // partial: "…/user", collection: @page.records,
+                // as: :user`. Treating that as a single render
+                // would keep only the first element, so the
+                // collection walks into a capture accumulator and
+                // the captured String is the fragment.
+                if let Some(coll) = ts.collection {
+                    if let Some(out) = turbo_stream_collection_fragment(
+                        method.as_str(),
+                        ts.target,
+                        ts.partial,
+                        rewrite_helpers_in_expr(coll, ctx),
+                        ts.as_name,
+                        locals.as_deref(),
+                        ctx,
+                    ) {
+                        return out;
                     }
+                } else if let Some(html) =
+                    super::partial::named_partial_call(ts.partial, None, locals.as_deref(), ctx)
+                {
+                    return vec![accumulator_append_call(
+                        super::helpers::turbo_stream_fragment_call(
+                            method.as_str(),
+                            super::helpers::turbo_stream_target(ts.target, ctx),
+                            html,
+                        ),
+                        ctx,
+                    )];
                 }
             }
         }
@@ -1776,6 +1728,7 @@ mod tests {
             i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
+            form_with_entry: false,
             stylesheets: Vec::new(),
             lexxy: false,
             lexxy_editor_adapter: false,

@@ -3399,6 +3399,28 @@ end
 }
 
 #[test]
+fn an_enqueued_job_types_perform_and_its_rest_parameter() {
+    // `NotifyMessageJob.perform_later(@message)` runs
+    // `NotifyMessageJob#perform(*messages)`: what callers enqueue types
+    // `perform`, a `*rest` parameter is the Array of it, and so the mailer
+    // each element reaches and its template's ivar are typed (lobsters).
+    let app = app_from_files(&[
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\nend\n"),
+        ("app/models/message.rb", "class Message < ApplicationRecord\n  def announce\n    NotifyJob.perform_later(self)\n  end\nend\n"),
+        ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
+        (
+            "app/jobs/notify_job.rb",
+            "class NotifyJob < ApplicationJob\n  def perform(*messages)\n    messages.each do |message|\n      deliver(message)\n    end\n  end\n\n  def deliver(message)\n    NoticeMailer.notify(message).deliver_now\n  end\nend\n",
+        ),
+        ("app/mailers/application_mailer.rb", "class ApplicationMailer < ActionMailer::Base\nend\n"),
+        ("app/mailers/notice_mailer.rb", "class NoticeMailer < ApplicationMailer\n  def notify(message)\n    @message = message\n    mail(to: \"a@example.com\", subject: \"hi\")\n  end\nend\n"),
+        ("app/views/notice_mailer/notify.text.erb", "<%= @message.id %>\n"),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(!unresolved.iter().any(|n| n == "message"), "@message should resolve through the job; unresolved = {unresolved:?}");
+}
+
+#[test]
 fn active_record_base_and_class_side_finders_resolve() {
     // Two class-side AR gaps:
     //  (1) `ActiveRecord::Base.transaction { ... }` /
@@ -4783,12 +4805,12 @@ end
     assert_eq!(ty("form.object.try(:name)", 12), "String?");
 }
 
-/// `.text.erb` templates are ingested for the analyzer (their Ruby
-/// types, the IDE sees them) and dropped before lowering. A `.json.erb`
-/// is not: it lowers through the view path as `<action>_json` (campfire's
-/// PWA manifest), and is no jbuilder.
+/// `.text.erb` templates are typed (the IDE sees them) and lower through
+/// the view path as `<action>_text`, which a mailer's `mail` renders. A
+/// `.json.erb` lowers as `<action>_json` (campfire's PWA manifest), and
+/// is no jbuilder.
 #[test]
-fn text_erb_templates_are_analysis_only_and_json_erb_is_rendered() {
+fn text_erb_and_json_erb_templates_are_rendered() {
     let mut app = app_from_files(&[
         ("app/mailers/application_mailer.rb", "class ApplicationMailer < ActionMailer::Base\nend\n"),
         ("app/mailers/product_mailer.rb", "class ProductMailer < ApplicationMailer\n  def in_stock\n    @name = \"x\"\n  end\nend\n"),
@@ -4803,7 +4825,9 @@ fn text_erb_templates_are_analysis_only_and_json_erb_is_rendered() {
         .filter(|v| v.analysis_only)
         .map(|v| format!("{}.{}", v.name.as_str(), v.format.as_str()))
         .collect();
-    assert_eq!(analysis_only, vec!["product_mailer/in_stock.text"]);
+    assert!(analysis_only.is_empty(), "{analysis_only:?}");
+    let text = app.views.iter().find(|v| v.name.as_str() == "product_mailer/in_stock" && v.format.as_str() == "text").expect("text view");
+    assert!(roundhouse::lower::view::lowers_through_view_path(text));
     let manifest = app.views.iter().find(|v| v.name.as_str() == "pwa/manifest").expect("manifest ingested");
     assert!(!manifest.jbuilder, "a json.erb is text, not jbuilder");
     assert!(roundhouse::lower::view::lowers_through_view_path(manifest));
@@ -5467,17 +5491,196 @@ fn inertia_share_and_render_inertia_analyze_without_errors_or_survey_gaps() {
 }
 
 #[test]
-fn render_inertia_with_a_computed_component_is_a_survey_gap() {
+fn render_inertia_always_prop_is_not_a_survey_gap() {
     let mut files = INERTIA_APP.to_vec();
     files[5] = (
         "app/controllers/widgets_controller.rb",
-        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/\" + action_name\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { kept: InertiaRails.always { \"yes\" } }\n  end\nend\n",
+    );
+    let (errors, gaps) = inertia_check(&files);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+#[test]
+fn inertia_full_page_redirect_stays_a_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def show\n    redirect_to \"https://example.com\", inertia: { full_page: true }\n  end\nend\n",
     );
     let (_, gaps) = inertia_check(&files);
     assert!(
-        gaps.iter().any(|g| g.contains("`render inertia:` with a component that is not a String literal")),
+        gaps.iter().any(|g| g.contains("redirect option other than `errors:`, `clear_history:`, or `preserve_fragment:`")),
         "{gaps:#?}"
     );
+}
+
+#[test]
+fn inertia_once_merge_and_lazy_props_stay_survey_gaps() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.once { 1 } }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.merge { 1 } }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.lazy { 1 } }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.scroll { 1 } }\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (_, gaps) = inertia_check(&files);
+        assert!(
+            gaps.iter().any(|g| g.contains("prop type other than `optional`/`defer`/`always`")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+}
+
+#[test]
+fn render_inertia_with_computed_props_has_no_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        r#"class WidgetsController < ApplicationController
+  def index
+    render inertia: "widgets/index", props: index_props
+  end
+
+  def show
+    props = { name: "local" }
+    render inertia: "widgets/show", props: props
+  end
+
+  def merged
+    render inertia: "widgets/merged", props: index_props.merge(extra: 1)
+  end
+
+  private
+    def index_props
+      {
+        name: "from-method",
+        secret: InertiaRails.optional { "opt" },
+        stats: InertiaRails.defer { 1 },
+        kept: InertiaRails.always { "yes" }
+      }
+    end
+end
+"#,
+    );
+    let (errors, gaps) = inertia_check(&files);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(
+        !gaps.iter().any(|g| g.contains("props:")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
+fn render_inertia_with_a_computed_component_has_no_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/\" + action_name\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  PAGE = \"widgets/index\"\n  def index\n    render inertia: PAGE\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: page_name\n  end\n  def page_name\n    \"widgets/index\"\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (errors, gaps) = inertia_check(&files);
+        assert!(errors.is_empty(), "{source}\n{errors:#?}");
+        assert!(
+            !gaps.iter().any(|g| g.contains("component")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+}
+
+#[test]
+fn render_inertia_true_or_a_hash_stays_a_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: true\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: { title: \"x\" }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: nil\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (_, gaps) = inertia_check(&files);
+        assert!(
+            gaps.iter().any(|g| g.contains("component that is not a String or a String expression")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+}
+
+#[test]
+fn inertia_clear_history_redirect_is_not_a_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def destroy\n    redirect_to \"/widgets\", inertia: { clear_history: true }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { errors: { name: [\"bad\"] }, clear_history: false }\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (errors, gaps) = inertia_check(&files);
+        assert!(errors.is_empty(), "{source}\n{errors:#?}");
+        assert!(
+            !gaps.iter().any(|g| g.contains("redirect option")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { flash: \"no\" }\n  end\nend\n",
+    );
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("`inertia:` redirect option other than `errors:`, `clear_history:`, or `preserve_fragment:`")),
+        "{gaps:#?}"
+    );
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def destroy\n    redirect_to \"/widgets\", inertia: { clear_history: \"yes\" }\n  end\nend\n",
+    );
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("`clear_history:` that is not `true` or `false`")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
+fn inertia_preserve_fragment_redirect_is_not_a_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { preserve_fragment: true }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { preserve_fragment: false }\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (errors, gaps) = inertia_check(&files);
+        assert!(errors.is_empty(), "{source}\n{errors:#?}");
+        assert!(
+            !gaps.iter().any(|g| g.contains("redirect option")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { preserve_fragment: \"yes\" }\n  end\nend\n",
+    );
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("`preserve_fragment:` that is not `true` or `false`")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
+fn inertia_location_is_a_controller_method() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def show\n    inertia_location \"https://example.com/away\"\n  end\nend\n",
+    );
+    let (errors, gaps) = inertia_check(&files);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
 }
 
 #[test]
@@ -5589,6 +5792,60 @@ fn a_vite_tag_without_a_manifest_entry_is_a_survey_gap() {
     );
 }
 
+/// On a large real app, `vite_typescript_tag 'sign_up.ts', crossorigin:
+/// 'anonymous'` was an ingest gap for the whole call — the extra keyword
+/// alone, not a missing manifest entry — which blocked every route that
+/// reached the view. `crossorigin:`, a boolean attribute (`defer:`) and a
+/// `data:` hash all pass through the way vite_rails forwards them to
+/// `javascript_include_tag`, so none of this is a gap any more.
+#[test]
+fn vite_tag_html_options_pass_through_without_a_survey_gap() {
+    let layout = (
+        "app/views/layouts/application.html.erb",
+        "<html><head><%= vite_javascript_tag \"application\", crossorigin: \"anonymous\", defer: true, data: { turbo_track: \"reload\" } %></head><body><%= yield %></body></html>\n",
+    );
+    let (messages, gaps) = vite_check(&[layout, VITE_MANIFEST]);
+    assert!(messages.iter().all(|m| !m.contains("vite_")), "{messages:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+/// `skip_preload_tags:`/`skip_style_tags:`/`media:` and the like change
+/// which tags get emitted, not just which attributes they carry —
+/// approximating them would silently produce the wrong markup, so they
+/// still gap the whole call, but the survey message now names the
+/// specific option rather than a blanket "options ... are not modeled".
+#[test]
+fn a_structural_vite_tag_option_still_gaps_by_name() {
+    let layout = (
+        "app/views/layouts/application.html.erb",
+        "<html><head><%= vite_javascript_tag \"application\", skip_preload_tags: true %></head><body><%= yield %></body></html>\n",
+    );
+    let (_, gaps) = vite_check(&[layout, VITE_MANIFEST]);
+    assert!(
+        gaps.iter().any(|g| g.contains("`vite_javascript_tag`: option `skip_preload_tags` is not modeled")),
+        "{gaps:#?}"
+    );
+}
+
+/// `aria:` needs its own array/boolean token-join rules we don't model
+/// yet — dropping just that option (rather than gapping the whole call,
+/// as an unrepresentable value in `crossorigin:`/`type:` still does) is
+/// what keeps a single odd option from blocking a route that otherwise
+/// has nothing wrong with it.
+#[test]
+fn an_unrepresentable_vite_tag_option_is_dropped_not_a_whole_call_gap() {
+    let layout = (
+        "app/views/layouts/application.html.erb",
+        "<html><head><%= vite_javascript_tag \"application\", crossorigin: \"anonymous\", aria: { hidden: true } %></head><body><%= yield %></body></html>\n",
+    );
+    let (messages, gaps) = vite_check(&[layout, VITE_MANIFEST]);
+    assert!(messages.iter().all(|m| !m.contains("vite_")), "{messages:#?}");
+    assert!(
+        gaps.iter().any(|g| g.contains("`vite_javascript_tag`: option(s) `aria` are not modeled and were dropped")),
+        "{gaps:#?}"
+    );
+}
+
 /// `include ActionView::RecordIdentifier` is admitted on a model and on a
 /// plain library class (no "includes unresolved" refusal), and `dom_id` /
 /// `dom_class` — the module's public surface — type as String there.
@@ -5632,6 +5889,31 @@ fn record_identifier_include_is_admitted_and_dom_calls_are_strings() {
     assert_eq!(row.body.ty, Some(Ty::Str), "Presenter#row");
 }
 
+/// A backtick literal is `Kernel#``: a String, unless the class defines
+/// its own ` (Ruby dispatches the literal to it), whose return wins.
+#[test]
+fn a_backtick_types_as_string_unless_the_class_defines_its_own() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        ),
+        (
+            "lib/shells.rb",
+            "class Shell\n  def run\n    `ls`\n  end\nend\n\nclass FakeShell\n  def `(cmd)\n    [cmd]\n  end\n\n  def run\n    `ls`\n  end\nend\n\nclass ClassOnly\n  def self.`(cmd)\n    [cmd]\n  end\n\n  def run\n    `ls`\n  end\nend\n\nclass InstanceOnly\n  def `(cmd)\n    [cmd]\n  end\n\n  def self.run\n    `ls`\n  end\nend\n",
+        ),
+    ]);
+    let run = |name: &str| {
+        let class = app.library_classes.iter().find(|c| c.name.0.as_str() == name).expect(name);
+        class.methods.iter().find(|m| m.name.as_str() == "run").expect("run").body.ty.clone()
+    };
+    assert_eq!(run("Shell"), Some(Ty::Str), "Shell#run");
+    assert!(matches!(run("FakeShell"), Some(Ty::Array { .. })), "FakeShell#run: {:?}", run("FakeShell"));
+    // A method on the other side is not an override of this call.
+    assert_eq!(run("ClassOnly"), Some(Ty::Str), "ClassOnly#run");
+    assert_eq!(run("InstanceOnly"), Some(Ty::Str), "InstanceOnly.run");
+}
+
 /// Only the BARE `dom_id` is the mixed-in helper (emit qualifies bare
 /// calls alone); an explicit receiver that does not define it stays
 /// unresolved (not String-typed), so nothing claims it runs.
@@ -5654,4 +5936,29 @@ fn record_identifier_explicit_receiver_dom_id_stays_unresolved() {
         .expect("Caller");
     let bad = caller.methods.iter().find(|m| m.name.as_str() == "bad").expect("bad");
     assert_ne!(bad.body.ty, Some(Ty::Str), "explicit-receiver dom_id must not type as String");
+}
+
+#[test]
+fn a_method_reference_to_a_computed_name_reads_untyped() {
+    let app = app_from_files(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("lib/settings_extension.rb", "module SettingsExtension\n  def setting(name, default)\n    define_singleton_method(name) { default }\n  end\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  extend SettingsExtension\n  setting :title_limit, 40\n\n  def self.limit_ref\n    method(:title_limit)\n  end\n\n  def self.limits\n    [1].map(&method(:title_limit))\n  end\nend\n"),
+    ]);
+    let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").expect("Article");
+    let limits = article.methods().find(|m| m.name.as_str() == "limits").expect("limits");
+    assert_eq!(limits.body.ty, Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }), "{:?}", limits.body.ty);
+}
+
+#[test]
+fn a_private_marker_on_a_generated_enum_predicate_is_enforced() {
+    let app = app_from_files(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.integer :status\n  end\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  enum :status, { draft: 0, published: 1 }\n  private :draft?\nend\n"),
+        ("app/models/probe.rb", "class Probe\n  def self.run\n    Article.new.draft?\n  end\nend\n"),
+    ]);
+    let found = diagnose(&app).iter().any(|d| d.message.contains("private method `draft?` called on Article"));
+    assert!(found, "{:#?}", diagnose(&app).iter().map(|d| d.message.clone()).collect::<Vec<_>>());
 }

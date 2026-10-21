@@ -154,6 +154,8 @@ fn identity_is_invalidated_by_reassignment_and_branch_writes() {
         "k = Probe; [Probe.new] => [k]; k.define_method(:x) { 1 }",
         "k = Probe; begin; raise StandardError; rescue => k; k.define_method(:x) { 1 }; end",
         "Probe.new.class.define_method(:x) { 1 }",
+        "k = title; k.define_method(:x) { 1 } if k.is_a?(Class)",
+        "title.to_s.constantize.define_method(:x) { 1 }",
     ] { refuses(body, "Module protocol"); }
 }
 
@@ -165,6 +167,11 @@ fn cross_date_time_comparison_requires_activesupport_runtime() {
 #[test]
 fn instance_eval_changes_self_identity_in_class_side_methods() {
     refuses_with("Probe.go", "Module protocol", &[("app/models/probe.rb", "class Probe < ApplicationRecord\n  def self.go\n    Probe.new.instance_eval { self.define_method(:x) { 1 } }\n  end\nend\n")]);
+}
+
+#[test]
+fn an_overridden_then_does_not_yield_the_class() {
+    refuses_with("Probe.go", "Module protocol", &[("app/models/probe.rb", "class Probe < ApplicationRecord\n  def self.then\n    yield 1\n  end\n\n  def self.go\n    Probe.then { |k| k.const_defined?(:X) }\n  end\nend\n")]);
 }
 
 #[test]

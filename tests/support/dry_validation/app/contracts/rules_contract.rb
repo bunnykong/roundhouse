@@ -20,6 +20,7 @@ class RulesContract < Dry::Validation::Contract
     next if value.nil?
 
     key.failure("nick long") if value.size > LIMIT
+    key.failure('nick #@x #$y #{z}') if value == "hsh"
   end
 
   rule(:a, :b) do

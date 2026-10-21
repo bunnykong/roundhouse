@@ -141,6 +141,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
             // `with_locale` returns its block's value — opaque here.
             ("with_locale", GemTy::Untyped),
             ("available_locales", GemTy::Untyped),
+            ("locale_available?", GemTy::Bool),
             ("exists?", GemTy::Bool),
         ],
         instance_methods: &[],
@@ -314,7 +315,31 @@ pub const GEM_CATALOG: &[GemClass] = &[
     },
     GemClass {
         name: "Nokogiri",
-        class_methods: &[("HTML", GemTy::Untyped), ("XML", GemTy::Untyped)],
+        class_methods: &[
+            ("HTML", GemTy::Untyped),
+            ("HTML4", GemTy::Untyped),
+            ("HTML5", GemTy::Untyped),
+            ("XML", GemTy::Untyped),
+        ],
+        instance_methods: &[],
+    },
+    // Nokogiri's HTML5 parser (gumbo, vendored by the gem and carried by
+    // spinel-nokogiri): `Nokogiri::HTML5.fragment(html)` and the module's
+    // Document/DocumentFragment classes. The parsed tree stays unmodeled,
+    // as `Nokogiri::HTML`'s does.
+    GemClass {
+        name: "Nokogiri::HTML5",
+        class_methods: &[("parse", GemTy::Untyped), ("fragment", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Nokogiri::HTML5::Document",
+        class_methods: &[("parse", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Nokogiri::HTML5::DocumentFragment",
+        class_methods: &[("parse", GemTy::Untyped)],
         instance_methods: &[],
     },
     // pdf-reader — PDF metadata/text extraction.
@@ -395,4 +420,125 @@ pub const GEM_CATALOG: &[GemClass] = &[
         class_methods: &[],
         instance_methods: &[],
     },
+    // Faraday — the HTTP client. Ruby and JRuby run the real gem (the
+    // emitted Gemfile declares it on demand, `gems::RUNTIME_GEMS`);
+    // every other target refuses each reference (`lower::faraday`).
+    // Responses and bodies are the gem's own objects, so they stay
+    // `Untyped` past the shapes below.
+    GemClass {
+        name: "Faraday",
+        class_methods: &[
+            ("new", GemTy::Instance("Faraday::Connection")),
+            ("default_adapter", GemTy::Sym),
+            ("default_adapter=", GemTy::Sym),
+            ("get", GemTy::Instance("Faraday::Response")),
+            ("post", GemTy::Instance("Faraday::Response")),
+            ("put", GemTy::Instance("Faraday::Response")),
+            ("patch", GemTy::Instance("Faraday::Response")),
+            ("delete", GemTy::Instance("Faraday::Response")),
+            ("head", GemTy::Instance("Faraday::Response")),
+        ],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Faraday::Connection",
+        class_methods: &[],
+        instance_methods: &[
+            ("get", GemTy::Instance("Faraday::Response")),
+            ("post", GemTy::Instance("Faraday::Response")),
+            ("put", GemTy::Instance("Faraday::Response")),
+            ("patch", GemTy::Instance("Faraday::Response")),
+            ("delete", GemTy::Instance("Faraday::Response")),
+            ("head", GemTy::Instance("Faraday::Response")),
+            ("run_request", GemTy::Instance("Faraday::Response")),
+            ("request", GemTy::Untyped),
+            ("response", GemTy::Untyped),
+            ("use", GemTy::Untyped),
+            ("adapter", GemTy::Untyped),
+            ("headers", GemTy::Untyped),
+            ("params", GemTy::Untyped),
+            ("options", GemTy::Instance("Faraday::RequestOptions")),
+            ("url_prefix", GemTy::Untyped),
+            ("set_basic_auth", GemTy::Untyped),
+            ("builder", GemTy::Untyped),
+        ],
+    },
+    GemClass {
+        name: "Faraday::RequestOptions",
+        class_methods: &[],
+        instance_methods: &[
+            ("timeout", GemTy::Untyped),
+            ("timeout=", GemTy::Untyped),
+            ("open_timeout", GemTy::Untyped),
+            ("open_timeout=", GemTy::Untyped),
+            ("read_timeout", GemTy::Untyped),
+            ("read_timeout=", GemTy::Untyped),
+            ("write_timeout", GemTy::Untyped),
+            ("write_timeout=", GemTy::Untyped),
+            ("params_encoder", GemTy::Untyped),
+            ("params_encoder=", GemTy::Untyped),
+        ],
+    },
+    GemClass {
+        name: "Faraday::Response",
+        class_methods: &[],
+        instance_methods: &[
+            ("status", GemTy::Int),
+            ("body", GemTy::Untyped),
+            ("headers", GemTy::Untyped),
+            ("success?", GemTy::Bool),
+            ("finished?", GemTy::Bool),
+            ("reason_phrase", GemTy::Untyped),
+            ("env", GemTy::Untyped),
+            ("to_hash", GemTy::Untyped),
+        ],
+    },
+    // Values an app hands the connection: an encoder, a middleware class.
+    GemClass { name: "Faraday::FlatParamsEncoder", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::NestedParamsEncoder", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::Response::RaiseError", class_methods: &[], instance_methods: &[] },
+    // faraday-multipart: the parts a multipart body carries, and the
+    // Faraday v1 names it still aliases (`Faraday::UploadIO`, `FilePart`).
+    GemClass { name: "Faraday::Multipart", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::Multipart::FilePart", class_methods: &[], instance_methods: FARADAY_FILE_PART },
+    GemClass { name: "Faraday::Multipart::ParamPart", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::Multipart::CompositeReadIO", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::FilePart", class_methods: &[], instance_methods: FARADAY_FILE_PART },
+    GemClass { name: "Faraday::ParamPart", class_methods: &[], instance_methods: &[] },
+    GemClass { name: "Faraday::UploadIO", class_methods: &[], instance_methods: FARADAY_FILE_PART },
+    GemClass { name: "Faraday::CompositeReadIO", class_methods: &[], instance_methods: &[] },
+    // The error hierarchy an app rescues. `response` is the Hash the gem
+    // builds (`status`, `body`, `headers`), or nil for a connection error.
+    GemClass { name: "Faraday::Error", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ClientError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ServerError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::BadRequestError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::UnauthorizedError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ForbiddenError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ResourceNotFound", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ConflictError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::UnprocessableEntityError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::TooManyRequestsError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ConnectionFailed", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::TimeoutError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::SSLError", class_methods: &[], instance_methods: FARADAY_ERROR },
+    GemClass { name: "Faraday::ParsingError", class_methods: &[], instance_methods: FARADAY_ERROR },
+];
+
+const FARADAY_FILE_PART: &[(&str, GemTy)] = &[
+    ("content_type", GemTy::Untyped),
+    ("original_filename", GemTy::Untyped),
+    ("local_path", GemTy::Untyped),
+    ("io", GemTy::Untyped),
+];
+
+const FARADAY_ERROR: &[(&str, GemTy)] = &[
+    ("message", GemTy::Str),
+    ("to_s", GemTy::Str),
+    ("response", GemTy::Untyped),
+    ("response_status", GemTy::Untyped),
+    ("response_body", GemTy::Untyped),
+    ("response_headers", GemTy::Untyped),
+    ("wrapped_exception", GemTy::Untyped),
+    ("backtrace", GemTy::Untyped),
 ];

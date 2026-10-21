@@ -75,6 +75,44 @@ pub(super) fn integer_value(node: &Node<'_>) -> Option<i64> {
     integer_i64(&node.as_integer_node()?.value())
 }
 
+/// A non-interpolated `/pattern/flags` literal's pattern (prism's
+/// UNESCAPED bytes — the regex engine's view, same as
+/// `dialect::Literal::Regex`) and its flags, in canonical `imxoesun`
+/// order (matching Ruby's own `Regexp#to_s`). `None` for anything but
+/// a plain regex literal node — an interpolated regex
+/// (`InterpolatedRegularExpressionNode`) has no single pattern string
+/// and is each caller's own concern.
+pub(super) fn regexp_literal_flags(node: &Node<'_>) -> Option<(String, String)> {
+    let r = node.as_regular_expression_node()?;
+    let mut flags = String::new();
+    if r.is_ignore_case() {
+        flags.push('i');
+    }
+    if r.is_multi_line() {
+        flags.push('m');
+    }
+    if r.is_extended() {
+        flags.push('x');
+    }
+    if r.is_once() {
+        flags.push('o');
+    }
+    if r.is_euc_jp() {
+        flags.push('e');
+    }
+    if r.is_windows_31j() {
+        flags.push('s');
+    }
+    if r.is_utf_8() {
+        flags.push('u');
+    }
+    if r.is_ascii_8bit() {
+        flags.push('n');
+    }
+    let pattern = String::from_utf8_lossy(r.unescaped()).into_owned();
+    Some((pattern, flags))
+}
+
 /// An integer literal's value as `i64`.
 ///
 /// **prism only offers `TryInto<i32>`**, and every literal in ingest

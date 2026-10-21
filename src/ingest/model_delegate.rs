@@ -28,6 +28,7 @@ pub(crate) fn lower_model_delegates(app: &mut crate::App) {
         return;
     }
 
+    let body_names = crate::lower::model_to_library::schema::share_model_body_names(&app.models, &Default::default());
     let mut params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
     params_specs.mark_file_fields(&app.models);
@@ -98,6 +99,7 @@ pub(crate) fn lower_model_delegates(app: &mut crate::App) {
         })
         .collect();
 
+    drop(body_names);
     for model in &mut app.models {
         let mut unknown_calls: Vec<_> = model
             .body
@@ -119,6 +121,7 @@ pub(crate) fn lower_model_delegates(app: &mut crate::App) {
         let blocked = blocked_names
             .get(&model.name)
             .expect("delegate model surface");
+        let method_targets = own_reader_targets(model);
         let generated = expand_delegates(
             &model.name,
             &methods,
@@ -126,6 +129,7 @@ pub(crate) fn lower_model_delegates(app: &mut crate::App) {
             &additional_methods,
             blocked,
             Some(&supported_target_methods),
+            &method_targets,
             &app.sources,
         );
         let mut unexpanded_spans: Vec<_> = unknown_calls
@@ -152,6 +156,25 @@ pub(crate) fn lower_model_delegates(app: &mut crate::App) {
                 leading_blank_line: true,
             }));
     }
+}
+
+/// The model's own argument-less instance methods that are not
+/// associations: forem's `def authorizer` behind `delegate …, to:
+/// :authorizer`. The forwarder calls it as Rails' does, and analysis
+/// types what it answers, so a delegated name its class lacks is an
+/// error at the forwarder rather than at every caller.
+fn own_reader_targets(model: &Model) -> HashSet<String> {
+    let associations: HashSet<_> = model.associations().map(|a| a.name().as_str().to_string()).collect();
+    model
+        .methods()
+        .filter(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Instance
+                && exact_positional_arity(m) == Some(0)
+                && !uses_implicit_block(&m.body)
+        })
+        .map(|m| m.name.as_str().to_string())
+        .filter(|name| !associations.contains(name))
+        .collect()
 }
 
 fn included_concern_method_bodies(

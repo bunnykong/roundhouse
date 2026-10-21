@@ -79,12 +79,12 @@ use crate::ident::Symbol;
 pub fn apply_html_safe_lowering(app: &mut App) {
     apply_filter_chain_h_exemption(app);
     // Collect before rewriting: the marks are what is about to be erased.
-    let mut safe: Vec<Symbol> = Vec::new();
+    let mut safe: Vec<(String, Symbol)> = Vec::new();
     for model in &app.models {
         for item in &model.body {
             if let ModelBodyItem::Method { method, .. } = item {
                 if returns_html_safe(&method.body) {
-                    safe.push(method.name.clone());
+                    safe.push((model.name.0.as_str().to_string(), method.name.clone()));
                 }
             }
         }
@@ -92,11 +92,14 @@ pub fn apply_html_safe_lowering(app: &mut App) {
     for lc in &app.library_classes {
         for m in &lc.methods {
             if returns_html_safe(&m.body) {
-                safe.push(m.name.clone());
+                safe.push((lc.name.0.as_str().to_string(), m.name.clone()));
             }
         }
     }
-    app.html_safe_methods.extend(safe);
+    for (owner, name) in safe {
+        app.html_safe_method_owners.insert((owner, name.as_str().to_string()));
+        app.html_safe_methods.insert(name);
+    }
     for model in &mut app.models {
         for item in &mut model.body {
             match item {
@@ -109,6 +112,20 @@ pub fn apply_html_safe_lowering(app: &mut App) {
     }
     for lc in &mut app.library_classes {
         for m in &mut lc.methods {
+            rewrite(&mut m.body);
+        }
+    }
+    // A TEST's mark builds an argument (campfire's
+    // `view.send(:auto_link_text, "<pre>…".html_safe)`); no view walker
+    // or `render html:` answers it there, so it is erased as a model's.
+    for tm in &mut app.test_modules {
+        if let Some(setup) = &mut tm.setup {
+            rewrite(setup);
+        }
+        for t in &mut tm.tests {
+            rewrite(&mut t.body);
+        }
+        for m in &mut tm.helpers {
             rewrite(&mut m.body);
         }
     }

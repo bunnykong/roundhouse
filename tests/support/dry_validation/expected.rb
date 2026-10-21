@@ -51,3 +51,8 @@ dv_check(49, RulesContract.new, {"name" => "ok", "a" => 7, "b" => 9, "nick" => n
 dv_check(50, RulesContract.new, {"a" => "1"}, false, {:a => 1}, {:name => ["is missing"], :a => ["a schema err"]})
 dv_check(51, Users::SignupContract.new, {"login" => "adm", "age" => 1}, false, {:login => "adm", :age => 1}, {:login => ["Логин занят (admin, root)"]})
 dv_check(52, Users::SignupContract.new, {"login" => "zzz", "age" => 1}, false, {:login => "zzz", :age => 1}, {nil => ["Регистрация закрыта"]})
+dv_check(53, Users::SignupContract.new, {"login" => "hsh", "age" => 1}, false, {:login => "hsh", :age => 1}, {:login => ["тег  и "]})
+dv_check(54, RulesContract.new, {"name" => "ok", "nick" => "hsh"}, false, {:name => "ok", :nick => "hsh"}, {:nick => ["nick \#@x \#$y \#{z}"]})
+dv_check(55, ShapesContract.new, {"tags" => [{"title" => "a"}], "code" => "x", "nick" => "ab", "owner" => Shop::User.new, "address" => {"city" => "M", "z" => 1}}, true, {:tags => [{:title => "a"}], :code => "x", :nick => "ab", :owner => Shop::User, :address => {:city => "M"}}, {})
+dv_check(56, ShapesContract.new, {"tags" => [{}], "code" => 1, "nick" => "a", "owner" => 1, "address" => {}}, false, {:tags => [{}], :code => 1, :nick => "a", :owner => 1, :address => {}}, {:tags => {0 => {:title => ["is missing"]}}, :code => ["must be a string"], :nick => ["size cannot be less than 2"], :owner => ["must be Shop::User or must be Shop::Guest"], :address => ["must be filled"]})
+dv_check(57, ShapesContract.new, {"code" => nil, "nick" => 3, "owner" => Shop::Guest.new, "address" => nil}, false, {:code => nil, :nick => 3, :owner => Shop::Guest, :address => nil}, {:code => ["must be a string"], :nick => ["must be a string"], :address => ["must be filled"]})

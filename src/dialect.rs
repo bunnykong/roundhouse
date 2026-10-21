@@ -140,6 +140,32 @@ impl Model {
         })
     }
 
+    /// The association on this model, the `through:` model, that
+    /// supplies the rows of `through_assoc`. This is Rails'
+    /// `source_reflection_names`: the `source:` name when it is given,
+    /// and otherwise the singular name, then the name itself. `None`
+    /// when no candidate is declared here, or when both are (Rails
+    /// raises `AmbiguousSourceReflectionForThroughAssociation`). Never
+    /// match the source by class: a model can have two associations to
+    /// one class, and each one gives other rows.
+    pub fn through_source(&self, through_assoc: &Association) -> Option<&Association> {
+        let Association::HasMany { name, source, .. } = through_assoc else { return None };
+        let mut candidates = match source {
+            Some(source) => vec![source.clone()],
+            None => vec![Symbol::from(crate::naming::singularize(name.as_str())), name.clone()],
+        };
+        candidates.dedup();
+        // A later declaration of a name replaces an earlier one, as in Rails.
+        let found = candidates
+            .iter()
+            .filter_map(|c| self.associations().filter(|a| a.name() == c).last())
+            .collect::<Vec<_>>();
+        match found.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
     /// Like `associations()`, but paired with each declaration's source
     /// span — for lowerers that stamp synthesized methods with the
     /// `has_many`/`belongs_to` line they came from.
@@ -415,6 +441,17 @@ pub enum Association {
         #[serde(default, skip_serializing_if = "is_false")]
         foreign_key_explicit: bool,
         through: Option<Symbol>,
+        /// The `source:` option as written. It names the association on
+        /// the `through:` model that supplies the rows. Read it through
+        /// [`Model::through_source`], which also covers an omitted
+        /// `source:`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<Symbol>,
+        /// Written with `class_name:` or `source_type:`. Otherwise app
+        /// assembly sets the `target` of a `through:` association to the
+        /// class of its source association, as Rails does.
+        #[serde(default, skip_serializing_if = "is_false")]
+        class_explicit: bool,
         dependent: Dependent,
         /// `has_many :notifications, as: :notifiable` — this side is
         /// one implementor of the named polymorphic interface; rows
@@ -550,6 +587,30 @@ pub enum Dependent {
 pub struct Validation {
     pub attribute: Symbol,
     pub rules: Vec<ValidationRule>,
+    /// `if: :pred` / `if: -> { … }` / `if: lambda { … }` / `if: proc { … }`.
+    /// A Symbol and a zero-arity lambda/proc both become the guard
+    /// expression `callback_condition` already builds for a callback:
+    /// a Symbol is the predicate called on the record, and a lambda
+    /// body is spliced where Rails `instance_exec`s it with `self` the
+    /// record. `None` runs the rules on every save. When both this and
+    /// `unless_cond` are set, the rules run only when `if:` holds and
+    /// `unless:` does not. Anything else (an arity>0 lambda, a String,
+    /// a captured local, a body survey mode had to stub with `nil`) is
+    /// not stored; ingest refuses the whole call instead of checking
+    /// unconditionally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_cond: Option<Expr>,
+    /// `unless:` — see `if_cond`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_cond: Option<Expr>,
+}
+
+/// Inclusive or exclusive numeric range from `inclusion: { in: 1..3 }`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InclusionRange {
+    pub begin: f64,
+    pub end: f64,
+    pub exclusive: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -557,7 +618,18 @@ pub struct Validation {
 pub enum ValidationRule {
     Presence,
     Absence,
-    Uniqueness { scope: Vec<Symbol>, case_sensitive: bool },
+    /// `uniqueness: true` / `{ scope:, case_sensitive:, allow_nil:,
+    /// allow_blank: }`. `scope` holds the names as written; an
+    /// association name resolves to its foreign key when the check is
+    /// built. `case_sensitive: false` compares `LOWER(col) = LOWER(value)`.
+    Uniqueness {
+        scope: Vec<Symbol>,
+        case_sensitive: bool,
+        #[serde(default)]
+        allow_nil: bool,
+        #[serde(default)]
+        allow_blank: bool,
+    },
     Length {
         min: Option<u32>,
         max: Option<u32>,
@@ -575,9 +647,48 @@ pub enum ValidationRule {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_nil: Option<bool>,
     },
-    Format { pattern: String },
-    Numericality { only_integer: bool, gt: Option<f64>, lt: Option<f64> },
-    Inclusion { values: Vec<Literal> },
+    Format {
+        pattern: String,
+        /// Ruby regex flags, restricted at ingest to the combinations
+        /// every emit target can reproduce with Ruby's exact meaning:
+        /// `i` (case-insensitive), `m` (Ruby's dot-matches-newline), or
+        /// both — never `x` (extended) or an encoding/`o` flag, which
+        /// stay a `format: with` survey gap instead. `#[serde(default)]`
+        /// so JSON written before this field existed still loads.
+        #[serde(default)]
+        flags: String,
+    },
+    Numericality {
+        only_integer: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gt: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lt: Option<f64>,
+        /// `greater_than_or_equal_to:` / `less_than_or_equal_to:`.
+        /// The store guide uses the inclusive floor. Strict bounds stay
+        /// `gt` / `lt`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gte: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lte: Option<f64>,
+    },
+    Inclusion {
+        values: Vec<Literal>,
+        /// `in: 1..3` / `1...3`. Numeric `Range#include?` is `cover?`,
+        /// so the endpoints stay a range instead of an expanded list.
+        /// `values` is empty when this is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<InclusionRange>,
+    },
+    /// `exclusion: { in: […] }` / `validates_exclusion_of`: the value
+    /// must NOT be one of `values`, or, with `range`, must not be covered
+    /// by it. `nil` is reserved only when it's listed (no implicit
+    /// `allow_nil`), never by a range. Rails' message is "is reserved".
+    Exclusion {
+        values: Vec<Literal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<InclusionRange>,
+    },
     Custom {
         method: Symbol,
         /// `validate :m, if: :pred` / `unless: :pred` — the instance
@@ -1123,6 +1234,8 @@ pub enum LibraryClassOrigin {
     /// A `Dry::Validation::Contract` given its `call`, a `Dry::Schema`
     /// constant's class, or what they share (`ingest::dry_validation`).
     DryValidation,
+    /// dry-monads' Result and do-notation stand-ins (`ingest::dry_monads`).
+    DryMonads,
     /// The class a file-level `X = Data.define(:a, :b)` creates, in a
     /// file that declares nothing else. `members` are the literal
     /// Symbol members in declaration order; `span` is the
@@ -1135,6 +1248,8 @@ pub enum LibraryClassOrigin {
         members: Vec<Symbol>,
         span: Span,
     },
+    /// The `Oj` stand-in an app under `Oj.mimic_JSON` reaches (`ingest::oj`).
+    Oj,
 }
 
 /// A graphql-ruby object type (a class descending from
@@ -1984,9 +2099,10 @@ pub struct View {
     /// for the overwhelmingly common headerless partial/view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_locals: Option<Vec<Param>>,
-    /// Ingested for the analyzer only — a mailer's `.text.erb` variant
-    /// and the mailer layout: templates whose Ruby the type checks and
-    /// the IDE should see, but which no emitter renders yet.
+    /// Ingested for the analyzer only: a template whose Ruby the type
+    /// checks and the IDE should see, but which no emitter renders. No
+    /// ingest sets it today (a mailer's `.text.erb` renders, through
+    /// `lower::mailer_templates`).
     /// `session::analyze_and_lower` drops them before lowering;
     /// `check`, the LSP and the MCP keep them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

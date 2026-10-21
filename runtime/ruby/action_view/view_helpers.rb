@@ -121,8 +121,15 @@ module ActionView
     # Monomorphic String. Skip gsub when already safe (ERB::Util).
     # Probe with `include?`, not `match?(re)` — Rust/Python have no
     # portable match? emit.
+    #
+    # A safe input is answered as a fresh String (`+ ""`). Returning
+    # `s` kept the caller's handle; Spinel's share analysis then
+    # refused ERB sites that pass `filename.to_s` / `extension` into
+    # the escape (campfire's `active_storage/blobs/_blob`, #9258):
+    # the same characters can still be appended under another name.
+    # The escape's job is text for embedding, not a shared buffer.
     def self.html_escape(s)
-      return s unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("'")
+      return s + "" unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("'")
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
 
@@ -140,7 +147,7 @@ module ActionView
     BUILDER_TEXT_PATTERN = /[&<>]/.freeze
 
     def self.builder_text(s)
-      return s unless s.include?("&") || s.include?("<") || s.include?(">")
+      return s + "" unless s.include?("&") || s.include?("<") || s.include?(">")
       s.gsub(BUILDER_TEXT_PATTERN, BUILDER_TEXT_ESCAPES)
     end
 
@@ -158,7 +165,7 @@ module ActionView
     BUILDER_ATTR_PATTERN = /[&<>"\n\r]/.freeze
 
     def self.builder_attr(s)
-      return s unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("\n") || s.include?("\r")
+      return s + "" unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("\n") || s.include?("\r")
       s.gsub(BUILDER_ATTR_PATTERN, BUILDER_ATTR_ESCAPES)
     end
 
@@ -302,6 +309,44 @@ module ActionView
     end
 
     def self.collection_fragment_write(_name, value)
+      value
+    end
+
+    # Every element's fragment in one lookup, as Rails' collection
+    # renderer asks its `collection_cache.read_multi`: the hits in the
+    # order of `names`, `nil` for a miss.
+    def self.collection_fragment_read_multi(names)
+      names.map { |name| ActionView::ViewHelpers.collection_fragment_read(name) }
+    end
+
+    # Told once a cached collection has rendered: the partial's template
+    # (`app/views/messages/_message.html.erb`) and what the store
+    # answered for each element. Rails reports the same facts as its
+    # `render_collection.action_view` event; nothing listens here, and
+    # the ruby family's test support reports them.
+    def self.collection_rendered(_identifier, _hits)
+      nil
+    end
+
+    # A jbuilder template wrapped in `json.cache! key do … end` reads and
+    # writes its JSON through these (`lower::jbuilder_to_library`,
+    # `walk_cached_template`). Caching is off here, so the lowering
+    # renders the block; the ruby family and spinel reopen them with the
+    # controller and Jbuilder's own `_read_fragment_cache` /
+    # `_write_fragment_cache`.
+    def self.jbuilder_caching?
+      false
+    end
+
+    def self.jbuilder_cache_key(template, _key)
+      template
+    end
+
+    def self.jbuilder_fragment_read(_key)
+      nil
+    end
+
+    def self.jbuilder_fragment_write(_key, value)
       value
     end
 
@@ -871,54 +916,47 @@ module ActionView
       ActionController.masked_authenticity_token
     end
   
-    # Empty in dev mode without a CSP nonce configured, mirroring Rails'
-    # behavior and the other targets' runtimes (Rust / Python / Elixir
-    # all return "" here). Production deployment with CSP wired would
-    # plug a real nonce in.
+    # Empty when no policy is configured. The ruby family reopens this
+    # in `view_helpers_ext.rb` and emits the meta tag Rails'
+    # `csp_meta_tag` emits once `Rails.application.content_security_policy`
+    # is set (the object a request duplicates). Strict targets have no
+    # request in a view helper, so they stay empty — the same split as
+    # `url_for_path`.
     def self.csp_meta_tag
       ""
     end
   
     def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
-      href = "/assets/#{name}.css"
+      href = digested_asset_path("#{name}.css")
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
       "<link#{attrs}>"
     end
 
     # `<script src>` include for a JS source. The source resolves through
-    # the same undigested `/assets/<name>.js` convention as
-    # `javascript_path` (see the `image_path` note on why no digests);
-    # absolute paths and URLs pass verbatim. Rails takes a Symbol source
+    # the same emitted asset table as `image_path`.
+    # Absolute paths and URLs pass verbatim. Rails takes a Symbol source
     # too, and a value can hold one, so the source becomes a String here.
     def self.javascript_include_tag(source, opts = EMPTY_HTML_OPTS)
       source_s = source.to_s
       name = source_s.include?(".") ? source_s : "#{source_s}.js"
-      src = name.start_with?("/") || name.include?("://") ? name : "/assets/#{name}"
+      src = name.start_with?("/") || name.include?("://") ? name : digested_asset_path(name)
       attrs = render_attrs({ src: src }.merge(opts.to_h))
       "<script#{attrs}></script>"
     end
 
     # Asset path for an image source. `skip_pipeline: true` (and any
     # already-absolute or protocol-relative source) returns the source
-    # verbatim — Rails bypasses the pipeline for those, and the lobsters
-    # benchmark (production, `config.assets.compile = false`, no manifest)
-    # has no digests to apply anyway, so the undigested `/assets/<name>`
-    # prefix below matches its Rails output. Fingerprinting belongs to an
-    # app that actually precompiles assets, not here.
+    # verbatim, since neither belongs to the emitted logical-asset table.
     def self.image_path(source, skip_pipeline: false)
       return source if skip_pipeline
       return source if source.start_with?("/")
       return source if source.include?("://")
-      "/assets/#{source}"
+      digested_asset_path(source)
     end
 
     # `asset_path` — the GENERAL one. In Rails `image_path` is
-    # `asset_path(source, type: :image)`, so the body above is this body
-    # with a type that only ever picked a subdirectory in the
-    # sprockets-era layout; under Propshaft (and under the
-    # no-manifest benchmark posture both share) the answer is the same
-    # `/assets/<source>`, so the two are spelled out separately rather
-    # than one delegating and paying a kwarg forward.
+    # `asset_path(source, type: :image)`; Propshaft uses a logical name
+    # independent of the asset type.
     #
     # campfire reaches it for the /sounds/*.mp3 a `/play` message
     # renders — `asset_path(sound.asset_path)` inside
@@ -928,6 +966,10 @@ module ActionView
       return source if skip_pipeline
       return source if source.start_with?("/")
       return source if source.include?("://")
+      digested_asset_path(source)
+    end
+
+    def self.digested_asset_path(source)
       "/assets/#{source}"
     end
 
@@ -951,7 +993,7 @@ module ActionView
       return source if skip_pipeline
       return source if source.start_with?("/")
       return source if source.include?("://")
-      "/assets/#{source}"
+      digested_asset_path(source)
     end
 
     # `path_to_javascript "application"` → the asset path for a JS source.
@@ -964,7 +1006,7 @@ module ActionView
       return source if source.start_with?("/")
       return source if source.include?("://")
       name = source.include?(".") ? source : "#{source}.js"
-      "/assets/#{name}"
+      digested_asset_path(name)
     end
 
     # Alias of `path_to_javascript`. Inlined rather than delegating, so no
@@ -976,7 +1018,7 @@ module ActionView
       return source if source.start_with?("/")
       return source if source.include?("://")
       name = source.include?(".") ? source : "#{source}.js"
-      "/assets/#{name}"
+      digested_asset_path(name)
     end
 
     # `<img>` tag for a source path + attribute opts. The source flows

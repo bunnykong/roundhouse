@@ -64,7 +64,7 @@ pub(super) fn decline(item: &mut ModelBodyItem, detail: &str) {
     let ModelBodyItem::Unknown { expr, .. } = item else {
         unreachable!()
     };
-    expr.diagnostic.get_or_insert(DiagnosticKind::Unsupported {
+    expr.diagnostic_mut().get_or_insert(DiagnosticKind::Unsupported {
         target: None,
         construct: Symbol::from("concern attr_accessor"),
         detail: detail.into(),
@@ -414,6 +414,8 @@ fn refusals(
                             .as_ref()
                             .is_none_or(|recv| matches!(&*recv.node, ExprNode::SelfRef))
                             && matches!(method.as_str(), "private" | "protected" | "public")
+                            // Not a refusal: the model lowering applies a carried marker to the accessor it synthesizes.
+                            && expr.decisions & crate::expr::INHERITED_VISIBILITY == 0
                         {
                             for arg in args {
                                 let name = match &*arg.node {
@@ -458,7 +460,7 @@ fn refusals(
             };
             if let Some(DiagnosticKind::Unsupported {
                 construct, detail, ..
-            }) = &expr.diagnostic
+            }) = &expr.diagnostic()
             {
                 refused.push((expr.span, format!("{construct} on {} {detail}", model.name.0)));
                 continue;

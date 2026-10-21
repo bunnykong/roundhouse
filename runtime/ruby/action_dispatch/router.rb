@@ -26,7 +26,7 @@ module ActionDispatch
     # like this one.
     class Route
       attr_reader :verb, :pattern, :controller, :action, :req_format, :int_params,
-                  :pattern_parts, :seg_constraints
+                  :pattern_parts, :seg_constraints, :part_count, :globbed, :lead
 
       # `req_format` — the route-forced response format (Rails'
       # `get "/rss" => "home#index", :format => "rss"`), nil for the
@@ -70,7 +70,27 @@ module ActionDispatch
         # deep in the table) and ~2.7 array allocations per candidate. The
         # table is built once at boot; the request path is the only thing
         # that has to be split per request.
-        @pattern_parts = pattern.split("/")
+        parts = pattern.split("/")
+        @pattern_parts = parts
+        # And what `scan_routes` asks of every candidate, worked out once
+        # too: the segment count, whether the last
+        # segment is a `*glob`, and the first segment when it is a plain
+        # literal ("" when it is dynamic). Those two compares reject nearly
+        # every route in the table before `match_parts` is called: `/up`,
+        # the last of campfire's ~180 routes, spent 24% of its request in
+        # the scan (2026-10-15, CRuby on the bench box).
+        #
+        # Each ivar is assigned once, unconditionally (the Rust emitter turns
+        # an ivar assignment inside an `if` in `initialize` into a
+        # block-local `let` that shadows it), and from the `parts` local
+        # rather than by reading `@pattern_parts` back (Elixir's emit takes
+        # that read's `.length` for a String's).
+        count = parts.length
+        @part_count = count
+        tail = count > 0 ? parts[count - 1].to_s : +""
+        @globbed = tail.start_with?("*")
+        first = count > 1 ? parts[1].to_s : +""
+        @lead = first.include?(":") || first.start_with?("*") ? +"" : first
       end
     end
 
@@ -201,6 +221,8 @@ module ActionDispatch
 
     # One pass of the table for one verb, over the already-split path.
     def self.scan_routes(method_upcase, path_parts, table, format)
+      count = path_parts.length
+      lead = count > 1 ? path_parts[1].to_s : +""
       i = 0
       while i < table.length
         route = table[i]
@@ -208,9 +230,12 @@ module ActionDispatch
         # Not on the HEAD pass, though: Rails' first HEAD pass takes only
         # routes that name a verb, so a `via: :all` route is reached on
         # the GET pass, in declaration order with the GET routes.
-        verb = route.verb.to_s
-        if verb == method_upcase || (verb == "ANY" && method_upcase != "HEAD")
-          params = match_parts(route.pattern_parts, path_parts, route.int_params, format, route.seg_constraints)
+        # Attr-reader Strings do not carry Spinel's shared handle.
+        # Concatenating "" is a new string with the same characters;
+        # `match_parts` and the verb compare only read them.
+        verb = route.verb + ""
+        if (verb == method_upcase || (verb == "ANY" && method_upcase != "HEAD")) && admits(route, count, lead)
+          params = match_parts(route.pattern_parts, path_parts, route.int_params + "", format, route.seg_constraints + "")
           unless params.nil?
             return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)
           end
@@ -218,6 +243,21 @@ module ActionDispatch
         i += 1
       end
       nil
+    end
+
+    # Whether a path of `count` segments whose first is `lead` can match
+    # `route` at all: the cheap half of `match_parts`, from what
+    # `Route#initialize` precomputed. False means it cannot; true means
+    # `match_parts` decides. A module function rather than a Route method:
+    # the Rust emitter borrows a String argument for the former and not
+    # the latter.
+    def self.admits(route, count, lead)
+      if route.globbed
+        return false if count < route.part_count
+      elsif count != route.part_count
+        return false
+      end
+      route.lead.empty? || route.lead == lead
     end
 
     # Match a path against a pattern containing `:name` segments.
@@ -805,11 +845,38 @@ module ActionDispatch
 
     # Does the WHOLE of `value` satisfy `pattern` (one route's
     # compiled requirement for one param)? Anchored to the whole
-    # segment, as Rails anchors every routing requirement — walks
-    # `pattern`'s items strictly left to right over `value`, greedily,
-    # with no backtracking (see `segment_pattern.rs`'s module docs for
-    # why that is always correct for a pattern this compiled).
+    # segment, as Rails anchors every routing requirement.
+    #
+    # A pattern that starts with `A` is an ordered list of
+    # alternatives (`segment_pattern.rs` expands `|`, groups, and
+    # `{n,m}` into whole-segment sequences). The first alternative
+    # that matches wins. Anything else is one sequence, walked left
+    # to right with no backtracking.
     def self.segment_pattern_match(pattern, value)
+      if pattern.length > 0 && pattern[0, 1].to_s == "A"
+        return segment_pattern_alt_match(pattern, value)
+      end
+      segment_pattern_seq_match(pattern, value)
+    end
+
+    # `A` then `<len>.<pattern>` entries back to back, each pattern a
+    # sequence `segment_pattern_seq_match` reads. One counter step
+    # (`i += advance`), the shape the Elixir while-lowering accepts.
+    def self.segment_pattern_alt_match(pattern, value)
+      i = 1
+      while i < pattern.length
+        after_len = length_prefix_content_start(pattern, i)
+        len = length_prefix_value(pattern, i, after_len)
+        alt = pattern[after_len, len].to_s
+        return true if segment_pattern_seq_match(alt, value)
+        advance = after_len + len - i
+        i += advance
+      end
+      false
+    end
+
+    # One backtrack-free sequence. See `segment_pattern.rs`.
+    def self.segment_pattern_seq_match(pattern, value)
       pi = 0
       vi = 0
       while pi < pattern.length

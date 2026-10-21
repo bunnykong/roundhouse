@@ -25,37 +25,35 @@ advisory jobs and the scheduled Full cycle for the multi-target ledger.
 | **Draft or ready** + `ci:spinel` | Ruby floor plus the **CORE** Spinel lane (required for that run) |
 | **Draft or ready** + focus label(s) | Ruby floor plus **only** the selected focus lanes (required) |
 | **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Spinel); extras stay advisory |
-| **Push to canonical `main`** | Ruby floor plus the full Spinel suite (advisory except `campfire-archive-build`) and `campfire-latest` (advisory); extra-language SDKs wait for the schedule |
-| **Scheduled / manual Full validation** | Full validation (the extra-language ledger and publication cycle) |
+| **Push to canonical `main`** | Ruby floor plus **path-owned** lanes (Spinel when the diff owns it); no always-on full Spinel suite. Extra-language SDKs and broad Spinel wait for Full |
+| **Push to `main`** with a `[ci full]` line in a pushed commit's message | Full validation, as `ci:full` would plan it; extras stay advisory |
+| **Scheduled / manual Full validation** | Full validation (extra-language ledger, broad Spinel suite, publication cycle) |
 
 PRs without a special label run a Ruby floor: fixture preparation, unit
 tests, Store analysis, the CRuby comparison against Rails (on `MRI_RUBY`, the
 supported minimum, with its runtime gates repeated on `MRI_RUBY_NEXT` in
 `compare-ruby-next`), and Campfire
 conformance/comparison. Campfire conformance is pinned (`CAMPFIRE_SHA`)
-and blocking; `campfire-latest` runs the same suite against
-basecamp/once-campfire `main` on that app's own Ruby after every merge to
-`main`, on Full, and for unknown changed inputs on non-PR runs (never in
-a pull request's plan), advisory. It always
-surveys the strict emit and reports ingest gaps and strict-emit errors; it
-runs the suite, and reports tests against the pinned floor, only when the
-survey finds no ingest gap. Four unit shards cover all package test targets in
-bounded batches; ignored integrations need selected toolchain lanes. Framework
-and toolchain suites also run inside comparison jobs, not necessarily as
-standalone checks. **Spinel is not part of `BASE`.**
+and blocking. Tip drift against basecamp/once-campfire `main` is not a
+standing CI job; survey tip only when deliberately bumping that pin.
+`unit-build` compiles one archive of all library, binary, and integration
+tests. Four unit shards partition the active cases; ignored integrations
+still need selected toolchain lanes. Framework and toolchain suites also
+run inside comparison jobs. **Spinel is not part of `BASE`.**
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
-Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, and WASM do
-**not** start on that path unless the diff owns them or a maintainer applies
-`ci:full`. When path ownership or Full selects the seven extras, their
-`compare-extra` / `smoke-extra` jobs are **advisory** (visible, not
-merge-blocking) unless a focus label made them required. JRuby stays with
-Ruby-family path ownership (`src/emit/ruby.rs`, interpreter-only runtime
-files, proven `src/project.rs` bodies) or `ci:jruby`. Spinel starts when the
-diff owns it, via `ci:spinel` (CORE, required), or via `ci:full` / main push
-(full suite, mostly advisory). Extra-language failures after merge are a
-scheduled-ledger item, not a reason to block the next Ruby PR.
+Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, and the broad
+Spinel suite do **not** start on that path unless the diff owns them or a
+maintainer applies `ci:full` (or a main push carries `[ci full]`). When path
+ownership or Full selects the seven extras, their `compare-extra` /
+`smoke-extra` jobs are **advisory** (visible, not merge-blocking) unless a
+focus label made them required. JRuby stays with Ruby-family path ownership
+(`src/emit/ruby.rs`, interpreter-only runtime files, proven `src/project.rs`
+bodies) or `ci:jruby`. Spinel starts when the diff owns it, via `ci:spinel`
+(CORE, required), or via Full / unknown-input fallback (full suite, mostly
+advisory). Extra-language and broad-Spinel failures after an unrelated merge
+are a scheduled-ledger item, not a reason to block the next Ruby PR.
 
 Selected lanes start once their inputs are ready, without waiting for unit
 tests to pass. Campfire consumes an independently built same-run debug compiler.
@@ -85,6 +83,38 @@ has no effect. Stacked labels prefer the broader lane:
 still receive checks; changes to the rendered user guide also select
 site/browser coverage.
 
+### Unit test execution
+
+`unit-build` creates a same-run Nextest archive and a complete case inventory.
+The test jobs download its exact artifact ID, including on failed-job reruns.
+They retain the fixture, Ruby gems, system libraries, and Rust toolchain needed
+by test bodies, but do not rebuild the workspace.
+
+The unit producer uses `opt-level=0` for the `roundhouse` package.
+Dependencies stay optimized. Local test defaults and production profiles
+stay unchanged.
+
+Each job checks the source SHA, archive digest, workspace paths, case identities,
+and ignored states before execution. The four hash partitions must be disjoint
+and cover every active case. An empty combined suite or incomplete inventory
+fails the job. Build artifacts are shared; test results are never reused.
+
+Producer and consumer workspace paths stay identical because existing tests
+embed source and executable paths. Test binaries retain embedded backtrace line
+data. Documentation tests use the same CI package override, so they reuse
+the producer's library build.
+
+`store-check` builds `emit_preview` with the unoptimized `dev` profile and
+runs the nine-target bench gate. The steps run even when Store analysis
+reuses a prior result. They reuse the Store library build when it exists.
+The bench gate stays required but does not delay the test archive.
+
+The producer and every unit shard remain required. Per-attempt timing, resource,
+coverage, and test-result artifacts retain failure evidence without matrix
+output races. The runner and its contracts are
+[`ci-unit-tests.py`](../../scripts/ci-unit-tests.py) and
+[`ci_unit_tests_test.py`](../../tests/ci_unit_tests_test.py).
+
 ### Focus labels (narrow fix rounds)
 
 When Full validation (or a `ci:full` PR) shows red lanes, apply focus labels
@@ -94,14 +124,16 @@ so fix rounds only queue the lanes under repair — and those lanes are
 | Label | Selects (required while focused) |
 |---|---|
 | `ci:crystal` … `ci:python` | That language's `compare-extra` **and** `smoke-extra` (+ `build-site` / archives / `archive-results`) |
+| `ci:rust` / `ci:typescript` | That language's `compare` and floor `smoke` (+ `build-site` / archives). Each label is its own leg |
 | `ci:extras` | All seven of the above |
 | `ci:jruby` | `compare-jruby` + floor `smoke` jruby (+ site/archives) |
 | `ci:spinel` | CORE Spinel (`spinel-build`, `spinel-toolchain`, `spinel-compare`) + `spinel-framework` (+ site/archives). Not the heavy Campfire Spinel suite (`campfire-spinel-*`); not folded into `ci:extras`. |
 
 **Narrow semantics:** with any focus label set and `ci:full` **not** set, the
 plan is the Ruby floor (`BASE`) plus only the selected focus lanes. Path
-ownership does not expand the plan. Unrelated extras / WASM / rust·ts
-`compare` / full Spinel11 stay off. `ci:full` still wins as the
+ownership does not expand the plan. Unrelated extras / WASM / full
+Spinel suite stay off, and rust·ts `compare` stays off unless `ci:rust` or
+`ci:typescript` is set. `ci:full` still wins as the
 full ledger (extras remain advisory there).
 
 **Rust vs TypeScript:** selecting one no longer forces both `compare` matrix
@@ -133,13 +165,15 @@ require approval for all outside collaborators** (org owners may also set
 this at the organization Actions policy). Workflow edits cannot remove that
 prompt.
 
-Pushes to canonical `main` run the Ruby floor plus the full Spinel suite
-and cancel a superseded SHA on the same ref. They do **not** run Crystal,
-Go, Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, or the
-extra-language smoke matrix. Extra-target red is follow-up work on
-the four-hour scheduled Full validation cycle, not a merge gate for later
-Ruby PRs. That schedule remains the extra-language ledger, publication
-path, and floating-pin catch-up.
+Pushes to canonical `main` run the Ruby floor plus any **path-owned**
+lanes (including Spinel when the diff owns it) and cancel a superseded SHA
+on the same ref. They do **not** force the full Spinel suite, Crystal, Go,
+Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, or the
+extra-language smoke matrix. Broad Spinel and extra-target red are
+follow-up work on the three-hour scheduled Full validation cycle, not a
+merge gate for later unrelated Ruby PRs. That schedule remains the
+extra-language ledger, broad Spinel poll (unpinned `matz/spinel`), and
+publication path.
 
 ## Request full, Spinel, focus, or fresh validation
 
@@ -164,12 +198,19 @@ path, and floating-pin catch-up.
 - **A newer head:** needs a new run. Reruns retain the original SHA and
   coverage; rerunning an old compact run neither tests the new head nor
   expands its matrix.
+- **Full validation of a push to `main`:** put `[ci full]` on a line of its
+  own in a pushed commit's message, outside the subject. Committers land on
+  `main` without a PR, so there is no label to set. The run plans like
+  `ci:full` and names the commit in the plan's reasons. Only a whole line
+  counts, so prose that names the marker does not trigger it. Pull requests
+  ignore the marker and keep the maintainer-applied label. A later push
+  still cancels the run, and plans from its own commits only.
 - **Manual full validation:** Actions → **Full validation** → **Run workflow**.
   Leave `publish` unchecked. This executes freshly on the chosen ref; a
   branch-head dispatch is not a substitute for a PR merge-tree check.
 
-Superseded PR runs cancel. Push-to-main Ruby+Spinel runs also cancel a
-superseded SHA; the scheduled full-ci lock does not. Neither dependency-cache hits nor
+Superseded PR runs cancel. Push-to-main runs also cancel a superseded SHA;
+the scheduled full-ci lock does not. Neither dependency-cache hits nor
 restored fixture source are test results; check the job summary for any
 explicitly reused execution evidence. The compact and summary gates run only
 when `plan` succeeded and the workflow has not been cancelled. Their explicit
@@ -201,7 +242,7 @@ broaden comparison masks merely to turn CI green.
 ## Publication is separate
 
 PR checks never deploy Pages. Pushes to canonical `main` run Ruby+Spinel
-without publication. The four-hour scheduled cycle on canonical
+without publication. The three-hour scheduled cycle on canonical
 `rubys/roundhouse` main is what runs the extra-language matrix and requests
 publication. Manual publication is opt-in on canonical main.
 
@@ -225,7 +266,7 @@ Read the owner and its executable contract before editing:
 
 | Concern | Source | Tests |
 |---|---|---|
-| Coverage and execution | [ci.yml](../../.github/workflows/ci.yml), [ci-plan.py](../../scripts/ci-plan.py), [ci-unit-tests.py](../../scripts/ci-unit-tests.py) | `tests/ci_plan_test.py`, `tests/ci_plan_focus_test.py`, `tests/ci_policy_workflow.rs`, `tests/workflow_yaml_parses.rs` |
+| Coverage and execution | [ci.yml](../../.github/workflows/ci.yml), [ci-plan.py](../../scripts/ci-plan.py), [ci-unit-tests.py](../../scripts/ci-unit-tests.py) | `tests/ci_unit_tests_test.py`, `tests/ci_plan_test.py`, `tests/ci_plan_focus_test.py`, `tests/ci_policy_workflow.rs`, `tests/workflow_yaml_parses.rs` |
 | Toolchain selection | [ci.yml](../../.github/workflows/ci.yml), [`.ruby-version`](../../.ruby-version), [bin/rh](../../bin/rh) | `tests/ci_toolchain_workflow.rs`, `tests/rh_verify.rs` |
 | Receipt reuse | [ci-reuse.py](../../scripts/ci-reuse.py) | `tests/ci_reuse_test.py` |
 | Fixture caching | [generate-fixture in ci.yml](../../.github/workflows/ci.yml) | `tests/ci_fixture_workflow.rs` |

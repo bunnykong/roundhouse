@@ -12,3 +12,4 @@ ru:
         login:
           filled?: Логин обязателен
           taken: "Логин занят (%{who})"
+          hashy: "тег #@x и #$y"
