@@ -196,9 +196,12 @@ class Routing(unittest.TestCase):
             "src/analyze/body/send.rs",
             "src/analyze/body/mod.rs",
             "src/analyze/mod.rs",
+            "src/analyze/dirty_retype.rs",
             "src/analyze/registry/stdlib.rs",
             "tests/json_dump.rs",
             "tests/json_dump/included_visibility.stdout",
+            "tests/json_dump/encoder_defaults.stdout",
+            "tests/json_dump/protocol_overrides.rb",
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])

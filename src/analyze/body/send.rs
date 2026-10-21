@@ -1060,9 +1060,15 @@ impl<'a> BodyTyper<'a> {
                 MethodReceiver::Class => &class.class_methods,
                 MethodReceiver::Instance => &class.instance_methods,
             };
-            if own.contains_key(method) {
+            let key = (side, method.clone());
+            if own.contains_key(method) || class.method_visibility.contains_key(&key) {
+                // dump ignores write's result; only conversion requires a
+                // proven return as well as public visibility.
+                if method.as_str() == "to_io" && (!own.contains_key(method) || class.ambiguous_method_returns.contains(&key)) {
+                    return Err(());
+                }
                 // A return-type entry alone does not prove public visibility.
-                return class.method_visibility.get(&(side, method.clone()))
+                return class.method_visibility.get(&key)
                     .copied().map(Some).ok_or(());
             }
             if side == MethodReceiver::Instance {
@@ -1079,11 +1085,75 @@ impl<'a> BodyTyper<'a> {
         }
         let Ty::Class { id, .. } = io else { return Some(false) };
         let side = if class_object { MethodReceiver::Class } else { MethodReceiver::Instance };
+        // The facade asks the receiver, so a source override of the query
+        // invalidates a proof made only from its public method table. This
+        // includes aliases, inherited queries and folded include/extend copies.
+        // A missing external parent is not a source-defined override.
+        fn custom_query(typer: &BodyTyper<'_>, id: &ClassId, side: MethodReceiver, depth: usize) -> bool {
+            if depth >= 32 { return true; }
+            let Some(class) = typer.classes().get(id) else { return false };
+            if class.open { return true; }
+            let own = match side {
+                MethodReceiver::Class => &class.class_methods,
+                MethodReceiver::Instance => &class.instance_methods,
+            };
+            let query = Symbol::from("respond_to?");
+            (own.contains_key(&query) || class.method_visibility.contains_key(&(side, query)))
+                || (side == MethodReceiver::Instance && class.includes.iter()
+                    .any(|module| custom_query(typer, module, side, depth + 1)))
+                || class.parent.as_ref().is_some_and(|parent| custom_query(typer, parent, side, depth + 1))
+        }
+        // An unwritten superclass still supplies Object/Kernel's query.
+        // Class objects also inherit the instance protocols of Class/Module.
+        let implicit: &[&str] = if class_object {
+            &["Class", "Module", "Object", "Kernel"]
+        } else {
+            &["Object", "Kernel"]
+        };
+        if custom_query(self, id, side, 0) || implicit.iter().any(|name| {
+            custom_query(self, &ClassId(Symbol::from(*name)), MethodReceiver::Instance, 0)
+        }) {
+            return None;
+        }
         lookup(self, id, method, side, 0)
             .map(|visibility| visibility == Some(MethodVisibility::Public)).ok()
     }
 
     fn json_dump_return_ty(&self, io: &Ty, class_object: bool) -> Ty {
+        // Primitive IR shapes normally denote limits/options, but an app can
+        // reopen their Ruby classes with destination protocols. Their generic
+        // primitive dispatch does not establish that conversion's return.
+        let primitive: &[&str] = match io {
+            Ty::Str => &["String"],
+            Ty::Int => &["Integer"],
+            Ty::Float => &["Float"],
+            Ty::Bool => &["TrueClass", "FalseClass"],
+            Ty::Sym => &["Symbol"],
+            Ty::Date => &["Date"],
+            Ty::Time => &["Time", "DateTime"],
+            Ty::Array { .. } | Ty::Tuple { .. } => &["Array"],
+            Ty::Hash { .. } | Ty::Record { .. } => &["Hash"],
+            Ty::Fn { .. } => &["Proc"],
+            Ty::Relation { .. } => &["ActiveRecord::Relation"],
+            _ => &[],
+        };
+        let roots: &[&str] = if matches!(io, Ty::Class { .. }) {
+            &["Class", "Module", "Object", "Kernel"]
+        } else {
+            &["Object", "Kernel"]
+        };
+        if !matches!(io, Ty::Nil) && roots.iter().chain(primitive).any(|name| {
+            let id = ClassId(Symbol::from(*name));
+            self.classes().get(&id).is_some_and(|class|
+                class.open || ["to_io", "write", "respond_to?", "respond_to_missing?"].iter()
+                    .any(|method| {
+                        let method = Symbol::from(*method);
+                        class.method_visibility.contains_key(&(crate::dialect::MethodReceiver::Instance, method.clone()))
+                            || self.defines_instance_method(&id, &method)
+                    }))
+        }) {
+            return Ty::Untyped;
+        }
         match io {
             Ty::Union { variants } => super::union_many(
                 variants.iter().map(|ty| self.json_dump_return_ty(ty, class_object)).collect(),
@@ -4149,6 +4219,46 @@ mod json_dump_tests {
             let classes = HashMap::from([(id.clone(), info)]);
             assert_eq!(BodyTyper::new(&classes).json_dump_return_ty(&destination, false), Ty::Untyped);
         }
+    }
+
+    #[test]
+    fn an_open_surface_cannot_prove_the_conversion_query() {
+        let id = ClassId(Symbol::from("OpenDestination"));
+        let mut info = ClassInfo::default();
+        info.open = true;
+        info.instance_methods.insert(Symbol::from("write"), Ty::Int);
+        info.method_visibility.insert(
+            (MethodReceiver::Instance, Symbol::from("write")), MethodVisibility::Public,
+        );
+        let mut classes = HashMap::from([(id.clone(), info)]);
+        let destination = Ty::Class { id: id.clone(), args: vec![].into() };
+        assert_eq!(BodyTyper::new(&classes).json_dump_return_ty(&destination, false), Ty::Untyped);
+        // A declared external conversion on an implicit ancestor is also
+        // uncertainty; it need not be marked as an app-defined class.
+        classes.get_mut(&id).unwrap().open = false;
+        let mut root = ClassInfo::default();
+        root.instance_methods.insert(Symbol::from("to_io"), Ty::Nil);
+        classes.insert(ClassId(Symbol::from("Object")), root);
+        assert_eq!(BodyTyper::new(&classes).json_dump_return_ty(&destination, false), Ty::Untyped);
+        let root = classes.get_mut(&ClassId(Symbol::from("Object"))).unwrap();
+        root.instance_methods.clear();
+        root.open = true;
+        assert_eq!(BodyTyper::new(&classes).json_dump_return_ty(&Ty::Str, false), Ty::Untyped);
+    }
+
+    #[test]
+    fn a_declared_pending_conversion_is_not_skipped_for_a_writer() {
+        let id = ClassId(Symbol::from("PendingConversionDestination"));
+        let mut info = ClassInfo::default();
+        info.instance_methods.insert(Symbol::from("write"), Ty::Int);
+        for method in ["to_io", "write"] {
+            info.method_visibility.insert(
+                (MethodReceiver::Instance, Symbol::from(method)), MethodVisibility::Public,
+            );
+        }
+        let classes = HashMap::from([(id.clone(), info)]);
+        let destination = Ty::Class { id, args: vec![].into() };
+        assert_eq!(BodyTyper::new(&classes).json_dump_return_ty(&destination, false), Ty::Untyped);
     }
 }
 

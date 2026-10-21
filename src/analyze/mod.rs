@@ -4692,6 +4692,8 @@ impl Analyzer {
         InferenceSig {
             instance,
             class_methods,
+            protocol: self.classes.iter()
+                .map(|(id, cls)| (id.clone(), dirty_retype::ProtocolEvidence::of(cls))).collect(),
             params: self.inferred_params.clone(),
         }
     }
@@ -4714,6 +4716,9 @@ impl Analyzer {
             return false;
         }
         for (id, cls) in &self.classes {
+            if !prev.protocol.get(id).is_some_and(|before| before.matches(cls)) {
+                return false;
+            }
             match prev.instance.get(id) {
                 Some(methods) if methods == &cls.instance_methods => {}
                 _ => return false,
@@ -4985,9 +4990,10 @@ impl Analyzer {
         }
 
         self.harvest_block_value_methods(app);
-        self.fold_concern_surfaces(app);
+        let mut copied_evidence = HashMap::new();
+        self.fold_concern_surfaces(app, &mut copied_evidence);
         self.fold_host_surfaces(app);
-        self.fold_extended_modules(app);
+        self.fold_extended_modules(app, &mut copied_evidence);
         self.fold_current_attribute_forwarders(app);
     }
 
@@ -5108,7 +5114,7 @@ impl Analyzer {
     /// `User.with_current`). Folded the way an `include`d module's surface
     /// is, onto the class-side table, with the class's own methods winning.
     /// `extend self` is the module-function idiom, handled at ingest.
-    fn fold_extended_modules(&mut self, app: &App) {
+    fn fold_extended_modules(&mut self, app: &App, copied: &mut body::CopiedMethodSurfaces) {
         let mut wanted: Vec<(ClassId, Vec<ClassId>)> = Vec::new();
         let extends_of = |exprs: &mut dyn Iterator<Item = &Expr>| {
             let mut out: Vec<ClassId> = Vec::new();
@@ -5151,7 +5157,7 @@ impl Analyzer {
         let module_ids: std::collections::HashSet<&ClassId> =
             app.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
         for (id, modules) in wanted {
-            let mut copied_visibility = HashMap::new();
+            let copied_evidence = copied.entry(id.clone()).or_default();
             let mut queue = modules;
             let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
             let mut qi = 0;
@@ -5164,6 +5170,7 @@ impl Analyzer {
                 let Some(module) = self.classes.get(&m) else { continue };
                 let inst = module.instance_methods.clone();
                 let visibility = module.method_visibility.clone();
+                let ambiguous_returns = module.ambiguous_method_returns.clone();
                 for n in module.includes.clone() {
                     if seen.insert(n.clone()) {
                         queue.push(n);
@@ -5173,24 +5180,39 @@ impl Analyzer {
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
                     if cls.class_methods.contains_key(&name) && !folded.1.contains(&name) {
+                        if app.concern_spliced_class_methods.get(&id).is_some_and(|methods| methods.contains_key(&name)) {
+                            // Ingest hoisted this concern method into the host.
+                            // It is still a copy, not proof that it outranks an
+                            // extend. Retain the body's table entry for emission,
+                            // but compare both sources before trusting a protocol.
+                            let key = (crate::dialect::MethodReceiver::Class, name.clone());
+                            let previous = cls.class_methods[&name].clone();
+                            let previous_visibility = cls.method_visibility.get(&key).copied();
+                            cls.copy_method_evidence(key.0, &name, &previous, previous_visibility, false, copied_evidence);
+                            let source_key = (crate::dialect::MethodReceiver::Instance, name.clone());
+                            cls.copy_method_evidence(key.0, &name, &ty,
+                                visibility.get(&source_key).copied(), ambiguous_returns.contains(&source_key), copied_evidence);
+                        }
                         continue;
                     }
-                    cls.class_methods.insert(name.clone(), ty);
-                    cls.copy_method_visibility(
-                        crate::dialect::MethodReceiver::Class, &name,
+                    let key = (crate::dialect::MethodReceiver::Instance, name.clone());
+                    cls.copy_method_evidence(
+                        crate::dialect::MethodReceiver::Class, &name, &ty,
                         visibility.get(&(crate::dialect::MethodReceiver::Instance, name.clone())).copied(),
-                        &mut copied_visibility,
+                        ambiguous_returns.contains(&key), copied_evidence,
                     );
+                    cls.class_methods.insert(name.clone(), ty);
                     folded.1.insert(name);
                 }
             }
         }
     }
 
-    fn fold_concern_surfaces(&mut self, app: &App) {
+    fn fold_concern_surfaces(&mut self, app: &App, copied: &mut body::CopiedMethodSurfaces) {
         type Surface = (
             HashMap<Symbol, Ty>, HashMap<Symbol, Ty>, Vec<ClassId>,
             HashMap<(crate::dialect::MethodReceiver, Symbol), crate::dialect::MethodVisibility>,
+            std::collections::HashSet<(crate::dialect::MethodReceiver, Symbol)>,
         );
         let module_surfaces: HashMap<ClassId, Surface> = app
             .library_classes
@@ -5205,7 +5227,8 @@ impl Analyzer {
                 if let Some(lent) = self.host_folded.get(&lc.name) {
                     inst.retain(|name, _| !lent.contains(name));
                 }
-                Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone(), cls.method_visibility.clone())))
+                Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone(),
+                    cls.method_visibility.clone(), cls.ambiguous_method_returns.clone())))
             })
             .collect();
         if module_surfaces.is_empty() {
@@ -5219,7 +5242,7 @@ impl Analyzer {
             .map(|(id, c)| (id.clone(), c.includes.clone()))
             .collect();
         for (id, includes) in targets {
-            let mut copied_visibility = HashMap::new();
+            let copied_evidence = copied.entry(id.clone()).or_default();
             // Transitive closure over module includes.
             let mut queue = includes;
             let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
@@ -5227,7 +5250,7 @@ impl Analyzer {
             while qi < queue.len() {
                 let m = queue[qi].clone();
                 qi += 1;
-                let Some((inst, class_side, nested, visibility)) = module_surfaces.get(&m) else {
+                let Some((inst, class_side, nested, visibility, ambiguous_returns)) = module_surfaces.get(&m) else {
                     continue;
                 };
                 for n in nested {
@@ -5243,9 +5266,9 @@ impl Analyzer {
                     }
                     cls.instance_methods.insert(name.clone(), ty.clone());
                     let key = (crate::dialect::MethodReceiver::Instance, name.clone());
-                    cls.copy_method_visibility(
-                        crate::dialect::MethodReceiver::Instance, name,
-                        visibility.get(&key).copied(), &mut copied_visibility,
+                    cls.copy_method_evidence(
+                        crate::dialect::MethodReceiver::Instance, name, ty,
+                        visibility.get(&key).copied(), ambiguous_returns.contains(&key), copied_evidence,
                     );
                     folded.0.insert(name.clone());
                 }
@@ -5255,9 +5278,9 @@ impl Analyzer {
                     }
                     cls.class_methods.insert(name.clone(), ty.clone());
                     let key = (crate::dialect::MethodReceiver::Class, name.clone());
-                    cls.copy_method_visibility(
-                        crate::dialect::MethodReceiver::Class, name,
-                        visibility.get(&key).copied(), &mut copied_visibility,
+                    cls.copy_method_evidence(
+                        crate::dialect::MethodReceiver::Class, name, ty,
+                        visibility.get(&key).copied(), ambiguous_returns.contains(&key), copied_evidence,
                     );
                     folded.1.insert(name.clone());
                 }

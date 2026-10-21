@@ -243,6 +243,10 @@ pub struct ClassInfo {
     /// Known visibility for public-only protocol checks such as JSON.dump.
     /// Carried with copied mixin methods; absence means unknown.
     pub method_visibility: HashMap<(crate::dialect::MethodReceiver, Symbol), crate::dialect::MethodVisibility>,
+    /// Copied signatures disagree, or inherit a disagreement from a module.
+    /// The folded table is not evidence for a concrete protocol return until
+    /// the actual Ruby method owner is established.
+    pub ambiguous_method_returns: std::collections::HashSet<(crate::dialect::MethodReceiver, Symbol)>,
     /// AccessorKind per method — lets the body-typer flag Method
     /// dispatches so emitters add parens. AttributeReader/Writer
     /// dispatches keep `parenthesized` as ingested. Default `Method`
@@ -328,28 +332,49 @@ impl ClassInfo {
         self.attributes.fields.contains_key(name)
     }
 
-    pub(super) fn copy_method_visibility(
+    pub(super) fn copy_method_evidence(
         &mut self,
         side: crate::dialect::MethodReceiver,
         name: &Symbol,
+        return_ty: &Ty,
         visibility: Option<crate::dialect::MethodVisibility>,
-        copied: &mut HashMap<(crate::dialect::MethodReceiver, Symbol), Option<crate::dialect::MethodVisibility>>,
+        ambiguous_return: bool,
+        copied: &mut HashMap<(crate::dialect::MethodReceiver, Symbol), CopiedMethodEvidence>,
     ) {
         let key = (side, name.clone());
-        let known = copied.entry(key.clone()).or_insert(visibility);
+        let known = copied.entry(key.clone()).or_insert_with(|| CopiedMethodEvidence {
+            visibility,
+            return_ty: return_ty.clone(),
+            ambiguous_return,
+        });
         // A transitive surface can overwrite a nearer override during the
         // return-type fold. Conflicting visibility cannot prove publicity;
         // once unknown, another copy must not make it public again.
-        if *known != visibility {
-            *known = None;
+        if known.visibility != visibility {
+            known.visibility = None;
         }
-        if let Some(visibility) = *known {
+        known.ambiguous_return |= ambiguous_return || known.return_ty != *return_ty;
+        if known.ambiguous_return {
+            self.ambiguous_method_returns.insert(key.clone());
+        } else {
+            self.ambiguous_method_returns.remove(&key);
+        }
+        if let Some(visibility) = known.visibility {
             self.method_visibility.insert(key, visibility);
         } else {
             self.method_visibility.remove(&key);
         }
     }
 }
+
+pub(super) struct CopiedMethodEvidence {
+    visibility: Option<crate::dialect::MethodVisibility>,
+    return_ty: Ty,
+    ambiguous_return: bool,
+}
+
+pub(super) type CopiedMethodSurfaces = HashMap<ClassId,
+    HashMap<(crate::dialect::MethodReceiver, Symbol), CopiedMethodEvidence>>;
 
 /// Resolve a single-segment Const ref (like `Const { path:
 /// ["HashWithIndifferentAccess"] }` from app source) to a fully-

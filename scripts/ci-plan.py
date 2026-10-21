@@ -196,6 +196,7 @@ JSON_DUMP_INPUTS = {
     "src/analyze/body/send.rs",
     "src/analyze/body/mod.rs",
     "src/analyze/mod.rs",
+    "src/analyze/dirty_retype.rs",
     "src/analyze/registry/stdlib.rs",
 }
 # Inputs of the PostgreSQL Db gate (tests/spinel_pg_db.rs): the shim, its

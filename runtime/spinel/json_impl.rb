@@ -33,8 +33,8 @@
 # `JSON.generate("articles")` → `"\"articles\""`.
 require "json"
 
-# The native package's dump binding accepts only the value. Keep the Ruby
-# facade here so its IO/limit arguments are not discarded by that binding.
+# Keep the Ruby facade for json 2.9's destination conversion and options.
+# The package's __dump encoder supplies dump's allow_nan and nesting defaults.
 # CRuby and JRuby already provide this facade in the real json library.
 if RUBY_ENGINE == "spinel"
   require "stringio"
@@ -89,7 +89,7 @@ if RUBY_ENGINE == "spinel"
       begin
         strict = opts[:strict] ? true : false
         check_dump_value(obj, nesting, 0, strict) if nesting != 0 || strict
-        json = generate(obj, opts)
+        json = __dump(obj, nesting)
         return json unless anIO
         anIO.write(json)
         anIO.flush

@@ -17,6 +17,10 @@ fn app() -> emit_and_run::Overlay {
         )
 }
 
+const ENCODER_DEFAULTS: &str = include_str!("json_dump/encoder_defaults.rb");
+const PROTOCOL_OVERRIDES: &str = include_str!("json_dump/protocol_overrides.rb");
+const PROTOCOL_OVERRIDES_PROBE: &str = include_str!("json_dump/protocol_overrides_probe.rb");
+
 const IO: &str = r#"
 require "json"
 require "stringio"
@@ -353,6 +357,15 @@ impl DumpContract {
 // Regenerate with that Ruby on PATH:
 // UPDATE_JSON_DUMP_GOLDENS=1 cargo test --locked --test json_dump cruby_dump_contracts
 const DUMP_CONTRACTS: &[DumpContract] = &[
+    DumpContract {
+        name: "encoder_defaults", script: ENCODER_DEFAULTS,
+        golden: include_str!("json_dump/encoder_defaults.stdout"), service: None,
+    },
+    DumpContract {
+        name: "protocol_overrides", script: PROTOCOL_OVERRIDES_PROBE,
+        golden: include_str!("json_dump/protocol_overrides.stdout"),
+        service: Some(("app/services/json_protocol_probe.rb", PROTOCOL_OVERRIDES)),
+    },
     DumpContract {
         name: "io", script: IO,
         golden: include_str!("json_dump/io.stdout"), service: None,
@@ -1148,4 +1161,142 @@ p JsonIncludedVisibilityProbe.public_writer.text
 #[ignore = "requires the native Spinel compiler; set SPINEL"]
 fn dump_included_destination_visibility_executes_with_application_sidecars() {
     compare_native("included_visibility");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_preserves_encoder_defaults() {
+    compare_native("encoder_defaults");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_protocol_overrides_execute_with_application_sidecars() {
+    compare_native("protocol_overrides");
+}
+
+#[test]
+fn dump_protocol_overrides_keep_uncertain_returns_gradual() {
+    let (emitted, errors) = app()
+        .write("app/services/json_protocol_probe.rb", PROTOCOL_OVERRIDES)
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let rbs = std::fs::read_to_string(emitted.join("app/models/json_protocol_probe.rbs")).unwrap();
+    for method in [
+        "nested_false", "nested_nil", "nested_alias", "nested_alias_method", "nested_writer",
+        "relayed_false", "diamond_false", "inherited_conflict", "deferred_conflict", "include_order_false",
+        "include_order_writer", "extended_conflict", "inherited_extended_conflict", "own_query",
+        "inherited_query", "included_query", "relayed_query", "alias_query", "alias_method_query",
+        "accept_query", "query_writer", "class_query", "inherited_class_query", "extended_query",
+        "relayed_extended_query", "constant", "returned", "local_alias", "absolute", "explicit_limit",
+        "options", "local_query_alias",
+    ] {
+        assert!(rbs.contains(&format!("def self.{method}: () -> untyped\n")), "{method}: {rbs}");
+    }
+    assert!(rbs.contains("def ivar: () -> untyped\n"), "{rbs}");
+    for method in ["union", "query_union"] {
+        let union = rbs.lines().find(|line| line.contains(&format!("def self.{method}:"))).unwrap();
+        assert!(union.ends_with(" -> untyped"), "{union}");
+    }
+    for method in ["own_false", "nested_dump"] {
+        assert!(rbs.contains(&format!("def self.{method}: () -> String\n")), "{rbs}");
+    }
+    for method in ["own_writer", "inherited_own_writer", "ordinary"] {
+        assert!(rbs.contains(&format!("def self.{method}: () -> StringIO\n")), "{rbs}");
+    }
+    assert!(rbs.contains("def self.disagreeing_writer: () -> JsonConflictingWriter\n"), "{rbs}");
+}
+
+#[test]
+fn dump_protocol_evidence_spans_concern_and_extend_copies() {
+    let source = r#"
+require "stringio"
+module CrossFoldWriter
+  def to_io = StringIO.new
+end
+module CrossFoldAbsent
+  extend ActiveSupport::Concern
+  class_methods do
+    def to_io = false
+  end
+end
+class CrossFoldIncludeLast
+  extend CrossFoldWriter
+  include CrossFoldAbsent
+end
+class CrossFoldExtendLast
+  include CrossFoldAbsent
+  extend CrossFoldWriter
+end
+class CrossFoldProbe
+  def self.include_last = JSON.dump([1], CrossFoldIncludeLast)
+  def self.extend_last = JSON.dump([1], CrossFoldExtendLast)
+end
+"#;
+    let (emitted, errors) = app()
+        .write("app/services/cross_fold_probe.rb", source)
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let rbs = std::fs::read_to_string(emitted.join("app/models/cross_fold_probe.rbs")).unwrap();
+    for method in ["include_last", "extend_last"] {
+        assert!(rbs.contains(&format!("def self.{method}: () -> untyped\n")), "{rbs}");
+    }
+}
+
+#[test]
+fn dump_protocol_queries_include_implicit_core_ancestors() {
+    for (declaration, root) in [("class", "Object"), ("module", "Kernel"), ("class", "Class"), ("class", "Module")] {
+        let source = format!(r#"
+require "stringio"
+{declaration} {root}
+  def respond_to?(name, include_private = false) = false
+end
+class CoreQueryInstanceDestination
+  def to_io = StringIO.new
+end
+class CoreQuerySingletonDestination
+  def self.to_io = StringIO.new
+end
+class CoreQueryProbe
+  def self.instance = JSON.dump([1], CoreQueryInstanceDestination.new)
+  def self.singleton = JSON.dump([1], CoreQuerySingletonDestination)
+end
+"#);
+        let (emitted, errors) = app()
+            .write("app/services/core_query_probe.rb", &source)
+            .emit(BuildTarget::Spinel);
+        assert!(errors.is_empty(), "{}", errors.join("\n"));
+        let rbs = std::fs::read_to_string(emitted.join("app/models/core_query_probe.rbs")).unwrap();
+        for method in ["instance", "singleton"] {
+            assert!(rbs.contains(&format!("def self.{method}: () -> untyped\n")), "{root}: {rbs}");
+        }
+    }
+}
+
+#[test]
+fn dump_reopened_primitive_destinations_do_not_claim_text() {
+    for (class, destination) in [
+        ("String", "\"destination\""), ("Integer", "1"), ("Float", "1.0"),
+        ("TrueClass", "true"), ("FalseClass", "false"), ("Symbol", ":destination"),
+        ("Array", "[1]"), ("Hash", "{a: 1}"), ("Proc", "-> { 1 }"),
+        ("Date", "Date.today"), ("Time", "Time.now"), ("DateTime", "DateTime.now"),
+    ] {
+        let source = format!(r#"
+require "date"
+require "stringio"
+class {class}
+  def to_io = StringIO.new
+end
+class PrimitiveProtocolProbe
+  def self.call = JSON.dump([1], {destination}, 2)
+end
+"#);
+        let (emitted, errors) = app()
+            .write("app/services/primitive_protocol_probe.rb", &source)
+            .emit(BuildTarget::Spinel);
+        assert!(errors.is_empty(), "{class}: {}", errors.join("\n"));
+        let rbs = std::fs::read_to_string(emitted.join("app/models/primitive_protocol_probe.rbs")).unwrap();
+        assert!(rbs.contains("def self.call: () -> untyped\n")
+            || rbs.contains("def self.call: () -> StringIO\n"), "{class}: {rbs}");
+    }
 }
