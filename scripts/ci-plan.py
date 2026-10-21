@@ -130,6 +130,7 @@ SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_PUSH_INPUTS - {"runtime/spinel/sidekiq_redis.rb"}
 # test binary's compile included), for balancing its shards; a suite not
 # listed counts as one Spinel build.
 SPINEL_TEST_SECONDS = {
+    "json_dump": 900,
     "spinel_transaction_connection": 501,
     "spinel_stmt_cache_lru": 203,
     "param_binds": 181,
