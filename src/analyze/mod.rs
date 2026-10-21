@@ -60,6 +60,7 @@ pub mod producer_evidence;
 mod parameter_conservation;
 mod param_views;
 mod writers;
+mod route_static;
 mod canon_var;
 mod fixpoint_bound;
 mod fixpoint_check;
@@ -122,6 +123,7 @@ fn spliced_own_on() -> bool {
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
     materialized_associations: std::collections::HashSet<Symbol>,
+    static_routes: route_static::Index,
     /// Inferred parameter types per (class, method). Empty after
     /// `Analyzer::new`; populated by `unify_params_from_call_sites`
     /// during the fixpoint loop in `analyze`. Consulted when seeding
@@ -1255,9 +1257,10 @@ impl Analyzer {
             .map(|class| class.name.clone())
             .collect();
 
-        Self {
+        let mut analyzer = Self {
             materialized_associations: crate::lower::assoc_pluck::materialized_assoc_names(app),
             classes,
+            static_routes: route_static::Index::default(),
             inferred_params: HashMap::new(),
             declared_signatures: app
                 .rbs_signatures
@@ -1292,7 +1295,11 @@ impl Analyzer {
             sccq_production_end: None,
             sccq_last_global: None,
             sccq_ctrl_pending: None,
+        };
+        if route_static::on() {
+            analyzer.static_routes = route_static::Index::build(app, &analyzer);
         }
+        analyzer
     }
 
     /// Build a body-typer borrowing this analyzer's dispatch tables.
@@ -6367,6 +6374,7 @@ impl Analyzer {
     /// Unknown receivers remain live writers. Route their current arguments to
     /// every compatible named destination, rather than treating unknown as no call.
     fn writer_param_targets(&self, defined: &BTreeSet<ParamKey>) -> HashMap<Symbol,BTreeSet<ParamKey>> {
+        if route_static::on() { return HashMap::new(); }
         let mut out: HashMap<Symbol,BTreeSet<ParamKey>>=HashMap::new();
         for key in defined { out.entry(key.1.clone()).or_default().insert(key.clone()); }
         for (class,method,recv) in writers::targets() {
@@ -6383,6 +6391,8 @@ impl Analyzer {
         if site.2.is_empty() { return Vec::new(); }
         if !writers::unknown_class(&site.0) { return self.resolve_param_site(site,shapes,defined).into_iter().collect(); }
         let (_,method,args,kwargs,_)=site;
+        if route_static::top_on() { return self.static_routes.resolve_top(&method, args.len(), &kwargs); }
+        if route_static::on() { return self.static_routes.resolve(&method, args, kwargs); }
         targets.get(&method).into_iter().flatten().map(|key| {
             let row=Self::place_keyword_args(shapes.get(key),args.clone(),kwargs.clone());
             if writers::tracing() && matches!(method.as_str(),"preview"|"includes") {
@@ -8666,7 +8676,17 @@ fn collect_direct_send_sites(
                         args.last().map(|a| &*a.node),
                         Some(ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. })
                     );
-                    let kw_tys = SiteKeywords { group, keys, splat, anonymous_forward, sources, span: expr.span };
+                    let opaque_arity = args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. } | ExprNode::ForwardArgs));
+                    // A syntax fact: recovering some typed pairs from **h must
+                    // never shrink the top route's possible keyword positions.
+                    let opaque_keywords = match args.last().map(|a| &*a.node) {
+                        Some(ExprNode::KeywordSplat { .. } | ExprNode::ForwardKeywords
+                            | ExprNode::ForwardKeywordsWithPairs { .. }) => true,
+                        Some(ExprNode::Hash { entries, kwargs: true }) => entries.iter().any(|(k, _)|
+                            !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } })),
+                        _ => false,
+                    };
+                    let kw_tys = SiteKeywords { group, keys, splat, anonymous_forward, opaque_arity, opaque_keywords, sources, span: expr.span };
                     // `Klass.new(a, b)` hands its arguments to
                     // `initialize` — that is all `Class#new` does with
                     // them — so the site is evidence for the
@@ -8704,6 +8724,10 @@ type SendSite = (ClassId, Symbol, Vec<Ty>, SiteKeywords, SiteRecv);
 /// A call's trailing keyword arguments as `collect_send_sites` saw them.
 #[derive(Clone, Debug)]
 struct SiteKeywords {
+    /// Syntactic splats/forwarding cannot restrict the destination by args.len().
+    opaque_arity: bool,
+    /// Syntax permits keyword names absent from `keys`, independent of types.
+    opaque_keywords: bool,
     span: crate::span::Span,
     /// Raw source writer candidates for audit only; never affects routing.
     sources: Vec<String>,
@@ -8723,7 +8747,7 @@ struct SiteKeywords {
 
 /// A method's declared parameter slots, in declaration order, as
 /// `place_keyword_args` reads them.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct ParamShape {
     slots: Vec<(Symbol, ParamKind)>,
     /// True when every keyword in `slots` is still declared a keyword,

@@ -396,6 +396,7 @@ pub(super) fn targets() -> Vec<(ClassId, Symbol, super::SiteRecv)> {
     ST.with(|s| s.borrow().targets.keys().cloned().collect())
 }
 pub(super) fn revision() -> u64 {
+    if super::route_static::on() { return 0; }
     ST.with(|s| s.borrow().revision)
 }
 pub(super) fn unknown_receiver(t: &Ty, classes: &HashMap<ClassId, ClassInfo>) -> bool {
