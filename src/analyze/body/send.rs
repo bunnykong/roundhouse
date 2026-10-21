@@ -1092,7 +1092,7 @@ impl<'a> BodyTyper<'a> {
         fn custom_query(typer: &BodyTyper<'_>, id: &ClassId, side: MethodReceiver, depth: usize) -> bool {
             if depth >= 32 { return true; }
             let Some(class) = typer.classes().get(id) else { return false };
-            if class.open { return true; }
+            if class.open || class.uncertain_protocol_owner { return true; }
             let own = match side {
                 MethodReceiver::Class => &class.class_methods,
                 MethodReceiver::Instance => &class.instance_methods,
@@ -1145,7 +1145,8 @@ impl<'a> BodyTyper<'a> {
         if !matches!(io, Ty::Nil) && roots.iter().chain(primitive).any(|name| {
             let id = ClassId(Symbol::from(*name));
             self.classes().get(&id).is_some_and(|class|
-                class.open || ["to_io", "write", "respond_to?", "respond_to_missing?"].iter()
+                class.open || class.uncertain_protocol_owner
+                    || ["to_io", "write", "respond_to?", "respond_to_missing?"].iter()
                     .any(|method| {
                         let method = Symbol::from(*method);
                         class.method_visibility.contains_key(&(crate::dialect::MethodReceiver::Instance, method.clone()))
@@ -1188,7 +1189,8 @@ impl<'a> BodyTyper<'a> {
                         // Spinel cannot unbox a dynamic return as singleton(C).
                         // Keep class-object destinations in their boxed form.
                         Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => Ty::Untyped,
-                        Ty::Class { .. } if self.json_dump_responds_to(ty, &writer, true) != Some(false) => Ty::Untyped,
+                        Ty::Class { .. } if self.json_dump_responds_to(ty, &writer, true) != Some(false)
+                            || self.json_dump_responds_to(ty, &writer, false).is_none() => Ty::Untyped,
                         ty => ty.clone(),
                     };
                     match converted {

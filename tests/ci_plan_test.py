@@ -198,6 +198,7 @@ class Routing(unittest.TestCase):
             "src/analyze/mod.rs",
             "src/analyze/dirty_retype.rs",
             "src/analyze/registry/stdlib.rs",
+            "src/emit/ruby/library.rs",
             "tests/json_dump.rs",
             "tests/json_dump/included_visibility.stdout",
             "tests/json_dump/encoder_defaults.stdout",
@@ -634,7 +635,7 @@ class Routing(unittest.TestCase):
         # must too when that file is the only change.
         self.assertEqual(
             ci.select(["src/emit/ruby/library.rs"])["spinel_tests"],
-            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel"],
+            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "json_dump"],
         )
         self.assertEqual(
             ci.select(["runtime/spinel/db.rb"])["spinel_tests"],

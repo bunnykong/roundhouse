@@ -254,6 +254,9 @@ pub struct ClassInfo {
     /// The folded table is not evidence for a concrete protocol return until
     /// the actual Ruby method owner is established.
     pub ambiguous_method_returns: std::collections::HashSet<(crate::dialect::MethodReceiver, Symbol)>,
+    /// Source mixin lookup can outrank the flattened method table. Until
+    /// its owner is resolved, no concrete JSON destination is proven.
+    pub uncertain_protocol_owner: bool,
     /// AccessorKind per method — lets the body-typer flag Method
     /// dispatches so emitters add parens. AttributeReader/Writer
     /// dispatches keep `parenthesized` as ingested. Default `Method`

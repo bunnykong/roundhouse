@@ -21,6 +21,10 @@ const ENCODER_DEFAULTS: &str = include_str!("json_dump/encoder_defaults.rb");
 const PROTOCOL_OVERRIDES: &str = include_str!("json_dump/protocol_overrides.rb");
 const PROTOCOL_OVERRIDES_PROBE: &str = include_str!("json_dump/protocol_overrides_probe.rb");
 
+const PREPENDED_PROTOCOLS: &str = include_str!("json_dump/prepended_protocols.rb");
+const STRICT_CLASSES: &str = include_str!("json_dump/strict_classes.rb");
+const STRINGIO_QUERIES: &str = include_str!("json_dump/stringio_queries.rb");
+
 const IO: &str = r#"
 require "json"
 require "stringio"
@@ -357,6 +361,26 @@ impl DumpContract {
 // Regenerate with that Ruby on PATH:
 // UPDATE_JSON_DUMP_GOLDENS=1 cargo test --locked --test json_dump cruby_dump_contracts
 const DUMP_CONTRACTS: &[DumpContract] = &[
+    DumpContract {
+        name: "stringio_subclass_queries", script: include_str!("json_dump/stringio_subclass_queries_probe.rb"),
+        golden: include_str!("json_dump/stringio_subclass_queries.stdout"),
+        service: Some(("app/services/stringio_probe.rb", include_str!("json_dump/stringio_subclass_queries.rb"))),
+    },
+    DumpContract {
+        name: "prepended_protocols", script: include_str!("json_dump/prepended_protocols_probe.rb"),
+        golden: include_str!("json_dump/prepended_protocols.stdout"),
+        service: Some(("app/services/prepend_probe.rb", PREPENDED_PROTOCOLS)),
+    },
+    DumpContract {
+        name: "strict_classes", script: include_str!("json_dump/strict_classes_probe.rb"),
+        golden: include_str!("json_dump/strict_classes.stdout"),
+        service: Some(("app/services/strict_probe.rb", STRICT_CLASSES)),
+    },
+    DumpContract {
+        name: "stringio_queries", script: include_str!("json_dump/stringio_queries_probe.rb"),
+        golden: include_str!("json_dump/stringio_queries.stdout"),
+        service: Some(("app/services/stringio_probe.rb", STRINGIO_QUERIES)),
+    },
     DumpContract {
         name: "encoder_defaults", script: ENCODER_DEFAULTS,
         golden: include_str!("json_dump/encoder_defaults.stdout"), service: None,
@@ -1299,4 +1323,48 @@ end
         assert!(rbs.contains("def self.call: () -> untyped\n")
             || rbs.contains("def self.call: () -> StringIO\n"), "{class}: {rbs}");
     }
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_prepended_protocols_execute_with_application_sidecars() {
+    compare_native("prepended_protocols");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_strict_classes_execute_with_application_sidecars() {
+    compare_native("strict_classes");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_stringio_queries_execute_with_application_sidecars() {
+    compare_native("stringio_queries");
+}
+
+#[test]
+fn dump_prepended_protocol_owners_stay_gradual() {
+    let (emitted, errors) = app()
+        .write("app/services/prepend_probe.rb", PREPENDED_PROTOCOLS)
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let rbs = std::fs::read_to_string(emitted.join("app/models/prepend_probe.rbs")).unwrap();
+    for method in ["call", "own_conversion", "present", "inherited", "included", "extended",
+        "aliased", "alias_method", "writer", "converted_writer", "query", "constant", "returned",
+        "local_alias", "receiver_alias", "scalar", "hash", "limit", "options", "private_writer",
+        "protected_writer", "late", "order_absent", "order_present", "multiple", "module_alias",
+        "module_alias_extended", "namespaced"] {
+        assert!(rbs.contains(&format!("def self.{method}: () -> untyped\n")), "{method}: {rbs}");
+    }
+    assert!(rbs.contains("def ivar: () -> untyped\n"), "{rbs}");
+    assert!(rbs.contains("def self.nested: () -> String\n"), "{rbs}");
+    let union = rbs.lines().find(|line| line.contains("def self.union:")).unwrap();
+    assert!(union.ends_with(" -> untyped"), "{union}");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn dump_stringio_subclass_queries_execute_with_application_sidecars() {
+    compare_native("stringio_subclass_queries");
 }

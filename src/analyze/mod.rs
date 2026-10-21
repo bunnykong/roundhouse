@@ -1199,6 +1199,75 @@ impl Analyzer {
         );
 
         let const_resolver = app.const_resolver.for_sources(&app.sources);
+        // Prepend precedence is not represented by the folded dispatch table.
+        // Keep that fact before folding, including through module relays,
+        // inheritance, extend and source reopenings. Singleton-block mixins
+        // can be flattened at ingest, so uncertainty covers both sides.
+        let mut protocol_edges: Vec<(ClassId, ClassId)> = classes.iter()
+            .flat_map(|(id, class)| class.includes.iter().chain(class.parent.iter())
+                .map(move |ancestor| (id.clone(), ancestor.clone())))
+            .collect();
+        fn visit_protocol_mixins(expr: &Expr, visit: &mut dyn FnMut(&Expr)) {
+            visit(expr);
+            expr.node.for_each_child(&mut |child| visit_protocol_mixins(child, visit));
+        }
+        let mut protocol_mixins = |owner: &ClassId, root: &Expr| {
+            visit_protocol_mixins(root, &mut |expr| {
+                let ExprNode::Send { recv, method, args, .. } = &*expr.node else { return };
+                if !matches!(method.as_str(), "include" | "extend" | "prepend") { return; }
+                if recv.as_ref().is_some_and(|recv| !matches!(&*recv.node, ExprNode::SelfRef)) { return; }
+                if method.as_str() == "prepend" {
+                    classes.entry(owner.clone()).or_default().uncertain_protocol_owner = true;
+                }
+                for arg in args {
+                    if let ExprNode::Const { path } = &*arg.node {
+                        let id = const_resolver.namespace(arg.span, path).cloned()
+                            .unwrap_or_else(|| mixin_path_id(path));
+                        protocol_edges.push((owner.clone(), id));
+                    } else {
+                        classes.entry(owner.clone()).or_default().uncertain_protocol_owner = true;
+                    }
+                }
+            });
+        };
+        for class in &app.library_classes {
+            for expr in &class.unknown_calls { protocol_mixins(&class.name, expr); }
+        }
+        for model in &app.models {
+            for item in &model.body {
+                if let ModelBodyItem::Unknown { expr, .. } = item { protocol_mixins(&model.name, expr); }
+            }
+        }
+        for controller in &app.controllers {
+            for item in &controller.body {
+                if let crate::dialect::ControllerBodyItem::Unknown { expr, .. } = item {
+                    protocol_mixins(&controller.name, expr);
+                }
+            }
+        }
+        for mixin in &app.module_mixins {
+            let owner = ClassId(mixin.target.clone());
+            if mixin.kind == crate::app::MixinKind::Prepend {
+                classes.entry(owner.clone()).or_default().uncertain_protocol_owner = true;
+            }
+            protocol_edges.push((owner, ClassId(mixin.module.clone())));
+        }
+        let mut protocol_dependents: HashMap<ClassId, Vec<ClassId>> = HashMap::new();
+        for (id, ancestor) in protocol_edges {
+            protocol_dependents.entry(ancestor).or_default().push(id);
+        }
+        let mut uncertain: Vec<_> = classes.iter()
+            .filter(|(_, class)| class.uncertain_protocol_owner)
+            .map(|(id, _)| id.clone()).collect();
+        while let Some(ancestor) = uncertain.pop() {
+            for id in protocol_dependents.get(&ancestor).into_iter().flatten() {
+                let Some(class) = classes.get_mut(id) else { continue };
+                if !class.uncertain_protocol_owner {
+                    class.uncertain_protocol_owner = true;
+                    uncertain.push(id.clone());
+                }
+            }
+        }
         let data_factories = data::register(app, &const_resolver, &mut classes);
         let data_factories_without_custom_initialize = app
             .library_classes
@@ -1939,11 +2008,15 @@ impl Analyzer {
                     crate::dialect::MethodReceiver::Instance => &ci.instance_methods,
                     crate::dialect::MethodReceiver::Class => &ci.class_methods,
                 });
-                let ret = table
+                // A prepend can replace this source method at dispatch. Do
+                // not turn its flattened return into a trusted native seed.
+                let uncertain_protocol = registered.is_some_and(|class| class.uncertain_protocol_owner)
+                    && matches!(method.name.as_str(), "to_io" | "write");
+                let ret = (!uncertain_protocol).then_some(table).flatten()
                     .and_then(|t| t.get(&method.name))
                     .filter(|t| !matches!(t, Ty::Fn { .. }))
                     .cloned()
-                    .or_else(|| effective_return_ty(&method.body))
+                    .or_else(|| (!uncertain_protocol).then(|| effective_return_ty(&method.body)).flatten())
                     .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped));
 
                 if !has_params && ret.is_none() {

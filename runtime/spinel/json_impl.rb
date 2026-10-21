@@ -58,11 +58,10 @@ if RUBY_ENGINE == "spinel"
       unless anIO.nil?
         if anIO.is_a?(Module) ? anIO.respond_to?(:to_io) : anIO.respond_to?(to_io_method)
           anIO = anIO.to_io
-        # Carried-C StringIO methods are callable but absent from Spinel's
-        # respond_to? table. It is a writer, just like a Ruby-defined sink.
+        # The runtime-name query includes native StringIO writers and
+        # respects source-defined negative queries before selecting IO mode.
         elsif limit.nil? &&
-            !(anIO.is_a?(Module) ? anIO.respond_to?(:write) : anIO.respond_to?(write_method)) &&
-            !anIO.is_a?(StringIO)
+            !(anIO.is_a?(Module) ? anIO.respond_to?(:write) : anIO.respond_to?(write_method))
           limit = anIO
           anIO = nil
         end
@@ -100,15 +99,19 @@ if RUBY_ENGINE == "spinel"
     end
 
     def self.check_dump_value(value, limit, depth, strict)
+      # json 2.9 accepts exact builtin classes in strict mode, before it
+      # traverses containers (even empty subclasses must be rejected).
+      klass = value.class
+      if strict && klass != NilClass && klass != TrueClass && klass != FalseClass &&
+          klass != String && klass != Integer && klass != Float && klass != Array && klass != Hash
+        raise JSON::GeneratorError, value.class.to_s + " not allowed in JSON"
+      end
       if value.is_a?(Array)
         raise ArgumentError, "exceed depth limit" if limit != 0 && depth >= limit
         value.each { |child| check_dump_value(child, limit, depth + 1, strict) }
       elsif value.is_a?(Hash)
         raise ArgumentError, "exceed depth limit" if limit != 0 && depth >= limit
         value.each_value { |child| check_dump_value(child, limit, depth + 1, strict) }
-      elsif strict && !value.nil? && !value.is_a?(TrueClass) && !value.is_a?(FalseClass) &&
-          !value.is_a?(String) && !value.is_a?(Integer) && !value.is_a?(Float)
-        raise JSON::GeneratorError, value.class.to_s + " not allowed in JSON"
       end
       nil
     end
