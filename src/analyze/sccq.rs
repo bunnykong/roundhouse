@@ -373,7 +373,7 @@ pub(crate) fn hash_ty<H: Hasher>(t: &Ty, h: &mut H) {
         }
         Ty::Untyped { why } => {
             static REASONS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            if *REASONS.get_or_init(|| std::env::var("RH_C45_REASON_CHECK").as_deref() == Ok("1")) {
+            if super::strict_producers::congruent_on() || *REASONS.get_or_init(|| std::env::var("RH_C45_REASON_CHECK").as_deref() == Ok("1")) {
                 why.reporting_bits().hash(h);
             }
         }
@@ -1667,7 +1667,7 @@ impl Analyzer {
         for k in keys {
             eng.stats.param_checked += 1;
             let row = super::handoff::join_param_row(&k, eng.final_row(&k), false);
-            if row.as_ref() != self.inferred_params.get(&k) {
+            if !super::strict_producers::same_row(row.as_ref(), self.inferred_params.get(&k)) {
                 eng.stats.param_mismatch += 1;
             }
         }
@@ -1770,7 +1770,7 @@ impl Analyzer {
         for k in &keys {
             let row = eng.fold_sites(k);
             let old = eng.base_rows.get(k);
-            if row.as_ref() != old {
+            if !super::strict_producers::same_row(row.as_ref(), old) {
                 match row {
                     Some(r) => {
                         eng.base_rows.insert(k.clone(), r);
@@ -1790,7 +1790,7 @@ impl Analyzer {
             // A reference-mode row joins with its previous row,
             // as `fold::join_params` does after main's unify.
             let row = super::handoff::join_param_row(&k, eng.final_row(&k), true);
-            if row.as_ref() != self.inferred_params.get(&k) {
+            if !super::strict_producers::same_row(row.as_ref(), self.inferred_params.get(&k)) {
                 match row {
                     Some(r) => {
                         self.inferred_params.insert(k.clone(), r);
@@ -2393,11 +2393,8 @@ impl Analyzer {
             }
         }
         if !(resolved.len() == eng.units[u as usize].sites.len()
-            && resolved
-                .iter()
-                .zip(&eng.units[u as usize].sites)
-                .all(|((k, a), (l, b))| k == l && a == b))
-        {
+            && resolved.iter().zip(&eng.units[u as usize].sites).all(|((k, a), (l, b))|
+                k == l && super::strict_producers::same_types(a, b))) {
             let ord = eng.unit_ord[u as usize];
             let mut keys: BTreeSet<ParamKey> = BTreeSet::new();
             if ord != u32::MAX {
@@ -2522,7 +2519,7 @@ impl Analyzer {
         }
         let mut keys: Vec<ParamKey> = Vec::new();
         for (k, v) in &self.inferred_params {
-            if prev.sig.params.get(k) != Some(v) {
+            if !super::strict_producers::same_row(prev.sig.params.get(k), Some(v)) {
                 keys.push(k.clone());
             }
         }

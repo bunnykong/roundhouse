@@ -467,9 +467,12 @@ impl<'a> BodyTyper<'a> {
         // gradual choice extends to the destructured params). Without
         // this, `untyped_hash.each { |k, v| ... }` would give k=Untyped
         // and v=Var since block_params_for returns a single-Untyped vec.
-        if matches!(recv_ty, Some(Ty::Untyped { .. })) {
+        if matches!(recv_ty, Some(Ty::Untyped { .. }))
+            || recv_ty.is_some_and(|t| crate::analyze::strict_producers::xfer_on()
+                && crate::analyze::strict_producers::only_pending(t)) {
             for name in params {
-                new_ctx.local_bindings.insert(name.clone(), Ty::unresolved());
+                new_ctx.local_bindings.insert(name.clone(),
+                    recv_ty.map(crate::analyze::strict_producers::unresolved_from).unwrap_or_else(Ty::unresolved));
             }
             return new_ctx;
         }
@@ -1382,6 +1385,11 @@ impl<'a> BodyTyper<'a> {
                 None => Ty::unresolved(),
             };
         }
+        if let Some(t @ Ty::Union { .. }) = recv_ty {
+            if crate::analyze::strict_producers::xfer_on() && crate::analyze::strict_producers::only_pending(t) {
+                return self.dispatch_on(Some(&Ty::pending_untyped()), method, block_ret, args, instance_receiver);
+            }
+        }
         // The call's arguments, under a name the `Ty::Class { id, args }`
         // pattern below does not shadow.
         let call_args = args;
@@ -1429,7 +1437,16 @@ impl<'a> BodyTyper<'a> {
             //
             // Signing out of typing for a receiver is not signing out
             // of Ruby's own guarantees about the answer.
-            Some(Ty::Untyped { why }) => conversion_fallback(method).unwrap_or(Ty::untyped(*why)),
+            Some(t @ Ty::Untyped { why }) => {
+                if crate::analyze::strict_producers::xfer_on() && crate::analyze::strict_producers::only_pending(t) {
+                    match method.as_str() {
+                        "to_h" => Ty::Hash { key: std::sync::Arc::new(Ty::pending_untyped()),
+                            value: std::sync::Arc::new(Ty::pending_untyped()) },
+                        "to_a" | "to_ary" => Ty::Array { elem: std::sync::Arc::new(Ty::pending_untyped()) },
+                        _ => conversion_fallback(method).unwrap_or(Ty::untyped(*why)),
+                    }
+                } else { conversion_fallback(method).unwrap_or(Ty::untyped(*why)) }
+            },
             Some(Ty::Class { id, args }) => {
                 // `GlobalID::Locator.locate(…, only: Model)` /
                 // `locate_signed(…, only: Model, for:)` — the literal
@@ -2620,7 +2637,7 @@ impl<'a> BodyTyper<'a> {
     /// (Var / primitive) carries no method table, so → `Untyped`.
     fn receiver_method_return_union(&self, recv_ty: &Ty) -> Ty {
         let Ty::Class { id, .. } = recv_ty else {
-            return Ty::unresolved();
+            return crate::analyze::strict_producers::unresolved_from(recv_ty);
         };
         let mut rets: Vec<Ty> = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -2645,7 +2662,7 @@ impl<'a> BodyTyper<'a> {
                 // A single gradual method makes the dynamic union
                 // gradual — bail early with the absorbing type.
                 if matches!(r, Ty::Untyped { .. }) {
-                    return Ty::unresolved();
+                    return crate::analyze::strict_producers::unresolved_from(&r);
                 }
                 if !r.is_open() {
                     rets.push(r);
@@ -2862,7 +2879,9 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
         // not be an Integer; claiming Date would green-light Date-only
         // follow-ups after a send that can TypeError).
         ">>" | "<<" if args.len() == 1 => match args[0].ty.as_ref() {
-            Some(Ty::Untyped { .. }) => Ty::unresolved(),
+            Some(t) if crate::analyze::strict_producers::xfer_on()
+                && crate::analyze::strict_producers::only_pending(t) => Ty::pending_untyped(),
+            Some(t @ Ty::Untyped { .. }) => crate::analyze::strict_producers::unresolved_from(t),
             Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
             _ => return None,
         },
@@ -2870,7 +2889,9 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
         // `Date + Integer` → Date. `Date + Untyped` stays gradual: the
         // operand might not be an Integer day shift, and Spinel has no `+`.
         "+" if args.len() == 1 => match args[0].ty.as_ref() {
-            Some(Ty::Untyped { .. }) => Ty::unresolved(),
+            Some(t) if crate::analyze::strict_producers::xfer_on()
+                && crate::analyze::strict_producers::only_pending(t) => Ty::pending_untyped(),
+            Some(t @ Ty::Untyped { .. }) => crate::analyze::strict_producers::unresolved_from(t),
             Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
             _ => return None,
         },
@@ -2878,7 +2899,10 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
         // we do not model structurally (gradual, like Time − Time).
         // `Date - Untyped` stays gradual for the same reason as `+`.
         "-" if args.len() == 1 => match args[0].ty.as_ref() {
-            Some(Ty::Date) | Some(Ty::Untyped { .. }) => Ty::unresolved(),
+            Some(t) if crate::analyze::strict_producers::xfer_on()
+                && crate::analyze::strict_producers::only_pending(t) => Ty::pending_untyped(),
+            Some(t @ Ty::Untyped { .. }) => crate::analyze::strict_producers::unresolved_from(t),
+            Some(Ty::Date) => Ty::unresolved(),
             Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
             _ => return None,
         },
@@ -3000,9 +3024,11 @@ pub(crate) fn indexed_pluck(method: &Symbol, elem: &Ty, args: &[crate::expr::Exp
         return None;
     }
     let value = match elem {
-        Ty::Hash { value, .. } if matches!(&**value, Ty::Untyped { .. }) => Ty::unresolved(),
+        t if crate::analyze::strict_producers::xfer_on()
+            && crate::analyze::strict_producers::only_pending(t) => Ty::pending_untyped(),
+        Ty::Hash { value, .. } if matches!(&**value, Ty::Untyped { .. }) => crate::analyze::strict_producers::unresolved_from(value),
         Ty::Hash { value, .. } => super::union_of((**value).clone(), Ty::Nil),
-        Ty::Untyped { .. } | Ty::Var { .. } => Ty::unresolved(),
+        t @ (Ty::Untyped { .. } | Ty::Var { .. }) => crate::analyze::strict_producers::unresolved_from(t),
         _ => return None,
     };
     Some(Ty::Array { elem: std::sync::Arc::new(value) })
@@ -3086,6 +3112,8 @@ fn non_nil_elem(elem: &Ty) -> Ty {
 }
 
 pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -> Ty {
+    if method.as_str() == "model" && crate::analyze::strict_producers::xfer_on()
+        && crate::analyze::strict_producers::only_pending(elem) { return Ty::pending_untyped(); }
     // AR-specific dispatches go FIRST so they win over the generic
     // array methods that share a name (`find` on a relation raises, so
     // it returns Class; on a plain Array it returns `Union<elem, Nil>`).
@@ -3105,7 +3133,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             "model" => {
                 return match elem {
                     Ty::Class { .. } => elem.clone(),
-                    _ => Ty::unresolved(),
+                    _ => crate::analyze::strict_producers::unresolved_from(elem),
                 };
             }
             // `arel` on a single-model relation is intercepted by the
@@ -3251,7 +3279,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "sum" => match block_ret.unwrap_or(elem) {
             Ty::Int => Ty::Int,
             Ty::Float => Ty::Float,
-            _ => Ty::unresolved(),
+            t => crate::analyze::strict_producers::unresolved_from(t),
         },
         "exclude?" | "intersect?" => Ty::Bool,
         // `Set` isn't parameterized, so the element type can't be carried.

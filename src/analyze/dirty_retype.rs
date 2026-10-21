@@ -41,7 +41,7 @@ pub(super) fn moved_method_names(
     };
     let mut out: BTreeSet<Symbol> = BTreeSet::new();
     for (name, ty) in now {
-        if before.get(name) != Some(ty) {
+        if !before.get(name).is_some_and(|old| super::strict_producers::same(old, ty)) {
             out.insert(name.clone());
         }
     }
@@ -84,7 +84,7 @@ pub(super) fn dirty_classes_for_retype(
         moved_by_class.entry(id.clone()).or_default().extend(names);
     }
     for (key, tys) in inferred_params {
-        if prev.params.get(key) != Some(tys) {
+        if !super::strict_producers::same_row(prev.params.get(key), Some(tys)) {
             dirty.insert(key.0.clone());
         }
     }

@@ -323,7 +323,9 @@ pub(crate) fn value_of(slot: u32, classes: &HashMap<ClassId, ClassInfo>) -> Opti
 fn fingerprint(t: &Ty) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
-    t.hash(&mut h);
+    if super::strict_producers::congruent_on() {
+        super::sccq::hash_ty(t, &mut h);
+    } else { t.hash(&mut h); }
     h.finish()
 }
 

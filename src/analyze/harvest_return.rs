@@ -52,7 +52,9 @@ fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
     }
     if matches!(core_e, Ty::Nil) {
         if existing.has_unknown_arm() || new.has_unknown_arm() {
-            return Some(gradual_nil());
+            return Some(if super::strict_producers::stripped_pending(&[existing, new]) {
+                body::union_of(Ty::Nil, Ty::pending_untyped())
+            } else { gradual_nil() });
         }
         return Some(core_e);
     }
@@ -136,6 +138,10 @@ fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
         return HarvestWrite::Keep;
     }
     if existing == &new {
+        if super::strict_producers::xfer_on() && super::strict_producers::is_p(existing)
+            && matches!(&new, Ty::Untyped { .. }) && !super::strict_producers::is_p(&new) {
+            return HarvestWrite::Set("harvest.pending_identity", new);
+        }
         if super::handoff::c45_m0_on() {
             let merged = super::producer_evidence::merge_equal(new, existing);
             if !crate::wire_ty::storage_types(std::slice::from_ref(existing), std::slice::from_ref(&merged)) {
@@ -192,6 +198,10 @@ pub(super) fn insert_inferred_return(
 ) {
     let ty = super::fixpoint_bound::bound(ty);
     match table.get(method) {
+        Some(existing) if super::strict_producers::stubs_on() && super::strict_producers::is_p(existing) => {
+            super::det::note_named("harvest.first", method.as_str(), Some(existing), &ty);
+            table.insert(method.clone(), ty);
+        }
         None => {
             super::det::note_named("harvest.first", method.as_str(), None, &ty);
             table.insert(method.clone(), ty);

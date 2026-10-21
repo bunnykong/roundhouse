@@ -54,6 +54,7 @@ mod private_calls;
 mod filter_targets;
 pub mod graphql;
 mod harvest_return;
+pub(crate) mod strict_producers;
 pub mod producer_evidence;
 mod parameter_conservation;
 mod fixpoint_bound;
@@ -203,6 +204,7 @@ pub struct Analyzer {
     /// `RH_SCHED=sccq`: the ordered worklist. `None` runs main's global
     /// rounds.
     sccq: Option<Box<sccq::Engine>>,
+    strict_stub_originals: Vec<(ParamKey, Ty)>,
     /// The worklist's class passes leave model, library and controller
     /// method bodies to it.
     sccq_skip_fine: bool,
@@ -1269,6 +1271,7 @@ impl Analyzer {
             fixpoint_rounds: FixpointRounds::default(),
             fixpoint_checks: fixpoint_check::Checks::default(),
             sccq: None,
+            strict_stub_originals: Vec::new(),
             sccq_skip_fine: false,
             sccq_harvest_fine: false,
             sccq_production_end: None,
@@ -1359,6 +1362,20 @@ impl Analyzer {
         handoff::reset();
         fold::reset();
         slots::reset();
+        self.strict_stub_originals.clear();
+        if strict_producers::stubs_on() {
+            for key in Self::defined_methods(app) {
+                let Some(cls) = self.classes.get_mut(&key.0) else { continue };
+                let table = match key.2 {
+                    MethodReceiver::Instance => &mut cls.instance_methods,
+                    MethodReceiver::Class => &mut cls.class_methods,
+                };
+                if let Some(stub @ Ty::Untyped { .. }) = table.get_mut(&key.1) {
+                    self.strict_stub_originals.push((key, stub.clone()));
+                    *stub = Ty::pending_untyped();
+                }
+            }
+        }
         structure::reset(|| (Self::defined_methods(app), Self::param_shapes(app)));
         if fixpoint_check::stats_on() {
             self.fixpoint_checks.structure_start = Some(self.structure_snapshot(app).summary());
@@ -1842,7 +1859,7 @@ impl Analyzer {
     /// as "never returns". Each type settles on its own, so the walk's
     /// order does not matter.
     fn settle_pending(&mut self, app: &mut App) {
-        if !(handoff::settle_on() || fold::on()) {
+        if !(handoff::settle_on() || fold::on() || strict_producers::stubs_on() || strict_producers::xfer_on()) {
             return;
         }
         fn settle(t: &mut Ty) {
@@ -1870,7 +1887,11 @@ impl Analyzer {
             .flat_map(|res| res.filter_chain.iter_mut())
             .flat_map(|filter| filter.assigns.values_mut())
             .for_each(settle);
-        crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e));
+        if strict_producers::stubs_on() || strict_producers::xfer_on() {
+            crate::lower::for_each_emit_body_mut(app, &mut |e| rewrite(e));
+        } else {
+            crate::lower::for_each_forwarding_body(app, &mut |e| rewrite(e));
+        }
     }
 
     /// `RH_FOLD`: expand every reference in the registry, the parameter
@@ -2693,8 +2714,23 @@ impl Analyzer {
             // ivars, untyped, absent from the schema. Seed as gradual
             // so a direct `@edit_user_id` read resolves (don't clobber
             // a schema column of the same name).
+            let mut own_assignments = HashMap::new();
+            if strict_producers::stubs_on() {
+                for method in model.methods() {
+                    let mut syntax = method.body.clone();
+                    fn seed_missing(e: &mut Expr) {
+                        if e.ty.is_none() { e.ty = Some(Ty::pending_untyped()); }
+                        e.node.for_each_child_mut(&mut seed_missing);
+                    }
+                    seed_missing(&mut syntax);
+                    extract_ivar_assignments(&syntax, &mut own_assignments);
+                }
+            }
             for name in collect_attr_accessor_names(&model.body) {
-                class_ivars.entry(name).or_insert(Ty::unresolved());
+                let seed = if strict_producers::stubs_on() && own_assignments.contains_key(&name) {
+                    Ty::pending_untyped()
+                } else { Ty::unresolved() };
+                class_ivars.entry(name).or_insert(seed);
             }
 
             // Phase 0: type the model's `Unknown` body items so the
@@ -5048,16 +5084,18 @@ impl Analyzer {
     }
 
     fn inference_matches(&self, prev: &InferenceSig) -> bool {
-        if self.classes.len() != prev.instance.len() || self.inferred_params != prev.params {
+        if self.classes.len() != prev.instance.len()
+            || self.inferred_params.len() != prev.params.len()
+            || self.inferred_params.iter().any(|(k, v)| !strict_producers::same_row(Some(v), prev.params.get(k))) {
             return false;
         }
         for (id, cls) in &self.classes {
             match prev.instance.get(id) {
-                Some(methods) if methods == &cls.instance_methods => {}
+                Some(methods) if strict_producers::same_table(methods, &cls.instance_methods) => {}
                 _ => return false,
             }
             match prev.class_methods.get(id) {
-                Some(methods) if methods == &cls.class_methods => {}
+                Some(methods) if strict_producers::same_table(methods, &cls.class_methods) => {}
                 _ => return false,
             }
         }
@@ -5166,6 +5204,19 @@ impl Analyzer {
         det::next_round();
         let before = det::registry_snapshot(&self.classes);
         self.harvest_method_returns(app, harvest_tests);
+        // The first complete production harvest identifies declarations it skips.
+        if !harvest_tests {
+            for (key, original) in std::mem::take(&mut self.strict_stub_originals) {
+                let Some(cls) = self.classes.get_mut(&key.0) else { continue };
+                let table = match key.2 {
+                    MethodReceiver::Instance => &mut cls.instance_methods,
+                    MethodReceiver::Class => &mut cls.class_methods,
+                };
+                if table.get(&key.1).is_some_and(strict_producers::is_p) {
+                    table.insert(key.1, original);
+                }
+            }
+        }
         // `RH_FOLD_JOIN`: returns join with the value they held after the
         // previous harvest, after the registry copies too.
         handoff::join_rets(&mut self.classes);
@@ -5628,7 +5679,7 @@ impl Analyzer {
                     {
                         // The includer harvest types this spliced body itself.
                         // The copy only declares existence, never a value writer.
-                        cls.instance_methods.entry(name.clone()).or_insert(Ty::unresolved());
+                        cls.instance_methods.entry(name.clone()).or_insert_with(strict_producers::stub);
                         continue;
                     }
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
@@ -5944,7 +5995,8 @@ impl Analyzer {
                 Self::insert_inferred_return(table, method, t.clone());
             }
             _ => {
-                if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })) {
+                if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })
+                    && !(strict_producers::stubs_on() && strict_producers::is_p(t))) {
                     table.insert(method.clone(), Ty::unresolved());
                 }
             }
