@@ -193,13 +193,21 @@ impl Analyzer {
                                     .local_bindings
                                     .get(&p.name)
                                     .cloned()
-                                    .unwrap_or_else(super::strict_producers::stub).into(),
+                                    .unwrap_or_else(|| {
+                                        self.s3d.minted(super::s3d::CONFIG, &controller.name, &method.name,
+                                            crate::dialect::MethodReceiver::Class);
+                                        super::strict_producers::stub()
+                                    }).into(),
                             },
                             kind: p.ty_kind(),
                         })
                         .collect(),
                     block: None,
-                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or_else(super::strict_producers::stub)),
+                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or_else(|| {
+                        self.s3d.minted(super::s3d::CONFIG, &controller.name, &method.name,
+                            crate::dialect::MethodReceiver::Class);
+                        super::strict_producers::stub()
+                    })),
                     effects: method.effects.clone(),
                 });
                 // Sibling class methods in this same pass call each other
