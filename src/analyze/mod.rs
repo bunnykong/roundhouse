@@ -57,6 +57,7 @@ mod harvest_return;
 pub(crate) mod strict_producers;
 pub mod producer_evidence;
 mod parameter_conservation;
+mod param_views;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod s4_census;
@@ -1368,6 +1369,7 @@ impl Analyzer {
         errgate::reset();
         handoff::reset();
         fold::reset();
+        param_views::reset(&app.sources);
         slots::reset();
         self.strict_stub_originals.clear();
         if strict_producers::stubs_on() {
@@ -1832,6 +1834,7 @@ impl Analyzer {
             let fp = self.c1_state_fp(app);
             eprintln!("rh-det-pre: {}", fp.det_line());
         }
+        param_views::report(&self.classes);
         self.fold_finish(app);
 
         if std::env::var("RH_C5_ROWDUMP").as_deref() == Ok("1")
@@ -3003,6 +3006,7 @@ impl Analyzer {
                         &ctrl_id,
                         origin,
                         &action.name,
+                        action.body.span,
                         &action.params,
                         &action.kw_params,
                         action.block_param.as_ref(),
@@ -3524,6 +3528,7 @@ impl Analyzer {
                             &ctrl_name,
                             origin,
                             &action.name,
+                            action.body.span,
                             &action.params,
                             &action.kw_params,
                             action.block_param.as_ref(),
@@ -4050,6 +4055,7 @@ impl Analyzer {
                         &ctrl_name,
                         origin,
                         &action.name,
+                        action.body.span,
                         &action.params,
                         &action.kw_params,
                         action.block_param.as_ref(),
@@ -4876,7 +4882,8 @@ impl Analyzer {
         dsl_macro_host: bool,
     ) -> Ctx {
         let key = (class_id.clone(), method.name.clone(), method.receiver);
-        let observed = self.inferred_params.get(&key).map(|row| c5_reader_row(row));
+        let raw_observed = self.inferred_params.get(&key);
+        let observed = raw_observed.map(|row| c5_reader_row(row));
         let mut ctx = base.clone();
         ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
         ctx.instance_body = !ctx.class_side;
@@ -4918,13 +4925,13 @@ impl Analyzer {
             };
             let declared = self.declared_param_ty(class_id, &method.name, positional, &param.name);
             let is_declared = declared.is_some();
-            let ty = prefer_declared(declared, seeded);
-            if let Some(ty) = ty {
-                // `RH_FOLD`: a parameter of a recursive component is read
-                // by reference.
-                let ty = if is_declared { ty } else { fold::param_ref(class_id, &method.name, method.receiver, i, ty) };
-                ctx.local_bindings.insert(param.name.clone(), ty);
-            }
+            let control = prefer_declared(declared, seeded);
+            let ty = if is_declared { control } else {
+                fold::declare_param(class_id,&method.name,method.receiver,i,method.body.span);
+                let raw=param_ty_with_default(raw_observed.and_then(|row|row.get(i)).cloned(),param);
+                fold::param_seed(class_id,&method.name,method.receiver,i,method.body.span,raw,control)
+            };
+            if let Some(ty)=ty {ctx.local_bindings.insert(param.name.clone(),ty);}
         }
         // An indexed module's Ruby callback gets its host as a Module object,
         // even when the hook is dormant and no explicit call site supplies types.
@@ -4965,6 +4972,7 @@ impl Analyzer {
         class_id: &ClassId,
         origin: Option<&ClassId>,
         action_name: &Symbol,
+        definition_span: crate::span::Span,
         params: &Row,
         kw_params: &[(Symbol, Option<crate::expr::Expr>)],
         block_param: Option<&Symbol>,
@@ -4990,13 +4998,16 @@ impl Analyzer {
                 .reduce(unify_param_ty);
             let declared = self.declared_param_ty(class_id, action_name, Some(i), name);
             let is_declared = declared.is_some();
-            let ty = prefer_declared(declared, observed);
-            if let Some(ty) = ty {
-                // `RH_FOLD`: a parameter of a recursive component is read
-                // by reference.
-                let ty = if is_declared { ty } else { fold::param_ref(class_id, action_name, MethodReceiver::Instance, i, ty) };
-                ctx.local_bindings.insert(name.clone(), ty);
-            }
+            let control = prefer_declared(declared, observed);
+            let ty=if is_declared {control} else {
+                fold::declare_param(class_id,action_name,MethodReceiver::Instance,i,definition_span);
+                let own_raw=self.inferred_params.get(&(class_id.clone(),action_name.clone(),MethodReceiver::Instance));
+                let origin_raw=origin.and_then(|m|self.inferred_params.get(&(m.clone(),action_name.clone(),MethodReceiver::Instance)));
+                let raw=[own_raw,origin_raw].into_iter().flatten().filter_map(|v|v.get(i).cloned())
+                    .filter(|t|!matches!(t,Ty::Var {..})).reduce(unify_param_ty);
+                fold::param_seed(class_id,action_name,MethodReceiver::Instance,i,definition_span,raw,control)
+            };
+            if let Some(ty)=ty {ctx.local_bindings.insert(name.clone(),ty);}
         }
         // Keyword params sit beside the positional row rather than in
         // it, and a call site passes them by NAME — so there is no
@@ -8078,9 +8089,44 @@ pub(crate) fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
 fn c5_reader_row(row: &[Ty]) -> std::borrow::Cow<'_, [Ty]> {
     static VIEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *VIEW.get_or_init(|| std::env::var("RH_C5_READER_VIEW").as_deref() == Ok("1")) {
-        std::borrow::Cow::Owned(row.iter().map(|t| unify_param_ty_raw(t.clone(), t.clone())).collect())
+        std::borrow::Cow::Owned(row.iter().map(|t| view_param_ty(t.clone())).collect())
     } else {
         std::borrow::Cow::Borrowed(row)
+    }
+}
+
+/// Quick-test variant of the reader view. `RH_VIEW_KEEP=gradual` keeps Gradual `untyped` arms beside an
+/// informative arm; `RH_VIEW_KEEP=known` keeps every non-Pending `untyped` arm. Unset keeps the current view.
+fn view_param_ty(t: Ty) -> Ty {
+    static KEEP: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    let keep = *KEEP.get_or_init(|| match std::env::var("RH_VIEW_KEEP").as_deref() {
+        Ok("gradual") => 1,
+        Ok("known") => 2,
+        _ => 0,
+    });
+    if keep == 0 {
+        return unify_param_ty_raw(t.clone(), t);
+    }
+    let joined = crate::analyze::body::drop_pending_arms(crate::analyze::body::union_of(t.clone(), t));
+    let Ty::Union { variants } = joined else {
+        return joined;
+    };
+    if !variants.iter().any(|v| !v.is_unknown() && !matches!(v, Ty::Nil)) {
+        return Ty::Union { variants };
+    }
+    let mut kept: Vec<Ty> = variants
+        .into_iter()
+        .filter(|v| match v {
+            Ty::Untyped { why } => {
+                let bits = why.effective().reporting_bits();
+                if keep == 1 { bits == 2 } else { bits != 1 }
+            }
+            _ => true,
+        })
+        .collect();
+    match kept.len() {
+        1 => kept.pop().unwrap(),
+        _ => Ty::Union { variants: kept.into() },
     }
 }
 

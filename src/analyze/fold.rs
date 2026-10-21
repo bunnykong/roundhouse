@@ -251,6 +251,45 @@ pub(crate) fn ret_ref(class: &ClassId, method: &Symbol, class_side: bool) -> Opt
     Some(Ty::Rec { slot })
 }
 
+/// Enumerate the declared writer before reading its row. No destination is allocated here.
+pub(super) fn declare_param(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver,
+                           index: usize, span: crate::span::Span) {
+    if active() && is_rec_method(class,method) {
+        super::param_views::declare(&SlotKey::Param {class:class.clone(),method:method.clone(),side,index},span);
+    }
+}
+
+/// C materialization and lifetime; V replaces only the value from current raw cells.
+pub(super) fn param_seed(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver,
+                        index: usize, span: crate::span::Span, raw: Option<Ty>, control: Option<Ty>) -> Option<Ty> {
+    if !active() || !is_rec_method(class,method) { return control; }
+    let key=SlotKey::Param {class:class.clone(),method:method.clone(),side,index};
+    let slot=if control.is_some() {Some(intern(key.clone()))} else {slot_id(&key)};
+    let raw=raw.map(|t|slot.map_or_else(||t.clone(),|slot|strip_self(t.clone(),slot)));
+    let aggregate=super::param_views::replace(&key,span,raw);
+    let before=slot.and_then(|id|ST.with(|s|s.borrow().values.get(&id).cloned()));
+    if !super::param_views::on() {
+        let out=control.map(|t|param_ref(class,method,side,index,t));
+        let after=slot.and_then(|id|ST.with(|s|s.borrow().values.get(&id).cloned()));
+        super::param_views::note_storage(before.clone(),after,before.is_some() && out.is_some() && super::handoff::join_on());
+        return out;
+    }
+    if let Some(slot)=slot {
+        // No old stored value enters the right hand side.
+        let value=super::param_views::view(aggregate);
+        super::structure::fold_write(&key,"parameter-seed");
+        ST.with(|s| {
+            let mut s=s.borrow_mut();
+            if s.values.get(&slot)!=Some(&value) { note_moved(slot,s.values.get(&slot)); }
+            s.joined.remove(&slot);
+            super::det::note("fold.param_seed",s.values.get(&slot),&value);
+            s.values.insert(slot,value.clone());
+        });
+        super::param_views::note_storage(before,Some(value),false);
+        control.map(|_|Ty::Rec {slot})
+    } else { None }
+}
+
 /// A read of a parameter slot, when it is in reference mode. `value` is
 /// what the body would otherwise have been seeded with.
 pub(crate) fn param_ref(class: &ClassId, method: &Symbol, side: crate::dialect::MethodReceiver, index: usize, value: Ty) -> Ty {

@@ -2201,6 +2201,7 @@ impl Analyzer {
                             &ctrl_name,
                             origin.as_ref(),
                             &action.name,
+                            action.body.span,
                             &action.params,
                             &action.kw_params,
                             action.block_param.as_ref(),
