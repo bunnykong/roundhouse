@@ -71,6 +71,7 @@ pub fn swift_ty(t: &Ty) -> String {
             }
         },
 
+        Ty::Union { .. } if t.is_stringish() => "String".to_string(),
         Ty::Union { variants } => render_union(variants),
 
         Ty::Class { id, args } => render_class(id.0.as_str(), args),

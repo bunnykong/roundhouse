@@ -106,7 +106,7 @@ module ActiveRecord
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
     # Nil and uncastable request keys reject before the scalar adapter.
     # Not `?id`: the def takes `*ids`, and spinel types a positional field by the def's own slot.
-    def self.exists?: (*(Integer | Float | String | nil) ids) -> bool
+    def self.exists?: (*(Hash[String | Symbol, untyped] | Integer | Float | String | nil) ids) -> bool
     def self._exists_primary_key_input: (Integer | Float | String | nil id) -> bool
     # Ruby-family overrides of base.rb's Array / COUNT fallbacks.
     def self.where: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
