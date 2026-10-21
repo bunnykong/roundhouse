@@ -15,9 +15,14 @@
 //! - `RH_FIXPOINT_DIGEST=1`: a 64-bit digest of each part of the final
 //!   carried state, to compare two runs on the same input.
 //! - `RH_FIXPOINT_STATS=1`: the loop ends; the expressions whose type holds
-//!   `untyped` at any depth; how often #584's bound cut a carried type; and
-//!   how often the harvest cut a return that nests its previous round's
-//!   (#528's `harvest_untie_cut`).
+//!   `untyped` at any depth; how often #584's bound cut a carried type; how
+//!   often the harvest cut a return that nests its previous round's (#528's
+//!   `harvest_untie_cut`); and, when they run, the fold's and the worklist's
+//!   counters.
+//! - `RH_PRECISION_CENSUS=1`: aggregate counts of emit-bound expressions with
+//!   a type, fully typed (no `untyped` or `Var` at any depth), holding `untyped`,
+//!   holding only `Var`, and missing a type, in the `precision` field. Shares
+//!   use expressions with a type as their denominator.
 //!
 //! Each prints one `rh-fixpoint:` JSON line on stderr at the end of
 //! `analyze`. It holds counts and hashes only: no names, spans or types.
@@ -41,6 +46,7 @@
 //! | `controller_cache` | `controller_action_meta_cache`: the concern and action bindings, and the typed concern bodies, that a controller outside the dirty frontier reuses |
 //! | `view_seeds` | `view_seeds`: the controller→view channel that a views pass reads |
 //! | `copies` | `concern_folded` and `host_folded`: which registry entries are copies a fold may overwrite |
+//! | `side_table` | with `RH_FOLD`, the fold's parameter, position and narrowing slots |
 //! | `ir` | every emit-bound expression's type, decisions and diagnostic annotation ([`crate::lower::for_each_emit_body_ref`]). Parameter defaults and empty literals are typed in place and read back by the next typing, so their stamps are here too |
 //!
 //! Not compared, and why:
@@ -86,6 +92,7 @@ pub(super) fn verify_on() -> bool {
     *VERIFY
 }
 
+/// Whether the fixpoint statistics are enabled.
 pub(super) fn stats_on() -> bool { *STATS }
 
 static BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -145,6 +152,8 @@ pub(super) struct Checks {
     bound_calls: u64,
     bound_cuts: u64,
     untie_cuts: u64,
+    pub(super) structure_start: Option<serde_json::Value>,
+    pub(super) structure_end: Option<serde_json::Value>,
 }
 
 impl Checks {
@@ -197,6 +206,7 @@ pub(super) fn type_hash(t: &Ty) -> u64 {
             }
         }
         Ty::Relation { of } => of.0.as_str().hash(&mut h),
+        Ty::Rec { slot } => format!("{:?}", super::fold::key_of(*slot)).hash(&mut h),
         Ty::Fn { params, block, ret, effects } => {
             for p in params.iter() {
                 p.name.as_str().hash(&mut h);
@@ -350,6 +360,13 @@ impl StateFp {
         Self { parts, ir: self.ir.clone() }
     }
 
+    pub(super) fn context_slot_keys(&self) -> Vec<String> {
+        self.parts.iter().filter(|(part, _)| matches!(**part,
+            "controller_bindings" | "controller_cache" | "view_seeds" | "copies"))
+            .flat_map(|(part, entries)| entries.keys().map(move |key| format!("{part}:{key}")))
+            .collect()
+    }
+
     fn sizes(&self) -> BTreeMap<&'static str, u64> {
         let mut out: BTreeMap<&'static str, u64> =
             self.parts.iter().map(|(name, part)| (*name, part.len() as u64)).collect();
@@ -358,31 +375,48 @@ impl StateFp {
     }
 }
 
-/// Typed expressions, and those whose type holds `untyped`.
+/// Typed expressions, and those whose type holds `untyped`, in all and by
+/// provenance (an expression can hold more than one kind).
 #[derive(Default)]
 struct Census {
     typed: u64,
     missing: u64,
     bare_untyped: u64,
     untyped_anywhere: u64,
+    /// Pending, gradual, unresolved.
+    by_kind: [u64; 3],
 }
 
-fn holds_untyped(t: &Ty) -> bool {
+/// The provenances of the `untyped` positions in `t`, as bits.
+fn untyped_kinds(t: &Ty) -> u8 {
+    let mut bits = 0u8;
+    let mut each = |c: &Ty| bits |= untyped_kinds(c);
     match t {
-        Ty::Untyped => true,
-        Ty::Array { elem } => holds_untyped(elem),
-        Ty::Hash { key, value } => holds_untyped(key) || holds_untyped(value),
-        Ty::Tuple { elems } => elems.iter().any(holds_untyped),
-        Ty::Union { variants } => variants.iter().any(holds_untyped),
-        Ty::Record { row } => row.fields.values().any(holds_untyped),
-        Ty::Class { args, .. } => args.iter().any(holds_untyped),
-        Ty::Fn { params, block, ret, .. } => {
-            params.iter().any(|p| holds_untyped(&p.ty))
-                || block.as_deref().is_some_and(holds_untyped)
-                || holds_untyped(ret)
+        Ty::Untyped { why } => return why.reporting_bits(),
+        Ty::Array { elem } => each(elem),
+        Ty::Hash { key, value } => {
+            each(key);
+            each(value);
         }
-        _ => false,
+        Ty::Tuple { elems } => elems.iter().for_each(each),
+        Ty::Union { variants } => variants.iter().for_each(each),
+        Ty::Record { row } => row.fields.values().for_each(each),
+        Ty::Class { args, .. } => args.iter().for_each(each),
+        Ty::Fn { params, block, ret, .. } => {
+            params.iter().for_each(|p| each(&p.ty));
+            if let Some(b) = block.as_deref() {
+                each(b);
+            }
+            each(ret);
+        }
+        _ => {}
     }
+    bits
+}
+
+#[cfg(test)]
+fn holds_untyped(t: &Ty) -> bool {
+    untyped_kinds(t) != 0
 }
 
 impl Census {
@@ -390,13 +424,89 @@ impl Census {
         match &e.ty {
             Some(t) => {
                 self.typed += 1;
-                self.bare_untyped += u64::from(matches!(t, Ty::Untyped));
-                self.untyped_anywhere += u64::from(holds_untyped(t));
+                self.bare_untyped += u64::from(matches!(t, Ty::Untyped { .. }));
+                let kinds = untyped_kinds(t);
+                self.untyped_anywhere += u64::from(kinds != 0);
+                for (i, n) in self.by_kind.iter_mut().enumerate() {
+                    *n += u64::from(kinds & (1 << i) != 0);
+                }
             }
             None => self.missing += 1,
         }
         e.node.for_each_child(&mut |c| self.expr(c));
     }
+}
+
+/// Read-only C4/C5 diagnostic, at exactly the census's emit-bound roots.
+/// Source tags, spans and per-root occurrences distinguish cloned bodies
+/// without depending on unrelated roots' iteration order.
+fn dump_census(app: &App, path: std::ffi::OsString) -> std::io::Result<()> {
+    use std::io::Write;
+
+    fn visit(
+        e: &Expr,
+        body: &serde_json::Value,
+        site: &mut Vec<usize>,
+        sources: &[crate::span::SourceFile],
+        out: &mut impl Write,
+    ) -> std::io::Result<()> {
+        if let Some(t) = &e.ty {
+            let kinds = untyped_kinds(t);
+            if kinds != 0 {
+                let row = serde_json::json!({
+                    "emit_body": body,
+                    "site": {
+                        "path": site,
+                        "source": e.span.file.0.checked_sub(1)
+                            .and_then(|i| sources.get(i as usize)).map(|s| s.path.as_str()),
+                        "span": e.span,
+                    },
+                    "untyped_kinds": kinds,
+                    "type_hash": format!("{:016x}", type_hash(t)),
+                });
+                writeln!(out, "{row}")?;
+            }
+        }
+        let mut result = Ok(());
+        let mut child = 0;
+        e.node.for_each_child(&mut |c| {
+            if result.is_ok() {
+                site.push(child);
+                result = visit(c, body, site, sources, out);
+                site.pop();
+            }
+            child += 1;
+        });
+        result
+    }
+
+    let mut declarations = BTreeMap::<usize, String>::new();
+    for class in &app.library_classes {
+        for method in &class.methods {
+            declarations.insert(&method.body as *const Expr as usize,
+                format!("{}#{:?}::{}", class.name.0.as_str(), method.receiver, method.name.as_str()));
+        }
+    }
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut occurrences = BTreeMap::<String, usize>::new();
+    let mut result = Ok(());
+    crate::lower::for_each_emit_body_ref(app, &mut |root| {
+        if result.is_ok() {
+            let mut body = serde_json::json!({
+                "source": root.span.file.0.checked_sub(1)
+                    .and_then(|i| app.sources.get(i as usize)).map(|s| s.path.as_str()),
+                "declaration": declarations.get(&(root as *const Expr as usize)),
+                "span": root.span,
+                "kind": root.node.kind_str(),
+            });
+            let occurrence = occurrences.entry(body.to_string()).or_default();
+            body["occurrence"] = serde_json::json!(*occurrence);
+            *occurrence += 1;
+            result = visit(root, &body, &mut Vec::new(), &app.sources, &mut out);
+        }
+    });
+    result?;
+    out.flush()
 }
 
 fn loop_end(end: LoopEnd) -> serde_json::Value {
@@ -507,6 +617,11 @@ impl Analyzer {
         for (id, names) in &self.host_folded {
             put("copies", format!("host {}", id.0.as_str()), names_hash(names));
         }
+        if super::fold::on() {
+            for (key, hash) in super::fold::side_table_hashes(&mut |t| type_hash(t)) {
+                put("side_table", key, hash);
+            }
+        }
         let mut ir = Vec::new();
         crate::lower::for_each_emit_body_ref(app, &mut |e| ir_rows(e, &mut ir));
         ir.sort_unstable();
@@ -608,20 +723,42 @@ impl Analyzer {
             line["entries"] = serde_json::json!(fp.sizes());
         }
         if *STATS {
+            line["structure"] = serde_json::json!({
+                "schema": 2, "scope": "observed-cumulative-equations",
+                "start": self.fixpoint_checks.structure_start,
+                "end": self.fixpoint_checks.structure_end,
+                "unchanged": self.fixpoint_checks.structure_start == self.fixpoint_checks.structure_end,
+            });
             let mut census = Census::default();
             crate::lower::for_each_emit_body_ref(app, &mut |e| census.expr(e));
+            if let Some(path) = std::env::var_os("RH_C4_CENSUS_DUMP") {
+                dump_census(app, path).expect("write RH_C4_CENSUS_DUMP");
+            }
             line["census"] = serde_json::json!({
                 "typed": census.typed,
                 "missing": census.missing,
                 "bare_untyped": census.bare_untyped,
                 "untyped_anywhere": census.untyped_anywhere,
+                "untyped_by_provenance": {
+                    "pending": census.by_kind[0],
+                    "gradual": census.by_kind[1],
+                    "unresolved": census.by_kind[2],
+                },
             });
             line["bound"] = serde_json::json!({
                 "calls": BOUND_CALLS.load(Ordering::Relaxed) - self.fixpoint_checks.bound_calls,
                 "cuts": BOUND_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.bound_cuts,
             });
-            line["harvest_untie_cut"] =
-                serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+            line["harvest_untie_cut"] = serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+            if super::fold::on() {
+                line["fold"] = super::fold::stats();
+            }
+            if let Some(worklist) = self.sccq_stats() {
+                line["worklist"] = worklist;
+            }
+        }
+        if super::precision::on() {
+            line["precision"] = serde_json::json!(super::precision::census(app));
         }
         if *STATS {
             if let Some(worklist) = self.sccq_stats() { line["worklist"] = worklist; }
@@ -786,7 +923,7 @@ end
     fn untyped_is_found_at_any_depth() {
         let deep = Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::Untyped])) }),
+            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::unresolved()])) }),
         };
         assert!(holds_untyped(&deep));
         assert!(!holds_untyped(&Ty::Array { elem: std::sync::Arc::new(Ty::Int) }));

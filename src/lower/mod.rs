@@ -692,7 +692,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Grounds `attach(io:, filename:, content_type:)` to positional
     // Strings by reading the io at the call site — the runtime's RBS
     // has no File type, and an `untyped` parameter there is five new
-    // Ty::Untyped sites every strict target pays for. No ordering
+    // Ty::gradual() sites every strict target pays for. No ordering
     // constraint of its own: it matches on Rails' own keyword spelling,
     // which no earlier pass rewrites.
     ("attach", &[]),

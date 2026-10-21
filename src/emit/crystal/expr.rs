@@ -91,7 +91,7 @@ pub fn emit_expr(e: &Expr) -> String {
     //
     // Applied to Ivar reads typed as a concrete non-nilable type
     // (`Class`, primitives `Int`/`Str`/`Bool`/`Float`/`Sym`,
-    // collections `Array`/`Hash`). Excluded: `Ty::Untyped`,
+    // collections `Array`/`Hash`). Excluded: `Ty::gradual()`,
     // `Ty::Nil`, `Ty::Var`, `Ty::Union` — these either are or
     // already include nil; `.not_nil!` would be wrong or redundant.
     // Schema-derived attr accessors carry the non-nilable column

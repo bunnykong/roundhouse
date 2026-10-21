@@ -2288,7 +2288,7 @@ fn js_class_member(
             (tys, optionals, is_keyword, (**ret).clone())
         }
         _ => (
-            m.params.iter().map(|_| Ty::Untyped).collect(),
+            m.params.iter().map(|_| Ty::gradual()).collect(),
             m.params.iter().map(|_| false).collect(),
             m.params.iter().map(|_| false).collect(),
             m.body.ty.clone().unwrap_or(Ty::Nil),
@@ -2545,7 +2545,7 @@ pub(super) fn js_library_function(
                 (tys, optionals, (**ret).clone())
             }
             _ => (
-                func.params.iter().map(|_| Ty::Untyped).collect(),
+                func.params.iter().map(|_| Ty::gradual()).collect(),
                 func.params.iter().map(|_| false).collect(),
                 func.body.ty.clone().unwrap_or(Ty::Nil),
             ),
@@ -2660,9 +2660,9 @@ fn collect_ivar_assignments(
     match &*e.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value }
         | ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
-            // Type from the RHS, falling back to `any` (Ty::Untyped)
+            // Type from the RHS, falling back to `any` (Ty::gradual())
             // when the analyzer didn't infer one.
-            let ty = value.ty.clone().unwrap_or(Ty::Untyped);
+            let ty = value.ty.clone().unwrap_or(Ty::gradual());
             out.insert(name.as_str().to_string(), ty);
             collect_ivar_assignments(value, out);
         }

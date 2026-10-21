@@ -326,8 +326,8 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
         let first = hash.elements().iter().next();
         let Some(first) = first else {
             return Some(Ty::Hash {
-                key: std::sync::Arc::new(Ty::Untyped),
-                value: std::sync::Arc::new(Ty::Untyped),
+                key: std::sync::Arc::new(Ty::gradual()),
+                value: std::sync::Arc::new(Ty::gradual()),
             });
         };
         let assoc = first.as_assoc_node()?;
@@ -341,7 +341,7 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
     if let Some(array) = node.as_array_node() {
         let first = array.elements().iter().next();
         let Some(first) = first else {
-            return Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+            return Some(Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) });
         };
         // Literal elements first; a `Klass.new(…)` element falls through
         // to the constructed-instance rule above, which is how a table
@@ -557,7 +557,7 @@ pub fn parse_library_with_rbs(
     // Step 2: build a class registry from the now-typed methods. The
     // body-typer dispatches `Send { recv: SelfRef, method: m }` against
     // self_ty's class entry, so without this registry self-method
-    // calls resolve to `Ty::Untyped`.
+    // calls resolve to `Ty::gradual()`.
     let mut class_registry: std::collections::HashMap<
         crate::ident::ClassId,
         crate::analyze::ClassInfo,
@@ -701,7 +701,7 @@ fn seed_well_known_classes(
 
     let row_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::gradual()),
     };
     let nilable_row = Ty::Union {
         variants: vec![row_ty.clone(), Ty::Nil].into(),

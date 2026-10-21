@@ -163,13 +163,13 @@ pub(super) fn emit_array(elements: &[Expr]) -> String {
         return_elem_ty.as_ref(),
         Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)
     );
-    // Ty::Record and Ty::Untyped both render as `serde_json::Value` at
+    // Ty::Record and Ty::gradual() both render as `serde_json::Value` at
     // the rust emit. A Vec of either reaches the function tail wanting
     // Value-shaped elements; route through coerce_arg_for_param_ty so
     // the Hash-literal-to-Value transform fires per element.
     let coerce_via_param_ty = matches!(
         return_elem_ty.as_ref(),
-        Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. })
+        Some(crate::ty::Ty::Untyped { .. }) | Some(crate::ty::Ty::Record { .. })
     );
     let parts: Vec<String> = elements
         .iter()
@@ -383,7 +383,7 @@ pub(super) fn string_interp_fmt_and_args(parts: &[InterpPart]) -> (String, Vec<S
                 // body-typer doesn't always propagate the result Ty
                 // through nested `value[key]` index Sends.
                 match expr.ty.as_ref() {
-                    Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. }) => {
+                    Some(crate::ty::Ty::Untyped { .. }) | Some(crate::ty::Ty::Record { .. }) => {
                         args.push(format!("({arg}).ruby_to_s()"));
                     }
                     Some(ty)
@@ -427,7 +427,7 @@ fn expr_recv_is_value(expr: &Expr) -> bool {
     let Some(recv) = recv_opt else { return false };
     matches!(
         recv.ty.as_ref(),
-        Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. })
+        Some(crate::ty::Ty::Untyped { .. }) | Some(crate::ty::Ty::Record { .. })
     )
 }
 

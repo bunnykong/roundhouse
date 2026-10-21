@@ -170,7 +170,7 @@ fn render_params(m: &MethodDef) -> String {
     // blocks fall back to a permissive `Box<dyn Fn>`-shaped closure —
     // body still references `f`, so the binding has to exist. RBS
     // block-signature parsing (src/rbs.rs::parse_function_type_to_fn)
-    // produces `Ty::Fn`; older `Ty::Untyped` block placeholders use
+    // produces `Ty::Fn`; older `Ty::gradual()` block placeholders use
     // the permissive fallback path.
     if let Some(bp) = block_param {
         // Prefer source-declared block-param name (from `MethodDef.block_param`)
@@ -467,7 +467,7 @@ pub(super) fn emit_instance_method(
     // Arity + types come from the first observed Yield call in the
     // body. The RBS signature carries a `block: Option<Box<Ty>>`
     // slot, but the current RBS parser collapses block signatures
-    // to `Ty::Untyped` — until that improves, body-derived
+    // to `Ty::gradual()` — until that improves, body-derived
     // inference is the only signal. HWIA's `each` body yields
     // `(k: String, v: serde_json::Value)`, which is what we want.
     //
@@ -749,7 +749,7 @@ fn default_value_for_ty(ty: &Ty) -> String {
         Ty::Nil => "()".to_string(),
         Ty::Array { .. } => "Vec::new()".to_string(),
         Ty::Hash { .. } => "std::collections::HashMap::new()".to_string(),
-        Ty::Untyped => "serde_json::Value::Null".to_string(),
+        Ty::Untyped { .. } => "serde_json::Value::Null".to_string(),
         Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => {
             "None".to_string()
         }
@@ -820,7 +820,7 @@ fn find_yield_signature(body: &crate::expr::Expr) -> Option<Vec<Ty>> {
     use crate::expr::ExprNode;
     match &*body.node {
         ExprNode::Yield { args } => {
-            Some(args.iter().map(|a| a.ty.clone().unwrap_or(Ty::Untyped)).collect())
+            Some(args.iter().map(|a| a.ty.clone().unwrap_or(Ty::gradual())).collect())
         }
         ExprNode::Seq { exprs } => exprs.iter().find_map(find_yield_signature),
         ExprNode::If { cond, then_branch, else_branch } => find_yield_signature(cond)

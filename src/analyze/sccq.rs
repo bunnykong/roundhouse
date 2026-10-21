@@ -7,11 +7,22 @@
 //! spend most of their time re-typing. Class-body items, views and tests
 //! keep their class passes (#524's dirty frontier).
 //!
-//! Registry classes and constants read during a typing are recorded; method
-//! names and ivars come from its syntax. The slot-read graph determines
-//! Bourdoncle WTO priorities. A moved slot queues its readers, and each
-//! evaluation immediately harvests its return and replaces its call sites.
-//! This port includes no recursive fold or experimental inference rules.
+//! While a unit is typed, the registry classes it fetched, the constants it
+//! read and the fold slots it unfolded are recorded; the method names it
+//! can look up and the ivars it touches come from its syntax. Slots are
+//! registry entries `(class, name)` (returns, block-value verdicts),
+//! parameter rows, class ivar seeds, constants and, with `RH_FOLD`, the
+//! fold's side table. The slot-read graph orders units by Bourdoncle's weak
+//! topological order. A unit is re-typed only when a slot it read changed;
+//! its return is harvested and its call sites update parameter rows at
+//! once, so a chain settles in one sweep. A per-unit cap freezes a unit
+//! whose output keeps changing.
+//!
+//! With the fold, a side-table move re-types the readers that come later in
+//! the order in the same sweep; a back edge (a reader at or before the
+//! current position) is batched into further sweeps of just its readers,
+//! until the component holds still. Propagating back edges at once storms;
+//! batching them to the next round leaves a long tail.
 //!
 //! Hidden inputs are replayed as slots: parameter-default stamps (a library
 //! method's next typing seeds from them), a unit's empty-literal stamps
@@ -32,10 +43,10 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use rubydex::model::ids::DeclarationId;
 
-use crate::App;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::{ClassId, Symbol};
+use crate::ident::{ClassId, Symbol, TyVar};
 use crate::ty::Ty;
+use crate::App;
 
 use super::body::{ConstScope, Ctx};
 use super::dirty_retype::DirtyHints;
@@ -49,9 +60,12 @@ pub(crate) fn sched_sccq() -> bool {
     *ON.get_or_init(|| std::env::var("RH_SCHED").is_ok_and(|v| v == "sccq"))
 }
 
-/// The spine's output-change safety cap with folding disabled.
+/// Output changes after which a unit is frozen. With the fold the handoffs
+/// are joins, so a unit's output only ascends, and 12 changes froze
+/// legitimately long ascents (77 on Mastodon); the cap stays as a safety
+/// net.
 fn unit_cap() -> u32 {
-    12
+    if super::fold::on() { 200 } else { 12 }
 }
 
 // ─────────────────────────── recorder ───────────────────────────
@@ -67,6 +81,8 @@ pub(crate) struct Reads {
     pub wild: Vec<u32>,
     pub const_ids: Vec<DeclarationId>,
     pub const_names: Vec<Symbol>,
+    /// Fold slots whose value the typing read (unfolding).
+    pub fold_slots: Vec<u32>,
 }
 
 impl Reads {
@@ -77,9 +93,10 @@ impl Reads {
         self.wild.dedup();
         self.const_ids.sort_unstable();
         self.const_ids.dedup();
-        self.const_names
-            .sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        self.const_names.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
         self.const_names.dedup();
+        self.fold_slots.sort_unstable();
+        self.fold_slots.dedup();
     }
 
     fn absorb(&mut self, other: Reads) {
@@ -87,6 +104,7 @@ impl Reads {
         self.wild.extend(other.wild);
         self.const_ids.extend(other.const_ids);
         self.const_names.extend(other.const_names);
+        self.fold_slots.extend(other.fold_slots);
         self.normalize();
     }
 
@@ -120,6 +138,14 @@ pub(crate) fn rec_wild(idx: u32) {
 pub(crate) fn rec_const_id(id: &DeclarationId) {
     if RECORDING.load(Relaxed) {
         REC.with(|r| r.borrow_mut().const_ids.push(*id));
+    }
+}
+
+/// A fold slot's value was read (`fold::value_of`).
+#[inline]
+pub(crate) fn rec_fold_slot(slot: u32) {
+    if RECORDING.load(Relaxed) {
+        REC.with(|r| r.borrow_mut().fold_slots.push(slot));
     }
 }
 
@@ -194,25 +220,15 @@ fn scan_names(body: &Expr, extra: &[&Expr], own: &Symbol) -> Vec<Symbol> {
             ExprNode::MethodRef { name, .. } => {
                 set.insert(name.as_str().to_string());
             }
-            ExprNode::Lit {
-                value: Literal::Sym { value },
-            } => {
+            ExprNode::Lit { value: Literal::Sym { value } } => {
                 set.insert(value.as_str().to_string());
             }
             // `send("...")` dispatches a String literal of any length.
-            ExprNode::Lit {
-                value: Literal::Str { value },
-            } => {
+            ExprNode::Lit { value: Literal::Str { value } } => {
                 set.insert(value.clone());
             }
-            ExprNode::Assign {
-                target: LValue::Attr { name, .. },
-                ..
-            }
-            | ExprNode::OpAssign {
-                target: LValue::Attr { name, .. },
-                ..
-            } => {
+            ExprNode::Assign { target: LValue::Attr { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Attr { name, .. }, .. } => {
                 set.insert(name.as_str().to_string());
                 set.insert(format!("{}=", name.as_str()));
             }
@@ -281,14 +297,10 @@ fn scan_ivars(body: &Expr) -> (Vec<Symbol>, bool) {
                     }
                     if let Some(first) = args.first() {
                         match &*first.node {
-                            ExprNode::Lit {
-                                value: Literal::Sym { value },
-                            } => {
+                            ExprNode::Lit { value: Literal::Sym { value } } => {
                                 set.insert(strip(value.as_str()));
                             }
-                            ExprNode::Lit {
-                                value: Literal::Str { value },
-                            } => {
+                            ExprNode::Lit { value: Literal::Str { value } } => {
                                 set.insert(strip(value));
                             }
                             _ => {}
@@ -342,12 +354,7 @@ pub(crate) fn hash_ty<H: Hasher>(t: &Ty, h: &mut H) {
             args.len().hash(h);
             args.iter().for_each(|a| hash_ty(a, h));
         }
-        Ty::Fn {
-            params,
-            block,
-            ret,
-            effects,
-        } => {
+        Ty::Fn { params, block, ret, effects } => {
             params.len().hash(h);
             for p in params {
                 p.name.as_str().hash(h);
@@ -364,7 +371,15 @@ pub(crate) fn hash_ty<H: Hasher>(t: &Ty, h: &mut H) {
             hash_ty(ret, h);
             format!("{effects:?}").hash(h);
         }
+        Ty::Untyped { why } => {
+            static REASONS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *REASONS.get_or_init(|| std::env::var("RH_C45_REASON_CHECK").as_deref() == Ok("1")) {
+                why.reporting_bits().hash(h);
+            }
+        }
         Ty::Var { var } => var.0.hash(h),
+        // A fold reference is its slot.
+        Ty::Rec { slot } => slot.hash(h),
         _ => {}
     }
 }
@@ -465,17 +480,11 @@ impl ClassEntry {
     fn pass_a_ctx(&self) -> Ctx {
         match self.family {
             Family::Lib => Ctx {
-                self_ty: Some(Ty::Class {
-                    id: self.self_id.clone(),
-                    args: vec![].into(),
-                }),
+                self_ty: Some(Ty::Class { id: self.self_id.clone(), args: vec![].into() }),
                 ..Ctx::default()
             },
             _ => Ctx {
-                self_ty: Some(Ty::Class {
-                    id: self.id.clone(),
-                    args: vec![].into(),
-                }),
+                self_ty: Some(Ty::Class { id: self.id.clone(), args: vec![].into() }),
                 ivar_bindings: self.class_ivars.clone(),
                 constants: self.consts.clone(),
                 ..Ctx::default()
@@ -487,18 +496,12 @@ impl ClassEntry {
         let map = self.reseeded.as_ref()?;
         Some(match self.family {
             Family::Lib => Ctx {
-                self_ty: Some(Ty::Class {
-                    id: self.self_id.clone(),
-                    args: vec![].into(),
-                }),
+                self_ty: Some(Ty::Class { id: self.self_id.clone(), args: vec![].into() }),
                 ivar_bindings: map.clone(),
                 ..Ctx::default()
             },
             _ => Ctx {
-                self_ty: Some(Ty::Class {
-                    id: self.id.clone(),
-                    args: vec![].into(),
-                }),
+                self_ty: Some(Ty::Class { id: self.id.clone(), args: vec![].into() }),
                 ivar_bindings: map.clone(),
                 constants: self.consts.clone(),
                 ..Ctx::default()
@@ -653,6 +656,10 @@ pub(super) struct Stats {
     pub max_evals_unit: u32,
     /// Units by evaluations in production after the initial pass: 0, 1, 2, 3, 4–6, 7–12, > 12.
     pub evals_hist: [u64; 7],
+    /// Marks from moved fold slots, new reference-mode methods, new cycle
+    /// ivars; full class passes forced by the side table.
+    pub fold_marks: u64,
+    pub fold_moved: u64,
     /// Evaluations per drain.
     pub drain_evals: Vec<u64>,
     /// Worklist seconds by step (typing incl. literal stamps; harvest and
@@ -663,6 +670,11 @@ pub(super) struct Stats {
     pub t_rows: f64,
     pub t_ivars: f64,
     pub lit_restamps: u64,
+    pub fold_deferred: u64,
+    pub sweeps: u64,
+    pub new_rec: u64,
+    pub new_scc_ivars: u64,
+    pub side_full_class: u64,
 }
 
 pub(super) struct Engine {
@@ -706,10 +718,22 @@ pub(super) struct Engine {
     pub body_cache: Vec<(u64, Vec<(ParamKey, Vec<Ty>)>)>,
     /// The concern param fold's key relation is static per phase.
     pub fold_ready: bool,
+    /// Fold slot → units whose recorded reads include it (append-only; a
+    /// stale entry is checked against the unit's reads).
+    pub fold_readers: HashMap<u32, HashSet<u32>>,
     /// Class index → units that read every method of it
     /// (dynamic `send`); their syntax names none of those methods, so the
     /// name index cannot find them (append-only, validated on use).
     pub wild_readers: HashMap<u32, HashSet<u32>>,
+    /// The side table's fingerprint before the last class pass.
+    pub class_side_fp: Option<u64>,
+    /// Fold slots whose move reached a back edge during the current drain;
+    /// their readers are marked by the next sweep.
+    pub deferred_fold: BTreeSet<u32>,
+    /// Inside `sccq_drain`.
+    pub draining: bool,
+    /// Position of the unit being evaluated.
+    pub current_pos: u32,
 }
 
 impl Engine {
@@ -733,35 +757,62 @@ impl Engine {
         self.class_idx.get(class).copied().unwrap_or(0)
     }
 
-    /// Index a unit's wildcard reads.
-    fn index_wild_reads(&mut self, u: u32) {
+    /// Index a unit's recorded fold-slot and wildcard reads.
+    fn index_fold_reads(&mut self, u: u32) {
+        for &slot in &self.units[u as usize].reads.fold_slots {
+            self.fold_readers.entry(slot).or_default().insert(u);
+        }
         for &c in &self.units[u as usize].reads.wild {
             self.wild_readers.entry(c).or_default().insert(u);
         }
     }
 
+    /// A fold slot's value moved; re-type the units whose last typing read
+    /// it.
+    fn mark_fold_slot(&mut self, slot: u32) {
+        let Some(rs) = self.fold_readers.get(&slot) else { return };
+        let hits: Vec<u32> = rs
+            .iter()
+            .copied()
+            .filter(|&u| self.units[u as usize].reads.fold_slots.binary_search(&slot).is_ok())
+            .collect();
+        // Inside a drain, a reader later in the order is re-typed in this
+        // sweep; one at or before the current position (a back edge) waits
+        // for the next sweep.
+        for u in hits {
+            if self.draining && self.units[u as usize].pos <= self.current_pos {
+                self.deferred_fold.insert(slot);
+                continue;
+            }
+            self.stats.fold_marks += 1;
+            self.mark(u, DIRTY_FULL);
+        }
+    }
+
     fn mark_slot_readers(&mut self, class: &ClassId, name: &Symbol) {
+        // A return in reference mode is also read by every typing that
+        // unfolded a reference to it, named or not.
+        if super::fold::active() {
+            for class_side in [false, true] {
+                let key = super::fold::SlotKey::Ret { class: class.clone(), method: name.clone(), class_side };
+                if let Some(slot) = super::fold::slot_id(&key) {
+                    self.mark_fold_slot(slot);
+                }
+            }
+        }
         let idx = self.idx_of(class);
         // A dynamic send read every method of the class.
         if let Some(ws) = self.wild_readers.get(&idx) {
             let hits: Vec<u32> = ws
                 .iter()
                 .copied()
-                .filter(|&u| {
-                    self.units[u as usize]
-                        .reads
-                        .wild
-                        .binary_search(&idx)
-                        .is_ok()
-                })
+                .filter(|&u| self.units[u as usize].reads.wild.binary_search(&idx).is_ok())
                 .collect();
             for u in hits {
                 self.mark(u, DIRTY_FULL);
             }
         }
-        let Some(cands) = self.name_index.get(name) else {
-            return;
-        };
+        let Some(cands) = self.name_index.get(name) else { return };
         let hits: Vec<u32> = cands
             .iter()
             .copied()
@@ -773,9 +824,7 @@ impl Engine {
     }
 
     fn mark_key_readers(&mut self, key: &ParamKey) {
-        let Some(us) = self.key_units.get(key) else {
-            return;
-        };
+        let Some(us) = self.key_units.get(key) else { return };
         for u in us.clone() {
             self.mark(u, DIRTY_FULL);
         }
@@ -791,12 +840,9 @@ impl Engine {
             if Some(u) == except {
                 continue;
             }
-            let reads = changed.iter().any(|n| {
-                self.units[u as usize]
-                    .ivars
-                    .binary_search_by(|x| x.as_str().cmp(n.as_str()))
-                    .is_ok()
-            });
+            let reads = changed
+                .iter()
+                .any(|n| self.units[u as usize].ivars.binary_search_by(|x| x.as_str().cmp(n.as_str())).is_ok());
             if reads {
                 self.stats.ivar_marks += 1;
                 self.mark(u, DIRTY_RESEED);
@@ -819,28 +865,13 @@ impl Engine {
     /// Use the same join-then-bound phases as main: sites, concerns, overlay.
     fn final_row(&self, key: &ParamKey) -> Option<Vec<Ty>> {
         let mut rows = HashMap::new();
-        if let Some(row) = self.base_rows.get(key) {
-            rows.insert(key.clone(), row.clone());
-        }
-        let concern_observations = self
-            .fold_from
-            .get(key)
-            .into_iter()
-            .flatten()
-            .filter_map(|inc| {
-                self.base_rows
-                    .get(inc)
-                    .map(|row| (key.clone(), row.clone()))
-            })
+        if let Some(row) = self.base_rows.get(key) { rows.insert(key.clone(), row.clone()); }
+        let concern_observations = self.fold_from.get(key).into_iter().flatten()
+            .filter_map(|inc| self.base_rows.get(inc).map(|row| (key.clone(), row.clone())))
             .collect();
         super::fold_param_observations(&mut rows, concern_observations);
-        let overlay = self
-            .overlay
-            .get(key)
-            .into_iter()
-            .flatten()
-            .map(|args| (key.clone(), args.clone()))
-            .collect();
+        let overlay = self.overlay.get(key).into_iter().flatten()
+            .map(|args| (key.clone(), args.clone())).collect();
         super::fold_param_observations(&mut rows, overlay);
         rows.remove(key)
     }
@@ -852,89 +883,34 @@ impl Engine {
                 None => "null".into(),
                 Some(g) => format!(
                     "{{\"nodes\":{},\"edges\":{},\"edges_reg\":{},\"edges_param\":{},\"edges_ivar\":{},\"self_loops\":{},\"sccs\":{},\"trivial\":{},\"nontrivial\":{},\"in_nontrivial\":{},\"largest\":{},\"buckets\":{:?},\"wto_heads\":{},\"wto_depth\":{},\"secs_edges\":{:.3},\"secs_total\":{:.3}}}",
-                    g.nodes,
-                    g.edges,
-                    g.edges_reg,
-                    g.edges_param,
-                    g.edges_ivar,
-                    g.self_loops,
-                    g.sccs,
-                    g.trivial,
-                    g.nontrivial,
-                    g.in_nontrivial,
-                    g.largest,
-                    g.buckets,
-                    g.wto_heads,
-                    g.wto_depth,
-                    g.secs_edges,
-                    g.secs_total
+                    g.nodes, g.edges, g.edges_reg, g.edges_param, g.edges_ivar, g.self_loops, g.sccs,
+                    g.trivial, g.nontrivial, g.in_nontrivial, g.largest, g.buckets, g.wto_heads, g.wto_depth,
+                    g.secs_edges, g.secs_total
                 ),
             }
         };
-        let lib = self
-            .units
-            .iter()
-            .filter(|u| u.family == Family::Lib)
-            .count();
-        let mm = self
-            .units
-            .iter()
-            .filter(|u| u.family == Family::ModelMethod)
-            .count();
-        let ms = self
-            .units
-            .iter()
-            .filter(|u| u.family == Family::ModelScope)
-            .count();
+        let lib = self.units.iter().filter(|u| u.family == Family::Lib).count();
+        let mm = self.units.iter().filter(|u| u.family == Family::ModelMethod).count();
+        let ms = self.units.iter().filter(|u| u.family == Family::ModelScope).count();
         let ctrl = self.units.len() - lib - mm - ms;
         format!(
             "\"engine\":{{\"units\":{},\"lib_units\":{lib},\"model_method_units\":{mm},\"model_scope_units\":{ms},\"ctrl_units\":{ctrl},\"class_entries\":{},\"rounds_prod\":{},\"prod_converged\":{},\"rounds_absorb\":{},\"absorb_converged\":{},\"evals_full\":{},\"evals_ctrl\":{},\"evals_reseed\":{},\"evals_out_same\":{},\"evals_out_changed\":{},\"back_to_seen\":{},\"periods\":{:?},\"cap\":{},\"cap_hits\":{},\"cap_osc\":{},\"cap_drift\":{},\"frozen_units\":{},\"seeds\":{:?},\"moved_slots\":{:?},\"moved_params\":{:?},\"marks\":{},\"ivar_marks\":{},\"const_marks\":{},\"restamps\":{},\"harvest_reapplied\":{},\"budget_exhausted\":{},\"max_evals_unit\":{},\"evals_hist\":{:?},\"param_checked\":{},\"param_mismatch\":{},\"engine_secs\":{:.3},\"graph_secs\":{:.3},\"index_secs\":{:.3},\"class_pass_secs\":{:.3},\"graph_first\":{},\"graph_last\":{}}}",
-            self.units.len(),
-            self.entries.len(),
-            s.rounds_prod,
-            s.prod_converged,
-            s.rounds_absorb,
-            s.absorb_converged,
-            s.evals_full,
-            s.evals_ctrl,
-            s.evals_reseed,
-            s.evals_out_same,
-            s.evals_out_changed,
-            s.back_to_seen,
-            s.periods,
-            unit_cap(),
-            s.cap_hits,
-            s.cap_osc,
-            s.cap_drift,
-            s.frozen_units,
-            s.seeds,
-            s.moved_slots,
-            s.moved_params,
-            s.marks,
-            s.ivar_marks,
-            s.const_marks,
-            s.restamps,
-            s.harvest_reapplied,
-            s.budget_exhausted,
-            s.max_evals_unit,
-            s.evals_hist,
-            s.param_checked,
-            s.param_mismatch,
-            s.engine_secs,
-            s.graph_secs,
-            s.index_secs,
-            s.class_pass_secs,
-            g(&s.graph_first),
-            g(&s.graph_last)
+            self.units.len(), self.entries.len(), s.rounds_prod, s.prod_converged, s.rounds_absorb,
+            s.absorb_converged, s.evals_full, s.evals_ctrl, s.evals_reseed, s.evals_out_same, s.evals_out_changed,
+            s.back_to_seen, s.periods, unit_cap(), s.cap_hits, s.cap_osc, s.cap_drift,
+            s.frozen_units, s.seeds, s.moved_slots, s.moved_params, s.marks, s.ivar_marks,
+            s.const_marks, s.restamps, s.harvest_reapplied, s.budget_exhausted, s.max_evals_unit, s.evals_hist, s.param_checked, s.param_mismatch,
+            s.engine_secs, s.graph_secs, s.index_secs, s.class_pass_secs, g(&s.graph_first), g(&s.graph_last)
         ) + &format!(
-            ",\"cost\":{}",
-            serde_json::json!({
-                "lit_restamps": s.lit_restamps, "drain_evals": s.drain_evals,
-                "t_typing": s.t_typing, "t_harvest": s.t_harvest,
-                "t_sites": s.t_sites, "t_rows": s.t_rows, "t_ivars": s.t_ivars,
-            })
+            ",\"fold\":{{\"fold_marks\":{},\"fold_moved\":{},\"new_rec\":{},\"new_scc_ivars\":{},\"side_full_class\":{},\"lit_restamps\":{},\"fold_deferred\":{},\"sweeps\":{},\"drain_evals\":{:?},\"t_typing\":{:.2},\"t_harvest\":{:.2},\"t_sites\":{:.2},\"t_rows\":{:.2},\"t_ivars\":{:.2}}}",
+            s.fold_marks, s.fold_moved, s.new_rec, s.new_scc_ivars, s.side_full_class, s.lit_restamps, s.fold_deferred, s.sweeps, s.drain_evals,
+            s.t_typing, s.t_harvest, s.t_sites, s.t_rows, s.t_ivars,
         )
     }
+}
+
+fn var0() -> Ty {
+    Ty::Var { var: TyVar(0) }
 }
 
 // ─────────────────────────── graph ───────────────────────────
@@ -1067,15 +1043,7 @@ impl Wto<'_> {
 }
 
 fn wto_positions(n: usize, succ: &[Vec<u32>]) -> (Vec<u32>, u64, u64) {
-    let mut w = Wto {
-        succ,
-        dfn: vec![0; n],
-        num: 0,
-        stack: Vec::new(),
-        order: Vec::new(),
-        heads: 0,
-        depth: 0,
-    };
+    let mut w = Wto { succ, dfn: vec![0; n], num: 0, stack: Vec::new(), order: Vec::new(), heads: 0, depth: 0 };
     let mut rev: Vec<u32> = Vec::new();
     for v in 0..n as u32 {
         if w.dfn[v as usize] == 0 {
@@ -1163,21 +1131,17 @@ impl Analyzer {
             stats: Stats::default(),
             body_cache: Vec::new(),
             fold_ready: false,
+            fold_readers: HashMap::new(),
             wild_readers: HashMap::new(),
+            class_side_fp: None,
+            deferred_fold: BTreeSet::new(),
+            draining: false,
+            current_pos: 0,
         };
         let sole_includer = app.sole_includer_of_modules();
-        let new_unit = |eng: &mut Engine,
-                        family: Family,
-                        ci: usize,
-                        mi: usize,
-                        entry: usize,
-                        class: &ClassId,
-                        name: &Symbol,
-                        class_side: bool,
-                        body: &Expr,
-                        extra: &[&Expr],
-                        own_key: Option<ParamKey>|
-         -> u32 {
+        let new_unit = |eng: &mut Engine, family: Family, ci: usize, mi: usize, entry: usize,
+                        class: &ClassId, name: &Symbol, class_side: bool, body: &Expr,
+                        extra: &[&Expr], own_key: Option<ParamKey>| -> u32 {
             let (ivars, ivar_write) = scan_ivars(body);
             let id = eng.units.len() as u32;
             eng.units.push(Unit {
@@ -1221,22 +1185,10 @@ impl Analyzer {
             };
             let mut methods = Vec::new();
             for (mi, m) in lc.methods.iter().enumerate() {
-                let extra: Vec<&Expr> =
-                    m.params.iter().filter_map(|p| p.default.as_ref()).collect();
+                let extra: Vec<&Expr> = m.params.iter().filter_map(|p| p.default.as_ref()).collect();
                 let side = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
-                let u = new_unit(
-                    &mut eng,
-                    Family::Lib,
-                    ci,
-                    mi,
-                    entry,
-                    &lc.name,
-                    &m.name,
-                    side,
-                    &m.body,
-                    &extra,
-                    Some((lc.name.clone(), m.name.clone(), m.receiver)),
-                );
+                let u = new_unit(&mut eng, Family::Lib, ci, mi, entry, &lc.name, &m.name, side,
+                                 &m.body, &extra, Some((lc.name.clone(), m.name.clone(), m.receiver)));
                 methods.push(u);
             }
             eng.lib_units.push(methods.clone());
@@ -1264,39 +1216,16 @@ impl Analyzer {
             let entry = eng.entries.len();
             let mut methods = Vec::new();
             for (mi, m) in model.methods().enumerate() {
-                let extra: Vec<&Expr> =
-                    m.params.iter().filter_map(|p| p.default.as_ref()).collect();
+                let extra: Vec<&Expr> = m.params.iter().filter_map(|p| p.default.as_ref()).collect();
                 let side = matches!(m.receiver, crate::dialect::MethodReceiver::Class);
-                let u = new_unit(
-                    &mut eng,
-                    Family::ModelMethod,
-                    ci,
-                    mi,
-                    entry,
-                    &model.name,
-                    &m.name,
-                    side,
-                    &m.body,
-                    &extra,
-                    Some((model.name.clone(), m.name.clone(), m.receiver)),
-                );
+                let u = new_unit(&mut eng, Family::ModelMethod, ci, mi, entry, &model.name, &m.name,
+                                 side, &m.body, &extra, Some((model.name.clone(), m.name.clone(), m.receiver)));
                 methods.push(u);
             }
             let mut scopes = Vec::new();
             for (si, s) in model.scopes().enumerate() {
-                let u = new_unit(
-                    &mut eng,
-                    Family::ModelScope,
-                    ci,
-                    si,
-                    entry,
-                    &model.name,
-                    &s.name,
-                    true,
-                    &s.body,
-                    &[],
-                    None,
-                );
+                let u = new_unit(&mut eng, Family::ModelScope, ci, si, entry, &model.name, &s.name,
+                                 true, &s.body, &[], None);
                 scopes.push(u);
             }
             eng.model_method_units.push(methods.clone());
@@ -1328,55 +1257,19 @@ impl Analyzer {
             for (ai, a) in c.actions().enumerate() {
                 let mut extra: Vec<&Expr> = a.opt_params.iter().map(|(_, e)| e).collect();
                 extra.extend(a.kw_params.iter().filter_map(|(_, e)| e.as_ref()));
-                let u = new_unit(
-                    &mut eng,
-                    Family::CtrlAction,
-                    ci,
-                    ai,
-                    entry,
-                    &c.name,
-                    &a.name,
-                    false,
-                    &a.body,
-                    &extra,
-                    Some((
-                        c.name.clone(),
-                        a.name.clone(),
-                        crate::dialect::MethodReceiver::Instance,
-                    )),
-                );
+                let u = new_unit(&mut eng, Family::CtrlAction, ci, ai, entry, &c.name, &a.name, false,
+                                 &a.body, &extra, Some((c.name.clone(), a.name.clone(), crate::dialect::MethodReceiver::Instance)));
                 actions.push(u);
                 members.push(u);
             }
             let mut cmethods = Vec::new();
-            for (mi, m) in c
-                .body
-                .iter()
-                .filter_map(|item| match item {
-                    crate::dialect::ControllerBodyItem::ClassMethod {
-                        method,
-                        configuration_slot: None,
-                        ..
-                    } => Some(method),
-                    _ => None,
-                })
-                .enumerate()
-            {
-                let extra: Vec<&Expr> =
-                    m.params.iter().filter_map(|p| p.default.as_ref()).collect();
-                let u = new_unit(
-                    &mut eng,
-                    Family::CtrlClassMethod,
-                    ci,
-                    mi,
-                    entry,
-                    &c.name,
-                    &m.name,
-                    true,
-                    &m.body,
-                    &extra,
-                    Some((c.name.clone(), m.name.clone(), m.receiver)),
-                );
+            for (mi, m) in c.body.iter().filter_map(|item| match item {
+                crate::dialect::ControllerBodyItem::ClassMethod { method, configuration_slot: None, .. } => Some(method),
+                _ => None,
+            }).enumerate() {
+                let extra: Vec<&Expr> = m.params.iter().filter_map(|p| p.default.as_ref()).collect();
+                let u = new_unit(&mut eng, Family::CtrlClassMethod, ci, mi, entry, &c.name, &m.name, true,
+                                 &m.body, &extra, Some((c.name.clone(), m.name.clone(), m.receiver)));
                 cmethods.push(u);
                 members.push(u);
             }
@@ -1491,9 +1384,7 @@ impl Analyzer {
     /// Stop recording; `pass_a` replaces the unit's reads, otherwise they merge.
     pub(super) fn sccq_rec_end(&mut self, unit: Option<u32>, pass_a: bool, body: Option<&Expr>) {
         let Some(u) = unit else { return };
-        let Some(eng) = self.sccq.as_mut() else {
-            return;
-        };
+        let Some(eng) = self.sccq.as_mut() else { return };
         let reads = rec_end();
         let unit = &mut eng.units[u as usize];
         if pass_a {
@@ -1502,7 +1393,7 @@ impl Analyzer {
             unit.reads.absorb(reads);
         }
         let (ivar_write, entry) = (unit.ivar_write, unit.entry);
-        eng.index_wild_reads(u);
+        eng.index_fold_reads(u);
         if pass_a && ivar_write {
             if let Some(b) = body {
                 eng.entries[entry].pass_a.insert(u, b.clone());
@@ -1513,9 +1404,7 @@ impl Analyzer {
     /// The flow ivars a skip-mode class pass replays from cached Pass A trees.
     pub(super) fn sccq_flow_ivars(&self, family: Family, ci: usize) -> HashMap<Symbol, Ty> {
         let mut flow: HashMap<Symbol, Ty> = HashMap::new();
-        let Some(eng) = self.sccq.as_ref() else {
-            return flow;
-        };
+        let Some(eng) = self.sccq.as_ref() else { return flow };
         let entry = match family {
             Family::Lib => eng.lib_entry[ci],
             _ => eng.model_entry[ci],
@@ -1549,9 +1438,7 @@ impl Analyzer {
         is_current_attributes: bool,
         reseeded: Option<&HashMap<Symbol, Ty>>,
     ) {
-        let Some(eng) = self.sccq.as_mut() else {
-            return;
-        };
+        let Some(eng) = self.sccq.as_mut() else { return };
         let entry = eng.lib_entry[ci];
         let e = &mut eng.entries[entry];
         e.self_id = self_id.clone();
@@ -1577,9 +1464,7 @@ impl Analyzer {
         reseeded: Option<&HashMap<Symbol, Ty>>,
     ) {
         let skip = self.sccq_skip_fine;
-        let Some(eng) = self.sccq.as_mut() else {
-            return;
-        };
+        let Some(eng) = self.sccq.as_mut() else { return };
         let entry = eng.model_entry[ci];
         let e = &mut eng.entries[entry];
         let consts_moved = e.ready && (e.own_consts != own_consts || e.class_ivars != *class_ivars);
@@ -1617,9 +1502,7 @@ impl Analyzer {
         before_global: Option<&ConstScope>,
         global: &ConstScope,
     ) {
-        let Some(eng) = self.sccq.as_mut() else {
-            return;
-        };
+        let Some(eng) = self.sccq.as_mut() else { return };
         let mut ids: HashSet<DeclarationId> = HashSet::new();
         for (k, v) in self.typed_constants.iter() {
             if before_ids.get(k) != Some(v) {
@@ -1677,9 +1560,7 @@ impl Analyzer {
         bodies: &[(Option<u32>, usize, usize)],
         sites: &[super::SendSite],
     ) {
-        let Some(mut eng) = self.sccq.take() else {
-            return;
-        };
+        let Some(mut eng) = self.sccq.take() else { return };
         let t0 = std::time::Instant::now();
         if eng.body_cache.len() != bodies.len() {
             // First walk (or a different walk shape): start over.
@@ -1730,11 +1611,7 @@ impl Analyzer {
             }
             let mut resolved: Vec<(ParamKey, Vec<Ty>)> = Vec::with_capacity(raw.len());
             for site in raw {
-                let Some((key, placed)) =
-                    self.resolve_param_site(site.clone(), &eng.params_by_method, &eng.defined)
-                else {
-                    continue;
-                };
+                let Some((key, placed)) = self.resolve_param_site(site.clone(), &eng.params_by_method, &eng.defined) else { continue };
                 // Side selection can discard a site (`x.class.m` beside only
                 // an instance def). Cache and removal indices address the
                 // retained sites, just as the fine-unit evaluation does.
@@ -1774,9 +1651,7 @@ impl Analyzer {
 
     /// The test overlay (absorb): resolved test sites, applied on top.
     pub(super) fn sccq_capture_overlay(&mut self, resolved: Vec<(ParamKey, Vec<Ty>)>) {
-        let Some(eng) = self.sccq.as_mut() else {
-            return;
-        };
+        let Some(eng) = self.sccq.as_mut() else { return };
         eng.overlay.clear();
         for (k, args) in resolved {
             eng.overlay.entry(k).or_default().push(args);
@@ -1785,15 +1660,13 @@ impl Analyzer {
 
     /// Self-check: the replica rows equal main's table.
     pub(super) fn sccq_check_rows(&mut self) {
-        let Some(eng) = self.sccq.as_mut() else {
-            return;
-        };
+        let Some(eng) = self.sccq.as_mut() else { return };
         let mut keys: BTreeSet<ParamKey> = eng.base_rows.keys().cloned().collect();
         keys.extend(eng.fold_from.keys().cloned());
         keys.extend(eng.overlay.keys().cloned());
         for k in keys {
             eng.stats.param_checked += 1;
-            let row = eng.final_row(&k);
+            let row = super::handoff::join_param_row(&k, eng.final_row(&k), false);
             if row.as_ref() != self.inferred_params.get(&k) {
                 eng.stats.param_mismatch += 1;
             }
@@ -1805,10 +1678,7 @@ impl Analyzer {
     fn sccq_param_fold_structure(
         &self,
         app: &App,
-    ) -> (
-        HashMap<ParamKey, Vec<ParamKey>>,
-        HashMap<ParamKey, Vec<ParamKey>>,
-    ) {
+    ) -> (HashMap<ParamKey, Vec<ParamKey>>, HashMap<ParamKey, Vec<ParamKey>>) {
         let mut from: HashMap<ParamKey, Vec<ParamKey>> = HashMap::new();
         let mut into: HashMap<ParamKey, Vec<ParamKey>> = HashMap::new();
         let mut module_methods: HashMap<ClassId, BTreeSet<Symbol>> = HashMap::new();
@@ -1838,9 +1708,7 @@ impl Analyzer {
                 let mut cur = Some(id.clone());
                 let mut depth = 0;
                 while let Some(cid) = cur {
-                    let Some(c) = self.classes.get(&cid) else {
-                        break;
-                    };
+                    let Some(c) = self.classes.get(&cid) else { break };
                     for inc in &c.includes {
                         if !includes.contains(inc) {
                             includes.push(inc.clone());
@@ -1873,9 +1741,7 @@ impl Analyzer {
                         }
                     }
                 }
-                let Some(names) = module_methods.get(&m) else {
-                    continue;
-                };
+                let Some(names) = module_methods.get(&m) else { continue };
                 for name in names {
                     let spliced_from_here = app
                         .concern_spliced_class_methods
@@ -1885,15 +1751,10 @@ impl Analyzer {
                     if !spliced_from_here && owned.contains(&(id.clone(), name.clone())) {
                         continue;
                     }
-                    for side in [
-                        crate::dialect::MethodReceiver::Instance,
-                        crate::dialect::MethodReceiver::Class,
-                    ] {
+                    for side in [crate::dialect::MethodReceiver::Instance, crate::dialect::MethodReceiver::Class] {
                         let inc = (id.clone(), name.clone(), side);
                         let module_key = (m.clone(), name.clone(), side);
-                        from.entry(module_key.clone())
-                            .or_default()
-                            .push(inc.clone());
+                        from.entry(module_key.clone()).or_default().push(inc.clone());
                         into.entry(inc).or_default().push(module_key);
                     }
                 }
@@ -1926,7 +1787,9 @@ impl Analyzer {
         }
         let mut moved = 0;
         for k in finals {
-            let row = eng.final_row(&k);
+            // A reference-mode row joins with its previous row,
+            // as `fold::join_params` does after main's unify.
+            let row = super::handoff::join_param_row(&k, eng.final_row(&k), true);
             if row.as_ref() != self.inferred_params.get(&k) {
                 match row {
                     Some(r) => {
@@ -2012,14 +1875,8 @@ impl Analyzer {
                     }
                     let mut val: Option<Ty> = None;
                     for m in order {
-                        let Some(mc) = self.classes.get(m) else {
-                            continue;
-                        };
-                        let table = if side {
-                            &mc.class_methods
-                        } else {
-                            &mc.instance_methods
-                        };
+                        let Some(mc) = self.classes.get(m) else { continue };
+                        let table = if side { &mc.class_methods } else { &mc.instance_methods };
                         if !side && self.host_folded.get(m).is_some_and(|l| l.contains(name)) {
                             continue;
                         }
@@ -2046,22 +1903,14 @@ impl Analyzer {
         if eng.module_ids.contains(class) {
             if let Some(includers) = eng.includers_of.get(class) {
                 for id in includers {
-                    let Some(order) = eng.modules_bfs.get(id) else {
-                        continue;
-                    };
+                    let Some(order) = eng.modules_bfs.get(id) else { continue };
                     for side in [false, true] {
                         let mut val: Option<Ty> = None;
                         for m in order {
-                            let Some(mc) = self.classes.get(m) else {
-                                continue;
-                            };
-                            let table = if side {
-                                &mc.class_methods
-                            } else {
-                                &mc.instance_methods
-                            };
-                            let lent =
-                                !side && self.host_folded.get(m).is_some_and(|l| l.contains(name));
+                            let Some(mc) = self.classes.get(m) else { continue };
+                            let table = if side { &mc.class_methods } else { &mc.instance_methods };
+                            let lent = !side
+                                && self.host_folded.get(m).is_some_and(|l| l.contains(name));
                             if lent {
                                 continue;
                             }
@@ -2129,6 +1978,13 @@ impl Analyzer {
     /// re-applications still changed the entry.
     fn sccq_harvest_unit(&mut self, eng: &Engine, app: &App, u: u32) -> u64 {
         let unit = &eng.units[u as usize];
+        let side = match unit.family {
+            Family::Lib => app.library_classes[unit.ci].methods.get(unit.mi).is_some_and(|m| m.receiver == crate::dialect::MethodReceiver::Class),
+            Family::ModelMethod => app.models[unit.ci].methods().nth(unit.mi).is_some_and(|m| m.receiver == crate::dialect::MethodReceiver::Class),
+            Family::CtrlClassMethod => true,
+            _ => false,
+        };
+        let _writer = super::errgate::writer(&unit.class, &unit.name, side);
         let mut reapplied = 0u64;
         // A unit that reads its own return re-types between harvests (its
         // self-loop re-queues it), as main's next round would; one that does
@@ -2150,57 +2006,40 @@ impl Analyzer {
                 }
                 Family::ModelMethod => {
                     let model = &app.models[unit.ci];
-                    let Some(method) = model.methods().nth(unit.mi) else {
-                        return reapplied;
-                    };
+                    let Some(method) = model.methods().nth(unit.mi) else { return reapplied };
                     let scope_names = &eng.entries[unit.entry].scope_names;
                     self.harvest_model_method(&model.name, scope_names, method);
                 }
                 Family::ModelScope => return reapplied,
                 Family::CtrlAction => {
                     let controller = &app.controllers[unit.ci];
-                    let Some(action) = controller.actions().nth(unit.mi) else {
-                        return reapplied;
-                    };
+                    let Some(action) = controller.actions().nth(unit.mi) else { return reapplied };
                     let body_ty = super::tuple_return_ty(&action.body)
                         .or_else(|| super::effective_return_ty(&action.body));
                     if let Some(body_ty) = body_ty.filter(|t| !matches!(t, Ty::Var { .. })) {
-                        let target = &mut self
-                            .classes
-                            .entry(controller.name.clone())
-                            .or_default()
-                            .instance_methods;
+                        let target = &mut self.classes.entry(controller.name.clone()).or_default().instance_methods;
                         Self::insert_inferred_return(target, &action.name, body_ty);
                     }
                 }
                 Family::CtrlClassMethod => {
                     let controller = &app.controllers[unit.ci];
-                    let Some(method) = controller
-                        .body
-                        .iter()
-                        .filter_map(|item| match item {
-                            crate::dialect::ControllerBodyItem::ClassMethod {
-                                method,
-                                configuration_slot: None,
-                                ..
-                            } => Some(method),
-                            _ => None,
-                        })
-                        .nth(unit.mi)
-                    else {
-                        return reapplied;
-                    };
+                    let Some(method) = controller.body.iter().filter_map(|item| match item {
+                        crate::dialect::ControllerBodyItem::ClassMethod { method, configuration_slot: None, .. } => Some(method),
+                        _ => None,
+                    }).nth(unit.mi) else { return reapplied };
                     let ret = self.method_return_ty(&controller.name, method);
-                    let target = &mut self
-                        .classes
-                        .entry(controller.name.clone())
-                        .or_default()
-                        .class_methods;
+                    let target = &mut self.classes.entry(controller.name.clone()).or_default().class_methods;
                     Self::register_method_return(target, &method.name, ret.as_ref());
                 }
             }
+            // A reference-mode return joins with its previous
+            // value here, as `fold::join_rets` does after main's harvest.
+            super::handoff::join_ret_one(&mut self.classes, &unit.class, &unit.name);
             if self.slot_hash(&unit.class, &unit.name) == before {
                 break;
+            }
+            if round + 1 == limit {
+                super::det::note_cap(if self_reading { "harvest_reapply_limit_self" } else { "harvest_reapply_limit" });
             }
             if round > 0 {
                 reapplied += 1;
@@ -2224,12 +2063,7 @@ impl Analyzer {
                 Family::CtrlAction => {
                     // Main's block-value harvest reads controller actions.
                     if let Some(a) = app.controllers[wu.ci].actions().nth(wu.mi) {
-                        if self.returns_block_value(
-                            &class,
-                            &a.name,
-                            &a.body,
-                            a.block_param.as_ref(),
-                        ) {
+                        if self.returns_block_value(&class, &a.name, &a.body, a.block_param.as_ref()) {
                             any = true;
                         }
                     }
@@ -2334,10 +2168,7 @@ impl Analyzer {
                 Family::ModelMethod => {
                     let model = &mut app.models[ci];
                     let model_name = model.name.clone();
-                    let Some(method) = model.methods_mut().nth(mi) else {
-                        rec_end();
-                        return;
-                    };
+                    let Some(method) = model.methods_mut().nth(mi) else { rec_end(); return };
                     for param in &mut method.params {
                         if let Some(default) = &mut param.default {
                             self.body_typer().analyze_expr(default, &class_ctx);
@@ -2348,10 +2179,7 @@ impl Analyzer {
                 }
                 Family::ModelScope => {
                     let model = &mut app.models[ci];
-                    let Some(scope) = model.scopes_mut().nth(mi) else {
-                        rec_end();
-                        return;
-                    };
+                    let Some(scope) = model.scopes_mut().nth(mi) else { rec_end(); return };
                     self.body_typer().analyze_expr(&mut scope.body, &class_ctx);
                 }
                 Family::CtrlAction => {
@@ -2362,13 +2190,9 @@ impl Analyzer {
                     }
                     let ctrl_name = app.controllers[ci].name.clone();
                     let aname = eng.units[u as usize].name.clone();
-                    let origin =
-                        app_spliced_origin(&app.concern_spliced_actions, &ctrl_name, &aname);
+                    let origin = app_spliced_origin(&app.concern_spliced_actions, &ctrl_name, &aname);
                     let controller = &mut app.controllers[ci];
-                    let Some(action) = controller.actions_mut().nth(mi) else {
-                        rec_end();
-                        return;
-                    };
+                    let Some(action) = controller.actions_mut().nth(mi) else { rec_end(); return };
                     // The class pass's sequence for this action: Pass A, then
                     // any Pass B sweeps or concern splice that re-typed it.
                     for base in &seq {
@@ -2387,28 +2211,13 @@ impl Analyzer {
                     }
                 }
                 Family::CtrlClassMethod => {
-                    let Some(base) = eng.units[u as usize].ctx.last().cloned() else {
-                        rec_end();
-                        return;
-                    };
+                    let Some(base) = eng.units[u as usize].ctx.last().cloned() else { rec_end(); return };
                     let controller = &mut app.controllers[ci];
                     let ctrl_name = controller.name.clone();
-                    let Some(method) = controller
-                        .body
-                        .iter_mut()
-                        .filter_map(|item| match item {
-                            crate::dialect::ControllerBodyItem::ClassMethod {
-                                method,
-                                configuration_slot: None,
-                                ..
-                            } => Some(method),
-                            _ => None,
-                        })
-                        .nth(mi)
-                    else {
-                        rec_end();
-                        return;
-                    };
+                    let Some(method) = controller.body.iter_mut().filter_map(|item| match item {
+                        crate::dialect::ControllerBodyItem::ClassMethod { method, configuration_slot: None, .. } => Some(method),
+                        _ => None,
+                    }).nth(mi) else { rec_end(); return };
                     for p in &mut method.params {
                         if let Some(default) = &mut p.default {
                             self.body_typer().analyze_expr(default, &base);
@@ -2420,7 +2229,7 @@ impl Analyzer {
             }
             let reads = rec_end();
             eng.units[u as usize].reads = reads;
-            eng.index_wild_reads(u);
+            eng.index_fold_reads(u);
             eng.stats.evals_full += 1;
             if matches!(family, Family::CtrlAction | Family::CtrlClassMethod) {
                 eng.stats.evals_ctrl += 1;
@@ -2469,7 +2278,7 @@ impl Analyzer {
             }
             let reads = rec_end();
             eng.units[u as usize].reads.absorb(reads);
-            eng.index_wild_reads(u);
+            eng.index_fold_reads(u);
         }
         let t_typed = std::time::Instant::now();
         eng.stats.t_typing += (t_typed - t_start).as_secs_f64();
@@ -2493,7 +2302,14 @@ impl Analyzer {
                 fold_before.push((view_ctx.clone(), self.slot_hash(&view_ctx, &name)));
             }
             eng.stats.harvest_reapplied += self.sccq_harvest_unit(eng, app, u);
-            self.sccq_fold_slot(eng, &class, &name);
+            let touched = self.sccq_fold_slot(eng, &class, &name);
+            // Main's harvest copies (concern, `Current`) and
+            // then joins every reference-mode return; join again after the
+            // copies so a copied side ends where main's order leaves it.
+            super::handoff::join_ret_one(&mut self.classes, &class, &name);
+            for id in &touched {
+                super::handoff::join_ret_one(&mut self.classes, id, &name);
+            }
             let after = self.slot_hash(&class, &name);
             after.hash(&mut fp);
             // Only a value that differs from before this evaluation is a
@@ -2689,14 +2505,8 @@ impl Analyzer {
         let mut moved_params = 0u64;
         let mut moved: Vec<(ClassId, Symbol)> = Vec::new();
         for (id, cls) in &self.classes {
-            let mut names = super::dirty_retype::moved_method_names(
-                &cls.instance_methods,
-                prev.sig.instance.get(id),
-            );
-            names.extend(super::dirty_retype::moved_method_names(
-                &cls.class_methods,
-                prev.sig.class_methods.get(id),
-            ));
+            let mut names = super::dirty_retype::moved_method_names(&cls.instance_methods, prev.sig.instance.get(id));
+            names.extend(super::dirty_retype::moved_method_names(&cls.class_methods, prev.sig.class_methods.get(id)));
             match prev.block_value.get(id) {
                 Some(b) if b == &cls.block_value_methods => {}
                 Some(b) => names.extend(cls.block_value_methods.symmetric_difference(b).cloned()),
@@ -2799,9 +2609,7 @@ impl Analyzer {
                     owners.extend(ms.iter().copied());
                 }
                 for o in owners {
-                    let Some(defs) = defs_by_class.get(&o) else {
-                        continue;
-                    };
+                    let Some(defs) = defs_by_class.get(&o) else { continue };
                     for &(name, w) in defs {
                         if wild || has_name(&ru.names, name) {
                             seen.push(w);
@@ -2938,11 +2746,70 @@ impl Analyzer {
         eng.stats.graph_secs += t0.elapsed().as_secs_f64();
     }
 
+    /// Fold side-table slots that moved since the last call
+    /// re-queue the units that read them.
+    fn sccq_fold_moves(eng: &mut Engine) {
+        if !super::fold::on() {
+            return;
+        }
+        for slot in super::fold::take_moved() {
+            eng.stats.fold_moved += 1;
+            eng.mark_fold_slot(slot);
+        }
+    }
+
+    /// The fold's structure grew at the last unify. A method
+    /// that entered reference mode changes what its readers see (a
+    /// reference instead of a copy) and what its own body is seeded with
+    /// (parameter references); an ivar that joined a cycle changes how its
+    /// writers stamp it.
+    fn sccq_fold_structure(&self, eng: &mut Engine) {
+        if !super::fold::on() {
+            return;
+        }
+        for (class, method) in super::fold::take_new_rec() {
+            eng.stats.new_rec += 1;
+            eng.mark_slot_readers(&class, &method);
+            for inc in super::fold::alias_includers(&class, &method) {
+                eng.mark_slot_readers(&inc, &method);
+            }
+            for side in [crate::dialect::MethodReceiver::Instance, crate::dialect::MethodReceiver::Class] {
+                eng.mark_key_readers(&(class.clone(), method.clone(), side));
+            }
+        }
+        let ivars = super::slots::take_new_scc_ivars();
+        if ivars.is_empty() {
+            return;
+        }
+        for (class, name) in ivars {
+            eng.stats.new_scc_ivars += 1;
+            let bare = name.as_str().trim_start_matches('@').to_string();
+            let at = Symbol::from(format!("@{bare}").as_str());
+            let bare = Symbol::from(bare.as_str());
+            let entries: Vec<usize> =
+                (0..eng.entries.len()).filter(|&e| eng.entries[e].id == class).collect();
+            for e in entries {
+                let members: Vec<u32> =
+                    eng.entries[e].methods.iter().chain(eng.entries[e].scopes.iter()).copied().collect();
+                for u in members {
+                    let iv = &eng.units[u as usize].ivars;
+                    let touches = [&bare, &at]
+                        .iter()
+                        .any(|n| iv.binary_search_by(|x| x.as_str().cmp(n.as_str())).is_ok());
+                    if touches {
+                        eng.mark(u, DIRTY_FULL);
+                    }
+                }
+            }
+        }
+    }
+
     /// Drain the worklist.
     fn sccq_drain(&mut self, eng: &mut Engine, app: &mut App) {
         let t0 = std::time::Instant::now();
         // Safety net: a drain evaluates at most 40× the unit count.
         let budget = 40 * eng.units.len() as u64 + 1000;
+        eng.draining = true;
         let mut spent = 0u64;
         while let Some(Reverse((_, seq, u))) = eng.heap.pop() {
             let unit = &mut eng.units[u as usize];
@@ -2970,9 +2837,12 @@ impl Analyzer {
                     eng.stats.queue_prefix.push((drain, u));
                 }
             }
+            eng.current_pos = eng.units[u as usize].pos;
             self.sccq_eval(eng, app, u, level);
+            Self::sccq_fold_moves(eng);
         }
         eng.pending = 0;
+        eng.draining = false;
         eng.stats.engine_secs += t0.elapsed().as_secs_f64();
         eng.stats.drain_evals.push(spent);
     }
@@ -2981,11 +2851,12 @@ impl Analyzer {
     /// worklist settling the query units inside each round. Returns how the
     /// loop ended, counted as main's loops count.
     pub(super) fn sccq_phase(&mut self, app: &mut App, pa: &PassArgs<'_>, absorb: bool) -> LoopEnd {
-        let Some(mut eng) = self.sccq.take() else {
-            return LoopEnd::NotRun;
-        };
+        let Some(mut eng) = self.sccq.take() else { return LoopEnd::NotRun };
         eng.phase_absorb = absorb;
         eng.fold_ready = false;
+        // From here on the fold reports moved side-table slots and new
+        // reference-mode methods to the worklist.
+        super::fold::track_moves(true);
         for u in eng.units.iter_mut() {
             u.evals = 0;
             u.changes = 0;
@@ -3008,10 +2879,9 @@ impl Analyzer {
             // global harvest registers query units only for the initial
             // typings. Outside the phases (the tests loop) it stays main's.
             self.sccq_harvest_fine = !absorb && round == 0;
-            crate::timings::phase(
-                format_args!("sccq {label} {round}: harvest returns"),
-                || self.harvest_returns_to_registry(app, absorb),
-            );
+            crate::timings::phase(format_args!("sccq {label} {round}: harvest returns"), || {
+                self.harvest_returns_to_registry(app, absorb)
+            });
             self.sccq_harvest_fine = true;
             // That harvest consumed the last class pass's controller typings.
             self.sccq_ctrl_pending = Some(HashSet::new());
@@ -3026,11 +2896,16 @@ impl Analyzer {
             if super::fixpoint_check::stats_on() {
                 self.sccq_check_rows();
             }
-            let idle = self.sccq.as_ref().is_none_or(|e| e.pending == 0);
+            // The fold's side table is state the loop must hold still too;
+            // one check per round.
+            let side_stable =
+                super::fold::side_stable(|| super::fold::bindings_fp(&self.refined_action_bindings));
+            let idle = self.sccq.as_ref().is_none_or(|e| e.pending == 0 && e.deferred_fold.is_empty());
             // Round 0 always runs a class pass: the views pass consumed the
             // view seeds, and main's absorb also starts with a production pass.
             if round > 0
                 && idle
+                && side_stable
                 && self.inference_matches(&prev.sig)
                 && self.block_value_matches(&prev)
             {
@@ -3039,6 +2914,14 @@ impl Analyzer {
             }
             let mut eng = self.sccq.take().expect("worklist");
             self.sccq_refresh_registry_folds(&mut eng);
+            self.sccq_fold_structure(&mut eng);
+            Self::sccq_fold_moves(&mut eng);
+            // Side-table moves batched during the last drain.
+            let deferred = std::mem::take(&mut eng.deferred_fold);
+            eng.stats.fold_deferred += deferred.len() as u64;
+            for slot in deferred {
+                eng.mark_fold_slot(slot);
+            }
             self.sccq_seed_from_diff(&mut eng, &prev);
             if !absorb && round == 0 {
                 // The initial pass seeded library params before their
@@ -3064,8 +2947,35 @@ impl Analyzer {
             crate::timings::phase(format_args!("sccq {label} {round}: worklist"), || {
                 self.sccq_drain(&mut eng, app)
             });
+            // Bourdoncle's outer iteration inside the round: back-edge marks
+            // batched by the sweep start another sweep over just their
+            // readers, until the component holds still (or 64 sweeps),
+            // instead of costing a global round each.
+            let mut sweeps = 0;
+            while !eng.deferred_fold.is_empty() && sweeps < 64 {
+                sweeps += 1;
+                let deferred = std::mem::take(&mut eng.deferred_fold);
+                eng.stats.fold_deferred += deferred.len() as u64;
+                for slot in deferred {
+                    eng.mark_fold_slot(slot);
+                }
+                if eng.pending == 0 {
+                    continue;
+                }
+                self.sccq_drain(&mut eng, app);
+            }
+            eng.stats.sweeps += sweeps;
+            // Class passes keep #524's frontier, which cannot see a
+            // referenced value move: when the side table moved since the last
+            // class pass began, the class pass is full.
+            let side_now = super::fold::side_fp_peek();
+            let side_moved = super::fold::active() && eng.class_side_fp != Some(side_now);
+            eng.class_side_fp = Some(side_now);
+            if side_moved && !(absorb && round == 0) {
+                eng.stats.side_full_class += 1;
+            }
             self.sccq = Some(eng);
-            let dirty = if absorb && round == 0 {
+            let dirty = if (absorb && round == 0) || side_moved {
                 None
             } else {
                 self.dirty_classes_for_retype(app, &class_hints)
@@ -3087,9 +2997,7 @@ impl Analyzer {
                     pa.module_methods,
                     pa.module_includes,
                     pa.parent_link_by_name,
-                    TypingMode::Production {
-                        dirty: dirty.as_ref(),
-                    },
+                    TypingMode::Production { dirty: dirty.as_ref() },
                 )
             });
             if let Some(e) = self.sccq.as_mut() {
@@ -3097,6 +3005,9 @@ impl Analyzer {
             }
             self.sccq_skip_fine = false;
             self.sccq_ctrl_pending = dirty.clone();
+            if let Some(eng) = self.sccq.as_mut() {
+                Self::sccq_fold_moves(eng);
+            }
             let global = self.sccq_last_global.clone();
             if let Some(g) = global {
                 self.sccq_constants_moved(&before_ids, before_global.as_ref(), &g);
@@ -3134,6 +3045,9 @@ impl Analyzer {
                     eng.stats.evals_hist[b] += 1;
                 }
             }
+        }
+        if absorb {
+            super::fold::track_moves(false);
         }
         self.sccq_ctrl_pending = None;
         if !absorb {
@@ -3189,13 +3103,7 @@ fn unit_body(app: &App, family: Family, ci: usize, mi: usize) -> &Expr {
         Family::Lib => &app.library_classes[ci].methods[mi].body,
         Family::ModelMethod => &app.models[ci].methods().nth(mi).expect("model method").body,
         Family::ModelScope => &app.models[ci].scopes().nth(mi).expect("model scope").body,
-        Family::CtrlAction => {
-            &app.controllers[ci]
-                .actions()
-                .nth(mi)
-                .expect("controller action")
-                .body
-        }
+        Family::CtrlAction => &app.controllers[ci].actions().nth(mi).expect("controller action").body,
         Family::CtrlClassMethod => {
             &app.controllers[ci]
                 .body
@@ -3222,6 +3130,8 @@ fn app_spliced_origin(
 ) -> Option<ClassId> {
     spliced.get(ctrl).and_then(|m| m.get(name)).cloned()
 }
+
+/// Which non-monotone rule a frozen unit's last two returns point at.
 
 #[cfg(test)]
 mod tests {
@@ -3282,27 +3192,17 @@ mod tests {
     }
 
     fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
-        Expr::new(
-            crate::span::Span::synthetic(),
-            ExprNode::Send {
-                recv,
-                method: Symbol::from(method),
-                args,
-                block: None,
-                parenthesized: true,
-            },
-        )
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
+            recv,
+            method: Symbol::from(method),
+            args,
+            block: None,
+            parenthesized: true,
+        })
     }
 
     fn sym(s: &str) -> Expr {
-        Expr::new(
-            crate::span::Span::synthetic(),
-            ExprNode::Lit {
-                value: Literal::Sym {
-                    value: Symbol::from(s),
-                },
-            },
-        )
+        Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } })
     }
 
     #[test]
@@ -3312,10 +3212,7 @@ mod tests {
         let has = |n: &str| names.iter().any(|x| x.as_str() == n);
         assert!(has("try") && has("helper") && has("initialize"));
         assert!(!has("own"));
-        let sup = Expr::new(
-            crate::span::Span::synthetic(),
-            ExprNode::Super { args: None },
-        );
+        let sup = Expr::new(crate::span::Span::synthetic(), ExprNode::Super { args: None });
         let names = scan_names(&sup, &[], &Symbol::from("own"));
         assert!(names.iter().any(|x| x.as_str() == "own"));
     }
@@ -3329,11 +3226,7 @@ mod tests {
         let long = "value_read_through_send_with_a_string_literal_longer_than_the_eighty_character_name_scan_limit";
         let arg = Expr::new(
             crate::span::Span::synthetic(),
-            ExprNode::Lit {
-                value: Literal::Str {
-                    value: long.to_string(),
-                },
-            },
+            ExprNode::Lit { value: Literal::Str { value: long.to_string() } },
         );
         let body = send(None, "send", vec![arg]);
         let names = scan_names(&body, &[], &Symbol::from("own"));
@@ -3342,24 +3235,12 @@ mod tests {
 
     #[test]
     fn ivar_scan_sees_memo_writes() {
-        let ivar = |n: &str| {
-            Expr::new(
-                crate::span::Span::synthetic(),
-                ExprNode::Ivar {
-                    name: Symbol::from(n),
-                },
-            )
-        };
-        let body = Expr::new(
-            crate::span::Span::synthetic(),
-            ExprNode::OpAssign {
-                target: LValue::Ivar {
-                    name: Symbol::from("cache"),
-                },
-                op: crate::expr::OpAssignOp::OrOr,
-                value: ivar("other"),
-            },
-        );
+        let ivar = |n: &str| Expr::new(crate::span::Span::synthetic(), ExprNode::Ivar { name: Symbol::from(n) });
+        let body = Expr::new(crate::span::Span::synthetic(), ExprNode::OpAssign {
+            target: LValue::Ivar { name: Symbol::from("cache") },
+            op: crate::expr::OpAssignOp::OrOr,
+            value: ivar("other"),
+        });
         let (names, writes) = scan_ivars(&body);
         assert!(writes);
         assert!(names.iter().any(|n| n.as_str() == "cache"));

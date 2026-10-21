@@ -92,9 +92,9 @@ mod tests {
             Some(Ty::Bottom),
             Some(Ty::Var { var: TyVar(1) }),
             Some(Ty::Array { elem: Arc::new(Ty::Var { var: TyVar(2) }) }),
-            Some(Ty::Untyped),
+            Some(Ty::gradual()),
             Some(Ty::Array { elem: Arc::new(Ty::Union {
-                variants: vec![Ty::Untyped, Ty::Var { var: TyVar(3) }].into(),
+                variants: vec![Ty::pending_untyped(), Ty::Var { var: TyVar(3) }].into(),
             }) }),
             None,
         ] {
@@ -109,8 +109,8 @@ mod tests {
     }
 
     #[test]
-    fn nested_untyped_and_variables_are_detected() {
-        for t in [Ty::Untyped] {
+    fn nested_untyped_provenances_and_variables_are_detected() {
+        for t in [Ty::pending_untyped(), Ty::gradual(), Ty::unresolved()] {
             let nested = Ty::Hash {
                 key: Arc::new(Ty::Str),
                 value: Arc::new(Ty::Tuple {
