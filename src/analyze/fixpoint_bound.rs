@@ -56,6 +56,7 @@ pub(super) fn bound(ty: Ty) -> Ty {
         return ty;
     }
     super::fixpoint_check::note_bound(true);
+    super::det::note_cap("bound.firings");
     let mut limit = measure(&ty).0.min(MAX_DEPTH);
     loop {
         let cut = cut(&ty, limit);
@@ -65,7 +66,7 @@ pub(super) fn bound(ty: Ty) -> Ty {
         // A union with more leaf arms than the node bound has no nesting
         // left to cut.
         if limit == 0 {
-            return Ty::Untyped;
+            return Ty::unresolved();
         }
         limit -= 1;
     }
@@ -137,7 +138,7 @@ fn cut(ty: &Ty, levels: usize) -> Ty {
         return ty.clone();
     }
     if levels == 0 {
-        return Ty::Untyped;
+        return Ty::unresolved();
     }
     let inner = |t: &Ty| cut(t, levels - 1);
     match ty {
@@ -220,7 +221,7 @@ mod tests {
         while let Ty::Array { elem } = innermost {
             innermost = elem;
         }
-        assert_eq!(innermost, &Ty::Untyped);
+        assert_eq!(innermost, &Ty::unresolved());
     }
 
     #[test]
@@ -240,7 +241,7 @@ mod tests {
         let classes = (0..MAX_NODES).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("C{i}").as_str())), args: vec![].into() });
         let wide = body::union_many(classes.chain([arr(Ty::Int)]).collect());
         assert!(measure(&wide).1 > MAX_NODES);
-        assert_eq!(bound(wide), Ty::Untyped);
+        assert_eq!(bound(wide), Ty::unresolved());
     }
 
     /// An ivar's type is carried too: the next round seeds it into every
@@ -366,3 +367,8 @@ mod tests {
         panic!("the bounded unrolling never settled");
     }
 }
+
+#[cfg(test)]
+mod writer_law_tests;
+#[cfg(test)]
+mod writer_law_partitions;

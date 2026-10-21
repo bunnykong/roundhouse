@@ -968,7 +968,7 @@ fn with_locale(e: &Expr) -> Option<Expr> {
                 block: None,
                 parenthesized: false,
             });
-            call.ty = Some(Ty::Untyped);
+            call.ty = Some(Ty::gradual());
             call
         }
         _ => return None,

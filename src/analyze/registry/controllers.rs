@@ -21,6 +21,17 @@ pub(in crate::analyze) fn register(
     app: &App,
     route_helper_names: &[String],
 ) {
+    // S7 (default on; `RH_RESPONSE_RETURNS=0` restores the control): Rails' response calls answer a value,
+    // never nil, and app code reads it (a helper whose last call is
+    // `render`, `render … and return`). `render` answers the rendered body,
+    // a String from every built-in renderer; `redirect_to` the redirect body
+    // String (to Rails 7.1) or the status Integer (7.2 on); `head` true;
+    // `respond_to` the chosen format block's value, or nil for a format with
+    // no block. Explicit zero keeps the spine's nil, which is the emitted runtime's
+    // answer (`insert_baseline_controller_methods`), not Rails'.
+    let rails_returns = std::env::var("RH_RESPONSE_RETURNS").as_deref() != Ok("0");
+    let response = |rails: Ty| if rails_returns { rails } else { Ty::Nil };
+    let str_or_int = || Ty::Union { variants: vec![Ty::Str, Ty::Int].into() };
     // `ActionController::Base.helpers` — the view-helper proxy a model
     // or library reaches for to build paths/URLs outside a request
     // (`ActionController::Base.helpers.image_url(...)` in user.rb). The
@@ -33,7 +44,7 @@ pub(in crate::analyze) fn register(
     {
         let mut acb = ClassInfo::default();
         for m in ["helpers", "helper", "default_url_options"] {
-            acb.class_methods.insert(Symbol::from(m), Ty::Untyped);
+            acb.class_methods.insert(Symbol::from(m), Ty::gradual());
         }
         classes
             .entry(ClassId(Symbol::from("ActionController::Base")))
@@ -55,7 +66,7 @@ pub(in crate::analyze) fn register(
         let params_id = ClassId(Symbol::from("ActionController::Parameters"));
         let params_ty = Ty::Class { id: params_id.clone(), args: vec![].into() };
         let mut p = ClassInfo::default();
-        let hash_str_untyped = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
+        let hash_str_untyped = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::gradual()) };
         for m in [
             // strong parameters
             "permit", "permit!", "except", "slice", "merge", "merge!", "reverse_merge",
@@ -74,7 +85,7 @@ pub(in crate::analyze) fn register(
             "delete", "required", "fetch_type", "require_type", "required_type",
             "instance_variable_get",
         ] {
-            p.instance_methods.insert(Symbol::from(m), Ty::Untyped);
+            p.instance_methods.insert(Symbol::from(m), Ty::gradual());
         }
         for m in [
             "key?", "has_key?", "include?", "member?", "empty?", "blank?", "present?",
@@ -152,10 +163,10 @@ pub(in crate::analyze) fn register(
             );
         }
         for m in ["fetch", "dig"] {
-            session.instance_methods.insert(Symbol::from(m), Ty::Untyped);
+            session.instance_methods.insert(Symbol::from(m), Ty::gradual());
         }
         for m in ["[]=", "store", "clear", "destroy", "update", "merge!", "each", "reload!"] {
-            session.instance_methods.insert(Symbol::from(m), Ty::Untyped);
+            session.instance_methods.insert(Symbol::from(m), Ty::gradual());
         }
         for m in ["key?", "has_key?", "include?", "empty?", "loaded?", "exists?"] {
             session.instance_methods.insert(Symbol::from(m), Ty::Bool);
@@ -164,26 +175,26 @@ pub(in crate::analyze) fn register(
         session.instance_methods.insert(Symbol::from("keys"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         session.instance_methods.insert(
             Symbol::from("options"),
-            Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
+            Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) },
         );
         for m in ["to_hash", "to_h"] {
             session.instance_methods.insert(
                 Symbol::from(m),
-                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::gradual()) },
             );
         }
         classes.insert(session_id.clone(), session);
         app_ctrl.class_methods.insert(Symbol::from("session"), Ty::Class { id: session_id, args: vec![].into() });
     }
-    app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
+    app_ctrl.class_methods.insert(Symbol::from("render"), response(Ty::Str));
     // Rails answers the rendered String and writes no response; the
     // lowerer turns the call into the bare `Views::…` call, which is
     // that String. Typing it lets the ivar an action stores it in reach
     // a template (campfire's `@message_html`).
     app_ctrl.class_methods.insert(Symbol::from("render_to_string"), Ty::Str);
-    app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
-    app_ctrl.class_methods.insert(Symbol::from("redirect_back_or_to"), Ty::Nil);
-    app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
+    app_ctrl.class_methods.insert(Symbol::from("redirect_to"), response(str_or_int()));
+    app_ctrl.class_methods.insert(Symbol::from("redirect_back_or_to"), response(str_or_int()));
+    app_ctrl.class_methods.insert(Symbol::from("head"), response(Ty::Bool));
     // Rails' implicit forgery check — also a known filter target so
     // `filter_targets::framework_methods` keeps it (and analyzer
     // dispatch on a bare call resolves).
@@ -204,7 +215,7 @@ pub(in crate::analyze) fn register(
     // runtime/ruby/action_controller/pagination.rb.
     app_ctrl
         .class_methods
-        .insert(Symbol::from("set_page_and_extract_portion_from"), Ty::Untyped);
+        .insert(Symbol::from("set_page_and_extract_portion_from"), Ty::gradual());
 
     // The `Page` that method ASSIGNS. `runtime/ruby/action_controller/
     // pagination.rb` sets `@page = ActionController::Page.new(...)` and
@@ -217,7 +228,7 @@ pub(in crate::analyze) fn register(
     // The method list is `pagination.rbs` verbatim, so the two say the
     // same thing to the analyzer and to a strict target.
     {
-        let relation_ty = Ty::Untyped;
+        let relation_ty = Ty::gradual();
         let mut page = ClassInfo::default();
         for (m, ty) in [
             ("number", Ty::Int),
@@ -245,7 +256,7 @@ pub(in crate::analyze) fn register(
     // a method that is not listed (`page_url`, `in`, `options`, the `_js`
     // helpers, ...) is "no known method on Pagy" -- the refusal.
     if app.gem_lock.as_ref().is_some_and(|lock| lock.has("pagy")) {
-        app_ctrl.class_methods.insert(Symbol::from("pagy"), Ty::Untyped);
+        app_ctrl.class_methods.insert(Symbol::from("pagy"), Ty::gradual());
         let nullable_int = Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() };
         let mut pagy = ClassInfo::default();
         for (m, ty) in [
@@ -302,7 +313,7 @@ pub(in crate::analyze) fn register(
                 id: ClassId(Symbol::from("ActionController::MimeResponds::Collector")),
                 args: vec![].into(),
             },
-            Ty::Nil,
+            response(Ty::Union { variants: vec![Ty::Str, Ty::Int, Ty::Bool, Ty::Nil].into() }),
         ),
     );
     // `request` is an ActionDispatch::Request with the surface an app
@@ -357,11 +368,11 @@ pub(in crate::analyze) fn register(
         for m in ["POST", "GET", "session_options"] {
             request.instance_methods.insert(
                 Symbol::from(m),
-                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::gradual()) },
             );
         }
         for m in ["get_header", "set_header", "delete_header", "cookies"] {
-            request.instance_methods.insert(Symbol::from(m), Ty::Untyped);
+            request.instance_methods.insert(Symbol::from(m), Ty::gradual());
         }
         request.instance_methods.insert(Symbol::from("original_fullpath"), Ty::Str);
         request.instance_methods.insert(Symbol::from("request_method_symbol"), Ty::Sym);
@@ -373,7 +384,7 @@ pub(in crate::analyze) fn register(
                   // The app's key generator, and the controller CLASS the
                   // request routed to (`Request#controller_class`).
                   "key_generator", "controller_class"] {
-            request.instance_methods.insert(Symbol::from(m), Ty::Untyped);
+            request.instance_methods.insert(Symbol::from(m), Ty::gradual());
         }
         // The two readers the runtime backs with a parsed, bracket-nested
         // `Hash[String, Roundhouse::ParamValue]` (`Request#query_parameters`
@@ -432,7 +443,7 @@ pub(in crate::analyze) fn register(
             effects: crate::effect::EffectSet::default(),
         })),
         // The block's verdict, or nil once the challenge is rendered.
-        ret: std::sync::Arc::new(Ty::Untyped),
+        ret: std::sync::Arc::new(Ty::gradual()),
         effects: crate::effect::EffectSet::default(),
     };
     let str_hash = || Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
@@ -446,20 +457,20 @@ pub(in crate::analyze) fn register(
         app_ctrl.class_methods.insert(
             Symbol::from(m),
             // A Token block usually answers the authenticated record.
-            yields_two(("token", Ty::Str), ("options", str_hash()), Ty::Untyped),
+            yields_two(("token", Ty::Str), ("options", str_hash()), Ty::gradual()),
         );
     }
     for m in ["request_http_basic_authentication", "request_http_token_authentication"] {
         app_ctrl.class_methods.insert(Symbol::from(m), Ty::Nil);
     }
-    app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
+    app_ctrl.class_methods.insert(Symbol::from("response"), Ty::gradual());
     // The response surface the shared runtime's Base defines on the
     // controller itself: `self.response_body = body` (campfire's
     // MessagesController / CachedResponses) and `media_type`.
     for m in ["response_body", "response_body=", "media_type"] {
         app_ctrl.class_methods.insert(Symbol::from(m), Ty::Str);
     }
-    app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
+    app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::gradual());
     // `cookies` is the cookie jar: string values in and out,
     // `signed`/`permanent`/`encrypted` are the same jar with a codec
     // (so `cookies.signed.permanent[:session_id] = …` chains), and
@@ -524,13 +535,13 @@ pub(in crate::analyze) fn register(
         );
         app_ctrl.class_methods.insert(
             Symbol::from(format!("{scope}_session").as_str()),
-            Ty::Untyped,
+            Ty::gradual(),
         );
         for m in ["sign_in", "sign_out", "bypass_sign_in"] {
             app_ctrl
                 .class_methods
                 .entry(Symbol::from(m))
-                .or_insert(Ty::Untyped);
+                .or_insert(Ty::gradual());
         }
         // Devise marks `current_<scope>` / `<scope>_signed_in?` as
         // `helper_method`, so templates see them too — register on
@@ -596,7 +607,7 @@ pub(in crate::analyze) fn register(
 pub(crate) fn param_value_ty(nilable: bool) -> Ty {
     let mut variants = vec![
         Ty::Str,
-        Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::gradual()) },
         Ty::Class { id: ClassId(Symbol::from("ActionController::Parameters")), args: vec![].into() },
         Ty::Class { id: ClassId(Symbol::from("ActionDispatch::Http::UploadedFile")), args: vec![].into() },
     ];
@@ -633,7 +644,7 @@ fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut Cl
                 },
                 crate::ty::Param {
                     name: Symbol::from("value"),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::gradual().into(),
                     kind: crate::ty::ParamKind::Required,
                 },
             ].into(),
@@ -652,7 +663,7 @@ fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut Cl
         Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("errors"),
-                ty: Ty::Untyped.into(),
+                ty: Ty::gradual().into(),
                 kind: crate::ty::ParamKind::Required,
             }].into(),
             block: None,

@@ -181,7 +181,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // framework_tests_kotlin gate; production builds skip the directory).
     // The body-typer needs the framework RBS + app/runtime ClassInfo to
     // dispatch precisely against framework methods (`Inflector.pluralize`,
-    // `Article.find`, …); without it `Ty::Untyped → Any?` collapse loses
+    // `Article.find`, …); without it `Ty::gradual() → Any?` collapse loses
     // the typed dispatch. Same recipe as the Crystal/TS test-emit branch.
     if !app.test_modules.is_empty() {
         let mut test_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> = Vec::new();

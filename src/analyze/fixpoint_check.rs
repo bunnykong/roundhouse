@@ -15,9 +15,14 @@
 //! - `RH_FIXPOINT_DIGEST=1`: a 64-bit digest of each part of the final
 //!   carried state, to compare two runs on the same input.
 //! - `RH_FIXPOINT_STATS=1`: the loop ends; the expressions whose type holds
-//!   `untyped` at any depth; how often #584's bound cut a carried type; and
-//!   how often the harvest cut a return that nests its previous round's
-//!   (#528's `harvest_untie_cut`).
+//!   `untyped` at any depth; how often #584's bound cut a carried type; how
+//!   often the harvest cut a return that nests its previous round's (#528's
+//!   `harvest_untie_cut`); and, when they run, the fold's and the worklist's
+//!   counters.
+//! - `RH_PRECISION_CENSUS=1`: aggregate counts of emit-bound expressions with
+//!   a type, fully typed (no `untyped` or `Var` at any depth), holding `untyped`,
+//!   holding only `Var`, and missing a type, in the `precision` field. Shares
+//!   use expressions with a type as their denominator.
 //!
 //! Each prints one `rh-fixpoint:` JSON line on stderr at the end of
 //! `analyze`. It holds counts and hashes only: no names, spans or types.
@@ -41,6 +46,7 @@
 //! | `controller_cache` | `controller_action_meta_cache`: the concern and action bindings, and the typed concern bodies, that a controller outside the dirty frontier reuses |
 //! | `view_seeds` | `view_seeds`: the controller→view channel that a views pass reads |
 //! | `copies` | `concern_folded` and `host_folded`: which registry entries are copies a fold may overwrite |
+//! | `side_table` | with `RH_FOLD`, the fold's parameter, position and narrowing slots |
 //! | `ir` | every emit-bound expression's type, decisions and diagnostic annotation ([`crate::lower::for_each_emit_body_ref`]). Parameter defaults and empty literals are typed in place and read back by the next typing, so their stamps are here too |
 //!
 //! Not compared, and why:
@@ -84,6 +90,9 @@ static STATS: LazyLock<bool> = LazyLock::new(|| flag("RH_FIXPOINT_STATS"));
 pub(super) fn verify_on() -> bool {
     *VERIFY
 }
+
+/// Whether the fixpoint statistics are enabled.
+pub(super) fn stats_on() -> bool { *STATS }
 
 static BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 static BOUND_CUTS: AtomicU64 = AtomicU64::new(0);
@@ -142,6 +151,8 @@ pub(super) struct Checks {
     bound_calls: u64,
     bound_cuts: u64,
     untie_cuts: u64,
+    pub(super) structure_start: Option<serde_json::Value>,
+    pub(super) structure_end: Option<serde_json::Value>,
 }
 
 impl Checks {
@@ -194,6 +205,7 @@ pub(super) fn type_hash(t: &Ty) -> u64 {
             }
         }
         Ty::Relation { of } => of.0.as_str().hash(&mut h),
+        Ty::Rec { slot } => format!("{:?}", super::fold::key_of(*slot)).hash(&mut h),
         Ty::Fn { params, block, ret, effects } => {
             for p in params.iter() {
                 p.name.as_str().hash(&mut h);
@@ -334,6 +346,13 @@ impl StateFp {
         out
     }
 
+    pub(super) fn context_slot_keys(&self) -> Vec<String> {
+        self.parts.iter().filter(|(part, _)| matches!(**part,
+            "controller_bindings" | "controller_cache" | "view_seeds" | "copies"))
+            .flat_map(|(part, entries)| entries.keys().map(move |key| format!("{part}:{key}")))
+            .collect()
+    }
+
     fn sizes(&self) -> BTreeMap<&'static str, u64> {
         let mut out: BTreeMap<&'static str, u64> =
             self.parts.iter().map(|(name, part)| (*name, part.len() as u64)).collect();
@@ -342,31 +361,48 @@ impl StateFp {
     }
 }
 
-/// Typed expressions, and those whose type holds `untyped`.
+/// Typed expressions, and those whose type holds `untyped`, in all and by
+/// provenance (an expression can hold more than one kind).
 #[derive(Default)]
 struct Census {
     typed: u64,
     missing: u64,
     bare_untyped: u64,
     untyped_anywhere: u64,
+    /// Pending, gradual, unresolved.
+    by_kind: [u64; 3],
 }
 
-fn holds_untyped(t: &Ty) -> bool {
+/// The provenances of the `untyped` positions in `t`, as bits.
+fn untyped_kinds(t: &Ty) -> u8 {
+    let mut bits = 0u8;
+    let mut each = |c: &Ty| bits |= untyped_kinds(c);
     match t {
-        Ty::Untyped => true,
-        Ty::Array { elem } => holds_untyped(elem),
-        Ty::Hash { key, value } => holds_untyped(key) || holds_untyped(value),
-        Ty::Tuple { elems } => elems.iter().any(holds_untyped),
-        Ty::Union { variants } => variants.iter().any(holds_untyped),
-        Ty::Record { row } => row.fields.values().any(holds_untyped),
-        Ty::Class { args, .. } => args.iter().any(holds_untyped),
-        Ty::Fn { params, block, ret, .. } => {
-            params.iter().any(|p| holds_untyped(&p.ty))
-                || block.as_deref().is_some_and(holds_untyped)
-                || holds_untyped(ret)
+        Ty::Untyped { why } => return why.reporting_bits(),
+        Ty::Array { elem } => each(elem),
+        Ty::Hash { key, value } => {
+            each(key);
+            each(value);
         }
-        _ => false,
+        Ty::Tuple { elems } => elems.iter().for_each(each),
+        Ty::Union { variants } => variants.iter().for_each(each),
+        Ty::Record { row } => row.fields.values().for_each(each),
+        Ty::Class { args, .. } => args.iter().for_each(each),
+        Ty::Fn { params, block, ret, .. } => {
+            params.iter().for_each(|p| each(&p.ty));
+            if let Some(b) = block.as_deref() {
+                each(b);
+            }
+            each(ret);
+        }
+        _ => {}
     }
+    bits
+}
+
+#[cfg(test)]
+fn holds_untyped(t: &Ty) -> bool {
+    untyped_kinds(t) != 0
 }
 
 impl Census {
@@ -374,13 +410,89 @@ impl Census {
         match &e.ty {
             Some(t) => {
                 self.typed += 1;
-                self.bare_untyped += u64::from(matches!(t, Ty::Untyped));
-                self.untyped_anywhere += u64::from(holds_untyped(t));
+                self.bare_untyped += u64::from(matches!(t, Ty::Untyped { .. }));
+                let kinds = untyped_kinds(t);
+                self.untyped_anywhere += u64::from(kinds != 0);
+                for (i, n) in self.by_kind.iter_mut().enumerate() {
+                    *n += u64::from(kinds & (1 << i) != 0);
+                }
             }
             None => self.missing += 1,
         }
         e.node.for_each_child(&mut |c| self.expr(c));
     }
+}
+
+/// Read-only C4/C5 diagnostic, at exactly the census's emit-bound roots.
+/// Source tags, spans and per-root occurrences distinguish cloned bodies
+/// without depending on unrelated roots' iteration order.
+fn dump_census(app: &App, path: std::ffi::OsString) -> std::io::Result<()> {
+    use std::io::Write;
+
+    fn visit(
+        e: &Expr,
+        body: &serde_json::Value,
+        site: &mut Vec<usize>,
+        sources: &[crate::span::SourceFile],
+        out: &mut impl Write,
+    ) -> std::io::Result<()> {
+        if let Some(t) = &e.ty {
+            let kinds = untyped_kinds(t);
+            if kinds != 0 {
+                let row = serde_json::json!({
+                    "emit_body": body,
+                    "site": {
+                        "path": site,
+                        "source": e.span.file.0.checked_sub(1)
+                            .and_then(|i| sources.get(i as usize)).map(|s| s.path.as_str()),
+                        "span": e.span,
+                    },
+                    "untyped_kinds": kinds,
+                    "type_hash": format!("{:016x}", type_hash(t)),
+                });
+                writeln!(out, "{row}")?;
+            }
+        }
+        let mut result = Ok(());
+        let mut child = 0;
+        e.node.for_each_child(&mut |c| {
+            if result.is_ok() {
+                site.push(child);
+                result = visit(c, body, site, sources, out);
+                site.pop();
+            }
+            child += 1;
+        });
+        result
+    }
+
+    let mut declarations = BTreeMap::<usize, String>::new();
+    for class in &app.library_classes {
+        for method in &class.methods {
+            declarations.insert(&method.body as *const Expr as usize,
+                format!("{}#{:?}::{}", class.name.0.as_str(), method.receiver, method.name.as_str()));
+        }
+    }
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut occurrences = BTreeMap::<String, usize>::new();
+    let mut result = Ok(());
+    crate::lower::for_each_emit_body_ref(app, &mut |root| {
+        if result.is_ok() {
+            let mut body = serde_json::json!({
+                "source": root.span.file.0.checked_sub(1)
+                    .and_then(|i| app.sources.get(i as usize)).map(|s| s.path.as_str()),
+                "declaration": declarations.get(&(root as *const Expr as usize)),
+                "span": root.span,
+                "kind": root.node.kind_str(),
+            });
+            let occurrence = occurrences.entry(body.to_string()).or_default();
+            body["occurrence"] = serde_json::json!(*occurrence);
+            *occurrence += 1;
+            result = visit(root, &body, &mut Vec::new(), &app.sources, &mut out);
+        }
+    });
+    result?;
+    out.flush()
 }
 
 fn loop_end(end: LoopEnd) -> serde_json::Value {
@@ -491,6 +603,11 @@ impl Analyzer {
         for (id, names) in &self.host_folded {
             put("copies", format!("host {}", id.0.as_str()), names_hash(names));
         }
+        if super::fold::on() {
+            for (key, hash) in super::fold::side_table_hashes(&mut |t| type_hash(t)) {
+                put("side_table", key, hash);
+            }
+        }
         let mut ir = Vec::new();
         crate::lower::for_each_emit_body_ref(app, &mut |e| ir_rows(e, &mut ir));
         ir.sort_unstable();
@@ -549,8 +666,12 @@ impl Analyzer {
 
     /// The `rh-fixpoint:` line, when any canary is on.
     pub(super) fn report_fixpoint_checks(&self, app: &App) {
-        if !(*VERIFY || *DIGEST || *STATS) {
+        if !(*VERIFY || *DIGEST || *STATS || super::precision::on()) {
             return;
+        }
+        if std::env::var("RH_S2_VALUES").as_deref() == Ok("1") {
+            self.s2_dump(app).expect("write S2 value rows");
+            s6_flush();
         }
         let rounds: FixpointRounds = self.fixpoint_rounds;
         let mut line = serde_json::json!({
@@ -576,21 +697,44 @@ impl Analyzer {
             line["entries"] = serde_json::json!(fp.sizes());
         }
         if *STATS {
+            line["structure"] = serde_json::json!({
+                "schema": 2, "scope": "observed-cumulative-equations",
+                "start": self.fixpoint_checks.structure_start,
+                "end": self.fixpoint_checks.structure_end,
+                "unchanged": self.fixpoint_checks.structure_start == self.fixpoint_checks.structure_end,
+            });
             let mut census = Census::default();
             crate::lower::for_each_emit_body_ref(app, &mut |e| census.expr(e));
+            if let Some(path) = std::env::var_os("RH_C4_CENSUS_DUMP") {
+                dump_census(app, path).expect("write RH_C4_CENSUS_DUMP");
+            }
             line["census"] = serde_json::json!({
                 "typed": census.typed,
                 "missing": census.missing,
                 "bare_untyped": census.bare_untyped,
                 "untyped_anywhere": census.untyped_anywhere,
+                "untyped_by_provenance": {
+                    "pending": census.by_kind[0],
+                    "gradual": census.by_kind[1],
+                    "unresolved": census.by_kind[2],
+                },
             });
             line["bound"] = serde_json::json!({
                 "calls": BOUND_CALLS.load(Ordering::Relaxed) - self.fixpoint_checks.bound_calls,
                 "cuts": BOUND_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.bound_cuts,
             });
-            line["harvest_untie_cut"] =
-                serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+            line["harvest_untie_cut"] = serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+            if super::fold::on() {
+                line["fold"] = super::fold::stats();
+            }
+            if let Some(worklist) = self.sccq_stats() {
+                line["worklist"] = worklist;
+            }
         }
+        if super::precision::on() {
+            line["precision"] = serde_json::json!(super::precision::census(app));
+        }
+        if let Some(s4) = super::s4_census::report(app) { line["s4"] = s4; }
         eprintln!("rh-fixpoint: {line}");
     }
 }
@@ -728,7 +872,7 @@ end
     fn untyped_is_found_at_any_depth() {
         let deep = Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::Untyped])) }),
+            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::unresolved()])) }),
         };
         assert!(holds_untyped(&deep));
         assert!(!holds_untyped(&Ty::Array { elem: std::sync::Arc::new(Ty::Int) }));
@@ -750,4 +894,125 @@ end
         assert_eq!(moved["ir"], 1);
         assert_eq!(before.moved(&before).values().sum::<u64>(), 0);
     }
+}
+
+
+pub(super) fn s2_ty(t: &Ty) -> serde_json::Value {
+    fn symbolic(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.get("kind").and_then(|x| x.as_str()) == Some("rec") {
+                    if let Some(slot) = m.get("slot").and_then(|x| x.as_u64()) {
+                        m.insert("slot".into(), serde_json::json!(format!("{:?}", super::fold::key_of(slot as u32))));
+                    }
+                }
+                for x in m.values_mut() { symbolic(x); }
+            }
+            serde_json::Value::Array(xs) => for x in xs { symbolic(x); },
+            _ => {}
+        }
+    }
+    let mut v = serde_json::to_value(t).unwrap();
+    symbolic(&mut v);
+    v
+}
+
+impl Analyzer {
+    fn s2_dump(&self, app: &App) -> std::io::Result<()> {
+        use std::io::Write;
+        let path = std::path::PathBuf::from(std::env::var_os("RH_STRUCT_DUMP").expect("observer dump path"))
+            .with_file_name("s2-values.jsonl");
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        let mut emit = |v: serde_json::Value| { serde_json::to_writer(&mut out, &v).unwrap(); writeln!(out).unwrap(); };
+        let fp = self.state_fp(app);
+        emit(serde_json::json!({"part":"fingerprint", "parts":fp.parts, "ir":fp.ir,
+            "sources":app.sources.iter().map(|s| &s.path).collect::<Vec<_>>(), "digests":fp.digests()}));
+        let mut value = |part: &str, key: String, t: &Ty| emit(serde_json::json!({
+            "part":part,"key":key,"ty":s2_ty(t),"debug":format!("{t:?}"),"hash":type_hash(t)}));
+        for (id,ci) in &self.classes {
+            for (m,t) in &ci.instance_methods { value("returns",format!("{}#{}",id.0.as_str(),m.as_str()),t); }
+            for (m,t) in &ci.class_methods { value("returns",format!("{}.{}",id.0.as_str(),m.as_str()),t); }
+        }
+        for ((id,m,side),row) in &self.inferred_params {
+            let sep = if *side == crate::dialect::MethodReceiver::Class { "." } else { "#" };
+            for (i,t) in row.iter().enumerate() {
+                value("params",format!("{}{sep}{}[{i}]",id.0.as_str(),m.as_str()),t);
+            }
+        }
+        for (key,t) in super::fold::s2_values() { value("side_table",key,&t); }
+        for (id,(bindings,_)) in &self.controller_action_meta_cache {
+            for (method,bs) in bindings { for (k,t) in bs {
+                value("controller_cache",format!("{}#{}:binding:{}",id.0.as_str(),method.as_str(),k.as_str()),t);
+            }}
+        }
+        fn expr(e: &Expr, part: &str, root: &str, path: &mut Vec<usize>,
+                emit: &mut dyn FnMut(serde_json::Value)) {
+            emit(serde_json::json!({"part":part,"key":format!("{root}:{}",path.iter().map(|x|x.to_string()).collect::<Vec<_>>().join("/")),
+                "root":root,"path":path,"span":e.span,"source":e.span.file.0,
+                "node":e.node.kind_str(),
+                "call":match &*e.node { crate::expr::ExprNode::Send { recv, method, .. } =>
+                    Some(serde_json::json!({"method":method.as_str(), "recv":recv.as_ref().and_then(|r| r.ty.as_ref()).map(s2_ty)})), _ => None },
+                "ty":e.ty.as_ref().map(s2_ty),
+                "debug":e.ty.as_ref().map(|t|format!("{t:?}")),
+                "hash":e.ty.as_ref().map_or(0,type_hash),
+                "note":hash_of((e.decisions,e.diagnostic.as_ref().map(annotation_hash))),
+                "diagnostic":e.diagnostic,"decisions":format!("{:?}",e.decisions)}));
+            let mut i=0;
+            e.node.for_each_child(&mut |c| { path.push(i); i+=1; expr(c,part,root,path,emit); path.pop(); });
+        }
+        for (id,(_,bodies)) in &self.controller_action_meta_cache {
+            for (m,body) in bodies {
+                expr(body,"controller_cache",&format!("{}#{}:body",id.0.as_str(),m.as_str()),&mut Vec::new(),&mut emit);
+            }
+        }
+        let mut declarations = BTreeMap::<usize,String>::new();
+        for c in &app.library_classes { for m in &c.methods {
+            declarations.insert(&m.body as *const Expr as usize, format!("{}{}{}",c.name.0.as_str(),
+                if m.receiver == crate::dialect::MethodReceiver::Class {"."} else {"#"},m.name.as_str()));
+        }}
+        for c in &app.models { for m in c.methods() {
+            declarations.insert(&m.body as *const Expr as usize, format!("{}{}{}",c.name.0.as_str(),
+                if m.receiver == crate::dialect::MethodReceiver::Class {"."} else {"#"},m.name.as_str()));
+        }}
+        for c in &app.controllers { for m in c.actions() {
+            declarations.insert(&m.body as *const Expr as usize, format!("{}#{}",c.name.0.as_str(),m.name.as_str()));
+        }}
+        let mut occurrences = BTreeMap::<String,usize>::new();
+        crate::lower::for_each_emit_body_ref(app, &mut |root| {
+            let body=serde_json::json!({"source":root.span.file.0.checked_sub(1)
+                .and_then(|i| app.sources.get(i as usize)).map(|s| s.path.as_str()),
+                "declaration":declarations.get(&(&*root as *const Expr as usize)),
+                "span":root.span,"kind":root.node.kind_str()}).to_string();
+            let n=occurrences.entry(body.clone()).or_default();
+            let key=format!("{body}:occurrence:{n}"); *n+=1;
+            expr(root,"ir",&key,&mut Vec::new(),&mut emit);
+        });
+        for (key,module) in super::fold::s2_aliases() {
+            emit(serde_json::json!({"part":"aliases","key":key,"module":module}));
+        }
+        out.flush()
+    }
+}
+
+thread_local! {
+    static S6_TRACE: std::cell::RefCell<Option<std::io::BufWriter<std::fs::File>>> = const { std::cell::RefCell::new(None) };
+    static S6_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+pub(super) fn s6_trace(mut value: serde_json::Value) {
+    if std::env::var("RH_S2_VALUES").as_deref() != Ok("1") { return; }
+    use std::io::Write;
+    let seq = S6_SEQ.with(|x| { let n=x.get()+1; x.set(n); n });
+    value["sequence"] = seq.into();
+    S6_TRACE.with(|x| {
+        let mut x=x.borrow_mut();
+        if x.is_none() {
+            let path=std::path::PathBuf::from(std::env::var_os("RH_STRUCT_DUMP").unwrap()).with_file_name("focus.jsonl");
+            *x=Some(std::io::BufWriter::new(std::fs::File::create(path).unwrap()));
+        }
+        let f=x.as_mut().unwrap(); serde_json::to_writer(&mut *f,&value).unwrap(); writeln!(f).unwrap();
+    });
+}
+fn s6_flush() {
+    use std::io::Write;
+    S6_TRACE.with(|x| { if let Some(f)=x.borrow_mut().as_mut() { f.flush().unwrap(); } });
 }

@@ -122,7 +122,7 @@ fn resolve_owner_model(
         }
         // Unique-name for view/test/non-model owners only. Model methods
         // with an untyped or mixed-union receiver stay unre-written.
-        // View locals are `Ty::Untyped`, not `ty: None`.
+        // View locals are `Ty::gradual()`, not `ty: None`.
         let in_model = enclosing.is_some_and(|id| by_model.contains_key(id));
         if !in_model {
             return unique_model_for_name(by_model, name);
@@ -294,7 +294,7 @@ pub(crate) fn rewrite_node(
         elem: std::sync::Arc::new(inner.ty.as_ref().and_then(|t| match t {
             Ty::Array { elem } => Some((**elem).clone()),
             _ => None,
-        }).unwrap_or(Ty::Untyped)),
+        }).unwrap_or(Ty::gradual())).into(),
     });
     // Explicit `message.boosts.loaded?` keeps `message` as receiver.
     // Implicit-self `boosts.loaded?` collapses to `self.boosts_loaded?`

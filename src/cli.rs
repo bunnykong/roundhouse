@@ -235,6 +235,7 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     // census below names the gems, this labels the diagnostics.
     crate::analyze::attribution::attribute_initializer_constants(&mut diags, &app);
     crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
+    crate::analyze::errgate::diagnostics(&diags, &app);
     let census = app.gem_lock.as_ref().map(crate::gems::GemCensus::of);
 
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();

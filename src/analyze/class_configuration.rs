@@ -193,13 +193,21 @@ impl Analyzer {
                                     .local_bindings
                                     .get(&p.name)
                                     .cloned()
-                                    .unwrap_or(Ty::Untyped).into(),
+                                    .unwrap_or_else(|| {
+                                        self.s3d.minted(super::s3d::CONFIG, &controller.name, &method.name,
+                                            crate::dialect::MethodReceiver::Class);
+                                        super::strict_producers::stub()
+                                    }).into(),
                             },
                             kind: p.ty_kind(),
                         })
                         .collect(),
                     block: None,
-                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or(Ty::Untyped)),
+                    ret: std::sync::Arc::new(method.body.ty.clone().unwrap_or_else(|| {
+                        self.s3d.minted(super::s3d::CONFIG, &controller.name, &method.name,
+                            crate::dialect::MethodReceiver::Class);
+                        super::strict_producers::stub()
+                    })),
                     effects: method.effects.clone(),
                 });
                 // Sibling class methods in this same pass call each other
@@ -213,6 +221,7 @@ impl Analyzer {
                         .entry(controller.name.clone())
                         .or_default()
                         .class_methods;
+                    let _current = super::current_harvest::writer(&controller.name, &method.name, true, method.body.span);
                     Self::insert_inferred_return(table, &method.name, ret);
                 }
             }
@@ -225,7 +234,7 @@ impl Analyzer {
 /// wipe a concrete default or a stored hash element.
 fn is_uninformative(ty: &Ty) -> bool {
     match ty {
-        Ty::Untyped | Ty::Var { .. } | Ty::Bottom => true,
+        Ty::Untyped { .. } | Ty::Var { .. } | Ty::Bottom => true,
         Ty::Union { variants } => variants.iter().all(is_uninformative),
         _ => false,
     }

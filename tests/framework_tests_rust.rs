@@ -38,7 +38,7 @@ use roundhouse::ingest::ingest_test_file;
 /// Walk `runtime/ruby/**/*.rbs` and merge each parsed signature into
 /// `app.rbs_signatures`. Without this the test body-typer can't dispatch
 /// precisely against framework methods, and the strict-typed Rust emit
-/// falls through to the default `Ty::Untyped` collapse. Same helper as
+/// falls through to the default `Ty::gradual()` collapse. Same helper as
 /// the crystal/typescript gates (intentional duplication — each gate
 /// stays self-contained).
 fn load_framework_rbs(app: &mut App) {

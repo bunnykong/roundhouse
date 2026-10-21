@@ -7,7 +7,7 @@ use crate::dialect::{AccessorKind, MethodReceiver};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
-pub(super) fn register(classes: &mut HashMap<ClassId, ClassInfo>, app: &App) {
+pub(super) fn register(classes: &mut HashMap<ClassId, ClassInfo>, app: &App, tracker: &mut super::s3d::Tracker) {
     // File-local stand-ins are real source declarations too. Use the
     // same declared surface as test lowering, without replacing an
     // already registered production class or guessing a return type.
@@ -26,7 +26,10 @@ pub(super) fn register(classes: &mut HashMap<ClassId, ClassInfo>, app: &App) {
             };
             table
                 .entry(method.name.clone())
-                .or_insert_with(|| method.signature.clone().unwrap_or(Ty::Untyped));
+                .or_insert_with(|| method.signature.clone().unwrap_or_else(|| {
+                    tracker.minted(super::s3d::TEST, &module.name, &method.name, method.receiver);
+                    super::strict_producers::stub()
+                }));
             match method.receiver {
                 MethodReceiver::Instance => &mut cls.instance_method_kinds,
                 MethodReceiver::Class => &mut cls.class_method_kinds,
@@ -87,6 +90,7 @@ impl Analyzer {
     /// full views/tests pass typed them; helper-chain rounds must not
     /// walk every template.
     pub(super) fn type_tests_only(&mut self, app: &mut App) {
+        super::fold::new_epoch();
         let (fallback, resolved_values) = self.build_constant_registry(app);
         self.typed_constants = resolved_values;
         let global_constants = ConstScope::global(fallback);

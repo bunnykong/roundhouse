@@ -48,7 +48,7 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
                 name: p.name.clone(),
                 // `lock!` takes Rails' lock clause; `reload`'s options are open.
                 ty: if method.name.as_str() == "reload" {
-                    Ty::Untyped.into()
+                    Ty::gradual().into()
                 } else {
                     Ty::Union { variants: vec![Ty::Bool, Ty::Str, Ty::Nil].into() }.into()
                 },
@@ -1505,7 +1505,7 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol, owner
             at,
             crate::ty::Param {
                 name: rel_param.clone(),
-                ty: Ty::Untyped.into(),
+                ty: Ty::gradual().into(),
                 kind: crate::ty::ParamKind::Optional,
             },
         );
@@ -9775,11 +9775,11 @@ mod insert_rel_param_tests {
         let sig = Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("tags"),
-                ty: Ty::Untyped.into(),
+                ty: Ty::unresolved().into(),
                 kind: ParamKind::Rest,
             }].into(),
             block: None,
-            ret: std::sync::Arc::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::unresolved()),
             effects: crate::effect::EffectSet::pure(),
         };
         let mut m = bare_method(params, Some(sig));
@@ -9810,11 +9810,11 @@ mod insert_rel_param_tests {
         let sig = Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("user"),
-                ty: Ty::Untyped.into(),
+                ty: Ty::unresolved().into(),
                 kind: ParamKind::Required,
             }].into(),
             block: None,
-            ret: std::sync::Arc::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::unresolved()),
             effects: crate::effect::EffectSet::pure(),
         };
         let mut m = bare_method(params, Some(sig));
@@ -9830,7 +9830,7 @@ mod insert_rel_param_tests {
         };
         let rel_ty_param = params.iter().find(|p| p.name == rel_param).expect("__rel in signature");
         assert_eq!(rel_ty_param.kind, ParamKind::Optional);
-        assert_eq!(*rel_ty_param.ty, Ty::Untyped, "unchanged: still Untyped, not Relation");
+        assert_eq!(*rel_ty_param.ty, Ty::gradual(), "unchanged: still Untyped, not Relation");
     }
 
     /// `def f(*tags, **opts)`: no keyword may follow `**opts`, so `__rel:`
@@ -9842,11 +9842,11 @@ mod insert_rel_param_tests {
         let params = vec![Param::rest(Symbol::from("tags")), kwrest];
         let sig = Ty::Fn {
             params: vec![
-                crate::ty::Param { name: Symbol::from("tags"), ty: Ty::Untyped.into(), kind: ParamKind::Rest },
-                crate::ty::Param { name: Symbol::from("opts"), ty: Ty::Untyped.into(), kind: ParamKind::KeywordRest },
+                crate::ty::Param { name: Symbol::from("tags"), ty: Ty::unresolved().into(), kind: ParamKind::Rest },
+                crate::ty::Param { name: Symbol::from("opts"), ty: Ty::unresolved().into(), kind: ParamKind::KeywordRest },
             ].into(),
             block: None,
-            ret: std::sync::Arc::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::unresolved()),
             effects: crate::effect::EffectSet::pure(),
         };
         let mut m = bare_method(params, Some(sig));

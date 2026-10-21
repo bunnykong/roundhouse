@@ -989,7 +989,7 @@ pub(super) fn hand_update_the_attrs(
             block: None,
             parenthesized: false,
         },
-        Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
+        Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) }),
     );
     attrs.span = span;
     args[0] = attrs;
@@ -1823,7 +1823,7 @@ pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     // The declared type is `initialize`'s parameter type verbatim: this
     // hash is built to be handed straight to it, and a narrower element
     // type would need a widening conversion at every call site.
-    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::gradual()) };
     let attrs_var = || {
         with_ty(
             Expr::new(
@@ -1967,9 +1967,9 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
     // non-scalar (`permit(widget_ids: [])`, nothing else) and so `fields`
     // drops to empty (see `tests/params_all_non_scalar_keys.rs`). `key`
     // is then unused; the body is just `nil`, same signature, same
-    // `Ty::Untyped` result.
+    // `Ty::gradual()` result.
     let body = if arms.is_empty() {
-        expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::Untyped))
+        expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::gradual()))
     } else {
         expr(
             ExprNode::Case {
@@ -1979,7 +1979,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
                 ),
                 arms,
             },
-            Some(Ty::Untyped),
+            Some(Ty::gradual()),
         )
     };
 
@@ -1995,7 +1995,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
         // Heterogeneous: the value when provided, nil when not.
         signature: Some(crate::lower::typing::fn_sig(
             vec![(key, Ty::Sym)],
-            Ty::Untyped,
+            Ty::gradual(),
         )),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
