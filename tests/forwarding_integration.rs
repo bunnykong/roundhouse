@@ -195,13 +195,20 @@ fn inherited_constructor_and_reopened_descendant_mixin_refuse_unsafe_contracts()
             .write("app/lib/probe.rb", source)
             .write("app/lib/probe_reopen.rb", reopen)
             .run_ruby(script);
-        assert!(
-            run.errors.iter().any(|e| e.contains("forwarding")),
-            "errors={:?}; actual={}; stderr={}",
-            run.errors,
-            run.stdout,
-            run.stderr
-        );
+        if reopen.is_empty() {
+            // One fragment: the subclass's optional keywords are restored
+            // and `new(...)` binds them.
+            run.assert_passes();
+            assert_eq!(run.stdout, "3\n");
+        } else {
+            assert!(
+                run.errors.iter().any(|e| e.contains("forwarding")),
+                "errors={:?}; actual={}; stderr={}",
+                run.errors,
+                run.stdout,
+                run.stderr
+            );
+        }
     }
 }
 
@@ -863,10 +870,11 @@ fn check_surveys_effective_model_declarations_without_lowering_or_diagnostic_lea
             "",
             &[false, false],
         ),
+        // The instance `title` over the column's reader is the effective one (a column accessor yields).
         (
             "def self.title(...); 11; end; def title(...); 29; end",
             "",
-            &[false, true],
+            &[false, false],
         ),
         ("def self.create_from_params(...); 11; end", "", &[false]),
         (

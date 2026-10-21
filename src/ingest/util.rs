@@ -75,6 +75,44 @@ pub(super) fn integer_value(node: &Node<'_>) -> Option<i64> {
     integer_i64(&node.as_integer_node()?.value())
 }
 
+/// A non-interpolated `/pattern/flags` literal's pattern (prism's
+/// UNESCAPED bytes — the regex engine's view, same as
+/// `dialect::Literal::Regex`) and its flags, in canonical `imxoesun`
+/// order (matching Ruby's own `Regexp#to_s`). `None` for anything but
+/// a plain regex literal node — an interpolated regex
+/// (`InterpolatedRegularExpressionNode`) has no single pattern string
+/// and is each caller's own concern.
+pub(super) fn regexp_literal_flags(node: &Node<'_>) -> Option<(String, String)> {
+    let r = node.as_regular_expression_node()?;
+    let mut flags = String::new();
+    if r.is_ignore_case() {
+        flags.push('i');
+    }
+    if r.is_multi_line() {
+        flags.push('m');
+    }
+    if r.is_extended() {
+        flags.push('x');
+    }
+    if r.is_once() {
+        flags.push('o');
+    }
+    if r.is_euc_jp() {
+        flags.push('e');
+    }
+    if r.is_windows_31j() {
+        flags.push('s');
+    }
+    if r.is_utf_8() {
+        flags.push('u');
+    }
+    if r.is_ascii_8bit() {
+        flags.push('n');
+    }
+    let pattern = String::from_utf8_lossy(r.unescaped()).into_owned();
+    Some((pattern, flags))
+}
+
 /// An integer literal's value as `i64`.
 ///
 /// **prism only offers `TryInto<i32>`**, and every literal in ingest
@@ -240,6 +278,10 @@ fn collect_classes<'pr, F: FnMut(&[String], &[String], ruby_prism::ClassNode<'pr
         collect_classes(&body, scope, nesting, out);
         return;
     }
+    if let Some(decl) = self_guarded_body(node, Some(scope)) {
+        collect_classes(&decl, scope, nesting, out);
+        return;
+    }
     if let Some(m) = node.as_module_node() {
         // Push the module's name onto the scope before descending —
         // bare class declarations inside qualify with the module
@@ -334,6 +376,10 @@ fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
     }
     if let Some(body) = hoisted_singleton_body(node) {
         collect_modules(&body, scope, out);
+        return;
+    }
+    if let Some(decl) = self_guarded_body(node, Some(scope)) {
+        collect_modules(&decl, scope, out);
     }
 }
 
@@ -583,10 +629,35 @@ pub(super) fn constant_path_is_rooted(p: &ruby_prism::ConstantPathNode<'_>) -> b
 
 pub(super) fn flatten_statements<'pr>(node: Node<'pr>) -> Vec<Node<'pr>> {
     if let Some(s) = node.as_statements_node() {
-        s.body().iter().collect()
+        s.body().iter().flat_map(|stmt| match self_guarded_body(&stmt, None) {
+            Some(body) => vec![body],
+            None => vec![stmt],
+        }).collect()
     } else {
         vec![node]
     }
+}
+
+// Only a reload guard around its own declaration: any other guard, or an `else`, takes the branch what else loaded decides.
+pub(super) fn self_guarded_body<'pr>(node: &Node<'pr>, scope: Option<&[String]>) -> Option<Node<'pr>> {
+    let unless = node.as_unless_node()?;
+    if unless.else_clause().is_some() {
+        return None;
+    }
+    let guarded = constant_path_of(&unless.predicate().as_defined_node()?.value())?;
+    let mut body = unless.statements()?.body().iter();
+    let decl = body.next()?;
+    if body.next().is_some() {
+        return None;
+    }
+    let declared = if let Some(m) = decl.as_module_node() {
+        module_name_path(&m)?
+    } else if let Some(c) = decl.as_class_node() {
+        class_name_path(&c)?
+    } else {
+        return None;
+    };
+    (guarded == declared || scope.is_some_and(|scope| guarded.iter().eq(scope.iter().chain(&declared)))).then_some(decl)
 }
 
 pub(super) fn find_call_named<'pr>(

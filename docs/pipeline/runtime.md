@@ -186,6 +186,94 @@ The tradeoff: emitters and primitives stay in lockstep. If
 helpers, the `runtime/ruby/action_view/` source) has to learn to call
 it. Snapshot tests + toolchain tests catch drift.
 
+## Read bind capability
+
+`ROUNDHOUSE_PARAM_BINDS` is sampled once when assembling each target, then
+passed explicitly through lowering. The exhaustive `ParamBindCapability` policy
+separates driver support from the measured default:
+
+| Capability | Targets | Unset / other value | `=0` / `=1` |
+| --- | --- | --- | --- |
+| Default-on | Spinel | Binds | Inline / binds |
+| Opt-in | Ruby (CRuby), JRuby | Inline | Inline / binds |
+| Unsupported | All remaining targets | Inline | Inline / inline |
+
+Unsupported targets are Blog, Roda, Futamura, Crystal, Elixir, Go, Kotlin, Python, Rust,
+Swift, C#, TypeScript and TypeScript Worker. This includes every TypeScript
+profile: `node-sync`, libsql `node-async`, and `worker`. Empty or unrecognized
+values use the target default. An override never enables an unsupported shim.
+
+Spinel is default-on under the rollout policy. Lobsters statement counts favor
+binds with IN caching; a latency improvement over main is not established. CRuby binds improve
+nested reads, but repeated-query workloads lose SQL-only result replay and
+remain slower. JRuby has correctness coverage but lacks matched performance
+evidence. Both are opt-in until their workload measurements support a default
+change. Direct Ruby emitter APIs use the Ruby default; the Spinel-specific
+entry points use the Spinel default. Neither reads the environment; callers
+assembling a target resolve the override once.
+
+The override affects transpilation, not an already emitted server. It supports
+paired `=0`/`=1` measurements without changing the target capability. Compile-time
+literals, variable-arity IN lists, and writes keep their existing inline form.
+Ruby-family nullable equality selects its SQL shape at runtime: a present value
+uses `= ?` and reserves a bind slot; nil uses `IS NULL` without a slot. Inline
+mode uses `= value` / `IS NULL`. This preserves partial-index eligibility and
+LEFT JOIN reduction. At most seven nullable predicates may share cached bound
+shapes (128 combinations); larger combinations prepare transient statements.
+Variable-arity IN reads stay inline and cached by their complete SQL text, as
+on main. They do not opt into the nullable-shape overflow policy. Non-nullable columns
+keep `= ?`; nil passed to a typed integer bind remains SQL NULL, never zero.
+Enabling another target requires its selected driver/profile to implement
+`bind_int`, `bind_text`, `bind_bool`, and their `_opt` variants, with execution
+after binding and value serialization matching the inline writer.
+
+## Spinel statement-cache diagnostic
+
+Set `RH_STMT_STATS=1` before starting an emitted Spinel app to write cumulative
+per-connection summaries to stderr. A different nonempty value names a file to
+append to; unset, empty and `0` disable it. The destination and enabled flag are
+read once at boot. Changing the environment afterwards does not enable or disable
+the diagnostic. Disabled hooks are constant checks: no SQL tracking, counter
+updates, output, per-row work or diagnostic locking. Run diagnostics separately
+from timings.
+
+`Db.close` dumps after finalizing the pool. For an on-demand snapshot, stop request
+workers first and call `Db.dump_stmt_stats("phase")`; labels should contain no
+whitespace. Connection IDs are `shard:index`, local to the configured pool. A
+process that exits without closing its pool must explicitly request a snapshot.
+
+Each `RH_STMT_STATS` line reports:
+
+- `hits`, `misses` (successful native prepares), and `prepare_failures`.
+  Statement-cache hit rate is `hits / (hits + misses)`; replay hits do not reach
+  that cache. `misses` includes transient prepares and `transient_prepares` counts
+  that subset, including busy-hit readers and partial-replay promotions.
+- `entries`, `peak_entries`, and `distinct_sql` (distinct successfully
+  prepared SQL strings retained for that connection, including transient reads).
+  The connection keeps at most `STAT_SQL_CAP` (4096) of those strings.
+  `distinct_sql` is that retained count. `distinct_sql_capped=1` means further
+  distinct SQL was prepared and not stored, so the count is the cap rather than
+  the true total. Disabled diagnostics store nothing. SQL text and bind values
+  are not printed.
+- `trims` (boundaries exceeding CAP), `evictions` (cached statements dropped), and
+  `finalizations` (real SQLite finalizations, including transient release, failed
+  cleanup and pool close). Logical `Db.finalize` resets a cached statement and
+  does not count as a real finalization.
+- `qc_hits`, `qc_misses`, and `qc_bypasses` count request-replay decisions.
+  Bypasses include disabled request replay and SQL containing `?`. Bound reads
+  always execute against SQLite; SQL-only replay cannot distinguish bind values.
+- `executions`: SQLite `SQLITE_STMTSTATUS_RUN`, summed over live and finalized
+  cached and transient statements. It counts first native steps, including replay
+  promotions, rather than rows, prepares, replayed results or `Db.exec` writes.
+  The native counter is read only at snapshots or real finalization, including
+  before failed cleanup destroys a statement.
+
+Counters are cumulative; subtract snapshots to measure a phase. The native cache's
+128-entry cap is soft within a request, with least-recently-used trimming at lease
+boundaries after every outstanding cursor is released. Summing per-connection
+`distinct_sql` is not a count of globally unique SQL strings. A capped connection reports 4096, not the prepares it stopped storing. The diagnostic is
+implemented for compiled Spinel; CRuby and JRuby do not emit these summaries.
+
 ## Emitter ↔ runtime contract
 
 Ruby-family lowered equality reads select SQL from the runtime value: a
@@ -603,6 +691,23 @@ Nokogiri-backed Fragment.
 with every attribute it carried (`sgid`, `content_type`, `caption`,
 `filename`, `url`).
 
+### `constantize` resolves only the app's own constants
+
+`name.constantize` and `name.safe_constantize` turn any String into the
+constant it names in Rails. A name computed at run time (pundit's
+`"#{model}Policy"`) or read off the wire would then reach every constant
+in the process, the reflection this pipeline does not emit. On the Ruby
+and JRuby targets `lower::constantize` routes each call to one generated
+`RoundhouseConstants` lookup, a `case` over the constants the app's own
+source defines: its models,
+controllers and library classes, including the source of a gem the app
+keeps in its tree (`gem "pundit", path: "vendor/pundit"`). A name in
+that set answers what Rails answers. A name outside it (`"String"`,
+a framework class) answers `nil` from `safe_constantize` and raises
+`NameError` from `constantize`, where Rails would resolve it. Every
+other target refuses the call with an unsupported diagnostic, and
+`name.constantize.instantiate(attrs)` stays `lower::record_snapshot`'s.
+
 ### Action Text decodes only the entities Rails' escaper emits
 
 `Content#to_plain_text` decodes `&amp; &lt; &gt; &quot; &#39; &apos;
@@ -879,6 +984,37 @@ reads that arm: `def signed_in?; Current.user.present?; end` folds to
 the constant `true` against a non-nilable type — a correct fold of an
 incorrect type, which signed every visitor in and stopped the join-code
 page from 404ing. A lie the type system can act on is worse than a gap.
+
+### `ActiveModel::Attributes` writers raise where Rails would guess
+
+`ingest::active_model_attributes` gives each `attribute :name, :type`
+(`:string`, `:integer`, `:boolean`, `:datetime`) a reader and a casting
+writer. Three answers differ from Rails on purpose, each by raising:
+
+- An `:integer` writer given a value that is not nil, a boolean, an
+  Integer, a Float or a String raises `TypeError`; Rails calls `to_i`
+  and answers nil when it is missing (a Symbol) or the epoch (a Time).
+- A `:datetime` writer given a value that is neither a String nor a
+  Time keeps it on the CRuby and JRuby trees, as Rails does, and raises
+  `TypeError` on Spinel's.
+- Spinel's `ActiveSupport.cast_datetime` reads only ISO 8601 (a date,
+  an optional `HH:MM[:SS[.ffffff]]`, and a `Z` or `±HH[:]MM` zone after
+  the seconds). Any other non-empty string raises `ArgumentError`; Rails
+  falls back to `Date._parse`, which reads `"Oct 14 2026"` and answers
+  nil for `"garbage"`. The CRuby and JRuby trees run Rails' algorithm.
+
+A zoneless string is UTC only when `config.time_zone` is `"UTC"`. Rails'
+`is_utc?` is `Time.zone_default.name == "UTC"`, and `GMT`, `Etc/UTC`,
+`Etc/GMT`, and `Etc/UCT` are not that name, so Rails reads them with
+`Time.local`. The process zone stays the host's: boot does not pin
+`ENV["TZ"]` to `config.time_zone`.
+
+The four casts live in the ruby-family and Spinel runtime
+(`cast_string`, `cast_integer`, and `cast_boolean` in
+`runtime/ruby/active_support_ext.rb`, `cast_datetime` beside
+`parse_time`). A strict target does not load that runtime, so it
+reports each call rather than emitting a writer that names a method
+it does not have.
 
 ### `list.many?` becomes `ActiveSupport.many?(list)`
 
@@ -1288,9 +1424,14 @@ and no behavioral test can see that, because nothing renders
 
 Two residues, both smaller than they look:
 
-* **`touch` still runs no COMMIT callbacks.** Rails fires
-  `after_commit` (and the `_commit` variants) after a touch; this
-  runtime fires `after_touch` only.
+* **`touch` runs COMMIT callbacks on the Ruby family only.** Rails
+  fires `after_update_commit`/`after_commit` after a touch, held, like
+  every commit callback, until the enclosing transaction's COMMIT;
+  the Ruby family's `touch` does (connection.rb), the strict targets'
+  fires `after_touch` only. On the Ruby family a save, destroy and
+  touch each run inside `Model.transaction`, an exception from their
+  callbacks rolls the whole write back, and a ROLLBACK drops the held
+  commit callbacks.
 * **The update hook is unguarded.** Rails registers its touch with
   `if: :saved_changes?` and skips the parent when the child's save
   changed nothing. This runtime's `save` issues an unconditional
@@ -1386,23 +1527,19 @@ counts as enqueued too, and `assert_enqueued_email_with` checks that a
 mail went out, not the mailer, action, or arguments — the narrowing
 `assert_enqueued_with` already documents for jobs.
 
-### `remote_connections.disconnect` selects an empty set
+### `remote_connections.disconnect` selects an empty set on spinel
 
+On the CRuby overlay `disconnect` broadcasts on the selected identifier's
+internal channel and the matching sockets close themselves (see "An open
+socket outlives the authorization that opened it" below). On spinel
 `ActionCable.server.remote_connections.where(current_user: user)
-.disconnect` returns without closing anything. A remote connection is
-selected by its connection *identifiers*, and no connection in this
-runtime ever registers one: Turbo's streams subscribe by signed stream
-name through `Cable::Connection#handle_message`, and channel
-subscription dispatch — the half that would run `identified_by
-:current_user` — is not implemented. The selected set is genuinely
-empty, so the no-op is accurate rather than a stub.
+.disconnect` still returns without closing or broadcasting anything: no
+tep socket registers its identifier anywhere a broadcast could find it.
 
 **What it costs.** campfire calls this from `User#deactivate` and
-`User#reset_remote_connections`: a deactivated or banned user's live
-socket stays open. Nothing in the corpus's own tests can observe it
-(they assert on the database rows the same method deletes), which is
-exactly why it is written down here. When subscription dispatch lands,
-`ActionCable::RemoteConnections#where` is where the real selection goes.
+`User#reset_remote_connections`: on spinel a deactivated or banned
+user's live socket stays open, and campfire's room-destroy test, which
+asserts the internal-channel broadcast, fails there.
 
 ### A raw cable payload is JSON TEXT on spinel, a Hash on CRuby
 
@@ -2330,23 +2467,28 @@ methods the two lanes exclude are the same list, kept in both files.
 
 `ActionCable.server.remote_connections.where(current_user: user)
 .disconnect(reconnect: true)` — campfire's `User#deactivate` and
-`#reset_remote_connections` — selects an empty set and returns.
+`#reset_remote_connections` — closes that user's sockets on the CRuby
+lane and on no other.
 
-**Why.** Nothing indexes live connections by user. `Cable::Reactor`'s
-table is keyed by socket, and the identity a connection carries is read
-off it rather than looked up by it. Closing the gap means an index the
-reactor maintains on attach and drops on close, plus a posted close per
-hit.
+**The CRuby overlay does what Rails does.** `RemoteConnection#disconnect`
+broadcasts `{type: "disconnect", reconnect:}` on the internal channel
+`action_cable/<connection identifier>` (the identifier is Rails'
+`connection_gid`: each identifier's `to_gid_param`, sorted, joined by
+`:`). An identified `Cable::Connection` subscribes to its own internal
+channel when it starts, and `Cable::Registry.deliver` hands a message on
+it to `process_internal_message`, which sends the client
+`{"type":"disconnect","reason":"remote","reconnect":…}` and closes the
+socket. The client then replays its subscriptions, and membership is
+checked again at SUBSCRIBE time.
 
-**What it costs.** Membership is checked at SUBSCRIBE time, which is
-exactly the window campfire's `RoomMessagesChannel` comment calls out:
-"revoking a membership disconnects the user with `reconnect: true`, and
-the client then replays its subscriptions on the fresh socket." The
-replay is now authorized on the CRuby lane — a revoked member's
-resubscribe is refused. The disconnect that would FORCE that replay is
-what does not happen, so an already-open socket keeps delivering to a
-user whose membership was just revoked, until they reconnect for some
-other reason.
+**Spinel still selects an empty set.** `runtime/spinel/action_cable.rb`
+neither broadcasts nor subscribes: the tep lane's sockets are fds in
+`Tep::Broadcast`, with no index from identity to driver, so a
+broadcast on the internal channel would reach nobody. An already-open
+socket there keeps delivering to a user whose membership was just
+revoked, until they reconnect for some other reason, and campfire's
+`test_a_room_destroyed_later_resets_the_connections_of_its_former_members…`
+stays red on that lane because the broadcast it asserts is not made.
 
 ### Rich text renders EMPTY on a target with no safe-list sanitizer
 
@@ -3615,7 +3757,7 @@ table it prints, and the gaps in it:
 | global_ids, sgids.generate | 4/4, 5/5 | |
 | sgids.verify | 19/24 | |
 | app_verifiers.blob_id / envelope / data | 8/8, 3/3, 7/7 | fixed with this entry: the blob verifier signed with signed-id's envelope |
-| encrypted_cookies | 0/28 | not implemented |
+| encrypted_cookies.verify / generate | 20/20, 8/8 | `cookies.encrypted`; see "`cookies.encrypted` is Rails' encrypted cookie jar" below |
 | csrf | 0/208 | not implemented |
 | passwords | 0/45 | not held |
 
@@ -4059,6 +4201,49 @@ comparison, so there is one script.
    the first and split between them in the second — RSS alone would
    invent a penalty the clustered lane does not pay, PSS alone would
    break comparison with the single-process rows already measured.
+
+### `cookies.encrypted` is Rails' encrypted cookie jar - CLOSED (ours, 2026-10-15)
+
+**Was:** `ActionController::CookieJar` had `signed` and `permanent`
+views and no `encrypted`, so `cookies.encrypted[...]` was a
+NoMethodError, and the runtime had no AES-GCM.
+
+**Now (measured against Rails 8.1.4, `load_defaults 8.1`):**
+`cookies.encrypted` writes and reads
+`b64(ciphertext)--b64(iv)--b64(tag)`, AES-256-GCM with a 12-byte IV and
+no associated data, the key PBKDF2-HMAC-SHA256(secret_key_base,
+"authenticated encrypted cookie", 1000, 32), the plaintext the `_rails`
+envelope (purpose `cookie.<name>`) around the value as JSON, so a
+read answers the value with its type (a Hash with String keys, an
+Integer). `ActionController::MessageEncryptor` holds the format, over
+`MessageDigest.aes_256_gcm_encrypt` / `aes_256_gcm_decrypt` (OpenSSL on
+CRuby, spinel's `packages/openssl` on spinel).
+`tests/rails_compat_vectors.rb` holds the jar to campfire's 28 vectors
+(tampered parts, wrong name, rotated secret, Marshal value, the
+pre-5.2 cookie without metadata), CRuby and the spinel binary alike.
+
+**Left as they are, each stated where it lives:**
+
+- **Not read:** key rotation (`config.action_dispatch.cookies_rotations`),
+  the AES-256-CBC jar (`use_authenticated_cookie_encryption = false`),
+  overridden `authenticated_encrypted_cookie_salt` / `encrypted_cookie_cipher`
+  / `cookies_serializer` (`:marshal`, `:hybrid`), and the
+  `{"_rails":{"data":…}}` envelope no cookie jar writes. An app that
+  sets them gets the defaults here.
+- **`expires:` on a write is dropped:** `cookies.encrypted[:t] = {
+  value: x, expires: 1.hour }` sends no `Expires` and puts no `exp` in
+  the envelope, so the cookie reads for as long as the browser keeps
+  it. Rails records the expiry inside the encrypted envelope, so a
+  copied short-lived cookie stops reading server-side. Only
+  `.permanent` sets one. The signed jar has the same gap.
+- **The session cookie** is still the signed one (see "Not
+  implemented" in the vectors entry above): `cookies.encrypted[<session
+  key>]` reads nil in an emitted app until the session store writes
+  through this jar.
+- **Link cost (spinel):** AES-GCM comes from spinel's `packages/openssl`,
+  which `runtime/spinel/message_digest.rb` requires, so every spinel web
+  app now links libssl/libcrypto and a build host needs the OpenSSL
+  headers.
 
 ### Signed cookies interoperate with Rails — CLOSED (ours)
 
@@ -4925,3 +5110,34 @@ Found 2026-10-07 probing `request.format` on a from-scratch Rails API
 app under `--target spinel`; reproduces identically under `--target
 ruby`, since both lanes consume the same `controller_to_library`
 universal IR.
+
+### A readable `content_security_policy` block sends no CSP header on `futamura`'s lowered path
+
+TEMPORARY, pending rubys/roundhouse#58: `content_security_policy` is
+not modelled on any target — no directive builder exists, and no
+emitter writes the header. On the ordinary ruby-family and strict
+targets that is simply a dropped class-body macro, surveyed like any
+other. On `--target futamura`'s whole-route replacement
+(`src/emit/futamura/routes.rs`) it used to be more than that: every
+ingest gap blocks the route it is attributed to, and a
+`content_security_policy do |p| … end` block — however ordinary —
+earned the same "controller class-body block not recognized" gap as
+a construct nobody has read yet, which blocks every route on every
+controller that inherits or includes it. On an app that sets its CSP
+once, high in the controller hierarchy, that is most of the app.
+
+Until (1) on #58 (modelling the directive builders) lands, a block
+this ingest can read well enough to know it does nothing but build a
+policy object — every statement a direct call on the block's own
+parameter, naming a known CSP directive, with symbol/string/simple-
+literal arguments, in a controller's own class body or a concern's
+`included do` — is recorded as a named divergence instead
+(`ingest::app::csp_block_is_recognized`,
+`ingest::app::CSP_DIVERGENCE_MESSAGE`): it still shows in `--survey`
+and `check --continue`, but `project::futamura_whole_route` excludes
+it from the gaps `routes::plan` blocks on. **The lowered app sends no
+`Content-Security-Policy` header from these routes, same as it always
+has — this only stops treating that as a reason to keep the route on
+Rails.** A block this ingest cannot read as cleanly — a dynamic
+directive, a conditional, any other code — keeps the blocking gap,
+unchanged, wherever it appears.

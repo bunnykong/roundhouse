@@ -39,7 +39,8 @@ test readiness. Fixture generation uses Rails and can change with its release.
    the fix from a plausible wrong implementation, not just a no-crash case.
 3. Iterate with [focused tests](testing.md), inspecting [IR/output](debugging.md)
    when needed. Removing an error diagnostic requires emitted execution coverage.
-4. Run the default `cargo test` suite before committing; use
+4. Run the complete default suite before committing. Use `bin/rh verify --all`
+   for concurrent execution, or `cargo test` without Nextest. Use
    `cargo test --all-targets` at milestones. A focused pass is not full CI.
 
 For a PR, include the repro, regression test, and what you actually verified.
@@ -59,6 +60,7 @@ reported, not described as passing; request [broader CI](../ci/README.md) when n
 | Run the emitted Ruby app | `bin/rh dev ruby` (also `test ruby`, `run ruby`) |
 | Compare against Rails | `bin/rh compare <target>` |
 | Benchmark / build the complete site | `bin/rh bench` / `bin/rh site` |
+| Time each route against a reference, in pairs | [`scripts/bench-paired`](benchmarking.md) |
 
 `bin/rh clean <target>` removes that emitted build; `bin/rh clean fixture`
 removes real-blog, not Store. Neither is a Cargo-cache cleanup command.

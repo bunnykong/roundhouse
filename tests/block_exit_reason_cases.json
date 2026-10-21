@@ -1555,8 +1555,8 @@
     "runtime": false,
     "expected_type": null,
     "expected_value": null,
-    "main_value": "Arel::Node",
-    "main_forward": "Arel::Node"
+    "main_value": "Arel::Nodes::SqlLiteral",
+    "main_forward": "Arel::Nodes::SqlLiteral"
   },
   {
     "id": "catalog-data-02",

@@ -169,6 +169,17 @@ module ActiveRecord
     end
   end
 
+  # Raised by app code (`raise ActiveRecord::RecordNotDestroyed.new(msg, record)`).
+  # `destroy!` does not raise it: there is no abort channel on destroy yet.
+  class RecordNotDestroyed < ActiveRecordError
+    attr_reader :record
+
+    def initialize(message = "ActiveRecord::RecordNotDestroyed", record = nil)
+      @record = record
+      super(message)
+    end
+  end
+
   # Raised by app code; no runtime path marks a record read-only yet.
   class ReadOnlyRecord < ActiveRecordError
     def initialize(message = "ActiveRecord::ReadOnlyRecord")

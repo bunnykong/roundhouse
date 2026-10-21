@@ -1123,7 +1123,7 @@ fn str_method(model: &Model, name: &str, body: Expr) -> MethodDef {
 ///
 ///   def after_create
 ///     __touch_message = message
-///     __touch_message.touch unless __touch_message.nil?
+///     __touch_message.touch_later unless __touch_message.nil?
 ///   end
 ///
 /// and the same in `after_update`, `after_destroy` and `after_touch`.
@@ -1205,9 +1205,14 @@ fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
             ));
         }
         // A stamped column has to reach the row with the timestamp, so
-        // that form finishes with the whole-row `touch_written`; the bare
-        // form's `touch` writes `updated_at` alone, as Rails' does.
-        let finish = if matches!(touch, Touch::Column(_)) { "touch_written" } else { "touch" };
+        // that form finishes with the whole-row `touch_written`, at once.
+        // The bare form is Rails' `touch_later`: inside the save's
+        // transaction the parent is stamped once, just before COMMIT,
+        // however many of this record's hooks (and its siblings') asked
+        // (runtime/ruby/active_record/connection.rb); outside one, and on
+        // a strict target (base.rb), it is `touch`, which writes
+        // `updated_at` alone, as Rails' does.
+        let finish = if matches!(touch, Touch::Column(_)) { "touch_written" } else { "touch_later" };
         guarded.push(Expr::new(
             span,
             ExprNode::Send {
@@ -1358,7 +1363,7 @@ fn push_symbol_callback(
     fold_into_or_push(methods, model, hook_name, body);
 }
 
-/// Wrap a validation-hook body in the `new_record?` guard its `on:`
+/// Wrap a validation-hook body in the `persisted?` guard its `on:`
 /// restriction lowers to — accurate at validation time, since the
 /// insert hasn't happened yet. `on: :destroy` has no reading here
 /// (validations never run on destroy) and returns None: drop the
@@ -1370,28 +1375,33 @@ fn guard_validation_on(
 ) -> Option<Expr> {
     use crate::dialect::CallbackOn as On;
 
-    let new_record = Expr::new(
+    // `self.persisted?`, not a bare `new_record?`: `persisted?` is
+    // synthesized per model on every target, while `new_record?` lives on
+    // the runtime Base, which a rust or go struct does not inherit (rust
+    // read the bare call as a free `new_record_pred()`, go as a missing
+    // `self.NewRecord` field). Same spelling as the cache-key marker above.
+    let persisted = Expr::new(
         span,
         ExprNode::Send {
-            recv: None,
-            method: Symbol::from("new_record?"),
+            recv: Some(Expr::new(span, ExprNode::SelfRef)),
+            method: Symbol::from("persisted?"),
             args: vec![],
             block: None,
             parenthesized: false,
         },
     );
     let cond = match on {
-        On::Create => new_record,
-        On::Update => Expr::new(
+        On::Create => Expr::new(
             span,
             ExprNode::Send {
-                recv: Some(new_record),
+                recv: Some(persisted),
                 method: Symbol::from("!"),
                 args: vec![],
                 block: None,
                 parenthesized: false,
             },
         ),
+        On::Update => persisted,
         On::Destroy => return None,
     };
     let mut guarded = Expr::new(

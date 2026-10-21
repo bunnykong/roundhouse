@@ -463,6 +463,9 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                     .map(|attribute| Validation {
                         attribute,
                         rules: vec![ValidationRule::Presence],
+                        if_cond: None,
+                        unless_cond: None,
+                        message: None,
                     })
                     .collect()
             })
@@ -490,6 +493,9 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                             message: message.clone(),
                             allow_nil: None,
                         }],
+                        if_cond: None,
+                        unless_cond: None,
+                        message: None,
                     })
                     .collect()
             })

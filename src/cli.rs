@@ -1,7 +1,7 @@
 //! The subcommands behind the multi-call `roundhouse` binary and the
-//! per-tool aliases (`roundhouse-check`, `roundhouse-lsp`,
-//! `roundhouse-mcp`). Both spellings run the code here, so a shipped
-//! single binary and a `cargo run --bin` dev loop cannot drift.
+//! per-tool entrypoints (`roundhouse-check`, `roundhouse-lsp`,
+//! `roundhouse-mcp`, `fractal`). Each uses the same implementation as
+//! the shipped binary.
 //!
 //! Host-only: every subcommand speaks stdio or walks a real directory.
 
@@ -10,6 +10,8 @@ use std::process::ExitCode;
 
 use crate::analyze::{diagnose, Analyzer, Diagnostic, DiagnosticKind, Severity};
 use crate::ingest::{ingest_app, survey, IngestError};
+
+pub mod fractal;
 
 /// `roundhouse lsp`: serve the read-only Language Server over stdio
 /// until the client hangs up. The workspace root comes from the LSP
@@ -220,7 +222,7 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut analyzer = Analyzer::new(&app);
+    let mut analyzer = Analyzer::for_source(&app);
     crate::timings::phase("analyze", || analyzer.analyze(&mut app));
     let mut diags = crate::timings::phase("diagnose", || diagnose(&app));
     // Survey mode: diagnostics that trace back to a recorded ingest gap

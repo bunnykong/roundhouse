@@ -3,8 +3,11 @@ module ActionView
   module ViewHelpers
     type number_option_value = String | Integer | Float | Rational | Symbol | bool | Regexp | nil | Hash[Symbol, String | Hash[Symbol, String]]
     def self.content_security_policy_nonce: () -> String
+    def self.csp_policy_for_test=: (bool present) -> bool
+    def self.csp_meta_tag: () -> String
     def self.url_origin=: (String origin) -> String
     def self.url_for_path: (String path) -> String
+    def self.digested_asset_path: (String source) -> String
     def self.class_names: (*(String | Symbol | Integer | bool | Hash[String | Symbol, untyped] | Array[untyped] | nil) args) -> String
     def self.number_helper_for_template: (Symbol method, Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
     def self.number_with_delimiter: (Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
@@ -33,6 +36,7 @@ module ActionView
     def self.strip_tags: (String html) -> String
     def self.sanitize: (String html) -> String
     def self.sanitize_allowing: (String html, Array[String] tags, Array[String] attributes) -> String
+    def self.sanitize_with: (String html, Array[String] tags, Array[String] attributes) -> String
     # The safe-list engine and its ported rule tables.
     def self.sanitize_engine: (String s, Array[String] tags, Array[String] attributes) -> String
     def self.sanitize_default_tags: () -> Array[String]

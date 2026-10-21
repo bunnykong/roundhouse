@@ -107,7 +107,68 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
         AccessorKind::AttributeWriter,
         true,
     );
+    // Rails 7.1's `<attr>_salt`: the digest's bcrypt salt, nil while there
+    // is no digest. Campfire binds its transfer link to it
+    // (`generates_token_for :transfer … { password_salt&.last(10) }`).
+    push_synth_instance_method(
+        methods,
+        model,
+        Symbol::from(format!("{}_salt", attr.as_str())),
+        Vec::new(),
+        salt_body(&digest),
+        Some(fn_sig(vec![], Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })),
+        AccessorKind::Method,
+        false,
+    );
+    // Rails 7.1's `<attr>_challenge`, the current password a form asks for
+    // before the password changes: a plain virtual attribute, as the
+    // confirmation is. Rails checks it only under its own validations;
+    // an app on `validations: false` checks it itself (campfire's
+    // `password_challenge_matches`).
+    let challenge = Symbol::from(format!("{}_challenge", attr.as_str()));
+    push_synth_instance_method(
+        methods,
+        model,
+        challenge.clone(),
+        Vec::new(),
+        ivar_read(&challenge),
+        Some(fn_sig(vec![], Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })),
+        AccessorKind::AttributeReader,
+        false,
+    );
+    let challenge_value = Symbol::from("value");
+    push_synth_instance_method(
+        methods,
+        model,
+        Symbol::from(format!("{}=", challenge.as_str())),
+        vec![Param::positional(challenge_value.clone())],
+        plain_ivar_assign(&challenge, &challenge_value),
+        Some(fn_sig(vec![(challenge_value, Ty::Str)], Ty::Nil)),
+        AccessorKind::AttributeWriter,
+        true,
+    );
     push_reset_token_methods(methods, model, &attr);
+}
+
+/// `@<digest>.nil? || @<digest>.empty? ? nil : BCrypt::Password.new(@<digest>).salt`
+/// — Rails' `BCrypt::Password.new(digest).salt if digest.present?`.
+fn salt_body(digest: &Symbol) -> Expr {
+    let blank = sp_expr(ExprNode::BoolOp {
+        op: crate::expr::BoolOpKind::Or,
+        surface: crate::expr::BoolOpSurface::Symbol,
+        left: send(Some(ivar_read(digest)), "nil?", vec![]),
+        right: send(Some(ivar_read(digest)), "empty?", vec![]),
+    });
+    let wrapped = send(
+        Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("BCrypt"), Symbol::from("Password")] })),
+        "new",
+        vec![ivar_read(digest)],
+    );
+    sp_expr(ExprNode::If {
+        cond: blank,
+        then_branch: sp_expr(ExprNode::Lit { value: Literal::Nil }),
+        else_branch: send(Some(wrapped), "salt", vec![]),
+    })
 }
 
 /// Rails 8's `has_secure_password` also generates a password-reset

@@ -67,7 +67,7 @@ pub mod default_self_recv;
 mod attr_or_assign;
 mod system_exception;
 mod case_class_narrow;
-mod reset_counters;
+pub(crate) mod reset_counters;
 mod perform_all_later;
 pub mod authenticate_by;
 pub mod group_count;
@@ -81,6 +81,7 @@ pub mod assoc_pluck;
 pub mod try_guard;
 pub mod class_body_new;
 pub mod mocha;
+pub mod stub_const;
 pub mod webmock;
 pub mod global_id_locate;
 pub mod record_snapshot;
@@ -98,19 +99,21 @@ pub mod attachable;
 pub mod attachables_grep;
 pub mod errors_index;
 pub mod job_class_side;
+pub mod transaction_after_commit;
+pub mod module_mattr_storage;
 pub mod job_payload;
 pub mod mailer_class_side;
+pub mod mailer_templates;
 pub mod as_json_shape;
 pub mod as_json_writer;
 pub mod as_json_super;
-pub mod parameterize;
+pub mod string_core_ext;
 pub mod random_formatter;
 pub mod bigdecimal;
 pub mod range_enumerable;
 pub mod preloader;
 pub mod to_json;
 pub mod number_to_fs;
-pub mod string_inflections;
 pub mod attribute_aliases;
 pub mod presence_in;
 pub mod relation_ivar_materialize;
@@ -134,8 +137,10 @@ pub mod including;
 pub mod enum_symbols;
 pub mod has_json;
 pub mod serialize;
+pub mod column_slot;
 pub mod assoc_loaded;
 pub mod object_extend;
+pub mod nested_def;
 pub mod param_rebind;
 pub mod to_sgid;
 pub mod cable_test_case;
@@ -166,6 +171,15 @@ pub mod session_options;
 pub mod status_literal;
 pub mod to_param_residue;
 pub mod relation_residue;
+/// Host-only: the Oj emit gate reads `project::BuildTarget`, which the
+/// wasm build excludes. The playground has no emit gate to raise it for.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod oj;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ruby_family_gems;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod gem_refusal;
+pub mod constantize;
 pub mod params_residue;
 pub mod params_permit;
 pub mod normalizes;
@@ -199,7 +213,6 @@ pub mod view;
 pub mod view_buffer_passing;
 pub mod tag_block_passing;
 pub mod lazy_model_state;
-pub mod deferred_preload;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
@@ -218,7 +231,7 @@ pub use attachables_grep::apply_attachables_grep_lowering;
 pub use errors_index::apply_errors_index_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
-pub use parameterize::apply_parameterize_grounding;
+pub use string_core_ext::apply_parameterize_grounding;
 pub use random_formatter::apply_random_formatter_grounding;
 pub use to_json::apply_to_json_lowering;
 pub use number_to_fs::apply_number_to_fs_grounding;
@@ -386,6 +399,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraints.
     ("class_body_new", &[]),
     ("mocha", &[]),
+    ("stub_const", &[]),
     // Independent context-heavy send rewrites: one fused tree walk in
     // `fused::apply_fused_context_rewrites`. Empty runs_after — they
     // match disjoint method names and do not consume each other's
@@ -638,6 +652,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `obj.extend Mod` on an instance -> a raise stub with the report.
     // Consumes a shape no pass produces or reads; no constraints.
     ("object_extend", &[]),
+    // A test reaching an ingest-stamped nested `def` -> the whole
+    // test a raise stub with the report. Reads only that stamp, which
+    // no pass produces or removes; no constraints.
+    ("nested_def", &[]),
     // A parameter written after its binder (`user = users(user) unless
     // user.is_a? User`, `id = id.to_i`) -> a fresh local, so AOT does
     // not pin the caller's type onto the later write. Reads an Assign
@@ -662,7 +680,16 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // or reads; no constraints.
     ("current_set", &[]),
     ("mailer_class_side", &[]),
+    ("mailer_templates", &[]),
     ("job_class_side", &[]),
+    // `….current_transaction.after_commit { … }` -> the block as a lambda
+    // argument, the shape the runtime holds for the COMMIT. Consumes a
+    // shape no pass produces or reads; no constraints.
+    ("transaction_after_commit", &[]),
+    // A module's `mattr_*` `@@x` storage -> its own `@x`, when nothing
+    // outside the module names `@@x`. Consumes ingest's mattr expansion,
+    // which no pass rewrites; no constraints.
+    ("module_mattr_storage", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
@@ -861,7 +888,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("as_json_super");
     secure_password::apply_secure_password_super(app);
     ran!("secure_password_super");
-    parameterize::apply_parameterize_grounding(app);
+    string_core_ext::apply_parameterize_grounding(app);
     ran!("parameterize");
     diags.extend(class_body_new::apply_class_body_new_lowering(app));
     ran!("class_body_new");
@@ -869,6 +896,8 @@ pub fn apply_post_analyze_lowerings(
         mocha::apply_mocha_lowering(app);
     });
     ran!("mocha");
+    stub_const::apply_stub_const_lowering(app);
+    ran!("stub_const");
     crate::timings::phase("post-analyze: fused context rewrites", || {
         fused::apply_fused_context_rewrites(app);
     });
@@ -953,6 +982,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("send_file");
     html_safe::apply_html_safe_lowering(app);
     ran!("html_safe");
+    diags.extend(crate::ingest::rake_tasks::gap_diagnostics(app));
     diags.extend(module_mixins::apply_module_mixins_lowering(app));
     ran!("module_mixins");
     transaction_ground::apply_transaction_grounding(app);
@@ -1001,6 +1031,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("assoc_attr_key");
     diags.extend(object_extend::apply_object_extend_stub(app));
     ran!("object_extend");
+    diags.extend(nested_def::apply_nested_def_test_stub(app));
+    ran!("nested_def");
     param_rebind::apply_param_rebind_lowering(app);
     ran!("param_rebind");
     diags.extend(to_sgid::apply_to_sgid_lowering(app));
@@ -1013,8 +1045,14 @@ pub fn apply_post_analyze_lowerings(
     ran!("current_set");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
+    diags.extend(mailer_templates::apply_mailer_templates(app));
+    ran!("mailer_templates");
     diags.extend(job_class_side::apply_job_class_side(app));
     ran!("job_class_side");
+    transaction_after_commit::apply_transaction_after_commit(app);
+    ran!("transaction_after_commit");
+    module_mattr_storage::apply_module_mattr_storage(app);
+    ran!("module_mattr_storage");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
         send_dispatch::apply_send_static_dispatch(app, registry)
     }));
@@ -1225,6 +1263,18 @@ pub(crate) fn for_each_owned_hook_body(
                         f(cond);
                     }
                 }
+                // `validates :attr, …, if: -> { … }` / `unless: …` — a
+                // lambda guard is a general expression, same as a
+                // callback's, and needs the same passes (`.in?`
+                // rewriting, attribute aliasing, …) to see it.
+                crate::dialect::ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &mut validation.if_cond {
+                        f(cond);
+                    }
+                    if let Some(cond) = &mut validation.unless_cond {
+                        f(cond);
+                    }
+                }
                 // Unrecognized class-body exprs (constant procs and
                 // friends) round-trip verbatim into the emit — their
                 // sites are just as reachable.
@@ -1373,6 +1423,14 @@ pub(crate) fn for_each_hook_body_ref(
                         f(cond);
                     }
                 }
+                crate::dialect::ModelBodyItem::Validation { validation, .. } => {
+                    if let Some(cond) = &validation.if_cond {
+                        f(cond);
+                    }
+                    if let Some(cond) = &validation.unless_cond {
+                        f(cond);
+                    }
+                }
                 crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
                 crate::dialect::ModelBodyItem::Association {
                     assoc: crate::dialect::Association::HasMany { extension, .. },
@@ -1488,6 +1546,73 @@ pub(crate) fn for_each_forwarding_body_ref(app: &crate::App, f: &mut impl FnMut(
     forwarding_roots!(app, f, iter, as_ref);
 }
 
+/// Mutable twin of [`for_each_emit_body_ref`]. The two must walk the same
+/// roots: a rewrite that sees only one of them leaves the other copy to emit.
+pub(crate) fn for_each_emit_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+    for_each_forwarding_body(app, f);
+    for model in &mut app.models {
+        for item in &mut model.body {
+            if let crate::dialect::ModelBodyItem::Association { assoc, .. } = item {
+                match assoc {
+                    crate::dialect::Association::BelongsTo { default: Some(e), .. }
+                    | crate::dialect::Association::HasMany { scope: Some(e), .. }
+                    | crate::dialect::Association::HasOne { scope: Some(e), .. } => f(e),
+                    _ => {}
+                }
+            }
+        }
+    }
+    for controller in &mut app.controllers {
+        for item in &mut controller.body {
+            if let crate::dialect::ControllerBodyItem::Action { action, .. } = item {
+                for default in action.kw_params.iter_mut().filter_map(|(_, e)| e.as_mut()) {
+                    f(default);
+                }
+            }
+        }
+    }
+    for view in &mut app.views {
+        if let Some(locals) = &mut view.strict_locals {
+            for param in locals {
+                if let Some(default) = &mut param.default {
+                    f(default);
+                }
+            }
+        }
+    }
+    for fixture in &mut app.fixtures {
+        for e in &mut fixture.preamble {
+            f(e);
+        }
+        for record in fixture.records.values_mut() {
+            for value in record.values_mut() {
+                if let crate::dialect::FixtureValue::Ruby(e) = value {
+                    f(e);
+                }
+            }
+        }
+    }
+    for helper in &mut app.routes.direct_helpers {
+        f(&mut helper.body);
+    }
+    for function in &mut app.sql_functions {
+        match &mut function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => visit_sql_method(method, f),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
+                visit_sql_method(step, f);
+                visit_sql_method(finalize, f);
+            }
+        }
+    }
+}
+
+fn visit_sql_method(method: &mut crate::dialect::MethodDef, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+    f(&mut method.body);
+    for default in method.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+        f(default);
+    }
+}
+
 /// Survey every emit-bound expression root, including defaults and fixture
 /// expressions outside the forwarding pass's narrower inventory. Callers walk
 /// children themselves, so each root is visited exactly once.
@@ -1496,7 +1621,8 @@ pub(crate) fn for_each_emit_body_ref(app: &crate::App, f: &mut impl FnMut(&crate
     for association in app.models.iter().flat_map(|model| model.associations()) {
         match association {
             crate::dialect::Association::BelongsTo { default: Some(e), .. }
-            | crate::dialect::Association::HasMany { scope: Some(e), .. } => f(e),
+            | crate::dialect::Association::HasMany { scope: Some(e), .. }
+            | crate::dialect::Association::HasOne { scope: Some(e), .. } => f(e),
             _ => {}
         }
     }

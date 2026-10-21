@@ -835,6 +835,42 @@ module Db
     Thread.current[:ar_txn_depth] = value
   end
 
+  # Bit `depth - 1` of this integer is whether that frame can be joined.
+  # Same thread slot as the depth. See runtime/ruby/db.rbs.
+  def self._txn_joinable_bits
+    bits = Thread.current[:ar_txn_joinable_bits]
+    bits.nil? ? 0 : bits
+  end
+
+  def self._txn_joinable_bits=(value)
+    Thread.current[:ar_txn_joinable_bits] = value
+  end
+
+  # The open transaction's enlisted writes (connection.rb), held in the
+  # same per-thread storage as the depth.
+  def self._txn_records
+    records = Thread.current[:ar_txn_records]
+    if records.nil?
+      records = [ActiveRecord::EnlistedRecord.new(ActiveRecord::Base.new, 0)]
+      records.clear
+      Thread.current[:ar_txn_records] = records
+    end
+    records
+  end
+
+  # The work `current_transaction.after_commit` holds for the COMMIT
+  # (ActiveRecord::Base._after_commit), beside the records above. Seeded
+  # and cleared, as the records are, so the element type is the work's.
+  def self._txn_callbacks
+    work = Thread.current[:ar_txn_callbacks]
+    if work.nil?
+      work = [-> { nil }]
+      work.clear
+      Thread.current[:ar_txn_callbacks] = work
+    end
+    work
+  end
+
   # Not PostgreSQL's DISABLE TRIGGER: its DDL here carries no foreign keys yet (emit::shared::schema_sql), so a fixture load has nothing to defer.
   def self.without_foreign_keys
     yield
@@ -1303,6 +1339,9 @@ module Db
 
   def self.record_query(sql)
     @query_log.push(sql) unless @query_log.nil?
+    if defined?(ActiveSupport::Notifications) && ActiveSupport::Notifications.respond_to?(:sql)
+      ActiveSupport::Notifications.sql(sql)
+    end
     if @sql_trace
       $stderr.puts "  SQL " + sql
     end

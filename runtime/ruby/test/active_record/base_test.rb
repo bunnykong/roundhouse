@@ -138,6 +138,72 @@ class BaseTest < Minitest::Test
     Db.close
   end
 
+  def test_pluck_projects_multiple_columns_in_argument_order
+    first = Item.new
+    first.title = "First"
+    first.save!
+    second = Item.new
+    second.title = "Second"
+    second.save!
+    relation = Item.where(nil).order(:id)
+
+    assert_equal [[first.id, "First"], [second.id, "Second"]], relation.pluck(:id, :title)
+    assert_equal [["First", first.id], ["Second", second.id]], relation.pluck("title", "id")
+    assert_equal [[first.id, first.id], [second.id, second.id]], relation.pluck(:id, :id)
+    assert_equal ["First", "Second"], relation.pluck(:title)
+    assert_equal [first.id, second.id], relation.to_a.map(&:id)
+  end
+
+  def test_pick_projects_multiple_columns_without_changing_the_limit
+    first = Item.new
+    first.title = "First"
+    first.save!
+    second = Item.new
+    second.title = "Second"
+    second.save!
+    relation = Item.where(nil).order(:id).limit(2)
+
+    assert_equal [first.id, "First"], relation.pick(:id, :title)
+    assert_equal "First", relation.pick(:title)
+    assert_equal [first.id, second.id], relation.to_a.map(&:id)
+    assert_equal [], Item.where(id: []).pluck(:id, :title)
+    assert_nil Item.where(id: []).pick(:id, :title)
+    assert_equal [], Item.where(id: -1).pluck(:id, :title)
+    assert_nil Item.where(id: -1).pick(:id, :title)
+  end
+
+  # An integer `id` column plus another primary key: Rails 8.1.4 selects
+  # the `id` column from `pluck(:id)` and keeps it in a bare `pluck`.
+  # `ids` is still the primary key.
+  class Labeled < ActiveRecord::Base
+    def self.table_name = "labeled_widgets"
+    def self.schema_columns = [:id, :identifier, :name]
+    def self.primary_key = "identifier"
+    # Hand-written models do not get the lowered string-key cast.
+    # The primary key is text, so `ids` must keep "key-4".
+    def self._string_primary_key = true
+  end
+
+  def test_pluck_id_selects_the_id_column_when_that_column_exists
+    Db.exec("CREATE TABLE labeled_widgets (id INTEGER, identifier TEXT, name TEXT)")
+    Db.exec("INSERT INTO labeled_widgets (id, identifier, name) VALUES (4, 'key-4', 'labeled')")
+    relation = ActiveRecord::Relation.new(Labeled)
+
+    assert_equal [4], relation.pluck(:id)
+    assert_equal [[4, "labeled"]], relation.pluck(:id, :name)
+    assert_equal [[4, "key-4", "labeled"]], relation.pluck
+    assert_equal ["key-4"], relation.ids
+  end
+
+  def test_pluck_quotes_a_reserved_word_column
+    Db.exec("ALTER TABLE items ADD COLUMN \"order\" TEXT")
+    Db.exec("INSERT INTO items (title, \"order\") VALUES ('First', 'kept')")
+    relation = ActiveRecord::Relation.new(Item).order(:id)
+
+    assert_equal ["kept"], relation.pluck(:order)
+    assert_equal [["kept", "First"]], relation.pluck(:"items.order", :title)
+  end
+
   # ── persistence-state predicates ────────────────────────────
 
   def test_new_record_starts_unpersisted
@@ -712,7 +778,7 @@ class BaseTest < Minitest::Test
     assert_match(/title = 'B'/, fork.to_sql)
     assert_equal prior, base.to_sql
     # Copy-on-write: mutating the parent after spawn must not rewrite the fork.
-    base.where(title: "C")
+    base.where!(title: "C")
     assert_match(/title = 'B'/, fork.to_sql)
     refute_match(/title = 'C'/, fork.to_sql)
     ordered = ActiveRecord::Relation.new(Item).where(title: "A")
@@ -721,6 +787,21 @@ class BaseTest < Minitest::Test
     ordered.order!(:id)
     assert_equal prior_order, fork_order.to_sql
     assert_match(/ORDER BY/, ordered.to_sql)
+  end
+
+  def test_chain_methods_leave_the_receiver_unchanged
+    base = ActiveRecord::Relation.new(Item).where(title: "A")
+    prior = base.to_sql
+    forks = [
+      base.where(id: 1), base.not(id: 2), base.order(:id), base.reorder(:id),
+      base.limit(1), base.offset(1), base.select(:id), base.distinct,
+      base.group(:title), base.having("COUNT(*) > 1"), base.none,
+      base.merge(base.where(id: 3)), base.unscope(where: :title),
+      base.or(base.where(id: 4)), base.excluding([1]), base.page(2)
+    ]
+    forks.each { |fork| refute_same base, fork }
+    assert_equal prior, base.to_sql
+    refute base.null_relation?
   end
 
   def test_find_in_batches_yields_loaded_records_once

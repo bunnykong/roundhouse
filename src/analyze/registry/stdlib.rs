@@ -151,6 +151,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     time_cls.class_methods.insert(Symbol::from("now"), time_ty());
     time_cls.class_methods.insert(Symbol::from("zone"), time_ty());
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
+    time_cls.class_methods.insert(Symbol::from("find_zone"), Ty::Union {
+        variants: vec![
+            Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() },
+            Ty::Nil,
+        ].into(),
+    });
     classes.insert(ClassId(Symbol::from("Time")), time_cls);
 
     // The seconds-based Duration value class the Ruby-family trees ship
@@ -286,16 +292,54 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Dir", &[
         ("entries", str_arr()), ("glob", str_arr()), ("[]", str_arr()),
         ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("mkdir", Ty::Int),
+        ("rmdir", Ty::Int), ("mktmpdir", Ty::Str),
         ("pwd", Ty::Str), ("home", Ty::Str),
+    ], &[]);
+    register_stdlib_class(classes, "Rake::Task", &[
+        ("[]", Ty::untyped()),
+        ("task_defined?", Ty::Bool),
+        // App code may call the gem. The runtime's own `define_task`
+        // is the typed fallback in `rake/task.rbs`; the gem replaces it.
+        ("define_task", Ty::untyped()),
+    ], &[
+        ("reenable", Ty::Nil),
+        ("all_prerequisite_tasks", Ty::untyped()),
+        ("invoke", Ty::Nil),
+    ]);
+    register_stdlib_class(classes, "ActiveRecord", &[
+        ("dump_schema_after_migration", Ty::Bool),
+        ("dump_schema_after_migration=", Ty::Bool),
+    ], &[]);
+    register_stdlib_class(classes, "ActiveRecord::Tasks::DatabaseTasks", &[
+        ("env", Ty::Str),
+        ("env=", Ty::Str),
+        ("migrations_paths", Ty::untyped()),
+        ("migrations_paths=", Ty::untyped()),
+        ("seed_loader", Ty::untyped()),
+        ("seed_loader=", Ty::untyped()),
+        ("with_temporary_connection", Ty::untyped()),
+        ("load_schema", Ty::Nil),
+        ("prepare_all", Ty::Nil),
+        ("migrate", Ty::Nil),
+        ("migration_connection_pool", Ty::untyped()),
     ], &[]);
     // Psych/YAML — campfire's Purchaser loads `config/purchased_by.yml`
     // via `YAML.load_file`. Register the class-side surface the corpus
     // writes so the constant is modeled (not a silent raise stub) and
     // ruby-family emit keeps the call. Return types stay gradual: the
     // document shape is whatever the file held.
+    register_stdlib_class(classes, "ERB", &[], &[
+        ("result", Ty::Str),
+    ]);
+    {
+        let db = classes.entry(ClassId(Symbol::from("Db"))).or_default();
+        db.class_methods.entry(Symbol::from("capture_sql")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+        db.class_methods.entry(Symbol::from("escape_string")).or_insert(Ty::Str);
+    }
     register_stdlib_class(classes, "YAML", &[
         ("load", Ty::untyped()), ("load_file", Ty::untyped()),
         ("safe_load", Ty::untyped()), ("safe_load_file", Ty::untyped()),
+        ("unsafe_load", Ty::untyped()),
         ("dump", Ty::Str),
     ], &[]);
     // Framework modules an app `include`s that emit already handles
@@ -335,6 +379,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("html_escape", Ty::Str), ("h", Ty::Str),
         ("url_encode", Ty::Str), ("u", Ty::Str), ("json_escape", Ty::Str),
     ], &[]);
+    // ActiveSupport's `Digest::UUID.uuid_v4` is `SecureRandom.uuid`
+    // (`lower::random_formatter` writes it so). `uuid_v5` / `uuid_v3`
+    // hash a namespace and are not registered: they stay refused.
+    register_stdlib_class(classes, "Digest::UUID", &[("uuid_v4", Ty::Str)], &[]);
     for digest in ["Digest::MD5", "Digest::SHA1", "Digest::SHA256"] {
         register_stdlib_class(classes, digest, &[
             ("hexdigest", Ty::Str), ("digest", Ty::Str),
@@ -359,6 +407,27 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "PlatformAgent", &[], &[
         ("browser", Ty::Str), ("version", Ty::Str), ("os", Ty::Str),
         ("match?", Ty::Bool), ("user_agent", user_agent_ty),
+    ]);
+    // The i18n gem's `I18n::Locale::Tag`, ported into
+    // `runtime/ruby/i18n_locale_tag.rb`; that file's `.rbs` by hand, not
+    // parsed, because the parsed table does not tell a class's singleton
+    // methods from its instance methods.
+    let simple = Ty::Class { id: ClassId(Symbol::from("I18n::Locale::Tag::Simple")), args: vec![].into() };
+    let rfc = Ty::Class { id: ClassId(Symbol::from("I18n::Locale::Tag::Rfc4646")), args: vec![].into() };
+    let subtag = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    let strs = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
+    register_stdlib_class(classes, "I18n::Locale::Tag", &[("tag", simple.clone())], &[]);
+    register_stdlib_class(classes, "I18n::Locale::Tag::Simple", &[("tag", simple)], &[
+        ("subtags", strs(Ty::Str)), ("to_sym", Ty::Sym),
+        ("to_s", Ty::Str), ("to_a", strs(Ty::Str)),
+    ]);
+    register_stdlib_class(classes, "I18n::Locale::Tag::Rfc4646", &[
+        ("tag", Ty::Union { variants: vec![rfc, Ty::Nil].into() }),
+    ], &[
+        ("language", subtag.clone()), ("script", subtag.clone()), ("region", subtag.clone()),
+        ("variant", subtag.clone()), ("extension", subtag.clone()), ("privateuse", subtag.clone()),
+        ("grandfathered", subtag.clone()), ("to_sym", Ty::Sym), ("to_s", Ty::Str),
+        ("to_a", strs(subtag)),
     ]);
     // `typeid`, PORTED into `runtime/ruby/typeid.rb` as a module whose
     // `new` answers a plain String (the gem's `TypeID < String` is a
@@ -477,6 +546,33 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `ActiveSupport::Cache` — `expand_cache_key` and the bounded
     // `MemoryStore`, in runtime/spinel/active_support_cache.rb (the ruby
     // family and spinel). A cached value is whatever was written.
+    {
+        let state = classes.entry(ClassId(Symbol::from("ActiveSupport::IsolatedExecutionState"))).or_default();
+        state.is_module = true;
+        state.class_methods.insert(Symbol::from("[]"), Ty::untyped());
+        state.class_methods.insert(Symbol::from("[]="), Ty::untyped());
+        state.class_methods.insert(Symbol::from("state"), Ty::Hash { key: std::sync::Arc::new(Ty::untyped()), value: std::sync::Arc::new(Ty::untyped()) });
+    }
+    {
+        let notes = classes.entry(ClassId(Symbol::from("ActiveSupport::Notifications"))).or_default();
+        notes.is_module = true;
+        notes.class_methods.insert(Symbol::from("subscribe"), Ty::untyped());
+        notes.class_methods.insert(Symbol::from("unsubscribe"), Ty::Nil);
+        notes.class_methods.insert(Symbol::from("instrument"), Ty::untyped());
+        notes.class_methods.insert(Symbol::from("subscribed"), Ty::untyped());
+    }
+    register_stdlib_class(classes, "ActiveSupport::Notifications::Event", &[], &[
+        ("name", Ty::Str),
+        ("payload", Ty::Hash { key: std::sync::Arc::new(Ty::untyped()), value: std::sync::Arc::new(Ty::untyped()) }),
+    ]);
+    register_stdlib_class(classes, "ActiveSupport::ConfigurationFile", &[
+        ("parse", Ty::untyped()),
+    ], &[]);
+    {
+        let continuable = classes.entry(ClassId(Symbol::from("ActiveJob::Continuable"))).or_default();
+        continuable.is_module = true;
+        continuable.instance_methods.insert(Symbol::from("step"), Ty::untyped());
+    }
     register_stdlib_class(classes, "ActiveSupport::Cache", &[
         ("expand_cache_key", Ty::Str),
     ], &[]);
@@ -494,6 +590,20 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("prune", Ty::Nil),
         ("read_multi", Ty::Hash { key: std::sync::Arc::new(Ty::untyped()), value: std::sync::Arc::new(Ty::untyped()) }),
         ("write_multi", Ty::Bool),
+    ]);
+    let null_store = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::Cache::NullStore")), args: vec![].into() };
+    register_stdlib_class(classes, "ActiveSupport::Cache::NullStore", &[
+        ("new", null_store),
+    ], &[
+        ("read", Ty::Nil),
+        ("write", Ty::Bool),
+        ("fetch", Ty::untyped()),
+        ("delete", Ty::Bool),
+        ("exist?", Ty::Bool),
+        ("clear", Ty::Nil),
+        ("read_str", Ty::Nil),
+        ("write_str", Ty::Str),
+        ("fetch_str", Ty::Str),
     ]);
 
     // `FileUtils` — a default gem / spinel's `packages/fileutils`.
@@ -684,8 +794,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     for exc in [
         "Exception", "StandardError", "RuntimeError", "ArgumentError",
         "TypeError", "NameError", "NoMethodError", "IndexError",
-        "KeyError", "RangeError", "IOError", "NotImplementedError",
-        "FrozenError", "ZeroDivisionError", "StopIteration",
+        "KeyError", "RangeError", "IOError", "IO::TimeoutError", "NotImplementedError",
+        "FrozenError", "ZeroDivisionError", "FloatDomainError", "StopIteration",
         "ThreadError", "ClosedQueueError", "RegexpError",
         // CRuby's bundled libraries and Spinel's uri/net/json packages
         // recognize these exception names; emitted requires load them.
@@ -700,6 +810,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Timeout::Error",
         // `rescue EOFError` around `readpartial` on a pipe or a pty.
         "EOFError",
+        // `rescue LoadError` around an optional `require` (counter_culture's
+        // after_commit_action fallback).
+        "LoadError",
         // lobsters' `Sponge::OTHER_PEOPLES_PROBLEMS`, a class-body Array
         // of exception classes. zlib's and Encoding's are Ruby's own and
         // spinel's (`packages/zlib`, `lib/sp_exc.c`). net/protocol's
@@ -753,7 +866,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
         ("ActiveRecord::RecordInvalid", Some(("record", Ty::untyped()))),
         ("ActiveRecord::RecordNotSaved", Some(("record", Ty::untyped()))),
+        ("ActiveRecord::RecordNotDestroyed", Some(("record", Ty::untyped()))),
         ("ActiveRecord::ReadOnlyRecord", None),
+        ("ActiveRecord::ConnectionNotEstablished", None),
+        ("ActiveRecord::ConnectionFailed", None),
+        ("ActiveRecord::ConnectionTimeoutError", None),
+        ("ActiveRecord::Encryption::Errors::Decryption", None),
+        ("ActiveRecord::Encryption::Errors::Configuration", None),
+        ("ActiveJob::EnqueueError", None),
         // Names overlap `project::RUBY_FAMILY_RUNTIME_CONSTANTS` (emit
         // ledger). Keep extras here — inference needs the readers.
         ("ActionController::ParameterMissing", Some(("param", Ty::Str))),
@@ -769,6 +889,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let methods: Vec<(&str, Ty)> = methods;
         register_stdlib_class(classes, exc, &[], &methods);
     }
+    // `Associations::Preloader#call` — the ruby-family class in
+    // preloading.rb. A two-keyword call is rewritten before it runs.
+    register_stdlib_class(classes, "ActiveRecord::Associations::Preloader", &[], &[
+        ("call", Ty::Nil),
+    ]);
     // `ActiveModel::Type::Boolean.new.cast(v)`: nil for a blank value, else the boolean.
     // `ActiveSupport::TimeZone` is `runtime/ruby/active_support_ext.rb`'s port; `[]` is typed in dispatch, by its argument.
     {
@@ -785,6 +910,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Not answered here beyond `new`: the dispatch arm for `ActiveSupport::StringInquirer` types its predicates and String surface.
     register_stdlib_class(classes, "ActiveSupport::StringInquirer", &[("new", Ty::Str)], &[]);
     // `ActiveRecord::Type::Boolean` is a subclass with the same casting; `deserialize` casts the same way for a boolean.
+    register_stdlib_class(classes, "ActiveRecord::Type::String", &[], &[
+        ("cast", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+        ("deserialize", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+    ]);
+    register_stdlib_class(classes, "ActiveRecord::Type::Integer", &[], &[
+        ("cast", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+        ("deserialize", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+    ]);
     for name in ["ActiveModel::Type::Boolean", "ActiveRecord::Type::Boolean"] {
         register_stdlib_class(classes, name, &[], &[
             ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }),
@@ -911,6 +1044,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("rewind", Ty::Int),
         ("binmode", io.clone()),
         ("close", Ty::Nil),
+        // Writing to a stream: `STDERR.puts "…"`.
+        ("puts", Ty::Nil),
+        ("print", Ty::Nil),
+        ("flush", io.clone()),
+        ("sync", Ty::Bool),
+        ("tty?", Ty::Bool),
+        ("fileno", Ty::Int),
     ]);
     // `File < IO` — Ruby's hierarchy (not a PTY detail). File's class
     // methods are registered earlier; the parent is set once `IO` exists
@@ -983,6 +1123,26 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // of that constant and Mutex.new retain their source expressions.
     // Do not invent member or synchronization return types here.
     register_stdlib_class(classes, "Struct", &[], &[]);
+    // `Range.new(0, n)` (flag_shih_tzu); its answer is typed off the bounds in dispatch.
+    register_stdlib_class(classes, "Range", &[], &[]);
+    // `default.is_a?(Proc) ? default.call : default` (rails-settings-cached):
+    // what a value that only proved itself a Proc answers is not known.
+    register_stdlib_class(classes, "Proc", &[], &[
+        ("call", Ty::untyped()), ("arity", Ty::Int), ("lambda?", Ty::Bool),
+    ]);
+    // `Method.method_defined?(:source_location)` (aasm's invokers): the class as a value only.
+    register_stdlib_class(classes, "Method", &[], &[]);
+    // Rubygems' version value, which the ruby family and spinel load with Ruby itself.
+    {
+        let version = || Ty::Class { id: ClassId(Symbol::from("Gem::Version")), args: vec![].into() };
+        register_stdlib_class(classes, "Gem::Version", &[("correct?", Ty::Bool)], &[
+            ("<=>", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+            ("<", Ty::Bool), ("<=", Ty::Bool), (">", Ty::Bool), (">=", Ty::Bool), ("==", Ty::Bool),
+            ("eql?", Ty::Bool), ("hash", Ty::Int),
+            ("to_s", Ty::Str), ("version", Ty::Str), ("prerelease?", Ty::Bool),
+            ("release", version()), ("bump", version()),
+        ]);
+    }
     register_stdlib_class(classes, "Mutex", &[], &[]);
     // The queue constructors, Thread's core aliases, and the standard
     // mixins likewise need exact entries for source constant resolution.
@@ -1113,6 +1273,9 @@ pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
     ("Thread::Mutex", "synchronize"),
     ("Monitor", "synchronize"),
     ("ActiveSupport::Cache::MemoryStore", "fetch"),
+    ("ActiveSupport::Cache::NullStore", "fetch"),
+    ("ActiveSupport::Notifications", "subscribed"),
+    ("ActiveJob::Continuable", "step"),
 ];
 
 fn register_stdlib_class(

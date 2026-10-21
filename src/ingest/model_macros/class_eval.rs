@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dialect::{MethodDef, ModelBodyItem};
 use crate::ident::ClassId;
-use crate::ingest::model::ingest_model_body_items;
+use crate::ingest::model::{ClassConsts, ingest_model_body_items};
 use crate::ingest::prism::parse_silent;
 use crate::ingest::util::constant_id_str;
 use crate::span::SourceFile;
@@ -101,10 +101,9 @@ pub(super) fn expand(
     // non-symbol kwarg) declines the *entire* expansion, including
     // already-rewritten class_eval methods. That is fail-closed, not
     // a support claim — pin with a negative overlay.
-    if items
-        .iter()
-        .any(|item| matches!(item, ModelBodyItem::Unknown { .. }))
-    {
+    if items.iter().any(|item| {
+        matches!(item, ModelBodyItem::Unknown { expr, .. } if super::mixin_args(expr).is_none())
+    }) {
         return None;
     }
     (!methods.is_empty() || !items.is_empty()).then_some(Expansion { methods, items })
@@ -124,7 +123,7 @@ fn ingest_rewritten_body(
     let program = parsed.node().as_program_node()?;
     for stmt in program.statements().body().iter() {
         absorb_items(
-            ingest_model_body_items(&stmt, owner, file, Vec::new(), None).ok()?,
+            ingest_model_body_items(&stmt, owner, file, Vec::new(), None, &ClassConsts::default()).ok()?,
             methods,
             items,
         );

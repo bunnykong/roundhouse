@@ -78,7 +78,7 @@ class FocusLabels(unittest.TestCase):
         self.assertNotIn("archive-results", plan["required"])
         self.assertNotIn("compare-jruby", plan["jobs"])
         self.assertNotIn("build-wasm", plan["jobs"])
-        self.assertFalse(set(ci.SPINEL11).intersection(plan["jobs"]))
+        self.assertFalse(set(ci.SPINEL).intersection(plan["jobs"]))
 
     def test_extra_compare_targets_and_labels(self):
         self.assertEqual(
@@ -173,13 +173,15 @@ class FocusLabels(unittest.TestCase):
         self.assertEqual(plan["archives"], ["spinel"])
         self.assertIn("build-site", plan["required"])
 
-    def test_main_spinel_lane_stays_advisory_full_suite(self):
+    def test_unknown_input_spinel_lane_stays_advisory_full_suite(self):
+        # spinel_lane is the unknown-input / explicit advisory suite — not
+        # every main push. Full validation selects the same jobs via full=.
         plan = ci.select([], spinel_lane=True)
         self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
         self.assertNotIn("spinel-compare", plan["required"])
         self.assertTrue(plan["spinel_advisory"])
         self.assertTrue(set(ci.CORE).issubset(plan["advisory"]))
-        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertTrue(set(ci.SPINEL).issubset(plan["jobs"]))
 
     def test_rust_and_typescript_compare_independently(self):
         rust = ci.select(["src/emit/rust.rs"])
@@ -190,6 +192,39 @@ class FocusLabels(unittest.TestCase):
         self.assertEqual(ts["compare"], ["typescript"])
         self.assertEqual(ts["smoke"], ["typescript"])
         self.assertIn("browser-smoke-typescript", ts["jobs"])
+
+    def test_rust_and_typescript_focus_labels_are_independent(self):
+        parsed = ci.parse_coverage_labels(["ci:rust", "ci:crystal"])
+        self.assertEqual(parsed.focus_compare, ("rust",))
+        self.assertEqual(parsed.focus_extras, ("crystal",))
+        rust = ci.select(
+            ["src/emit/typescript/expr.rs", "src/emit/go.rs"],
+            focus_compare=("rust",),
+        )
+        self.assertEqual(rust["compare"], ["rust"])
+        self.assertEqual(rust["smoke"], ["rust"])
+        self.assertEqual(rust["extra_compare"], [])
+        self.assertNotIn("compare-extra", rust["jobs"])
+        self.assertNotIn("browser-smoke-typescript", rust["jobs"])
+        self.assertIn("compare", rust["required"])
+        self.assertIn("smoke", rust["required"])
+        self.assertFalse(set(ci.SPINEL).intersection(rust["jobs"]))
+        both = plan_pull_request(
+            ["ci:typescript", "ci:rust", "ci:crystal"],
+            changed_inputs=(["src/analyze/body/send.rs"], None),
+        )
+        self.assertEqual(both["compare"], ["rust", "typescript"])
+        self.assertEqual(both["smoke"], ["rust", "typescript"])
+        self.assertEqual(both["extra_compare"], ["crystal"])
+        self.assertEqual(both["smoke_extra"], ["crystal"])
+        self.assertIn("compare", both["required"])
+        self.assertIn("smoke", both["required"])
+        self.assertIn("compare-extra", both["required"])
+        self.assertIn("smoke-extra", both["required"])
+        self.assertNotIn("browser-smoke-typescript", both["jobs"])
+        self.assertFalse(both["wasm"])
+        self.assertFalse(both["spinel"])
+        self.assertFalse(both["extras_advisory"])
 
     def test_pr_events_drive_focus_and_unknown_keeps_focus(self):
         plan = plan_pull_request(

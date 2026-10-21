@@ -670,67 +670,20 @@ fn kt_default(ty: &str) -> &'static str {
     }
 }
 
-/// Find locals needing top-of-method hoisting: first assigned at a nested
-/// scope depth (>0) yet assigned more than once. Returns `(name, kotlin_ty)`
-/// pairs, the type taken from the first assignment's value.
+/// Locals needing top-of-method hoisting (`emit::shared::hoist`), as
+/// `(name, kotlin_ty)` pairs, the type taken from the first assignment's
+/// value.
 fn scan_hoist(body: &Expr) -> Vec<(String, String)> {
-    // name → (first-assignment depth, total assignment count, type)
-    let mut info: std::collections::BTreeMap<String, (usize, usize, String)> =
-        std::collections::BTreeMap::new();
-    walk_hoist(body, 0, &mut info);
-    info.into_iter()
-        .filter(|(_, (depth, count, _))| *depth > 0 && *count > 1)
-        .map(|(n, (_, _, ty))| (n, ty))
+    crate::emit::shared::hoist::hoisted_locals(body)
+        .into_iter()
+        .map(|h| {
+            let ty = match h.tys.first() {
+                Some(Some(t)) => kotlin_ty(t),
+                _ => "Any?".to_string(),
+            };
+            (camel(&h.name), ty)
+        })
         .collect()
-}
-
-fn walk_hoist(
-    e: &Expr,
-    depth: usize,
-    info: &mut std::collections::BTreeMap<String, (usize, usize, String)>,
-) {
-    if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
-        let n = camel(name.as_str());
-        let ty = match value.ty.as_ref() {
-            Some(t) if !matches!(t, crate::ty::Ty::Nil) => kotlin_ty(t),
-            _ => "Any?".to_string(),
-        };
-        let entry = info.entry(n).or_insert((depth, 0, ty));
-        entry.1 += 1;
-    }
-    // Recurse, deepening only into genuinely nested scopes (branch/loop/block
-    // bodies); a `Seq` and an `if` condition stay at the current depth.
-    match &*e.node {
-        ExprNode::Seq { exprs } => {
-            for c in exprs {
-                walk_hoist(c, depth, info);
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            walk_hoist(cond, depth, info);
-            walk_hoist(then_branch, depth + 1, info);
-            walk_hoist(else_branch, depth + 1, info);
-        }
-        ExprNode::While { cond, body, .. } => {
-            walk_hoist(cond, depth, info);
-            walk_hoist(body, depth + 1, info);
-        }
-        ExprNode::Case { scrutinee, arms } => {
-            walk_hoist(scrutinee, depth, info);
-            for a in arms {
-                walk_hoist(&a.body, depth + 1, info);
-            }
-        }
-        ExprNode::Lambda { body, .. } => walk_hoist(body, depth + 1, info),
-        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
-            walk_hoist(value, depth, info)
-        }
-        _ => {
-            for c in children(e) {
-                walk_hoist(c, depth, info);
-            }
-        }
-    }
 }
 
 /// Infer element types for empty-container locals from how they're later
@@ -880,7 +833,7 @@ pub fn emit_expr(e: &Expr) -> String {
 /// Mirrors `crystal::expr::try_string_builder`. Non-hinted sites fall
 /// through to the normal node emit.
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -1062,13 +1015,68 @@ fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("\"{}\"", escape_str(value)),
         // No symbol type in Kotlin → string.
         Literal::Sym { value } => format!("\"{}\"", escape_str(value.as_str())),
-        Literal::Regex { pattern, .. } => {
+        Literal::Regex { pattern, flags } => {
             // Ruby `/[\r\n\0\t]/` carries a backslash-zero NUL escape.
             // Java `Pattern` rejects `\0` (octal needs more digits); use
             // `\u0000` which both Kotlin's string literal and Pattern accept.
             let normalized = normalize_java_regex_nul(pattern);
-            format!("Regex(\"{}\")", escape_str(&normalized))
+            let options = kotlin_regex_options(flags);
+            if options.is_empty() {
+                format!("Regex(\"{}\")", escape_str(&normalized))
+            } else {
+                format!("Regex(\"{}\", setOf({options}))", escape_str(&normalized))
+            }
         }
+    }
+}
+
+/// Ruby regex flags this build can reproduce exactly: `i` →
+/// `RegexOption.IGNORE_CASE`. Ruby's `m` (dot-matches-newline) is
+/// `RegexOption.DOT_MATCHES_ALL`. Ruby's `^`/`$` are always line
+/// anchors, so a flagged `m` also adds `RegexOption.MULTILINE`.
+/// Any other flag character stays an ingest-time gap, so none
+/// reaches here.
+fn kotlin_regex_options(flags: &str) -> String {
+    let bits = crate::emit::shared::regex_literal::parse_ruby_regex_flags(flags);
+    let mut parts: Vec<&str> = Vec::new();
+    if bits.ignore_case {
+        parts.push("RegexOption.IGNORE_CASE");
+    }
+    if bits.dot_matches_newline {
+        parts.push("RegexOption.DOT_MATCHES_ALL");
+        parts.push("RegexOption.MULTILINE");
+    }
+    parts.join(", ")
+}
+
+#[cfg(test)]
+mod regex_flag_tests {
+    #[test]
+    fn rubys_m_keeps_line_anchors_as_well_as_dotall() {
+        assert_eq!(kotlin_regex_options("m"), "RegexOption.DOT_MATCHES_ALL, RegexOption.MULTILINE");
+    }
+
+    use super::{emit_literal, kotlin_regex_options};
+    use crate::expr::Literal;
+
+    #[test]
+    fn no_flags_drop_the_options_set() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "".into() };
+        assert_eq!(emit_literal(&lit), r#"Regex("a.b")"#);
+    }
+
+    #[test]
+    fn ignore_case_maps_to_regexoption_ignore_case() {
+        assert_eq!(kotlin_regex_options("i"), "RegexOption.IGNORE_CASE");
+    }
+
+    #[test]
+    fn ignore_case_and_dot_matches_newline_combine_in_a_set() {
+        let lit = Literal::Regex { pattern: "a.b".into(), flags: "im".into() };
+        assert_eq!(
+            emit_literal(&lit),
+            r#"Regex("a.b", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL, RegexOption.MULTILINE))"#
+        );
     }
 }
 
@@ -1260,12 +1268,13 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
         BoolOpKind::And => format!("{l} && {r}"),
         // `||` is logical-or for Bool results, but Ruby's `x || default`
         // nil-coalescing idiom maps to Kotlin's `?:` when the result
-        // isn't a Bool.
+        // isn't a Bool. `?:` binds looser than a call, so the coalesce is
+        // parenthesized to stay whole as a receiver (`(x ?: "").isEmpty()`).
         BoolOpKind::Or => {
             if matches!(e.ty.as_ref(), Some(crate::ty::Ty::Bool)) {
                 format!("{l} || {r}")
             } else {
-                format!("{l} ?: {r}")
+                format!("({l} ?: {r})")
             }
         }
     }
@@ -1555,7 +1564,12 @@ fn emit_slice_range(
 }
 
 fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr, destructure: bool) -> String {
+    // A local the block declares is the block's own (Ruby scopes it the
+    // same way), so a sibling block assigning the same name declares its
+    // own too. See `emit::shared::hoist`.
+    let outer = DECLARED.with(|d| d.borrow().clone());
     let body_s = emit_expr(body);
+    DECLARED.with(|d| *d.borrow_mut() = outer);
     if params.is_empty() {
         format!("{{ {body_s} }}")
     } else {
@@ -1600,6 +1614,10 @@ fn emit_send(
     args: &[Expr],
     block: Option<&Expr>,
 ) -> String {
+    if let Some(recv) = crate::emit::shared::fn_call::function_receiver(recv, method, block) {
+        let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+        return format!("{}({})", emit_expr(recv), args_s.join(", "));
+    }
     // A bare implicit-self zero-arg send that names a parameter is a
     // reference to that local, not a method call — emit the identifier
     // without `()`. (See `PARAM_NAMES`: the view lowerer renders a partial

@@ -86,6 +86,7 @@ pub fn load_gem_boundary<V: Vfs + ?Sized>(
             || extensions.lock_gated_requires.iter().any(|row| row.gem == name)
             || extensions.is_rails_dependent(name);
         if lock.is_in_repo(name)
+            || lock.is_source(name)
             || (!extension_gem && !matches!(fate_of(name), GemFate::Unknown | GemFate::Modeled))
         {
             continue;

@@ -32,6 +32,9 @@ impl EnumConstants {
             kind: SourceKind,
             nesting: Vec<String>,
             parents: Vec<Node<'pr>>,
+            /// Offsets of the plain `NAME = …` writes at a file's or a
+            /// body's top level, the one write a constant may have.
+            direct_writes: std::collections::HashSet<usize>,
         }
         impl Collector<'_, '_> {
             fn scoped(&self, path: String) -> ScopedName {
@@ -117,6 +120,28 @@ impl EnumConstants {
                         )
                     });
                 self.constants.record_write(&node, &self.nesting, direct);
+                if direct && node.as_constant_write_node().is_some() {
+                    self.direct_writes.insert(node.location().start_offset());
+                }
+                // `const_set(:X, …)` / `self.send(:remove_const, :X)` in a
+                // body replaces that owner's constants.
+                if matches!(self.kind, SourceKind::Inputs)
+                    && let Some(call) = node.as_call_node()
+                    && call.receiver().is_none_or(|r| r.as_self_node().is_some())
+                    && super::super::REFLECTION_METHODS.contains(&constant_id_str(&call.name()).as_ref())
+                {
+                    // Outside any body the receiver is `main`, whose
+                    // `const_get` reaches every owner, as `Object`'s does;
+                    // its `const_set(:Name, …)` only the one `Name`.
+                    let named = super::super::named_constant_write(&call);
+                    let owner = match (self.nesting.last(), &named) {
+                        (Some(owner), _) => owner.as_str(),
+                        (None, Some(name)) => name.as_str(),
+                        (None, None) => "Object",
+                    };
+                    let last = owner.rsplit("::").next().unwrap_or(owner).to_string();
+                    self.constants.reflected.insert(last);
+                }
                 let path = node
                     .as_class_node()
                     .map(|c| c.constant_path())
@@ -124,7 +149,8 @@ impl EnumConstants {
                 if let Some(path) = path.and_then(|p| EnumConstants::path(&p)) {
                     let owner = self.nesting.last().map(String::as_str).unwrap_or("");
                     let name = EnumConstants::qualify(owner, &path);
-                    if path.contains("::") {
+                    let qualified = path.contains("::");
+                    if qualified {
                         self.constants.facts.push(SourceFact::Reopen {
                             subject: self.scoped(path),
                             collected: name.clone(),
@@ -180,6 +206,30 @@ impl EnumConstants {
                     // lookup — concern `TYPES` inside `included do`
                     // resolves through the module entry the same way a
                     // model class resolves `STATUS` for `enum`.
+                    if matches!(self.kind, SourceKind::Inputs) {
+                        // `module Wrapper; class Catalog::Rating` may reopen
+                        // ::Catalog::Rating: the collected name is not
+                        // certain, so its table never folds.
+                        let certain = direct && (!qualified || self.nesting.is_empty());
+                        let table = certain.then(|| {
+                            let body = node
+                                .as_class_node()
+                                .and_then(|class| class.body())
+                                .or_else(|| node.as_module_node().and_then(|module| module.body()));
+                            super::super::ClassConsts::collect(
+                                &body.map(flatten_statements).unwrap_or_default(),
+                                self.file,
+                            )
+                        });
+                        match (self.constants.owner_consts.get_mut(&name), table) {
+                            (Some(Some(existing)), Some(table)) => existing.merge(table),
+                            (Some(existing), None) => *existing = None,
+                            (Some(None), Some(_)) => {}
+                            (None, table) => {
+                                self.constants.owner_consts.insert(name.clone(), table);
+                            }
+                        }
+                    }
                     if node.as_class_node().is_some() || node.as_module_node().is_some() {
                         self.constants.nesting.insert(
                             (self.file.to_string(), node.location().start_offset()),
@@ -216,16 +266,21 @@ impl EnumConstants {
             SourceKind::Mutations => ruby_prism::parse(source),
         };
         if result.errors().next().is_none() {
-            ruby_prism::Visit::visit(
-                &mut Collector {
-                    constants: self,
-                    file,
-                    kind,
-                    nesting: Vec::new(),
-                    parents: Vec::new(),
-                },
-                &result.node(),
-            );
+            let mut collector = Collector {
+                constants: self,
+                file,
+                kind,
+                nesting: Vec::new(),
+                parents: Vec::new(),
+                direct_writes: Default::default(),
+            };
+            ruby_prism::Visit::visit(&mut collector, &result.node());
+            let direct_writes = collector.direct_writes;
+            if matches!(kind, SourceKind::Inputs) {
+                let (tainted, reflected) = super::super::ConstTaint::scan_tree(&result.node(), direct_writes);
+                self.foreign_taint.extend(tainted);
+                self.reflected.extend(reflected);
+            }
         }
     }
 
@@ -249,6 +304,7 @@ impl EnumConstants {
         }
         if let Some(write) = node.as_constant_write_node() {
             let name = Self::qualify(owner, constant_id_str(&write.name()));
+            *self.write_counts.entry(name.clone()).or_default() += 1;
             let value = write.value();
             let literal = match value.as_call_node() {
                 Some(call)
@@ -319,7 +375,7 @@ impl EnumConstants {
     }
 
     /// A static path retaining root qualification, rejecting runtime receivers.
-    pub(super) fn path(node: &Node<'_>) -> Option<String> {
+    pub(in crate::ingest) fn path(node: &Node<'_>) -> Option<String> {
         if let Some(parentheses) = node.as_parentheses_node() {
             let statements = flatten_statements(parentheses.body()?);
             return match statements.as_slice() {

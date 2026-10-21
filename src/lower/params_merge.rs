@@ -336,12 +336,8 @@ fn including_models(app: &App) -> HashMap<ClassId, Vec<Symbol>> {
 
 fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
     let mut seen: HashMap<BindKey, SiteShapes> = HashMap::new();
-    let models = crate::lower::scope_chain::model_set(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
-    let assoc = AssocCtx {
-        models: &models,
-        assocs: &assocs,
-    };
+    let assoc = AssocCtx { assocs: &assocs };
 
     // EVERY call site has to be seen, not just the ones that could bind
     // — a site passing a plain Hash is exactly what proves the parameter
@@ -587,12 +583,9 @@ fn callee_class(recv: &Expr, assoc: &AssocCtx<'_>) -> Option<Symbol> {
     } = &*recv.node
     {
         if args.is_empty() {
-            if let Some((_, target, _)) = crate::lower::scope_chain::assoc_read_target(
-                owner,
-                aname,
-                assoc.models,
-                assoc.assocs,
-            ) {
+            if let Some((_, target, _)) =
+                crate::lower::scope_chain::assoc_read_target(owner, aname, assoc.assocs)
+            {
                 return Some(unqualified(target.0.as_str()));
             }
         }
@@ -623,7 +616,6 @@ fn unqualified(name: &str) -> Symbol {
 }
 
 struct AssocCtx<'a> {
-    models: &'a std::collections::HashSet<ClassId>,
     assocs: &'a crate::lower::scope_chain::AssocRegistry,
 }
 
@@ -805,6 +797,14 @@ const RUNTIME_ATTRS_SLOTS: &[&str] = &[
     "destroy_by",
     "delete_by",
     "exists?",
+    // The find-or-build/create family takes the same condition hash, which
+    // is also what the record it builds is given: campfire's push
+    // subscriptions controller moved from `find_by` to
+    // `@push_subscriptions.find_or_initialize_by(push_subscription_params)`
+    // at once-campfire c8f74a0.
+    "find_or_initialize_by",
+    "find_or_create_by",
+    "find_or_create_by!",
 ];
 
 fn convert_attributes_assignments(app: &mut App, specs: &ParamsSpecs) {
@@ -917,12 +917,8 @@ fn convert_attrs_call_sites(
     if !bindings.values().any(|b| matches!(b, Binding::Attrs(_))) {
         return;
     }
-    let models = crate::lower::scope_chain::model_set(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
-    let assoc = AssocCtx {
-        models: &models,
-        assocs: &assocs,
-    };
+    let assoc = AssocCtx { assocs: &assocs };
     for controller in &mut app.controllers {
         let actions: Vec<crate::dialect::Action> = controller.actions().cloned().collect();
         let helpers: BTreeMap<Symbol, ClassId> = helper_spec_map(&actions, specs)

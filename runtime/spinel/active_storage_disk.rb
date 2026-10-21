@@ -255,7 +255,8 @@ module ActiveStorage
   # own table (`Main.route_table`), and the controllers behind them.
   # Rails answers the two redirect routes with a redirect to the disk
   # route — the blob's SERVICE URL, which for the disk service is this
-  # same process — so that is what these do. The last two are the
+  # same process — so that is what these do; the proxy route answers
+  # with the bytes itself. The last two are the
   # DIRECT UPLOAD pair: the browser POSTs the blob's metadata and gets
   # a signed PUT url back, then PUTs the bytes there.
   #
@@ -268,6 +269,10 @@ module ActiveStorage
         ActionDispatch::Router::Route.new(
           "GET", "/rails/active_storage/blobs/redirect/:signed_id/*filename",
           :active_storage_blobs_redirect, :show
+        ),
+        ActionDispatch::Router::Route.new(
+          "GET", "/rails/active_storage/blobs/proxy/:signed_id/*filename",
+          :active_storage_blobs_proxy, :show
         ),
         ActionDispatch::Router::Route.new(
           "GET", "/rails/active_storage/representations/redirect/:signed_blob_id/:variation_key/*filename",
@@ -293,6 +298,8 @@ module ActiveStorage
     def self.instantiate_controller(sym)
       if sym == :active_storage_blobs_redirect
         ActiveStorage::Blobs::RedirectController.new
+      elsif sym == :active_storage_blobs_proxy
+        ActiveStorage::Blobs::ProxyController.new
       elsif sym == :active_storage_representations_redirect
         ActiveStorage::Representations::RedirectController.new
       elsif sym == :active_storage_direct_uploads
@@ -335,6 +342,40 @@ module ActiveStorage
           disposition = Params.str(@params, "disposition", "inline")
           redirect_to(ActiveStorage::DiskKey.disk_url(blob, disposition))
         end
+        nil
+      end
+    end
+
+    # Rails' `Blobs::ProxyController#show`: the bytes from this
+    # process, no redirect, under `http_cache_forever(public: true)`'s
+    # Cache-Control so a CDN in front keeps them (the signed id never
+    # expires by default). The disposition is the query's, held to
+    # `inline`/`attachment` as Rails' `content_disposition_with` holds
+    # it. Not modelled: a `Range` request (Rails answers 206 with the
+    # slice; this answers 200 with the whole body, which HTTP allows),
+    # so `Accept-Ranges` is not advertised, and the ETag/Last-Modified
+    # pair `http_cache_forever` adds for conditional GETs.
+    class ProxyController < ActionController::Base
+      def process_action(action_name)
+        ActiveStorage.set_current(request)
+        show
+        nil
+      end
+
+      def show
+        blob = ActiveStorage::Blob.find_signed(Params.str(@params, "signed_id", ""))
+        service = ActiveStorage::Blob.service
+        if blob.nil? || !service.exist?(blob.key)
+          head(:not_found)
+          return nil
+        end
+        forced = blob.forced_disposition_for_serving
+        asked = forced == "" ? Params.str(@params, "disposition", "inline") : forced
+        disposition = asked == "attachment" ? "attachment" : "inline"
+        headers["Cache-Control"] = "max-age=3155695200, public, immutable"
+        send_data(service.download(blob.key), type: blob.content_type_for_serving, disposition: disposition)
+        headers["Content-Disposition"] = disposition + "; filename=\"" +
+          ActiveStorage.url_filename(blob.filename.to_s) + "\""
         nil
       end
     end
@@ -401,6 +442,7 @@ module ActiveStorage
       initializer_filters(action_name)
       return nil if performed?
       create
+      initializer_after_filters(action_name)
       nil
     end
 
@@ -408,6 +450,12 @@ module ActiveStorage
     # `project::apply_module_mixins`. Redefined by the generated reopen
     # at the end of boot.rb when the app registers one.
     def initializer_filters(action_name)
+      nil
+    end
+
+    # The same for an initializer's `after_action`, asked once the
+    # action has answered.
+    def initializer_after_filters(action_name)
       nil
     end
 
@@ -463,12 +511,17 @@ module ActiveStorage
       else
         show
       end
+      initializer_after_filters(action_name)
       nil
     end
 
-    # The seam an initializer's `before_action` is written into — see
-    # `DirectUploadsController#initializer_filters`.
+    # The seams an initializer's `before_action` and `after_action` are
+    # written into — see `DirectUploadsController#initializer_filters`.
     def initializer_filters(action_name)
+      nil
+    end
+
+    def initializer_after_filters(action_name)
       nil
     end
 
@@ -515,8 +568,7 @@ module ActiveStorage
         head(:not_found)
         return nil
       end
-      headers["Cache-Control"] = "max-age=3600, public"
-      send_data(service.download(key), type: blob.content_type, disposition: disposition)
+      send_data(service.download(key), type: blob.content_type_for_serving, disposition: disposition)
       # send_data writes only `inline`/`attachment`; restore the
       # sanitized filename after that overwrite.
       headers["Content-Disposition"] = (disposition == "attachment" ? "attachment" : "inline") + "; filename=\"" +

@@ -44,7 +44,10 @@
 #                    adds it in a `Gemfile.falcon` beside the emit, at the
 #                    version tobi's lock pins, so the two lanes run the
 #                    same server.
-#     spinel         the roundhouse spinel BINARY, workers autodetected
+#     spinel         the roundhouse spinel BINARY, workers autodetected,
+#                    with Thruster's response cache in process
+#                    (runtime/spinel/tep/thruster_cache.rb), as the
+#                    CRuby lanes carry it and the rails lane has Thruster
 #     jruby          the roundhouse emit for the JVM (`--target jruby`:
 #                    the same tree over JDBC), ONE process, one Puma
 #                    thread per hardware thread — JRuby has no GVL, so

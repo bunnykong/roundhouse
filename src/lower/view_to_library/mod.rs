@@ -48,7 +48,9 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
-use self::extra_params::{collect_extra_params, drop_closure_names};
+use self::extra_params::{drop_closure_names, rewritten_extras};
+
+pub(crate) use self::extra_params::flash_param_in_scope;
 use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
 use self::walker::walk_body;
 
@@ -265,6 +267,9 @@ pub struct ViewLowerCtx<'a> {
     /// Helper methods that are a thin wrapper around a BUILDER-YIELDING
     /// form helper (see [`form_wrapper_helpers`]).
     form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    /// See the ViewCtx field of the same name. Off unless the emitter
+    /// opts in with [`ViewLowerCtx::observe_form_with_entry`].
+    form_with_entry: bool,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -336,16 +341,59 @@ impl<'a> ViewLowerCtx<'a> {
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
             collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views, app)),
             form_wrappers: std::rc::Rc::new(form_wrapper_helpers(app)),
+            form_with_entry: false,
         }
     }
 
+    /// Open each template `form_with` site with the
+    /// `ActionView::Base.new.form_with` entry. Only the Ruby family
+    /// ships `ActionView::Base` (`runtime/ruby/action_view/base.rb`):
+    /// the call exists so a mocha spy on the view context observes the
+    /// site, and the strict targets have neither the class nor mocha.
+    pub fn observe_form_with_entry(mut self) -> Self {
+        self.form_with_entry = true;
+        self
+    }
+
     pub fn lower(&self, view: &View) -> LibraryClass {
-        build_library_class(view, self, /*type_body=*/ true)
+        plain_text(view, build_library_class(view, self, /*type_body=*/ true))
     }
 
     pub(crate) fn lower_untyped(&self, view: &View) -> LibraryClass {
-        build_library_class(view, self, /*type_body=*/ false)
+        plain_text(view, build_library_class(view, self, /*type_body=*/ false))
     }
+}
+
+/// A text/plain template (`.text.erb`, `.txt.erb`) writes `<%= x %>` as
+/// it is: Rails' ERB handler escapes every other format but this one
+/// (`escape_ignore_list`), so the walker's `html_escape` comes back off.
+fn plain_text(view: &View, mut lc: LibraryClass) -> LibraryClass {
+    if !matches!(view.format.as_str(), "text" | "txt") {
+        return lc;
+    }
+    fn unescape(e: &mut Expr) {
+        e.node.for_each_child_mut(&mut |c| unescape(c));
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else { return };
+        let helpers = matches!(&*recv.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"]));
+        if !helpers || method.as_str() != "html_escape" || args.len() != 1 {
+            return;
+        }
+        let arg = args[0].clone();
+        let span = e.span;
+        let already_string = matches!(&*arg.node, ExprNode::Send { method, args, .. } if method.as_str() == "to_s" && args.is_empty())
+            || matches!(arg.ty, Some(crate::ty::Ty::Str));
+        *e = if already_string {
+            arg
+        } else {
+            let mut s = Expr::new(span, ExprNode::Send { recv: Some(arg), method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false });
+            s.ty = Some(crate::ty::Ty::Str);
+            s
+        };
+    }
+    for m in &mut lc.methods {
+        unescape(&mut m.body);
+    }
+    lc
 }
 
 pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
@@ -379,12 +427,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     //
     // The arg is a positional param, so a reserved-word `as:` (`as:
     // :for`) goes through `safe_local`, as its reads do.
-    let arg_name = view_key_of(view)
-        .and_then(|k| lx.collection_element_locals.get(&k).cloned())
-        .map(|local| crate::naming::safe_local(&local))
-        .unwrap_or_else(|| {
-            infer_view_arg(stem, dir, base.starts_with('_'), known_models)
-        });
+    let arg_name = effective_record_arg(view, &lx.collection_element_locals, known_models);
 
     // Rewrite `@ivar` → bare `ivar` everywhere so the inferred arg name
     // (and any extra params we surface) read as plain locals in the
@@ -395,22 +438,11 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         .and_then(|k| lx.closures.get(&k).cloned())
         .unwrap_or_default();
     let ivar_locals = view_ivar_locals(view, &closure_raw);
-    let rewritten = rewrite_ivars_to_locals(&view.body, &ivar_locals);
-
-    // (No trim pass here: erubi's `<% %>`-on-its-own-line rule is
-    // applied lexically in `src/erb.rs`, where the tag's own line is
-    // still visible. It used to be reconstructed from the text-append
-    // statements by `lower::erb_trim`, which could only recognize the
-    // shapes it enumerated — enough for real-blog, not for lobsters,
-    // whose deeper bodies kept the whitespace. Two implementations of
-    // one rule also double-trimmed once the lexical one landed.)
-
-    // Collect free names other than the inferred arg → those become
-    // additional positional params. Today this picks up `notice`,
-    // `alert`, etc. (Rails flash helpers parsed as bare Sends/Vars),
-    // plus names referenced inside `defined?(name)` Sends (partial-
-    // local optionality markers in ERB).
-    let extra_params = collect_extra_params(&rewritten, &arg_name);
+    let keys = view_key_of(view).and_then(|k| lx.locals_keys.get(&k));
+    // Flash rename → ivar rewrite → extras collect, one pipeline shared
+    // with the call-site contracts (see `extra_params::rewritten_extras`).
+    let (rewritten, extra_params) =
+        rewritten_extras(view, &ivar_locals, &arg_name, keys.map(Vec::as_slice));
 
     // Rewrite `defined?(name)` marker Sends to `!name.nil?` checks.
     // Runs AFTER collect_extra_params so the inner Var name has been
@@ -740,6 +772,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         i18n: lx.i18n.clone(),
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
+        form_with_entry: lx.form_with_entry,
         stylesheets: app.stylesheets.clone(),
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
@@ -947,6 +980,26 @@ pub fn insert_db_stub(
         Symbol::from("close"),
         fn_sig(vec![], Ty::Nil),
     );
+    db_info.class_methods.insert(
+        Symbol::from("database_path"),
+        fn_sig(vec![], Ty::Str),
+    );
+    let hash_config = ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig"));
+    let hash_config_methods = [
+        ("database", Ty::Str),
+        ("adapter", Ty::Str),
+        ("name", Ty::Str),
+        ("env_name", Ty::Str),
+        ("schema_dump", Ty::Str),
+        ("seeds?", Ty::Bool),
+        ("database_tasks?", Ty::Bool),
+    ];
+    for id in [hash_config.clone(), ClassId(Symbol::from("HashConfig"))] {
+        let info = classes.entry(id).or_default();
+        for (name, ty) in &hash_config_methods {
+            info.instance_methods.entry(Symbol::from(*name)).or_insert_with(|| ty.clone());
+        }
+    }
     // The per-request replay cache, which `ActiveRecord::Base.uncached`
     // (active_record/connection.rb, ruby family) suspends for a block.
     for (name, ret) in [
@@ -1102,6 +1155,53 @@ pub fn insert_db_stub(
         Symbol::from("_txn_depth="),
         fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
     );
+    // Bit `depth - 1` records whether that frame can be joined. A
+    // fixture transaction is not joinable, so a nested save or
+    // destroy opens a savepoint (connection.rb). Same boxed accessor
+    // as the depth so the body stays concretely typed.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_joinable_bits"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("_txn_joinable_bits="),
+        fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
+    );
+    // Whether the connection holds a transaction — one ActiveRecord
+    // opened or one opened beneath it (connection.rb's
+    // `self.transaction` joins the latter instead of nesting a BEGIN).
+    db_info.class_methods.insert(Symbol::from("transaction_open?"), fn_sig(vec![], Ty::Bool));
+    // The open transaction's enlisted writes (connection.rb's
+    // `_commit_enlisted`), boxed per thread the same way.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_records"),
+        fn_sig(
+            vec![],
+            Ty::Array {
+                elem: std::sync::Arc::new(Ty::Class {
+                    id: ClassId(Symbol::from("ActiveRecord::EnlistedRecord")),
+                    args: vec![].into(),
+                }),
+            },
+        ),
+    );
+    // The work `current_transaction.after_commit` holds for the COMMIT
+    // (connection.rb's `_after_commit`): `^() -> nil` lambdas, boxed per
+    // thread like the records above.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_callbacks"),
+        fn_sig(
+            vec![],
+            Ty::Array {
+                elem: std::sync::Arc::new(Ty::Fn {
+                    params: vec![].into(),
+                    block: None,
+                    ret: std::sync::Arc::new(Ty::Nil),
+                    effects: crate::effect::EffectSet::default(),
+                }),
+            },
+        ),
+    );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 
     // MessageDigest — the keyed-digest primitive surface, same
@@ -1143,6 +1243,17 @@ pub fn insert_db_stub(
             ],
             Ty::Str,
         ),
+    );
+    // AES-256-GCM, the encrypted cookie jar's cipher: encrypt answers the
+    // ciphertext followed by the tag, decrypt the plaintext or "".
+    let bytes = |n: &str| (Symbol::from(n), Ty::Str);
+    digest_info.class_methods.insert(
+        Symbol::from("aes_256_gcm_encrypt"),
+        fn_sig(vec![bytes("key"), bytes("iv"), bytes("plain")], Ty::Str),
+    );
+    digest_info.class_methods.insert(
+        Symbol::from("aes_256_gcm_decrypt"),
+        fn_sig(vec![bytes("key"), bytes("iv"), bytes("ct"), bytes("tag")], Ty::Str),
     );
     classes.insert(ClassId(Symbol::from("MessageDigest")), digest_info);
 
@@ -1424,6 +1535,20 @@ pub(crate) fn insert_framework_stubs(
     // entry. Lowerer-synthesized refs (`view_helpers_call`) also
     // resolve through the same key.
     classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers")), vh);
+
+    // `ActionView::Base.new.form_with` is the cache-observable entry
+    // planted at each Ruby-family form site (`form_with::form_with_entry`).
+    // The method returns nil; the markup is the expansion that
+    // follows. `.new` already types as an instance of the receiver.
+    // Without this stub the zero-arg call stays `Ty::Var`, and the
+    // lowered real-blog residual is no longer zero.
+    let mut av_base = crate::analyze::ClassInfo::default();
+    av_base.instance_methods.insert(
+        Symbol::from("form_with"),
+        fn_sig(vec![], Ty::Nil),
+    );
+    tag_all_method(&mut av_base);
+    classes.insert(ClassId(Symbol::from("ActionView::Base")), av_base);
 
     // RouteHelpers — every `_path` / `_url` helper returns String.
     // Catch-all: the typer's `Class { id }` lookup returns Untyped if
@@ -2408,17 +2533,38 @@ pub struct PartialCallContract {
 }
 
 impl PartialCallContract {
-    /// The call's trailing arguments for `extras`, given what each name
-    /// binds to. Positional partials take every extra up to the last
-    /// bound one (nil filling the gaps); a strict-locals partial takes
-    /// just the bound ones, by name — its header defaults the rest.
+    /// The call's trailing arguments for `extras`.
+    ///
+    /// `locals_lookup` is the render's `locals:` hash; `param_lookup` is
+    /// the enclosing method's params. Positional partials take every
+    /// extra up to the last bound one (nil filling the gaps); a
+    /// strict-locals partial takes just the bound ones, by name.
+    ///
+    /// The first two extras are the flash pair (possibly renamed). When
+    /// `caller_flash` is `Some`, those slots bind by **position**: an
+    /// explicit `locals:` value under the callee name still wins, then
+    /// the caller's flash param for that slot — not a same-named ivar
+    /// local that name lookup would prefer after rename.
     pub fn extras_args(
         &self,
-        lookup: impl Fn(&str) -> Option<Expr>,
+        locals_lookup: impl Fn(&str) -> Option<Expr>,
+        param_lookup: impl Fn(&str) -> Option<Expr>,
+        caller_flash: Option<&[String; 2]>,
         nil: impl Fn() -> Expr,
         span: crate::span::Span,
     ) -> Vec<Expr> {
-        let bound: Vec<Option<Expr>> = self.extras.iter().map(|n| lookup(n)).collect();
+        let bound: Vec<Option<Expr>> = self
+            .extras
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                if let (Some(flash), true) = (caller_flash, i < 2) {
+                    locals_lookup(n).or_else(|| param_lookup(&flash[i]))
+                } else {
+                    locals_lookup(n).or_else(|| param_lookup(n))
+                }
+            })
+            .collect();
         if self.keyword_extras {
             let entries: Vec<(Expr, Expr)> = self
                 .extras
@@ -2449,6 +2595,9 @@ pub(crate) fn partial_call_contracts(
 ) -> std::collections::HashMap<(String, String), PartialCallContract> {
     let closures = view_ivar_closures(views, controllers);
     let keys_map = render_locals_keys(views, controllers, library_classes);
+    // Same record derivation as `build_library_class` / `partial_extras_map`
+    // so `flash_locals` sees one handed name across def and callers.
+    let (collection_locals, _) = collection_element_locals_from_views(views);
     let mut out = std::collections::HashMap::new();
     for view in views {
         let (dir, base) = split_view_name(view.name.as_str());
@@ -2482,11 +2631,11 @@ pub(crate) fn partial_call_contracts(
             );
             continue;
         }
-        let record = singularize(last_segment(dir));
+        let record = effective_record_arg(view, &collection_locals, &[]);
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
-        let rewritten = rewrite_ivars_to_locals(&view.body, &ivar_locals);
-        let mut extras = collect_extra_params(&rewritten, &record);
+        let keys = keys_map.get(&key).map(Vec::as_slice);
+        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys);
         // The def side names each closure param by `ivar_locals` and
         // skips the one the record covers. The caller passes `@<ivar>`
         // for the rest, so the contract keeps the RAW ivar name: the
@@ -2656,6 +2805,7 @@ pub(super) fn partial_extras_map(
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let closures = view_ivar_closures(&app.views, &app.controllers);
     let keys_map = render_locals_keys(&app.views, &app.controllers, &app.library_classes);
+    let collection_locals = collection_element_locals(&app.views, app);
     let mut out: std::collections::HashMap<(String, String), Vec<String>> =
         std::collections::HashMap::new();
     for view in &app.views {
@@ -2663,13 +2813,15 @@ pub(super) fn partial_extras_map(
         if dir.is_empty() || !base.starts_with('_') {
             continue;
         }
-        let stem = base.trim_start_matches('_');
-        let arg_name = infer_view_arg(stem, dir, true, &known_models);
-        let key = (camelize_path(&snake_case(dir)), stem.to_string());
+        let arg_name = effective_record_arg(view, &collection_locals, &known_models);
+        let key = (
+            camelize_path(&snake_case(dir)),
+            base.trim_start_matches('_').to_string(),
+        );
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
         let ivar_locals = view_ivar_locals(view, &closure_raw);
-        let rewritten = rewrite_ivars_to_locals(&view.body, &ivar_locals);
-        let mut extras = collect_extra_params(&rewritten, &arg_name);
+        let keys = keys_map.get(&key).map(Vec::as_slice);
+        let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys);
         // locals-key params — mirrors the def site's append exactly.
         let closure: Vec<String> =
             closure_raw.iter().map(|s| ivar_local(&ivar_locals, s.as_str())).collect();
@@ -2884,13 +3036,7 @@ fn collection_element_locals(
     views: &[View],
     app: &App,
 ) -> std::collections::HashMap<ViewKey, String> {
-    use std::collections::{HashMap, HashSet};
-    let mut out: HashMap<ViewKey, String> = HashMap::new();
-    let mut conflicted: HashSet<ViewKey> = HashSet::new();
-    for view in views {
-        let (dir, _) = split_view_name(view.name.as_str());
-        collect_collection_element_locals(&view.body, dir, &mut out, &mut conflicted);
-    }
+    let (mut out, conflicted) = collection_element_locals_from_views(views);
     // The partials the FRAMEWORK renders, whose call site is Action
     // Text's `render_action_text_attachment` — `render(partial:
     // attachment.to_attachable_partial_path, object: attachment, as:
@@ -2909,6 +3055,42 @@ fn collection_element_locals(
         out.entry(key).or_insert(binding.local);
     }
     out
+}
+
+/// Collection `as:` / element locals from view bodies only (no attachable
+/// framework bindings). Shared by `partial_call_contracts`, which has no
+/// `App`, and `collection_element_locals`.
+fn collection_element_locals_from_views(
+    views: &[View],
+) -> (
+    std::collections::HashMap<ViewKey, String>,
+    std::collections::HashSet<ViewKey>,
+) {
+    use std::collections::{HashMap, HashSet};
+    let mut out: HashMap<ViewKey, String> = HashMap::new();
+    let mut conflicted: HashSet<ViewKey> = HashSet::new();
+    for view in views {
+        let (dir, _) = split_view_name(view.name.as_str());
+        collect_collection_element_locals(&view.body, dir, &mut out, &mut conflicted);
+    }
+    (out, conflicted)
+}
+
+/// The record arg a view / partial takes: an unambiguous collection
+/// element local (`as:`) when every call site agrees, else the directory
+/// convention. Def site, `partial_call_contracts`, and `partial_extras_map`
+/// all use this so `flash_locals` hands the same name.
+fn effective_record_arg(
+    view: &View,
+    collection_locals: &std::collections::HashMap<ViewKey, String>,
+    known_models: &[String],
+) -> String {
+    let (dir, base) = split_view_name(view.name.as_str());
+    let stem = base.trim_start_matches('_');
+    view_key_of(view)
+        .and_then(|k| collection_locals.get(&k).cloned())
+        .map(|local| crate::naming::safe_local(&local))
+        .unwrap_or_else(|| infer_view_arg(stem, dir, base.starts_with('_'), known_models))
 }
 
 fn collect_collection_element_locals(
@@ -2988,7 +3170,25 @@ fn collect_render_keys(
             }
         }
     }
+    if let Some(k) = turbo_stream_partial_key(e, dir) {
+        out.push(k);
+    }
     e.node.for_each_child(&mut |c| collect_render_keys(c, dir, pools, out));
+}
+
+/// The partial a `turbo_stream.<action> target, partial: "x"` call
+/// renders, which the walker lowers through the same partial call a
+/// `render` gets, so it is an edge like any other.
+///
+/// Not the positional form (`turbo_stream.append target, @message`): the
+/// walker renders `@message`'s partial only when it is a record, which
+/// it tells from a String by analyzed types this graph does not have.
+/// An edge for a String would thread an unrelated partial's ivars into
+/// the caller.
+fn turbo_stream_partial_key(e: &Expr, dir: &str) -> Option<ViewKey> {
+    let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else { return None };
+    let ts = self::helpers::turbo_stream_partial(recv.as_ref(), method.as_str(), args)?;
+    Some(partial_name_to_key(ts.partial, dir))
 }
 
 /// Resolve a partial-name string to its `(module, method)` ViewKey.
@@ -4155,6 +4355,10 @@ pub(super) struct ViewCtx {
     /// to the wrapped call so the form-builder macro-inline can see
     /// both halves at once.
     pub(super) form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    /// Begin each `form_with` expansion with the
+    /// `ActionView::Base.new.form_with` entry (Ruby family only — see
+    /// `form_with::form_with_entry`).
+    pub(super) form_with_entry: bool,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
@@ -4428,7 +4632,7 @@ pub(super) fn assign_accumulator_string_new(name: &str) -> Expr {
             value: new_call,
         },
     );
-    e.hint = Some(IrHint::StringBuilderInit);
+    e.set_hint(Some(IrHint::StringBuilderInit));
     e
 }
 
@@ -4446,7 +4650,7 @@ pub(super) fn accumulator_append_call(arg: Expr, ctx: &ViewCtx) -> Expr {
         None,
         false,
     );
-    e.hint = Some(IrHint::StringBuilderAppend);
+    e.set_hint(Some(IrHint::StringBuilderAppend));
     e
 }
 
@@ -4456,7 +4660,7 @@ pub(super) fn accumulator_append_call(arg: Expr, ctx: &ViewCtx) -> Expr {
 /// references to `io` elsewhere stay untagged.
 pub(super) fn accumulator_result_ref(name: &str) -> Expr {
     let mut e = var_ref(Symbol::from(name));
-    e.hint = Some(IrHint::StringBuilderResult);
+    e.set_hint(Some(IrHint::StringBuilderResult));
     e
 }
 

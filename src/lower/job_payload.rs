@@ -542,6 +542,7 @@ fn ancestry<'a>(app: &'a App, lc: &'a LibraryClass) -> Vec<&'a LibraryClass> {
 /// Rewrite each payload job's enqueue arm, and ledger the jobs that keep
 /// their Proc.
 pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
+    let sidekiq = app.queue_adapter.as_deref() == Some("sidekiq");
     for lc in lcs.iter_mut() {
         let own_name = lc.name.0.as_str().to_string();
         let Some(plan) = app.job_plans.iter().find(|p| p.job == own_name) else { continue };
@@ -552,7 +553,7 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
         };
         let span = wrapper.name_span;
         if let Some(f) = &plan.fallback {
-            crate::emit::diagnostics::push(fallback_diagnostic(plan, f, span));
+            crate::emit::diagnostics::push(fallback_diagnostic(plan, f, span, sidekiq));
             continue;
         }
         let args: Vec<Expr> = wrapper
@@ -571,7 +572,7 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
                 v
             })
             .collect();
-        if !rewrite_enqueue(&mut wrapper.body, plan, args) {
+        if !rewrite_enqueue(&mut wrapper.body, plan, args, sidekiq) {
             crate::emit::diagnostics::push(fallback_diagnostic(
                 plan,
                 &JobFallback {
@@ -579,16 +580,39 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
                     reason: "the generated perform_later is not the shape this pass rewrites".to_string(),
                 },
                 span,
+                sidekiq,
             ));
         }
     }
 }
 
-fn fallback_diagnostic(plan: &JobPlan, f: &JobFallback, span: crate::span::Span) -> crate::diagnostic::Diagnostic {
+/// The ledger line for a job that keeps its Proc. Under `queue_adapter
+/// :sidekiq` it is an error: a Proc can't be pushed to Redis, so the job
+/// would silently run in process instead of where the app sends it.
+fn fallback_diagnostic(
+    plan: &JobPlan,
+    f: &JobFallback,
+    span: crate::span::Span,
+    sidekiq: bool,
+) -> crate::diagnostic::Diagnostic {
     let what = match &f.param {
         Some(p) => format!("`{}`'s parameter `{}`: {}", plan.job, p.as_str(), f.reason),
         None => format!("`{}`: {}", plan.job, f.reason),
     };
+    if sidekiq {
+        let mut d = crate::lower::residue_diagnostic(
+            "job_payload",
+            "job-closure-fallback",
+            span,
+            "argument not serializable",
+            format!(
+                "job_payload: {what}; under queue_adapter :sidekiq the job must be pushed to Redis \
+                 as an ActiveJob payload, and a closure can't be"
+            ),
+        );
+        d.severity = crate::diagnostic::Severity::Error;
+        return d;
+    }
     crate::lower::residue_diagnostic(
         "job_payload",
         "job-closure-fallback",
@@ -603,7 +627,11 @@ fn fallback_diagnostic(plan: &JobPlan, f: &JobFallback, span: crate::span::Span)
 /// <here> else <inline> end else <hold> end` — and replace it. The shape
 /// is a contract with that pass; anything else is left alone and
 /// answers false.
-fn rewrite_enqueue(body: &mut Expr, plan: &JobPlan, args: Vec<Expr>) -> bool {
+///
+/// Under `queue_adapter :sidekiq` the arm is
+/// `JobRegistry.push_<job>("<queue_as>", 0.0, args)` instead, which pushes
+/// the payload to Redis in Sidekiq's format (`runtime/sidekiq_push.rb`).
+fn rewrite_enqueue(body: &mut Expr, plan: &JobPlan, args: Vec<Expr>, sidekiq: bool) -> bool {
     let ExprNode::Seq { exprs } = &mut *body.node else { return false };
     for e in exprs.iter_mut() {
         let ExprNode::If { then_branch, .. } = &mut *e.node else { continue };
@@ -615,6 +643,27 @@ fn rewrite_enqueue(body: &mut Expr, plan: &JobPlan, args: Vec<Expr>) -> bool {
             continue;
         }
         let span = enqueue.span;
+        if sidekiq {
+            let mut queue = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: plan.queue.clone() } });
+            queue.ty = Some(Ty::Str);
+            let mut at = Expr::new(span, ExprNode::Lit { value: Literal::Float { value: 0.0 } });
+            at.ty = Some(Ty::Float);
+            let mut push_args = vec![queue, at];
+            push_args.extend(args);
+            let mut call = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("JobRegistry")] })),
+                    method: Symbol::from(format!("push_{}", plan.suffix()).as_str()),
+                    args: push_args,
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            call.ty = Some(Ty::Nil);
+            *enqueue = call;
+            return true;
+        }
         let mut payload = Expr::new(
             span,
             ExprNode::Send {
@@ -714,34 +763,61 @@ pub fn push_model_to_gid_uri(methods: &mut Vec<crate::dialect::MethodDef>, model
 
 // ---- The generated registry -----------------------------------------
 
+/// The Ruby that writes a job's arguments as an `Arguments.list` input:
+/// one writer per fixed parameter, and a rest parameter's elements
+/// appended, as Rails flattens a splat.
+fn arguments_list(plan: &JobPlan) -> String {
+    let fixed: Vec<String> = plan
+        .params
+        .iter()
+        .filter(|p| !p.rest)
+        .map(|p| write_expr(&p.codec, p.name.as_str()))
+        .collect();
+    let mut list = format!("[{}]", fixed.join(", "));
+    if let Some(rest) = plan.params.iter().find(|p| p.rest) {
+        let elems = format!("{}.map {{ |a| {} }}", rest.name.as_str(), write_expr(&rest.codec, "a"));
+        list = if fixed.is_empty() { elems } else { format!("{list} + {elems}") };
+    }
+    list
+}
+
 /// The text between the `job-registry` markers in
 /// `runtime/job_registry.rb`: the payload writers, `perform`,
 /// `discards_deserialization_error`, and the record locators. Valid
 /// Ruby for an app with no payload jobs too: `perform` answers false
 /// and nothing else is written.
-pub fn registry_source(plans: &[JobPlan]) -> String {
+///
+/// With `sidekiq` (the app is on `queue_adapter :sidekiq`), each payload
+/// job also gets `push_<job>(queue, at, args)`, which the job's
+/// `perform_later` calls instead of queueing in process: the payload,
+/// with `scheduled_at` when `at` is set, handed to `SidekiqPush`.
+pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
     let payload: Vec<&JobPlan> = plans.iter().filter(|p| p.is_payload()).collect();
     let mut s = String::new();
 
     for plan in &payload {
+        let list = arguments_list(plan);
         s.push_str(&format!("  def self.payload_{}{}\n", plan.suffix(), writer_params(plan)));
-        let fixed: Vec<String> = plan
-            .params
-            .iter()
-            .filter(|p| !p.rest)
-            .map(|p| write_expr(&p.codec, p.name.as_str()))
-            .collect();
-        let mut list = format!("[{}]", fixed.join(", "));
-        if let Some(rest) = plan.params.iter().find(|p| p.rest) {
-            let elems = format!("{}.map {{ |a| {} }}", rest.name.as_str(), write_expr(&rest.codec, "a"));
-            list = if fixed.is_empty() { elems } else { format!("{list} + {elems}") };
-        }
         s.push_str(&format!(
             "    ActiveJob::Payload.build({}, {}, ActiveJob::Arguments.list({list}))\n",
             ruby_str(&plan.job),
             ruby_str(&plan.queue)
         ));
         s.push_str("  end\n\n");
+        if sidekiq {
+            let params = writer_params(plan);
+            let params = match params.strip_prefix('(') {
+                Some(rest) => format!("(queue, at, {rest}"),
+                None => "(queue, at)".to_string(),
+            };
+            let push = if plan.enqueue_after_commit { "enqueue_after_commit" } else { "enqueue" };
+            s.push_str(&format!("  def self.push_{}{params}\n", plan.suffix()));
+            s.push_str(&format!(
+                "    SidekiqPush.{push}({job}, queue, at,\n      ActiveJob::Payload.build_at({job}, queue, at, ActiveJob::Arguments.list({list})))\n",
+                job = ruby_str(&plan.job),
+            ));
+            s.push_str("  end\n\n");
+        }
     }
 
     s.push_str("  def self.perform(job_class, args)\n");
@@ -905,4 +981,34 @@ fn read_rest(codec: &Codec, from: usize) -> String {
             format!("(({from})...{a}.count(args)).map {{ |j| {one} }}")
         }
     }
+}
+
+/// The one warning a target that doesn't honor `queue_adapter :sidekiq`
+/// files for an app on it: the strict targets have no Sidekiq push, so
+/// the app's jobs run in process there. Only for an app with ActiveJob
+/// jobs; one whose background work is all native Sidekiq workers has
+/// nothing to say it about. Decided by the host, which knows the target
+/// (`src/bin/roundhouse.rs`), as `elevate_nested_params_for_target` is.
+pub fn sidekiq_adapter_target_warning(
+    app: &App,
+    target: crate::project::BuildTarget,
+) -> Option<crate::diagnostic::Diagnostic> {
+    use crate::project::BuildTarget;
+    if app.queue_adapter.as_deref() != Some("sidekiq") || app.job_plans.is_empty() {
+        return None;
+    }
+    if matches!(target, BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby) {
+        return None;
+    }
+    Some(crate::lower::residue_diagnostic(
+        "job_payload",
+        "sidekiq-adapter-not-honored",
+        crate::span::Span::synthetic(),
+        "adapter not modeled on this target",
+        format!(
+            "job_payload: queue_adapter :sidekiq is honored on ruby, jruby and spinel; \
+             on {} the app's jobs run in process",
+            target.as_str()
+        ),
+    ))
 }
