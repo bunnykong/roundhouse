@@ -1866,6 +1866,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &scopes,
                 &models,
                 &assocs,
+                &user_returns,
             );
         }
         // User-written class methods the registry admitted as
@@ -1891,13 +1892,14 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     && !m.params.iter().any(|p| p.as_str() == "__rel")
                 {
                     if !insert_rel_param(m, &rel_param, &lc.name) { continue; }
-                    crate::lower::scope_chain::rewrite_scope_body(
+                    crate::lower::scope_chain::rewrite_class_scope_body(
                         &mut m.body,
                         &lc.name,
                         &rel_param,
                         &scopes,
                         &models,
                         &assocs,
+                        &user_returns,
                     );
                 }
             }
@@ -1945,6 +1947,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &user_returns,
                     );
                 }
             }

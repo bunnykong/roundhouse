@@ -44,6 +44,9 @@ class CountsTest < ActiveSupport::TestCase
     Widget.create!(owner_id: 7, name: "second")
     Widget.create!(owner_id: 9, name: "third")
     assert_equal({7 => 2, 9 => 1}, Widget.group(:owner_id).count)
+    query = Widget.where(name: "first")
+    assert_equal({7 => 1}, query.group(:owner_id).count)
+    assert_equal({7 => 2, 9 => 1}, Widget.group(:owner_id).order(:owner_id).count)
     assert_equal 3, Widget.count
   end
 end
@@ -81,4 +84,268 @@ end
         emitted.contains("ActiveRecord::Relation.new(Widget).order"),
         "test-only query did not lower to a Relation: {emitted}"
     );
+}
+
+#[test]
+fn emitted_test_group_keeps_ordinary_ruby_count_dispatch() {
+    widgets("")
+        .write(
+            "app/lib/grouper.rb",
+            r#"class Grouper
+  def group(kind)
+    [4, 5]
+  end
+end
+"#,
+        )
+        .write(
+            "test/models/ordinary_group_test.rb",
+            r#"require "test_helper"
+
+class OrdinaryGroupTest < ActiveSupport::TestCase
+  class InnerGrouper
+    def group(kind)
+      [6, 7, 8]
+    end
+    def count_groups
+      group(:category).count
+    end
+  end
+  def test_ordinary_count
+    assert_equal 2, Grouper.new.group(:category).count
+    grouper = Grouper.new
+    assert_equal 2, grouper.group("category").count
+    assert_equal 2, grouper.group(:category).sort.count
+    assert_equal [2], [grouper].map { |item| item.group(:category).count }
+    grouped = grouper.group(:category)
+    assert_equal 2, grouped.count
+    assert_equal 1, grouper.group(:category).count(4)
+    assert_equal 1, grouper.group(:category).count { |item| item == 5 }
+    assert_equal 3, InnerGrouper.new.group(:category).count
+    assert_equal 3, InnerGrouper.new.count_groups
+    query = Widget.where(name: "absent")
+    assert_equal [2], [grouper].map { |query| query.group(:category).count }
+    assert_equal({}, query.group(:owner_id).count)
+  end
+end
+"#,
+        )
+        .run_test("test/models/ordinary_group_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn emitted_test_query_preserves_override_families_and_implicit_self() {
+    // Cover each lowering family, including catalog aliases and the
+    // operand shapes used by terminals and bulk insert expansion.
+    let methods = [
+        "order", "where", "limit", "left_joins", "order!", "all", "group",
+        "pluck", "pick", "ids", "maximum", "minimum", "destroy_by", "delete_by",
+        "first", "last", "insert_all", "insert_all!",
+    ];
+    let mut body = String::new();
+    let mut assertions = String::new();
+    for (index, method) in methods.iter().enumerate() {
+        let value = index + 10;
+        let incidental = if ["group", "all", "insert_all", "insert_all!"].contains(method) {
+            "    ignored = limit(2)\n"
+        } else { "" };
+        body.push_str(&format!("  def self.{method}(argument = nil)\n{incidental}    [{value}, 2]\n  end\n"));
+        let argument = match *method {
+            "all" | "ids" => "",
+            "where" | "destroy_by" | "delete_by" => "name: \"x\"",
+            "limit" | "first" | "last" => "2",
+            "insert_all" | "insert_all!" => "[{name: \"x\"}]",
+            _ => ":id",
+        };
+        assertions.push_str(&format!("    assert_equal [{value}, 2], Widget.{method}({argument})\n"));
+    }
+    body.push_str(r#"  def self.bare_order
+    order(:id)
+  end
+  def self.explicit_order
+    self.order(:id)
+  end
+  def self.bare_all
+    all
+  end
+  def self.constant_order
+    Widget.order(:id)
+  end
+"#);
+    assertions.push_str(r#"    assert_equal [10, 2], Widget.bare_order
+    assert_equal [10, 2], Widget.explicit_order
+    assert_equal [15, 2], Widget.bare_all
+    assert_equal [10], Widget.bare_order.first(1)
+    assert_equal [10], Widget.constant_order.first(1)
+    values = Widget.bare_order
+    assert_equal [2], values.last(1)
+    assert_equal 2, Widget.group(:id).count
+    model = Widget
+    assert_equal [10, 2], model.order(:id)
+"#);
+    widgets(&body)
+        .write("test/models/overrides_test.rb", &format!(r#"require "test_helper"
+class OverridesTest < ActiveSupport::TestCase
+  def test_overrides
+{assertions}  end
+end
+"#))
+        .run_test("test/models/overrides_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn emitted_test_query_preserves_an_inherited_model_override() {
+    widgets("")
+        .write(
+            "app/models/application_record.rb",
+            r#"class ApplicationRecord < ActiveRecord::Base
+  primary_abstract_class
+  def self.order(column)
+    [6, 2]
+  end
+end
+"#,
+        )
+        .write(
+            "test/models/inherited_override_test.rb",
+            r#"require "test_helper"
+class InheritedOverrideTest < ActiveSupport::TestCase
+  def test_inherited_override
+    assert_equal [6, 2], Widget.order(:id)
+    assert_equal 2, Widget.order(:id).count
+  end
+end
+"#,
+        )
+        .run_test("test/models/inherited_override_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn emitted_test_query_preserves_singleton_method_aliases() {
+    widgets(r#"  class << self
+    def arrange(column)
+      [12, 4]
+    end
+    alias_method :order, :arrange
+    alias group arrange
+    alias order! arrange
+  end
+"#)
+        .write("test/models/aliases_test.rb", r#"require "test_helper"
+class AliasesTest < ActiveSupport::TestCase
+  def test_aliases
+    assert_equal [12, 4], Widget.order(:id)
+    assert_equal [12, 4], Widget.order!(:id)
+    assert_equal [12, 4], Widget.group(:id)
+    assert_equal 2, Widget.group(:id).count
+  end
+end
+"#)
+        .run_test("test/models/aliases_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn emitted_test_override_can_return_a_query_without_replacing_relation_builtins() {
+    widgets(r#"  def self.order(column)
+    where(owner_id: 7)
+  end
+  def self.via_bare
+    order(:id)
+  end
+  def self.via_self
+    self.order(:id)
+  end
+  scope :sorted, -> { order(:id) }
+"#)
+        .write("test/models/query_override_test.rb", r#"require "test_helper"
+class QueryOverrideTest < ActiveSupport::TestCase
+  def test_query_override
+    Widget.create!(owner_id: 7, name: "first")
+    Widget.create!(owner_id: 9, name: "second")
+    Widget.create!(owner_id: 7, name: "third")
+    assert_equal [7, 7], Widget.order(:id).pluck(:owner_id)
+    assert_equal [7, 9, 7], Widget.all.order(:id).pluck(:owner_id)
+    assert_equal [7, 7], Widget.via_bare.pluck(:owner_id)
+    assert_equal [7, 7], Widget.via_self.pluck(:owner_id)
+    assert_equal [], Widget.where(owner_id: 9).via_bare.pluck(:owner_id)
+    assert_equal [], Widget.where(owner_id: 9).via_self.pluck(:owner_id)
+    assert_equal({7 => 2}, Widget.order(:id).group(:owner_id).count)
+    query = Widget.order(:id)
+    assert_equal({7 => 2}, query.group(:owner_id).count)
+    assert_equal [7, 9, 7], Widget.sorted.pluck(:owner_id)
+  end
+end
+"#)
+        .run_test("test/models/query_override_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn emitted_test_association_uses_relation_builders_before_model_overrides() {
+    widgets(r#"  def self.order(column)
+    where(name: "kept")
+  end
+"#)
+        .write("app/models/owner.rb", "class Owner < ApplicationRecord\n  has_many :widgets\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "owners", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "widgets", force: :cascade do |t|
+    t.integer "owner_id"
+    t.string "name"
+  end
+end
+"#)
+        .write("test/models/association_override_test.rb", r#"require "test_helper"
+class AssociationOverrideTest < ActiveSupport::TestCase
+  def test_association_override
+    owner = Owner.create!(name: "first")
+    other = Owner.create!(name: "second")
+    Widget.create!(owner_id: owner.id, name: "kept")
+    Widget.create!(owner_id: owner.id, name: "other")
+    Widget.create!(owner_id: other.id, name: "other")
+    assert_equal ["kept"], Widget.order(:id).pluck(:name)
+    assert_equal ["kept", "other"], owner.widgets.order(:id).pluck(:name)
+    query = owner.widgets
+    assert_equal ["kept", "other"], query.order(:id).pluck(:name)
+  end
+end
+"#)
+        .run_test("test/models/association_override_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn emitted_test_query_keeps_model_override_dispatch() {
+    widgets(
+        r#"  def self.order(column)
+    [9, 8]
+  end
+  scope :from_override, -> { order(:id) }
+"#,
+    )
+        .write(
+            "test/models/override_test.rb",
+            r#"require "test_helper"
+
+class OverrideTest < ActiveSupport::TestCase
+  def test_override
+    assert_equal [9, 8], Widget.order(:id)
+    assert_equal [], Widget.from_override.to_a
+    assert_equal({}, Widget.from_override.group(:owner_id).count)
+    assert_equal 2, Widget.order(:id).count
+    values = Widget.order(:id)
+    assert_equal [9, 8], values
+    assert_equal [[9, 8]], [1].map { |item| Widget.order(:id) }
+  end
+end
+"#,
+        )
+        .run_test("test/models/override_test.rb")
+        .assert_passes();
 }

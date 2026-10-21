@@ -31,10 +31,11 @@ pub fn apply_fused_independent_rewrites(app: &mut App) {
     let skip_in = super::in_predicate::app_defines_in(app);
     let skip_including = super::including::app_defines_including(app);
     let skip_full_messages = super::errors_full_messages::app_defines_full_messages(app);
+    let group_receivers = super::group_count::Receivers::new(app);
 
-    super::for_each_hook_body(app, &mut |body| {
+    super::for_each_owned_hook_body(app, &mut |owner, body| {
         walk_postorder(body, &mut |e| {
-            rewrite_hook_node(e, skip_exclude, skip_in, skip_including, skip_full_messages);
+            rewrite_hook_node(e, skip_exclude, skip_in, skip_including, skip_full_messages, &group_receivers, owner);
         });
     });
     for view in &mut app.views {
@@ -459,6 +460,8 @@ fn rewrite_hook_node(
     skip_in: bool,
     skip_including: bool,
     skip_full_messages: bool,
+    group_receivers: &super::group_count::Receivers,
+    owner: Option<&crate::ident::ClassId>,
 ) {
     super::pathname_ctor::rewrite_node(e);
     super::array_ordinal::rewrite_node(e);
@@ -492,7 +495,7 @@ fn rewrite_hook_node(
     super::relation_select_block::rewrite_node(e);
     super::arel_attribute::rewrite_node(e);
     super::attr_or_assign::rewrite_node(e);
-    super::group_count::rewrite_node(e);
+    super::group_count::rewrite_node(e, group_receivers, owner);
     if !skip_full_messages {
         super::errors_full_messages::rewrite_node(e);
     }

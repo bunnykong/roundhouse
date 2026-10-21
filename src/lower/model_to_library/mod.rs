@@ -1876,6 +1876,7 @@ pub(crate) fn push_scope_methods(
     scopes: &crate::lower::scope_chain::ScopeRegistry,
     models_set: &std::collections::HashSet<ClassId>,
     assocs: &crate::lower::scope_chain::AssocRegistry,
+    user_returns: &crate::lower::scope_chain::UserMethodReturns,
 ) {
     use crate::dialect::{AccessorKind, ModelBodyItem, Param};
     use crate::expr::{Expr, ExprNode, LValue};
@@ -1920,6 +1921,7 @@ pub(crate) fn push_scope_methods(
             scopes,
             models_set,
             assocs,
+            user_returns,
         );
 
         // Rails relations are immutable, so every implicit-self root in
