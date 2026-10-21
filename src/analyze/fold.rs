@@ -1042,6 +1042,11 @@ pub(crate) fn deactivate() {
     ST.with(|s| s.borrow_mut().active = false);
 }
 
+/// Rewrite the actual stored slot values after inference, not their observers.
+pub(super) fn canonicalize_kept_vars() {
+    ST.with(|s| s.borrow_mut().values.values_mut().for_each(super::canon_var::side_value));
+}
+
 /// Aggregates for the fixpoint canaries' stats line.
 pub(crate) fn stats() -> serde_json::Value {
     ST.with(|s| {
@@ -1073,6 +1078,24 @@ pub(crate) fn stats() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canon_var_rewrites_side_table_value_without_promoting_pending() {
+        ST.with(|s| *s.borrow_mut() = State::default());
+        let slot = intern(SlotKey::At { site: (1, 10, 20), step: Step::Val });
+        ST.with(|s| { s.borrow_mut().values.insert(slot, Ty::Union {
+            variants: vec![Ty::Int, Ty::Var { var: crate::ident::TyVar(0) }, Ty::pending_untyped()].into(),
+        }); });
+        canonicalize_kept_vars();
+        ST.with(|s| {
+            let s = s.borrow();
+            let Ty::Union { variants } = &s.values[&slot] else { panic!("stored union") };
+            assert!(!variants.iter().any(|t| matches!(t, Ty::Var { .. })));
+            assert!(variants.iter().any(|t| matches!(t, Ty::Untyped { why: crate::ty::Provenance::Unresolved })));
+            assert!(variants.iter().any(|t| matches!(t, Ty::Untyped { why: crate::ty::Provenance::Pending })));
+        });
+        ST.with(|s| *s.borrow_mut() = State::default());
+    }
 
     #[test]
     fn current_row_sites_retain_unknowns_and_replay_prior_inputs() {

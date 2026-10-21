@@ -59,6 +59,7 @@ pub(crate) mod strict_producers;
 pub mod producer_evidence;
 mod parameter_conservation;
 mod param_views;
+mod canon_var;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod s4_census;
@@ -1859,6 +1860,8 @@ impl Analyzer {
             eprintln!("rh-c5-rows: {}", serde_json::json!(rows));
         }
         self.settle_pending(app);
+
+        canon_var::finish(self, app);
 
         self.stamp_inferred_method_signatures(app);
         self.report_fixpoint_checks(app);
