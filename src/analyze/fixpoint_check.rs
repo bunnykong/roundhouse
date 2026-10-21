@@ -79,6 +79,7 @@ fn flag(name: &str) -> bool {
 static VERIFY: LazyLock<bool> = LazyLock::new(|| flag("RH_FIXPOINT_VERIFY"));
 static DIGEST: LazyLock<bool> = LazyLock::new(|| flag("RH_FIXPOINT_DIGEST"));
 static STATS: LazyLock<bool> = LazyLock::new(|| flag("RH_FIXPOINT_STATS"));
+static S2_VALUES: LazyLock<bool> = LazyLock::new(|| flag("RH_S2_VALUES"));
 
 /// Whether `RH_FIXPOINT_VERIFY` is set.
 pub(super) fn verify_on() -> bool {
@@ -334,6 +335,19 @@ impl StateFp {
         out
     }
 
+    /// The quick checker's ten-table contract. Main has no recursive side
+    /// table; its inventory is known empty. Preserve the full native state
+    /// separately, including view seeds, for verification and diagnostics.
+    fn s2_projection(&self) -> Self {
+        let parts = [
+            "attributes", "block_values", "constants", "controller_bindings",
+            "controller_cache", "copies", "params", "returns", "side_table",
+        ].into_iter().map(|name| {
+            (name, self.parts.get(name).cloned().unwrap_or_default())
+        }).collect();
+        Self { parts, ir: self.ir.clone() }
+    }
+
     fn sizes(&self) -> BTreeMap<&'static str, u64> {
         let mut out: BTreeMap<&'static str, u64> =
             self.parts.iter().map(|(name, part)| (*name, part.len() as u64)).collect();
@@ -549,7 +563,7 @@ impl Analyzer {
 
     /// The `rh-fixpoint:` line, when any canary is on.
     pub(super) fn report_fixpoint_checks(&self, app: &App) {
-        if !(*VERIFY || *DIGEST || *STATS) {
+        if !(*VERIFY || *DIGEST || *STATS || *S2_VALUES || super::precision::on()) {
             return;
         }
         let rounds: FixpointRounds = self.fixpoint_rounds;
@@ -570,8 +584,23 @@ impl Analyzer {
                 .collect();
             line["verify"] = serde_json::json!(verified);
         }
-        if *DIGEST {
-            let fp = self.state_fp(app);
+        if *DIGEST || *S2_VALUES {
+            let native = self.state_fp(app);
+            let fp = if *S2_VALUES {
+                line["native_digest"] = serde_json::json!(native.digests());
+                line["native_entries"] = serde_json::json!(native.sizes());
+                line["observer_contract"] = serde_json::json!({
+                    "schema": "main-s2-v1", "scheduler": "main",
+                    "shuffle_supported": false, "side_table": "absent-on-main",
+                    "provenance": false, "declarations": false, "structure": false,
+                });
+                native.s2_projection()
+            } else {
+                native
+            };
+            if *S2_VALUES {
+                self.s2_dump(app, &fp).expect("write S2 value rows");
+            }
             line["digest"] = serde_json::json!(fp.digests());
             line["entries"] = serde_json::json!(fp.sizes());
         }
@@ -590,6 +619,9 @@ impl Analyzer {
             });
             line["harvest_untie_cut"] =
                 serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+        }
+        if super::precision::on() {
+            line["precision"] = serde_json::json!(super::precision::census(app));
         }
         eprintln!("rh-fixpoint: {line}");
     }
@@ -610,6 +642,26 @@ mod tests {
         let b = union(vec![Ty::Var { var: TyVar(7) }, Ty::Str, Ty::Int]);
         assert_eq!(type_hash(&a), type_hash(&b));
         assert_ne!(type_hash(&a), type_hash(&union(vec![Ty::Int, Ty::Str])));
+    }
+
+    #[test]
+    fn s2_projection_keeps_native_view_state_separate() {
+        let native = StateFp {
+            parts: BTreeMap::from([
+                ("returns", BTreeMap::from([("Example#call".to_string(), 7)])),
+                ("view_seeds", BTreeMap::from([("action index".to_string(), 11)])),
+            ]),
+            ir: vec![(1, 2, 3, 4, 5)],
+        };
+        let before = native.digests();
+        let projected = native.s2_projection();
+        assert_eq!(native.digests(), before);
+        assert_eq!(projected.digests().len(), 10);
+        assert_eq!(projected.parts["returns"], native.parts["returns"]);
+        assert_eq!(projected.ir, native.ir);
+        assert!(projected.parts["side_table"].is_empty());
+        assert!(!projected.parts.contains_key("view_seeds"));
+        assert_eq!(native.parts["view_seeds"].len(), 1);
     }
 
     #[test]
@@ -749,5 +801,83 @@ end
         assert_eq!(moved["returns"], 2);
         assert_eq!(moved["ir"], 1);
         assert_eq!(before.moved(&before).values().sum::<u64>(), 0);
+    }
+}
+
+
+/// Native main types have no recursive-slot identities to rewrite.
+fn s2_ty(t: &Ty) -> serde_json::Value {
+    serde_json::to_value(t).expect("serialize S2 type")
+}
+
+impl Analyzer {
+    fn s2_dump(&self, app: &App, fp: &StateFp) -> std::io::Result<()> {
+        use std::io::Write;
+        let path = std::path::PathBuf::from(std::env::var_os("RH_STRUCT_DUMP").expect("observer dump path"))
+            .with_file_name("s2-values.jsonl");
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        let mut emit = |v: serde_json::Value| { serde_json::to_writer(&mut out, &v).unwrap(); writeln!(out).unwrap(); };
+        emit(serde_json::json!({"part":"fingerprint", "parts":fp.parts, "ir":fp.ir,
+            "sources":app.sources.iter().map(|s| &s.path).collect::<Vec<_>>(), "digests":fp.digests()}));
+        let mut value = |part: &str, key: String, t: &Ty| emit(serde_json::json!({
+            "part":part,"key":key,"ty":s2_ty(t),"debug":format!("{t:?}"),"hash":type_hash(t)}));
+        for (id,ci) in &self.classes {
+            for (m,t) in &ci.instance_methods { value("returns",format!("{}#{}",id.0.as_str(),m.as_str()),t); }
+            for (m,t) in &ci.class_methods { value("returns",format!("{}.{}",id.0.as_str(),m.as_str()),t); }
+        }
+        for ((id,m,side),row) in &self.inferred_params {
+            let sep = if *side == crate::dialect::MethodReceiver::Class { "." } else { "#" };
+            for (i,t) in row.iter().enumerate() {
+                value("params",format!("{}{sep}{}[{i}]",id.0.as_str(),m.as_str()),t);
+            }
+        }
+        for (id,(bindings,_)) in &self.controller_action_meta_cache {
+            for (method,bs) in bindings { for (k,t) in bs {
+                value("controller_cache",format!("{}#{}:binding:{}",id.0.as_str(),method.as_str(),k.as_str()),t);
+            }}
+        }
+        fn expr(e: &Expr, part: &str, root: &str, path: &mut Vec<usize>,
+                emit: &mut dyn FnMut(serde_json::Value)) {
+            emit(serde_json::json!({"part":part,"key":format!("{root}:{}",path.iter().map(|x|x.to_string()).collect::<Vec<_>>().join("/")),
+                "root":root,"path":path,"span":e.span,"source":e.span.file.0,
+                "node":e.node.kind_str(),
+                "call":match &*e.node { crate::expr::ExprNode::Send { recv, method, .. } =>
+                    Some(serde_json::json!({"method":method.as_str(), "recv":recv.as_ref().and_then(|r| r.ty.as_ref()).map(s2_ty)})), _ => None },
+                "ty":e.ty.as_ref().map(s2_ty),
+                "debug":e.ty.as_ref().map(|t|format!("{t:?}")),
+                "hash":e.ty.as_ref().map_or(0,type_hash),
+                "note":hash_of((e.decisions,e.diagnostic().as_ref().map(annotation_hash))),
+                "diagnostic":e.diagnostic(),"decisions":format!("{:?}",e.decisions)}));
+            let mut i=0;
+            e.node.for_each_child(&mut |c| { path.push(i); i+=1; expr(c,part,root,path,emit); path.pop(); });
+        }
+        for (id,(_,bodies)) in &self.controller_action_meta_cache {
+            for (m,body) in bodies {
+                expr(body,"controller_cache",&format!("{}#{}:body",id.0.as_str(),m.as_str()),&mut Vec::new(),&mut emit);
+            }
+        }
+        let mut declarations = BTreeMap::<usize,String>::new();
+        for c in &app.library_classes { for m in &c.methods {
+            declarations.insert(&m.body as *const Expr as usize, format!("{}{}{}",c.name.0.as_str(),
+                if m.receiver == crate::dialect::MethodReceiver::Class {"."} else {"#"},m.name.as_str()));
+        }}
+        for c in &app.models { for m in c.methods() {
+            declarations.insert(&m.body as *const Expr as usize, format!("{}{}{}",c.name.0.as_str(),
+                if m.receiver == crate::dialect::MethodReceiver::Class {"."} else {"#"},m.name.as_str()));
+        }}
+        for c in &app.controllers { for m in c.actions() {
+            declarations.insert(&m.body as *const Expr as usize, format!("{}#{}",c.name.0.as_str(),m.name.as_str()));
+        }}
+        let mut occurrences = BTreeMap::<String,usize>::new();
+        crate::lower::for_each_emit_body_ref(app, &mut |root| {
+            let body=serde_json::json!({"source":root.span.file.0.checked_sub(1)
+                .and_then(|i| app.sources.get(i as usize)).map(|s| s.path.as_str()),
+                "declaration":declarations.get(&(&*root as *const Expr as usize)),
+                "span":root.span,"kind":root.node.kind_str()}).to_string();
+            let n=occurrences.entry(body.clone()).or_default();
+            let key=format!("{body}:occurrence:{n}"); *n+=1;
+            expr(root,"ir",&key,&mut Vec::new(),&mut emit);
+        });
+        out.flush()
     }
 }

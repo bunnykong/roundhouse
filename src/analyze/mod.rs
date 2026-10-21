@@ -56,6 +56,7 @@ pub mod graphql;
 mod harvest_return;
 mod fixpoint_bound;
 mod fixpoint_check;
+mod precision;
 mod fixpoint_rounds;
 pub use fixpoint_rounds::{FixpointRounds, LoopEnd};
 mod dirty_retype;
