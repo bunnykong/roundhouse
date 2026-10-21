@@ -59,6 +59,14 @@ pub(super) fn reset(sources: &[SourceFile]) {
         });
     }
 }
+pub(super) fn completion_values(f: &mut dyn FnMut(&mut Ty)) {
+    LEDGER.with(|x| {
+        for d in x.borrow_mut().destinations.values_mut() {
+            for t in d.cells.values_mut() { f(t); }
+            f(&mut d.aggregate);
+        }
+    });
+}
 fn destination(key: &SlotKey) -> String {
     format!("Some({key:?})")
 }

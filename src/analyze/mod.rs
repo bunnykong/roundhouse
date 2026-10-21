@@ -62,6 +62,7 @@ mod param_views;
 mod writers;
 mod route_static;
 mod canon_var;
+mod completion_rerun;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod s4_census;
@@ -1890,6 +1891,7 @@ impl Analyzer {
     /// as "never returns". Each type settles on its own, so the walk's
     /// order does not matter.
     fn settle_pending(&mut self, app: &mut App) {
+        self.pending_report(app, "settlement-safety-net");
         if fixpoint_check::stats_on() || s3d::on() || cfg!(test) {
             let census = self.s3d.census(self, app);
             if fixpoint_check::stats_on() {
@@ -2774,6 +2776,11 @@ impl Analyzer {
                 } else { Ty::unresolved() };
                 class_ivars.entry(name).or_insert(seed);
             }
+            if strict_producers::seeds_on() {
+                for name in own_assignments.keys() {
+                    class_ivars.entry(name.clone()).or_insert_with(Ty::pending_untyped);
+                }
+            }
 
             // Phase 0: type the model's `Unknown` body items so the
             // RHS of in-class constant assignments (`FLAGGABLE_DAYS = 7`,
@@ -3004,7 +3011,7 @@ impl Analyzer {
                     writer_phase: 0,
                 self_ty: Some(self_ty.clone()),
                 lexical_self: None,
-                ivar_bindings: HashMap::new(),
+                ivar_bindings: pending_ivar_seeds(controller.actions().map(|a| &a.body)),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
@@ -4278,7 +4285,7 @@ impl Analyzer {
                     writer_phase: 0,
                 self_ty: Some(Ty::Class { id: self_id, args: vec![].into() }),
                 lexical_self: None,
-                ivar_bindings: HashMap::new(),
+                ivar_bindings: pending_ivar_seeds(lc.methods.iter().map(|m| &m.body)),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
@@ -4465,9 +4472,15 @@ impl Analyzer {
                 }
             }
             if retype && self.sccq.is_some() {
-                self.sccq_store_lib(lc_ci, &sccq_self_id, concern_ivar_env.get(&lc_name),
-                                    current_attribute_writes.get(&lc_name), is_current_attributes,
-                                    sccq_reseeded.as_ref());
+                self.sccq_store_lib(
+                    lc_ci,
+                    &sccq_self_id,
+                    &class_ctx.ivar_bindings,
+                    concern_ivar_env.get(&lc_name),
+                    current_attribute_writes.get(&lc_name),
+                    is_current_attributes,
+                    sccq_reseeded.as_ref(),
+                );
             }
         }
         drop(_typing_library);
@@ -4981,15 +4994,16 @@ impl Analyzer {
             } else {
                 param_ty_with_default(observed.as_ref().and_then(|v| v.get(i)).cloned(), param)
             };
+            let seeded = strict_producers::parameter_seed(seeded);
             let declared = self.declared_param_ty(class_id, &method.name, positional, &param.name);
             let is_declared = declared.is_some();
             let control = prefer_declared(declared, seeded);
             let ty = if is_declared { control } else {
                 fold::declare_param(class_id,&method.name,method.receiver,i,method.body.span);
-                let raw=param_ty_with_default(raw_observed.and_then(|row|row.get(i)).cloned(),param);
+                let raw=strict_producers::parameter_seed(param_ty_with_default(raw_observed.and_then(|row|row.get(i)).cloned(),param));
                 fold::param_seed(class_id,&method.name,method.receiver,i,method.body.span,raw,control)
             };
-            if let Some(ty)=ty {ctx.local_bindings.insert(param.name.clone(),ty);}
+            if let Some(ty)=strict_producers::parameter_seed(ty) {ctx.local_bindings.insert(param.name.clone(),ty);}
         }
         // An indexed module's Ruby callback gets its host as a Module object,
         // even when the hook is dormant and no explicit call site supplies types.
@@ -5062,28 +5076,30 @@ impl Analyzer {
                 .reduce(unify_param_ty);
             let declared = self.declared_param_ty(class_id, action_name, Some(i), name);
             let is_declared = declared.is_some();
-            let control = prefer_declared(declared, observed);
+            let control = prefer_declared(declared, strict_producers::parameter_seed(observed));
             let ty=if is_declared {control} else {
                 fold::declare_param(class_id,action_name,MethodReceiver::Instance,i,definition_span);
                 let own_raw=self.inferred_params.get(&(class_id.clone(),action_name.clone(),MethodReceiver::Instance));
                 let origin_raw=origin.and_then(|m|self.inferred_params.get(&(m.clone(),action_name.clone(),MethodReceiver::Instance)));
                 let raw=[own_raw,origin_raw].into_iter().flatten().filter_map(|v|v.get(i).cloned())
                     .filter(|t|!matches!(t,Ty::Var {..})).reduce(unify_param_ty);
-                fold::param_seed(class_id,action_name,MethodReceiver::Instance,i,definition_span,raw,control)
+                fold::param_seed(class_id,action_name,MethodReceiver::Instance,i,definition_span,
+                    strict_producers::parameter_seed(raw),control)
             };
-            if let Some(ty)=ty {ctx.local_bindings.insert(name.clone(),ty);}
+            if let Some(ty)=strict_producers::parameter_seed(ty) {ctx.local_bindings.insert(name.clone(),ty);}
         }
         // Keyword params sit beside the positional row rather than in
         // it, and a call site passes them by NAME — so there is no
         // index to read an observation from. The declaration is the
         // only source, which is the case the signature readers exist
         // for.
-        for (name, _) in kw_params.iter() {
+        for (name, default) in kw_params.iter() {
             if ctx.local_bindings.contains_key(name) {
                 continue;
             }
-            if let Some(ty) =
+            if let Some(ty) = strict_producers::parameter_seed(
                 self.declared_param_ty(class_id, action_name, None, name)
+                    .or_else(|| strict_producers::seeds_on().then(|| default.as_ref().and_then(|e| e.ty.clone())).flatten()))
             {
                 ctx.local_bindings.insert(name.clone(), ty);
             }
@@ -9205,6 +9221,24 @@ fn ivars_assigned_by_statement(body: &Expr) -> Vec<Symbol> {
 /// Harvest `@ivar = expr` / OpAssign / MultiAssign writes from a typed
 /// body, union-merging repeated assignments. Used by the analyzer's
 /// two-pass library typing and by the Spinel AR RBS probe.
+/// Only source-owned ivars can wait for an uncomputed writer. An absent writer
+/// remains a real inference gap. Discovery uses syntax, not stale type stamps.
+fn pending_ivar_seeds<'a>(bodies: impl Iterator<Item = &'a Expr>) -> HashMap<Symbol, Ty> {
+    fn walk(e: &Expr, out: &mut HashMap<Symbol, Ty>) {
+        match &*e.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, .. }
+            | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
+                out.insert(name.clone(), Ty::pending_untyped());
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, out));
+    }
+    let mut out = HashMap::new();
+    if strict_producers::seeds_on() { for body in bodies { walk(body, &mut out); } }
+    out
+}
+
 pub fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     extract_ivar_assignments_in(expr, out, &ivar_set::IvarNameEnv::NONE);
 }

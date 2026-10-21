@@ -1290,6 +1290,10 @@ pub(super) fn structure_parts() -> (Vec<SlotKey>, Vec<String>, Vec<String>) {
 }
 
 // Read-only S2 classification observer. Snapshot before serialization to avoid nested borrows.
+pub(super) fn completion_values(f: &mut dyn FnMut(&mut Ty)) {
+    ST.with(|s| { for t in s.borrow_mut().values.values_mut() { f(t); } });
+}
+
 pub(crate) fn s2_values() -> Vec<(String, Ty)> {
     ST.with(|s| {
         let s = s.borrow();

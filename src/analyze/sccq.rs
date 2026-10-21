@@ -481,6 +481,7 @@ impl ClassEntry {
         match self.family {
             Family::Lib => Ctx {
                 self_ty: Some(Ty::Class { id: self.self_id.clone(), args: vec![].into() }),
+                ivar_bindings: self.class_ivars.clone(),
                 ..Ctx::default()
             },
             _ => Ctx {
@@ -1448,6 +1449,7 @@ impl Analyzer {
         &mut self,
         ci: usize,
         self_id: &ClassId,
+        class_ivars: &HashMap<Symbol, Ty>,
         concern_env: Option<&HashMap<Symbol, Ty>>,
         current_writes: Option<&HashMap<Symbol, Ty>>,
         is_current_attributes: bool,
@@ -1457,6 +1459,7 @@ impl Analyzer {
         let entry = eng.lib_entry[ci];
         let e = &mut eng.entries[entry];
         e.self_id = self_id.clone();
+        e.class_ivars = class_ivars.clone();
         e.concern_env = concern_env.cloned();
         e.current_writes = current_writes.cloned();
         e.is_current_attributes = is_current_attributes;

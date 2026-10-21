@@ -1,6 +1,19 @@
 //! CARD-5b producer strictness and complete-read comparisons (opt-in port).
 use crate::ty::{Provenance, Ty};
 
+pub(crate) fn seeds_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RH_RS5").as_deref() == Ok("1"))
+}
+
+/// An open parameter is a wait for callers, never evidence of an unknown value.
+/// This also keeps legacy Var observations out of the unresolved boundary.
+pub(crate) fn parameter_seed(t: Option<Ty>) -> Option<Ty> {
+    if seeds_on() && t.as_ref().is_none_or(|t| matches!(t, Ty::Var { .. })) {
+        Some(Ty::pending_untyped())
+    } else { t }
+}
+
 pub(crate) fn stubs_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RH_C5_STRICT_STUBS").as_deref() == Ok("1"))
