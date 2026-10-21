@@ -101,9 +101,9 @@ if RUBY_ENGINE == "spinel"
     def self.check_dump_value(value, limit, depth, strict)
       # json 2.9 accepts exact builtin classes in strict mode, before it
       # traverses containers (even empty subclasses must be rejected).
-      klass = value.class
-      if strict && klass != NilClass && klass != TrueClass && klass != FalseClass &&
-          klass != String && klass != Integer && klass != Float && klass != Array && klass != Hash
+      if strict && value.class != NilClass && value.class != TrueClass && value.class != FalseClass &&
+          value.class != String && value.class != Integer && value.class != Float &&
+          value.class != Array && value.class != Hash
         raise JSON::GeneratorError, value.class.to_s + " not allowed in JSON"
       end
       if value.is_a?(Array)
