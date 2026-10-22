@@ -216,27 +216,43 @@ pub(super) fn content_partial_view_name(literal: &str, prefix: &str) -> Symbol {
 /// (they already carry their directory).
 pub(super) fn collect_action_render_views(expr: &Expr, prefix: &str, out: &mut Vec<Symbol>) {
     if let ExprNode::Send { recv, method, args, .. } = &*expr.node {
-        if recv.is_none() && matches!(method.as_str(), "render" | "render_to_string") {
+        if (recv.is_none() || super::sound_rest::render_on()
+            && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::SelfRef)))
+            && matches!(method.as_str(), "render" | "render_to_string") {
             for arg in args {
+                if super::sound_rest::render_on() {
+                    let name = match &*arg.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
+                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.as_str()),
+                        _ => None,
+                    };
+                    if let Some(name) = name {
+                        out.push(Symbol::from(if name.contains('/') { name.to_owned() } else { format!("{prefix}/{name}") }));
+                    }
+                }
                 if let ExprNode::Hash { entries, .. } = &*arg.node {
                     for (k, v) in entries {
                         let key = match &*k.node {
                             ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
                             _ => continue,
                         };
-                        let ExprNode::Lit { value: Literal::Str { value } } = &*v.node else {
-                            continue;
+                        let value = match &*v.node {
+                            ExprNode::Lit { value: Literal::Str { value } } => value.as_str(),
+                            ExprNode::Lit { value: Literal::Sym { value } } if super::sound_rest::render_on() => value.as_str(),
+                            _ => continue,
                         };
                         match key {
                             "action" => {
                                 let name = if value.contains('/') {
-                                    value.clone()
+                                    value.to_owned()
                                 } else {
                                     format!("{}/{}", prefix, value)
                                 };
                                 out.push(Symbol::from(name));
                             }
-                            "template" => out.push(Symbol::from(value.clone())),
+                            "template" => out.push(Symbol::from(if super::sound_rest::render_on() && !value.contains('/') {
+                                format!("{prefix}/{value}")
+                            } else { value.to_owned() })),
                             _ => {}
                         }
                     }

@@ -123,13 +123,13 @@ impl Graph {
         let (a, b) = (self.root(a), self.root(b));
         self.parent[a.max(b)] = a.min(b);
     }
-    fn build(&mut self, e: &Expr) {
+    fn build(&mut self, e: &Expr, getters: &HashMap<Symbol, Symbol>) {
         self.loops |= matches!(
             &*e.node,
             ExprNode::While { .. } | ExprNode::Send { block: Some(_), .. }
         );
         let id = self.expr(e);
-        e.node.for_each_child(&mut |child| self.build(child));
+        e.node.for_each_child(&mut |child| self.build(child, getters));
         let mut link = Vec::new();
         match &*e.node {
             ExprNode::Var { name, .. } => link.push(self.name(false, name)),
@@ -168,6 +168,17 @@ impl Graph {
                 link.push(self.expr(else_branch));
             }
             ExprNode::Cast { value, .. } => link.push(self.expr(value)),
+            ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. }
+                if super::sound_rest::memo_alias_on() && super::sound_rest::getter(e).is_some() => {
+                link.push(self.name(true, name));
+                link.push(self.expr(value));
+            }
+            ExprNode::Send { recv, method, args, block, .. }
+                if super::sound_rest::memo_alias_on() && args.is_empty() && block.is_none()
+                    && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                    && getters.contains_key(method) => {
+                link.push(self.name(true, &getters[method]));
+            }
             ExprNode::Send {
                 recv: Some(recv),
                 method,
@@ -204,6 +215,9 @@ struct State {
     source_heap: HashMap<String, Vec<(String, usize)>>,
     source_effects: HashMap<String, Vec<(ParamKey, usize, usize)>>,
     declarations: HashMap<String, Vec<(Symbol, ParamKey, usize)>>,
+    getters: HashMap<ParamKey, Option<Symbol>>,
+    getter_names: BTreeSet<Symbol>,
+    getter_scopes: HashMap<(Vec<crate::ident::ClassId>, bool), HashMap<Symbol, Symbol>>,
     effects: HashMap<(ParamKey, usize), BTreeMap<(String, usize), Ty>>,
     effects_by_method: HashMap<Symbol, Vec<(ParamKey, usize)>>,
     roots: u64,
@@ -225,7 +239,7 @@ pub(super) fn reset() {
 pub(super) struct Visit {
     root: bool,
 }
-pub(super) fn enter(e: &Expr, ctx: &Ctx) -> Visit {
+pub(super) fn enter(e: &Expr, ctx: &Ctx, classes: &HashMap<crate::ident::ClassId, ClassInfo>) -> Visit {
     if !on() {
         return Visit { root: false };
     }
@@ -234,8 +248,6 @@ pub(super) fn enter(e: &Expr, ctx: &Ctx) -> Visit {
         if s.frame.is_some() {
             return false;
         }
-        let mut graph = Graph::default();
-        graph.build(e);
         let mut scope = ctx
             .lexical_self
             .as_ref()
@@ -244,6 +256,41 @@ pub(super) fn enter(e: &Expr, ctx: &Ctx) -> Visit {
             .unwrap_or_default();
         scope.sort();
         scope.dedup();
+        let mut graph = Graph::default();
+        let mut getters = HashMap::new();
+        if super::sound_rest::memo_alias_on() {
+            let key = (scope.clone(), ctx.class_side);
+            if let Some(known) = s.getter_scopes.get(&key) {
+                getters = known.clone();
+            } else {
+            let side = if ctx.class_side { crate::dialect::MethodReceiver::Class } else { crate::dialect::MethodReceiver::Instance };
+            for name in &s.getter_names {
+                let mut found = BTreeSet::new();
+                let mut valid = true;
+                for owner in &scope {
+                    let mut todo = vec![owner.clone()];
+                    let mut seen = BTreeSet::new();
+                    while let Some(id) = todo.pop() {
+                        if !seen.insert(id.clone()) { continue; }
+                        if let Some(alias) = s.getters.get(&(id.clone(), name.clone(), side)) {
+                            if let Some(ivar) = alias { found.insert(ivar.clone()); } else { valid = false; }
+                            break;
+                        }
+                        if let Some(info) = classes.get(&id) {
+                            // Stack order follows method lookup: includes before parent.
+                            todo.extend(info.parent.iter().cloned());
+                            todo.extend(info.includes.iter().cloned());
+                        }
+                    }
+                }
+                if valid && found.len() == 1 { getters.insert(name.clone(), found.pop_first().unwrap()); }
+            }
+            // These aliases depend only on frozen syntax and method lookup,
+            // so every body of the same receiver scope can share the lookup.
+            s.getter_scopes.insert(key, getters.clone());
+            }
+        }
+        graph.build(e, &getters);
         let source = format!(
             "{}:{scope:?}:{}:{}:{:?}:{}",
             ctx.writer_source
@@ -646,6 +693,22 @@ pub(super) fn declare(source: &str, key: ParamKey, names: Vec<Symbol>) {
             );
         });
     }
+}
+/// Freeze getter identities before any schedule-dependent body typing.
+pub(super) fn declare_getters(app: &crate::App) {
+    if !on() || !super::sound_rest::memo_alias_on() { return; }
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        let mut record = |owner: &crate::ident::ClassId, method: &crate::dialect::MethodDef| {
+            let alias = method.params.is_empty().then(|| super::sound_rest::getter(&method.body)).flatten();
+            s.getters.insert((owner.clone(), method.name.clone(), method.receiver), alias);
+        };
+        for model in &app.models { for method in model.methods() { record(&model.name, method); } }
+        for class in app.library_classes.iter().chain(app.rails_application.iter()) {
+            for method in &class.methods { record(&class.name, method); }
+        }
+        s.getter_names = s.getters.iter().filter_map(|(k, v)| v.as_ref().map(|_| k.1.clone())).collect();
+    });
 }
 fn parameter_join(base: Ty, contribution: &Ty) -> Ty {
     if super::strict_producers::is_p(&base) {

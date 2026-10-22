@@ -62,6 +62,7 @@ mod mutation_writers;
 mod route_static;
 mod canon_var;
 mod cb_project;
+mod sound_rest;
 mod completion_rerun;
 mod fixpoint_bound;
 mod fixpoint_check;
@@ -1356,6 +1357,7 @@ impl Analyzer {
         param_views::reset(&app.sources);
         writers::reset(app);
         mutation_writers::reset();
+        mutation_writers::declare_getters(app);
         slots::reset();
         self.strict_stub_originals.clear();
         self.s3d.reset_completions();
@@ -3983,6 +3985,7 @@ impl Analyzer {
                     for (k, v) in &ivars {
                         let noise = |t: &Ty| t.is_unknown();
                         let merged = match entry.remove(k) {
+                            Some(prev) if sound_rest::render_on() => writers::join(prev, v.clone()),
                             Some(prev) if noise(&prev) => v.clone(),
                             Some(prev) if noise(v) => prev,
                             Some(prev) if prev == *v => prev,
@@ -6428,18 +6431,29 @@ impl Analyzer {
     /// Share main's receiver-side selection with the worklist's recorded sites.
     fn resolve_param_site(
         &self,
-        (class_id, method, arg_tys, kw_tys, recv): SendSite,
+        (class_id, method, mut arg_tys, kw_tys, recv): SendSite,
         params_by_method: &HashMap<ParamKey, ParamShape>,
         defined: &BTreeSet<ParamKey>,
     ) -> Option<(ParamKey, Vec<Ty>)> {
         if writers::unknown_class(&class_id) { return None; }
-        let key = self.resolve_param_key(class_id, method, recv, defined)?;
+        let splat = recv == SiteRecv::SidekiqSplat;
+        let key = self.resolve_param_key(class_id, method,
+            if splat { SiteRecv::Instance } else { recv }, defined)?;
         if writers::tracing() && (key.1.as_str() == "preview" || key.0.0.as_str() == "Comment" && key.1.as_str() == "includes") {
             eprintln!("WRITER row key={key:?} sources={:?} args={arg_tys:?} kw={kw_tys:?}",kw_tys.sources);
         }
         let sources = kw_tys.sources.clone();
         let positional = !kw_tys.group;
-        let arg_tys = Self::place_keyword_args(params_by_method.get(&key), arg_tys, kw_tys);
+        let arg_tys = if splat {
+            // A dynamic bulk row may fill every positional formal. The
+            // ordinary binder only expands splats for rest-only macros.
+            let elem = arg_tys.drain(..).map(|t| body::splat_elements(t)
+                .unwrap_or_else(Ty::unresolved)).fold(Ty::Bottom, writers::join);
+            params_by_method.get(&key).map(|shape| shape.slots.iter().map(|(_, kind)| {
+                if matches!(kind, ParamKind::Rest) { Ty::Array { elem: std::sync::Arc::new(elem.clone()) } }
+                else { elem.clone() }
+            }).collect()).unwrap_or_else(|| vec![Ty::unresolved()])
+        } else { Self::place_keyword_args(params_by_method.get(&key), arg_tys, kw_tys) };
         producer_evidence::parameter_destination(&key, &sources, positional, &arg_tys);
         Some((key, arg_tys))
     }
@@ -6490,6 +6504,7 @@ impl Analyzer {
         recv: SiteRecv,
         defined: &BTreeSet<ParamKey>,
     ) -> Option<ParamKey> {
+        let recv = if recv == SiteRecv::SidekiqSplat { SiteRecv::Instance } else { recv };
         let want = if recv == SiteRecv::Instance { MethodReceiver::Instance } else { MethodReceiver::Class };
         let on_side = self.inherited_param_owner(defined, class_id.clone(), &method, Some(want));
         let class_id = if defined.contains(&(on_side.clone(), method.clone(), want)) {
@@ -8605,6 +8620,8 @@ enum SiteRecv {
     Class,
     // Not `Class`: `x.class` also reaches class methods a gem defines, which no `def` here owns.
     DotClass,
+    /// A synthetic JSON job row with dynamic argument positions.
+    SidekiqSplat,
 }
 
 /// One typed send's observations, shared by the source walk and writer capture.
@@ -8784,6 +8801,7 @@ fn collect_direct_send_sites(
                         && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
 
                     for class_id in recv_classes {
+                        sound_rest::sidekiq_sites(expr, &class_id, site_recv, &kw_tys, classes, out);
                         if record_initialize
                             && !factories.contains(&class_id)
                         {

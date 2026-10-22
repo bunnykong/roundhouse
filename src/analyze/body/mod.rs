@@ -576,7 +576,7 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
-        let mutation_visit = super::mutation_writers::enter(expr,ctx);
+        let mutation_visit = super::mutation_writers::enter(expr,ctx,self.classes().raw());
         loop {
             let _writer_visit = super::writers::enter(expr.span, ctx);
             let ty = self.compute(expr, ctx);
@@ -1870,7 +1870,9 @@ impl<'a> BodyTyper<'a> {
                     _ => None,
                 };
                 if let Some((construct, detail)) = unsupported_deep_merge
-                    && matches!(recv_ty, Some(Ty::Hash { .. }))
+                    && (matches!(recv_ty, Some(Ty::Hash { .. }))
+                        || super::sound_rest::ivar_calls_on()
+                            && recv_ty.as_ref().is_some_and(super::sound_rest::has_hash_arm))
                 {
                     expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
@@ -2527,6 +2529,9 @@ impl<'a> BodyTyper<'a> {
                         forget_class_object_writes(e, &mut local_ctx);
                     }
                     last = self.analyze_expr(e, &local_ctx);
+                    if super::sound_rest::ivar_calls_on() && super::sound_rest::has_call(e) {
+                        super::sound_rest::refresh_ivars(&mut local_ctx, ctx);
+                    }
                     // A self binding gives `self` its declared type from
                     // the next statement to the end of this body, blocks
                     // inside included. It changes only how `self` types:
