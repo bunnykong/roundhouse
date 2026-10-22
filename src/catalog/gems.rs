@@ -44,11 +44,9 @@ pub enum GemTy {
     Float,
     Sym,
     /// Gradual escape: the gem returns an object we don't model
-    /// structurally. Dispatch resolves and the choice propagates.
+    /// structurally, including opaque block results. Dispatch resolves
+    /// and the choice propagates through return stabilization.
     Untyped,
-    /// An opaque callback summary, rather than an external data contract.
-    /// The block may determine the answer; no gradual source is established.
-    BlockResult,
     /// An instance of the named (dotted-path) class, so a *factory*
     /// method can return another cataloged gem type and chains
     /// resolve. (`.new` is already universal, so this is only for
@@ -65,7 +63,6 @@ impl GemTy {
             GemTy::Float => Ty::Float,
             GemTy::Sym => Ty::Sym,
             GemTy::Untyped => Ty::gradual_untyped(),
-            GemTy::BlockResult => Ty::untyped(),
             GemTy::Instance(path) => Ty::Class {
                 id: ClassId(Symbol::from(path)),
                 args: vec![].into(),
@@ -143,7 +140,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("locale", GemTy::Sym),
             ("default_locale", GemTy::Sym),
             // `with_locale` returns its block's value — opaque here.
-            ("with_locale", GemTy::BlockResult),
+            ("with_locale", GemTy::Untyped),
             ("available_locales", GemTy::Untyped),
             ("locale_available?", GemTy::Bool),
             ("exists?", GemTy::Bool),
@@ -258,8 +255,8 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("insert_after", GemTy::Untyped),
             ("append_child", GemTy::Untyped),
             ("delete", GemTy::Untyped),
-            ("walk", GemTy::BlockResult),
-            ("each", GemTy::BlockResult),
+            ("walk", GemTy::Untyped),
+            ("each", GemTy::Untyped),
         ],
     },
     // RQRCode — QR-code rendering; the `as_*` methods serialize to a
@@ -532,7 +529,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
     // `retryable` returns its block's value — opaque here.
     GemClass {
         name: "Retryable",
-        class_methods: &[("retryable", GemTy::BlockResult)],
+        class_methods: &[("retryable", GemTy::Untyped)],
         instance_methods: &[],
     },
     // JWT — token encode/decode (the jwt gem). As Faraday: the real gem
@@ -597,28 +594,20 @@ mod reason_tests {
     use super::*;
 
     #[test]
-    fn callback_summaries_do_not_admit_external_data() {
-        let mut callbacks = Vec::new();
+    fn unknown_catalog_returns_use_the_gradual_contract() {
+        // #964's block42 probe: an opaque result must not disappear into
+        // a concrete fallback merely because it came from a block.
+        // https://github.com/rubys/roundhouse/issues/964#issuecomment-6330115463
         for class in GEM_CATALOG {
-            for (side, methods) in [("class", class.class_methods), ("instance", class.instance_methods)] {
+            for methods in [class.class_methods, class.instance_methods] {
                 for (name, kind) in methods {
                     let ty = kind.to_ty();
                     match kind {
-                        GemTy::BlockResult => {
-                            assert!(ty.inference_eq(&Ty::untyped()), "{}.{name}", class.name);
-                            callbacks.push((class.name, side, *name));
-                        }
                         GemTy::Untyped => assert!(ty.inference_eq(&Ty::gradual_untyped()), "{}.{name}", class.name),
                         _ => assert!(ty.inference_eq(&ty.computed()), "{}.{name}", class.name),
                     }
                 }
             }
         }
-        assert_eq!(callbacks, [
-            ("I18n", "class", "with_locale"),
-            ("Commonmarker::Node", "instance", "walk"),
-            ("Commonmarker::Node", "instance", "each"),
-            ("Retryable", "class", "retryable"),
-        ]);
     }
 }

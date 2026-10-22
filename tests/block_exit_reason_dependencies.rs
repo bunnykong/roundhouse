@@ -1,4 +1,4 @@
-//! Callback summaries and nonlocal block exits cannot certify a gradual value flow.
+//! Opaque catalog results stay gradual; nonlocal exits cannot certify value flows.
 
 use roundhouse::analyze::{DiagnosticKind, diagnose};
 use std::{
@@ -128,11 +128,23 @@ fn check_group(group: &str) {
 
 #[test]
 fn catalog_callback_aliases_and_operands() {
+    // Even catalog-00's String block has an opaque catalog contract.
+    // Absorbing it is invalid for the block42 probe in #964:
+    // https://github.com/rubys/roundhouse/issues/964#issuecomment-6330115463
     check_group("catalog");
 }
 #[test]
 fn other_catalog_callback_receivers() {
+    // The same block42 contract survives literal send aliases on instances.
     check_group("catalog-other");
+}
+
+#[test]
+fn catalog_integer_result_survives_return_stabilization() {
+    // #964's posted block42 probe returns Integer 42, so absorbing the
+    // catalog's unknown result into the String fallback is unsound.
+    // https://github.com/rubys/roundhouse/issues/964#issuecomment-6330115463
+    check_group("catalog-integer");
 }
 #[test]
 fn opaque_catalog_data_remains_gradual() {

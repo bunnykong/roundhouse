@@ -1367,7 +1367,9 @@ impl<'a> BodyTyper<'a> {
                     _ => None,
                 };
                 if let Some(name) = literal_name {
-                    return self.dispatch(recv_ty, &name, block_ret, &args[1..]);
+                    // A literal alias keeps the receiver's side, including
+                    // an instance catalog method's gradual return contract.
+                    return self.dispatch_on(recv_ty, &name, block_ret, &args[1..], instance_receiver);
                 }
             }
             return match recv_ty {
