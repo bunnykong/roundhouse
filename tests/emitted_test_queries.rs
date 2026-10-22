@@ -349,3 +349,241 @@ end
         .run_test("test/models/override_test.rb")
         .assert_passes();
 }
+
+#[test]
+fn emitted_test_query_preserves_extended_module_override_families() {
+    let names = ["order", "where", "limit", "left_joins", "order!", "all", "group",
+        "pluck", "pick", "ids", "maximum", "minimum", "destroy_by", "delete_by",
+        "first", "last", "insert_all", "insert_all!"];
+    let mut source = String::from("module QueryOverrides\n");
+    let mut assertions = String::new();
+    let mut helpers = String::from("  extend QueryOverrides\n");
+    for (index, name) in names.iter().enumerate() {
+        let value = index + 10;
+        source.push_str(&format!("  def {name}(argument = nil)\n    [{value}, 2]\n  end\n"));
+        let argument = match *name {
+            "all" | "ids" => "",
+            "where" | "destroy_by" | "delete_by" => "name: \"x\"",
+            "limit" | "first" | "last" => "2",
+            "insert_all" | "insert_all!" => "[{name: \"x\"}]",
+            _ => ":id",
+        };
+        assertions.push_str(&format!("    assert_equal [{value}, 2], Widget.{name}({argument})\n"));
+        for (spelling, receiver) in [("bare", ""), ("explicit", "self."), ("constant", "Widget.")] {
+            helpers.push_str(&format!("  def self.{spelling}_{index}\n    {receiver}{name}({argument})\n  end\n"));
+            assertions.push_str(&format!("    assert_equal [{value}, 2], Widget.{spelling}_{index}\n"));
+        }
+    }
+    source.push_str("  alias_method :reorder, :order\n  alias rewhere where\nend\n");
+    assertions.push_str(r#"    assert_equal [10, 2], Widget.reorder(:id)
+    assert_equal [11, 2], Widget.rewhere(name: "x")
+    assert_equal [10, 2], Widget.bare_order
+    assert_equal [10, 2], Widget.explicit_order
+    assert_equal [16, 2], Widget.bare_group
+    assert_equal 2, Widget.bare_group_count
+    assert_equal 2, Widget.explicit_group_count
+    assert_equal 2, Widget.constant_group_count
+    assert_equal 2, Widget.group(:owner_id).count
+    model = Widget
+    assert_equal [10, 2], model.order(:id)
+    assert_equal 2, model.group("owner_id").count
+    assert_equal [2], [1].map { |item| Widget.group(:owner_id).count }
+"#);
+    helpers.push_str(r#"  def self.bare_order
+    order(:id)
+  end
+  def self.explicit_order
+    self.order(:id)
+  end
+  def self.bare_group
+    group(:owner_id)
+  end
+  def self.bare_group_count
+    group(:owner_id).count
+  end
+  def self.explicit_group_count
+    self.group(:owner_id).count
+  end
+  def self.constant_group_count
+    Widget.group(:owner_id).count
+  end
+"#);
+    widgets(&helpers)
+        .write("app/models/query_overrides.rb", &source)
+        .write("test/models/extended_test.rb", &format!(r#"require "test_helper"
+class ExtendedTest < ActiveSupport::TestCase
+  def test_extended
+{assertions}  end
+end
+"#))
+        .run_test("test/models/extended_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn emitted_test_query_preserves_extension_lookup_forms() {
+    for (body, parent, module) in [
+        ("extend QueryOverrides", "", "module QueryOverrides\n include QueryImplementation\nend"),
+        ("class << self\n include QueryOverrides\nend", "", "module QueryOverrides\n include QueryImplementation\nend"),
+        ("", "extend QueryOverrides", "module QueryOverrides\n include QueryImplementation\nend"),
+        ("extend ::QueryOverrides", "", "module QueryOverrides\n include QueryImplementation\nend"),
+        ("extend Extensions::QueryOverrides", "", "module Extensions\n module QueryOverrides\n  include QueryImplementation\n end\nend"),
+    ] {
+        let run = widgets(body)
+            .write("app/models/application_record.rb", &format!("class ApplicationRecord < ActiveRecord::Base\n primary_abstract_class\n {parent}\nend\n"))
+            .write("app/models/query_implementation.rb", r#"module QueryImplementation
+  def arrange(*columns)
+    [9, 8]
+  end
+  alias_method :order, :arrange
+  alias group arrange
+end
+"#)
+            .write("app/models/query_overrides.rb", module)
+            .write("test/models/extension_forms_test.rb", r#"require "test_helper"
+class ExtensionFormsTest < ActiveSupport::TestCase
+  def test_extensions
+    assert_equal [9, 8], Widget.order(:id)
+    assert_equal 2, Widget.group(:owner_id).count
+    assert_equal 2, Widget.group("owner_id").count
+    assert_equal 2, Widget.group(:owner_id) { |value| value }.count
+    assert_equal 2, Widget.group.count
+    assert_equal 2, Widget.group(:owner_id, :name).count
+    assert_equal 1, Widget.group(:owner_id).count(9)
+    assert_equal 1, Widget.group(:owner_id).count { |value| value == 8 }
+    values = Widget.group(:owner_id)
+    assert_equal 2, values.count
+    model = Widget
+    assert_equal 2, model.group(:owner_id).count
+    assert_equal [], Widget.all.order(:id).to_a
+    query = Widget.where(name: "absent")
+    assert_equal({}, query.group(:owner_id).count)
+  end
+end
+"#)
+            .run_test("test/models/extension_forms_test.rb");
+        run.assert_passes();
+    }
+}
+
+#[test]
+fn emitted_test_extended_query_returns_keep_relation_dispatch() {
+    for query in ["Widget.where(owner_id: 7)", "where(owner_id: 7)", "self.where(owner_id: 7)"] {
+    widgets("  extend QueryOverrides")
+        .write("app/models/query_overrides.rb", &format!("module QueryOverrides\n\
+  def order(column)\n    {query}\n  end\n\
+  def group(column)\n    {query}\n  end\nend\n"))
+        .write("test/models/extended_query_test.rb", r#"require "test_helper"
+class ExtendedQueryTest < ActiveSupport::TestCase
+  def test_queries
+    Widget.create!(owner_id: 7, name: "first")
+    Widget.create!(owner_id: 9, name: "other")
+    Widget.create!(owner_id: 7, name: "third")
+    assert_equal [7, 7], Widget.order(:id).pluck(:owner_id)
+    assert_equal [7, 9, 7], Widget.all.order(:id).pluck(:owner_id)
+    assert_equal 2, Widget.group(:ignored).count
+    assert_equal({7 => 2}, Widget.group(:ignored).group(:owner_id).count)
+    query = Widget.group(:ignored)
+    assert_equal({7 => 2}, query.group(:owner_id).count)
+  end
+end
+"#)
+        .run_test("test/models/extended_query_test.rb")
+        .assert_passes();
+    }
+}
+
+#[test]
+fn emitted_test_extension_does_not_import_module_singleton_methods() {
+    widgets("  extend QueryOverrides")
+        .write("app/models/query_overrides.rb", r#"module QueryOverrides
+  def self.order(column)
+    [9, 8]
+  end
+  def self.group(column)
+    [9, 8]
+  end
+end
+"#)
+        .write("test/models/module_singletons_test.rb", r#"require "test_helper"
+class ModuleSingletonsTest < ActiveSupport::TestCase
+  def test_queries
+    assert_equal [], Widget.order(:id).to_a
+    assert_equal({}, Widget.group(:owner_id).count)
+  end
+end
+"#)
+        .run_test("test/models/module_singletons_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn emitted_test_instance_mixins_do_not_prove_class_query_dispatch() {
+    for (body, parent) in [("include QueryGroups", ""), ("", "include QueryGroups")] {
+        widgets(&format!("{body}\n  def groups\n    group(:owner_id).count\n  end\n"))
+            .write("app/models/application_record.rb", &format!("class ApplicationRecord < ActiveRecord::Base\n primary_abstract_class\n {parent}\nend\n"))
+            .write("app/models/query_groups.rb", r#"module QueryGroups
+  def group(column)
+    [9, 8]
+  end
+end
+"#)
+            .write("test/models/instance_mixin_test.rb", r#"require "test_helper"
+class InstanceMixinTest < ActiveSupport::TestCase
+  def test_groups
+    assert_equal 2, Widget.new.groups
+    assert_equal 2, Widget.new.group(:owner_id).count
+    assert_equal({}, Widget.group(:owner_id).count)
+  end
+end
+"#)
+            .run_test("test/models/instance_mixin_test.rb")
+            .assert_passes();
+    }
+}
+
+#[test]
+fn emitted_test_extended_overrides_leave_association_builtins_intact() {
+    widgets("  extend QueryOverrides")
+        .write("app/models/query_overrides.rb", r#"module QueryOverrides
+  def order(column)
+    [9, 8]
+  end
+  def group(column)
+    [9, 8]
+  end
+end
+"#)
+        .write("app/models/owner.rb", "class Owner < ApplicationRecord\n has_many :widgets\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "owners", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "widgets", force: :cascade do |t|
+    t.integer "owner_id"
+    t.string "name"
+  end
+end
+"#)
+        .write("test/models/extended_association_test.rb", r#"require "test_helper"
+class ExtendedAssociationTest < ActiveSupport::TestCase
+  def test_queries
+    owner = Owner.create!(name: "first")
+    other = Owner.create!(name: "second")
+    Widget.create!(owner_id: owner.id, name: "kept")
+    Widget.create!(owner_id: owner.id, name: "other")
+    Widget.create!(owner_id: other.id, name: "other")
+    assert_equal [9, 8], Widget.order(:id)
+    assert_equal 2, Widget.group(:owner_id).count
+    assert_equal ["kept", "other"], owner.widgets.order(:id).pluck(:name)
+    assert_equal({owner.id => 2}, owner.widgets.group(:owner_id).count)
+    query = owner.widgets
+    assert_equal({owner.id => 2}, query.group(:owner_id).count)
+    relation = ActiveRecord::Relation.new(Widget)
+    assert_equal({owner.id => 2, other.id => 1}, relation.group(:owner_id).count)
+  end
+end
+"#)
+        .run_test("test/models/extended_association_test.rb")
+        .assert_passes();
+}

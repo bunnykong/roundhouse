@@ -40,7 +40,7 @@ pub fn apply_fused_independent_rewrites(app: &mut App) {
     });
     for view in &mut app.views {
         walk_postorder(&mut view.body, &mut |e| {
-            rewrite_view_node(e, skip_exclude, skip_in, skip_including, skip_full_messages);
+            rewrite_view_node(e, skip_exclude, skip_in, skip_including, skip_full_messages, &group_receivers);
         });
     }
     super::for_each_test_body(app, &mut |body| {
@@ -488,7 +488,7 @@ fn rewrite_hook_node(
         super::including::rewrite_node(e);
     }
     super::exists_conditions::rewrite_node(e);
-    super::destroy_by::rewrite_node(e);
+    super::destroy_by::rewrite_node(e, group_receivers, owner);
     super::literal_append::rewrite_node(e);
     super::byte_size::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);
@@ -512,6 +512,7 @@ fn rewrite_view_node(
     skip_in: bool,
     skip_including: bool,
     skip_full_messages: bool,
+    group_receivers: &super::group_count::Receivers,
 ) {
     super::pathname_ctor::rewrite_node(e);
     super::array_ordinal::rewrite_node(e);
@@ -536,7 +537,7 @@ fn rewrite_view_node(
         super::including::rewrite_node(e);
     }
     super::exists_conditions::rewrite_node(e);
-    super::destroy_by::rewrite_node(e);
+    super::destroy_by::rewrite_node(e, group_receivers, None);
     super::literal_append::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);
     super::relation_select_block::rewrite_node(e);

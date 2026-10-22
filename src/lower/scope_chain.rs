@@ -291,11 +291,9 @@ pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol 
 pub struct UserMethodReturns {
     pub instance: HashMap<Symbol, Option<ClassId>>,
     pub class: HashMap<(ClassId, Symbol), ClassId>,
-    /// Class methods defined on that model itself. Ancestors stay on
-    /// the ancestor: [`UserMethodReturns::defines_class_method`] walks
-    /// [`Self::parents`], the same question `ClassInfo::source_class_method`
-    /// answers for the typer. Copying every ancestor method onto each
-    /// descendant made the two indexes disagree about who defined it.
+    /// Effective source singleton methods, including inherited methods
+    /// and extended modules. Return tracking uses the same winning
+    /// definition as the dispatch guard.
     pub class_methods: HashSet<(ClassId, Symbol)>,
     pub parents: HashMap<ClassId, ClassId>,
     /// Scopes whose body answers something OTHER than a relation (see
@@ -309,7 +307,7 @@ impl UserMethodReturns {
         Self::default()
     }
 
-    /// A source `def self.<method>` on `model` or one of its parents.
+    /// A source singleton method on `model`, its extensions or ancestors.
     pub fn defines_class_method(&self, model: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(model);
         for _ in 0..32 {
@@ -324,7 +322,7 @@ impl UserMethodReturns {
 
     /// Return tracking follows the same nearest source definition as
     /// dispatch; a child's non-relation override stops the ancestor walk.
-    fn class_return_model(&self, model: &ClassId, method: &Symbol) -> Option<ClassId> {
+    pub(crate) fn class_return_model(&self, model: &ClassId, method: &Symbol) -> Option<ClassId> {
         let mut current = Some(model);
         for _ in 0..32 {
             let id = current?;
@@ -350,22 +348,34 @@ impl UserMethodReturns {
     }
 }
 
-pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
+pub fn build_user_method_returns(app: &crate::app::App) -> UserMethodReturns {
+    let models = &app.models;
+    let source = crate::analyze::SourceMethods::new(app);
     let model_ids: HashSet<ClassId> = models.iter().map(|m| m.name.clone()).collect();
     let mut reg = UserMethodReturns::new();
+    let scopes = build_scope_registry(models);
+    reg.non_relation_scopes = non_relation_scopes(models, &model_ids);
     for m in models {
+        let effective = source.class_methods(&m.name);
+        let bodies = effective.iter().map(|(name, method)| (name, &method.body)).collect();
+        for (name, method) in &effective {
+            let non_relation = method.body.ty.as_ref().is_some_and(definitely_non_relation_type)
+                || tail_is_non_relation(&method.body, &bodies, &model_ids, &m.name, false, 0);
+            if non_relation { reg.non_relation_scopes.insert((m.name.clone(), name.clone())); }
+        }
+        for (name, method) in effective {
+            reg.class_methods.insert((m.name.clone(), name.clone()));
+            if let Some(target) = class_relation_return_model(
+                &method.body, &m.name, &model_ids, &source, &scopes, &reg.non_relation_scopes, &mut HashSet::new(),
+            ) {
+                reg.class.insert((m.name.clone(), name), target);
+            }
+        }
         for item in &m.body {
             if let ModelBodyItem::Scope { scope, .. } = item {
                 reg.declared_scopes.insert((m.name.clone(), scope.name.clone()));
             }
             let ModelBodyItem::Method { method, .. } = item else { continue };
-            if method.receiver == crate::dialect::MethodReceiver::Class {
-                reg.class_methods.insert((m.name.clone(), method.name.clone()));
-                if let Some(target) = relation_return_model(&method.body, &model_ids) {
-                    reg.class.insert((m.name.clone(), method.name.clone()), target);
-                }
-                continue;
-            }
             if method.receiver != crate::dialect::MethodReceiver::Instance {
                 continue;
             }
@@ -386,7 +396,6 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
             reg.parents.insert(model.name.clone(), parent.clone());
         }
     }
-    reg.non_relation_scopes = non_relation_scopes(models, &model_ids);
     reg.class.retain(|key, _| !reg.non_relation_scopes.contains(key));
     reg
 }
@@ -1249,6 +1258,48 @@ fn relation_return_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<Class
             _ => return None,
         }
     }
+}
+
+/// Query-return proof for a source singleton method. An extended module's
+/// bare/self calls run on the receiving model, not on the module where the
+/// body was declared. Follow the same effective source definitions as the
+/// dispatch guard before treating a query-shaped name as a framework call.
+fn class_relation_return_model(
+    expr: &Expr, owner: &ClassId, models: &HashSet<ClassId>, source: &crate::analyze::SourceMethods<'_>,
+    scopes: &ScopeRegistry, non_relation: &HashSet<(ClassId, Symbol)>,
+    active: &mut HashSet<(ClassId, Symbol)>,
+) -> Option<ClassId> {
+    let tail = match &*expr.node {
+        ExprNode::Seq { exprs } => exprs.last()?,
+        _ => expr,
+    };
+    let ExprNode::Send { recv, method, block: None, .. } = &*tail.node else { return None };
+    if method.as_str() == "new" {
+        return relation_return_model(tail, models);
+    }
+    let root = match recv.as_ref().map(|recv| &*recv.node) {
+        None | Some(ExprNode::SelfRef) => Some(owner.clone()),
+        Some(ExprNode::Const { .. }) => recv.as_ref().and_then(|recv| const_model(recv, models)),
+        _ => None,
+    };
+    if let Some(model) = root {
+        let key = (model.clone(), method.clone());
+        if !active.insert(key.clone()) { return None; }
+        let result = if let Some(definition) = source.lookup(&model, method.as_str(), crate::dialect::MethodReceiver::Class) {
+            class_relation_return_model(&definition.body, &model, models, source, scopes, non_relation, active)
+        } else if (is_relation_chain_method(method.as_str()) || method.as_str() == "all"
+            || scopes.get(&model).is_some_and(|scopes| scopes.contains_key(method)))
+            && !non_relation.contains(&key)
+        {
+            Some(model)
+        } else { None };
+        active.remove(&key);
+        return result;
+    }
+    if is_relation_chain_method(method.as_str()) {
+        return class_relation_return_model(recv.as_ref()?, owner, models, source, scopes, non_relation, active);
+    }
+    None
 }
 
 /// Per-model association facts the chain rewriter consumes once a chain's
@@ -4136,6 +4187,18 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             None
         }
         Some(r) => {
+            // A written Relation seed proves a query just as one minted by
+            // this pass does. Keep that proof when the seed is parked in a
+            // local, even when the model overrides a builder's class name.
+            if method.as_str() == "new" && args.len() == 1 && block.is_none()
+                && matches!(&*r.node, ExprNode::Const { path }
+                    if path.iter().map(Symbol::as_str).filter(|part| !part.is_empty())
+                        .eq(["ActiveRecord", "Relation"]))
+            {
+                let model = const_model(&args[0], ctx.models);
+                *expr = put(span, Some(r), method, args, block, parenthesized);
+                return model;
+            }
             // Class-level call on a model constant.
             if let Some(m) = const_model(&r, ctx.models) {
                 // A catalog name does not override a source class method.
@@ -5585,6 +5648,116 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn extended_methods_keep_dispatch_for_every_query_entrypoint() {
+        let mut names: HashSet<&str> = crate::catalog::AR_CATALOG.iter()
+            .map(|entry| entry.name).filter(|name| is_relation_chain_method(name)).collect();
+        names.extend(crate::catalog::BUILDER_ALIASES.iter().map(|(alias, _)| *alias));
+        names.extend(CLASS_ROOT_TERMINALS.iter().copied());
+        names.extend(["all", "first", "last", "insert_all", "insert_all!"]);
+        let methods = names.iter().map(|name| format!("def {name}(*args); [9, 8]; end\n")).collect::<String>();
+        for (body, parent, mixin) in [
+            ("extend Overrides", "", "module Overrides; include Methods; end"),
+            ("class << self; include Overrides; end", "", "module Overrides; include Methods; end"),
+            ("", "extend Overrides", "module Overrides; include Methods; end"),
+        ] {
+            let tree = [
+                ("db/schema.rb", "ActiveRecord::Schema.define do; create_table(\"widgets\") do |t|; t.integer \"owner_id\"; end; end".to_string()),
+                ("app/models/application_record.rb", format!("class ApplicationRecord < ActiveRecord::Base; primary_abstract_class; {parent}; end")),
+                ("app/models/widget.rb", format!("class Widget < ApplicationRecord; {body}; end")),
+                ("app/models/methods.rb", format!("module Methods\n{methods}end")),
+                ("app/models/overrides.rb", mixin.to_string()),
+            ].into_iter().map(|(path, source)| (std::path::PathBuf::from(path), source.into_bytes())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).expect("extension app");
+            let returns = build_user_method_returns(&app);
+            let model = ClassId(Symbol::from("Widget"));
+            let scopes = ScopeRegistry::new();
+            let models = HashSet::from([model.clone()]);
+            let assocs = AssocRegistry::default();
+            let mut ctx = ctx_with(&scopes, &models, &assocs);
+            ctx.class_self = Some(model.clone());
+            ctx.user_returns = &returns;
+            for name in &names {
+                assert!(returns.defines_class_method(&model, &Symbol::from(*name)),
+                    "{name}: {body}, {parent}; models={:?}, modules={:?}",
+                    app.models.iter().map(|m| &m.name).collect::<Vec<_>>(),
+                    app.library_classes.iter().map(|c| (&c.name, &c.includes, c.methods.len())).collect::<Vec<_>>());
+                for recv in [None, Some(const_expr(span(), &model)), Some(syn(span(), ExprNode::SelfRef))] {
+                    for arity in 0..=2 {
+                        for blocked in [false, true] {
+                            let mut expr = syn(span(), ExprNode::Send {
+                                recv: recv.clone(), method: Symbol::from(*name),
+                                args: (0..arity).map(int_lit).collect(),
+                                block: blocked.then(|| int_lit(1)), parenthesized: true,
+                            });
+                            let source = expr.clone();
+                            rewrite(&mut expr, &ctx, &mut Locals::default());
+                            assert_eq!(expr, source, "extended {name}: {body}, {parent}; arity={arity}, block={blocked}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extended_method_returns_follow_ruby_ancestor_precedence() {
+        let modules = "module Values; def order(*args); [9, 8]; end; end\n\
+            module Queries; def order(*args); Widget.where(owner_id: 7); end; end\n\
+            module BaseValues; def order(*args); [3, 4]; end; end\n\
+            module Left; include BaseValues; def order(*args); Widget.where(owner_id: 7); end; end\n\
+            module Right; include BaseValues; end\n\
+            module SingletonOnly; def self.order(*args); [5, 6]; end; end";
+        for (body, parent, expected) in [
+            ("extend Values, Queries", "", false),
+            ("extend Queries, Values", "", true),
+            ("extend Values; extend Queries", "", true),
+            ("extend Queries; extend Values", "", false),
+            ("extend Values; extend Queries; extend Values", "", true),
+            ("extend Left; extend Right", "", true),
+            ("extend Values", "extend Queries", false),
+            ("extend Queries; def self.order(*args); [1, 2]; end", "", false),
+            ("extend SingletonOnly", "extend Queries", true),
+            ("include Values", "extend Queries", true),
+        ] {
+            let tree = [
+                ("db/schema.rb", "ActiveRecord::Schema.define do; create_table(\"widgets\") do |t|; t.integer \"owner_id\"; end; end".to_string()),
+                ("app/models/application_record.rb", format!("class ApplicationRecord < ActiveRecord::Base; primary_abstract_class; {parent}; end")),
+                ("app/models/widget.rb", format!("class Widget < ApplicationRecord; {body}; end")),
+                ("app/models/overrides.rb", modules.to_string()),
+            ].into_iter().map(|(path, source)| (std::path::PathBuf::from(path), source.into_bytes())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).expect("precedence app");
+            let returns = build_user_method_returns(&app);
+            let model = ClassId(Symbol::from("Widget"));
+            assert!(returns.defines_class_method(&model, &Symbol::from("order")), "{body}");
+            assert_eq!(returns.class_return_model(&model, &Symbol::from("order")).is_some(), expected, "{body}; parent {parent}");
+            assert_eq!(returns.returns_non_relation(&model, &Symbol::from("order")), !expected, "{body}; parent {parent}");
+        }
+    }
+
+    #[test]
+    fn extended_method_lookup_uses_resolved_lexical_and_rooted_names() {
+        for (declaration, expected) in [
+            ("class Space::Widget < ApplicationRecord; extend Overrides; end", true),
+            ("module Space; class Widget < ApplicationRecord; extend Overrides; end; end", false),
+            ("module Space; class Widget < ApplicationRecord; extend ::Overrides; end; end", true),
+        ] {
+            let tree = [
+                ("db/schema.rb", "ActiveRecord::Schema.define do; create_table(\"widgets\") do |t|; t.integer \"owner_id\"; end; end".to_string()),
+                ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base; primary_abstract_class; end".to_string()),
+                ("app/models/widget.rb", "class Widget < ApplicationRecord; end".to_string()),
+                ("app/models/space/widget.rb", declaration.to_string()),
+                ("app/models/overrides.rb", "module Overrides; def order(*args); Widget.where(owner_id: 7); end; end".to_string()),
+                ("app/models/space/overrides.rb", "module Space; module Overrides; def order(*args); [9, 8]; end; end; end".to_string()),
+            ].into_iter().map(|(path, source)| (std::path::PathBuf::from(path), source.into_bytes())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).expect("namespace app");
+            let returns = build_user_method_returns(&app);
+            let model = ClassId(Symbol::from("Space::Widget"));
+            assert!(returns.defines_class_method(&model, &Symbol::from("order")), "{declaration}");
+            assert_eq!(returns.class_return_model(&model, &Symbol::from("order")).is_some(), expected, "{declaration}");
         }
     }
 

@@ -1800,7 +1800,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         return;
     }
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
-    let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
+    let user_returns = crate::lower::scope_chain::build_user_method_returns(app);
     let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
     let regs = crate::lower::scope_chain::Registries {
         scopes: &scopes,

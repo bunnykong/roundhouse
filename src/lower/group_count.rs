@@ -31,16 +31,30 @@ pub(crate) struct Receivers {
 
 impl Receivers {
     pub(crate) fn new(app: &App) -> Self {
+        let source = crate::analyze::SourceMethods::new(app);
         Self {
             models: super::scope_chain::model_set(&app.models),
             scopes: super::scope_chain::build_scope_registry(&app.models),
-            user_returns: super::scope_chain::build_user_method_returns(&app.models),
-            instance_groups: app.models.iter().filter(|model| model.body.iter().any(|item| {
-                matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
-                    if method.receiver == crate::dialect::MethodReceiver::Instance
-                        && method.name.as_str() == "group")
-            })).map(|model| model.name.clone()).collect(),
+            user_returns: super::scope_chain::build_user_method_returns(app),
+            instance_groups: app.models.iter().filter(|model| source.lookup(
+                &model.name, "group", crate::dialect::MethodReceiver::Instance,
+            ).is_some()).map(|model| model.name.clone()).collect(),
         }
+    }
+
+    /// Whether this send reaches an application singleton method before
+    /// framework query dispatch. Relation receivers keep their builtins.
+    pub(crate) fn source_class_call(&self, expr: &Expr, owner: Option<&ClassId>) -> bool {
+        let ExprNode::Send { recv, method, .. } = &*expr.node else { return false };
+        let model = match recv {
+            None => owner.cloned(),
+            Some(recv) if matches!(&*recv.node, ExprNode::SelfRef) => owner.cloned(),
+            Some(recv) => self.model_const(recv).or_else(|| match &recv.ty {
+                Some(Ty::Class { id, .. }) if self.models.contains(id) => Some(id.clone()),
+                _ => None,
+            }),
+        };
+        model.is_some_and(|model| self.user_returns.defines_class_method(&model, method))
     }
 
     fn model_const(&self, expr: &Expr) -> Option<ClassId> {
@@ -90,6 +104,14 @@ impl Receivers {
                     ExprNode::Const { path } if path.iter().map(Symbol::as_str).eq(["ActiveRecord", "Relation"])))
             {
                 return self.model_const(&args[0]).is_some();
+            }
+            // A source override may itself return a query. That proves a
+            // *following* group is Relation#group, without claiming that
+            // the override named `group` grouped anything itself.
+            if recv.as_ref().and_then(|recv| self.model_const(recv))
+                .is_some_and(|model| self.user_returns.class_return_model(&model, method).is_some())
+            {
+                return true;
             }
             let is_scope = recv.as_ref().and_then(|recv| self.model_const(recv))
                 .is_some_and(|model| self.scopes.get(&model).is_some_and(|scopes| scopes.contains_key(method)));

@@ -246,7 +246,7 @@ fn materialize_models_with_param_binds(
     // materializes its body into an Array before the call-site guard
     // can preserve `Model.order(...).pluck(...)`.
     assoc_scopes.extend(
-        crate::lower::scope_chain::build_user_method_returns(&app.models).class.keys()
+        crate::lower::scope_chain::build_user_method_returns(app).class.keys()
             .filter(|(_, method)| crate::lower::scope_chain::is_relation_chain_method(method.as_str())
                 || method.as_str() == "all")
             .cloned(),
@@ -263,6 +263,7 @@ fn materialize_models_with_param_binds(
         param_binds,
         crate::lower::model_to_library::ErrorsReaders::CreatedOnFirstRead,
         crate::lower::model_to_library::RuntimeRelation::Present,
+        Some(&crate::analyze::SourceMethods::new(app)),
     ).0;
     (lcs, params_specs)
 }
