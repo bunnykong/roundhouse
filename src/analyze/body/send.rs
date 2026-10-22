@@ -3969,8 +3969,13 @@ pub(super) fn object_protocol_method(
 /// `params.fetch(:ids, [])`, `params.each { |k, v| }` and
 /// `params.values` hand out the same element union `params[:k]` does.
 pub(super) fn params_as_hash() -> Ty {
+    static STRING_KEYS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(||
+        std::env::var("RH_PARAMS_STRING_KEYS").as_deref() == Ok("1"));
+    // Rails iterates parameter names as Strings. Preserve the Symbol arm
+    // used by existing schema and literal-key readers.
+    let key = if *STRING_KEYS { union_of(Ty::Str, Ty::Sym) } else { Ty::Sym };
     Ty::Hash {
-        key: std::sync::Arc::new(Ty::Sym),
+        key: std::sync::Arc::new(key),
         value: std::sync::Arc::new(crate::analyze::registry::controllers::param_value_ty(false)),
     }
 }
