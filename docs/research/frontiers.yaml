@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "Counted by reader, 12 of F73's 21 witnessed losses have reader-visible repairs: F77's class-body sites 5 and String parameter keys 2, and F78's four flags 5, four of them only through Unresolved. Seven repairs reach no reader, C1376 and C1465 still reject, and render bindings add 4 Forem losses. On reader-visible rows, at most 48.0% of F73's narrowings lose values at 95%: the bound is wide for lack of proofs. Both binding tables miss 45 reachable bindings, and older catalog gaps remain, such as `Int + Float` typed `Int`."
-  facts: [F78, F77, F76, F75, F74, F73, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "Counted by reader, 12 of F73's 21 witnessed losses have reader-visible repairs: F77's class-body sites 5 and String parameter keys 2, and F78's four flags 5. C1376 and C1465 still reject, and render bindings add 4 Forem losses. An independent checker proves 1,922 of F73's 4,652 narrowed rows from source and no known loss; with its proofs, and two circular hand proofs counted as unproved, at most 46.9% of the narrowings lose values at 95%. Both binding tables miss 45 reachable bindings, and older catalog gaps remain, such as `Int + Float` typed `Int`."
+  facts: [F79, F78, F77, F76, F75, F74, F73, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Prove census rows from source to tighten the bound, fix `array: true` in schema ingestion, then repair C1376, C1465 and the 45 missed bindings before claiming sound equality."
+  next: "Extend the proof checker to caller enumeration and returns across methods, since only proofs move the bound; fix `array: true` in schema ingestion, then repair C1376, C1465 and the 45 missed bindings before claiming sound equality."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
     compiler: "research/sound-rest-3b96ce25 693a9f3cb97c51fa73aa7a6af7d10a8f779604fe (snapshot of 3b96ce25 over research/params-keys-953680ad 7ea97ec7c1b39cfb7eab95a7bf8606f6b61d05ec and research/route-per-class-575558cd b391cd9781452bba589ead4ba77ca0b4ee9a1242) and research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f, each over F75's branch from upstream a5d73fdf"
-    lab: "d524ad4d06a3bdc5cc2a3566ebea907862d3da3c; remaining repairs, census by reader, loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
+    lab: "009aabed0c3c545df483ef6a9565e33552cb9817; census proof checker with F73's correction, remaining repairs, census by reader, loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
