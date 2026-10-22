@@ -24,8 +24,8 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "With F74's strict guard, F75's binding projection and the later F76 and F77 changes, Campfire, Forem, Chatwoot and Mastodon all keep 10/10 schedule-equal tables at V0A0, Mastodon also across twelve schedules for F74 to F76. One Chatwoot reason row's provenance depends on the schedule under F76, 13 of F73's rows still exclude a witness or sit in unread tables, and both binding tables miss 45 reachable bindings, so sound order independence remains open."
-  facts: [F77, F76, F75, F74, F73, F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "With F74's strict guard, F75's binding projection and the later F76 to F78 changes, Campfire, Forem, Chatwoot and Mastodon all keep 10/10 schedule-equal tables at V0A0, Mastodon also across twelve schedules for F74 to F76. One Chatwoot reason row's provenance depends on the schedule under F76, 2 of F73's rows still reject their witnesses, 7 repairs reach no reader, render bindings add 4 Forem losses, and both binding tables miss 45 reachable bindings, so sound order independence remains open."
+  facts: [F78, F77, F76, F75, F74, F73, F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
@@ -34,9 +34,9 @@
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
-    compiler: "research/params-keys-953680ad 7ea97ec7c1b39cfb7eab95a7bf8606f6b61d05ec (snapshot of 953680ad over research/route-per-class-575558cd b391cd9781452bba589ead4ba77ca0b4ee9a1242) and research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f, each over F75's branch from upstream a5d73fdf"
-    lab: "e03ab6cc6702eebf11398969294c6e39f9c3f212; loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
-    runner: "V0A0 quick-test reports, row admissions and narrowing witnesses at lab e03ab6cc6702eebf11398969294c6e39f9c3f212"
+    compiler: "research/sound-rest-3b96ce25 693a9f3cb97c51fa73aa7a6af7d10a8f779604fe (snapshot of 3b96ce25 over research/params-keys-953680ad 7ea97ec7c1b39cfb7eab95a7bf8606f6b61d05ec and research/route-per-class-575558cd b391cd9781452bba589ead4ba77ca0b4ee9a1242) and research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f, each over F75's branch from upstream a5d73fdf"
+    lab: "d524ad4d06a3bdc5cc2a3566ebea907862d3da3c; remaining repairs, census by reader, loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
+    runner: "V0A0 quick-test reports, row admissions and narrowing witnesses at lab d524ad4d06a3bdc5cc2a3566ebea907862d3da3c"
   claims:
     - who: eddygarcas
       scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
@@ -58,18 +58,18 @@
   name: Soundness
   brief: frontiers/soundness.md
   status: open
-  stands: "F77 makes 8 substantive repairs of F73's 21 witnessed losses: class-body sites 5 and String parameter keys 3. 13 F73 rows still exclude a witness or sit in unread tables, since per-class routes' 5 repairs pass only through an Unresolved arm in parameter rows nothing reads. F73's sampled bound is not recomputed. Both binding tables miss 45 reachable bindings, and older catalog gaps remain, such as `Int + Float` typed `Int`."
-  facts: [F77, F76, F75, F74, F73, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  stands: "Counted by reader, 12 of F73's 21 witnessed losses have reader-visible repairs: F77's class-body sites 5 and String parameter keys 2, and F78's four flags 5, four of them only through Unresolved. Seven repairs reach no reader, C1376 and C1465 still reject, and render bindings add 4 Forem losses. On reader-visible rows, at most 48.0% of F73's narrowings lose values at 95%: the bound is wide for lack of proofs. Both binding tables miss 45 reachable bindings, and older catalog gaps remain, such as `Int + Float` typed `Int`."
+  facts: [F78, F77, F76, F75, F74, F73, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
     - Type systems
-  next: "Classify the census rows by whether any analyzer body or emitter reads them, then repair the 8 remaining F73 losses and cover the 45 missed bindings before claiming sound equality."
+  next: "Prove census rows from source to tighten the bound, fix `array: true` in schema ingestion, then repair C1376, C1465 and the 45 missed bindings before claiming sound equality."
   check: frontiers/soundness.md#the-check
   check_public: partial
   pins:
-    compiler: "research/params-keys-953680ad 7ea97ec7c1b39cfb7eab95a7bf8606f6b61d05ec (snapshot of 953680ad over research/route-per-class-575558cd b391cd9781452bba589ead4ba77ca0b4ee9a1242) and research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f, each over F75's branch from upstream a5d73fdf"
-    lab: "e03ab6cc6702eebf11398969294c6e39f9c3f212; loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
+    compiler: "research/sound-rest-3b96ce25 693a9f3cb97c51fa73aa7a6af7d10a8f779604fe (snapshot of 3b96ce25 over research/params-keys-953680ad 7ea97ec7c1b39cfb7eab95a7bf8606f6b61d05ec and research/route-per-class-575558cd b391cd9781452bba589ead4ba77ca0b4ee9a1242) and research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f, each over F75's branch from upstream a5d73fdf"
+    lab: "d524ad4d06a3bdc5cc2a3566ebea907862d3da3c; remaining repairs, census by reader, loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
@@ -84,19 +84,19 @@
   name: Precision
   brief: frontiers/precision.md
   status: open
-  stands: "Per-class routes add an Unresolved arm to 1,962 parameter rows that no analyzer body or emitter reads, so that cost is table-only, while their 75 narrowings drop only Unresolved; the binding projection makes 104 known values partly or fully Unresolved, 95 in Chatwoot; the strict guard widens 24 Mastodon rows. F73's narrowings lose witnessed values in 21 rows; 8 are substantively repaired."
-  facts: [F77, F75, F74, F73, F72, F71, F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
+  stands: "F78's four flags widen 1,877 rows, 632 of them to a bare Unresolved, and ivar call joins alone cause 1,528, most of them read; per-class routes add an Unresolved arm to 1,962 parameter rows that nothing reads; the binding projection makes 104 known values partly or fully Unresolved, 95 in Chatwoot; the strict guard widens 24 Mastodon rows. F73's narrowings lose witnessed values in 21 rows; 12 have reader-visible repairs."
+  facts: [F78, F77, F75, F74, F73, F72, F71, F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
   skills:
     - Rust
     - type inference
     - "Rails idioms such as guards, memoization and `Array(…)`"
-  next: "Recover the 104 binding values and the 24 widened rows without a Pending seed, and keep runtime membership beside each narrowing claim."
+  next: "Recover the precision that ivar call joins give up, the 104 binding values and the 24 widened rows without a Pending seed, and keep runtime membership beside each narrowing claim."
   check: frontiers/precision.md#the-check
   check_public: public
   pins:
-    compiler: "research/params-keys-953680ad 7ea97ec7c1b39cfb7eab95a7bf8606f6b61d05ec (snapshot of 953680ad over research/route-per-class-575558cd b391cd9781452bba589ead4ba77ca0b4ee9a1242) and research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f, each over F75's branch from upstream a5d73fdf"
-    lab: "e03ab6cc6702eebf11398969294c6e39f9c3f212; loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
-    runner: "V0A0 quick-test reports, row admissions and narrowing witnesses at lab e03ab6cc6702eebf11398969294c6e39f9c3f212"
+    compiler: "research/sound-rest-3b96ce25 693a9f3cb97c51fa73aa7a6af7d10a8f779604fe (snapshot of 3b96ce25 over research/params-keys-953680ad 7ea97ec7c1b39cfb7eab95a7bf8606f6b61d05ec and research/route-per-class-575558cd b391cd9781452bba589ead4ba77ca0b4ee9a1242) and research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f, each over F75's branch from upstream a5d73fdf"
+    lab: "d524ad4d06a3bdc5cc2a3566ebea907862d3da3c; remaining repairs, census by reader, loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
+    runner: "V0A0 quick-test reports, row admissions and narrowing witnesses at lab d524ad4d06a3bdc5cc2a3566ebea907862d3da3c"
 - id: incremental
   name: Incremental
   brief: frontiers/incremental.md
