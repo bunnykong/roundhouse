@@ -31,9 +31,14 @@ impl IndexerKeys {
     }
 
     pub(crate) fn inherited(&self, class: &str) -> Option<&Ty> {
+        self.classes.get(self.inherited_class(class)?)?.1.as_ref()
+    }
+
+    /// The ancestor that establishes the key contract, through helper overrides.
+    pub(crate) fn inherited_class(&self, class: &str) -> Option<&str> {
         let mut current = self.classes.get(class)?.0.as_deref();
         let mut seen = HashSet::new();
-        let mut key = None;
+        let mut ancestor = None;
         while let Some(name) = current {
             if !seen.insert(name) {
                 break;
@@ -43,11 +48,11 @@ impl IndexerKeys {
             };
             // An intermediate override itself uses its ancestor's contract.
             if own.is_some() {
-                key = own.as_ref();
+                ancestor = Some(name);
             }
             current = parent.as_deref();
         }
-        key
+        ancestor
     }
 }
 

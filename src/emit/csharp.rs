@@ -227,7 +227,7 @@ fn emit_tests(
     );
     // Resolve helper ancestry independently of test-file emission order.
     for lowered in &test_lowered {
-        library::register_class_hierarchy(&lowered.inner_classes);
+        library::register_helper_indexers(&lowered.inner_classes);
     }
     for lowered in &test_lowered {
         files.push(library::emit_test_class_file(

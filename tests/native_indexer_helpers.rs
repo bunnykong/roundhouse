@@ -49,7 +49,7 @@ class OverrideRecord < LocalRecord
     case name
     when :title
       case name
-      when "title" then "nested"
+      when :title then "nested"
       else nil
       end
     else nil
@@ -197,6 +197,173 @@ fn run(command: &mut Command) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn return_helpers() -> (emit_and_run::Emitted, String) {
+    let (emitted, errors) = app()
+        .write(
+            "test/models/z_return_parent_test.rb",
+            r#"require "test_helper"
+class ReturnParent
+  attr_reader :reader
+  attr_writer :writer
+  def initialize
+    @reader = 0
+    @writer = 0
+    @state = 0
+  end
+  def label; 0; end
+  def argument(key); 0; end
+  def optional(key = 0); 0; end
+  def from_nil; nil; end
+  def to_nil; 0; end
+  def state_label; @state; end
+  def self.class_label; 0; end
+  def [](key); 0; end
+  def []=(key, value); nil; end
+end
+class ReturnDirect < ReturnParent
+  def label; "direct"; end
+end
+class ReturnMiddle < ReturnParent
+end
+class ReturnGetterParent
+  def [](key); 0; end
+end
+class ReturnSetterParent
+  def []=(key, value); nil; end
+end
+class ReturnParentTest < ActiveSupport::TestCase
+  test "parent return" do
+    assert_equal 0, ReturnParent.new.label
+  end
+end
+"#,
+        )
+        .write(
+            "test/models/a_return_child_test.rb",
+            r#"require "test_helper"
+require_relative "z_return_parent_test"
+class ReturnChild < ReturnMiddle
+  attr_reader :reader
+  attr_writer :writer
+  def initialize
+    @reader = "reader"
+    @writer = "writer"
+    @state = "state"
+  end
+  def label; "child"; end
+  def argument(key); "argument"; end
+  def optional(key = 0); "optional"; end
+  def from_nil; "value"; end
+  def to_nil; nil; end
+  def state_label; @state; end
+  def self.class_label; "class"; end
+  def [](key); "indexer"; end
+  def []=(key, value); nil; end
+end
+class ReturnLeaf < ReturnChild
+  def label; false; end
+end
+class ReturnGetterChild < ReturnGetterParent
+  def [](key); "getter"; end
+end
+class ReturnSetterChild < ReturnGetterParent
+  def []=(key, value); nil; end
+end
+class ReturnReaderChild < ReturnSetterParent
+  def [](key); "reader"; end
+end
+class ReturnChildTest < ActiveSupport::TestCase
+  test "child return" do
+    assert_equal "child", ReturnChild.new.label
+  end
+end
+"#,
+        )
+        .emit(BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let helpers = [
+        ("ReturnParentTest", "ReturnParent"),
+        ("ReturnParentTest", "ReturnDirect"),
+        ("ReturnParentTest", "ReturnMiddle"),
+        ("ReturnParentTest", "ReturnGetterParent"),
+        ("ReturnParentTest", "ReturnSetterParent"),
+        ("ReturnChildTest", "ReturnChild"),
+        ("ReturnChildTest", "ReturnLeaf"),
+        ("ReturnChildTest", "ReturnGetterChild"),
+        ("ReturnChildTest", "ReturnSetterChild"),
+        ("ReturnChildTest", "ReturnReaderChild"),
+    ]
+    .iter()
+    .map(|(file, name)| {
+        block(&read(&emitted, &format!("tests/{file}.cs")), &format!("public class {name} "))
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+    (emitted, helpers)
+}
+
+#[test]
+fn helper_registration_preserves_independent_member_return_types() {
+    let (_emitted, helpers) = return_helpers();
+    assert!(!helpers.contains("override "), "{helpers}");
+    for declaration in [
+        "public virtual long Label()",
+        "public virtual string Label()",
+        "public virtual bool Label()",
+        "public virtual void FromNil()",
+        "public virtual string FromNil()",
+        "public virtual void ToNil()",
+        "public virtual long this[",
+        "public virtual string this[",
+        "public string Reader",
+        "public string Writer",
+        "public string State",
+    ] {
+        assert!(helpers.contains(declaration), "missing {declaration}: {helpers}");
+    }
+}
+
+#[test]
+#[ignore = "requires .NET 8; compiles helpers with differing member return types"]
+fn helper_member_return_types_compile_and_run_on_csharp() {
+    let (emitted, helpers) = return_helpers();
+    let native = emitted.join("native-return-probe");
+    std::fs::create_dir(&native).unwrap();
+    std::fs::write(native.join("Native.csproj"), r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable></PropertyGroup></Project>"#).unwrap();
+    std::fs::write(native.join("Program.cs"), format!(r#"using System;
+namespace Roundhouse;
+{helpers}
+public static class Program {{
+    public static void Main() {{
+        if (new ReturnParent().Label() != 0L) throw new Exception("parent");
+        if (new ReturnDirect().Label() != "direct") throw new Exception("direct");
+        var child = new ReturnChild();
+        if (child.Label() != "child") throw new Exception("indirect");
+        if (child.Argument(null) != "argument") throw new Exception("argument");
+        if (child.Optional() != "optional") throw new Exception("optional");
+        if (child.FromNil() != "value") throw new Exception("from nil");
+        child.ToNil();
+        if (child.Reader != "reader") throw new Exception("reader");
+        child.Writer = "written";
+        if (child.Writer != "written") throw new Exception("writer");
+        if (child.StateLabel() != "state") throw new Exception("body ivar");
+        if (ReturnChild.ClassLabel() != "class") throw new Exception("class method");
+        if (child["key"] != "indexer") throw new Exception("indexer");
+        child["key"] = "written";
+        if (new ReturnGetterChild()["key"] != "getter") throw new Exception("getter only");
+        new ReturnSetterChild()["key"] = "written";
+        if (new ReturnReaderChild()["key"] != "reader") throw new Exception("setter parent");
+        if (new ReturnLeaf().Label()) throw new Exception("second override");
+        Console.WriteLine("helper return types passed");
+    }}
+}}
+"#)).unwrap();
+    let dotnet = std::env::var("DOTNET").unwrap_or_else(|_| "dotnet".into());
+    run(Command::new(dotnet)
+        .args(["run", "--project", "Native.csproj"])
+        .current_dir(native));
 }
 
 #[test]

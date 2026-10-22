@@ -43,6 +43,11 @@ pub(super) fn reset_indexer_keys() {
     INDEXER_KEYS.with(|keys| *keys.borrow_mut() = Default::default());
 }
 
+/// Test helpers need indexer ancestry without changing ordinary member hiding.
+pub(super) fn register_helper_indexers(classes: &[LibraryClass]) {
+    INDEXER_KEYS.with(|keys| keys.borrow_mut().register(classes));
+}
+
 /// The `using` + `namespace` header every emitted C# file carries.
 const FILE_HEADER: &str = "using System;\n\
                            using System.Collections.Generic;\n\
@@ -159,9 +164,9 @@ pub fn emit_test_class(
 
     let mut out = String::new();
 
-    // Helpers are not ordinary models. Register the whole group before
-    // emitting any member, including children declared before their parent.
-    register_class_hierarchy(inner_classes);
+    // Register every helper's indexer contract before emission, including
+    // children declared before their parent.
+    register_helper_indexers(inner_classes);
 
     // Inner helper classes declared inline in the test file (a non-test
     // model/controller paired with the `*Test` class). Ingest lifts them onto
@@ -560,14 +565,28 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         m.receiver == MethodReceiver::Instance && m.name.as_str() == "[]="
     });
     if getter.is_some() || setter.is_some() {
-        let modifier = if inherited.contains("get") || inherited.contains("set") {
+        // A helper chain can reach a registered runtime/model indexer through
+        // several unregistered helpers. Helper-only indexers keep their own
+        // element types and hide one another, just like ordinary methods.
+        let (inherited_key, inherited_indexer) = INDEXER_KEYS.with(|keys| {
+            let keys = keys.borrow();
+            (
+                keys.inherited(lc.name.0.as_str()).map(csharp_ty),
+                keys.inherited_class(lc.name.0.as_str()).map(type_name),
+            )
+        });
+        let indexer_members = inherited_indexer
+            .map(|name| super::expr::ancestor_members(&name))
+            .unwrap_or_default();
+        let modifier = if inherited.contains("get")
+            || inherited.contains("set")
+            || indexer_members.contains("get")
+            || indexer_members.contains("set")
+        {
             "override "
         } else {
             "virtual "
         };
-        let inherited_key = INDEXER_KEYS.with(|keys| {
-            keys.borrow().inherited(lc.name.0.as_str()).map(csharp_ty)
-        });
         out.push_str(&indent_method(&emit_indexer(modifier, getter, setter, inherited_key)));
         out.push('\n');
     }
