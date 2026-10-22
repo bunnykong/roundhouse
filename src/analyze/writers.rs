@@ -43,6 +43,8 @@ struct State {
     // Destination knowledge is conservative and monotone; counts describe live callers.
     // A withdrawn known caller removes its value, not an unknown caller's possible destination.
     targets: BTreeMap<(ClassId, Symbol, super::SiteRecv), usize>,
+    target_arities: BTreeMap<(ClassId, Symbol, super::SiteRecv, Option<usize>), usize>,
+    walked_target_arities: BTreeSet<(ClassId, Symbol, super::SiteRecv, Option<usize>)>,
     unknown_methods: BTreeMap<Symbol, usize>,
     revision: u64,
 }
@@ -266,6 +268,30 @@ impl Drop for Visit {
                 }
                 let old = s.calls.get(&source).map(|c| known(c)).unwrap_or_default();
                 let new = known(&calls);
+                if super::route_static::per_class_on() {
+                    let arities = |calls: &[SendSite]| -> BTreeSet<_> {
+                        calls.iter().filter(|call| !unknown_class(&call.0)).map(|call| {
+                            let arity = (!call.3.opaque_arity).then_some(call.2.len());
+                            (call.0.clone(), call.1.clone(), call.4, arity)
+                        }).collect()
+                    };
+                    let old_arities = s.calls.get(&source).map(|calls| arities(calls)).unwrap_or_default();
+                    let new_arities = arities(&calls);
+                    for key in old_arities.difference(&new_arities) {
+                        let n = s.target_arities.get_mut(key).unwrap();
+                        *n -= 1;
+                        if *n == 0 {
+                            s.target_arities.remove(key);
+                            s.revision += 1;
+                        }
+                    }
+                    for key in new_arities.difference(&old_arities) {
+                        let n = s.target_arities.entry(key.clone()).or_default();
+                        let fresh = *n == 0;
+                        *n += 1;
+                        if fresh { s.revision += 1; }
+                    }
+                }
                 for key in old.difference(&new) {
                     let n = s.targets.get_mut(key).unwrap();
                     *n -= 1;
@@ -408,8 +434,30 @@ pub(super) fn unknown_class(class: &ClassId) -> bool {
 pub(super) fn targets() -> Vec<(ClassId, Symbol, super::SiteRecv)> {
     ST.with(|s| s.borrow().targets.keys().cloned().collect())
 }
+pub(super) fn target_arities() -> Vec<(ClassId, Symbol, super::SiteRecv, Option<usize>)> {
+    ST.with(|s| {
+        let s = s.borrow();
+        s.target_arities.keys().cloned().chain(s.walked_target_arities.iter().cloned())
+            .collect::<BTreeSet<_>>().into_iter().collect()
+    })
+}
+/// The ordinary walk also owns sites outside captured method roots, notably
+/// class-body calls. They can create per-class rows without a catalog entry.
+pub(super) fn replace_walked_targets(sites: &[SendSite]) {
+    if !super::route_static::per_class_on() { return; }
+    let current = sites.iter().filter(|site| !unknown_class(&site.0)).map(|site| {
+        (site.0.clone(), site.1.clone(), site.4, (!site.3.opaque_arity).then_some(site.2.len()))
+    }).collect();
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.walked_target_arities != current {
+            s.walked_target_arities = current;
+            s.revision += 1;
+        }
+    });
+}
 pub(super) fn revision() -> u64 {
-    if super::route_static::on() { return 0; }
+    if super::route_static::on() && !super::route_static::per_class_on() { return 0; }
     ST.with(|s| s.borrow().revision)
 }
 pub(super) fn unknown_receiver(t: &Ty, classes: &HashMap<ClassId, ClassInfo>) -> bool {

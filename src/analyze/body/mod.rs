@@ -3228,7 +3228,7 @@ fn written_class_id(path: &[Symbol]) -> ClassId {
 /// tuple's elements, a hash's pairs, nothing for `nil`. Ruby `to_a`s any
 /// other value; one with no modeled element is kept as the one element
 /// `[*object]` gives for an object that is not a collection.
-fn splat_elements(ty: Ty) -> Option<Ty> {
+pub(super) fn splat_elements(ty: Ty) -> Option<Ty> {
     match ty {
         Ty::Nil => None,
         Ty::Tuple { elems } => elems.into_iter().reduce(union_of),

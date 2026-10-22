@@ -3700,6 +3700,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
         })
         .collect();
 
+    let mut consumed_calls = Vec::new();
     for controller in &mut app.controllers {
         let includes = &surfaces.controllers[&controller.name].direct_includes;
         if includes.is_empty() {
@@ -3772,6 +3773,9 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             });
             if method_stores_keyword_rest(&macro_def) && !another_unreadable {
                 if let Some(init) = stored_options_init(expr, &macro_def) {
+                    if crate::analyze::class_body_sites_on() {
+                        consumed_calls.push((controller.name.clone(), expr.clone()));
+                    }
                     survey::record(&IngestError::Unsupported {
                         file: controller.name.0.as_str().to_string(),
                         message: format!(
@@ -3831,6 +3835,9 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
                 &mut around_block_seq,
             ) {
                 Ok(items) => {
+                    if crate::analyze::class_body_sites_on() {
+                        consumed_calls.push((controller.name.clone(), expr.clone()));
+                    }
                     let mut comments = leading_comments.clone();
                     let mut blank = *leading_blank_line;
                     for macro_item in items {
@@ -3941,6 +3948,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
         }
         controller.body = expanded;
     }
+    app.expanded_class_body_calls.extend(consumed_calls);
     Ok(())
 }
 

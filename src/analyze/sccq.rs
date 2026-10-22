@@ -670,7 +670,7 @@ pub(super) struct Engine {
     pub writer_sites: BTreeMap<String, Vec<(ParamKey, Vec<Ty>)>>,
     pub writer_index: HashMap<ParamKey, super::writers::RowCells>,
     pub writer_revision: u64,
-    pub writer_targets: HashMap<Symbol,BTreeSet<ParamKey>>,
+    pub writer_targets: HashMap<Symbol,super::route_static::PerClassRows>,
     pub unit_ord: Vec<u32>,
     pub fold_from: HashMap<ParamKey, Vec<ParamKey>>,
     pub fold_into: HashMap<ParamKey, Vec<ParamKey>>,

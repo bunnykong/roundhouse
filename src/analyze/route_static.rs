@@ -35,6 +35,14 @@ pub(super) fn hwia_on() -> bool {
     *ON
 }
 
+pub(super) fn per_class_on() -> bool {
+    static ON: LazyLock<bool> =
+        LazyLock::new(|| std::env::var("RH_ROUTE_PER_CLASS").as_deref() == Ok("1"));
+    *ON && top_on()
+}
+
+pub(super) type PerClassRows = BTreeSet<(ParamKey, Option<usize>)>;
+
 /// A pending computation is not evidence of a dynamic receiver. The second
 /// phase replays every consumer before genuine unknowns can publish top.
 pub(super) fn strict_receiver(t: Option<&Ty>, classes: &HashMap<ClassId, super::ClassInfo>) -> bool {
@@ -488,7 +496,8 @@ impl Index {
         aliases
     }
 
-    fn candidates(&self, name: &Symbol, n: usize, opaque: bool) -> BTreeSet<ParamKey> {
+    fn candidates(&self, name: &Symbol, n: usize, opaque: bool,
+        per_class: Option<&PerClassRows>) -> BTreeSet<ParamKey> {
         let mut out = BTreeSet::new();
         if opaque {
             out.extend(self.named.get(name).into_iter().flatten().cloned());
@@ -517,6 +526,14 @@ impl Index {
                 .iter()
                 .map(|(owner, side)| (owner.clone(), name.clone(), *side)),
         );
+        // Native calls can create rows with no declaration in the frozen
+        // catalog (generated setters, association operators, universal sends).
+        // Keep their per-class identity and observed arity, not their values.
+        if per_class_on() {
+            out.extend(per_class.into_iter().flatten()
+                .filter(|(_, arity)| opaque || arity.is_none_or(|arity| arity == n))
+                .map(|(key, _)| key.clone()));
+        }
         out
     }
 
@@ -527,7 +544,7 @@ impl Index {
         kwargs: SiteKeywords,
     ) -> Vec<(ParamKey, Vec<Ty>)> {
         let mut out: Vec<_> = self
-            .candidates(name, args.len(), kwargs.opaque_arity)
+            .candidates(name, args.len(), kwargs.opaque_arity, None)
             .into_iter()
             .map(|key| {
                 let row = Analyzer::place_keyword_args(
@@ -559,14 +576,25 @@ impl Index {
     /// Unknown calls contribute top at each formal they can bind. No argument
     /// type is copied, nested, or joined into a destination. The existing source
     /// writer cells own these rows, so replacement retracts an absent call.
+    #[cfg(test)]
     pub(super) fn resolve_top(
         &self,
         name: &Symbol,
         nargs: usize,
         kwargs: &SiteKeywords,
     ) -> Vec<(ParamKey, Vec<Ty>)> {
+        self.resolve_top_with_rows(name, nargs, kwargs, None)
+    }
+
+    pub(super) fn resolve_top_with_rows(
+        &self,
+        name: &Symbol,
+        nargs: usize,
+        kwargs: &SiteKeywords,
+        per_class: Option<&PerClassRows>,
+    ) -> Vec<(ParamKey, Vec<Ty>)> {
         let mut out: Vec<_> = self
-            .candidates(name, nargs, kwargs.opaque_arity)
+            .candidates(name, nargs, kwargs.opaque_arity, per_class)
             .into_iter()
             .map(|key| {
                 let row = self.top_row(&key, nargs, kwargs);
@@ -671,6 +699,8 @@ mod tests {
     fn keywords() -> SiteKeywords {
         SiteKeywords {
             opaque_arity: false,
+            positional_splats: vec![],
+            class_body_site: false,
             opaque_keywords: false,
             span: crate::span::Span::synthetic(),
             sources: vec![],
@@ -999,6 +1029,26 @@ mod tests {
         assert_eq!(super::super::writers::revision(), 0);
     }
     #[test]
+    #[ignore = "RH_ROUTE_PER_CLASS=1 RH_ROUTE_TOP=1 RH_WRITERS=1"]
+    fn per_class_routes_cover_generated_rows_with_matching_arity() {
+        assert!(per_class_on());
+        let index = Index::default();
+        for name in ["selected_flags=", "<<", "is_a?"] {
+            let target = key("Generated", name);
+            let rows = [(target.clone(), Some(1))].into();
+            let name = Symbol::from(name);
+            assert_eq!(index.resolve_top_with_rows(&name, 1, &keywords(), Some(&rows)),
+                vec![(target.clone(), vec![Ty::unresolved()])]);
+            assert!(index.resolve_top_with_rows(&name, 2, &keywords(), Some(&rows)).is_empty());
+            let mut opaque = keywords();
+            opaque.opaque_arity = true;
+            assert_eq!(index.resolve_top_with_rows(&name, 2, &opaque, Some(&rows))[0].0, target);
+            assert!(index.resolve_top_with_rows(&name, 1, &keywords(), None).is_empty(),
+                "a withdrawn unknown site cannot retain its old routing claim");
+        }
+    }
+
+    #[test]
     fn static_routes_keep_overloads_variadics_and_opaque_catalogs() {
         let mut i = Index::default();
         i.insert(key("One", "call"), Some((1, Some(1))));
@@ -1007,15 +1057,15 @@ mod tests {
         i.insert(key("Catalog", "call"), None);
         let name = Symbol::from("call");
         assert_eq!(
-            i.candidates(&name, 1, false),
+            i.candidates(&name, 1, false, None),
             [key("One", "call"), key("Catalog", "call")].into()
         );
         assert_eq!(
-            i.candidates(&name, 3, false),
+            i.candidates(&name, 3, false, None),
             [key("Rest", "call"), key("Catalog", "call")].into()
         );
-        assert_eq!(i.candidates(&name, 1, true).len(), 4);
-        assert!(i.candidates(&Symbol::from("other"), 1, false).is_empty());
+        assert_eq!(i.candidates(&name, 1, true, None).len(), 4);
+        assert!(i.candidates(&Symbol::from("other"), 1, false, None).is_empty());
     }
     #[test]
     fn static_routes_missing_holders_cover_every_name_and_arity() {
@@ -1023,7 +1073,7 @@ mod tests {
         i.insert(key("Dynamic", "method_missing"), Some((1, None)));
         i.insert(key("Responder", "respond_to_missing?"), Some((2, Some(2))));
         assert_eq!(
-            i.candidates(&Symbol::from("arbitrary"), 99, false),
+            i.candidates(&Symbol::from("arbitrary"), 99, false, None),
             [key("Dynamic", "arbitrary"), key("Responder", "arbitrary")].into()
         );
     }
@@ -1076,10 +1126,10 @@ mod tests {
             .instance_methods
             .insert(target.1.clone(), Ty::Int);
         assert_eq!(
-            index.candidates(&target.1, 1, false),
+            index.candidates(&target.1, 1, false, None),
             [target.clone()].into()
         );
-        assert!(index.candidates(&target.1, 2, false).is_empty());
+        assert!(index.candidates(&target.1, 2, false, None).is_empty());
     }
     #[test]
     fn static_routes_catalog_dispatch_sides_share_the_native_parameter_fallback() {
@@ -1103,10 +1153,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(native.2, MethodReceiver::Instance);
-        assert!(index.candidates(&name, 1, false).contains(&native));
+        assert!(index.candidates(&name, 1, false, None).contains(&native));
         assert!(
             !index
-                .candidates(&name, 1, false)
+                .candidates(&name, 1, false, None)
                 .contains(&(owner, name, MethodReceiver::Class))
         );
     }
@@ -1151,7 +1201,7 @@ mod tests {
         index.module_aliases(&analyzer, &BTreeSet::from([declared]), &contracts);
         assert!(
             index
-                .candidates(&Symbol::from("update_labels"), 1, false)
+                .candidates(&Symbol::from("update_labels"), 1, false, None)
                 .contains(&(
                     child,
                     Symbol::from("update_labels"),
@@ -1173,15 +1223,15 @@ mod tests {
         analyzer.classes = HashMap::from([(base, ClassInfo::default()), (owner.clone(), class)]);
         let index = Index::build(&app, &analyzer);
         let setter = Symbol::from("multiple=");
-        assert!(index.candidates(&setter, 1, false).contains(&(
+        assert!(index.candidates(&setter, 1, false, None).contains(&(
             owner,
             setter.clone(),
             MethodReceiver::Instance
         )));
-        assert!(index.candidates(&setter, 0, false).is_empty());
+        assert!(index.candidates(&setter, 0, false, None).is_empty());
         assert!(
             index
-                .candidates(&Symbol::from("not"), 1, false)
+                .candidates(&Symbol::from("not"), 1, false, None)
                 .contains(&key("ActiveRecord::Base", "not"))
         );
     }
@@ -1192,6 +1242,8 @@ mod tests {
         index.insert(target.clone(), Some((1, None)));
         let kwargs = SiteKeywords {
             opaque_arity: false,
+            positional_splats: vec![],
+            class_body_site: false,
             opaque_keywords: false,
             span: crate::span::Span::synthetic(),
             sources: vec![],

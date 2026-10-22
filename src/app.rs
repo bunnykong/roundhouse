@@ -74,6 +74,10 @@ pub struct App {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library_classes: Vec<LibraryClass>,
     pub controllers: Vec<Controller>,
+    /// Original calls consumed by controller macro expansion. Inference still
+    /// needs their arguments as parameter writers; emitters use the expansion.
+    #[serde(skip)]
+    pub expanded_class_body_calls: Vec<(ClassId, Expr)>,
     pub routes: RouteTable,
     pub views: Vec<View>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -828,6 +832,7 @@ impl App {
             models: Vec::new(),
             library_classes: Vec::new(),
             controllers: Vec::new(),
+            expanded_class_body_calls: Vec::new(),
             routes: RouteTable::default(),
             views: Vec::new(),
             test_modules: Vec::new(),

@@ -149,6 +149,7 @@ fn tiny_blog_round_trips() {
         sql_functions: Vec::new(),
         rbs_includes: Default::default(),
         controllers: vec![posts_controller],
+        expanded_class_body_calls: Vec::new(),
         routes,
         views: vec![],
         test_modules: vec![],

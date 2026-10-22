@@ -51,7 +51,7 @@ fn omitted_keywords_are_absence_and_opaque_keywords_keep_real_unknown() {
         (Symbol::from("rest"),ParamKind::KeywordRest)],keywords_by_kind:true };
     let kw = |opaque| SiteKeywords {group:true,keys:vec![(Symbol::from("title"),Ty::Str),
         (Symbol::from("extra"),Ty::Bool)],splat:None,anonymous_forward:false,opaque_arity:false,
-        opaque_keywords:opaque,sources:Vec::new(),span:crate::span::Span::synthetic()};
+        opaque_keywords:opaque,positional_splats:vec![],class_body_site:false,sources:Vec::new(),span:crate::span::Span::synthetic()};
     let placed = Analyzer::place_keyword_args(Some(&shape),vec![Ty::unresolved()],kw(false));
     assert_eq!(placed[0],Ty::Bottom, "an omitted url is no incoming value");
     assert_eq!(parameter_conservation::join(Ty::Str,placed[0].clone()),Ty::Str);
@@ -89,7 +89,76 @@ fn hwia_structural_builtin_is_a_frozen_unknown_receiver_destination() {
     assert!(route_static::hwia_on());
     let routes = route_static::Index::build(&app,&analyzer).resolve_top(&Symbol::from("[]"),1,
         &SiteKeywords {group:false, keys:Vec::new(),splat:None,anonymous_forward:false,
-            opaque_arity:false,opaque_keywords:false,sources:Vec::new(),span:crate::span::Span::synthetic()});
+            opaque_arity:false,positional_splats:vec![],class_body_site:false,opaque_keywords:false,sources:Vec::new(),span:crate::span::Span::synthetic()});
     assert!(routes.iter().any(|(key,row)| key == &(id.clone(),Symbol::from("[]"),MethodReceiver::Instance)
         && row == &vec![Ty::unresolved()]), "{routes:?}");
+}
+
+#[test]
+#[ignore = "whole-rule research flags + RH_CLASS_BODY_SITES=1"]
+fn class_body_sites_reach_concern_declaration_rows() {
+    assert!(class_body_sites_on());
+    crate::ingest::survey::activate();
+    let tree = HashMap::from([
+        ("app/controllers/concerns/authentication.rb", "module Authentication\n extend ActiveSupport::Concern\n class_methods do\n def allow_unauthenticated_access(**options)\n skip_before_action :require_authentication, **options\n end\n end\nend\n"),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n include Authentication\n allow_unauthenticated_access only: [:new]\nend\n"),
+        ("app/controllers/sessions_controller.rb", "class SessionsController < ApplicationController\n allow_unauthenticated_access only: [:new, :create]\nend\n"),
+        ("app/models/concerns/rate_limitable.rb", "module RateLimitable\n extend ActiveSupport::Concern\n class_methods do\n def rate_limit(options = {})\n options[:by]\n end\n end\nend\n"),
+        ("app/models/follow_request.rb", "class FollowRequest < ActiveRecord::Base\n include RateLimitable\n rate_limit by: :account, family: :follows\nend\n"),
+    ]).into_iter().map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec())).collect();
+    let mut app = crate::ingest::app::ingest_app_from_tree(tree).unwrap();
+    assert!(!app.expanded_class_body_calls.is_empty(), "the fixture must cover a consumed macro call");
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let row = |owner, method| {
+        let declaration = app.library_classes.iter().find(|c| c.name.0.as_str() == owner).unwrap();
+        let declaration = declaration.methods.iter().find(|m| m.name.as_str() == method).unwrap();
+        analyzer.inferred_params.get(&(
+            ClassId(Symbol::from(owner)), Symbol::from(method), declaration.receiver)).cloned()
+    };
+    let auth = row("Authentication", "allow_unauthenticated_access").expect("declaration row");
+    assert_eq!(auth[0], Ty::Hash { key: Arc::new(Ty::Sym),
+        value: Arc::new(Ty::Array { elem: Arc::new(Ty::Sym) }) });
+    let rate = row("RateLimitable", "rate_limit").expect("declaration row");
+    assert_eq!(rate[0], Ty::Hash { key: Arc::new(Ty::Sym), value: Arc::new(Ty::Sym) });
+    let declaration = app.library_classes.iter().find(|c| c.name.0.as_str() == "RateLimitable").unwrap();
+    let method = declaration.methods.iter().find(|m| m.name.as_str() == "rate_limit").unwrap();
+    let answer = method.body.ty.as_ref().expect("typed declaration body");
+    assert!(!matches!(answer, Ty::Bottom | Ty::Nil), "the declaration must read its class-body caller: {answer:?}");
+}
+
+#[test]
+#[ignore = "whole-rule research flags + RH_CLASS_BODY_SITES=1 RH_ROUTE_PER_CLASS=1"]
+fn per_class_routes_include_rows_owned_only_by_the_class_body_walk() {
+    assert!(class_body_sites_on() && route_static::per_class_on());
+    crate::ingest::survey::activate();
+    let mut app = crate::ingest::app::ingest_app_from_tree(HashMap::from([
+        (std::path::PathBuf::from("app/models/native_model.rb"),
+            b"class NativeModel < ActiveRecord::Base\n dynamic_writer 'seed'\n def use(receiver)\n receiver.dynamic_writer(:incoming)\n end\nend\n".to_vec()),
+    ])).unwrap();
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let target = (ClassId(Symbol::from("NativeModel")), Symbol::from("dynamic_writer"), MethodReceiver::Instance);
+    let row = analyzer.inferred_params.get(&target).expect("ordinary class-body row");
+    assert!(matches!(&row[0], Ty::Untyped { .. }) || matches!(&row[0], Ty::Union { variants }
+        if variants.iter().any(|ty| matches!(ty, Ty::Untyped { .. }))),
+        "top routing must reach a row even when no captured method root declared its native destination: {row:?}");
+}
+
+#[test]
+#[ignore = "whole-rule research flags + RH_CLASS_BODY_SITES=1"]
+fn class_body_rest_binding_keeps_splat_and_trailing_hash() {
+    assert!(class_body_sites_on());
+    crate::ingest::survey::activate();
+    let mut app = crate::ingest::app::ingest_app_from_tree(HashMap::from([
+        (std::path::PathBuf::from("app/models/native_model.rb"),
+            b"class NativeModel < ActiveRecord::Base\n def self.capture(*values)\n values\n end\n capture(*[:a], nested: [[:b]])\nend\n".to_vec()),
+    ])).unwrap();
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let target = (ClassId(Symbol::from("NativeModel")), Symbol::from("capture"), MethodReceiver::Class);
+    let row = analyzer.inferred_params.get(&target).expect("class-body rest row");
+    let nested = Ty::Hash { key: Arc::new(Ty::Sym),
+        value: Arc::new(Ty::Array { elem: Arc::new(Ty::Array { elem: Arc::new(Ty::Sym) }) }) };
+    assert_eq!(row, &vec![Ty::Array { elem: Arc::new(parameter_conservation::join(Ty::Sym, nested)) }]);
 }
