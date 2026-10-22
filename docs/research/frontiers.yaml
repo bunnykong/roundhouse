@@ -24,18 +24,18 @@
   name: Any order
   brief: frontiers/any-order.md
   status: open
-  stands: "With F74's strict guard, F75's binding projection and the later F76 to F78 changes, Campfire, Forem, Chatwoot and Mastodon all keep 10/10 schedule-equal tables at V0A0, Mastodon also across twelve schedules for F74 to F76. One Chatwoot reason row's provenance depends on the schedule under F76, 2 of F73's rows still reject their witnesses, 7 repairs reach no reader, render bindings add 4 Forem losses, and both binding tables miss 45 reachable bindings, so sound order independence remains open."
-  facts: [F78, F77, F76, F75, F74, F73, F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  stands: "Upstream main itself changes types with the order of two methods, files or filters in five small Rails programs. With F74's strict guard, F75's binding projection and the later F76 to F78 changes, Campfire, Forem, Chatwoot and Mastodon all keep 10/10 schedule-equal tables at V0A0, Mastodon also across twelve schedules for F74 to F76. One Chatwoot reason row's provenance depends on the schedule under F76, 2 of F73's rows still reject their witnesses, 7 repairs reach no reader, render bindings add 4 Forem losses, and both binding tables miss 45 reachable bindings, so sound order independence remains open."
+  facts: [F80, F78, F77, F76, F75, F74, F73, F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
   skills:
     - Rust
     - fixpoint and lattice theory
     - the analyzer's harvest, dispatch and fold code
-  next: "Classify the twelve structural identities on main, cover the 45 missed bindings and recover the 104 lost binding values; then check V1A1 and Discourse."
+  next: "Turn F80's five repros into tests and fix main's first-wins merges; then classify the twelve structural identities on main, cover the 45 missed bindings and recover the 104 lost binding values, and check V1A1 and Discourse."
   check: frontiers/any-order.md#the-check
   check_public: public
   pins:
     compiler: "research/sound-rest-3b96ce25 693a9f3cb97c51fa73aa7a6af7d10a8f779604fe (snapshot of 3b96ce25 over research/params-keys-953680ad 7ea97ec7c1b39cfb7eab95a7bf8606f6b61d05ec and research/route-per-class-575558cd b391cd9781452bba589ead4ba77ca0b4ee9a1242) and research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f, each over F75's branch from upstream a5d73fdf"
-    lab: "d524ad4d06a3bdc5cc2a3566ebea907862d3da3c; remaining repairs, census by reader, loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
+    lab: "4be6b04abea6ba344fe999559d218343e5ceb9cb; order dependence on main, remaining repairs, census by reader, loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
     runner: "V0A0 quick-test reports, row admissions and narrowing witnesses at lab d524ad4d06a3bdc5cc2a3566ebea907862d3da3c"
   claims:
     - who: eddygarcas
@@ -59,7 +59,7 @@
   brief: frontiers/soundness.md
   status: open
   stands: "Counted by reader, 12 of F73's 21 witnessed losses have reader-visible repairs: F77's class-body sites 5 and String parameter keys 2, and F78's four flags 5. C1376 and C1465 still reject, and render bindings add 4 Forem losses. An independent checker proves 1,922 of F73's 4,652 narrowed rows from source and no known loss; with its proofs, and two circular hand proofs counted as unproved, at most 46.9% of the narrowings lose values at 95%. Both binding tables miss 45 reachable bindings, and older catalog gaps remain, such as `Int + Float` typed `Int`."
-  facts: [F79, F78, F77, F76, F75, F74, F73, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  facts: [F80, F79, F78, F77, F76, F75, F74, F73, F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
   skills:
     - Ruby and Rails semantics
     - Runtime tracing on CRuby 4.0.7
@@ -69,7 +69,7 @@
   check_public: partial
   pins:
     compiler: "research/sound-rest-3b96ce25 693a9f3cb97c51fa73aa7a6af7d10a8f779604fe (snapshot of 3b96ce25 over research/params-keys-953680ad 7ea97ec7c1b39cfb7eab95a7bf8606f6b61d05ec and research/route-per-class-575558cd b391cd9781452bba589ead4ba77ca0b4ee9a1242) and research/catalog-strict-5a6f535e 3e115e9af84dcb710be660d0721005d6e118ee1f, each over F75's branch from upstream a5d73fdf"
-    lab: "009aabed0c3c545df483ef6a9565e33552cb9817; census proof checker with F73's correction, remaining repairs, census by reader, loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
+    lab: "4be6b04abea6ba344fe999559d218343e5ceb9cb; order dependence on main, census proof checker with F73's correction, remaining repairs, census by reader, loss repairs with their October 22 correction, strict catalog, binding projection, strict pending guard and mutation-writer census"
     adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
   claims:
     - who: dai199
