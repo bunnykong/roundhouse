@@ -14241,6 +14241,138 @@ end
         .assert_passes();
 }
 
+/// `validate :m` with Rails 7.1's password-change guard shape: a Symbol
+/// dirty predicate as `if:` and a lambda as `unless:` (campfire's
+/// `password_challenge_matches`), `on: :create` (campfire's Session),
+/// `password_challenge` assigned through `update`, and an empty password
+/// leaving the digest as it was. Each assignment stays off bcrypt (CI's
+/// unit job does not install it).
+#[test]
+fn validate_guards_and_the_password_challenge_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"password_digest\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  has_secure_password validations: false
+  validate :challenge_matches, if: :will_save_change_to_title?, unless: -> { password_challenge.nil? }
+  validate :body_free, on: :create
+
+  def challenge_matches
+    errors.add(:password_challenge, :invalid) unless password_challenge == "ok"
+  end
+
+  def body_free
+    errors.add(:body, "is taken") if body == "only on create"
+  end"#,
+        )
+        .write(
+            "test/models/article_validate_guards_test.rb",
+            r#"require "test_helper"
+
+class ArticleValidateGuardsTest < ActiveSupport::TestCase
+  test "the challenge is checked only when the guarded column changes and a challenge is given" do
+    id = articles(:one).id
+    assert_not Article.find(id).update(title: "A new title", password_challenge: "wrong")
+    assert Article.find(id).update(title: "A new title", password_challenge: "ok")
+    assert Article.find(id).update(title: "Another title")
+    assert Article.find(id).update(body: "A different long body", password_challenge: "wrong")
+  end
+
+  test "on: :create runs before the first save only" do
+    assert_not Article.new(title: "Fresh", body: "only on create").save
+    assert articles(:one).update(body: "only on create")
+  end
+
+  test "an empty password leaves the digest as it was" do
+    article = articles(:one)
+    article.update!(password_digest: "stored digest")
+    article.update!(password: "")
+    assert_equal "stored digest", Article.find(article.id).password_digest
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_validate_guards_test.rb")
+        .assert_passes();
+}
+
+/// `flash` in an integration test is the last request's flash, read
+/// after a redirect the test does not follow (campfire's profile tests:
+/// `assert_equal "✓", flash[:notice]`).
+#[test]
+fn an_integration_test_reads_the_last_requests_flash() {
+    emit_and_run::real_blog()
+        .write(
+            "test/controllers/articles_flash_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticlesFlashControllerTest < ActionDispatch::IntegrationTest
+  test "the redirect's notice is the flash" do
+    post articles_url, params: { article: { title: "Flashed", body: "A sufficiently long article body." } }
+    assert_redirected_to article_url(Article.find_by(title: "Flashed"))
+    assert_equal "Article was successfully created.", flash[:notice]
+    assert_nil flash[:alert]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_flash_controller_test.rb")
+        .assert_passes();
+}
+
+/// A model class method a scope reaches (`titled.find_by_slug(s)`)
+/// takes the relation as a trailing `__rel`, so the call carries one
+/// argument more than the test's `stubs(...).with(s)` names; the ruby
+/// lanes' mocha replay still matches it (campfire's
+/// `User.stubs(:find_by_transfer_id).with(transfer_id)` against
+/// `User.active.find_by_transfer_id(params[:id])`), and the named
+/// argument still tells two stubs apart.
+#[test]
+#[ignore = "requires the mocha gem"]
+fn a_stub_with_args_matches_a_scope_reached_class_method() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  scope :titled, -> { where.not(title: nil) }
+
+  def self.find_by_slug(slug)
+    where(title: slug).first
+  end
+
+  def self.titled_slug(slug)
+    titled.find_by_slug(slug)
+  end"#,
+        )
+        .write(
+            "test/models/article_scoped_stub_test.rb",
+            r#"require "test_helper"
+
+class ArticleScopedStubTest < ActiveSupport::TestCase
+  test "the stub answers the scoped call it names" do
+    other = articles(:two)
+    Article.stubs(:find_by_slug).with("a-slug").returns(other)
+    Article.stubs(:find_by_slug).with("another").returns(articles(:one))
+    assert_equal other.id, Article.titled_slug("a-slug").id
+    assert_equal other.id, Article.find_by_slug("a-slug").id
+    assert_equal articles(:one).id, Article.titled_slug("another").id
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_scoped_stub_test.rb")
+        .assert_passes();
+}
+
 #[path = "emit_and_run/relation_finders.rs"]
 mod relation_finders;
 #[path = "emit_and_run/attach_hash.rs"]

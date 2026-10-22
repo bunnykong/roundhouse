@@ -1078,6 +1078,7 @@ pub fn writable_field_set(
     }
     if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
         writable.insert(Symbol::from(format!("{}_confirmation", attr.as_str())));
+        writable.insert(Symbol::from(format!("{}_challenge", attr.as_str())));
         writable.insert(attr);
     }
     for (name, _ty) in self::markers::attribute_api_decls(&model.body) {

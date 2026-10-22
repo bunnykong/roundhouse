@@ -449,7 +449,7 @@ fn not_nil(attr: &Symbol) -> Expr {
     )
 }
 
-fn context_guard(value: &Node<'_>) -> Option<Option<Expr>> {
+pub(super) fn context_guard(value: &Node<'_>) -> Option<Option<Expr>> {
     let mut contexts: Vec<String> = Vec::new();
     if let Some(array) = value.as_array_node() {
         for element in array.elements().iter() {
@@ -491,7 +491,7 @@ fn context_guard(value: &Node<'_>) -> Option<Option<Expr>> {
 
 /// Both guards hold (`on:`'s context guard and an `if:` condition), or
 /// whichever one is present.
-fn and_guard(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
+pub(super) fn and_guard(a: Option<Expr>, b: Option<Expr>) -> Option<Expr> {
     match (a, b) {
         (Some(a), Some(b)) => Some(Expr::new(
             Span::synthetic(),

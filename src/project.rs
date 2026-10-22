@@ -2767,6 +2767,19 @@ module MochaBridge
       else
         Object.const_get(konst)
       end
+    # A model class method a relation reaches (`User.active.find_by_x(id)`)
+    # takes the relation as a trailing `__rel`, the lowering's spelling of
+    # Rails' implicit scoping, so the call carries one argument more than
+    # the test's `with(...)` names. It is matched by an optional
+    # `anything` — the stubbed method is the one the test wrote either way.
+    # Read before the first stub replaces the method's parameter list, and
+    # remembered, since a second stub of the same method sees mocha's.
+    @rel_params ||= {}
+    rel_param =
+      %w[stubs expects].include?(kind.to_s) &&
+      @rel_params.fetch([target, meth.to_sym]) do |key|
+        @rel_params[key] = target.respond_to?(meth) && target.method(meth).parameters.last&.last == :__rel
+      end
     expectation =
       case kind.to_s
       when "stubs" then target.stubs(meth)
@@ -2777,6 +2790,7 @@ module MochaBridge
       end
     ops.each do |op, args|
       args = args.map { |a| a.is_a?(String) && a.match?(CONST_NAME) && Object.const_defined?(a) ? Object.const_get(a) : a } if op == :raises
+      args = args + [matcher(:optionally, matcher(:anything))] if op == :with && rel_param && !blk
       expectation =
         if op == :with && blk
           expectation.with(&blk)

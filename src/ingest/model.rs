@@ -33,7 +33,7 @@ pub use table_prefix::{
 };
 
 mod validations;
-use validations::{parse_validates_call, validation_items, ParsedValidates, ValidatesKind};
+use validations::{and_guard, context_guard, parse_validates_call, validation_items, ParsedValidates, ValidatesKind};
 
 /// Parse a single model file. The first class definition is treated as the
 /// model; any schema-derived attributes are filled in from `schema`.
@@ -892,11 +892,18 @@ pub(super) fn ingest_model_body_item(
                 .arguments()
                 .map(|args| args.arguments().iter().count())
                 .unwrap_or(0);
-            // `if: :pred` / `unless: :pred` (Symbol conditions only) ride
-            // along on the rule; any other option — `on:`, a lambda —
-            // keeps the call out, as before.
+            // `if: :pred` / `unless: :pred` ride along on the rule; a
+            // zero-arity lambda/proc condition is the guard expression
+            // `callback_condition` builds, carried on the Validation the
+            // way `validates` carries one, and `on: :create`/`:update`
+            // joins `if:` as the `persisted?` test `validates` uses. Any
+            // other option — `on: :custom`, a lambda that takes the
+            // record — keeps the call out.
             let mut if_method: Option<Symbol> = None;
             let mut unless_method: Option<Symbol> = None;
+            let mut if_cond: Option<Expr> = None;
+            let mut unless_cond: Option<Expr> = None;
+            let mut on_guard: Option<Expr> = None;
             let mut options_ok = true;
             let mut option_args = 0usize;
             if let Some(args) = call.arguments() {
@@ -913,6 +920,18 @@ pub(super) fn ingest_model_body_item(
                         match (key.as_deref(), value) {
                             (Some("if"), Some(v)) => if_method = Some(v),
                             (Some("unless"), Some(v)) => unless_method = Some(v),
+                            (Some("if"), None) => match callback_condition(&assoc.value(), file) {
+                                Some(c) => if_cond = Some(c),
+                                None => options_ok = false,
+                            },
+                            (Some("unless"), None) => match callback_condition(&assoc.value(), file) {
+                                Some(c) => unless_cond = Some(c),
+                                None => options_ok = false,
+                            },
+                            (Some("on"), _) => match context_guard(&assoc.value()) {
+                                Some(g) => on_guard = g,
+                                None => options_ok = false,
+                            },
                             _ => options_ok = false,
                         }
                     }
@@ -938,8 +957,8 @@ pub(super) fn ingest_model_body_item(
                                 unless_method: unless_method.clone(),
                             })
                             .collect(),
-                        if_cond: None,
-                        unless_cond: None,
+                        if_cond: and_guard(on_guard, if_cond),
+                        unless_cond,
                         message: None,
                     },
                     leading_comments,

@@ -2188,6 +2188,13 @@ fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
                     if let Some(c) = &validation.unless_cond {
                         walk(c, &mut out);
                     }
+                    // `validate :m, if: :will_save_change_to_<col>?` —
+                    // the Symbol guards ride on the rule itself.
+                    for rule in &validation.rules {
+                        if let crate::dialect::ValidationRule::Custom { if_method, unless_method, .. } = rule {
+                            out.extend(if_method.iter().chain(unless_method).cloned());
+                        }
+                    }
                 }
                 ModelBodyItem::Association { .. } => {}
             }
@@ -2769,11 +2776,17 @@ fn synth_initialize(
     // has_secure_password virtual attrs: `User.new(password: "...",
     // password_confirmation: "...")` is the factory/signup shape —
     // Rails routes them through the macro's plaintext writers (where
-    // digest computation lives). A supplied nil also reaches the writer;
-    // only an omitted key is skipped. The digest COLUMN was already
-    // covered by the column loop above.
+    // digest computation lives), and `<attr>_challenge` — the current
+    // password a profile form asks for — through its accessor, which
+    // the model's validation reads. A supplied nil also reaches the
+    // writer; only an omitted key is skipped. The digest COLUMN was
+    // already covered by the column loop above.
     if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
-        for key in [attr.as_str().to_string(), format!("{}_confirmation", attr.as_str())] {
+        for key in [
+            attr.as_str().to_string(),
+            format!("{}_confirmation", attr.as_str()),
+            format!("{}_challenge", attr.as_str()),
+        ] {
             let lookup = Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
