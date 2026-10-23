@@ -47,7 +47,7 @@ mod render;
 mod ivar_set;
 pub(crate) use ivar_set::controller_name_of;
 mod effects;
-mod claim_map;
+pub(crate) mod claim_map;
 use claim_map::ClaimMap;
 mod diagnostics;
 pub mod open_classes;
@@ -8118,7 +8118,7 @@ fn controller_mixed_in_modules(
 /// above the class, reversed. `include A` then `include B`
 /// puts B ahead of A; `include A, B` puts A ahead of B; a module sits ahead
 /// of the modules it includes; each module appears once.
-fn mixin_precedence(groups: Vec<Vec<ClassId>>, module_includes: &HashMap<ClassId, Vec<ClassId>>) -> Vec<ClassId> {
+pub(crate) fn mixin_precedence(groups: Vec<Vec<ClassId>>, module_includes: &HashMap<ClassId, Vec<ClassId>>) -> Vec<ClassId> {
     fn ahead(includes: Vec<ClassId>, module_includes: &HashMap<ClassId, Vec<ClassId>>, open: &mut BTreeSet<ClassId>) -> Vec<ClassId> {
         let mut ancestors: Vec<ClassId> = Vec::new();
         for module in includes {

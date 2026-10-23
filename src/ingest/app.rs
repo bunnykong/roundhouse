@@ -17,6 +17,7 @@ use ruby_prism::Node;
 use crate::App;
 use crate::Symbol;
 use crate::dialect::{LibraryClass, MethodReceiver, TestModule};
+use crate::analyze::claim_map::ClaimMap;
 use crate::vfs::{FsVfs, MapVfs, Vfs};
 
 use super::controller::ingest_controller;
@@ -3265,8 +3266,8 @@ fn synthesize_template_only_actions(app: &mut App) {
 ///
 /// Closes transitively — `Authentication` includes `SessionLookup`, and
 /// `find_session_by_cookie` has to arrive with it. A name the controller
-/// (or an earlier concern) already defines wins, matching Ruby's
-/// ancestor order.
+/// already defines wins; among concerns, the one Ruby's ancestor order
+/// dispatches to.
 ///
 /// A copied body carries its module's lexical scope with it, so a bare
 /// constant reference is qualified on the way in: lobsters'
@@ -3365,7 +3366,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
         // the ancestor chain — `include A, B` puts A ahead of B, and a
         // module ahead of what it includes — so the transitive closure
         // below walks the list as written, dependencies after, and the
-        // first definition of a name wins. FILTER registration is the
+        // definition Ruby dispatches to wins. FILTER registration is the
         // order the `included` hooks fire, which is the reverse: Ruby
         // processes a multi-argument `include` last-argument-first, and
         // ActiveSupport::Concern includes a concern's dependencies
@@ -3442,9 +3443,22 @@ fn splice_concerns_into_controllers(app: &mut App) {
                 });
             }
         }
+        // Each concern `def` claims its name, keyed by the module's
+        // dispatch precedence and then its definition order: the method
+        // spliced is the last claim, the one Ruby calls, whatever order
+        // the walk visits. The splice keeps the walk's order.
+        let precedence = crate::analyze::mixin_precedence(include_groups.clone(), &module_includes);
+        let mut winners: ClaimMap<&crate::ident::Symbol, (usize, usize), (&crate::ident::ClassId, usize)> =
+            ClaimMap::new();
         for module in &queue {
-            for method in module_methods.get(module).into_iter().flatten() {
-                if !defined.insert(method.name.clone()) {
+            let rank = precedence.iter().position(|m| m == module).map_or(0, |at| at + 1);
+            for (at, method) in module_methods.get(module).into_iter().flatten().enumerate() {
+                winners.claim(&method.name, (rank, at), (module, at));
+            }
+        }
+        for module in &queue {
+            for (at, method) in module_methods.get(module).into_iter().flatten().enumerate() {
+                if winners.last(&&method.name) != Some(&(module, at)) || !defined.insert(method.name.clone()) {
                     continue;
                 }
                 let mut body = method.body.clone();
