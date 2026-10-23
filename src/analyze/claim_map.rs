@@ -1,5 +1,5 @@
 //! `ClaimMap`: a name-keyed store whose reads cannot see the order its writes
-//! arrived in (rule O5: writer-keyed, withdrawable output).
+//! arrived in (writer-keyed, withdrawable output; docs/research/claimmap.md).
 //!
 //! A slot `K` holds at most one claim per writer `W`. A writer's new claim
 //! replaces its own previous claim there and nothing else; a writer that stops
