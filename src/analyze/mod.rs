@@ -1710,7 +1710,7 @@ impl Analyzer {
         // bodies, and only where no view site already said something.
         let helper_modules: std::collections::HashSet<ClassId> =
             app.helper_method_index.values().cloned().collect();
-        let mut helper_sites: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
+        let mut helper_sites = ClaimMap::new();
         for lc in app.library_classes.iter().filter(|lc| helper_modules.contains(&lc.name)) {
             for m in &lc.methods {
                 let mut targets = Vec::new();
@@ -1722,7 +1722,7 @@ impl Analyzer {
                 );
             }
         }
-        for (partial, locals) in helper_sites {
+        for (partial, locals) in helper_sites.into_resolve_join(render::join_partial_locals) {
             let entry = app.partial_local_types.entry(partial).or_default();
             for (k, ty) in locals {
                 if !ty.is_unknown() {
@@ -2405,6 +2405,7 @@ impl Analyzer {
         // first loop types each controller in isolation (no parent
         // inheritance), then the second loop walks the parent chain
         // using the captured metadata.
+        #[derive(Clone)]
         struct ControllerMeta {
             self_ty: Ty,
             /// This controller's own segment of the filter chain in
@@ -2431,7 +2432,34 @@ impl Analyzer {
             class_constants: body::ConstScope,
             layout: LayoutDecl,
         }
-        let mut meta_by_name: HashMap<ClassId, ControllerMeta> = HashMap::new();
+        // A controller split across files has one entry per file, and each
+        // claims its name. Their metas join: every method's bindings, with
+        // the types joined where both files write an ivar. A part a join
+        // cannot merge (a body defined in both files, filter order, the
+        // layout) takes the later file in path order, a fixed stand-in for
+        // Ruby's load order.
+        fn join_controller_meta(mut a: ControllerMeta, b: &ControllerMeta) -> ControllerMeta {
+            a.sourced_filters.extend(b.sourced_filters.iter().cloned());
+            for (name, ivars) in &b.action_bindings {
+                let slot = a.action_bindings.entry(name.clone()).or_default();
+                for (k, v) in ivars {
+                    let joined = match slot.remove(k) {
+                        Some(prev) if prev.is_unknown() => v.clone(),
+                        Some(prev) if v.is_unknown() || prev == *v => prev,
+                        Some(prev) => union_of(prev, v.clone()),
+                        None => v.clone(),
+                    };
+                    slot.insert(k.clone(), joined);
+                }
+            }
+            a.action_bodies.extend(b.action_bodies.iter().map(|(k, v)| (k.clone(), v.clone())));
+            a.action_effects.extend(b.action_effects.iter().map(|(k, v)| (k.clone(), v.clone())));
+            if b.layout != LayoutDecl::default() {
+                a.layout = b.layout.clone();
+            }
+            a
+        }
+        let mut meta_claims: ClaimMap<ClassId, usize, ControllerMeta> = ClaimMap::new();
         // Parent links and concern-module tables are cloned once in
         // `analyze` and reused every round — they do not depend on the
         // refined registry.
@@ -2603,7 +2631,7 @@ impl Analyzer {
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
         let _typing_controllers_a = crate::timings::begin("typing: controllers A");
-        for controller in &mut app.controllers {
+        for (entry_at, controller) in app.controllers.iter_mut().enumerate() {
             // A controller the round did not move still has to produce
             // its metadata: Phase B resolves a dirty child's filters by
             // walking its ancestors' entries, and the view channel is
@@ -2864,8 +2892,9 @@ impl Analyzer {
             let action_effects: HashMap<Symbol, EffectSet> = HashMap::new();
 
             let layout = controller.layout.clone();
-            meta_by_name.insert(
+            meta_claims.claim(
                 controller.name.clone(),
+                entry_at,
                 ControllerMeta {
                     self_ty,
                     sourced_filters,
@@ -2878,6 +2907,8 @@ impl Analyzer {
             );
         }
         drop(_typing_controllers_a);
+        let meta_by_name: HashMap<ClassId, ControllerMeta> =
+            meta_claims.into_resolve_join(join_controller_meta).collect();
 
         // Controller→layout-view ivar channel: every action that
         // renders also flows its ivars into whatever layout wraps it
@@ -4112,7 +4143,7 @@ impl Analyzer {
         // keying by the partial's view name, and analyze partials with that
         // seed. Nested partial-of-partial isn't handled here (would need a
         // fixpoint); real-blog's dependency graph is shallow enough to skip.
-        let mut partial_locals_by_name: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
+        let mut partial_local_claims = ClaimMap::new();
 
         // Renderer → partials-it-renders edges, harvested as views are
         // walked. Drives the ivar propagation below.
@@ -4178,7 +4209,7 @@ impl Analyzer {
             extract_partial_render_sites(
                 &view.body,
                 &view.name,
-                &mut partial_locals_by_name,
+                &mut partial_local_claims,
                 &mut targets,
             );
             record_render_edges(&mut render_edges, &view.name, targets);
@@ -4205,11 +4236,14 @@ impl Analyzer {
             extract_partial_render_sites(
                 &view.body,
                 &view.name,
-                &mut partial_locals_by_name,
+                &mut partial_local_claims,
                 &mut targets,
             );
             record_render_edges(&mut render_edges, &view.name, targets);
         }
+
+        let partial_locals_by_name: HashMap<Symbol, HashMap<Symbol, Ty>> =
+            partial_local_claims.into_resolve_join(render::join_partial_locals).collect();
 
         // Harvest partial→partial render edges too (comment trees etc.).
         // Partials aren't typed yet, so collection-form renders (`render
@@ -4220,7 +4254,7 @@ impl Analyzer {
             if !is_partial_view_name(&view.name) {
                 continue;
             }
-            let mut throwaway = HashMap::new();
+            let mut throwaway = ClaimMap::new();
             let mut targets = Vec::new();
             extract_partial_render_sites(&view.body, &view.name, &mut throwaway, &mut targets);
             record_render_edges(&mut render_edges, &view.name, targets);
@@ -4394,14 +4428,22 @@ impl Analyzer {
             // the Attachment's own readers a partial uses — `caption` —
             // are synthesized onto the class as delegations the other
             // way, see `lower::attachable::attachable_partial_bindings`).
+            // Every attachable that renders this partial claims its local;
+            // the local is the join of their classes, since Rails renders
+            // the partial for each of them.
+            let mut attachable_locals: ClaimMap<Symbol, ClassId, Ty> = ClaimMap::new();
             for binding in &attachable_partial_bindings {
                 if crate::lower::attachable::partial_view_name(&binding.partial) != view.name.as_str() {
                     continue;
                 }
-                view_ctx
-                    .local_bindings
-                    .entry(Symbol::from(binding.local.as_str()))
-                    .or_insert(Ty::Class { id: binding.class.clone(), args: vec![].into() });
+                attachable_locals.claim(
+                    Symbol::from(binding.local.as_str()),
+                    binding.class.clone(),
+                    Ty::Class { id: binding.class.clone(), args: vec![].into() },
+                );
+            }
+            for (local, ty) in attachable_locals.resolve_join(|a, b| union_of(a, b.clone())) {
+                view_ctx.local_bindings.entry(local.clone()).or_insert(ty);
             }
             if let Some(ivars) = partial_ivars_by_name.get(&view.name) {
                 view_ctx.ivar_bindings = ivars.clone();

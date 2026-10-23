@@ -119,6 +119,15 @@ impl<K: Ord, W: Ord, V> ClaimMap<K, W, V> {
         })
     }
 
+    /// Policy Join for every slot, consuming the map so no claim is cloned.
+    pub(crate) fn into_resolve_join(self, mut join: impl FnMut(V, &V) -> V) -> impl Iterator<Item = (K, V)> {
+        self.slots.into_iter().filter_map(move |(k, claims)| {
+            let mut values = claims.into_values();
+            let first = values.next()?;
+            Some((k, values.fold(first, |acc, v| join(acc, &v))))
+        })
+    }
+
     /// Policy Join in the boolean lattice: whether `pred` holds of some claim
     /// on `k` (false when no writer claims `k`).
     pub(crate) fn any(&self, k: &K, pred: impl FnMut(&V) -> bool) -> bool {

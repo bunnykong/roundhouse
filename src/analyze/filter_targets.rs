@@ -30,6 +30,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 use crate::dialect::{Controller, ControllerBodyItem, FilterKind};
 use crate::expr::{ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
+use super::claim_map::ClaimMap;
 
 /// Callbacks Rails defines on `ActionController::Base` that an app names
 /// as filter targets but that are not part of the typed call surface.
@@ -126,6 +127,11 @@ fn complete_chain<'a>(
     all: &'a [Controller],
     opaque: &dyn Fn(&Controller) -> bool,
 ) -> Option<Vec<&'a Controller>> {
+    // A parent split across files has one entry per file; each claims the
+    // parent's name, and the chain takes every claim (a join), so no file
+    // order decides which entry's methods the check sees.
+    let entries: ClaimMap<&ClassId, usize, &'a Controller> =
+        all.iter().enumerate().map(|(at, c)| (&c.name, at, c)).collect();
     let mut chain = vec![controller];
     let mut cur = controller;
     loop {
@@ -136,11 +142,12 @@ fn complete_chain<'a>(
         if FRAMEWORK_ROOTS.contains(&parent.0.as_str()) {
             return Some(chain);
         }
-        let next = all.iter().find(|c| &c.name == parent)?;
-        if chain.iter().any(|c| c.name == next.name) {
+        let parts: Vec<&'a Controller> = entries.claims(&parent).map(|(_, c)| *c).collect();
+        let next = *parts.iter().find(|c| c.parent.is_some()).or(parts.last())?;
+        if chain.iter().any(|c| c.name == next.name) || parts.iter().copied().any(|c| opaque(c)) {
             return None;
         }
-        chain.push(next);
+        chain.extend(parts);
         cur = next;
     }
 }

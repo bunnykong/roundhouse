@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 use crate::ty::Ty;
+use super::claim_map::ClaimMap;
 
 /// A view name identifies a partial when any path segment starts with `_`
 /// (Rails convention: `app/views/articles/_article.html.erb` → view name
@@ -39,10 +40,26 @@ pub(super) fn is_layout_view_name(name: &Symbol) -> bool {
 /// Call-site argument shapes outside these cases are skipped silently;
 /// an unrecognized render just leaves the target partial seeded by other
 /// sites (or unseeded).
+/// The join of two render sites' locals for one partial: every local either
+/// passes, with the types joined where both pass it. An unknown type (`Var`,
+/// `Untyped`) is the identity, as in the layout-ivar merge.
+pub(super) fn join_partial_locals(mut a: HashMap<Symbol, Ty>, b: &HashMap<Symbol, Ty>) -> HashMap<Symbol, Ty> {
+    for (k, v) in b {
+        let joined = match a.remove(k) {
+            Some(prev) if prev.is_unknown() => v.clone(),
+            Some(prev) if v.is_unknown() || prev == *v => prev,
+            Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+            None => v.clone(),
+        };
+        a.insert(k.clone(), joined);
+    }
+    a
+}
+
 pub(super) fn extract_partial_render_sites(
     expr: &Expr,
     current_view: &Symbol,
-    out: &mut HashMap<Symbol, HashMap<Symbol, Ty>>,
+    out: &mut ClaimMap<Symbol, (Symbol, u32, u32), HashMap<Symbol, Ty>>,
     targets: &mut Vec<Symbol>,
 ) {
     match &*expr.node {
@@ -56,10 +73,11 @@ pub(super) fn extract_partial_render_sites(
                     // (partials render in their parent's view context and
                     // read its `@ivars`).
                     targets.push(partial_name.clone());
-                    let entry = out.entry(partial_name).or_default();
-                    for (k, v) in locals {
-                        entry.insert(k, v);
-                    }
+                    // Each render site (its view and position) claims the
+                    // locals it passes; readers join the claims, since Rails
+                    // renders the partial from every site.
+                    let site = (current_view.clone(), expr.span.file.0, expr.span.start);
+                    out.claim(partial_name, site, locals.into_iter().collect());
                 }
             }
             if let Some(r) = recv {
