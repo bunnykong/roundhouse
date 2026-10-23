@@ -541,3 +541,41 @@ pub(crate) fn is_sqlite_keyword(name: &str) -> bool {
             | "vacuum" | "values" | "view" | "virtual" | "when" | "where" | "window" | "with" | "without"
     )
 }
+
+#[cfg(test)]
+mod string_query_parity {
+    use super::{is_reserved_local, RESERVED_LOCALS};
+    use ruby_prism::StringQuery;
+
+    /// Prism's `StringQuery::is_keyword` is a *superset* of
+    /// [`RESERVED_LOCALS`]: it also treats `__FILE__` / `__LINE__` /
+    /// `__ENCODING__` as keywords. Pseudo-vars stay in the table for
+    /// `safe_local` but are excluded from [`is_reserved_local`]. Until
+    /// those differences are modeled explicitly, do not replace the
+    /// table with StringQuery.
+    #[test]
+    fn reserved_locals_are_prism_keywords_but_prism_has_extras() {
+        for name in RESERVED_LOCALS {
+            assert_eq!(
+                StringQuery::new(name.as_bytes()).is_keyword(),
+                Ok(true),
+                "{name} should be a Prism keyword"
+            );
+        }
+        for magic in ["__FILE__", "__LINE__", "__ENCODING__"] {
+            assert_eq!(
+                StringQuery::new(magic.as_bytes()).is_keyword(),
+                Ok(true),
+                "{magic}"
+            );
+            assert!(
+                !RESERVED_LOCALS.contains(&magic),
+                "{magic} is intentionally absent from RESERVED_LOCALS"
+            );
+        }
+        for pseudo in ["self", "nil", "true", "false"] {
+            assert!(RESERVED_LOCALS.contains(&pseudo));
+            assert!(!is_reserved_local(pseudo));
+        }
+    }
+}

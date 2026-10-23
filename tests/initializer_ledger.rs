@@ -569,3 +569,28 @@ fn a_rooted_configure_block_and_an_in_repo_gem_keep_their_gems() {
     let got: Vec<(&str, &str)> = ledger.iter().map(|d| (statement(d), holder(d))).collect();
     assert_eq!(got, [("config.password_length =", "gem:devise:modeled"), ("c.size =", "gem:catalog:in-repo")]);
 }
+
+#[test]
+fn a_filter_parameters_list_with_a_regexp_and_comments_is_read() {
+    let (_, ledger) = ingest(&[(
+        "config/initializers/filter_parameter_logging.rb",
+        "Rails.application.config.filter_parameters += [\n  # keys named like an API key, not their ids\n  :passw,\n  /\\bapi_key(?!_id\\b)/,\n]\n\
+         Rails.application.config.filter_parameters += [/(?:card|cvv)[_.]code{1,2}/, :pin]\n\
+         Rails.application.config.filter_parameters += [/#{Secrets.prefix}_key/]\n",
+    )]);
+    // Plain Regexps are read, `,` and `]` inside them included; an
+    // interpolated one could be anything.
+    assert_eq!(statements(&ledger), ["Rails.application.config.filter_parameters +="]);
+    assert_eq!(location(&ledger[0]), "config/initializers/filter_parameter_logging.rb:7:1");
+}
+
+#[test]
+fn a_filter_parameters_operand_after_a_comment_or_blank_line_is_read() {
+    let (_, ledger) = ingest(&[(
+        "config/initializers/filter_parameter_logging.rb",
+        "Rails.application.config.filter_parameters +=\n  # credentials\n  [:password]\n\
+         Rails.application.config.filter_parameters +=\n\n  [:token]\n\
+         Rails.application.config.filter_parameters += [\n  # secrets\n  :secret,\n]\n",
+    )]);
+    assert!(ledger.is_empty(), "{:?}", statements(&ledger));
+}

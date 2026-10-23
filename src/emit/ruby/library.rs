@@ -10109,6 +10109,34 @@ enum PreloadKind {
     PlainText { attr: String, owner: String },
 }
 
+/// Would `assoc`'s raw-SQL batch (belongs_to, `through:`) load rows of a
+/// model whose `default_scope` the runtime Relation applies
+/// (`lower::default_scope`): its target, or its `through:` model?
+fn touches_default_scoped(model: &crate::dialect::Model, assoc: &crate::dialect::Association, app: &App) -> bool {
+    use crate::dialect::Association;
+    let scoped = |id: &ClassId| {
+        app.models.iter().any(|m| &m.name == id && crate::lower::default_scope::static_default_scope(m).is_some())
+    };
+    let (target, through) = match assoc {
+        Association::BelongsTo { target, .. } => (target, None),
+        Association::HasMany { target, through, .. } | Association::HasOne { target, through, .. } => {
+            (target, through.as_ref())
+        }
+        _ => return false,
+    };
+    // A direct has_many / has_one batch loads through
+    // `Relation.new(<target>)`, which applies the scope itself.
+    let Some(thr) = through else {
+        return matches!(assoc, Association::BelongsTo { .. }) && scoped(target);
+    };
+    scoped(target) || {
+        model.associations().any(|a| {
+            a.name() == thr
+                && matches!(a, Association::BelongsTo { target, .. } | Association::HasMany { target, .. } | Association::HasOne { target, .. } if scoped(target))
+        })
+    }
+}
+
 /// Select association shapes whose batch queries preserve the reader's filters,
 /// resolving each against the app model registry and its table metadata.
 fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, PreloadKind)> {
@@ -10125,6 +10153,12 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
         // A refused association (`assoc_primary_key`) has no reader to
         // preload into.
         if crate::lower::assoc_primary_key::unsupported_reason(model, &app.models, assoc).is_some() {
+            continue;
+        }
+        // A belongs_to or `through:` batch is raw SQL; one that loads a
+        // default-scoped model keeps its lazy reader, whose Relation
+        // applies the scope, rather than load the rows it hides.
+        if touches_default_scoped(model, assoc, app) {
             continue;
         }
         match assoc {

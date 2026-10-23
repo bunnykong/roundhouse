@@ -16,6 +16,7 @@ use ruby_prism::Visit;
 
 use crate::span::SourceFile;
 
+use crate::ingest::prism_api::PrismLocation;
 /// The name [`collect`] records a definition under when the name is
 /// computed at runtime.
 pub const DYNAMIC: &str = "*";

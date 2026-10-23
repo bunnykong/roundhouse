@@ -4,6 +4,7 @@
 //! Roundhouse retains source-position answers and keys inferred values
 //! by Rubydex declaration IDs.
 
+use crate::ingest::prism_api::PrismLocation;
 mod hoist;
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};

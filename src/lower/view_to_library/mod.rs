@@ -1202,6 +1202,13 @@ pub fn insert_db_stub(
             },
         ),
     );
+    // The tables inside a `Model.unscoped` block on this thread
+    // (relation.rb's `Relation.unscoped_tables`), boxed per thread like
+    // the transaction state above.
+    db_info.class_methods.insert(
+        Symbol::from("_unscoped_tables"),
+        fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+    );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 
     // MessageDigest — the keyed-digest primitive surface, same

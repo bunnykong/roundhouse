@@ -15,6 +15,8 @@
 //! and defers the close to the matching `<% end %>`, which emits `end).to_s`.
 //! A small block stack matches each `<% end %>` to its opener.
 
+use crate::ingest::prism_api::PrismLocation;
+
 /// Classification of a block on the compile-time stack. `Output` means the
 /// block was opened by a `<%= ... do %>` tag and must close with
 /// `end).to_s` to complete the enclosing `_buf = _buf + (EXPR).to_s` form.

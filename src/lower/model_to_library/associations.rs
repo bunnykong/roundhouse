@@ -201,7 +201,12 @@ pub(super) fn push_association_methods(
     model: &Model,
     models: &[Model],
     through_joins: &ThroughJoins,
+    runtime_relation: super::RuntimeRelation,
 ) {
+    // The ruby family's belongs_to writer stores nil for a nil value, as
+    // Rails does. A strict target's key field is its column's non-nil
+    // type, so there it stores the sentinel (`fk_sentinel`).
+    let keeps_nil = runtime_relation == super::RuntimeRelation::Present;
     let owner = &model.name;
     for (span, assoc) in model.spanned_associations() {
         let before = methods.len();
@@ -414,6 +419,7 @@ pub(super) fn push_association_methods(
                         &type_col,
                         &assoc_pk,
                         sentinel,
+                        keeps_nil,
                     ));
                 }
             }
@@ -444,7 +450,7 @@ pub(super) fn push_association_methods(
                 // target's own primary key.
                 let assoc_pk =
                     crate::lower::scope_chain::association_primary_key(models, target, primary_key.as_ref());
-                methods.push(synth_belongs_to_reader(owner, name, target, foreign_key, &assoc_pk, sentinel.clone()));
+                methods.push(synth_belongs_to_reader(owner, name, target, foreign_key, &assoc_pk, sentinel.clone(), keeps_nil));
                 // Rails provides the writer alongside the reader
                 // (`comment.story = obj` stores the foreign key). A
                 // custom writer in the model body must win (Rails: the
@@ -459,7 +465,7 @@ pub(super) fn push_association_methods(
                         .iter()
                         .any(|m| m.name == writer_name && m.receiver == MethodReceiver::Instance)
                 {
-                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, &assoc_pk, sentinel));
+                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, &assoc_pk, sentinel, keeps_nil));
                 }
                 push_singular_loaded_reader(methods, model, owner, name);
             }
@@ -1520,6 +1526,7 @@ fn synth_belongs_to_reader(
     foreign_key: &Symbol,
     assoc_pk: &Symbol,
     sentinel: Expr,
+    keeps_nil: bool,
 ) -> MethodDef {
     // def article
     //   @article_id == 0 ? nil : Article.find_by(id: @article_id)
@@ -1538,6 +1545,30 @@ fn synth_belongs_to_reader(
             parenthesized: false,
         },
     );
+    // `@article_id.nil? || @article_id == 0` where the writer keeps nil.
+    let cond = if keeps_nil {
+        let nil = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Ivar { name: foreign_key.clone() })),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::Or,
+                surface: crate::expr::BoolOpSurface::Symbol,
+                left: nil,
+                right: cond,
+            },
+        )
+    } else {
+        cond
+    };
 
     let find_by = Expr::new(
         Span::synthetic(),
@@ -1724,6 +1755,7 @@ fn synth_polymorphic_writer(
     type_col: &Symbol,
     assoc_pk: &Symbol,
     sentinel: Expr,
+    keeps_nil: bool,
 ) -> MethodDef {
     // def notifiable=(value)
     //   if value.nil?
@@ -1786,10 +1818,12 @@ fn synth_polymorphic_writer(
         Span::synthetic(),
         ExprNode::If {
             cond: nil_check,
-            then_branch: seq(vec![
-                assign(foreign_key, sentinel),
-                assign(&type_col, lit_str("")),
-            ]),
+            // Rails clears both columns to nil; the ruby family does too.
+            then_branch: if keeps_nil {
+                seq(vec![assign(foreign_key, nil_lit()), assign(&type_col, nil_lit())])
+            } else {
+                seq(vec![assign(foreign_key, sentinel), assign(&type_col, lit_str(""))])
+            },
             else_branch: seq(vec![assign(foreign_key, id_read), type_switch]),
         },
     );
@@ -1836,6 +1870,7 @@ fn synth_belongs_to_writer(
     foreign_key: &Symbol,
     assoc_pk: &Symbol,
     sentinel: Expr,
+    keeps_nil: bool,
 ) -> MethodDef {
     // def story=(value)
     //   if value.nil?
@@ -1845,8 +1880,10 @@ fn synth_belongs_to_writer(
     //   end
     // end
     //
-    // Stores the foreign key, mirroring the reader's `@fk == 0` nil
-    // sentinel (fk columns are non-nullable Int in the schema typing).
+    // Stores the foreign key. A nil value stores nil on the ruby family,
+    // as Rails does (`@story_id = nil`); a strict target mirrors the
+    // reader's `@fk == 0` nil sentinel, its key field being the column's
+    // non-nil type.
     // No object cache: the reader re-queries by fk, which matches its
     // existing shape — assigning an UNSAVED record then reading the
     // association back is the one Rails behavior this doesn't cover.
@@ -1884,7 +1921,7 @@ fn synth_belongs_to_writer(
         Span::synthetic(),
         ExprNode::If {
             cond: nil_check,
-            then_branch: fk_assign(sentinel),
+            then_branch: fk_assign(if keeps_nil { nil_lit() } else { sentinel }),
             else_branch: fk_assign(id_read),
         },
     );

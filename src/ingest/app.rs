@@ -39,6 +39,7 @@ use super::view::{ViewEngine, ingest_template};
 use super::survey::{self, unwrap_or_record};
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Read a file's bytes for one of the per-file walks below (ERB,
 /// jbuilder, models, controllers, migrations, `structure.sql`, routes
 /// split files, …). An unreadable file — the shape that matters in
@@ -230,7 +231,7 @@ fn names_root_constant(text: &str, name: &str) -> bool {
             }
         }
     }
-    let parsed = ruby_prism::parse(text.as_bytes());
+    let parsed = super::prism::parse_silent(text.as_bytes());
     let mut reads = Reads { name, found: false };
     ruby_prism::Visit::visit(&mut reads, &parsed.node());
     reads.found
@@ -1133,15 +1134,17 @@ end
         // `ActiveSupport.filter_parameters` for the event reporter; the
         // runtime's stays the reporter's own, as before.) Synthesized as
         // `config_filter_parameters` on the reopen, over the framework
-        // default (`[]`) in runtime/ruby/rails.rb. A Regexp, Proc or
-        // computed operand is not read; the survey names it.
+        // default (`[]`) in runtime/ruby/rails.rb. A Regexp literal is
+        // kept as written (ParameterFilter matches it against the key);
+        // an interpolated Regexp, a Proc or a computed operand is not
+        // read, and the survey names it.
         {
             let mut names: Vec<String> = Vec::new();
             let mut seen = false;
             let mut fold = |bytes: &[u8], file: &Path| {
                 for line in extract_filter_parameters(bytes) {
                     match line {
-                        FilterParametersLine::Literal { replace, names: more } => {
+                        FilterParametersLine::Literal { replace, filters: more } => {
                             seen = true;
                             if replace {
                                 names.clear();
@@ -1157,7 +1160,7 @@ end
                             }
                             survey::record(&IngestError::Unsupported {
                                 file: file.display().to_string(),
-                                message: "config.filter_parameters is not a list of Symbol or String literals; request.filtered_parameters does not apply it".to_string(),
+                                message: "config.filter_parameters is not a list of Symbol, String or Regexp literals; request.filtered_parameters does not apply it".to_string(),
                             })
                         }
                     }
@@ -1173,7 +1176,7 @@ end
                 }
             }
             if seen {
-                let literal = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
+                let literal = names.join(", ");
                 if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
                     "def config_filter_parameters\n  [{literal}]\nend\n"
                 )) {
@@ -2245,6 +2248,8 @@ end
     super::model_macros::expand_model_macros(&mut app, &sources)?;
     // After the concern-macro expansion: a concern's macros are that one's to expand or refuse.
     super::class_macros::expand_class_macros(&mut app, &sources);
+    // After the macros: an expanded `has_ancestry` is what writes the `extend`.
+    super::extend_splice::splice_sole_extended_modules(&mut app);
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
@@ -2327,6 +2332,8 @@ end
     super::model_delegate::lower_model_delegates(&mut app);
     super::on_load_reopen::drain_pending(&mut app);
     gap_numericality_allow_on_untyped(&mut app);
+    gap_acceptance_on_undeclared(&mut app);
+    gap_uniqueness_on_polymorphic_attribute(&mut app);
     app.const_resolver = const_resolver;
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
@@ -2518,21 +2525,163 @@ fn gap_numericality_allow_on_untyped(app: &mut App) {
                 }
             }
         }
-        // The whole `validates` call goes, as an ingest refusal
-        // (`ParsedValidates::Gap`) does: every Validation item it produced
-        // shares its span (one per attribute, and per-rule `if:`/`unless:`
-        // splits), so a `presence:` beside the numericality is not kept.
+        refuse_validates_calls(model, refused, &mut gaps);
+    }
+    report_validates_gaps(
+        app,
+        gaps,
+        "an untyped attribute's String input is not parsed as a number (#1158); emitting the check would reject input Rails accepts",
+    );
+}
+
+/// `acceptance:` stays the reported gap on an attribute the model does
+/// not declare as a column, an `attr_*` or a method. Rails'
+/// `AcceptanceValidator` defines a virtual reader and writer for an
+/// undeclared one on first use, which this build does not synthesize, so
+/// the lowered check would read an ivar nothing writes. A name declared
+/// only by `attribute :name, :type` of another type is refused too: its
+/// synthesized writer stores the input verbatim, where Rails casts it
+/// (`true` is `"t"` on a String attribute). Refused as a whole call, as
+/// the numericality gap is.
+fn gap_acceptance_on_undeclared(app: &mut App) {
+    use crate::dialect::{MethodReceiver, ModelBodyItem, ValidationRule};
+    use crate::expr::{ExprNode, Literal};
+    let mut undeclared: Vec<(crate::span::Span, String)> = Vec::new();
+    let mut attribute_api: Vec<(crate::span::Span, String)> = Vec::new();
+    for model in &mut app.models {
+        let attribute_call = |attr: &crate::ident::Symbol| {
+            model.body.iter().any(|item| match item {
+                ModelBodyItem::Unknown { expr, .. } => matches!(&*expr.node,
+                    ExprNode::Send { recv: None, method, args, .. }
+                        if method.as_str() == "attribute"
+                            && args.first().is_some_and(|arg| matches!(&*arg.node, ExprNode::Lit { value: Literal::Sym { value } } if value == attr))),
+                _ => false,
+            })
+        };
+        let declared = |attr: &crate::ident::Symbol| {
+            let setter = crate::ident::Symbol::from(format!("{}=", attr.as_str()));
+            model.attributes.fields.contains_key(attr)
+                || model.body.iter().any(|item| match item {
+                    ModelBodyItem::Method { method, .. } => {
+                        method.receiver == MethodReceiver::Instance && (method.name == *attr || method.name == setter)
+                    }
+                    ModelBodyItem::Unknown { expr, .. } => match &*expr.node {
+                        ExprNode::Send { recv: None, method, args, .. }
+                            if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer") =>
+                        {
+                            args.iter().any(|arg| {
+                                matches!(&*arg.node, ExprNode::Lit { value: Literal::Sym { value } } if value == attr)
+                            })
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                })
+        };
+        let mut refused: Vec<(usize, crate::span::Span, String)> = Vec::new();
+        let mut refused_attribute_api: Vec<(usize, crate::span::Span, String)> = Vec::new();
+        for (i, item) in model.body.iter().enumerate() {
+            let ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if !validation.rules.iter().any(|rule| matches!(rule, ValidationRule::Acceptance { .. })) {
+                continue;
+            }
+            let attr = &validation.attribute;
+            let construct = format!("validates :{}, acceptance:", attr.as_str());
+            // An `attribute :x, :boolean` with the synthesized writer is
+            // lowered on the ruby family and reported per strict target
+            // (`lower::validations::acceptance_gaps_for_target`).
+            if declared(attr) || crate::lower::model_to_library::markers::synthesized_boolean_attribute(model, attr) {
+                continue;
+            } else if attribute_call(attr) {
+                refused_attribute_api.push((i, item.span(), construct));
+            } else {
+                refused.push((i, item.span(), construct));
+            }
+        }
+        refuse_validates_calls(model, refused, &mut undeclared);
+        refuse_validates_calls(model, refused_attribute_api, &mut attribute_api);
+    }
+    report_validates_gaps(
+        app,
+        undeclared,
+        "acceptance: on an attribute the model does not declare; Rails defines a virtual accessor for it, which this build does not synthesize",
+    );
+    report_validates_gaps(
+        app,
+        attribute_api,
+        "acceptance: on an `attribute` the model declares, whose writer stores the input uncast where Rails casts it",
+    );
+}
+
+/// Drop every Validation item of each refused `validates` call, as an
+/// ingest refusal (`ParsedValidates::Gap`) does: every item a call
+/// produced shares its span (one per attribute, and per-rule `if:` /
+/// `unless:` splits), so a `presence:` beside the refused rule is not kept.
+fn refuse_validates_calls(
+    model: &mut crate::dialect::Model,
+    refused: Vec<(usize, crate::span::Span, String)>,
+    gaps: &mut Vec<(crate::span::Span, String)>,
+) {
+    use crate::dialect::ModelBodyItem;
+    let calls: std::collections::HashSet<(crate::span::FileId, u32, u32)> =
+        refused.iter().map(|(_, span, _)| (span.file, span.start, span.end)).collect();
+    model.body.retain(|item| {
+        !matches!(item, ModelBodyItem::Validation { .. }) || {
+            let span = item.span();
+            !calls.contains(&(span.file, span.start, span.end))
+        }
+    });
+    for (_, span, construct) in refused {
+        gaps.push((span, construct));
+    }
+}
+
+fn report_validates_gaps(app: &App, gaps: Vec<(crate::span::Span, String)>, detail: &str) {
+    for (span, construct) in gaps {
+        let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
+        let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(span, None, construct, detail);
+        diagnostic.severity = crate::diagnostic::Severity::Warning;
+        let message = diagnostic.message.clone();
+        super::prism::push(diagnostic);
+        survey::record(&IngestError::Unsupported { file, message });
+    }
+}
+
+/// `uniqueness:` on an attribute naming a polymorphic `belongs_to`
+/// (`validates :subject, uniqueness: true`) stays the reported gap. Rails
+/// 8.1.4 resolves the attribute to its foreign key through the association's
+/// class, which a polymorphic one does not have: validating a record that
+/// holds a subject raises `ArgumentError` ("Polymorphic associations do not
+/// support computing the class."). Refused as a whole call, as the
+/// numericality gap is.
+fn gap_uniqueness_on_polymorphic_attribute(app: &mut App) {
+    use crate::dialect::{Association, ModelBodyItem, ValidationRule};
+    let mut gaps: Vec<(crate::span::Span, String)> = Vec::new();
+    for model in &mut app.models {
+        let polymorphic = |attr: &crate::ident::Symbol| {
+            model
+                .associations()
+                .any(|a| matches!(a, Association::BelongsTo { name, polymorphic: true, .. } if name == attr))
+        };
+        let refused: Vec<(crate::span::Span, String)> = model
+            .body
+            .iter()
+            .filter_map(|item| {
+                let ModelBodyItem::Validation { validation, .. } = item else { return None };
+                (validation.rules.iter().any(|r| matches!(r, ValidationRule::Uniqueness { .. }))
+                    && polymorphic(&validation.attribute))
+                .then(|| (item.span(), format!("validates :{}, uniqueness:", validation.attribute.as_str())))
+            })
+            .collect();
         let calls: std::collections::HashSet<(crate::span::FileId, u32, u32)> =
-            refused.iter().map(|(_, span, _)| (span.file, span.start, span.end)).collect();
+            refused.iter().map(|(span, _)| (span.file, span.start, span.end)).collect();
         model.body.retain(|item| {
             !matches!(item, ModelBodyItem::Validation { .. }) || {
                 let span = item.span();
                 !calls.contains(&(span.file, span.start, span.end))
             }
         });
-        for (_, span, construct) in refused {
-            gaps.push((span, construct));
-        }
+        gaps.extend(refused);
     }
     for (span, construct) in gaps {
         let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
@@ -2540,7 +2689,7 @@ fn gap_numericality_allow_on_untyped(app: &mut App) {
             span,
             None,
             construct,
-            "an untyped attribute's String input is not parsed as a number (#1158); emitting the check would reject input Rails accepts",
+            "the attribute is a polymorphic association, which Rails' uniqueness check cannot resolve to a class; Rails raises ArgumentError validating a record that holds one",
         );
         diagnostic.severity = crate::diagnostic::Severity::Warning;
         let message = diagnostic.message.clone();
@@ -7160,7 +7309,7 @@ fn boot_required_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
     for name in ["application.rb", "environment.rb"] {
         let file = config_dir.join(name);
         let Ok(source) = vfs.read(&file) else { continue };
-        let parsed = ruby_prism::parse(&source);
+        let parsed = super::prism::parse_silent(&source);
         let Some(program) = parsed.node().as_program_node() else { continue };
         for statement in program.statements().body().iter() {
             let Some(call) = statement.as_call_node() else { continue };
@@ -7395,7 +7544,7 @@ pub(super) fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) ->
     }
     files.iter().any(|file| {
         vfs.read(file).is_ok_and(|source| {
-            let parsed = ruby_prism::parse(&source);
+            let parsed = super::prism::parse_silent(&source);
             let mut visitor = EngineVisitor { found: false };
             ruby_prism::Visit::visit(&mut visitor, &parsed.node());
             visitor.found
@@ -7434,7 +7583,7 @@ fn engine_route_sources<V: Vfs + ?Sized>(
         files.dedup();
         for file in files {
             let Ok(source) = vfs.read(&file) else { continue };
-            let parsed = ruby_prism::parse(&source);
+            let parsed = super::prism::parse_silent(&source);
             if parsed.errors().next().is_some() {
                 continue;
             }
@@ -7777,7 +7926,7 @@ fn plain_engine_library_sources<V: Vfs + ?Sized>(
             return false;
         }
         let Ok(source) = vfs.read(file) else { return false };
-        let parsed = ruby_prism::parse(&source);
+        let parsed = super::prism::parse_silent(&source);
         if parsed.errors().next().is_some() {
             return false;
         }
@@ -9807,10 +9956,13 @@ pub(super) fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<Str
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FilterParametersLine {
     /// `+= [...]` (`replace: false`) or `= [...]` (`replace: true`) of
-    /// Symbol and String literals, each as its String.
-    Literal { replace: bool, names: Vec<String> },
-    /// Any other operand: a Regexp, a Proc, a computed list. `replace`
-    /// is true for a plain `=`, which still discards the names before it.
+    /// Symbol, String and Regexp literals, each as the Ruby source of the
+    /// filter: a Symbol or String as its String literal (`"passw"`), a
+    /// Regexp as written (`/\bapi_key/i`).
+    Literal { replace: bool, filters: Vec<String> },
+    /// Any other operand: an interpolated Regexp, a Proc, a computed
+    /// list. `replace` is true for a plain `=`, which still discards the
+    /// filters before it.
     Computed { replace: bool },
 }
 
@@ -9818,14 +9970,17 @@ pub(crate) enum FilterParametersLine {
 /// (`Rails.application.config.filter_parameters += [:passw, :email]` in
 /// `filter_parameter_logging.rb`, or `config.filter_parameters += [...]`
 /// in the Application body). Line-scanned like the other config reads;
-/// the list may span lines, so the scan continues to its closing
-/// bracket. `%i[...]` and `%w[...]` lists count as literals.
+/// the operand may span lines, so it grows a line at a time until Prism
+/// parses it whole (comments and trailing commas inside the list are
+/// Ruby's to skip). `%i[...]` and `%w[...]` lists count as literals.
 pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLine> {
     let source = String::from_utf8_lossy(source);
+    let lines: Vec<&str> = source.lines().collect();
     let mut out = Vec::new();
-    let mut lines = source.lines();
-    while let Some(line) = lines.next() {
-        let t = line.trim_start();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        i += 1;
         if t.starts_with('#') {
             continue;
         }
@@ -9839,60 +9994,61 @@ pub(crate) fn extract_filter_parameters(source: &[u8]) -> Vec<FilterParametersLi
             out.push(FilterParametersLine::Computed { replace: false });
             continue;
         };
-        let mut text = rest.trim().to_string();
-        if text.is_empty() {
-            if let Some(next) = lines.next() {
-                text.push_str(next.trim());
+        // The shortest run of lines that parses as one operand. Blank
+        // and comment-only lines before it (`+=` ending its line) parse
+        // cleanly but hold no operand, so the run grows past them. A
+        // statement that never parses stays Computed, and the scan goes
+        // on from the next line.
+        let mut text = rest.to_string();
+        let mut filters = None;
+        for end in i..=lines.len() {
+            let found = {
+                let parsed = ruby_prism::parse(text.as_bytes());
+                let has_operand = parsed
+                    .node()
+                    .as_program_node()
+                    .is_some_and(|p| p.statements().body().iter().next().is_some());
+                (has_operand && parsed.errors().next().is_none())
+                    .then(|| filter_parameter_list(&parsed, &text))
+            };
+            if found.is_some() {
+                filters = found;
+                i = end;
+                break;
+            }
+            if end < lines.len() {
+                text.push('\n');
+                text.push_str(lines[end]);
             }
         }
-        let opens = text.starts_with('[') || text.starts_with("%i[") || text.starts_with("%w[");
-        if opens {
-            while !text.contains(']') {
-                let Some(next) = lines.next() else { break };
-                text.push(' ');
-                text.push_str(next.trim());
-            }
-        }
-        out.push(filter_parameter_list(&text).map_or(FilterParametersLine::Computed { replace }, |names| {
-            FilterParametersLine::Literal { replace, names }
-        }));
+        out.push(match filters.flatten() {
+            Some(filters) => FilterParametersLine::Literal { replace, filters },
+            None => FilterParametersLine::Computed { replace },
+        });
     }
     out
 }
 
-/// The names of a `[:a, "b"]`, `%i[a b]` or `%w[a b]` literal that is
-/// the whole operand (nothing but a comment after it).
-fn filter_parameter_list(text: &str) -> Option<Vec<String>> {
-    let (words, body) = if let Some(b) = text.strip_prefix("%i[").or_else(|| text.strip_prefix("%w[")) {
-        (true, b)
-    } else {
-        (false, text.strip_prefix('[')?)
-    };
-    let close = body.find(']')?;
-    let after = body[close + 1..].trim();
-    if !(after.is_empty() || after.starts_with('#')) {
-        return None;
-    }
-    let inner = &body[..close];
-    if words {
-        return Some(inner.split_whitespace().map(str::to_string).collect());
-    }
-    inner
-        .split(',')
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-        .map(|e| {
-            let name = if let Some(sym) = e.strip_prefix(':') {
-                sym
-            } else if e.len() >= 2
-                && ((e.starts_with('"') && e.ends_with('"')) || (e.starts_with('\'') && e.ends_with('\'')))
-            {
-                &e[1..e.len() - 1]
-            } else {
-                return None;
-            };
+/// The filters of an operand that is one `[...]`, `%i[...]` or `%w[...]`
+/// literal of Symbols, Strings and plain Regexps, as Ruby source. A
+/// Symbol or String is kept only when it is a plain name (letters,
+/// digits, `_`, `.`), since it is written back as a String literal.
+fn filter_parameter_list(parsed: &ruby_prism::ParseResult<'_>, text: &str) -> Option<Vec<String>> {
+    let program = parsed.node();
+    let statements: Vec<_> = program.as_program_node()?.statements().body().iter().collect();
+    let [operand] = statements.as_slice() else { return None };
+    let array = operand.as_array_node()?;
+    array
+        .elements()
+        .iter()
+        .map(|element| {
+            if element.as_regular_expression_node().is_some() {
+                let loc = element.location();
+                return Some(text[loc.start_offset()..loc.end_offset()].to_string());
+            }
+            let name = super::util::symbol_or_string_value(&element)?;
             let plain = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
-            plain.then(|| name.to_string())
+            plain.then(|| format!("{name:?}"))
         })
         .collect()
 }

@@ -12,6 +12,7 @@ use crate::ident::Symbol;
 use super::{Slot, slot_of};
 use super::owned::{Defined, OwnerIndex, Side};
 
+use crate::ingest::prism_api::PrismLocation;
 pub(super) struct InstanceCallParams {
     pub(super) slots: HashMap<(String, Symbol), Vec<Slot>>,
     pub(super) custom_new_slots: HashMap<(String, Symbol), Vec<Slot>>,

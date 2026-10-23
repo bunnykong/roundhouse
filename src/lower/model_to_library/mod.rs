@@ -604,7 +604,13 @@ fn model_class(model: &Model, mut methods: Vec<MethodDef>, table: Option<&Table>
         methods,
         nullable_columns: nullable_column_names(table),
         origin: None,
-        constants: collect_model_constants(model),
+        constants: {
+            let mut constants = collect_model_constants(model);
+            if let Some(table) = table {
+                constants.extend(schema::enum_constants(model, table));
+            }
+            constants
+        },
         unknown_calls: replayed_class_body(model),
         class_ivar_initializers: collect_class_attr_initializers(model),
     }
@@ -881,6 +887,12 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         {
             continue;
         }
+        // `default_scope { where(col: literal) }` — claimed by
+        // lower::default_scope (the runtime Relation applies it; a target
+        // without one reports it per target). Other shapes keep warning.
+        if name == "default_scope" && crate::lower::default_scope::static_default_scope(model).is_some() {
+            continue;
+        }
         // Bare `has_rich_text :body` — claimed by lower::rich_text.
         // The option-carrying forms (`encrypted:`, `store_if_blank:`)
         // are NOT claimed: each changes the expansion and none is
@@ -1078,6 +1090,7 @@ pub fn writable_field_set(
     }
     if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
         writable.insert(Symbol::from(format!("{}_confirmation", attr.as_str())));
+        writable.insert(Symbol::from(format!("{}_challenge", attr.as_str())));
         writable.insert(attr);
     }
     for (name, _ty) in self::markers::attribute_api_decls(&model.body) {
@@ -1247,6 +1260,9 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
         push_adapter_methods(&mut methods, model, table, schema, param_binds);
+        if let Some(scope) = crate::lower::default_scope::static_default_scope(model) {
+            methods.push(crate::lower::default_scope::synth_default_scope_where(model, &scope));
+        }
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
@@ -1322,7 +1338,7 @@ fn build_methods_with_finder_inputs(
         })
         .unwrap_or_else(|| Symbol::from("id"));
     push_validate_method(&mut methods, model, errors_readers, runtime_relation, &primary_key);
-    push_association_methods(&mut methods, model, models, &through_joins);
+    push_association_methods(&mut methods, model, models, &through_joins, runtime_relation);
     push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
@@ -1331,7 +1347,7 @@ fn build_methods_with_finder_inputs(
     self::validations::push_active_model_constructor(&mut methods, model);
     // `attribute :name, :type` (Rails Attributes API) — typed virtual
     // readers + cast writers; same before-user-methods ordering.
-    self::markers::push_attribute_api_methods(&mut methods, model);
+    self::markers::push_attribute_api_methods(&mut methods, model, runtime_relation);
     // typed_store virtual attributes — reader/predicate/writer per
     // declared attr, routing through the `TypedStore` runtime (the
     // YAML seam). Before `push_user_methods` so a custom method in the
@@ -2190,6 +2206,7 @@ fn build_class_info_with_finder_inputs(
 ) -> crate::analyze::ClassInfo {
     let mut info = crate::analyze::ClassInfo::default();
     info.table = Some(model.table.clone());
+    info.default_scoped = crate::lower::default_scope::static_default_scope(model).is_some();
     info.parent = model.parent.clone();
     // The analyzer's registry is not this map. Arel's `ids` / `pluck`
     // and the source-method decline read these two fields, so they have
@@ -2810,6 +2827,12 @@ fn type_method_body(
         // A `def` from the model's source carries no enclosing class; `self` in it is still the model.
         ctx.self_ty = Some(Ty::Class { id: model.name.clone(), args: vec![].into() });
         ctx.instance_body = true;
+    } else if let Some(model) = model.filter(|_| method.receiver == MethodReceiver::Class) {
+        // A source `def self.x`: names resolve in the model's namespace, so
+        // its own constant reads find the model's constants (#1223). Only
+        // the lexical class: a `self_ty` here would re-type its implicit-self
+        // calls, which this pass leaves as they were.
+        ctx.lexical_self = Some(Ty::Class { id: model.name.clone(), args: vec![].into() });
     }
     // Seed ivar_bindings from schema columns so bare `@title` reads
     // resolve to the column type. Same source the synthesizers used
@@ -2848,6 +2871,14 @@ fn type_method_body(
             }
         }
     }
+    // The model's own constants, as the analyzer seeds them
+    // (`extract_const_assignments`): this pass re-types the body from
+    // scratch, and the read the analyzer qualified to `Widget::WEIGHTS`
+    // otherwise fell back to a phantom `Ty::Class` (#1223), so the
+    // emitters saw no Hash or Array behind it.
+    if let Some(m) = model {
+        ctx.constants = crate::analyze::ConstScope::default().with_own(crate::analyze::extract_const_assignments(&m.body));
+    }
     // Opt-in to `recv: Some(SelfRef)` rewriting on bare Sends —
     // matches the pattern view_to_library uses.
     ctx.annotate_self_dispatch = true;
@@ -2859,18 +2890,18 @@ fn type_method_body(
 }
 
 /// Backfill a signature for a user-defined method whose body types to a
-/// concrete scalar. User methods carry `signature: None`, so the
+/// concrete scalar or Time. User methods carry `signature: None`, so the
 /// emitted `.rbs` says `-> untyped` even when the body is trivially
 /// typed — and under spinel AOT an untyped return turns every chained
 /// call into a whole-program poly dispatch (lobsters:
 /// `User.username_regex_s[1...-1]` became a 26-class `[]` switch that
-/// doesn't C-compile). Scalars only, and only when the body has no
+/// doesn't C-compile). Scalars and Time only, and only when the body has no
 /// explicit `return` (an early return of another type would make the
 /// trailing-expression type a lie — in Ruby a `return` inside a block
 /// exits the method, so the walk counts those too). If/Case bodies
 /// union their branches, so divergent shapes fail the scalar gate on
 /// their own. Param types stay untyped — this pins only the return.
-/// A scalar, or a scalar unioned with nil — `String?` and friends.
+/// A scalar or Time, optionally unioned with nil — `String?`, `Time?` and friends.
 ///
 /// The nullable arm matters because a `rescue` contributes one: a body
 /// of `uri.to_s … rescue nil` types `Str | Nil`, and refusing to
@@ -2880,7 +2911,7 @@ fn type_method_body(
 /// costs nothing here — widening to `untyped` does.
 fn scalar_or_nullable_scalar(ty: &Ty) -> bool {
     fn is_scalar(t: &Ty) -> bool {
-        matches!(t, Ty::Str | Ty::Int | Ty::Float | Ty::Bool)
+        matches!(t, Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Time)
     }
     match ty {
         t if is_scalar(t) => true,

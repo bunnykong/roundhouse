@@ -1509,6 +1509,19 @@ module Db
     work
   end
 
+  # The tables whose model is inside `Model.unscoped { … }` on this
+  # thread (relation.rb's `Relation.unscoped_tables`). Seeded and
+  # cleared, as the records are, so the element type is String.
+  def self._unscoped_tables
+    tables = Thread.current[:ar_unscoped_tables]
+    if tables.nil?
+      tables = [""]
+      tables.clear
+      Thread.current[:ar_unscoped_tables] = tables
+    end
+    tables
+  end
+
   # Request-scoped connection lease for the thread-per-connection
   # server. Leases a connection index (parking on the pool's condition
   # variable while none is free), binds its DbConn to this thread's

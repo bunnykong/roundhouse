@@ -2189,15 +2189,22 @@ end
 }
 
 #[test]
-fn non_nil_classvar_initializer_is_refused() {
+fn a_literal_classvar_initializer_is_kept_and_an_expression_refused() {
     use roundhouse::ingest::ingest_library_classes;
 
-    // A non-nil `@@X = <expr>` initializer can't be dropped silently —
-    // strict ingest refuses it (survey mode records the gap per-item).
-    let src = b"class Twitter\n  @@TIMEOUT = 30\nend\n";
+    // ancestry's `@@default_update_strategy = :ruby`: a literal reads no
+    // other state, so it is kept as the class's initializer. A computed
+    // value is refused: it would observe the emitted body's order.
+    let classes = ingest_library_classes(b"class Twitter\n  @@TIMEOUT = 30\nend\n", "extras/twitter.rb")
+        .expect("a literal class-variable initializer ingests");
     assert!(
-        ingest_library_classes(src, "extras/twitter.rb").is_err(),
-        "non-nil class-variable initializer must not be silently dropped"
+        classes[0].class_ivar_initializers.iter().any(|e| roundhouse::emit::ruby::emit_expr(e).contains("@@TIMEOUT = 30")),
+        "{:?}",
+        classes[0].class_ivar_initializers
+    );
+    assert!(
+        ingest_library_classes(b"class Twitter\n  @@TIMEOUT = ENV.fetch(\"T\")\nend\n", "extras/twitter.rb").is_err(),
+        "a computed class-variable initializer must be refused"
     );
 }
 
@@ -2592,7 +2599,7 @@ fn specific_ledger_messages_replace_the_generic_catch_all() {
     for (source, expected) in [
         ("class Foo; end", "class/module defined inside a method or block (runtime class definition)"),
         ("module Foo; end", "class/module defined inside a method or block (runtime class definition)"),
-        ("1 + ", "unparsed fragment (Prism recovery node)"),
+        ("1 + ", "unparsed fragment near `+` (Prism recovery)"),
     ] {
         let result = ruby_prism::parse(source.as_bytes());
         let program = result.node();
@@ -3504,7 +3511,8 @@ end
 }
 
 /// `uniqueness:` becomes a `Uniqueness` rule with its options; `conditions:`
-/// and a model with its own `default_scope` stay the reported gap.
+/// stays the reported gap. A model with its own `default_scope` lowers too
+/// (the check queries `Model.unscoped`, as Rails does).
 #[test]
 fn uniqueness_options_lower_to_a_rule() {
     let (model, warnings, _) = ingest_widget(
@@ -3532,14 +3540,14 @@ end
     let (model, warnings, _) = ingest_widget(
         "class Widget < ApplicationRecord\n  default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
     );
-    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "default_scope keeps the gap");
-    assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+    assert!(validation_rules(&model).iter().any(|v| v.attribute.as_str() == "uri"), "default_scope lowers");
+    assert!(!warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 
     let (model, warnings, _) = ingest_widget(
         "class Widget < ApplicationRecord\n  self.default_scope { where(kept: true) }\n  validates :uri, uniqueness: true\nend\n",
     );
-    assert!(validation_rules(&model).iter().all(|v| v.attribute.as_str() != "uri"), "self.default_scope keeps the gap");
-    assert!(warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
+    assert!(validation_rules(&model).iter().any(|v| v.attribute.as_str() == "uri"), "self.default_scope lowers");
+    assert!(!warnings.iter().any(|w| w.contains("validates :uri, uniqueness:")), "{warnings:?}");
 }
 
 /// `inclusion: { in: NAME }` folds a list constant with each element's

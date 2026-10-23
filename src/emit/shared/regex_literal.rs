@@ -86,7 +86,11 @@ pub fn re2_style_regex_source(pattern: &str, ruby_flags: &str) -> String {
     }
 }
 
-/// Escape unescaped `/` so `pattern` can sit inside `/…/` delimiters.
+/// Escape unescaped `/` so `pattern` can sit inside `/…/` delimiters,
+/// and an unescaped `#` that starts an interpolation there (`#{`, `#@`,
+/// `#$`): a pattern folded from a String (`'x#@name'`) holds the text
+/// itself, which a Ruby literal would read as `@name`'s value. `\#` is
+/// a literal `#` in Ruby, Crystal (PCRE2) and Elixir alike.
 ///
 /// An already-escaped `\/` is left alone, and a literal backslash `\\`
 /// does not make the following `/` look escaped — which is why this
@@ -94,8 +98,10 @@ pub fn re2_style_regex_source(pattern: &str, ruby_flags: &str) -> String {
 pub fn escape_regex_delimiters(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len() + 4);
     let mut prev_backslash = false;
-    for c in pattern.chars() {
-        if c == '/' && !prev_backslash {
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        let interpolation = c == '#' && matches!(chars.peek(), Some('{' | '@' | '$'));
+        if (c == '/' || interpolation) && !prev_backslash {
             out.push('\\');
         }
         out.push(c);
@@ -107,6 +113,19 @@ pub fn escape_regex_delimiters(pattern: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `#{`, `#@` and `#$` would interpolate inside a `/…/` literal; an
+    /// escaped one, a lone `#`, and `#` before anything else stay as they
+    /// are.
+    #[test]
+    fn an_interpolation_start_is_escaped() {
+        assert_eq!(escape_regex_delimiters("x#@name"), r"x\#@name");
+        assert_eq!(escape_regex_delimiters("x#$name"), r"x\#$name");
+        assert_eq!(escape_regex_delimiters("x#{y}"), r"x\#{y}");
+        assert_eq!(escape_regex_delimiters(r"x\#{y}"), r"x\#{y}");
+        assert_eq!(escape_regex_delimiters(r"x\\#@y"), r"x\\\#@y");
+        assert_eq!(escape_regex_delimiters("a#b#"), "a#b#");
+    }
 
     /// Ruby's `^`/`$` are always line anchors; its `m` only adds
     /// dot-matches-newline. A flagged `m` keeps both on RE2-style

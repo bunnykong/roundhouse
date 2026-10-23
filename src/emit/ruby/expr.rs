@@ -1500,10 +1500,11 @@ pub(super) fn emit_send_base(
 }
 
 /// A leading `if`/`case`/… argument must be parenthesized: paren-less,
-/// `j if c … end` reads `if` as a statement modifier of the call.
+/// `j if c … end` reads `if` as a statement modifier of the call. So
+/// must a leading Hash literal: `arrange {}, rel` reads `{}` as a block.
 fn first_arg_opens_block(args_s: &[String]) -> bool {
     args_s.first().is_some_and(|a| {
-        ["if ", "unless ", "case ", "while ", "until ", "begin"].iter().any(|k| a.starts_with(k))
+        a.starts_with('{') || ["if ", "unless ", "case ", "while ", "until ", "begin"].iter().any(|k| a.starts_with(k))
     })
 }
 

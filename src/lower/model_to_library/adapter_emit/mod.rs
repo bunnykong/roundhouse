@@ -71,7 +71,11 @@ pub(super) fn push_adapter_methods(
     methods.push(synth_adapter_any(owner, table, schema));
     methods.push(synth_adapter_exists_by_id(owner, table, schema, param_binds));
     methods.push(synth_adapter_truncate(owner, table, schema));
-    methods.push(synth_delete_all(owner, table));
+    // A default-scoped model's `delete_all` deletes the rows its scope
+    // keeps: the runtime's `Base.delete_all` goes through its Relation.
+    if crate::lower::default_scope::static_default_scope(model).is_none() {
+        methods.push(synth_delete_all(owner, table));
+    }
     methods.push(synth_adapter_reload(model, table, param_binds));
     methods.push(synth_columns_sql(owner, table));
     methods.push(synth_hydrate_all(owner));

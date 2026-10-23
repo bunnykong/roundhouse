@@ -55,6 +55,7 @@ use super::util::{
 };
 use super::{survey, IngestError};
 
+use crate::ingest::prism_api::PrismLocation;
 /// The reopened class the tolerant-sgid shape lives on.
 const ATTACHMENT: &str = "ActionText::Attachment";
 /// The envelope key the hand-decode reads; its presence is what says

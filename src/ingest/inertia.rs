@@ -18,6 +18,8 @@ use crate::vfs::Vfs;
 use super::controller_macro_synth::{append_private_actions, push_after_filter};
 use super::{IngestError, IngestResult, survey};
 
+use crate::ingest::prism_api::PrismLocation;
+
 #[derive(Clone, Copy, PartialEq)]
 enum PropKind {
     Eager,

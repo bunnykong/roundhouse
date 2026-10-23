@@ -41,3 +41,26 @@ puts "configured cookie keys passed"
 "#)
         .assert_passes();
 }
+
+/// `key: "_widget_session_#{Rails.env}"` (an initializer the generator's
+/// older `session_store.rb` shape writes): Rails evaluates the
+/// interpolation once at boot, so the key names the environment the app
+/// was started in. The compiled app reads its environment at runtime,
+/// so the key does too, rather than freezing the one roundhouse ran in.
+#[test]
+fn a_key_interpolating_rails_env_names_the_runtime_environment() {
+    emit_and_run::empty_app()
+        .write("config/application.rb", "module Demo\nclass Application < Rails::Application\nend\nend\n")
+        .write(
+            "config/initializers/session_store.rb",
+            "Rails.application.config.session_store :cookie_store, key: \"_widget_session_#{Rails.env}\"\n",
+        )
+        .run_ruby(r##"
+Rails.env_name = "test"
+raise Rails.application.session_cookie_key.inspect unless Rails.application.session_cookie_key == "_widget_session_test"
+Rails.env_name = "production"
+raise Rails.application.session_cookie_key.inspect unless Rails.application.session_cookie_key == "_widget_session_production"
+puts "env-interpolated cookie key passed"
+"##)
+        .assert_passes();
+}

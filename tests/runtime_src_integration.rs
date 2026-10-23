@@ -1182,7 +1182,27 @@ fn every_runtime_method_body_concretely_typed() {
     // active_record/connection.rb's `transaction`, 8 -> 10; the
     // savepoint branch already read its `result` the same way).
     // `touch_later` and `_flush_deferred_touches_from` type fully.
-    const CEILING: usize = 860;
+    // MEASURED 864 on 2026-10-22: ancestry from source reads a record's
+    // column by name (`read_attribute`, `write_attribute`,
+    // `attribute_in_database`), whose value is whatever that column
+    // holds, and asks a relation for its model's `primary_key` (+4 in
+    // active_record/connection.rb and relation.rb, 860 -> 864).
+    // MEASURED 865 on 2026-10-22: `ActiveSupport::JSON.encode_without_escape`
+    // (Rails' `encode(value, escape: false)`) hands its value to
+    // `jsonable` untyped, as `encode` does (+1 in active_support_ext.rb).
+    // MEASURED 866 on 2026-10-22 (rebased onto 865): `ActiveRecord::Base.unscoped { … }`
+    // returns its block's value, which is untyped (+1 in
+    // active_record/connection.rb).
+    // MEASURED 868 on 2026-10-22 (default_scope static, on 866): `unscoped { … }`
+    // pops the model's table in an `ensure`, so the block's untyped value
+    // is held in a local before it is returned (+2 in
+    // active_record/connection.rb).
+    // MEASURED 870 on 2026-10-23 (merged onto 868): `ActionDispatch::Http::Parameters::
+    // ParseError#initialize` takes the message the caller passed (or
+    // nil) and forwards it through `super`, the same two gradual sites
+    // `RecordNotDestroyed#initialize` carries (+2 in
+    // action_dispatch/exceptions.rb, 868 -> 870).
+    const CEILING: usize = 870;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

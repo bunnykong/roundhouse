@@ -65,9 +65,8 @@ puts "ok"
 
 // Re-read from the model, `include Greeting` would name a top-level constant, not the gem's `Greeter::Greeting`
 #[test]
-#[should_panic(expected = "model macro `acts_as_greeter` not expanded")]
 fn a_macro_mixin_written_relative_to_its_module_is_not_expanded() {
-    let _ = app(
+    let (_, errors) = app(
         "module Greeter
   module Greeting
     def greeting = \"Hello, #{title}\"
@@ -82,6 +81,10 @@ end
 ",
     )
     .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(
+        errors.iter().any(|e| e.contains("`acts_as_greeter` defines methods this call does not expand") && e.contains("`Greeting` names a different module")),
+        "{errors:#?}"
+    );
 }
 
 #[test]

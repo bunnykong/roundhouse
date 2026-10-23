@@ -107,6 +107,7 @@ SPINEL_TESTS = [
     "filter_block_params_spinel",
     "sidekiq_push",
     "model_queries_spinel",
+    "default_scope_spinel",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.

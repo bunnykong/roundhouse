@@ -835,6 +835,13 @@ pub fn survey_assoc_class_methods(
         collect_assoc_method_demand(body, assocs, &scope_names, &mut demand);
         collect_relation_class_method_demand(body, &models_set, &scope_names, &mut model_demand);
     });
+    // A gem's class method a relation may reach where no call site is typed (`relation_class_calls`).
+    for (name, owner) in crate::lower::relation_class_calls::spliced_owners(app) {
+        // Not a writer: `relation.x = v` is no call a relation delegates, and the delegate would not parse
+        if !name.as_str().ends_with('=') {
+            model_demand.insert((owner, name));
+        }
+    }
     for view in &app.views {
         collect_assoc_method_demand(&view.body, assocs, &scope_names, &mut demand);
         collect_relation_class_method_demand(
@@ -1967,6 +1974,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
             }
         }
     }
+    scope_join_tails(&mut reg, models);
     // By name once every owner is down to the declaration it keeps, so a
     // model redeclaring a name is one declarer, not two disagreeing ones.
     for ((_, name), entry) in &reg.has_many_fk {
@@ -2000,6 +2008,76 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
         }
     }
     reg
+}
+
+/// A join into a model with a default scope carries the scope's
+/// predicate in its ON clause, as Rails' association join does
+/// (`Shelf.joins(:gadgets)` reads `… ON gadgets.shelf_id = shelves.id
+/// AND gadgets.archived = FALSE`). A `through:` join touching a scoped
+/// model, or a scope this cannot render, keeps no tail: the join is not
+/// composed rather than composed without the scope.
+fn scope_join_tails(reg: &mut AssocRegistry, models: &[Model]) {
+    use super::default_scope::{sql_predicate, static_default_scope};
+    let scoped: HashMap<ClassId, Vec<(Symbol, Literal)>> = models
+        .iter()
+        .filter_map(|m| static_default_scope(m).map(|s| (m.name.clone(), s)))
+        .collect();
+    if scoped.is_empty() {
+        return;
+    }
+    let keys: Vec<((ClassId, Symbol), ClassId)> =
+        reg.assoc_target.iter().map(|(k, t)| (k.clone(), t.clone())).collect();
+    for ((owner, name), target) in keys {
+        let through = models
+            .iter()
+            .find(|m| m.name == owner)
+            .and_then(|m| {
+                m.associations().find_map(|a| match a {
+                    Association::HasMany { name: n, through: Some(thr), .. } if *n == name => {
+                        m.associations().find_map(|t| match t {
+                            Association::HasMany { name: tn, target: tt, .. } if tn == thr => Some(tt.clone()),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                })
+            });
+        let key = (owner.clone(), name.clone());
+        let through_scoped = through.as_ref().is_some_and(|t| scoped.contains_key(t));
+        let Some(preds) = scoped.get(&target) else {
+            if through_scoped {
+                reg.join_tails.remove(&key);
+                reg.aliased_join_tails.remove(&key);
+            }
+            continue;
+        };
+        if through.is_some() {
+            reg.join_tails.remove(&key);
+            reg.aliased_join_tails.remove(&key);
+            continue;
+        }
+        let table = reg.table_for(&target);
+        let render = |alias: &str| -> Option<String> {
+            preds
+                .iter()
+                .map(|(col, lit)| sql_predicate(alias, col, lit).map(|p| format!(" AND {p}")))
+                .collect()
+        };
+        match (render(&table), render(name.as_str())) {
+            (Some(plain), Some(aliased)) => {
+                if let Some(tail) = reg.join_tails.get_mut(&key) {
+                    tail.push_str(&plain);
+                }
+                if let Some(tail) = reg.aliased_join_tails.get_mut(&key) {
+                    tail.push_str(&aliased);
+                }
+            }
+            _ => {
+                reg.join_tails.remove(&key);
+                reg.aliased_join_tails.remove(&key);
+            }
+        }
+    }
 }
 
 /// What the parent-ivar rewrite reads off one declaration (see

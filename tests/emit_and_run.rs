@@ -17,6 +17,8 @@ mod arel_nodes;
 mod database_tasks;
 #[path = "emit_and_run/framework_exceptions.rs"]
 mod framework_exceptions;
+#[path = "emit_and_run/rescue_surface.rs"]
+mod rescue_surface;
 #[path = "emit_and_run/preloader_runtime.rs"]
 mod preloader_runtime;
 #[path = "emit_and_run/framework_surface_rest.rs"]
@@ -33,6 +35,8 @@ mod utc_zone_time;
 mod discard;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
+#[path = "emit_and_run/ancestry_source.rs"]
+mod ancestry_source;
 #[path = "emit_and_run/gem_class_macros.rs"]
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
@@ -202,6 +206,8 @@ mod relation_projections;
 mod pluck_projection_semantics;
 #[path = "emit_and_run/response_redirect.rs"]
 mod response_redirect;
+#[path = "emit_and_run/api_response_fidelity.rs"]
+mod api_response_fidelity;
 #[path = "emit_and_run/constructor_unrelated_mutations.rs"]
 mod constructor_unrelated_mutations;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
@@ -286,6 +292,12 @@ mod validates_options;
 mod validates_uniqueness;
 #[path = "emit_and_run/validates_inclusion_constants.rs"]
 mod validates_inclusion_constants;
+#[path = "emit_and_run/uniqueness_default_scoped.rs"]
+mod uniqueness_default_scoped;
+#[path = "emit_and_run/uniqueness_association_attribute.rs"]
+mod uniqueness_association_attribute;
+#[path = "emit_and_run/default_scope_static.rs"]
+mod default_scope_static;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]
@@ -308,16 +320,46 @@ mod validates_rule_on;
 mod validates_presence_allow_nil;
 #[path = "emit_and_run/validates_custom_message.rs"]
 mod validates_custom_message;
+#[path = "emit_and_run/presence_rails_blank.rs"]
+mod presence_rails_blank;
+#[path = "emit_and_run/allow_blank_unicode_space.rs"]
+mod allow_blank_unicode_space;
 #[path = "emit_and_run/regex_string_interpolation.rs"]
 mod regex_string_interpolation;
 #[path = "emit_and_run/format_allow_nil_blank.rs"]
 mod format_allow_nil_blank;
+#[path = "emit_and_run/format_value_to_s.rs"]
+mod format_value_to_s;
+#[path = "emit_and_run/validates_acceptance.rs"]
+mod validates_acceptance;
+#[path = "emit_and_run/attribute_api_boolean_cast.rs"]
+mod attribute_api_boolean_cast;
+#[path = "emit_and_run/hash_fetch_one_arg.rs"]
+mod hash_fetch_one_arg;
+#[path = "emit_and_run/numericality_unknown_option.rs"]
+mod numericality_unknown_option;
+#[path = "emit_and_run/belongs_to_nil_writer.rs"]
+mod belongs_to_nil_writer;
+#[path = "emit_and_run/inclusion_duration_literals.rs"]
+mod inclusion_duration_literals;
+#[path = "emit_and_run/validates_constant_splat.rs"]
+mod validates_constant_splat;
+#[path = "emit_and_run/cross_class_constants.rs"]
+mod cross_class_constants;
+#[path = "emit_and_run/regex_literal_hash_guard.rs"]
+mod regex_literal_hash_guard;
 #[path = "emit_and_run/numericality_allow_nil_blank.rs"]
 mod numericality_allow_nil_blank;
 #[path = "emit_and_run/stdlib_email_regexp.rs"]
 mod stdlib_email_regexp;
 #[path = "emit_and_run/constant_arithmetic_bounds.rs"]
 mod constant_arithmetic_bounds;
+#[path = "emit_and_run/validates_symbol_or_conditions.rs"]
+mod validates_symbol_or_conditions;
+#[path = "emit_and_run/stdlib_uri_make_regexp.rs"]
+mod stdlib_uri_make_regexp;
+#[path = "emit_and_run/validates_inclusion_hash_constants.rs"]
+mod validates_inclusion_hash_constants;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
@@ -14239,6 +14281,138 @@ end
         .assert_passes();
 }
 
+/// `validate :m` with Rails 7.1's password-change guard shape: a Symbol
+/// dirty predicate as `if:` and a lambda as `unless:` (campfire's
+/// `password_challenge_matches`), `on: :create` (campfire's Session),
+/// `password_challenge` assigned through `update`, and an empty password
+/// leaving the digest as it was. Each assignment stays off bcrypt (CI's
+/// unit job does not install it).
+#[test]
+fn validate_guards_and_the_password_challenge_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"password_digest\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  has_secure_password validations: false
+  validate :challenge_matches, if: :will_save_change_to_title?, unless: -> { password_challenge.nil? }
+  validate :body_free, on: :create
+
+  def challenge_matches
+    errors.add(:password_challenge, :invalid) unless password_challenge == "ok"
+  end
+
+  def body_free
+    errors.add(:body, "is taken") if body == "only on create"
+  end"#,
+        )
+        .write(
+            "test/models/article_validate_guards_test.rb",
+            r#"require "test_helper"
+
+class ArticleValidateGuardsTest < ActiveSupport::TestCase
+  test "the challenge is checked only when the guarded column changes and a challenge is given" do
+    id = articles(:one).id
+    assert_not Article.find(id).update(title: "A new title", password_challenge: "wrong")
+    assert Article.find(id).update(title: "A new title", password_challenge: "ok")
+    assert Article.find(id).update(title: "Another title")
+    assert Article.find(id).update(body: "A different long body", password_challenge: "wrong")
+  end
+
+  test "on: :create runs before the first save only" do
+    assert_not Article.new(title: "Fresh", body: "only on create").save
+    assert articles(:one).update(body: "only on create")
+  end
+
+  test "an empty password leaves the digest as it was" do
+    article = articles(:one)
+    article.update!(password_digest: "stored digest")
+    article.update!(password: "")
+    assert_equal "stored digest", Article.find(article.id).password_digest
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_validate_guards_test.rb")
+        .assert_passes();
+}
+
+/// `flash` in an integration test is the last request's flash, read
+/// after a redirect the test does not follow (campfire's profile tests:
+/// `assert_equal "✓", flash[:notice]`).
+#[test]
+fn an_integration_test_reads_the_last_requests_flash() {
+    emit_and_run::real_blog()
+        .write(
+            "test/controllers/articles_flash_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticlesFlashControllerTest < ActionDispatch::IntegrationTest
+  test "the redirect's notice is the flash" do
+    post articles_url, params: { article: { title: "Flashed", body: "A sufficiently long article body." } }
+    assert_redirected_to article_url(Article.find_by(title: "Flashed"))
+    assert_equal "Article was successfully created.", flash[:notice]
+    assert_nil flash[:alert]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_flash_controller_test.rb")
+        .assert_passes();
+}
+
+/// A model class method a scope reaches (`titled.find_by_slug(s)`)
+/// takes the relation as a trailing `__rel`, so the call carries one
+/// argument more than the test's `stubs(...).with(s)` names; the ruby
+/// lanes' mocha replay still matches it (campfire's
+/// `User.stubs(:find_by_transfer_id).with(transfer_id)` against
+/// `User.active.find_by_transfer_id(params[:id])`), and the named
+/// argument still tells two stubs apart.
+#[test]
+#[ignore = "requires the mocha gem"]
+fn a_stub_with_args_matches_a_scope_reached_class_method() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  scope :titled, -> { where.not(title: nil) }
+
+  def self.find_by_slug(slug)
+    where(title: slug).first
+  end
+
+  def self.titled_slug(slug)
+    titled.find_by_slug(slug)
+  end"#,
+        )
+        .write(
+            "test/models/article_scoped_stub_test.rb",
+            r#"require "test_helper"
+
+class ArticleScopedStubTest < ActiveSupport::TestCase
+  test "the stub answers the scoped call it names" do
+    other = articles(:two)
+    Article.stubs(:find_by_slug).with("a-slug").returns(other)
+    Article.stubs(:find_by_slug).with("another").returns(articles(:one))
+    assert_equal other.id, Article.titled_slug("a-slug").id
+    assert_equal other.id, Article.find_by_slug("a-slug").id
+    assert_equal articles(:one).id, Article.titled_slug("another").id
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_scoped_stub_test.rb")
+        .assert_passes();
+}
+
 #[path = "emit_and_run/relation_finders.rs"]
 mod relation_finders;
 #[path = "emit_and_run/attach_hash.rs"]
@@ -18810,3 +18984,49 @@ mod inherited_visibility;
 mod class_side_relations;
 #[path = "emit_and_run/dynamic_where_forms.rs"]
 mod dynamic_where_forms;
+#[path = "emit_and_run/enum_cross_class_mapping.rs"]
+mod enum_cross_class_mapping;
+
+/// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
+/// without the HTML-entity escaping, which campfire's fragment keys can
+/// digest instead of the escaped one — lowers to the runtime's
+/// `encode_without_escape`, keyword or braced, and plain `encode` keeps
+/// its escaping.
+#[test]
+fn json_encode_with_escape_false_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def plain_doc
+    ActiveSupport::JSON.encode([ "<b>&</b>", { title: title, n: 2 } ], escape: false)
+  end
+
+  def braced_doc
+    ActiveSupport::JSON.encode([ "<i>" ], { escape: false })
+  end
+
+  def escaped_doc
+    ActiveSupport::JSON.encode([ "<b>&</b>" ])
+  end"#,
+        )
+        .write(
+            "test/models/article_json_escape_test.rb",
+            r#"require "test_helper"
+
+class ArticleJsonEscapeTest < ActiveSupport::TestCase
+  test "escape: false leaves the entities alone" do
+    article = Article.new(title: "A <title> & more", body: "A sufficiently long article body.")
+    assert_equal %q(["<b>&</b>",{"title":"A <title> & more","n":2}]), article.plain_doc
+    assert_equal %q(["<i>"]), article.braced_doc
+    assert_equal %(["\\u003cb\\u003e\\u0026\\u003c/b\\u003e"]), article.escaped_doc
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_json_escape_test.rb")
+        .assert_passes();
+}

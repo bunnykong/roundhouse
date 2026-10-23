@@ -303,6 +303,20 @@ module Db
     work
   end
 
+  # The tables whose model is inside `Model.unscoped { … }` on this
+  # thread (relation.rb's `Relation.unscoped_tables`). `Thread.current`,
+  # not `Fiber[]` as the transaction state: fiber storage is copied into
+  # a thread started from this one, and the copy would share this Array,
+  # so a block on one thread would lift the scope on the other.
+  def self._unscoped_tables
+    tables = Thread.current[:ar_unscoped_tables]
+    if tables.nil?
+      tables = []
+      Thread.current[:ar_unscoped_tables] = tables
+    end
+    tables
+  end
+
   # Request-scoped connection lease. Checks out a handle, binds it to
   # this thread's fiber-storage so `current_dbh` resolves to it for the
   # block's duration, and returns it on completion (even on raise).

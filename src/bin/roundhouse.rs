@@ -482,6 +482,9 @@ fn run_transpile(
         target,
     );
     roundhouse::lower::params_residue::elevate_nested_params_for_target(&mut analyze_diags, target);
+    // queue_adapter :sidekiq is honored on the Ruby family only; the other
+    // targets say once that the app's jobs run in process there.
+    analyze_diags.extend(roundhouse::lower::job_payload::sidekiq_adapter_target_warning(&app, target));
 
     // A diagnostic whose root cause is a recorded ingest gap is OUR
     // coverage problem, not the app's: the nil placeholder survey mode

@@ -33,6 +33,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Parse a single Sequel model file. Returns `Ok(None)` when the file's
 /// first class doesn't subclass `Sequel::Model` (a support class — the
 /// caller ingests it through the library-class path instead).

@@ -121,7 +121,7 @@ fn requires(text: &str) -> Vec<(bool, String)> {
             ruby_prism::visit_call_node(self, node);
         }
     }
-    let parsed = ruby_prism::parse(text.as_bytes());
+    let parsed = super::prism::parse_silent(text.as_bytes());
     let mut finder = Finder(Vec::new(), 0);
     ruby_prism::Visit::visit(&mut finder, &parsed.node());
     finder.0

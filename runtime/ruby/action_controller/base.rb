@@ -1052,6 +1052,11 @@ module ActionController
       nil
     end
 
+    def set_header(name, value)
+      @headers[name] = value
+      value
+    end
+
     def headers
       @headers
     end
@@ -1199,9 +1204,8 @@ module ActionController
       ActionController.build_host_url(protocol, host, port, path)
     end
 
-    # Monomorphic on Symbol — real-blog never passes a literal Integer
-    # status, so the previous `is_a?(Integer)` pass-through branch is
-    # contracted away. Symbol -> Integer via the STATUS_CODES table.
+    # Strict targets use registered Symbols. The Ruby/Spinel reopen
+    # also accepts Integer codes and delegates Symbol lookup here.
     #
     # RAISES on a symbol the table doesn't carry, as Rails does
     # ("Invalid HTTP status"). It used to answer 200, which turned a
@@ -1211,6 +1215,10 @@ module ActionController
     # perfectly ordinary 200. With the table now ported whole, a miss
     # means the app named a status no HTTP registry has.
     def resolve_status(s)
+      resolve_symbol_status(s)
+    end
+
+    def resolve_symbol_status(s)
       raise "Invalid HTTP status: #{s}" unless STATUS_CODES.key?(s)
       STATUS_CODES.fetch(s, 200)
     end

@@ -9,7 +9,8 @@
 //!
 //! Now `is_a?` on a typed field folds to its nil test (rust's
 //! `static_is_a`), the value is dereferenced where the check reads it, and
-//! an Integer is widened to `float64` against a Float bound. `inclusion`
+//! an Integer is widened to `float64` against a Float bound. `format`
+//! matches nil as `""` (Rails matches `value.to_s`), and `inclusion`
 //! keeps nil "not included", as Rails does.
 
 use std::collections::HashMap;
@@ -52,7 +53,7 @@ fn validations_read_nullable_columns_as_values() {
     let validate = &go[go.find("func (self *Widget) Validate()").expect("Validate")..];
     let validate = &validate[..validate[1..].find("\nfunc ").map(|i| i + 1).unwrap_or(validate.len())];
     for line in [
-        r#"if !(self.Code != nil && regexp.MustCompile("\\A[A-Z0-9]+\\z").MatchString(DerefString(self.Code))) {"#,
+        r#"if !(self.Code == nil && regexp.MustCompile("\\A[A-Z0-9]+\\z").MatchString("") || !(self.Code == nil) && regexp.MustCompile("\\A[A-Z0-9]+\\z").MatchString(*self.Code)) {"#,
         "if self.Score == nil || !(self.Score != nil) {",
         "if float64(DerefInt64(self.Score)) <= 1.0 {",
         r#"if !((self.Kind != nil && slices.Contains([]string{"a", "b"}, DerefString(self.Kind)))) {"#,

@@ -183,6 +183,7 @@ fn article_lowers_with_schema_methods() {
         "_hydrate_all",
         // #818: class-side name table for `reflect_on_association`.
         "_association_names",
+        "schema_column_types",
     ];
     for m in &lc.methods {
         let n = m.name.as_str();

@@ -14,6 +14,7 @@ use crate::App;
 use super::survey::unwrap_or_record;
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Retain recognized attr_* declarations, including conditional ones,
 /// so refusal is attributed to each includer rather than silently dropped.
 pub(super) fn is_candidate(item: &ModelBodyItem) -> bool {
@@ -191,7 +192,7 @@ fn validate_activation(
         })))
         .collect();
     for (index, source) in app.sources.iter().enumerate().filter(|(_, s)| s.path.ends_with(".rb")) {
-        let parsed = ruby_prism::parse(source.text.as_bytes());
+        let parsed = super::prism::parse_silent(source.text.as_bytes());
         let root = parsed.node();
         let bodies = find_all_classes_with_scope(&root).into_iter()
             .filter_map(|(scope, class)| Some((scope, class_name_path(&class)?, class.body()?, false)))

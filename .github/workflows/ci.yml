@@ -56,15 +56,16 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 11d3fb9ce01faad3384807563053ba86126f747e
+  CAMPFIRE_SHA: c8f74a0b0e1e93146c4d7c1d6ac80c9079682216
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
   SPINEL_PG_SHA: f48735c91aa8cde258299e1189957972667a0d1f
-  # rubys/spinel-redis, the Redis client the Sidekiq push runs on in a
-  # Spinel tree, tested against a live Redis in sidekiq-live. A tag, the
-  # same ref the emitted spin.toml pins (src/project.rs); bump both together.
-  SPINEL_REDIS_REF: v0.2.0
+  # spinel-redis, the Redis client the Sidekiq push runs on in a Spinel
+  # tree, tested against a live Redis in sidekiq-live. The same repository
+  # and tag the emitted spin.toml pins (src/project.rs); bump both together.
+  SPINEL_REDIS_REPO: rubys/spinel-redis
+  SPINEL_REDIS_REF: v0.3.0
 
 jobs:
   plan:
@@ -1046,7 +1047,7 @@ jobs:
       - name: Check out spinel-redis (pinned)
         uses: actions/checkout@v7
         with:
-          repository: rubys/spinel-redis
+          repository: ${{ env.SPINEL_REDIS_REPO }}
           ref: ${{ env.SPINEL_REDIS_REF }}
           path: spinel-redis
       - uses: ruby/setup-ruby@v1
@@ -1626,9 +1627,9 @@ jobs:
       # so the floor can be raised. The pin is `CAMPFIRE_SHA`.
       - name: Enforce the floor
         env:
-          # 579 tests passed, 84 files green.
-          FLOOR_TESTS: 579
-          FLOOR_FILES: 84
+          # 623 tests passed, 87 files green.
+          FLOOR_TESTS: 623
+          FLOOR_FILES: 87
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)

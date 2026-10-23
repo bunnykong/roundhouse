@@ -85,23 +85,30 @@ impl<'a> DelegateEligibility<'a> {
             self.visibility_cache
                 .entry(call.span.file)
                 .or_insert_with(|| {
-                    super::super::sources::with_text(&file, |source| {
-                        super::super::visibility::Visibility::declaration_defaults(source, &file)
-                    })
-                    .or_else(|| {
-                        call.span
-                            .file
-                            .0
-                            .checked_sub(1)
-                            .and_then(|index| self.sources.get(index as usize))
-                            .map(|source| {
-                                super::super::visibility::Visibility::declaration_defaults(
-                                    &source.text,
-                                    &source.path,
-                                )
-                            })
-                    })
-                    .unwrap_or_default()
+                    // Clone text first — `declaration_defaults` re-parses via
+                    // `prism::parse_silent`, which mutates the sources
+                    // registry. `with_text` would hold an immutable borrow
+                    // across that call and panic (`RefCell already borrowed`).
+                    super::super::sources::text_of(&file)
+                        .map(|source| {
+                            super::super::visibility::Visibility::declaration_defaults(
+                                &source, &file,
+                            )
+                        })
+                        .or_else(|| {
+                            call.span
+                                .file
+                                .0
+                                .checked_sub(1)
+                                .and_then(|index| self.sources.get(index as usize))
+                                .map(|source| {
+                                    super::super::visibility::Visibility::declaration_defaults(
+                                        &source.text,
+                                        &source.path,
+                                    )
+                                })
+                        })
+                        .unwrap_or_default()
                 });
         let Some(&visibility) = visibility_defaults.get(&(call.span.start as usize)) else {
             super::super::survey::record(&crate::ingest::IngestError::Unsupported {

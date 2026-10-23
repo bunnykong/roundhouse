@@ -622,6 +622,8 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             DiagnosticKind::GraphqlNullableField { .. } => Diagnostic::stub_text(kind),
             // Produced by `ingest::initializer_ledger` as a returned list.
             DiagnosticKind::UnconsumedInitializer { .. } => Diagnostic::stub_text(kind),
+            // Produced by `ingest::model::validations` as a pushed note.
+            DiagnosticKind::IgnoredValidatorOption { .. } => Diagnostic::stub_text(kind),
         };
         if !matches!(
             kind,

@@ -28,6 +28,8 @@
 require_relative "boot"
 
 module Main
+  # Spinel's class reflection needs a lexical class receiver.
+  FrameworkParseError = ActionDispatch::Http::Parameters::ParseError
 
   # Maps the routes-table controller symbol to a literal `.new`
   # constructor call. Spinel's hash specializations don't accept class
@@ -618,9 +620,14 @@ module Main
       format_param = request_format == :html ? req.req_params.fetch("format", "") : fmt_name
       Main.render_not_found(res, format_param, request_path, req)
       return
-    rescue ActionController::ParameterMissing, ActionController::BadRequest
-      # `params.expect` / `params.require` refused the request and the app
-      # did not rescue it: Rails' rescue_responses answer :bad_request.
+    rescue ActionController::ParameterMissing, ActionController::BadRequest,
+           ActionDispatch::Http::Parameters::ParseError => error
+      # The app's handlers have already run. Rails' rescue_responses map
+      # an unhandled ParseError to :bad_request by its exact class name;
+      # an application subclass has no default mapping.
+      # Spinel has no built-in method binding: compare nominal classes,
+      # without consulting any application's subclass matcher.
+      raise if FrameworkParseError === error && error.class != FrameworkParseError
       res.status = 400
       res.body = "<h1>400 Bad Request</h1>"
       return
@@ -878,6 +885,8 @@ Broadcasts.set_transport(Cable::Transport.new)
 # reaches this line keeps the inline behaviour rather than dropping work
 # into an Array nobody reads.
 ActiveJob.register_drain
+# Under queue_adapter :sidekiq jobs go to Redis instead; say where.
+SidekiqPush.announce if JobRegistry.sidekiq?
 Thread.new do
   Main.job_loop
 end

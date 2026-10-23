@@ -71,6 +71,13 @@ module ActiveRecord
   end
 
   class Base
+    def read_attribute: (Symbol name) -> untyped
+    def write_attribute: (Symbol name, untyped value) -> untyped
+    def saved_changes?: () -> bool
+    def attribute_in_database: (Symbol | String name) -> untyped
+    def self.schema_column_types: () -> Hash[Symbol, Symbol]
+    def self.type_for_attribute: (String name) -> ActiveRecord::Type::Value
+    def self.default_scoped: () -> Relation
     # cache_key / cache_version / cache_key_with_version — see
     # connection.rb for why these live in this ruby-family/Spinel-only
     # reopen rather than base.rb.
@@ -106,7 +113,7 @@ module ActiveRecord
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
     # Nil and uncastable request keys reject before the scalar adapter.
     # Not `?id`: the def takes `*ids`, and spinel types a positional field by the def's own slot.
-    def self.exists?: (*(Hash[String | Symbol, untyped] | Integer | Float | String | nil) ids) -> bool
+    def self.exists?: (*(Integer | Float | String | Hash[String | Symbol, untyped] | nil) ids) -> bool
     def self._exists_primary_key_input: (Integer | Float | String | nil id) -> bool
     # Ruby-family overrides of base.rb's Array / COUNT fallbacks.
     def self.where: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
@@ -155,6 +162,12 @@ module ActiveRecord
     def self.with_recursive: (Hash[Symbol, Array[Relation]] ctes) -> Relation
     def self.without: (*untyped records) -> Relation
     def self.all: () -> Relation
+    def self.unscoped: () ?{ () -> untyped } -> untyped
+    def self._default_scope_where: () -> Hash[Symbol, untyped]
+    def self._find_in_scope: (Integer | Float | String | nil id) -> Base?
+    def self.count: () -> Integer
+    def self.last: () -> Base?
+    def self.destroy_all: () -> Array[Base]
     def self.none: () -> Relation
     def self.page: (?(Integer | String | nil) num) -> Relation
     def self.in_batches: (?of: Integer, ?order: Symbol?) ?{ (Relation) -> void } -> Relation

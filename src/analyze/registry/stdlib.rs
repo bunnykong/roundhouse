@@ -142,15 +142,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // it). `Time - x` arithmetic still resolves to `Untyped` inside
     // `time_method` because receiver-only dispatch can't tell a
     // Duration arg (→ Time) from a Time arg (→ Float).
-    let time_ty = || Ty::Class {
-        id: ClassId(Symbol::from("Time")),
-        args: vec![].into(),
-    };
+    let time_ty = || Ty::Time;
     let mut time_cls = ClassInfo::default();
     time_cls.class_methods.insert(Symbol::from("current"), time_ty());
     time_cls.class_methods.insert(Symbol::from("now"), time_ty());
-    time_cls.class_methods.insert(Symbol::from("zone"), time_ty());
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
+    time_cls.class_methods.insert(Symbol::from("zone"), Ty::Class {
+        id: ClassId(Symbol::from("Time")),
+        args: vec![].into(),
+    });
     time_cls.class_methods.insert(Symbol::from("find_zone"), Ty::Union {
         variants: vec![
             Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() },
@@ -621,6 +621,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // answers the document; `decode` whatever the document holds.
     register_stdlib_class(classes, "ActiveSupport::JSON", &[
         ("encode", Ty::Str),
+        ("encode_without_escape", Ty::Str),
         ("decode", Ty::Untyped),
         ("time_json", Ty::Str),
         ("time_fragment", Ty::Str),
@@ -913,6 +914,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "ActiveRecord::Type::String", &[], &[
         ("cast", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
         ("deserialize", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+    ]);
+    // What `Model.type_for_attribute(name)` answers on the ruby family: the column's type name, nil for no column.
+    register_stdlib_class(classes, "ActiveRecord::Type::Value", &[], &[
+        ("type", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
     ]);
     register_stdlib_class(classes, "ActiveRecord::Type::Integer", &[], &[
         ("cast", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),

@@ -20,6 +20,7 @@ use crate::ty::Ty;
 
 use super::select::Selection;
 
+use crate::ingest::prism_api::PrismLocation;
 /// One copy of a method in the analyzed IR. Ingest copies a concern's
 /// methods into every includer, so a method written once can have
 /// several, each typed against a different `self`.

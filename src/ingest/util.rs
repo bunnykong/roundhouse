@@ -12,6 +12,7 @@ use crate::dialect::Comment;
 use crate::expr::ArrayStyle;
 use crate::span::Span;
 
+use super::prism_api::PrismLocation;
 // ---- Leaf literal extractors -------------------------------------------
 
 /// The span of a `def`'s name token (`show` in `def show`, `title=` in
@@ -19,21 +20,21 @@ use crate::span::Span;
 /// position a method header has, since the body's spans start at its
 /// first statement.
 pub(super) fn def_name_span(def: &ruby_prism::DefNode<'_>, file: &str) -> crate::span::Span {
-    let loc = def.name_loc();
+    let (start, end) = super::prism_api::span_offsets(&def.name_loc());
     crate::span::Span {
         file: super::sources::file_id(file),
-        start: loc.start_offset() as u32,
-        end: loc.end_offset() as u32,
+        start,
+        end,
     }
 }
 
 /// Span of an arbitrary Prism node in `file`.
 pub(super) fn node_span(node: &Node<'_>, file: &str) -> crate::span::Span {
-    let loc = node.location();
+    let (start, end) = super::prism_api::span_offsets(&node.location());
     crate::span::Span {
         file: super::sources::file_id(file),
-        start: loc.start_offset() as u32,
-        end: loc.end_offset() as u32,
+        start,
+        end,
     }
 }
 
@@ -73,6 +74,34 @@ pub(super) fn bool_value(node: &Node<'_>) -> Option<bool> {
 
 pub(super) fn integer_value(node: &Node<'_>) -> Option<i64> {
     integer_i64(&node.as_integer_node()?.value())
+}
+
+/// The seconds an `ActiveSupport::Duration` literal stands for: an Integer
+/// literal times a unit (`1.week`, `2.months`), bare or with `.seconds`
+/// (`1.week.seconds`, itself a Duration of the same length). Rails 8.1.4's
+/// fixed lengths: a month is 2629746 seconds (a year / 12) and a year
+/// 31556952 (365.2425 days). A Duration equals its Integer seconds, both
+/// ways, so a list of them answers `include?` as the Integer list does.
+pub(super) fn duration_seconds(node: &Node<'_>) -> Option<i64> {
+    let call = node.as_call_node()?;
+    if call.arguments().is_some() || call.block().is_some() {
+        return None;
+    }
+    let receiver = call.receiver()?;
+    let unit: i64 = match constant_id_str(&call.name()) {
+        // `1.week.seconds`: the Duration's own `.seconds` is the same length.
+        "seconds" if receiver.as_call_node().is_some() => return duration_seconds(&receiver),
+        "second" | "seconds" => 1,
+        "minute" | "minutes" => 60,
+        "hour" | "hours" => 3_600,
+        "day" | "days" => 86_400,
+        "week" | "weeks" => 604_800,
+        "fortnight" | "fortnights" => 1_209_600,
+        "month" | "months" => 2_629_746,
+        "year" | "years" => 31_556_952,
+        _ => return None,
+    };
+    integer_value(&receiver)?.checked_mul(unit)
 }
 
 /// A non-interpolated `/pattern/flags` literal's pattern (prism's
@@ -201,7 +230,11 @@ pub(super) fn primary_class_with_scope<'pr>(
     while is_namespace_wrapper(&primary.1) {
         let inside = primary.1.location();
         match classes.next() {
-            Some(next) if next.1.location().start_offset() < inside.end_offset() => primary = next,
+            Some(next)
+                if next.1.location().start_offset() < inside.end_offset() =>
+            {
+                primary = next
+            }
             _ => break,
         }
     }

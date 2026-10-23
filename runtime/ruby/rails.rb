@@ -623,7 +623,10 @@ module Rails
     # masks (Rails' `rails new` initializer lists `:passw`, `:token`,
     # ...). Same framework-default shape as `config_time_zone` above:
     # Rails' default list is empty, and ingest lifts an app's Symbol and
-    # String filters, each as its String, into an override on the reopen.
+    # String filters, each as its String, and its Regexp literals as
+    # written, into an override on the reopen. The signature names
+    # Regexp too: Spinel compiles to the declared element type, and a
+    # Regexp filter typed as a String is silently never applied.
     def config_filter_parameters
       []
     end

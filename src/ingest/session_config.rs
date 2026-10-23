@@ -18,7 +18,8 @@
 //! sibling stays Unconsumed.
 //!
 //! What this cannot type is refused (ingest error in strict mode, a
-//! survey gap otherwise): a non-literal `key:`, a `session_store` that
+//! survey gap otherwise): a `key:` other than a String literal or a
+//! String interpolating only `Rails.env`, a `session_store` that
 //! is not at the top of a config body or of an `if`/`unless` inside one
 //! (a loop, a method), and an options splat.
 
@@ -33,11 +34,13 @@ use super::util::{
 use super::{IngestError, IngestResult};
 use crate::vfs::Vfs;
 
+use crate::ingest::prism_api::PrismLocation;
 /// One statement that can change the cookie key, in execution order.
 #[derive(Clone, Debug)]
 enum Step {
     /// `config.session_store …, key: "…"` (or the middleware default
-    /// `"_session_id"` when the store is set without a key).
+    /// `"_session_id"` when the store is set without a key), as the
+    /// Ruby source of the String the replay assigns.
     Set(Result<String, String>),
     /// An `if`/`unless` whose branches set the key.
     If {
@@ -63,6 +66,72 @@ fn text(node: &Node<'_>, src: &str) -> String {
     src[loc.start_offset()..loc.end_offset()].to_string()
 }
 
+enum KeyPart {
+    Text(String),
+    Env,
+}
+
+/// A Ruby double-quoted String literal for `parts`, `Rails.env` read
+/// at runtime. Text is escaped for Ruby (`"`, `\\`, `#`, control bytes).
+fn ruby_string(parts: &[KeyPart]) -> String {
+    let mut out = String::from("\"");
+    for part in parts {
+        match part {
+            KeyPart::Text(text) => {
+                let debug = format!("{text:?}");
+                out.push_str(&debug[1..debug.len() - 1].replace('#', "\\#"));
+            }
+            KeyPart::Env => out.push_str("#{Rails.env.to_s}"),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `Rails.env` or `Rails.env.to_s`.
+fn is_rails_env(node: &Node<'_>) -> bool {
+    let Some(call) = node.as_call_node() else {
+        return false;
+    };
+    if constant_id_str(&call.name()) == "to_s" && call.arguments().is_none() {
+        return call.receiver().is_some_and(|r| is_rails_env(&r));
+    }
+    constant_id_str(&call.name()) == "env"
+        && call.arguments().is_none()
+        && call.block().is_none()
+        && call
+            .receiver()
+            .and_then(|r| constant_path_of(&r))
+            .is_some_and(|p| p == ["Rails"])
+}
+
+/// The Ruby source the replay assigns for a `key:` value: a String
+/// literal, or a String whose only interpolation is `Rails.env`. Rails
+/// evaluates that interpolation once at boot (`"_app_session_#{Rails.env}"`
+/// is `"_app_session_production"` under `RAILS_ENV=production`); the
+/// compiled app reads its environment when it starts, so the replay
+/// reads `Rails.env` there too instead of fixing the one roundhouse ran in.
+fn key_source(node: &Node<'_>) -> Option<String> {
+    if let Some(text) = string_value(node) {
+        return Some(ruby_string(&[KeyPart::Text(text)]));
+    }
+    let interpolated = node.as_interpolated_string_node()?;
+    let mut parts = Vec::new();
+    for part in interpolated.parts().iter() {
+        if let Some(text) = string_value(&part) {
+            parts.push(KeyPart::Text(text));
+            continue;
+        }
+        let embedded = part.as_embedded_statements_node()?;
+        let body: Vec<Node<'_>> = embedded.statements()?.body().iter().collect();
+        match body.as_slice() {
+            [only] if is_rails_env(only) => parts.push(KeyPart::Env),
+            _ => return None,
+        }
+    }
+    Some(ruby_string(&parts))
+}
+
 fn store_key(node: &Node<'_>) -> Result<String, String> {
     let call = node
         .as_call_node()
@@ -70,7 +139,7 @@ fn store_key(node: &Node<'_>) -> Result<String, String> {
     let args = call
         .arguments()
         .ok_or("session_store has no store argument")?;
-    let mut key = "_session_id".to_string();
+    let mut key = ruby_string(&[KeyPart::Text("_session_id".to_string())]);
     for arg in args.arguments().iter() {
         let Some(kwargs) = arg.as_keyword_hash_node() else {
             continue;
@@ -80,8 +149,9 @@ fn store_key(node: &Node<'_>) -> Result<String, String> {
                 .as_assoc_node()
                 .ok_or("a session_store options splat")?;
             if symbol_value(&pair.key()).as_deref() == Some("key") {
-                key = string_value(&pair.value())
-                    .ok_or("session_store key is not a literal String")?;
+                key = key_source(&pair.value()).ok_or(
+                    "session_store key is not a literal String or a String interpolating Rails.env",
+                )?;
             }
         }
     }
@@ -209,7 +279,7 @@ fn replay(steps: &[Step], indent: &str) -> Result<String, String> {
     let mut out = String::new();
     for step in steps {
         match step {
-            Step::Set(Ok(key)) => out.push_str(&format!("{indent}key = {key:?}\n")),
+            Step::Set(Ok(key)) => out.push_str(&format!("{indent}key = {key}\n")),
             Step::Set(Err(why)) => return Err(why.clone()),
             Step::If { cond, then, other } => {
                 let inner = format!("{indent}  ");
@@ -279,7 +349,7 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path) -> IngestResult<Vec<Step>> {
 /// `session_store` declarations — possibly wrapped in `configure` /
 /// `if` / `unless`.
 pub(super) fn reads(source: &[u8]) -> bool {
-    let parsed = ruby_prism::parse(source);
+    let parsed = super::prism::parse_silent(source);
     let src = String::from_utf8_lossy(source);
     let stmts = parsed
         .node()
@@ -343,7 +413,7 @@ pub(super) fn synthesize<V: Vfs + ?Sized>(
 ) -> IngestResult<Option<String>> {
     let app_path = dir.join("config/application.rb");
     let app_bytes = vfs.read(&app_path).unwrap_or_default();
-    let app_parsed = ruby_prism::parse(&app_bytes);
+    let app_parsed = super::prism::parse_silent(&app_bytes);
     let name = application_name(
         app_parsed
             .node()

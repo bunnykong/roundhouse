@@ -374,13 +374,50 @@ module ActiveRecord
   # walked only into the ruby-family trees, and active_record.rb
   # requires it AFTER base.rb so the reopen sees the real class.
   class Base
+    # Ruby-family only, beside the other reopens here: strict targets have
+    # no `Type::Value`, no untyped `self[name]` and no relation `all`.
+    def read_attribute(name)
+      self[name]
+    end
+
+    def write_attribute(name, value)
+      self[name] = value
+    end
+
+    def saved_changes?
+      !saved_changes.empty?
+    end
+
+    # Rails' `attribute_in_database`: the stored value, before any change
+    # pending on this record. The changes are String-keyed; Rails takes a
+    # Symbol as well.
+    def attribute_in_database(name)
+      attribute_was(name.to_s)
+    end
+
+    def self.schema_column_types
+      {}
+    end
+
+    # Rails' `type_for_attribute(name).type`: the column's type name, nil
+    # for a name that is no column.
+    def self.type_for_attribute(name)
+      ActiveRecord::Type::Value.new(schema_column_types[name.to_sym])
+    end
+
+    # Rails' `default_scoped`: `all` with the model's `default_scope`,
+    # which this runtime does not model (a declared one is reported).
+    def self.default_scoped
+      all
+    end
+
     # Keep public input intact until schema-selected normalization, then raise
     # the same RecordNotFound for an invalid key or an absent record.
     # Reject nil before a key-typed adapter can coerce it to a real
     # zero/empty-string key.
     def self.find(id)
       raise RecordNotFound.new("Couldn't find #{name} without an ID", name, primary_key, id) if id.nil?
-      result = _find_primary_key_input(id)
+      result = _default_scope_where.empty? ? _find_primary_key_input(id) : _find_in_scope(id)
       raise RecordNotFound.new("Couldn't find #{name} with '#{primary_key}'=#{id.inspect}", name, primary_key, id) if result.nil?
       result
     end
@@ -404,6 +441,13 @@ module ActiveRecord
       _adapter_find_by_id(key)
     end
 
+    # `find` on a default-scoped model: the row only when the scope keeps it.
+    def self._find_in_scope(id)
+      key = _cast_primary_key(id)
+      return nil if key.nil?
+      all.find_by({ primary_key => key })
+    end
+
     # Relation and legacy-adapter finders use this shared conversion.
     # The integer parser never converts an out-of-range decimal string.
     def self._cast_primary_key(id)
@@ -423,8 +467,15 @@ module ActiveRecord
       return all.exists? if ids.empty?
       raise ArgumentError, "wrong number of arguments (given #{ids.length}, expected 0..1)" if ids.length > 1
       id = ids[0]
-      return all.exists?(id) if id.is_a?(Hash)
       return false if id.nil?
+      # Conditions, not a key (Rails' `exists?(name: "x")`): the Relation
+      # answers them, through the default scope when the model has one.
+      return all.exists?(id) if id.is_a?(Hash)
+      unless _default_scope_where.empty?
+        key = _cast_primary_key(id)
+        return false if key.nil?
+        return all.where({ primary_key => key }).exists?
+      end
       _exists_primary_key_input(id)
     end
 
@@ -855,6 +906,7 @@ module ActiveRecord
     # rather than counted beforehand. Ruby-family-only because
     # `changes` is — see base.rb's default.
     def self.delete_all
+      return all.delete_all unless _default_scope_where.empty?
       ActiveRecord.adapter.delete_all(table_name)
       ActiveRecord.adapter.changes
     end
@@ -1088,6 +1140,52 @@ module ActiveRecord
     # `ActiveRecord::Relation.new(Model)` directly.
     def self.all
       ActiveRecord::Relation.new(self)
+    end
+
+    # A Relation over the model with no default scope applied, which is
+    # what Rails' UniquenessValidator queries (`finder_class.unscoped`).
+    # With a block, Rails runs it with the model's default scope removed
+    # from every relation built inside, and returns the block's value.
+    def self.unscoped
+      if block_given?
+        tables = ActiveRecord::Relation.unscoped_tables
+        tables << _table_sql
+        value = nil
+        begin
+          value = yield
+        ensure
+          tables.pop
+        end
+        return value
+      end
+      ActiveRecord::Relation.new(self, false)
+    end
+
+    # The conditions of the model's `default_scope { where(…) }`, which
+    # `Relation#initialize` adds; a scoped model's emit overrides this.
+    def self._default_scope_where
+      {}
+    end
+
+    # A default-scoped model is read only through its Relation, which
+    # applies the scope (or not, inside `unscoped { }`): these class
+    # forms answer from it rather than from the model's whole-table
+    # adapter primitives, which base.rb's defaults use.
+    def self.count
+      return all.count unless _default_scope_where.empty?
+      _adapter_count
+    end
+
+    def self.last
+      return all.last unless _default_scope_where.empty?
+      _adapter_last
+    end
+
+    def self.destroy_all
+      return all.destroy_all unless _default_scope_where.empty?
+      records = _adapter_all
+      records.each { |r| r.destroy() }
+      records
     end
 
     # SELECT 1 LIMIT 1. Strict targets keep COUNT in base.rb.

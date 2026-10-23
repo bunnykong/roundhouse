@@ -68,6 +68,13 @@ module ActiveSupport
       JsonBuilder.escape_html_entities(::JSON.generate(ActiveSupport::JSON.jsonable(value)))
     end
 
+    # `encode(value, escape: false)`, which `lower::symbolize_keys`
+    # routes here: the same document without the HTML-entity escaping,
+    # for text no page embeds (a digest's input).
+    def self.encode_without_escape(value)
+      ::JSON.generate(ActiveSupport::JSON.jsonable(value))
+    end
+
     def self.decode(text)
       ::JSON.parse(text)
     end

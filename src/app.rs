@@ -314,6 +314,10 @@ pub struct App {
     /// their instance methods are class-method macros on every model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub load_hook_extended_macros: Vec<ClassId>,
+    /// Class methods a model took from a module only it extends
+    /// (`ingest::extend_splice`), by name.
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub spliced_class_methods: std::collections::HashSet<Symbol>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -928,6 +932,98 @@ impl App {
             .filter_map(|(m, set)| (set.len() == 1).then(|| (m, set.into_iter().next().unwrap())))
             .collect()
     }
+
+    /// A module that no class includes and exactly one class `extend`s
+    /// (ancestry's `extend Ancestry::MaterializedPath` in the expanded
+    /// `has_ancestry`): its instance methods run with that class as
+    /// `self`, so they are typed as its class methods.
+    pub fn sole_extender_of_modules(
+        &self,
+    ) -> std::collections::HashMap<crate::ident::ClassId, crate::ident::ClassId> {
+        use std::collections::{BTreeSet, HashMap, HashSet};
+        let modules: HashSet<&crate::ident::ClassId> =
+            self.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
+        let mixed = |exprs: &mut dyn Iterator<Item = &crate::expr::Expr>, mixin: &str, out: &mut Vec<crate::ident::ClassId>| {
+            for expr in exprs {
+                let crate::expr::ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { continue };
+                if method.as_str() != mixin {
+                    continue;
+                }
+                for arg in args {
+                    if let crate::expr::ExprNode::Const { path } = &*arg.node {
+                        out.push(crate::analyze::mixin_path_id(path));
+                    }
+                }
+            }
+        };
+        let mut included: HashSet<crate::ident::ClassId> = HashSet::new();
+        let mut extenders: HashMap<crate::ident::ClassId, BTreeSet<crate::ident::ClassId>> = HashMap::new();
+        for model in &self.models {
+            let mut items = model.body.iter().filter_map(|item| match item {
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => Some(expr),
+                _ => None,
+            });
+            let mut includes = Vec::new();
+            mixed(&mut items, "include", &mut includes);
+            included.extend(includes);
+            let mut items = model.body.iter().filter_map(|item| match item {
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => Some(expr),
+                _ => None,
+            });
+            let mut extends = Vec::new();
+            mixed(&mut items, "extend", &mut extends);
+            for m in extends {
+                extenders.entry(m).or_default().insert(model.name.clone());
+            }
+        }
+        for lc in self.library_classes.iter().filter(|lc| !lc.is_module) {
+            included.extend(lc.includes.iter().cloned());
+            let mut extends = Vec::new();
+            mixed(&mut lc.unknown_calls.iter(), "extend", &mut extends);
+            for m in extends {
+                extenders.entry(m).or_default().insert(lc.name.clone());
+            }
+        }
+        for controller in &self.controllers {
+            included.extend(crate::analyze::controller_includes(controller));
+            let mut items = controller.body.iter().filter_map(|item| match item {
+                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => Some(expr),
+                _ => None,
+            });
+            let mut extends = Vec::new();
+            mixed(&mut items, "extend", &mut extends);
+            for m in extends {
+                extenders.entry(m).or_default().insert(controller.name.clone());
+            }
+        }
+        // A module's own include counts only when something uses that module: ancestry's
+        // MaterializedPath2 includes MaterializedPath, and no model takes MaterializedPath2
+        let mut live: Vec<crate::ident::ClassId> = included.iter().chain(extenders.keys()).cloned().collect();
+        let mut seen: HashSet<crate::ident::ClassId> = live.iter().cloned().collect();
+        while let Some(id) = live.pop() {
+            for lc in self.library_classes.iter().filter(|lc| lc.is_module && lc.name == id) {
+                for nested in &lc.includes {
+                    included.insert(nested.clone());
+                    if seen.insert(nested.clone()) {
+                        live.push(nested.clone());
+                    }
+                }
+                let mut extends = Vec::new();
+                mixed(&mut lc.unknown_calls.iter(), "extend", &mut extends);
+                for m in extends {
+                    extenders.entry(m.clone()).or_default().insert(lc.name.clone());
+                    if seen.insert(m.clone()) {
+                        live.push(m);
+                    }
+                }
+            }
+        }
+        extenders
+            .into_iter()
+            .filter(|(m, set)| modules.contains(m) && !included.contains(m) && set.len() == 1)
+            .map(|(m, set)| (m, set.into_iter().next().unwrap()))
+            .collect()
+    }
     pub const SCHEMA_VERSION: u32 = 1;
 
     pub fn new() -> Self {
@@ -973,6 +1069,7 @@ impl App {
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
             load_hook_extended_macros: Vec::new(),
+            spliced_class_methods: Default::default(),
             partial_local_types: HashMap::new(),
             view_ivar_types: HashMap::new(),
             html_safe_methods: BTreeSet::new(),

@@ -21,9 +21,17 @@
 # `reconnect_attempts: 1` does for Sidekiq. Like Sidekiq, that can
 # duplicate a job whose first LPUSH reached Redis before the socket
 # died. A command error is not retried.
+#
+# Connect and read timeouts, at redis-client's 1 s defaults that Sidekiq
+# runs with: a Redis that stops answering costs a request one second
+# (two, with the reconnect) instead of hanging it. Running out raises
+# `Redis::CannotConnectError` or `Redis::TimeoutError`, both
+# `BaseConnectionError`s, so a timed-out read takes the reconnect above.
 require "redis"
 
 module SidekiqRedis
+  CONNECT_TIMEOUT = 1.0
+  READ_TIMEOUT = 1.0
   CONN = []
   CONN_PID = [0]
   LOCK = Mutex.new
@@ -79,7 +87,7 @@ module SidekiqRedis
   # `password:` overrides the URL's, as the explicit option does on both
   # clients.
   def self.open(url, password)
-    conn = password == "" ? Redis.new(url: url) : Redis.new(url: url, password: password)
+    conn = password == "" ? Redis.new(url: url, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT) : Redis.new(url: url, password: password, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT)
     begin
       conn.ping
     rescue StandardError => e

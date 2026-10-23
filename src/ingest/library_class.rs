@@ -26,6 +26,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+use crate::ingest::prism_api::PrismLocation;
 /// Ingest the first class declaration, or return `None` if there is none.
 /// Custom Data blocks require plural ingestion because their lifted methods
 /// belong to additional library classes; reject them rather than lose that IR.
@@ -1129,7 +1130,7 @@ fn sorbet_struct_members(body: Option<ruby_prism::Node<'_>>, file: &str) -> Vec<
         let Some(name) = args.next().and_then(|n| {
             let symbol = n.as_symbol_node()?;
             Some(Symbol::from(
-                String::from_utf8_lossy(symbol.value_loc()?.as_slice()).as_ref(),
+                String::from_utf8_lossy(symbol.unescaped()).as_ref(),
             ))
         }) else {
             continue;
@@ -2299,12 +2300,11 @@ fn walk_decl_body_with_visibility<'pr>(
         // has been walked. Non-nil initializers remain outside this slice.
         if stmt.as_class_variable_write_node().is_some() {
             let initializer = ingest_expr(&stmt, file)?;
-            if !matches!(&*initializer.node, ExprNode::Assign { value, .. }
-                if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }))
-            {
+            // Not any value: one that reads other state would observe the order the emitted body runs in
+            if !matches!(&*initializer.node, ExprNode::Assign { value, .. } if is_literal_value(value)) {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
-                    message: "class-variable initializer with non-nil value".into(),
+                    message: "class-variable initializer with a non-literal value".into(),
                 });
             }
             out.class_initializers.push(initializer);
@@ -3442,7 +3442,7 @@ pub(super) fn ingest_library_method_with_keywords(
     // the runtime_src split (see runtime_src::method_params).
     let block_param = def
         .parameters()
-        .and_then(|pn| pn.block())
+        .and_then(|pn| super::prism_api::block_parameter(&pn))
         .map(|block| {
             let name = block
                 .name()

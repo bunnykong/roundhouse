@@ -197,11 +197,17 @@ pub struct Ctx {
 pub struct ClassInfo {
     /// Kind of the indexed source declaration; never inferred from its name.
     pub is_module: bool,
+    /// `@@name` storage a `cattr_*`/`mattr_*` declares, typed by its default.
+    pub class_vars: HashMap<Symbol, Ty>,
     /// Constant values declared by external gem RBI/RBS files.
     pub constants: HashMap<Symbol, Ty>,
     /// If this class maps to a database table, which one.
     pub table: Option<crate::ident::TableRef>,
     pub primary_key: Option<Symbol>,
+    /// The model declares a `default_scope` the runtime Relation applies
+    /// (`lower::default_scope`): a query on it must not be folded to SQL
+    /// at transpile time, which would read the rows the scope hides.
+    pub default_scoped: bool,
     /// Instance-state shape (columns + attr_accessor).
     pub attributes: Row,
     /// Attributes of `attributes` that the app's own `def` replaces. A
@@ -1219,6 +1225,19 @@ impl<'a> BodyTyper<'a> {
                                     values.get(&declaration_id_from_lookup_name(name.0.as_str()))
                                 })
                                 .cloned()
+                                // `Widget::WEIGHTS` read inside `Widget` (a
+                                // body the analyzer already qualified, re-typed
+                                // after lowering): the class's own constant.
+                                .or_else(|| {
+                                    let (leaf, owner) = path.split_last()?;
+                                    let Some(Ty::Class { id, .. }) = ctx.lexical_self.as_ref().or(ctx.self_ty.as_ref()) else {
+                                        return None;
+                                    };
+                                    if written_class_id(owner) != *id {
+                                        return None;
+                                    }
+                                    ctx.constants.get_own(leaf).cloned()
+                                })
                         };
                         // Otherwise retain the written class path, but
                         // never guess another class by its suffix.
@@ -1247,6 +1266,19 @@ impl<'a> BodyTyper<'a> {
                 .local_bindings
                 .get(name)
                 .cloned()
+                .or_else(|| {
+                    let cvar = name.as_str().strip_prefix("@@")?;
+                    let id = match ctx.self_ty.as_ref()? {
+                        Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => match &args[0] {
+                            Ty::Class { id, .. } => id,
+                            _ => return None,
+                        },
+                        Ty::Class { id, .. } => id,
+                        _ => return None,
+                    };
+
+                    self.classes().get(id)?.class_vars.get(&Symbol::from(cvar)).cloned()
+                })
                 .unwrap_or_else(unknown),
 
             ExprNode::Ivar { name } => {

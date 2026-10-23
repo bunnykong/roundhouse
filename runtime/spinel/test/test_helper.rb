@@ -1776,6 +1776,15 @@ module RequestDispatch
     @__response
   end
 
+  # The last request's flash, as Rails' integration tests read it
+  # (`assert_equal "✓", flash[:notice]` after an unfollowed redirect).
+  # The dispatch already keeps it in `@__flash` to carry into the next
+  # request; this is its reader.
+  def flash
+    @__flash = ActionDispatch::Flash.new if @__flash.nil?
+    @__flash
+  end
+
   # `host! "once.campfire.test"` — the Host every subsequent request in
   # this test carries. Rails' integration tests set it when the app
   # reads the host back: campfire's messages_controller_test does,

@@ -622,6 +622,16 @@ pub struct InclusionRange {
 pub enum ValidationRule {
     Presence,
     Absence,
+    /// `acceptance: true` / `{ accept:, allow_nil: }`. `accept` holds the
+    /// literal values Rails' `AcceptanceValidator` accepts (its default is
+    /// `["1", true]`). `allow_nil` is from the validator's own hash or the
+    /// call (the hash wins); `None` is Rails' default, which for this
+    /// validator is `true`.
+    Acceptance {
+        accept: Vec<Literal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
+    },
     /// `uniqueness: true` / `{ scope:, case_sensitive:, allow_nil:,
     /// allow_blank: }`. `scope` holds the names as written; an
     /// association name resolves to its foreign key when the check is

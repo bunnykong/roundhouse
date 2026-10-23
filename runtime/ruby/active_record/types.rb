@@ -5,6 +5,15 @@
 # otherwise. `deserialize` casts the same way.
 module ActiveRecord
   module Type
+    # What `type_for_attribute` answers: the column's type name.
+    class Value
+      attr_reader :type
+
+      def initialize(type)
+        @type = type
+      end
+    end
+
     class String
       def cast(value)
         return nil if value.nil?

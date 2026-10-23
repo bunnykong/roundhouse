@@ -464,7 +464,13 @@ fn untyped_subexpressions_baseline() {
     // `_after_commit` +6, `transaction` +6 for the savepoint mark and
     // the run/drop calls). The same untyped reads off a `Db` list as the
     // records above.
-    const CEILING: usize = 1082;
+    // MEASURED 1085 on 2026-10-22: a record's column read by name
+    // (`read_attribute`, `write_attribute`, `attribute_in_database`)
+    // answers whatever that column holds (+3 in connection.rb's Base).
+    // MEASURED 1086 on 2026-10-22: `merge` carries a merged `none` through
+    // `other.explicit_none?`, read off the same untyped `other` its
+    // `other.null_relation?` already reads (+1 in relation.rb).
+    const CEILING: usize = 1086;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

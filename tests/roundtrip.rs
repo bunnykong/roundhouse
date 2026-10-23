@@ -185,6 +185,7 @@ fn tiny_blog_round_trips() {
         pending_attachment_on_load: Vec::new(),
         load_hook_class_macros: Vec::new(),
         load_hook_extended_macros: Vec::new(),
+        spliced_class_methods: Default::default(),
         partial_local_types: std::collections::HashMap::new(),
         view_ivar_types: std::collections::HashMap::new(),
         html_safe_methods: std::collections::BTreeSet::new(),

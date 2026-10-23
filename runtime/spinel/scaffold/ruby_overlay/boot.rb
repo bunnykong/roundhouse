@@ -106,6 +106,9 @@ require_relative "runtime/active_support_core_ext"
 # reopen above; it now takes the same lowered call every other
 # ruby-family target does, so the two stay one behaviour.
 require_relative "runtime/active_support_ext"
+# ActiveSupport::JSON.encode straight through the C generator when the
+# value is already JSON-native; the shared walk otherwise.
+require_relative "runtime/active_support_json_cruby"
 require_relative "runtime/action_view_number_helper"
 require_relative "runtime/action_view_form_builder_extras"
 require_relative "runtime/active_record"
@@ -115,6 +118,7 @@ require_relative "runtime/active_record_bang"
 require_relative "runtime/active_record_db_config"
 require_relative "runtime/active_record_serialization"
 require_relative "runtime/active_record_relation_ext"
+require_relative "runtime/arel_predicates"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
 require_relative "runtime/action_controller"
@@ -122,6 +126,8 @@ require_relative "runtime/action_controller"
 require_relative "runtime/header_validation_cruby"
 # Signed cookies verified once per value per thread, not per request.
 require_relative "runtime/message_verifier_cruby"
+# `allow_browser`'s verdict once per User-Agent per thread, not per request.
+require_relative "runtime/browser_blocker_cruby"
 # Masked CSRF tokens XORed with pack/unpack, not 32 `chr`s.
 require_relative "runtime/authenticity_token_cruby"
 # `Hash#to_query`'s nested bracket grammar — a reopen of the shared

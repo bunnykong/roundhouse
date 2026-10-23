@@ -33,6 +33,9 @@
 require_relative "boot"
 
 module Main
+  # The framework class used by the nominal ParseError fallback.
+  FrameworkParseError = ActionDispatch::Http::Parameters::ParseError
+
   # Dispatch one request to a response descriptor — the single source
   # of routing / controller / flash / redirect logic. Returns the
   # 10-tuple `[status, body, content_type, location, set_cookies,
@@ -297,9 +300,15 @@ module Main
       # param; an html one may still name `?format=`.
       format_param = request_format == :html ? merged["format"].to_s : request_format.to_s
       return not_found_response(format_param, request_path, request, env)
-    rescue ActionController::ParameterMissing, ActionController::BadRequest
-      # `params.expect` / `params.require` refused the request and the app
-      # did not rescue it: Rails' rescue_responses answer :bad_request.
+    rescue ActionController::ParameterMissing, ActionController::BadRequest,
+           ActionDispatch::Http::Parameters::ParseError => error
+      # The app's handlers have already run. Rails' rescue_responses map
+      # an unhandled ParseError to :bad_request by its exact class name;
+      # an application subclass has no default mapping.
+      # Bind the built-ins so application instance/class overrides cannot
+      # turn a subclass into the framework's exact exception class.
+      raise if Kernel.instance_method(:is_a?).bind_call(error, FrameworkParseError) &&
+               !Kernel.instance_method(:instance_of?).bind_call(error, FrameworkParseError)
       return [400, "<h1>400 Bad Request</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
       # Not a 500: Rails' rescue_responses answer these with 422.

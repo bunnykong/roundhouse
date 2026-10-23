@@ -2595,13 +2595,13 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
 }
 
 /// `rescue_from <Class>[, <Class>] { … }` / `rescue_from <Class>, with:
-/// :handler` — the controller's exception handlers, ITS OWN first and
-/// then each ancestor's.
+/// :handler` — the controller's exception handlers, ancestors first
+/// then the controller's own declarations.
 ///
 /// Rails registers them on `process_action`, so they cover the filter
 /// chain as well as the action; and it walks the registry in REVERSE,
 /// so a subclass's handler wins over the one it inherits. Order here is
-/// declaration order (own, then nearer ancestors, then further);
+/// declaration order (furthest ancestor through the subclass);
 /// `synthesize_process_action` reverses it into Ruby's source-order
 /// `rescue` matching.
 ///
@@ -2623,8 +2623,10 @@ fn collect_rescue_handlers(
     format_breadth: FormatBreadth,
 ) -> Vec<RescueHandler> {
     let mut out: Vec<RescueHandler> = Vec::new();
-    let mut chain: Vec<&Controller> = vec![controller];
-    chain.extend(ancestor_chain(controller, all_controllers));
+    // ancestor_chain is already ordered from the furthest ancestor.
+    // Inherited declarations precede subclass declarations; last wins.
+    let mut chain = ancestor_chain(controller, all_controllers);
+    chain.push(controller);
     for c in chain {
         let handler_arity = |name: &Symbol| -> Option<usize> {
             c.actions().find(|a| &a.name == name).map(|a| a.params.fields.len())

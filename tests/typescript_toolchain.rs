@@ -24,6 +24,8 @@ mod nested_classes;
 mod array_methods;
 #[path = "support/truthiness.rs"]
 mod truthiness;
+#[path = "support/class_constants.rs"]
+mod class_constants;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -296,6 +298,34 @@ fn real_blog_nested_classes_run_under_tsx() {
         "import { Report } from \"./app/models/report.js\";\nconsole.log(Report.summary());\n",
     );
     assert_eq!(out, nested_classes::SUMMARY);
+}
+
+#[test]
+#[ignore]
+fn real_blog_class_constants_run_under_tsx() {
+    // A class's own constants of each literal kind, read from a class
+    // method, answer as CRuby does (#1223).
+    let (emitted, errors) = class_constants::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Scale } from \"./app/models/scale.js\";\nconsole.log(Scale.summary());\n",
+    );
+    assert_eq!(out, class_constants::SUMMARY);
+}
+
+#[test]
+#[ignore]
+fn real_blog_model_constant_reads_run_under_tsx() {
+    // A model method reading its own constants through `fetch`, `key?`,
+    // `keys`, `first` and `[]` answers as CRuby does (#1223 b).
+    let (emitted, errors) = class_constants::gauge_overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Gauge } from \"./app/models/gauge.js\";\nconst g = new Gauge();\ng.size = \"large\";\nconsole.log(g.summary() + \";\" + Gauge.heaviest() + \";\" + Gauge.probe());\n",
+    );
+    assert_eq!(out, format!("{};9;true,false,true", class_constants::GAUGE_SUMMARY));
 }
 
 #[test]

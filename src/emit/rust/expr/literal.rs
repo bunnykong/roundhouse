@@ -114,6 +114,12 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
                         v_raw.clone()
                     };
                     format!("{bare}.clone()")
+                } else if matches!(v_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
+                    && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+                    && !str_color_handled
+                {
+                    // The key's spelling, for the same reason: a literal is `&str`, the slot an owned String
+                    format!("{v_raw}.to_string()")
                 } else {
                     coerce_arg_for_param_ty(v, v_ty)
                 }

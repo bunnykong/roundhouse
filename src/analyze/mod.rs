@@ -269,6 +269,7 @@ impl Analyzer {
 
             let mut cls = ClassInfo::default();
             cls.table = Some(model.table.clone());
+            cls.default_scoped = crate::lower::default_scope::static_default_scope(model).is_some();
             cls.attributes = model.attributes.clone();
             cls.primary_key = model.primary_key.clone().or_else(|| app.schema.tables.get(&model.table.0)
                 .and_then(|table| table.columns.iter().find(|column| column.primary_key))
@@ -374,7 +375,7 @@ impl Analyzer {
             }
             // `ActiveModel::Name`, the `Type::Value`s and the enum table are
             // objects the registry does not model.
-            for opaque in ["model_name", "attribute_types", "type_for_attribute", "defined_enums", "reset_column_information"] {
+            for opaque in ["model_name", "attribute_types", "defined_enums", "reset_column_information"] {
                 cls.class_methods.insert(Symbol::from(opaque), Ty::Untyped);
             }
             // The rest of the class-side query surface — everything
@@ -391,6 +392,12 @@ impl Analyzer {
                 // common bare/chained use.) `delete_all`/`update_all` return
                 // Int (affected row count).
                 cls.class_methods.insert(Symbol::from("unscoped"), relation_of_self.clone());
+                cls.class_methods.insert(Symbol::from("default_scoped"), relation_of_self.clone());
+                // The ruby-family reopen answers it (connection.rb); a strict target has no `Type::Value` and refuses the constant.
+                cls.class_methods.insert(
+                    Symbol::from("type_for_attribute"),
+                    Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Type::Value")), args: vec![].into() },
+                );
                 cls.class_methods.insert(Symbol::from("none"), relation_of_self.clone());
                 cls.class_methods.insert(Symbol::from("delete_all"), Ty::Int);
                 cls.class_methods.insert(Symbol::from("update_all"), Ty::Int);
@@ -999,6 +1006,15 @@ impl Analyzer {
                 cls.parent = Some(parent.clone());
             }
 
+            for (attr, default) in &model.class_attr_defaults {
+                // `self` in the class body is the class object, which the flattened `Ty::Class` would read as an instance
+                let ty = match &*default.node {
+                    ExprNode::SelfRef => Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![Ty::Class { id: model.name.clone(), args: vec![].into() }].into() },
+                    ExprNode::Lit { value } if !matches!(value, crate::expr::Literal::Nil) => body::lit_ty(value),
+                    _ => continue,
+                };
+                cls.class_vars.insert(attr.clone(), ty);
+            }
             classes.insert(model.name.clone(), cls);
         }
 

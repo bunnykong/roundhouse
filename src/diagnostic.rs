@@ -76,6 +76,7 @@ impl Diagnostic {
             DiagnosticKind::UndefinedFilterTarget { .. } => "undefined_filter_target",
             DiagnosticKind::GraphqlNullableField { .. } => "graphql_nullable_field",
             DiagnosticKind::UnconsumedInitializer { .. } => "unconsumed_initializer",
+            DiagnosticKind::IgnoredValidatorOption { .. } => "ignored_validator_option",
         }
     }
 
@@ -92,6 +93,7 @@ impl Diagnostic {
             DiagnosticKind::BlankUnlowered { .. } => Severity::Warning,
             DiagnosticKind::LowerResidue { .. } => Severity::Warning,
             DiagnosticKind::UnconsumedInitializer { .. } => Severity::Warning,
+            DiagnosticKind::IgnoredValidatorOption { .. } => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -224,6 +226,12 @@ impl Diagnostic {
                 owner.as_str(),
                 location.as_str(),
                 Self::holder_text(holder.as_str())
+            ),
+            DiagnosticKind::IgnoredValidatorOption { validator, option, hint } => format!(
+                "`{}: {{ {}: … }}` is not an option Rails' validator reads; Rails ignores it, and so does this build{}",
+                validator.as_str(),
+                option.as_str(),
+                hint.as_ref().map(|h| format!(" (did you mean `{}:`?)", h.as_str())).unwrap_or_default()
             ),
         }
     }
@@ -544,4 +552,12 @@ pub enum DiagnosticKind {
     /// `holder` is who the statement belongs to
     /// ([`crate::ingest::initializer_ledger::Holder::label`]).
     UnconsumedInitializer { owner: Symbol, statement: Symbol, location: Symbol, holder: Symbol },
+    /// A key in a validator's options hash that the Rails validator does
+    /// not read (`numericality: { greater_than_or_equal: 0 }`, where the
+    /// bound is `greater_than_or_equal_to:`). Rails ignores it, as an
+    /// interpolation option the default message never names, and so does
+    /// the lowering. A note, not a gap: the build checks what Rails checks.
+    /// Warning, because the app's validation is weaker than it reads.
+    /// `hint` is the option it most likely meant, when one is close.
+    IgnoredValidatorOption { validator: Symbol, option: Symbol, hint: Option<Symbol> },
 }
