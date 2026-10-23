@@ -47,6 +47,8 @@ mod render;
 mod ivar_set;
 pub(crate) use ivar_set::controller_name_of;
 mod effects;
+mod claim_map;
+use claim_map::ClaimMap;
 mod diagnostics;
 pub mod open_classes;
 pub(crate) mod forwarding;
@@ -2781,24 +2783,33 @@ impl Analyzer {
             // definitions win on a name clash.
             let mixed_in = controller_mixed_in_modules(controller, module_includes);
             if retype {
+                // Each concern `def` claims its name, keyed by the module's
+                // dispatch precedence and then its definition order. Ruby
+                // calls the last claim (the module included last; a later
+                // `def`), whatever order the modules are visited in.
+                let precedence = mixin_precedence(controller_include_groups(controller), module_includes);
+                let mut concern_defs: ClaimMap<Symbol, (usize, usize), &MethodDef> = ClaimMap::new();
                 for module_id in &mixed_in {
                     let Some(methods) = module_methods.get(module_id) else { continue };
-                    for method in methods {
+                    let rank = precedence.iter().position(|m| m == module_id).map_or(0, |at| at + 1);
+                    for (at, method) in methods.iter().enumerate() {
                         if action_bindings.contains_key(&method.name) {
                             continue;
                         }
-                        // Reserve the name so a later concern cannot
-                        // overwrite; bindings come from the harvest
-                        // below once every body is registered.
-                        action_bindings.entry(method.name.clone()).or_default();
-                        let mut body = method.body.clone();
-                        self.body_typer().analyze_expr(&mut body, &ctx);
-                        // Unconditional: a concern method with no DIRECT
-                        // write of its own (`authorize`) still needs its
-                        // typed body as a resolution target for
-                        // `collect_transitive_filter_ivars`.
-                        action_bodies.entry(method.name.clone()).or_insert_with(|| body.clone());
+                        concern_defs.claim(method.name.clone(), (rank, at), method);
                     }
+                }
+                for (name, method) in concern_defs.resolve_last() {
+                    // Reserve the name; bindings come from the harvest
+                    // below once every body is registered.
+                    action_bindings.entry(name.clone()).or_default();
+                    let mut body = method.body.clone();
+                    self.body_typer().analyze_expr(&mut body, &ctx);
+                    // Unconditional: a concern method with no DIRECT
+                    // write of its own (`authorize`) still needs its
+                    // typed body as a resolution target for
+                    // `collect_transitive_filter_ivars`.
+                    action_bodies.entry(name.clone()).or_insert_with(|| body.clone());
                 }
             } else if let Some((cached_bindings, cached_bodies)) =
                 self.controller_action_meta_cache.get(&controller.name)
@@ -3416,7 +3427,12 @@ impl Analyzer {
                 // attribution is irrelevant — an empty index keeps
                 // this walk exactly as before.
                 self.collect_send_sites(&action.body, Some(&ctrl_name), false, &HashMap::new(), &mut sites);
-                for (class_id, method, _, _, _) in &sites {
+                // Each call claims the ivars its callee writes, keyed by the
+                // call's place in the body walk (source order for calls in
+                // sequence): the view sees the last call's write, as Rails
+                // renders it.
+                let mut helper_writes: ClaimMap<&Symbol, usize, &Ty> = ClaimMap::new();
+                for (at, (class_id, method, _, _, _)) in sites.iter().enumerate() {
                     if *class_id != ctrl_name {
                         continue;
                     }
@@ -3425,9 +3441,12 @@ impl Analyzer {
                             if v.is_open() {
                                 continue;
                             }
-                            ivars.entry(k.clone()).or_insert_with(|| v.clone());
+                            helper_writes.claim(k, at, v);
                         }
                     }
+                }
+                for (k, v) in helper_writes.resolve_last() {
+                    ivars.entry((*k).clone()).or_insert_with(|| (*v).clone());
                 }
                 // An override calling `super` renders with what the
                 // overridden action wrote too (its entry in
@@ -7893,8 +7912,15 @@ fn stored_target(scope: &ClassId, written: &ClassId, classes: &HashMap<ClassId, 
 fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::MethodReceiver) -> bool {
     use crate::dialect::MethodReceiver::Instance;
     let classes = source_class_names(app);
+    // A model split across files has one entry per file: each entry claims
+    // the class name, and the lookup joins the claims (`any`), so no file
+    // order decides which entry is searched. The writer key is an identity
+    // only; a join never reads writer order.
+    let models: ClaimMap<&ClassId, usize, &Model> =
+        app.models.iter().enumerate().map(|(at, model)| (&model.name, at, model)).collect();
     fn lookup(
         app: &App,
+        models: &ClaimMap<&ClassId, usize, &Model>,
         owner: &ClassId,
         name: &str,
         side: crate::dialect::MethodReceiver,
@@ -7905,29 +7931,30 @@ fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::M
             return false;
         }
         let walk_includes = side == Instance;
-        if let Some(model) = app.models.iter().find(|model| &model.name == owner) {
-            if model.methods().any(|method| method.receiver == side && method.name.as_str() == name) {
-                return true;
-            }
-            return model.parent.as_ref().is_some_and(|parent| {
-                lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
-            }) || (walk_includes
-                && model_includes_in(model, classes)
-                    .iter()
-                    .any(|include| lookup(app, include, name, side, seen, classes)));
+        if models.contains(&owner) {
+            return models.any(&owner, |model| {
+                model.methods().any(|method| method.receiver == side && method.name.as_str() == name)
+                    || model.parent.as_ref().is_some_and(|parent| {
+                        lookup(app, models, &stored_target(owner, parent, classes), name, side, seen, classes)
+                    })
+                    || (walk_includes
+                        && model_includes_in(model, classes)
+                            .iter()
+                            .any(|include| lookup(app, models, include, name, side, seen, classes)))
+            });
         }
         app.library_classes.iter().filter(|class| &class.name == owner).any(|class| {
             class.methods.iter().any(|method| method.receiver == side && method.name.as_str() == name)
                 || class.parent.as_ref().is_some_and(|parent| {
-                    lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
+                    lookup(app, models, &stored_target(owner, parent, classes), name, side, seen, classes)
                 })
                 || (walk_includes
                     && class.includes.iter().any(|include| {
-                        lookup(app, &stored_target(owner, include, classes), name, side, seen, classes)
+                        lookup(app, models, &stored_target(owner, include, classes), name, side, seen, classes)
                     }))
         })
     }
-    lookup(app, owner, name, side, &mut BTreeSet::new(), &classes)
+    lookup(app, &models, owner, name, side, &mut BTreeSet::new(), &classes)
 }
 
 /// `**{k: v, …}.merge(h)`, `h` a `Hash[Symbol, V]` and the literal's
@@ -8084,6 +8111,32 @@ fn controller_mixed_in_modules(
         }
     }
     mixed_in
+}
+
+/// A class's mixins from lowest to highest dispatch precedence, given its
+/// `include` statements (`controller_include_groups`): its Ruby ancestors
+/// above the class, reversed. `include A` then `include B`
+/// puts B ahead of A; `include A, B` puts A ahead of B; a module sits ahead
+/// of the modules it includes; each module appears once.
+fn mixin_precedence(groups: Vec<Vec<ClassId>>, module_includes: &HashMap<ClassId, Vec<ClassId>>) -> Vec<ClassId> {
+    fn ahead(includes: Vec<ClassId>, module_includes: &HashMap<ClassId, Vec<ClassId>>, open: &mut BTreeSet<ClassId>) -> Vec<ClassId> {
+        let mut ancestors: Vec<ClassId> = Vec::new();
+        for module in includes {
+            if !open.insert(module.clone()) {
+                continue;
+            }
+            let mut chain = vec![module.clone()];
+            chain.extend(ahead(module_includes.get(&module).cloned().unwrap_or_default(), module_includes, open));
+            open.remove(&module);
+            chain.retain(|m| !ancestors.contains(m));
+            ancestors.splice(0..0, chain);
+        }
+        ancestors
+    }
+    let includes = groups.into_iter().flat_map(|group| group.into_iter().rev()).collect();
+    let mut order = ahead(includes, module_includes, &mut BTreeSet::new());
+    order.reverse();
+    order
 }
 
 /// Owned method bodies for [`controller_mixed_in_modules`] across every
@@ -9909,5 +9962,35 @@ mod concern_method_snapshot_tests {
         let snapshot = controller_concern_method_snapshot(&app, &includes_of(&app));
         assert_eq!(names(&snapshot), BTreeSet::from(["A".into()]));
         assert_eq!(snapshot[&ClassId(Symbol::from("A"))][0].name.as_str(), "second");
+    }
+}
+
+#[cfg(test)]
+mod mixin_precedence_tests {
+    use super::*;
+
+    fn ids(names: &[&str]) -> Vec<ClassId> {
+        names.iter().map(|name| ClassId(Symbol::from(*name))).collect()
+    }
+
+    /// Each case: the class's include statements, the modules' own includes,
+    /// and CRuby 4.0.7's ancestors above the class, highest precedence first.
+    #[test]
+    fn mixin_precedence_matches_cruby_ancestors() {
+        let cases: [(&[&[&str]], &[(&str, &[&str])], &[&str]); 7] = [
+            (&[&["A"], &["B"]], &[], &["B", "A"]),
+            (&[&["A", "B"]], &[], &["A", "B"]),
+            (&[&["A"], &["B"]], &[("A", &["C"]), ("B", &["C"])], &["B", "A", "C"]),
+            (&[&["A"], &["B"]], &[("B", &["C"])], &["B", "C", "A"]),
+            (&[&["A"], &["B"]], &[("A", &["B"])], &["A", "B"]),
+            (&[&["A"]], &[("A", &["C", "D"])], &["A", "D", "C"]),
+            (&[&["A"], &["B", "C"]], &[], &["B", "C", "A"]),
+        ];
+        for (groups, nested, ruby) in cases {
+            let module_includes = nested.iter().map(|(m, includes)| (ClassId(Symbol::from(*m)), ids(includes))).collect();
+            let mut order = mixin_precedence(groups.iter().map(|group| ids(group)).collect(), &module_includes);
+            order.reverse();
+            assert_eq!(order, ids(ruby), "includes {groups:?}, nested {nested:?}");
+        }
     }
 }
