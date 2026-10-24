@@ -48,7 +48,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     rails_cls.class_methods.insert(Symbol::from("root"), app_path.clone());
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
     register_stdlib_class(classes, "Rails::AppPath", &[], &[
-        ("join", app_path.clone()), ("+", app_path.clone()), ("expand_path", app_path.clone()),
+        ("join", app_path.clone()), ("+", app_path.clone()), ("expand_path", app_path.clone()), ("mkpath", app_path.clone()),
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("read", Ty::Str),
         ("readlines", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }), ("exist?", Ty::Bool),
     ]);

@@ -175,6 +175,7 @@ fn tiny_blog_round_trips() {
         gem_load_statements: Vec::new(),
         gem_loaded_files: Default::default(),
         initializer_response_headers: Vec::new(),
+        runs_after_initialize: false,
         collection_cache_store: None,
         app_requires: Vec::new(),
         sql_functions: Vec::new(),
