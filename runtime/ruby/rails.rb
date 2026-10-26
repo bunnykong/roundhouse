@@ -175,7 +175,14 @@ module Rails
         part = parts[i]
         unless part.empty? || part == "."
           built = built.empty? || built == "/" ? built + part : built + "/" + part
-          Dir.mkdir(built) unless Dir.exist?(built)
+          unless Dir.exist?(built)
+            begin
+              Dir.mkdir(built)
+            rescue SystemCallError
+              # Another process made it first: fine, as in FileUtils.mkdir_p; a file there still raises.
+              raise unless Dir.exist?(built)
+            end
+          end
         end
         i += 1
       end

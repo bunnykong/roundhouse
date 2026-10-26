@@ -158,12 +158,13 @@ end
 /// writes (`Rails.root.join("storage", dir).mkpath`) makes the directories
 /// as Rails 8.1.4 does (`topics/after-initialize-analyzed/oracle_mkpath.rb`):
 /// both exist after boot, `mkpath` answers the path, and a second call is a
-/// no-op.
+/// no-op. `Rails.public_path` is typed the same way.
 fn mkpath_app() -> emit_and_run::Overlay {
     base().write("config/initializers/storage_paths.rb", r#"Rails.application.config.after_initialize do
   %w[db files].each do |dir|
     Rails.root.join("tmp", "boot_paths", dir).mkpath
   end
+  Rails.public_path.join("boot_uploads").mkpath
 end
 "#)
 }
@@ -171,6 +172,7 @@ end
 const MKPATH_ASSERTIONS: &str = r#"
 raise "boot_paths/db missing" unless Dir.exist?("tmp/boot_paths/db")
 raise "boot_paths/files missing" unless Dir.exist?("tmp/boot_paths/files")
+raise "public/boot_uploads missing" unless Dir.exist?("public/boot_uploads")
 again = Rails.root.join("tmp", "boot_paths", "db")
 raise "mkpath does not answer the path" unless again.mkpath.to_s == again.to_s
 puts "Rails.root mkpath ran"
@@ -236,4 +238,111 @@ fn a_reopen_of_an_uncompiled_module_and_a_foreign_require_are_errors() {
         "Rails.application.config.after_initialize do\n  require \"some_gem/patch\"\nend\n",
     )]);
     assert!(require.contains("names no app file the compiled program carries"), "{require}");
+}
+
+/// One lib file that three callbacks require under three spellings, and
+/// that requires itself, is read once, as Rails 8.1.4 loads it once
+/// (`topics/after-initialize-analyzed/oracle_require_once.rb`). A second
+/// read would alias the already patched `greet`, which would then recurse.
+fn require_once_app() -> emit_and_run::Overlay {
+    base()
+        .write("config/initializers/d_twice.rb", r#"Rails.application.config.after_initialize do
+  require "ext/greeting_patch"
+end
+
+Rails.application.config.after_initialize do
+  require Rails.root.join("lib/ext/greeting_patch").to_s
+end
+"#)
+        .write("config/initializers/e_relative.rb", r#"Rails.application.config.after_initialize do
+  require_relative "../../lib/ext/greeting_patch"
+end
+"#)
+        .write("lib/ext/greeting_patch.rb", r#"require "ext/greeting_patch"
+Greeting.module_eval do
+  alias_method :original_greet, :greet
+
+  def greet(name)
+    original_greet(name) + "!"
+  end
+end
+BootLog.record("required")
+"#)
+}
+
+#[test]
+fn a_file_several_callbacks_require_is_read_once() {
+    let run = require_once_app().run_ruby(r#"
+raise "entries: #{BootLog.entries.inspect}" unless BootLog.entries == ["required"]
+greeter = Greeter.new
+raise "patched greet: #{greeter.greet("ann").inspect}" unless greeter.greet("ann") == "hello ann!"
+raise "aliased original: #{greeter.original_greet("ann").inspect}" unless greeter.original_greet("ann") == "hello ann"
+puts "required once"
+"#);
+    run.assert_passes();
+    assert!(run.stdout.contains("required once"));
+}
+
+/// A module an initializer defines and only a method of a callback's
+/// reopen names is kept: it is live at boot in Rails 8.1.4
+/// (`topics/after-initialize-analyzed/oracle_reopen_constant.rb`).
+#[test]
+fn a_constant_only_a_reopened_method_names_is_kept() {
+    let run = base()
+        .write("config/initializers/shout.rb", r#"module Shout
+  def self.call(text)
+    text.upcase
+  end
+end
+
+Rails.application.config.after_initialize do
+  Greeting.module_eval do
+    def greet(name)
+      Shout.call("hello " + name)
+    end
+  end
+end
+"#)
+        .run_ruby("raise \"greet: #{Greeter.new.greet(\"ann\").inspect}\" unless Greeter.new.greet(\"ann\") == \"HELLO ANN\"\nputs \"shouted\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("shouted"));
+}
+
+/// A required path resolves inside the app or not at all: a `..` past the
+/// root, an absolute path and a symlink out of `lib/` each name a file the
+/// compiled program does not carry, so each is refused.
+#[cfg(unix)]
+#[test]
+fn a_require_that_leaves_the_app_is_an_error() {
+    let root = std::env::temp_dir().canonicalize().expect("resolve temp dir").join(format!(
+        "roundhouse_after_initialize_require_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let app = root.join("app");
+    let outside = root.join("outside");
+    for d in [app.join("db"), app.join("config/initializers"), app.join("lib"), outside.clone()] {
+        std::fs::create_dir_all(d).expect("create directory");
+    }
+    std::fs::write(app.join("db/schema.rb"), "ActiveRecord::Schema.define do\nend\n").expect("write schema");
+    std::fs::write(outside.join("patch.rb"), "puts \"outside\"\n").expect("write outside file");
+    std::os::unix::fs::symlink(&outside, app.join("lib/linked")).expect("link outside directory");
+    let absolute = format!("require {:?}", outside.join("patch").display().to_string());
+    for (name, require) in [
+        ("parent", "require_relative \"../../../outside/patch\"".to_string()),
+        ("absolute", absolute),
+        ("symlink", "require \"linked/patch\"".to_string()),
+    ] {
+        std::fs::write(
+            app.join("config/initializers/load.rb"),
+            format!("Rails.application.config.after_initialize do\n  {require}\nend\n"),
+        )
+        .expect("write initializer");
+        let error = match roundhouse::ingest::ingest_app(&app) {
+            Ok(_) => panic!("{name}: ingest accepted `{require}`"),
+            Err(err) => err.to_string(),
+        };
+        assert!(error.contains("names no app file the compiled program carries"), "{name}: {error}");
+    }
+    std::fs::remove_dir_all(root).expect("remove temp app");
 }

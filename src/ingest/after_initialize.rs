@@ -39,14 +39,16 @@
 //!   an ingest error: the patch would silently not apply.
 //! * `require` of an app file (a literal path under `lib/`, or
 //!   `Rails.root.join("lib/…").to_s`): the file's top-level statements
-//!   are read here, under the same rules, as `require` runs them here.
-//!   Any other `require` is an error: the emitted program loads no files
-//!   at run time.
+//!   are read here, under the same rules, as `require` runs them here,
+//!   and only by the first `require` of that file, as Ruby loads it once.
+//!   Any other `require`, or one whose path leaves the app or passes a
+//!   symlink, is an error: the emitted program loads no files at run time.
 //!
 //! Applying a reopen statically means code that runs during boot, before
 //! the callbacks fire, already sees the patched method. Nothing emitted
 //! runs app code at that point.
 
+use crate::det::HashSet;
 use std::path::{Path, PathBuf};
 
 use ruby_prism::Node;
@@ -181,6 +183,8 @@ fn span_of(node: &Node<'_>, file: &str) -> Span {
 /// callback that fails to read is recorded (survey) or fails the ingest.
 pub(super) fn read_all<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<Callback>> {
     let mut out = Vec::new();
+    // `require` loads a file once per process, whichever callback asks first.
+    let mut loaded = HashSet::default();
     let application = dir.join("config/application.rb");
     if let Ok(bytes) = vfs.read(&application) {
         let file = application.display().to_string();
@@ -194,7 +198,7 @@ pub(super) fn read_all<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec
                 .is_some_and(|p| p.join("::").trim_start_matches("::") == "Rails::Application");
             let Some(body) = class.body().filter(|_| is_application) else { continue };
             for stmt in flatten_statements(body) {
-                read_statement(vfs, dir, &stmt, &file, Site::Application, &mut out)?;
+                read_statement(vfs, dir, &stmt, &file, Site::Application, &mut loaded, &mut out)?;
             }
         }
     }
@@ -208,7 +212,7 @@ pub(super) fn read_all<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec
             let root = parsed.node();
             let Some(program) = root.as_program_node() else { continue };
             for stmt in program.statements().body().iter() {
-                read_statement(vfs, dir, &stmt, &file, Site::Initializer, &mut out)?;
+                read_statement(vfs, dir, &stmt, &file, Site::Initializer, &mut loaded, &mut out)?;
             }
         }
     }
@@ -223,6 +227,7 @@ fn read_statement<V: Vfs + ?Sized>(
     stmt: &Node<'_>,
     file: &str,
     site: Site,
+    loaded: &mut HashSet<PathBuf>,
     out: &mut Vec<Callback>,
 ) -> IngestResult<()> {
     let Some(call) = stmt.as_call_node() else { return Ok(()) };
@@ -231,7 +236,7 @@ fn read_statement<V: Vfs + ?Sized>(
         if matches!(receiver.as_deref(), None | Some("Rails.application")) {
             if let Some(body) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body()) {
                 for inner in flatten_statements(body) {
-                    read_statement(vfs, dir, &inner, file, Site::Configure, out)?;
+                    read_statement(vfs, dir, &inner, file, Site::Configure, loaded, out)?;
                 }
             }
         }
@@ -241,7 +246,7 @@ fn read_statement<V: Vfs + ?Sized>(
     let mut callback = Callback { span: span_of(stmt, file), body: Vec::new(), reopens: Vec::new() };
     let read = block
         .body()
-        .map(|body| read_body(vfs, dir, flatten_statements(body), file, &mut callback, 0))
+        .map(|body| read_body(vfs, dir, flatten_statements(body), file, loaded, &mut callback, 0))
         .unwrap_or(Ok(()));
     match read {
         Ok(()) => out.push(callback),
@@ -257,6 +262,7 @@ fn read_body<V: Vfs + ?Sized>(
     dir: &Path,
     stmts: Vec<Node<'_>>,
     file: &str,
+    loaded: &mut HashSet<PathBuf>,
     callback: &mut Callback,
     depth: usize,
 ) -> IngestResult<()> {
@@ -266,6 +272,10 @@ fn read_body<V: Vfs + ?Sized>(
             continue;
         }
         if let Some(required) = required_app_file(vfs, dir, &stmt, file)? {
+            // A file already loaded, or still loading (a circular require), is a no-op, as in Ruby.
+            if !loaded.insert(required.clone()) {
+                continue;
+            }
             if depth > 8 {
                 return Err(unsupported(file, "require nesting inside an after_initialize callback is too deep".into()));
             }
@@ -282,7 +292,7 @@ fn read_body<V: Vfs + ?Sized>(
                     "a file required from an after_initialize callback defines a class or module; only its top-level statements are read".into(),
                 ));
             }
-            read_body(vfs, dir, inner, &path, callback, depth + 1)?;
+            read_body(vfs, dir, inner, &path, loaded, callback, depth + 1)?;
             continue;
         }
         let mut expr = super::expr::ingest_expr(&stmt, file)?;
@@ -415,7 +425,10 @@ fn required_app_file<V: Vfs + ?Sized>(vfs: &V, dir: &Path, stmt: &Node<'_>, file
     } else {
         PathBuf::from(format!("{}.rb", relative.display()))
     };
-    if vfs.read(&with_rb).is_err() {
+    // Only a file inside the app, one spelling per file: the emitted program carries no other.
+    let Ok(inside) = with_rb.strip_prefix(dir) else { return Err(refuse()) };
+    let with_rb = dir.join(super::source_gems::normalize(inside));
+    if super::app::path_has_symlink_component(vfs, dir, &with_rb) || vfs.read(&with_rb).is_err() {
         return Err(refuse());
     }
     Ok(Some(with_rb))
@@ -438,8 +451,9 @@ fn rails_root_path(node: &Node<'_>) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Root constant names the callback bodies read, so a class an
-/// initializer defines and only a callback names is kept.
+/// Root constant names the callback bodies and the methods their reopens
+/// define read, so a class an initializer defines and only a callback
+/// names is kept.
 pub(super) fn named_constants(callbacks: &[Callback]) -> std::collections::HashSet<String> {
     fn visit(expr: &Expr, out: &mut std::collections::HashSet<String>) {
         if let ExprNode::Const { path } = &*expr.node {
@@ -453,6 +467,16 @@ pub(super) fn named_constants(callbacks: &[Callback]) -> std::collections::HashS
     for callback in callbacks {
         for expr in &callback.body {
             visit(expr, &mut out);
+        }
+        for reopen in &callback.reopens {
+            for item in &reopen.items {
+                if let ReopenItem::Def(method) = item {
+                    visit(&method.body, &mut out);
+                    for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                        visit(default, &mut out);
+                    }
+                }
+            }
         }
     }
     out
