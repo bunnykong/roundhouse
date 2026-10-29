@@ -259,14 +259,14 @@ module Tep
     # TEP_SERVER=fiber measurement lane, whose client fd is non-blocking
     # -- a blocking recv would starve the whole loop). Loops on
     # Sock.sphttp_recv_some + Tep::Scheduler.io_wait so other fibers keep
-    # running while we wait for body bytes; a 5s per-recv timeout drops a
-    # client that opened the request but never sent the body. Form parse
-    # mirrors consume_body.
+    # running while we wait for body bytes; a per-recv timeout
+    # (Tep::BODY_READ_TIMEOUT) drops a client that opened the request but
+    # never sent the body. Form parse mirrors consume_body.
     def consume_body_via_scheduler(client_fd, input = InputBuffer.new)
       return consume_chunked_body(client_fd, input, true) if chunked?
       cl = content_length
       while @raw_body.bytesize < cl
-        ready = Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, 5)
+        ready = Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, Tep::BODY_READ_TIMEOUT)
         if ready == 0
           return false   # timeout -- client never finished sending
         end
@@ -287,8 +287,9 @@ module Tep
     # Body drain for Tep::Server::Threaded, whose client fd is
     # non-blocking: `io` is the connection's `IO.for_fd` wrapper, and its
     # timed `wait_readable` parks this green thread until body bytes
-    # arrive; a 5s per-recv timeout drops a client that opened the
-    # request but never sent the body. Form parse mirrors consume_body.
+    # arrive; a per-recv timeout (Tep::BODY_READ_TIMEOUT) drops a client
+    # that opened the request but never sent the body. Form parse mirrors
+    # consume_body.
     def consume_body_via_io(io, client_fd, input = InputBuffer.new)
       return consume_chunks(io, client_fd, input, false) if chunked?
       cl = content_length
@@ -296,7 +297,7 @@ module Tep
       # this path the char/byte gap also cost a 5s wait per multibyte
       # body, waiting for bytes that had already arrived.
       while @raw_body.bytesize < cl
-        ready = io.wait_readable(5)
+        ready = io.wait_readable(Tep::BODY_READ_TIMEOUT)
         if ready.nil?
           return false   # timeout -- client never finished sending
         end
