@@ -1,13 +1,13 @@
 //! A syntactic declaration inventory for explicitly supplied Ruby or RBS.
 //!
 //! The projection uses the RBI reader's grammar: named namespaces, literal
-//! ancestry, constant names and aliases. It reads no files, executes no code
-//! and is not called by ingest, check or emission. Choosing locked sources
-//! and accounting for loading, conditional definitions and incomplete
-//! namespaces belong to a separate input policy, before these declarations
-//! can supply inference facts. An inventory is not proof a constant exists.
+//! ancestry, constant names and aliases. It reads no files and executes no code.
+//! The check-only input uses a boundary-aware Ruby projection that retains
+//! uncertainty about omitted effects. Source selection and loading policy
+//! belong to the caller. An inventory is not proof a constant exists.
 
-use ruby_prism::Node;
+use ruby_prism::{Node, Visit};
+use std::collections::BTreeSet;
 
 /// Project direct Ruby declarations from UTF-8 or US-ASCII source.
 ///
@@ -267,9 +267,979 @@ fn rbs_members<'a>(nodes: impl Iterator<Item = ruby_rbs::node::Node<'a>>, out: &
     }
 }
 
+/// Index-only placeholder, rewritten to an impossible Ruby name by the resolver.
+pub(crate) const OPAQUE_CONSTANTS: &str = "RoundhouseIncompleteConstantsA6";
+
+pub(crate) const RECEIVER_EFFECT: &str = "__roundhouse_constant_effect__";
+pub(crate) const MIXIN_OVERRIDE: &str = "__roundhouse_mixin_override__";
+pub(crate) const UNBOUNDED_EFFECT: &str = "__roundhouse_unbounded_constant_effect__";
+
+const NAMED_EFFECT: &str = "RoundhouseUncertainNameA8_";
+pub(crate) enum ConstantEffect {
+    All,
+    Name(crate::ident::Symbol),
+}
+pub(crate) fn constant_effect(name: &str) -> Option<ConstantEffect> {
+    if matches!(
+        name,
+        OPAQUE_CONSTANTS | "<roundhouse:incomplete-constant-namespace>"
+    ) {
+        return Some(ConstantEffect::All);
+    }
+    if let Some(name) = name
+        .strip_prefix("<roundhouse:uncertain-name:")
+        .and_then(|n| n.strip_suffix('>'))
+    {
+        return Some(ConstantEffect::Name(crate::ident::Symbol::new(name)));
+    }
+    let hex = name.strip_prefix(NAMED_EFFECT)?;
+    if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let name = String::from_utf8(bytes).ok()?;
+    Some(ConstantEffect::Name(crate::ident::Symbol::new(name)))
+}
+pub(crate) fn named_marker(name: &str) -> String {
+    format!(
+        "{NAMED_EFFECT}{}",
+        name.as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
+}
+fn literal_constant_name(node: &Node<'_>) -> Option<String> {
+    let name = super::util::symbol_value(node).or_else(|| super::util::string_value(node))?;
+    let mut chars = name.bytes();
+    if !chars.next()?.is_ascii_uppercase() || !chars.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    {
+        return None;
+    }
+    Some(name)
+}
+
+/// Project literal declarations and conservative barriers for omitted effects.
+/// `nil` represents an opaque value name, never a claim about its type.
+/// Loading remains unverified even for declarations retained in the inventory.
+/// Apply the same whole-file rejection policy as `read_ruby`.
+pub(crate) fn read_ruby_for_check(source: &[u8]) -> Result<String, String> {
+    ruby_encoding(source)?;
+    let parsed = super::prism::parse_silent(source);
+    if let Some(error) = parsed.errors().next() {
+        return Err(format!(
+            "Ruby syntax error: {}",
+            String::from_utf8_lossy(error.message())
+        ));
+    }
+    let node = parsed.node();
+    node.as_program_node().ok_or("expected a Ruby program")?;
+    let mut producer = RubyProducer(
+        String::new(),
+        vec![false],
+        false,
+        vec![false],
+        vec![BTreeSet::new()],
+        vec![BTreeSet::new()],
+    );
+    producer.visit(&node);
+    if producer.1[0] {
+        producer.0.push_str(&format!(
+            "class ::Object\ninclude ::{OPAQUE_CONSTANTS}\nend\n"
+        ));
+    } else {
+        for name in &producer.4[0] {
+            producer.0.push_str(&format!(
+                "class ::Object\ninclude ::{}\nend\n",
+                named_marker(name)
+            ));
+        }
+    }
+    Ok(producer.0)
+}
+
+// These contracts change method tables/visibility or class variables, not
+// constants. Arguments and blocks still get visited; spelling alone never
+// makes an arbitrary callback or computed argument harmless.
+fn declaration_call(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"public"
+            | b"private"
+            | b"protected"
+            | b"module_function"
+            | b"public_class_method"
+            | b"private_class_method"
+            | b"ruby2_keywords"
+            | b"attr"
+            | b"attr_reader"
+            | b"attr_writer"
+            | b"attr_accessor"
+            | b"alias_method"
+            | b"remove_method"
+            | b"undef_method"
+            | b"delegate"
+            | b"delegate_missing_to"
+            | b"class_attribute"
+            | b"mattr_reader"
+            | b"mattr_writer"
+            | b"mattr_accessor"
+            | b"cattr_reader"
+            | b"cattr_writer"
+            | b"cattr_accessor"
+    )
+}
+fn effect_contract(name: &[u8]) -> bool {
+    declaration_call(name)
+        || matches!(
+            name,
+            b"const_set"
+                | b"autoload"
+                | b"include"
+                | b"prepend"
+                | b"extend"
+                | b"respond_to?"
+                | b"method_defined?"
+                | b"private_method_defined?"
+                | b"protected_method_defined?"
+                | b"public_method_defined?"
+                | b"block_given?"
+        )
+}
+fn effect_hook(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"method_added"
+            | b"singleton_method_added"
+            | b"const_added"
+            | b"inherited"
+            | b"included"
+            | b"extended"
+            | b"prepended"
+            | b"append_features"
+            | b"prepend_features"
+            | b"extend_object"
+            | b"const_missing"
+    )
+}
+fn effect_free_call(node: &ruby_prism::CallNode<'_>) -> bool {
+    let name = node.name();
+    let implicit_self =
+        node.receiver().is_none() || node.receiver().is_some_and(|n| n.as_self_node().is_some());
+    if implicit_self
+        && (declaration_call(name.as_slice())
+            || matches!(
+                name.as_slice(),
+                b"respond_to?"
+                    | b"method_defined?"
+                    | b"private_method_defined?"
+                    | b"protected_method_defined?"
+                    | b"public_method_defined?"
+                    | b"block_given?"
+            ))
+    {
+        return true;
+    }
+    // Ordinary value calls (including #freeze on literals) stay uncertain:
+    // source code may have replaced even a core receiver's implementation.
+    false
+}
+
+// An initializer/receiver can mutate its enclosing namespace even when its
+// resulting value is serialized opaquely. Inspect syntax, never evaluate it.
+struct ValueEffects(bool, bool, bool, String);
+impl ValueEffects {
+    fn receiver(&mut self, receiver: Option<Node<'_>>, member: Option<&str>, method: &str) {
+        let target = match receiver {
+            None => "self".to_string(),
+            Some(node) if node.as_self_node().is_some() => "self".to_string(),
+            Some(node) => match constant(&node) {
+                Some(name) => name,
+                None => {
+                    self.unbounded();
+                    return;
+                }
+            },
+        };
+        let member = member.map_or("nil".to_string(), |name| format!("{name:?}"));
+        self.3.push_str(&format!("{target}.{method}({member})\n"));
+    }
+    fn unbounded(&mut self) {
+        self.3.push_str(&format!("::Object.{UNBOUNDED_EFFECT}()\n"));
+    }
+}
+impl<'pr> Visit<'pr> for ValueEffects {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        self.0 |= !effect_free_call(node);
+        if !effect_free_call(node) && node.receiver().is_some_and(|n| n.as_self_node().is_none()) {
+            let member = if matches!(node.name().as_slice(), b"const_set" | b"autoload") {
+                node.arguments()
+                    .and_then(|a| a.arguments().iter().next())
+                    .and_then(|n| literal_constant_name(&n))
+            } else {
+                None
+            };
+            self.receiver(node.receiver(), member.as_deref(), RECEIVER_EFFECT);
+        }
+        if node.name().as_slice() == b"alias_method" {
+            let method = node
+                .arguments()
+                .and_then(|a| a.arguments().iter().next())
+                .and_then(|n| super::util::symbol_value(&n));
+            if method
+                .as_ref()
+                .is_none_or(|name| mixin_method(name.as_bytes()))
+            {
+                self.receiver(node.receiver(), method.as_deref(), MIXIN_OVERRIDE);
+            }
+        }
+        if matches!(
+            node.name().as_slice(),
+            b"raise" | b"fail" | b"abort" | b"exit" | b"exit!" | b"exec" | b"throw"
+        ) && (node.receiver().is_none()
+            || node
+                .receiver()
+                .as_ref()
+                .and_then(constant)
+                .is_some_and(|name| name.trim_start_matches("::") == "Kernel"))
+        {
+            self.1 = true;
+        }
+        if let Some(receiver) = node.receiver() {
+            self.visit(&receiver);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+        }
+        if let Some(block) = node.block() {
+            self.visit(&block);
+        }
+    }
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        self.0 = true;
+        self.visit(&node.value());
+    }
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+        self.0 = true;
+        self.visit(&node.value());
+    }
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'pr>) {
+        self.0 = true;
+        self.visit(&node.value());
+    }
+    fn visit_constant_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantOperatorWriteNode<'pr>,
+    ) {
+        self.0 = true;
+        self.visit(&node.value());
+    }
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        self.0 = true;
+        self.visit(&node.value());
+    }
+    fn visit_constant_path_or_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOrWriteNode<'pr>,
+    ) {
+        self.0 = true;
+        self.visit(&node.value());
+    }
+    fn visit_constant_path_and_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathAndWriteNode<'pr>,
+    ) {
+        self.0 = true;
+        self.visit(&node.value());
+    }
+    fn visit_constant_path_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>,
+    ) {
+        self.0 = true;
+        self.visit(&node.value());
+    }
+    fn visit_constant_target_node(&mut self, _: &ruby_prism::ConstantTargetNode<'pr>) {
+        self.0 = true;
+    }
+    fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {
+        self.0 = true;
+        self.unbounded();
+    }
+    fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {
+        self.0 = true;
+        self.unbounded();
+    }
+    fn visit_singleton_class_node(&mut self, _: &ruby_prism::SingletonClassNode<'pr>) {
+        self.0 = true;
+        self.unbounded();
+    }
+    fn visit_yield_node(&mut self, _: &ruby_prism::YieldNode<'pr>) {
+        self.0 = true;
+    }
+    fn visit_return_node(&mut self, _: &ruby_prism::ReturnNode<'pr>) {
+        self.0 = true;
+        self.1 = true;
+    }
+    fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) {
+        self.0 = true;
+        self.1 = true;
+    }
+    fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) {
+        self.0 = true;
+        self.1 = true;
+    }
+    fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) {
+        self.0 = true;
+        self.1 = true;
+    }
+    fn visit_retry_node(&mut self, _: &ruby_prism::RetryNode<'pr>) {
+        self.0 = true;
+        self.1 = true;
+    }
+    fn visit_alias_method_node(&mut self, node: &ruby_prism::AliasMethodNode<'pr>) {
+        let method = super::util::symbol_value(&node.new_name());
+        if method
+            .as_ref()
+            .is_none_or(|name| mixin_method(name.as_bytes()))
+        {
+            self.receiver(None, method.as_deref(), MIXIN_OVERRIDE);
+        }
+        if super::util::symbol_value(&node.new_name())
+            .is_none_or(|name| effect_contract(name.as_bytes()))
+        {
+            self.0 = true;
+        }
+    }
+    fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        self.0 |= !self.2
+            || effect_hook(node.name().as_slice())
+            || effect_contract(node.name().as_slice());
+        if mixin_method(node.name().as_slice()) {
+            self.receiver(
+                node.receiver(),
+                Some(super::util::constant_id_str(&node.name())),
+                MIXIN_OVERRIDE,
+            );
+        }
+        if effect_hook(node.name().as_slice())
+            || effect_contract(node.name().as_slice())
+            || node.receiver().is_some_and(|n| n.as_self_node().is_none())
+        {
+            self.receiver(node.receiver(), None, RECEIVER_EFFECT);
+        }
+        if let Some(receiver) = node.receiver() {
+            self.visit(&receiver);
+        }
+    }
+}
+
+fn mixin_method(name: &[u8]) -> bool {
+    matches!(name, b"include" | b"prepend" | b"extend")
+}
+
+struct MixinOverrides(BTreeSet<String>);
+impl<'pr> Visit<'pr> for MixinOverrides {
+    fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {}
+    fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {}
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        if mixin_method(node.name().as_slice())
+            && node.receiver().is_none_or(|n| n.as_self_node().is_some())
+        {
+            self.0
+                .insert(String::from_utf8_lossy(node.name().as_slice()).into_owned());
+        }
+    }
+    fn visit_alias_method_node(&mut self, node: &ruby_prism::AliasMethodNode<'pr>) {
+        if let Some(name) = super::util::symbol_value(&node.new_name()) {
+            if mixin_method(name.as_bytes()) {
+                self.0.insert(name);
+            }
+        } else {
+            self.0
+                .extend(["include", "prepend", "extend"].map(String::from));
+        }
+    }
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if node.name().as_slice() == b"alias_method"
+            && node.receiver().is_none_or(|n| n.as_self_node().is_some())
+        {
+            if let Some(name) = node
+                .arguments()
+                .and_then(|a| a.arguments().iter().next())
+                .and_then(|n| super::util::symbol_value(&n))
+            {
+                if mixin_method(name.as_bytes()) {
+                    self.0.insert(name);
+                }
+            } else {
+                self.0
+                    .extend(["include", "prepend", "extend"].map(String::from));
+            }
+        }
+        if let Some(block) = node.block() {
+            self.visit(&block);
+        }
+    }
+}
+
+struct RubyProducer(
+    String,
+    Vec<bool>,
+    bool,
+    Vec<bool>,
+    Vec<BTreeSet<String>>,
+    Vec<BTreeSet<String>>,
+);
+
+impl RubyProducer {
+    fn opaque(&mut self) {
+        *self.1.last_mut().unwrap() = true;
+    }
+    fn receiver_effect(&mut self, receiver: Option<Node<'_>>, member: Option<&str>, method: &str) {
+        let target = match receiver {
+            None => "self".to_string(),
+            Some(node) if node.as_self_node().is_some() => "self".to_string(),
+            Some(node) => match constant(&node) {
+                Some(name) => name,
+                None => {
+                    self.0.push_str(&format!("::Object.{UNBOUNDED_EFFECT}()\n"));
+                    self.opaque();
+                    return;
+                }
+            },
+        };
+        let member = member.map_or("nil".to_string(), |name| format!("{name:?}"));
+        self.0.push_str(&format!("{target}.{method}({member})\n"));
+    }
+    fn end_scope(&mut self) {
+        self.5.pop();
+        self.3.pop();
+        let names = self.4.pop().unwrap();
+        if self.1.pop().unwrap() {
+            self.0.push_str(&format!("include ::{OPAQUE_CONSTANTS}\n"));
+        } else {
+            for name in names {
+                self.0
+                    .push_str(&format!("include ::{}\n", named_marker(&name)));
+            }
+        }
+        self.0.push_str("end\n");
+    }
+    fn body(&mut self, body: Option<Node<'_>>) {
+        if let Some(body) = body {
+            if let Some(statements) = body.as_statements_node() {
+                self.visit_statements_node(&statements);
+            } else {
+                self.opaque();
+            }
+        }
+    }
+    fn observe_value(&mut self, value: &Node<'_>) {
+        let mut effects = ValueEffects(false, false, false, String::new());
+        effects.visit(value);
+        self.0.push_str(&effects.3);
+        if effects.0 {
+            self.opaque();
+        }
+        self.2 |= effects.1;
+    }
+    fn value(&mut self, name: &str, value: Option<Node<'_>>) {
+        if let Some(value) = &value {
+            self.observe_value(value);
+        }
+        if self.2 {
+            return;
+        }
+        let value = value
+            .as_ref()
+            .and_then(constant)
+            .unwrap_or_else(|| "nil".into());
+        self.0.push_str(&format!("{name} = {value}\n"));
+    }
+}
+
+impl<'pr> Visit<'pr> for RubyProducer {
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        self.observe_value(&node.constant_path());
+        if self.2 {
+            return;
+        }
+        let Some(name) = constant(&node.constant_path()) else {
+            self.opaque();
+            return;
+        };
+        if let Some(parent) = node.superclass() {
+            self.observe_value(&parent);
+        }
+        if self.2 {
+            return;
+        }
+        self.0.push_str(&format!("class {name}"));
+        if let Some(parent) = node.superclass().as_ref().and_then(constant) {
+            self.0.push_str(&format!(" < {parent}"));
+        }
+        self.0.push('\n');
+        self.1.push(
+            node.superclass().is_some() && node.superclass().as_ref().and_then(constant).is_none(),
+        );
+        self.3.push(false);
+        self.4.push(BTreeSet::new());
+        self.5.push(BTreeSet::new());
+        self.body(node.body());
+        self.end_scope();
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        self.observe_value(&node.constant_path());
+        if self.2 {
+            return;
+        }
+        let Some(name) = constant(&node.constant_path()) else {
+            self.opaque();
+            return;
+        };
+        self.0.push_str(&format!("module {name}\n"));
+        self.1.push(false);
+        self.3.push(false);
+        self.4.push(BTreeSet::new());
+        self.5.push(BTreeSet::new());
+        self.body(node.body());
+        self.end_scope();
+    }
+
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        let name = node.name();
+        if mixin_method(name.as_slice()) {
+            if node.receiver().is_none_or(|n| n.as_self_node().is_some()) {
+                self.5
+                    .last_mut()
+                    .unwrap()
+                    .insert(String::from_utf8_lossy(name.as_slice()).into_owned());
+            }
+            self.receiver_effect(
+                node.receiver(),
+                Some(super::util::constant_id_str(&name)),
+                MIXIN_OVERRIDE,
+            );
+        }
+        if effect_hook(name.as_slice()) || effect_contract(name.as_slice()) {
+            self.receiver_effect(node.receiver(), None, RECEIVER_EFFECT);
+            if node.receiver().is_none_or(|n| n.as_self_node().is_some()) {
+                self.opaque();
+            }
+        } else if node.receiver().is_some_and(|n| n.as_self_node().is_none()) {
+            // Defining a singleton method can invoke the receiver's hooks.
+            self.receiver_effect(node.receiver(), None, RECEIVER_EFFECT);
+        }
+        if let Some(receiver) = node.receiver() {
+            self.observe_value(&receiver);
+        }
+    }
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        let receiver = node.expression();
+        let mut overrides = MixinOverrides(BTreeSet::new());
+        if let Some(body) = node.body() {
+            overrides.visit(&body);
+        }
+        for name in overrides.0 {
+            self.receiver_effect(Some(node.expression()), Some(&name), MIXIN_OVERRIDE);
+            if receiver.as_self_node().is_some() {
+                self.5.last_mut().unwrap().insert(name);
+            }
+        }
+        if receiver.as_self_node().is_none() {
+            self.receiver_effect(Some(node.expression()), None, RECEIVER_EFFECT);
+            return;
+        }
+        let mut effects = ValueEffects(false, false, true, String::new());
+        if let Some(body) = node.body() {
+            effects.visit(&body);
+        }
+        self.0.push_str(&effects.3);
+        if effects.0 {
+            self.opaque();
+        }
+        self.2 |= effects.1;
+    }
+    fn visit_alias_method_node(&mut self, node: &ruby_prism::AliasMethodNode<'pr>) {
+        let name = super::util::symbol_value(&node.new_name());
+        if name
+            .as_ref()
+            .is_none_or(|name| mixin_method(name.as_bytes()))
+        {
+            let methods: Vec<_> = name.clone().map_or_else(
+                || ["include", "prepend", "extend"].map(String::from).to_vec(),
+                |name| vec![name],
+            );
+            for method in methods {
+                self.5.last_mut().unwrap().insert(method.clone());
+                self.receiver_effect(None, Some(&method), MIXIN_OVERRIDE);
+            }
+        }
+        if name
+            .as_ref()
+            .is_none_or(|name| effect_contract(name.as_bytes()))
+        {
+            self.opaque();
+        }
+    }
+    fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+
+    fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
+        let mut overrides = MixinOverrides(BTreeSet::new());
+        overrides.visit_statements_node(node);
+        self.5.last_mut().unwrap().extend(overrides.0);
+        for statement in node.body().iter() {
+            if self.2 {
+                break;
+            }
+            if statement.as_return_node().is_some()
+                || statement.as_break_node().is_some()
+                || statement.as_next_node().is_some()
+                || statement.as_redo_node().is_some()
+                || statement.as_retry_node().is_some()
+            {
+                self.opaque();
+                self.2 = true;
+                break;
+            }
+            if let Some(call) = statement.as_call_node() {
+                let name = call.name();
+                let exits = matches!(
+                    name.as_slice(),
+                    b"raise" | b"fail" | b"abort" | b"exit" | b"exit!" | b"exec" | b"throw"
+                ) && (call.receiver().is_none()
+                    || call
+                        .receiver()
+                        .as_ref()
+                        .and_then(constant)
+                        .is_some_and(|name| name.trim_start_matches("::") == "Kernel"));
+                self.visit_call_node(&call);
+                if exits {
+                    self.2 = true;
+                    break;
+                }
+            } else if statement.as_class_node().is_some()
+                || statement.as_module_node().is_some()
+                || statement.as_constant_write_node().is_some()
+                || statement.as_constant_path_write_node().is_some()
+                || statement.as_constant_or_write_node().is_some()
+                || statement.as_constant_path_or_write_node().is_some()
+                || statement.as_constant_and_write_node().is_some()
+                || statement.as_constant_path_and_write_node().is_some()
+                || statement.as_constant_operator_write_node().is_some()
+                || statement.as_constant_path_operator_write_node().is_some()
+            {
+                self.visit(&statement);
+            } else if let Some(singleton) = statement.as_singleton_class_node() {
+                self.visit_singleton_class_node(&singleton);
+            } else if let Some(alias) = statement.as_alias_method_node() {
+                self.visit_alias_method_node(&alias);
+            } else if let Some(definition) = statement.as_def_node() {
+                self.visit_def_node(&definition);
+            } else {
+                // Inspect possible effects without promoting any names from
+                // guarded code. A conditional visibility/method declaration
+                // is harmless; any possible constant definition stays opaque.
+                let mut effects = ValueEffects(false, false, true, String::new());
+                effects.visit(&statement);
+                self.0.push_str(&effects.3);
+                if effects.0 {
+                    self.opaque();
+                }
+            }
+        }
+    }
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        let name = node.name();
+        if node.receiver().is_none()
+            && matches!(name.as_slice(), b"include" | b"prepend" | b"extend")
+            && !self
+                .5
+                .last()
+                .unwrap()
+                .contains(super::util::constant_id_str(&name))
+        {
+            let targets: Option<Vec<_>> = node
+                .arguments()
+                .map(|args| args.arguments().iter().map(|arg| constant(&arg)).collect())
+                .flatten();
+            if let Some(targets) = targets.filter(|targets| !targets.is_empty()) {
+                // Keep the argument group. Repeated single calls reverse its
+                // priority. Never retain a partial list with a dynamic arg.
+                if name.as_slice() == b"extend" {
+                    if targets
+                        .iter()
+                        .any(|n| n.trim_start_matches("::") == "ActiveSupport::Concern")
+                    {
+                        *self.3.last_mut().unwrap() = true;
+                    }
+                    // A custom extension can replace a nil-effect DSL method
+                    // on this namespace's singleton class.
+                    if targets
+                        .iter()
+                        .any(|n| n.trim_start_matches("::") != "ActiveSupport::Concern")
+                    {
+                        self.opaque();
+                    }
+                }
+                self.0.push_str(&format!(
+                    "{} {}\n",
+                    super::util::constant_id_str(&name),
+                    targets.join(", ")
+                ));
+                return;
+            }
+        }
+        if node.block().is_none()
+            && matches!(name.as_slice(), b"const_set" | b"autoload")
+            && let Some(args) = node.arguments()
+        {
+            let args: Vec<_> = args.arguments().iter().collect();
+            if args.len() == 2
+                && let Some(member) = literal_constant_name(&args[0])
+            {
+                let mut effects = ValueEffects(false, false, false, String::new());
+                effects.visit(&args[1]);
+                if !effects.0 {
+                    if node.receiver().is_none_or(|n| n.as_self_node().is_some()) {
+                        self.4.last_mut().unwrap().insert(member);
+                    } else {
+                        self.receiver_effect(node.receiver(), Some(&member), RECEIVER_EFFECT);
+                    }
+                    return;
+                }
+            }
+        }
+        if node.receiver().is_none()
+            && node.arguments().is_none()
+            && matches!(name.as_slice(), b"included" | b"prepended")
+            && *self.3.last().unwrap()
+            && let Some(block) = node.block().and_then(|n| n.as_block_node())
+        {
+            // Registration does not execute now. Check every possible branch
+            // for future constant effects without promoting any block names.
+            let mut effects = ValueEffects(false, false, true, String::new());
+            if let Some(body) = block.body() {
+                effects.visit(&body);
+            }
+            self.0.push_str(&effects.3);
+            if effects.0 {
+                self.opaque();
+            }
+            return;
+        }
+        if effect_free_call(node) && node.block().is_none() {
+            if name.as_slice() == b"alias_method"
+                && node.arguments().is_some_and(|args| {
+                    args.arguments()
+                        .iter()
+                        .next()
+                        .and_then(|n| super::util::symbol_value(&n))
+                        .is_some_and(|name| effect_contract(name.as_bytes()))
+                })
+            {
+                self.opaque();
+                if let Some(method) = node
+                    .arguments()
+                    .and_then(|a| a.arguments().iter().next())
+                    .and_then(|n| super::util::symbol_value(&n))
+                {
+                    if mixin_method(method.as_bytes()) {
+                        self.5.last_mut().unwrap().insert(method.clone());
+                        self.receiver_effect(node.receiver(), Some(&method), MIXIN_OVERRIDE);
+                    }
+                }
+            }
+            let mut effects = ValueEffects(false, false, true, String::new());
+            if let Some(receiver) = node.receiver() {
+                effects.visit(&receiver);
+            }
+            if let Some(args) = node.arguments() {
+                for arg in args.arguments().iter() {
+                    effects.visit(&arg);
+                }
+            }
+            self.0.push_str(&effects.3);
+            if effects.0 {
+                self.opaque();
+            }
+            self.2 |= effects.1;
+            return;
+        }
+        if node.receiver().is_some_and(|n| n.as_self_node().is_none()) {
+            self.receiver_effect(node.receiver(), None, RECEIVER_EFFECT);
+        }
+        let mut effects = ValueEffects(false, false, true, String::new());
+        effects.visit_call_node(node);
+        self.0.push_str(&effects.3);
+        // An arbitrary omitted call can also affect its lexical namespace.
+        // Bounded const_set/autoload calls returned above with a named effect.
+        self.opaque();
+        // Eval/autoload/const_set and arbitrary blocks may add constants.
+        // Their absence must not let lookup skip to a later app ancestor.
+    }
+
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        self.value(
+            super::util::constant_id_str(&node.name()),
+            Some(node.value()),
+        );
+    }
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+        self.observe_value(&node.value());
+        self.value(super::util::constant_id_str(&node.name()), None);
+    }
+    fn visit_constant_and_write_node(&mut self, _: &ruby_prism::ConstantAndWriteNode<'pr>) {
+        self.opaque();
+    }
+    fn visit_constant_operator_write_node(
+        &mut self,
+        _: &ruby_prism::ConstantOperatorWriteNode<'pr>,
+    ) {
+        self.opaque();
+    }
+    fn visit_constant_target_node(&mut self, node: &ruby_prism::ConstantTargetNode<'pr>) {
+        self.value(super::util::constant_id_str(&node.name()), None);
+    }
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        self.observe_value(&node.target().as_node());
+        self.observe_value(&node.value());
+        if let Some(name) = constant(&node.target().as_node()) {
+            self.value(&name, Some(node.value()));
+        } else {
+            self.opaque();
+        }
+    }
+    fn visit_constant_path_or_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOrWriteNode<'pr>,
+    ) {
+        self.observe_value(&node.target().as_node());
+        self.observe_value(&node.value());
+        if let Some(name) = constant(&node.target().as_node()) {
+            self.value(&name, None);
+        } else {
+            self.opaque();
+        }
+    }
+    fn visit_constant_path_and_write_node(
+        &mut self,
+        _: &ruby_prism::ConstantPathAndWriteNode<'pr>,
+    ) {
+        self.opaque();
+    }
+    fn visit_constant_path_operator_write_node(
+        &mut self,
+        _: &ruby_prism::ConstantPathOperatorWriteNode<'pr>,
+    ) {
+        self.opaque();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receiver_effects_retain_literal_ownership_and_unbounded_receivers() {
+        let named =
+            read_ruby_for_check(b"module Zork; module Mix; end; Mix.const_set(:TOKEN, 42); end")
+                .unwrap();
+        assert!(
+            named.contains(&format!("Mix.{RECEIVER_EFFECT}(\"TOKEN\")")),
+            "{named}"
+        );
+        assert!(
+            !named.contains(OPAQUE_CONSTANTS),
+            "a bounded name does not poison the enclosing namespace: {named}"
+        );
+        let other =
+            read_ruby_for_check(b"module Zork; module Mix; end; Mix.const_set(:OTHER, 42); end")
+                .unwrap();
+        assert!(other.contains(&format!("Mix.{RECEIVER_EFFECT}(\"OTHER\")")));
+        for effect in [
+            "Mix.autoload(:TOKEN, 'missing')",
+            "if true; Mix.const_set(:TOKEN, 42); end",
+            "HOLDER = Mix.const_set(:TOKEN, 42)",
+            "Mix.class_eval('TOKEN = 42')",
+            "def Mix.token; end",
+            "class << Mix; def token; end; end",
+        ] {
+            let text = read_ruby_for_check(
+                format!("module Zork; module Mix; end; {effect}; end").as_bytes(),
+            )
+            .unwrap();
+            assert!(
+                text.contains(&format!("Mix.{RECEIVER_EFFECT}")),
+                "{effect}: {text}"
+            );
+        }
+        let unknown =
+            read_ruby_for_check(b"module Zork; receiver().const_set(:TOKEN, 42); end").unwrap();
+        assert!(unknown.contains(UNBOUNDED_EFFECT), "{unknown}");
+    }
+
+    #[test]
+    fn overridden_and_aliased_mixin_calls_are_not_literal_ancestry() {
+        for method in ["include", "prepend", "extend"] {
+            let pure =
+                read_ruby_for_check(format!("module Mix; {method} Empty; end").as_bytes()).unwrap();
+            assert!(pure.lines().any(|line| line == format!("{method} Empty")));
+            for declaration in [
+                format!("def self.{method}(*); const_set(:TOKEN, 42); end"),
+                format!("alias_method :{method}, :custom"),
+                format!("alias {method} custom"),
+                format!("class << self; def {method}(*); end; end"),
+            ] {
+                let text = read_ruby_for_check(
+                    format!("module Mix; {declaration}; {method} Empty; end").as_bytes(),
+                )
+                .unwrap();
+                assert!(
+                    !text.lines().any(|line| line == format!("{method} Empty")),
+                    "{declaration}: {text}"
+                );
+                assert!(text.contains(MIXIN_OVERRIDE), "{declaration}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn check_projection_preserves_the_reader_rejection_policy_and_reasons() {
+        for source in [
+            b"# encoding: ISO-8859-1\nCAF\xe9 = 1\n".as_slice(),
+            b"# coding: ISO-8859-1\nASCII = 1\n",
+            b"#!/usr/bin/ruby\n# coding: Shift_JIS\nASCII = 1\n",
+            b"#! coding: ISO-8859-1\nASCII = 1\n",
+            b"#! coding: ISO-8859-1\n# encoding: UTF-8\nASCII = 1\n",
+            b"# vim: set fileencoding=ISO-8859-1 :\nASCII = 1\n",
+            b"class Before; end\nclass Broken <\n",
+        ] {
+            let reason = read_ruby(source).expect_err("reader rejects the whole file");
+            assert_eq!(read_ruby_for_check(source), Err(reason));
+        }
+        for source in [
+            "#!/usr/bin/ruby\n# encoding: UTF-8\nCAFé = 1\n",
+            "\u{feff}# encoding: UTF-8\nCAFé = 1\n",
+            "# coding: US-ASCII\nASCII = 1\n",
+        ] {
+            let output = read_ruby_for_check(source.as_bytes()).unwrap();
+            assert!(output.contains(if source.contains("CAFé") {
+                "CAFé = nil"
+            } else {
+                "ASCII = nil"
+            }));
+        }
+    }
 
     #[test]
     fn ruby_rejects_encoding_marked_shebang_without_second_header() {
