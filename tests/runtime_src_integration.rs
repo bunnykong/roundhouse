@@ -1290,7 +1290,12 @@ fn every_runtime_method_body_concretely_typed() {
     // same bulk-write and Relation-bind sites, +12 on main's count.
     // Combined with main e368e2ae: 911 + (900 - 899) = 912.
     // Integer query strings retain their one gradual Array element read.
-    const CEILING: usize = 912;
+    // MEASURED 918 on 2026-10-30 (on 911): a hash condition's boolean is
+    // cast through its column's type (`column_bound_value`), reading the
+    // condition's value and the model's column types untyped (+7 in
+    // active_record/relation.rb).
+    // Combined with measured main f3eda5be2: 917 + (912 - 911) = 918.
+    const CEILING: usize = 918;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

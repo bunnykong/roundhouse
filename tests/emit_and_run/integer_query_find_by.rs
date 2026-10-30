@@ -262,3 +262,34 @@ puts "integer query casts compose with Relation binds"
 fn integer_query_casts_compose_with_relation_binds() {
     assert_query_parity(app(), MODEL_BODY, RELATION_BINDS);
 }
+
+// Sam's integer-column boolean conversion runs before the String list
+// serializer; original cardinality, NULL and range arms still matter.
+const BOOLEAN_STRING_QUERIES: &str = r##"
+Widget.connection.execute("INSERT INTO widgets (id, number) VALUES (0, 0), (1, 1), (2, NULL), (7, 7)")
+cases = [
+  [true, [1], [0, 7]],
+  [false, [0], [1, 7]],
+  [[true, "x"], [1], [0, 7]],
+  [[false, "1suffix"], [0, 1], [7]],
+  [[true, false, "x"], [0, 1], [7]],
+  [[true, "x", nil], [1, 2], [0, 7]],
+  [[true, 0..0], [0, 1], [7]],
+  [[true, "9223372036854775808"], [1], [0, 7]]
+]
+cases.each do |value, positive, negative|
+  conditions = {"number" => value}
+  actual = [Widget.where(conditions).order(:id).pluck(:id), Widget.where.not(conditions).order(:id).pluck(:id)]
+  expected = [positive, negative]
+  raise "boolean/String composition #{value.inspect}: #{actual.inspect}, expected #{expected.inspect}" unless actual == expected
+  puts "#{value.inspect}: #{actual.inspect}"
+end
+combined = Widget.where(number: "1suffix").and(Widget.where(number: true)).order(:id).pluck(:id)
+raise "String/boolean conjunction: #{combined.inspect}" unless combined == [1]
+puts "String and boolean constraints compose"
+"##;
+
+#[test]
+fn integer_query_strings_keep_integer_boolean_casts() {
+    assert_query_parity(app(), MODEL_BODY, BOOLEAN_STRING_QUERIES);
+}

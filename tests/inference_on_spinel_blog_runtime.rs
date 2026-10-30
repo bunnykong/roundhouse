@@ -537,7 +537,18 @@ fn untyped_subexpressions_baseline() {
     // Combined with main e368e2ae: 1173 + (1095 - 1111) = 1157.
     // Retain the qualified integer parser's 16-site reduction alongside
     // the bulk-write and Relation-bind sites above.
-    const CEILING: usize = 1157;
+    // MEASURED 1192 on 2026-10-30 against main 3dfccb68 (1173): Relation's
+    // `and`/`and!` read the other relation's conditions and none (+10),
+    // `unscope_parts`/`unscope_part!` read the part names (+8), and `lock`
+    // reads its clause (+1). Their parameters are vars on this RBS-less
+    // probe; relation.rbs and connection.rbs type them for the RBS-paired gate.
+    // MEASURED 1209 on 2026-10-30 (on 1192): `and` refuses structurally
+    // different relations, as Rails does, and keeps the other's HAVINGs.
+    // `structurally_incompatible_with` reads the other relation's parts
+    // (+10), `and!` its HAVINGs and the check (+6), and `structural_values`
+    // its own list (+1). relation.rbs types them for the RBS-paired gate.
+    // Combined with measured main f3eda5be2: 1209 + (1157 - 1173) = 1193.
+    const CEILING: usize = 1193;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
