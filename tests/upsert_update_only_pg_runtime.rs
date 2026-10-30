@@ -74,7 +74,6 @@ const FILES: [(&str, &str); 7] = [
 ];
 
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn upsert_update_only_assigns_only_the_listed_columns_as_natively_on_postgresql() {
     let overlay = FILES.iter().fold(emit_and_run::empty_app(), |app, (path, text)| app.write(path, text));
     let (emitted, errors) = overlay.emit(roundhouse::project::BuildTarget::Ruby);

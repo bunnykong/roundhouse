@@ -31,8 +31,11 @@ module ActiveRecord
 
   class Result
     @rows: Array[Hash[String, untyped]]
+    @affected_rows: Integer
 
-    def initialize: (Array[Hash[String, untyped]] rows) -> void
+    def initialize: (Array[Hash[String, untyped]] rows, ?Integer affected_rows) -> void
+    def affected_rows: () -> Integer
+    def columns: () -> Array[String]
     def rows: () -> Array[Array[untyped]]
     def to_a: () -> Array[Hash[String, untyped]]
     def first: () -> Hash[String, untyped]?
@@ -119,9 +122,21 @@ module ActiveRecord
     def with_lock: (?(bool | String)? lock, ?isolation: untyped, ?requires_new: untyped, ?joinable: bool) { () -> untyped } -> untyped
     def self.delete_all: () -> Integer
     def self.update_counters: (Integer | String id, Hash[Symbol, untyped] counters) -> Integer
-    def self.upsert: (Hash[Symbol, untyped] attrs, ?unique_by: (String | Symbol | Array[Symbol]), ?on_duplicate: String?, ?returning: untyped, ?record_timestamps: bool?) -> Integer
+    def self.upsert: (Hash[Symbol | String, untyped] attrs, ?unique_by: (String | Symbol | Array[Symbol | String]), ?on_duplicate: String?, ?update_only: (String | Symbol | Array[Symbol | String])?, ?returning: untyped, ?record_timestamps: bool?) -> ActiveRecord::Result
     def self._conflict_predicate: (String columns) -> String
-    def self.upsert_all: (Array[Hash[Symbol, untyped]] rows, ?unique_by: (String | Symbol | Array[Symbol]), ?on_duplicate: String?, ?returning: untyped, ?record_timestamps: bool?) -> Integer
+    def self._unique_index_columns: (String name) -> String
+    def self._conflict_target: (String | Symbol | Array[Symbol | String] unique_by) -> Array[String]
+    def self._string_keyed_rows: (Array[Hash[Symbol | String, untyped]] rows) -> Array[Hash[String, untyped]]
+    def self._database_now_sql: () -> String
+    def self._same_value_sql: (String left, String right) -> String
+    def self._bulk_stamps: (Array[String] given, bool? record_timestamps) -> Array[Symbol]
+    def self.upsert_all: (Array[Hash[Symbol | String, untyped]] rows, ?unique_by: (String | Symbol | Array[Symbol | String]), ?on_duplicate: String?, ?update_only: (String | Symbol | Array[Symbol | String])?, ?returning: untyped, ?record_timestamps: bool?) -> ActiveRecord::Result
+    def self.insert_all: (Array[Hash[Symbol | String, untyped]] rows, ?unique_by: (String | Symbol | Array[Symbol | String])?, ?returning: untyped, ?record_timestamps: bool?) -> ActiveRecord::Result
+    def self.insert_all!: (Array[Hash[Symbol | String, untyped]] rows, ?returning: untyped, ?record_timestamps: bool?) -> ActiveRecord::Result
+    def self.insert: (Hash[Symbol | String, untyped] attrs, ?unique_by: (String | Symbol | Array[Symbol | String])?, ?returning: untyped, ?record_timestamps: bool?) -> ActiveRecord::Result
+    def self.insert!: (Hash[Symbol | String, untyped] attrs, ?returning: untyped, ?record_timestamps: bool?) -> ActiveRecord::Result
+    def self._returned_rows: (String sql) -> Array[Hash[String, untyped]]
+    def self._insert_rows: (Array[Hash[Symbol | String, untyped]] rows, bool skip_duplicates, (String | Symbol | Array[Symbol | String])? unique_by, untyped returning, bool? record_timestamps) -> ActiveRecord::Result
     def self.record_timestamps=: (bool value) -> bool
     def self.record_timestamps: () -> bool
     def stamps_timestamps?: () -> bool

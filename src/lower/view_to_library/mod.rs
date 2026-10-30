@@ -1084,6 +1084,18 @@ pub fn insert_db_stub(
         Symbol::from("database_path"),
         fn_sig(vec![], Ty::Str),
     );
+    // The adapter Rails reports ("sqlite3", "postgresql"): the runtime's
+    // bulk writes pick the database's SQL spelling by it.
+    db_info.class_methods.insert(
+        Symbol::from("adapter_name"),
+        fn_sig(vec![], Ty::Str),
+    );
+    // A write that returns rows (`INSERT … RETURNING`): a statement
+    // handle, read as `prepare`'s is.
+    db_info.class_methods.insert(
+        Symbol::from("exec_returning"),
+        fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Int),
+    );
     let hash_config = ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig"));
     let hash_config_methods = [
         ("database", Ty::Str),

@@ -233,3 +233,32 @@ fn query_cast_evidence_excludes_decorated_integer_columns() {
         assert!(!columns.contains(name), "{columns}");
     }
 }
+
+// Hash values are serialized before the bind marker is lifted. A
+// Relation used as a SQL placeholder already carries its typed predicates.
+const RELATION_BINDS: &str = r##"
+Widget.connection.execute("INSERT INTO widgets (id, number) VALUES (0, 0), (1, 7), (2, NULL)")
+expect_ids = ->(expected, relation) do
+  actual = relation.order(:id).pluck(:id)
+  raise "#{relation.to_sql}: #{actual.inspect}, expected #{expected.inspect}" unless actual == expected
+end
+value = ["7", "suffix"].join
+inner = Widget.where({"number" => value})
+expect_ids.call([1], Widget.where("widgets.id IN (?)", inner.select(:id)))
+expect_ids.call([1], Widget.where("widgets.id IN (:ids)", ids: inner.select(:id)))
+expect_ids.call([], Widget.where("widgets.id IN (?)", Widget.where(number: "not-an-export").select(:id)))
+expect_ids.call([2], Widget.where("widgets.id IN (?)", Widget.where(number: nil).select(:id)))
+raise "integer serialization missing" unless inner.to_sql.include?(" = 7")
+if ActiveRecord::Relation.respond_to?(:lift_binds)
+  lifted = ActiveRecord::Relation.lift_binds(inner.bound_sql)
+  raise "cast must precede integer binding: #{lifted.inspect}" unless lifted.drop(2) == ["i", "7"]
+  invalid = ActiveRecord::Relation.lift_binds(Widget.where(number: "not-an-export").bound_sql)
+  raise "invalid integer text bound" unless invalid.length == 2 && invalid[0].include?(" = NULL")
+end
+puts "integer query casts compose with Relation binds"
+"##;
+
+#[test]
+fn integer_query_casts_compose_with_relation_binds() {
+    assert_query_parity(app(), MODEL_BODY, RELATION_BINDS);
+}

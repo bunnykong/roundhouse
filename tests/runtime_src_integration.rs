@@ -1278,7 +1278,19 @@ fn every_runtime_method_body_concretely_typed() {
     // ActiveSupport::Subscriber; Subscriber#notify's listener calls count.
     // After merging main dfd6a874, keep the integer-query String test's
     // one gradual Array element read on top of upstream's 899 sites.
-    const CEILING: usize = 900;
+    // MEASURED 916 on 2026-10-30 (on 904): the bulk writes' rows are
+    // attribute Hashes whose values are whatever the app passes, so the
+    // String-keyed copy `upsert_all` and the new `insert_all` family make
+    // of them, and the values they escape, read untyped, as does a
+    // RETURNING row's value off `Db.column_value` (+10 in
+    // active_record/connection.rb); a `where` bind that may be a Relation
+    // is read untyped before its `to_sql` or its escape (+2 in
+    // active_record/relation.rb).
+    // MEASURED 911 on 2026-10-30 after merging main dfd6a874 (899): the
+    // same bulk-write and Relation-bind sites, +12 on main's count.
+    // Combined with main e368e2ae: 911 + (900 - 899) = 912.
+    // Integer query strings retain their one gradual Array element read.
+    const CEILING: usize = 912;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

@@ -1162,6 +1162,21 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    /// Does `of` or an ancestor define `method` class-side (a scope, a
+    /// `def self.…`, a runtime-declared class method)?
+    fn class_side_defines(&self, of: &ClassId, method: &Symbol) -> bool {
+        let mut current = Some(of.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return false };
+            let Some(cls) = self.classes().get(&id) else { return false };
+            if cls.class_methods.contains_key(method) {
+                return true;
+            }
+            current = cls.parent.clone();
+        }
+        false
+    }
+
     fn defines_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {
@@ -1725,6 +1740,29 @@ impl<'a> BodyTyper<'a> {
                     return Ty::Array {
                         elem: std::sync::Arc::new(Ty::Class { id: id.clone(), args: vec![].into() }),
                     };
+                }
+                // A model's class-side relation builder that no class in
+                // the chain defines (`Widget.includes(:gadget)`,
+                // `Widget.order(:id)`). The analyzer's registry seeds the
+                // catalog's builders onto every model; the registry the
+                // lowered bodies are typed against carries only what the
+                // runtime's `ActiveRecord::Base` declares (`where`, `all`),
+                // so a chain that started with any other builder lost its
+                // model and `find` answered `untyped`. Same answer as the
+                // analyzer, from the same catalog. Ahead of the walk, whose
+                // instance-method fallback would otherwise answer with a
+                // reader of the same name (`belongs_to :order`); a
+                // class-side definition anywhere in the chain still wins,
+                // and so does the reader for a zero-argument call (the
+                // rule above).
+                if !instance_receiver
+                    && self.is_model_class(Some(&Ty::Class { id: id.clone(), args: vec![].into() }))
+                    && !self.class_side_defines(id, method)
+                    && !(call_args.is_empty() && self.defines_instance_method(id, method))
+                    && let Some(entry) = crate::catalog::lookup(method.as_str(), crate::catalog::ReceiverContext::Class)
+                    && let Some(kind) = entry.return_kind
+                {
+                    return crate::analyze::instantiate_return_kind(kind, id);
                 }
                 // Class-side defs stay a fallback: a value typed as an instance may still be a class object (`@klass = Post`).
                 let instance_side = instance_receiver && self.defines_instance_method(id, method);

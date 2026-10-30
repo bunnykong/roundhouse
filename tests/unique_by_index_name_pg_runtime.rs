@@ -94,7 +94,6 @@ fn real_errors(errors: &[String]) -> Vec<&String> {
 }
 
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn unique_by_an_index_name_matches_native_rails_on_postgresql() {
     let files = files();
     let overlay = files.iter().fold(emit_and_run::empty_app(), |app, (path, text)| app.write(path, text));

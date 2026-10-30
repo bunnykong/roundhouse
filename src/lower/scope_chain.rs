@@ -2739,6 +2739,47 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
     found
 }
 
+/// The columns `<Model>.insert_all!(rows, returning: …)` reads back, when
+/// `returning:` is left out (the primary key) or is a literal column list.
+/// `None` declines the inlining.
+fn insert_all_bang_returning(arg: Option<&Expr>) -> Option<Vec<String>> {
+    match arg.map(|a| &*a.node) {
+        None => Some(vec!["id".to_string()]),
+        Some(ExprNode::Hash { entries, .. }) if entries.len() == 1 => {
+            let (k, v) = &entries[0];
+            let key_ok = matches!(&*k.node,
+                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "returning");
+            match (&*v.node, key_ok) {
+                (ExprNode::Array { elements, .. }, true) => elements
+                    .iter()
+                    .map(|e| match &*e.node {
+                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// True when `scope_chain` inlines `<recv>.insert_all(args)` /
+/// `insert_all!(args)`: `recv` names a model, as `const_model` reads it,
+/// and the call has the shape the inlining takes. The strict-target
+/// survey reports only the forms this declines, which reach the
+/// Ruby-family runtime's methods.
+pub fn inlines_insert_all(recv: &Expr, method: &str, args: &[Expr], has_block: bool, models: &HashSet<ClassId>) -> bool {
+    !has_block
+        && const_model(recv, models).is_some()
+        && match method {
+            "insert_all" => args.len() == 1,
+            "insert_all!" => (1..=2).contains(&args.len()) && insert_all_bang_returning(args.get(1)).is_some(),
+            _ => false,
+        }
+}
+
 /// True when `expr` calls `<Model>.insert_all(rows)` (or `insert_all!`). Gate for the
 /// call-site expansion in `rewrite_send`.
 pub fn mentions_model_insert_all(expr: &Expr, models: &HashSet<ClassId>) -> bool {
@@ -4602,26 +4643,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 // Only a literal column list (Strings or Symbols) lowers;
                 // anything else declines.
                 if method.as_str() == "insert_all!" && !args.is_empty() && args.len() <= 2 && block.is_none() {
-                    let returning: Option<Vec<String>> = match args.get(1).map(|a| &*a.node) {
-                        None => Some(vec!["id".to_string()]),
-                        Some(ExprNode::Hash { entries, .. }) if entries.len() == 1 => {
-                            let (k, v) = &entries[0];
-                            let key_ok = matches!(&*k.node,
-                                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "returning");
-                            match (&*v.node, key_ok) {
-                                (ExprNode::Array { elements, .. }, true) => elements
-                                    .iter()
-                                    .map(|e| match &*e.node {
-                                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
-                                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
-                                        _ => None,
-                                    })
-                                    .collect(),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    };
+                    let returning = insert_all_bang_returning(args.get(1));
                     if let Some(columns) = returning {
                         let attrs = Symbol::from("__attrs");
                         let rec = Symbol::from("__rec");

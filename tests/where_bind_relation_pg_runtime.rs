@@ -79,7 +79,6 @@ fn overlay() -> emit_and_run::Overlay {
 }
 
 #[test]
-#[ignore = "fork spec: postgresql"]
 fn a_relation_bind_is_its_sql_like_native_rails() {
     let (emitted, _errors) = overlay().emit(roundhouse::project::BuildTarget::Ruby);
     let Some((native, emitted_lines)) = pg_probe::native_and_emitted(

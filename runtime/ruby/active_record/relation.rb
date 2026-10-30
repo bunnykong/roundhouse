@@ -3183,7 +3183,7 @@ module ActiveRecord
       index = 0
       while index < parts.length - 1
         if index < args.length
-          result = result + ActiveRecord.adapter.escape_value(args[index])
+          result = result + bound_text(args[index])
         else
           result = result + "?"
         end
@@ -3216,7 +3216,7 @@ module ActiveRecord
           key = name.to_sym
           if binds.key?(key)
             value = binds[key]
-            out = out + (value.is_a?(Array) ? escape_list(value) : ActiveRecord.adapter.escape_value(value))
+            out = out + (value.is_a?(Array) ? escape_list(value) : bound_text(value))
             i = j
             next
           end
@@ -3225,6 +3225,14 @@ module ActiveRecord
         i += 1
       end
       out
+    end
+
+    # One bind's SQL text, as Rails' `replace_bind_variable` writes it: a
+    # Relation is its own SELECT (`where("tier IN (?)", Tier.where(…)
+    # .select(:name))`), any other value its escaped literal.
+    def bound_text(value)
+      return value.to_sql if value.is_a?(Relation)
+      ActiveRecord.adapter.escape_value(value)
     end
 
     def named_bind_start?(ch)
