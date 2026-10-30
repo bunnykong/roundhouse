@@ -50,6 +50,11 @@ fn ruby_encoding(source: &[u8]) -> Result<(), String> {
         .split(|byte| *byte == b'\n');
     let first = lines.next().unwrap_or_default();
     let header = if first.starts_with(b"#!") {
+        // Prism can still read a non-Ruby shebang as an encoding comment.
+        // Reject its encoding marker before a second line can mask it.
+        if encoding_marker(first) {
+            return Err("unsupported Ruby source encoding declaration in shebang".into());
+        }
         lines.next().unwrap_or_default()
     } else {
         first
@@ -83,17 +88,20 @@ fn ruby_encoding(source: &[u8]) -> Result<(), String> {
     // Prism also accepts fallback forms (for example Vim's fileencoding=)
     // which it does not expose as magic comments. Reject such an unclassified
     // header instead of silently projecting legacy bytes as UTF-8 names.
-    let encoding_marker = header.windows(6).enumerate().any(|(offset, word)| {
+    if !declared && encoding_marker(header) {
+        return Err("unsupported Ruby source encoding comment; use an explicit UTF-8 or US-ASCII declaration".into());
+    }
+    Ok(())
+}
+
+fn encoding_marker(header: &[u8]) -> bool {
+    header.windows(6).enumerate().any(|(offset, word)| {
         word.eq_ignore_ascii_case(b"coding")
             && matches!(
                 header[offset + 6..].trim_ascii_start().first(),
                 Some(b':' | b'=')
             )
-    });
-    if !declared && encoding_marker {
-        return Err("unsupported Ruby source encoding comment; use an explicit UTF-8 or US-ASCII declaration".into());
-    }
-    Ok(())
+    })
 }
 
 fn constant(node: &Node<'_>) -> Option<String> {
@@ -262,6 +270,57 @@ fn rbs_members<'a>(nodes: impl Iterator<Item = ruby_rbs::node::Node<'a>>, out: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ruby_rejects_encoding_marked_shebang_without_second_header() {
+        let source = "#! coding: ISO-8859-1\nCAFé = 1\n";
+        assert_eq!(ruby_prism::parse(source.as_bytes()).errors().count(), 0);
+        let reason = read_ruby(source.as_bytes())
+            .expect_err("encoding-marked shebang must reject the whole input");
+        assert!(
+            reason.contains("encoding"),
+            "rejection must explain the encoding: {reason}"
+        );
+    }
+
+    #[test]
+    fn ruby_rejects_encoding_marked_shebang_before_second_utf8_header() {
+        let source = "#! coding: ISO-8859-1\n# encoding: UTF-8\nCAFé = 1\n";
+        assert_eq!(ruby_prism::parse(source.as_bytes()).errors().count(), 0);
+        let reason = read_ruby(source.as_bytes())
+            .expect_err("a second-line UTF-8 comment must not mask the first encoding");
+        assert!(
+            reason.contains("encoding"),
+            "rejection must explain the encoding: {reason}"
+        );
+    }
+
+    #[test]
+    fn ruby_shebang_encoding_controls_preserve_names() {
+        for source in [
+            "#! coding: ISO-8859-1\n# encoding: ISO-8859-1\nCAFé = 1\n",
+            "#!/usr/bin/ruby\n# encoding: ISO-8859-1\nCAFé = 1\n",
+        ] {
+            let reason = read_ruby(source.as_bytes())
+                .expect_err("legacy encoding comments must reject the whole input");
+            assert!(
+                reason.contains("encoding"),
+                "rejection must explain the encoding: {reason}"
+            );
+        }
+        for source in [
+            "#!/usr/bin/ruby\nCAFé = 1\n",
+            "#!/usr/bin/ruby\n# encoding: UTF-8\nCAFé = 1\n",
+            "# encoding: UTF-8\nCAFé = 1\n",
+            "\u{feff}# encoding: UTF-8\nCAFé = 1\n",
+        ] {
+            assert_eq!(read_ruby(source.as_bytes()).unwrap(), "CAFé = nil\n");
+        }
+        assert_eq!(
+            read_ruby(b"#!/usr/bin/ruby\n# encoding: US-ASCII\nASCII = 1\n").unwrap(),
+            "ASCII = nil\n"
+        );
+    }
 
     #[test]
     fn rbs_interface_mixins_do_not_become_runtime_ancestors() {
