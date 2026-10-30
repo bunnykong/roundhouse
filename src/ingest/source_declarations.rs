@@ -9,21 +9,91 @@
 
 use ruby_prism::Node;
 
-/// Project direct Ruby declarations, rejecting the entire file on syntax errors.
+/// Project direct Ruby declarations from UTF-8 or US-ASCII source.
 ///
-/// Method bodies, blocks, conditional declarations and singleton scopes are
-/// omitted. Value expressions become `nil` placeholders for a constant name,
-/// not claims about its type; consumers must treat those values as opaque.
-pub fn read_ruby(source: &[u8]) -> Option<String> {
+/// Reject the whole input with a reason on syntax errors, non-UTF-8 bytes or
+/// unsupported encoding declarations. No partial inventory or replacement
+/// characters are returned. Callers must retain the rejection reason.
+///
+/// Method bodies, blocks, conditionals, singleton scopes, computed parents,
+/// multiple assignments, parenthesized assignments, plain `begin` wrappers,
+/// `self.include` and `const_set` are omitted. Factory assignments keep only
+/// an opaque constant name. Value expressions become `nil` placeholders,
+/// not claims about their type; consumers must treat those values as opaque.
+pub fn read_ruby(source: &[u8]) -> Result<String, String> {
+    ruby_encoding(source)?;
     let parsed = super::prism::parse_silent(source);
-    if parsed.errors().next().is_some() {
-        return None;
+    if let Some(error) = parsed.errors().next() {
+        return Err(format!(
+            "Ruby syntax error: {}",
+            String::from_utf8_lossy(error.message())
+        ));
     }
     let program = parsed.node();
-    let program = program.as_program_node()?;
+    let program = program.as_program_node().ok_or("expected a Ruby program")?;
     let mut out = String::new();
     ruby_statements(&program.statements(), &mut out);
-    Some(out)
+    Ok(out)
+}
+
+fn ruby_encoding(source: &[u8]) -> Result<(), String> {
+    std::str::from_utf8(source).map_err(|error| {
+        format!(
+            "non-UTF-8 Ruby source at byte {} is not supported",
+            error.valid_up_to()
+        )
+    })?;
+    // Only the first line, or the line after a shebang, can set Ruby's encoding.
+    let mut lines = source
+        .strip_prefix(b"\xef\xbb\xbf")
+        .unwrap_or(source)
+        .split(|byte| *byte == b'\n');
+    let first = lines.next().unwrap_or_default();
+    let header = if first.starts_with(b"#!") {
+        lines.next().unwrap_or_default()
+    } else {
+        first
+    };
+    let header = header.trim_ascii_start();
+    if !header.starts_with(b"#") {
+        return Ok(());
+    }
+    // Let Prism interpret the supported spellings rather than decoding names
+    // using a different encoding from the source. Parse only this header so a
+    // later, ineffective encoding comment cannot mask the active declaration.
+    let parsed = ruby_prism::parse(header);
+    let mut declared = false;
+    for comment in parsed.magic_comments() {
+        if comment.key().eq_ignore_ascii_case(b"encoding")
+            || comment.key().eq_ignore_ascii_case(b"coding")
+        {
+            declared = true;
+            let encoding = comment.value();
+            if ![b"UTF-8".as_slice(), b"UTF8", b"US-ASCII", b"ASCII"]
+                .iter()
+                .any(|supported| encoding.eq_ignore_ascii_case(supported))
+            {
+                return Err(format!(
+                    "unsupported Ruby source encoding {}; only UTF-8 and US-ASCII are supported",
+                    String::from_utf8_lossy(encoding)
+                ));
+            }
+        }
+    }
+    // Prism also accepts fallback forms (for example Vim's fileencoding=)
+    // which it does not expose as magic comments. Reject such an unclassified
+    // header instead of silently projecting legacy bytes as UTF-8 names.
+    let encoding_marker = header.windows(6).enumerate().any(|(offset, word)| {
+        word.eq_ignore_ascii_case(b"coding")
+            && matches!(
+                header[offset + 6..].trim_ascii_start().first(),
+                Some(b':' | b'=')
+            )
+    });
+    if !declared && encoding_marker {
+        return Err("unsupported Ruby source encoding comment; use an explicit UTF-8 or US-ASCII declaration".into());
+    }
+    Ok(())
 }
 
 fn constant(node: &Node<'_>) -> Option<String> {
@@ -109,9 +179,18 @@ fn ruby_statements(body: &ruby_prism::StatementsNode<'_>, out: &mut String) {
 /// Project namespace declarations from an explicitly supplied RBS contract.
 ///
 /// Method types remain the existing signature reader's responsibility.
-/// Interfaces and type aliases do not declare Ruby constants.
+/// Interfaces and their mixins, and type aliases, do not declare Ruby constants.
+/// Reject any `use` directive: erasing an import could change the binding of a
+/// superclass, mixin or alias. Import resolution belongs to a future policy.
 pub fn read_rbs(source: &str) -> Result<String, String> {
     let parsed = ruby_rbs::node::parse(source)?;
+    if parsed
+        .directives()
+        .iter()
+        .any(|node| matches!(node, ruby_rbs::node::Node::Use(_)))
+    {
+        return Err("RBS `use` imports are not supported by the declaration reader".into());
+    }
     let mut out = String::new();
     rbs_members(parsed.declarations().iter(), &mut out);
     Ok(out)
@@ -135,6 +214,14 @@ fn rbs_name(name: &ruby_rbs::node::TypeNameNode<'_>) -> String {
     )
 }
 
+fn rbs_mixin(keyword: &str, name: &ruby_rbs::node::TypeNameNode<'_>, out: &mut String) {
+    // RBS interface names start with `_`; they are not Ruby module constants,
+    // regardless of qualification or generic arguments.
+    if !name.name().as_str().starts_with('_') {
+        out.push_str(&format!("{keyword} {}\n", rbs_name(name)));
+    }
+}
+
 fn rbs_members<'a>(nodes: impl Iterator<Item = ruby_rbs::node::Node<'a>>, out: &mut String) {
     use ruby_rbs::node::Node;
     for node in nodes {
@@ -154,9 +241,9 @@ fn rbs_members<'a>(nodes: impl Iterator<Item = ruby_rbs::node::Node<'a>>, out: &
                 out.push_str("end\n");
             }
             Node::Constant(value) => out.push_str(&format!("{} = nil\n", rbs_name(&value.name()))),
-            Node::Include(edge) => out.push_str(&format!("include {}\n", rbs_name(&edge.name()))),
-            Node::Prepend(edge) => out.push_str(&format!("prepend {}\n", rbs_name(&edge.name()))),
-            Node::Extend(edge) => out.push_str(&format!("extend {}\n", rbs_name(&edge.name()))),
+            Node::Include(edge) => rbs_mixin("include", &edge.name(), out),
+            Node::Prepend(edge) => rbs_mixin("prepend", &edge.name(), out),
+            Node::Extend(edge) => rbs_mixin("extend", &edge.name(), out),
             Node::ClassAlias(alias) => out.push_str(&format!(
                 "{} = {}\n",
                 rbs_name(&alias.new_name()),
@@ -175,6 +262,133 @@ fn rbs_members<'a>(nodes: impl Iterator<Item = ruby_rbs::node::Node<'a>>, out: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rbs_interface_mixins_do_not_become_runtime_ancestors() {
+        let source = r#"
+            interface _Readable
+              def read: () -> String
+            end
+            interface _Generic[A]
+              def read: () -> A
+            end
+            module Features[A]
+            end
+            module Before
+            end
+            module ClassMethods
+            end
+            class Client
+              include _Readable
+              include ::_Readable
+              include Lib::_Readable
+              include ::Lib::_Readable
+              include _Generic[String]
+              include ::Lib::_Generic[String]
+              extend _Readable
+              extend ::_Readable
+              extend Lib::_Readable
+              extend ::Lib::_Generic[String]
+              include Features[String]
+              prepend Before
+              extend ClassMethods
+            end
+            class After
+            end
+        "#;
+        let output = read_rbs(source).unwrap();
+        let parsed = ruby_prism::parse(output.as_bytes());
+        assert_eq!(parsed.errors().count(), 0, "projection must be valid Ruby");
+        drop(parsed);
+        assert_eq!(
+            output,
+            concat!(
+                "module Features\nend\nmodule Before\nend\nmodule ClassMethods\nend\n",
+                "class Client\ninclude Features\nprepend Before\nextend ClassMethods\nend\nclass After\nend\n"
+            )
+        );
+        let mut boundary = crate::gem_boundary::GemBoundary::default();
+        super::super::rbi::read_rbi(output.as_bytes(), "library", &mut boundary);
+        assert!(boundary.classes.keys().any(|id| id.0.as_str() == "After"));
+        let index = crate::analyze::definition_index(&[crate::span::SourceFile {
+            path: "interfaces.rb".into(),
+            text: output,
+        }]);
+        assert_eq!(index.files["After"], ["interfaces.rb"]);
+        assert!(
+            index.ancestors["Client"]
+                .iter()
+                .any(|name| &**name == "Features")
+        );
+        assert!(
+            index.ancestors["Client"]
+                .iter()
+                .all(|name| !name.contains("_Readable"))
+        );
+    }
+
+    #[test]
+    fn rbs_explicit_imports_are_rejected_before_projecting_bindings() {
+        for source in [
+            "use Lib::Base as Parent\nmodule Lib\nclass Base\nend\nend\nclass Parent\nend\nclass Child < Parent\nend\n",
+            "use Lib::Features as Features\nclass Client\ninclude Features\nend\n",
+            "use Lib::Base as Parent\nclass Alias = Parent\n",
+            "use Lib::Features as Features\nmodule Alias = Features\n",
+        ] {
+            let reason = read_rbs(source).expect_err("imports cannot be silently erased");
+            assert!(
+                reason.contains("use"),
+                "rejection must explain the unsupported import: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn rbs_wildcard_imports_are_rejected_before_projecting_bindings() {
+        let reason = read_rbs("use Lib::*\nclass Child < Base\nend\n")
+            .expect_err("wildcard imports cannot be silently erased");
+        assert!(
+            reason.contains("use"),
+            "rejection must explain the unsupported import: {reason}"
+        );
+    }
+
+    #[test]
+    fn ruby_legacy_encoding_is_rejected_without_panicking() {
+        let source = b"# encoding: ISO-8859-1\nCAF\xe9 = 1\n";
+        assert_eq!(
+            ruby_prism::parse(source).errors().count(),
+            0,
+            "valid Ruby control"
+        );
+        let result = std::panic::catch_unwind(|| read_ruby(source))
+            .expect("unsupported source encodings must not panic");
+        assert!(
+            format!("{result:?}").contains("non-UTF-8"),
+            "rejection must retain its reason"
+        );
+        assert_eq!(
+            read_ruby("# encoding: UTF-8\nCAFé = 1\n".as_bytes()).unwrap(),
+            "CAFé = nil\n"
+        );
+        for source in [
+            "# coding: ISO-8859-1\nASCII = 1\n",
+            "#!/usr/bin/ruby\n# -*- coding: Shift_JIS -*-\nASCII = 1\n",
+            "# vim: set fileencoding=ISO-8859-1 :\nCAFé = 1\n",
+            "# this file uses coding=ISO-8859-1\nCAFé = 1\n# encoding: UTF-8\n",
+        ] {
+            let reason = format!("{:?}", read_ruby(source.as_bytes()));
+            assert!(
+                reason.contains("unsupported Ruby source encoding"),
+                "rejection must explain the encoding: {reason}"
+            );
+        }
+        assert_eq!(
+            read_ruby(b"# coding: US-ASCII\nASCII = 1\n").unwrap(),
+            "ASCII = nil\n"
+        );
+        assert_eq!(read_ruby("CAFé = 1\n".as_bytes()).unwrap(), "CAFé = nil\n");
+    }
 
     #[test]
     fn ruby_keeps_namespace_paths_ancestry_aliases_and_opaque_values() {
@@ -221,7 +435,7 @@ mod tests {
         "#;
         // A dynamic constant assignment inside a method is invalid Ruby;
         // reject syntax errors rather than retaining Prism's recovery tree.
-        assert!(read_ruby(source).is_none());
+        assert!(read_ruby(source).is_err());
         let valid = String::from_utf8(source.to_vec())
             .unwrap()
             .replace("METHOD_BODY = 1", "raise 'method body'");
@@ -233,8 +447,8 @@ mod tests {
 
     #[test]
     fn ruby_syntax_errors_do_not_leave_partial_declarations() {
-        assert!(read_ruby(b"module Valid; end\nclass Broken <").is_none());
-        assert_eq!(read_ruby(b""), Some(String::new()));
+        assert!(read_ruby(b"module Valid; end\nclass Broken <").is_err());
+        assert_eq!(read_ruby(b""), Ok(String::new()));
     }
 
     #[test]
