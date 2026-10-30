@@ -28,6 +28,24 @@
 # per-target FFI and this is pure logic over the union — so it belongs
 # in the transpiled runtime rather than in twelve hand-written copies.
 module Params
+  def self.expect_array(params, key, fields, scalar_array_fields)
+    children = {}
+    modes = {}
+    scalar_array_fields.each do |field|
+      children[field] = Params.no_fields
+      modes[field] = "scalars"
+    end
+    out = []
+    value = params.fetch(key, nil)
+    if value.is_a?(Array)
+      value.each do |item|
+        out.push(Params.filtered_values(item, fields, children, modes)) if item.is_a?(Hash)
+      end
+    end
+    raise(ActionController::ParameterMissing.new(key)) if out.empty?
+    out
+  end
+
   def self.filtered_values(sub, fields, children, modes)
     filtered = Params.allowed_scalars(sub, fields)
     children.each do |key, allowed|

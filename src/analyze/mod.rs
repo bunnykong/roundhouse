@@ -555,6 +555,10 @@ impl Analyzer {
             // backed by something other than a schema column, so absent
             // from `model.attributes` above.
             register_ar_attributes(&model.body, &mut cls.instance_methods);
+            // Untyped, not the expression's type: the value is whatever the driver returns.
+            for name in crate::lower::model_to_library::select_aliases::reader_names(model) {
+                cls.instance_methods.entry(name).or_insert(Ty::Untyped);
+            }
             // Plain `attr_accessor :previewing, :vote, …` virtual attributes:
             // real methods at runtime, absent from the schema, untyped. Register
             // reader/writer as gradual (`Untyped`) so dispatch resolves them.

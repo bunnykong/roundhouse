@@ -1,4 +1,5 @@
 module Params
+  def self.expect_array: (Hash[String, Roundhouse::ParamValue], String, Array[String], Array[String]) -> Array[Hash[String, Roundhouse::ParamValue]]
   def self.filtered_values: (Hash[String, Roundhouse::ParamValue], Array[String], Hash[String, Array[String]], Hash[String, String]) -> Hash[String, Roundhouse::ParamValue]
   def self.nested_key: (Roundhouse::ParamValue | Symbol | Range[Integer]) -> (Roundhouse::ParamValue | Range[Integer])
   def self.nested_lookup: (Roundhouse::ParamValue, Roundhouse::ParamValue | Symbol | Range[Integer]) -> Roundhouse::ParamValue

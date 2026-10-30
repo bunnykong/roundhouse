@@ -453,6 +453,7 @@ pub(super) fn ingest_model_with_enum_constants(
         parent,
         parent_span,
         sti_subclass_names: Vec::new(),
+        select_aliases: Vec::new(),
         i18n: Default::default(),
         table: TableRef(Symbol::from(table_name)),
         primary_key,

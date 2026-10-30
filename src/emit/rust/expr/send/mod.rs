@@ -296,7 +296,9 @@ pub(super) fn emit_send(
             _ => false,
         };
         if recv_is_option {
-            return format!("{}.map(|v| v.to_string()).unwrap_or_default()", emit_expr(r));
+            // `.as_ref()` borrows: a param read again later (a partial
+            // handed the caller's `notice`) must not be moved by `map`.
+            return format!("{}.as_ref().map(|v| v.to_string()).unwrap_or_default()", emit_expr(r));
         }
     }
     // Static-method routing: `self.method(args)` where `method` was

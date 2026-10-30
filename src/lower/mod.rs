@@ -220,6 +220,7 @@ pub mod typing;
 pub mod validations;
 pub mod view;
 pub mod view_buffer_passing;
+pub mod view_instrumentation;
 pub mod tag_block_passing;
 pub mod lazy_model_state;
 pub(crate) mod eager_load;

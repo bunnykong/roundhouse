@@ -103,10 +103,11 @@ fn backreference_constraint_refuses_the_whole_route() {
     );
 }
 
-/// lobsters' domain routes: a lookahead keeps `example.com` whole while
-/// a trailing `.json`/`.rss` stays the format.
+/// lobsters' origin routes: a greedy body before the lookahead (it
+/// crosses `/`), which the segment subset leaves out. The lazy domain form
+/// is served (`route_format_lookahead`).
 const LOOKAHEAD_DOMAIN: &str = r#"
-  constraints :id => /([^\/]+?)(?=\.json|\.rss|$|\/)/ do
+  constraints :id => /(.+)(?=\.json|\.rss|$|\/)/ do
     get "/domains/:id" => "widgets#show", :as => "domain"
   end
 "#;

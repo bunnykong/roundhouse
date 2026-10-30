@@ -86,6 +86,10 @@ pub struct App {
     /// otherwise → here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library_classes: Vec<LibraryClass>,
+    /// Framework calls still use their lowered ABI; native argument
+    /// preservation requires a source library declaration.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_library_keywords: bool,
     /// Each gem-source file whose top level runs more than declarations
     /// when Ruby loads it (`ingest::library_class::file_program`): its
     /// declarations, statements and requires, in source order. The Ruby
@@ -1155,6 +1159,7 @@ impl App {
             i18n_table_sites: Vec::new(),
             models: Vec::new(),
             library_classes: Vec::new(),
+            native_library_keywords: false,
             file_programs: Vec::new(),
             boot_gem_entries: Vec::new(),
             controllers: Vec::new(),

@@ -121,15 +121,40 @@ pub struct FlatRoute {
 /// refused route as a located `unsupported` (`refused_route_diagnostics`).
 fn compile_seg_patterns(
     other_constraints: &[(String, String)],
+    path: &str,
 ) -> (Vec<(String, String)>, Option<(String, String)>) {
     let mut out = Vec::with_capacity(other_constraints.len());
+    let mut suffixes: Vec<String> = Vec::new();
     for (name, rx) in other_constraints {
         match crate::lower::segment_pattern::compile(rx) {
             Some(pattern) => out.push((name.clone(), pattern)),
-            None => return (Vec::new(), Some((name.clone(), rx.clone()))),
+            None => match crate::lower::segment_pattern::split_format_lookahead(rx)
+                .and_then(|(body, exts)| Some((crate::lower::segment_pattern::compile(&body)?, exts)))
+            {
+                Some((pattern, exts)) => {
+                    out.push((name.clone(), pattern));
+                    // Only a param the path ends in: one followed by `/` is stopped there by the lookahead, and the format is another segment's.
+                    if last_segment_param(path) == Some(name.as_str()) {
+                        suffixes.extend(exts);
+                    }
+                }
+                None => return (Vec::new(), Some((name.clone(), rx.clone()))),
+            },
+        }
+    }
+    if !suffixes.is_empty() {
+        match crate::lower::segment_pattern::compile(&suffixes.join("|")) {
+            Some(pattern) => out.push(("format_suffix".to_string(), pattern)),
+            None => return (Vec::new(), Some(("format_suffix".to_string(), suffixes.join("|")))),
         }
     }
     (out, None)
+}
+
+/// The param a route's path ends in (`/domains/:id` → `id`).
+fn last_segment_param(path: &str) -> Option<&str> {
+    let last = path.trim_end_matches('/').rsplit('/').next()?;
+    last.strip_prefix(':')
 }
 
 /// Add a route's `(.:format)` requirement (`dialect::FORMAT_REQUIREMENT`)
@@ -615,7 +640,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // that advertises `[^@/.]+` but can't actually check
                 // it is exactly the original bug.
                 let (seg_patterns, refused) =
-                    with_format_requirement(constraints_map, compile_seg_patterns(&constraints));
+                    with_format_requirement(constraints_map, compile_seg_patterns(&constraints, &vpath));
                 out.push(FlatRoute {
                     method: method.clone(),
                     source_path: full_path.clone(),
@@ -860,7 +885,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // requirement outside the supported subset refuses
                 // this action's route rather than serve it unenforced.
                 let (seg_patterns, refused) =
-                    with_format_requirement(resource_constraints, compile_seg_patterns(&other_constraints));
+                    with_format_requirement(resource_constraints, compile_seg_patterns(&other_constraints, &full_path));
                 out.push(FlatRoute {
                     method: method.clone(),
                     source_path: full_path.clone(),

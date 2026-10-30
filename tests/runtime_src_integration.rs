@@ -1270,7 +1270,15 @@ fn every_runtime_method_body_concretely_typed() {
     // array_with_ranges_predicate changes (4 -> 5): its String test
     // reads an element of the existing Array[untyped]. Other methods
     // are unchanged; the full-context zero-unresolved gate still passes.
-    const CEILING: usize = 905;
+    // MEASURED 893 on 2026-10-30: ActiveSupport::Notifications keeps typed
+    // Subscriber records, not `[pattern, listener]` Arrays, so publish and
+    // listening? read them typed; only the listener itself stays gradual.
+    // MEASURED 899 on 2026-10-30 (CI run 41007832906): 893 was taken while
+    // the rbs named Subscriber unqualified, which resolved to a missing
+    // ActiveSupport::Subscriber; Subscriber#notify's listener calls count.
+    // After merging main dfd6a874, keep the integer-query String test's
+    // one gradual Array element read on top of upstream's 899 sites.
+    const CEILING: usize = 900;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

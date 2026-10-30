@@ -112,12 +112,12 @@ fn the_renders_that_already_worked_emit_unchanged() {
     assert!(errors.is_empty(), "{errors:#?}");
     let view = |name: &str| std::fs::read_to_string(emitted.join(format!("app/views/authors/{name}.rb"))).unwrap();
     assert!(
-        view("listed").contains("      posts.each { |p| Views::Posts.post_into(io, p, marker, nil, nil) }\n"),
+        view("listed").contains("      posts.each { |p| Views::Posts.post_into(io, p, marker, notice, alert) }\n"),
         "{}",
         view("listed")
     );
     assert!(
-        view("all_posts").contains("      author.posts.each { |p| Views::Posts.post_into(io, p, marker, nil, nil) }\n"),
+        view("all_posts").contains("      author.posts.each { |p| Views::Posts.post_into(io, p, marker, notice, alert) }\n"),
         "{}",
         view("all_posts")
     );

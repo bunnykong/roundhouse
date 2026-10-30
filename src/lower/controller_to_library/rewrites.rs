@@ -130,7 +130,15 @@ pub(super) fn partial_view_call_with_record(
                 ),
             }),
             "path_parameters" => Some(ivar("path_parameters", span)),
-            _ => None,
+            // The request's flash, as the action's own view gets it
+            // (`flash_lookup`): a `render partial: "shared/flash"` in a
+            // turbo-stream response reads `notice`. By slot
+            // (`flash_slot_of`): the partial may spell it `notice_`, and
+            // a `local_assigns[:notice_]` it reads is no slot. A
+            // strict-locals partial takes no flash.
+            _ => crate::lower::view_to_library::flash_slot_of(&contract.extras, name)
+                .filter(|_| !contract.keyword_extras)
+                .map(|slot| flash_lookup(span, slot)),
         }
     };
     view_args.extend(contract.extras_args(lookup, request_value, None, || nil_expr(span), span));
@@ -2302,12 +2310,20 @@ pub(super) fn rewrite_request_format(expr: &Expr) -> Expr {
 pub(super) fn rewrite_params(expr: &Expr) -> Expr {
     map_expr(expr, &|e| match &*e.node {
         // `params.expect(...)` — recognized first so the recv is still
-        // the bare `params` Send, not the @params ivar (which would lose
-        // the recognition pattern).
+        // the original params receiver, before recursive rewrites change it.
         ExprNode::Send { recv: Some(recv), method, args, block, parenthesized }
-            if method.as_str() == "expect" && is_bare_params(recv) =>
+            if method.as_str() == "expect"
+                && is_bare_params(recv) =>
         {
             Some(rewrite_expect(args, block.as_ref(), *parenthesized, e.span))
+        }
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "expect"
+                && matches!(&*recv.node, ExprNode::Ivar { name } if name.as_str() == "params") =>
+        {
+            let [arg] = args.as_slice() else { return None };
+            let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+            params_expect_array(entries, e.span)
         }
         // Bare `params` (no recv, no args, no block) → `@params`.
         ExprNode::Send { recv: None, method, args, block: None, .. }
@@ -3270,6 +3286,7 @@ fn is_bare_params(e: &Expr) -> bool {
 /// Lower `params.expect(...)` based on its argument shape:
 /// - `params.expect(:id)` → `@params[:id].to_i`
 /// - `params.expect(post: [:title, :body])` → `@params.require(:post).permit(:title, :body)`
+/// - `params.expect(posts: [[:title]])` → `Params.expect_array(...)`
 ///
 /// Anything else (no args, multi-arg, unrecognized arg shape) is left
 /// as `@params.expect(args...)` so we don't silently drop an idiom we
@@ -3288,6 +3305,9 @@ fn rewrite_expect(
         }
         // Single-keyword-hash form → @params.require(:k).permit(:f1, :f2, ...)
         if let ExprNode::Hash { entries, .. } = &*arg.node {
+            if let Some(array) = params_expect_array(entries, span) {
+                return array;
+            }
             if let Some(pair) = single_resource_hash(entries) {
                 return params_require_permit(pair.0, pair.1, span);
             }
@@ -3365,6 +3385,54 @@ fn params_index_to_i(sym: &Symbol, span: Span) -> Expr {
             parenthesized: false,
         },
     )
+}
+
+fn params_expect_array(entries: &[(Expr, Expr)], span: Span) -> Option<Expr> {
+    use crate::lower::typing::with_ty;
+    use crate::ty::Ty;
+    let [(key, value)] = entries else { return None };
+    let name = |expr: &Expr| match &*expr.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let key = name(key)?;
+    let ExprNode::Array { elements, .. } = &*value.node else { return None };
+    let [inner] = elements.as_slice() else { return None };
+    let ExprNode::Array { elements, .. } = &*inner.node else { return None };
+    let mut fields = Vec::new();
+    let mut scalar_arrays = Vec::new();
+    for field in elements {
+        if let Some(field) = name(field) {
+            fields.push(field);
+        } else if let ExprNode::Hash { entries, .. } = &*field.node {
+            for (key, filter) in entries {
+                let ExprNode::Array { elements, .. } = &*filter.node else { return None };
+                if !elements.is_empty() { return None; }
+                scalar_arrays.push(name(key)?);
+            }
+        } else {
+            return None;
+        }
+    }
+    let string = |value: String| with_ty(
+        Expr::new(span, ExprNode::Lit { value: Literal::Str { value } }), Ty::Str,
+    );
+    let strings = |values: Vec<String>| with_ty(
+        Expr::new(span, ExprNode::Array { elements: values.into_iter().map(string).collect(), style: ArrayStyle::Brackets }),
+        Ty::Array { elem: Ty::Str.into() },
+    );
+    let hash_ty = Ty::Hash {
+        key: Ty::Str.into(),
+        value: Ty::Class { id: crate::ident::ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![].into() }.into(),
+    };
+    Some(with_ty(Expr::new(span, ExprNode::Send {
+        recv: Some(const_path(&["Params"], span)),
+        method: Symbol::from("expect_array"),
+        args: vec![with_ty(ivar("params", span), hash_ty.clone()), string(key), strings(fields), strings(scalar_arrays)],
+        block: None,
+        parenthesized: true,
+    }), Ty::Array { elem: hash_ty.into() }))
 }
 
 /// `@params.require(:resource).permit(:f1, :f2, ...)` — the strong-

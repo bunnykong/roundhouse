@@ -240,8 +240,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("rand", Ty::Untyped), ("bytes", Ty::Str), ("seed", Ty::Int),
     ]);
     // `OpenSSL::Random.random_bytes(n)` — lobsters' `Utils.random_str`.
-    // The openssl library's own on the ruby family; on spinel the
-    // façade alias in `runtime/spinel/facades/sponge.rb`.
+    // The openssl library's own on the ruby family, spinel's
+    // `packages/openssl` on spinel.
     register_stdlib_class(classes, "OpenSSL::Random", &[("random_bytes", Ty::Str)], &[]);
     // `Turbo::StreamsChannel` — turbo-rails' CLASS-side broadcast API,
     // the one an app reaches for when the payload is not a record's

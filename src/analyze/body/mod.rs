@@ -2346,7 +2346,7 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = recv.as_ref().and_then(|r| time_parse_ty(r, method, args)) {
                     return t;
                 }
-                if let Some(t) = expect_hash_arg_ty(recv_ty.as_ref(), method.as_str(), args) {
+                if let Some(t) = expect_hash_arg_ty(recv.as_ref(), recv_ty.as_ref(), method.as_str(), args) {
                     return t;
                 }
                 // Not `Integer?`: `nil.to_fs` raises in Rails, so only a number that cannot be nil types.
@@ -6749,8 +6749,8 @@ fn is_time_const(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Time")
 }
 
-// Not the value type for `expect(article: [:title, …])`: it answers the permitted Parameters; the array forms (`ids: []`, `[[…]]`) stay unmodeled until their lowering runs.
-fn expect_hash_arg_ty(recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::Expr]) -> Option<Ty> {
+// The empty scalar-list form stays unmodeled; the double-array form follows the admitted Params.expect_array reader.
+fn expect_hash_arg_ty(recv: Option<&Expr>, recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::Expr]) -> Option<Ty> {
     use crate::expr::ExprNode;
     if method != "expect" {
         return None;
@@ -6764,8 +6764,33 @@ fn expect_hash_arg_ty(recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::E
     };
     let [arg] = args else { return None };
     let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
-    let [(_, permitted)] = entries.as_slice() else { return None };
+    let [(resource, permitted)] = entries.as_slice() else { return None };
     let ExprNode::Array { elements, .. } = &*permitted.node else { return None };
+    if let [inner] = elements.as_slice()
+        && matches!(&*resource.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })
+        && let ExprNode::Array { elements: fields, .. } = &*inner.node
+        && !recv.is_some_and(|expr| matches!(&*expr.node,
+            ExprNode::Send { recv: Some(receiver), method, args, .. }
+                if matches!(&*receiver.node, ExprNode::SelfRef)
+                    && method.as_str() == "params" && args.is_empty()))
+        && recv.is_some_and(|expr| matches!(&*expr.node,
+                ExprNode::Send { recv: None, method, args, .. }
+                    if method.as_str() == "params" && args.is_empty())
+                || matches!(&*expr.node, ExprNode::Ivar { name } if name.as_str() == "params"))
+        && fields.iter().all(|field| match &*field.node {
+            ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } } => true,
+            ExprNode::Hash { entries, .. } => entries.iter().all(|(name, filter)| {
+                matches!(&*name.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })
+                    && matches!(&*filter.node, ExprNode::Array { elements, .. } if elements.is_empty())
+            }),
+            _ => false,
+        })
+    {
+        return Some(Ty::Array { elem: Ty::Hash {
+            key: Ty::Str.into(),
+            value: send::param_value_ty().into(),
+        }.into() });
+    }
     if elements.is_empty() || !elements.iter().all(|e| matches!(&*e.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } })) {
         return None;
     }

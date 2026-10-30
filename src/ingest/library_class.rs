@@ -2904,7 +2904,14 @@ fn walk_decl_body_with_visibility<'pr>(
                 included_hook: mode == DeclBodyMode::Instance,
                 has_class_methods: mode == DeclBodyMode::Instance && has_class_methods,
             };
+            let captured = super::inherited_alias::captured();
             let mut inner = walk_decl_body_with_visibility(sc.body(), owner, file, mode, visibility)?;
+            // An alias in another object's singleton is not the class's.
+            if !own && let Some(span) = super::inherited_alias::captured_since(captured) {
+                let err = IngestError::Unsupported { file: file.into(), message: super::inherited_alias::REFUSAL.into() };
+                super::error_site::note(&err, span.start as usize, span.end as usize);
+                return Err(err);
+            }
             // The class's own singleton: its statements run, and its
             // constants live, there (`expr::SINGLETON_BODY`).
             if own {
@@ -2988,9 +2995,23 @@ fn walk_decl_body_with_visibility<'pr>(
                     out.methods.push(copy);
                     continue;
                 }
+                // One an ancestor may define: the support walk captures
+                // it as the call it is, and `inherited_alias::settle`
+                // looks the original up once every file is walked.
+                if super::inherited_alias::is_capturing()
+                    && matches!(mode, DeclBodyMode::Instance | DeclBodyMode::SingletonClass { included_hook: true, .. })
+                {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: alias.location().start_offset() as u32,
+                        end: alias.location().end_offset() as u32,
+                    };
+                    out.unknown_calls.push(super::inherited_alias::capture(to.as_str(), from.as_str(), span));
+                    continue;
+                }
             }
             return Err(super::error_site::at(
-                IngestError::Unsupported { file: file.into(), message: "alias names a method this body has not defined".into() },
+                IngestError::Unsupported { file: file.into(), message: super::inherited_alias::REFUSAL.into() },
                 &alias.as_node(),
             ));
         }

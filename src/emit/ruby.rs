@@ -958,7 +958,9 @@ fn emit_jbuilder_view_files(
 /// cross-format visibility it needs, exactly as combining jbuilder's
 /// own per-view slices did for the jbuilder-jbuilder case.
 pub(crate) fn emit_lowered_views_and_jbuilder(app: &App) -> Vec<EmittedFile> {
-    let (html_views, html_lcs) = lowered_view_lcs_pre_helper(app);
+    let (html_views, mut html_lcs) = lowered_view_lcs_pre_helper(app);
+    // Not in `lowered_view_lcs_pre_helper`: the views-only entry points serve harnesses that load the views without ActiveSupport::Notifications, which only a whole tree ships.
+    crate::lower::view_instrumentation::apply(&html_views, &mut html_lcs, app);
     let (jbuilder_views, jbuilder_lcs) = jbuilder_view_lcs_pre_helper(app);
     let html_len = html_lcs.len();
     let mut combined = html_lcs;

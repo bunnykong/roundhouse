@@ -787,6 +787,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     }
     // Last, so a file a support root already reached is ingested once.
     support_batches.push((String::new(), dir.to_path_buf(), boot_required.clone()));
+    let mut held_aliases: Vec<super::inherited_alias::Held> = Vec::new();
     for (sub, support_dir, entries) in support_batches {
         let sub = sub.as_str();
         for entry in entries {
@@ -859,7 +860,9 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     }
                 }
             }
-            match ingest_library_classes(&source, &path_str) {
+            let (ingested, mut aliases) =
+                super::inherited_alias::capturing(|| ingest_library_classes(&source, &path_str));
+            match ingested {
                 Ok(mut classes) => {
                     // A gem's file runs more than its declarations when it
                     // loads (`file_program`).
@@ -877,7 +880,15 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                         }
                     }
                     if gem_libs.iter().any(|lib| entry.starts_with(lib)) {
-                        if let Ok(branched) = super::library_class::ingest_file_branch_classes(&source, &path_str) {
+                        let (branched, branch_aliases) = super::inherited_alias::capturing(|| {
+                            super::library_class::ingest_file_branch_classes(&source, &path_str)
+                        });
+                        for span in branch_aliases {
+                            if !aliases.contains(&span) {
+                                aliases.push(span);
+                            }
+                        }
+                        if let Ok(branched) = branched {
                             let branched: Vec<_> = branched.into_iter().filter(|m| !classes.iter().any(|c| c.name == m.name)).collect();
                             classes.extend(branched);
                         }
@@ -909,7 +920,15 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     let unconditional =
                         classes.iter().map(|c| c.name.clone()).filter(|name| !conditional.contains(name)).collect();
                     app.library_class_files.push((path_str.clone(), unconditional));
+                    let start = app.library_classes.len();
                     app.library_classes.extend(classes);
+                    if !aliases.is_empty() {
+                        held_aliases.push(super::inherited_alias::Held {
+                            path: path_str.clone(),
+                            classes: start..app.library_classes.len(),
+                            spans: aliases,
+                        });
+                    }
                     // A Concern here runs its `included do` in a model that
                     // includes it, as one under app/models/concerns does.
                     let (concern_items, concern_enum_decls, concern_guarded) =
@@ -942,6 +961,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             super::on_load_reopen::ingest_on_load_reopens(&source, &path_str, &mut app);
         }
     }
+
+    super::inherited_alias::settle(&mut app, held_aliases);
 
     // `app/helpers/*.rb` — ingested as library classes like the support
     // dirs above, but ALSO registered in `helper_method_index` so the
@@ -2581,6 +2602,9 @@ end
     // `Other.include(M)` written in another body: `Other`'s include,
     // before the concern splices read the includes.
     super::external_include::carry(&mut app);
+    // After the passes that make methods an alias may name, and before
+    // the concern splices copy a class's methods into its includers.
+    super::inherited_alias::resolve(&mut app);
     // Channels, before the concern splices for the same reason `Current`
     // is: this turns a class-body macro into real methods, and every
     // later pass reads methods.
@@ -2697,6 +2721,8 @@ end
     // `numericality:` on an untyped attribute is decided per target
     // (`refuse_numericality_allow_on_untyped`, `session::analyze_and_lower_for`).
     gap_acceptance_on_undeclared(&mut app);
+    // Not at model ingest: the `select` naming a model's aliases can sit in another model, class, controller or view.
+    super::select_aliases::stamp(&mut app);
     gap_uniqueness_on_polymorphic_attribute(&mut app);
     // After every model and library class: a custom `validates` key is
     // kept only when it names an app `EachValidator`.

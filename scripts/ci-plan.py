@@ -78,7 +78,7 @@ SPINEL_TESTS = [
     "temporal_initialize_spinel",
     "framework_tests_spinel",
     "spinel_web_push_crypto",
-    "sponge_random",
+    "openssl_random",
     "spinel_db_lease",
     *PARAM_BIND_TESTS,
     "spinel_stmt_cache_lru",
@@ -98,10 +98,12 @@ SPINEL_TESTS = [
     "routes_segment_pattern_spinel",
     "open_telemetry_stub_spinel",
     "spinel_mini_profiler",
+    "spinel_active_support_instrumentation",
     "around_block_filter_spinel",
     "after_initialize_bare_new_spinel",
     "find_or_create_bang_records",
     "before_action_return_spinel",
+    "partial_flash_from_caller_spinel",
     "plain_class_optional_keywords_spinel",
     "jbuilder_array_value_spinel",
     "active_job_payload",
@@ -538,6 +540,13 @@ def native_coverage(path):
         "runtime/spinel/request_hooks.rb",
     }:
         suites.add("spinel_mini_profiler")
+    if path in {
+        "runtime/spinel/active_support_instrumentation.rb",
+        "runtime/ruby/active_support_notifications.rb",
+        "runtime/ruby/active_support_notifications.rbs",
+        "src/lower/view_instrumentation.rs",
+    }:
+        suites.update(("spinel_active_support_instrumentation", "spinel_mini_profiler"))
     if path in PG_DB_INPUTS:
         suites.add("spinel_pg_db")
     suites.update(DB_CONTRACT_INPUTS.get(path, ()))
@@ -551,12 +560,10 @@ def native_coverage(path):
         name = path.rsplit("/", 1)[-1]
         owned_tests = set()
         if path in {
-            "runtime/spinel/facades/sponge.rb",
-            "runtime/spinel/facades/sponge.rbs",
             "runtime/spinel/secure_random_stub.rb",
             "runtime/spinel/secure_random_stub.rbs",
         }:
-            owned_tests.add("sponge_random")
+            owned_tests.add("openssl_random")
         if name == "statement_cache_cases.rb":
             owned_tests.add("param_binds")
         if any(word in name for word in ("web_push", "base64")):

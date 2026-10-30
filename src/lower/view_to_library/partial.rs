@@ -10,6 +10,7 @@ use crate::span::Span;
 
 use crate::lower::view::RenderPartial;
 
+use super::extra_params::flash_params;
 use super::{
     accumulator_append_call, assign_accumulator_string_new, lit_sym, nil_lit, send, seq,
     var_ref, view_helpers_call, ViewCtx, ViewKind,
@@ -1137,7 +1138,8 @@ pub(super) fn emit_layout_block(
 }
 
 /// The trailing extra-param arguments an explicit `locals:` hash binds,
-/// in the partial's declared extra order.
+/// and the caller's flash for the flash slots it leaves out, in the
+/// partial's declared extra order.
 ///
 /// A partial's non-record params are positional with nil defaults, so a
 /// provided local has to land at its declared index; only the tail up to
@@ -1160,6 +1162,18 @@ fn locals_extra_args(
     else {
         return Vec::new();
     };
+    // Rails renders a partial in its caller's view context, so a bare
+    // `notice` in `shared/_flash` reads the same flash the layout does.
+    // Here the flash is a param of every template, so the caller passes
+    // its own (`ViewCtx::own_flash`): the layout's `notice`, or its
+    // `notice_` when an `@notice` ivar took the plain name
+    // (`flash_locals`). Without it every partial got nil. A partial
+    // caller whose `notice` may be a local (a render hands it `notice:`,
+    // or its strict locals declare it) passes nil: Rails does not hand
+    // a partial's locals on, and no other flash is in reach here. So
+    // does a render under a block param or after an assignment that
+    // rebinds `notice` (`ViewCtx::shadow_flash`).
+    let flash = flash_params(extras);
     let bound: Vec<Option<Expr>> = extras
         .iter()
         .map(|name| {
@@ -1177,6 +1191,11 @@ fn locals_extra_args(
                         && matches!(name.as_str(), "action_name" | "controller_name" | "path_parameters")
                         && ctx.locals.iter().any(|l| l == name))
                     .then(|| var_ref(Symbol::from(name.as_str())))
+                })
+                // A strict-locals partial takes no flash (`flash_locals`).
+                .or_else(|| {
+                    let slot = flash.iter().position(|f| *f == Some(name.as_str())).filter(|_| !strict)?;
+                    ctx.own_flash[slot].as_deref().map(|n| var_ref(Symbol::from(n)))
                 })
         })
         .collect();

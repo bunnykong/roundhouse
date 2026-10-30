@@ -166,6 +166,14 @@ pub const SINGLETON_CONSTANT_REF: u64 = 1 << 29;
 /// The mark stays when lowering spells `Pathname(x)` as `Pathname.new(x)`.
 pub const KERNEL_CONVERSION: u64 = 1 << 30;
 
+/// On the body of a method `ingest::inherited_alias::resolve` copied
+/// from an ancestor for an `alias` of it: the Ruby family writes the
+/// captured `alias_method` back instead, and drops the copy.
+pub const INHERITED_ALIAS_COPY: u64 = 1 << 36;
+
+/// A source-resolved library call whose native keyword ABI is preserved.
+pub const NATIVE_KEYWORD_ARGUMENTS: u64 = 1 << 35;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

@@ -144,7 +144,6 @@ const GQLC: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn an_alias_of_an_inherited_method_is_carried() {
     gem_same_as_native(
         "gqlc",
@@ -164,7 +163,7 @@ const CORE_ALIAS: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "fork spec: load order"]
+#[ignore = "fork spec: core method signatures"]
 fn an_alias_of_a_core_superclass_method_is_carried() {
     gem_same_as_native(
         "amlike",

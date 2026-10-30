@@ -75,6 +75,7 @@ fn tiny_blog_round_trips() {
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        select_aliases: Vec::new(),
         i18n: Default::default(),
         span: Span::synthetic(),
     };
@@ -151,6 +152,7 @@ fn tiny_blog_round_trips() {
         inferred_method_params: Default::default(),
         models: vec![post_model],
         library_classes: vec![],
+        native_library_keywords: false,
         file_programs: vec![],
         boot_gem_entries: vec![],
         current_attribute_classes: vec![],

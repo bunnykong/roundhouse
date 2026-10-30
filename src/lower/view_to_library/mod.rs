@@ -48,9 +48,9 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
-use self::extra_params::{drop_closure_names, rewritten_extras};
+use self::extra_params::{drop_closure_names, flash_params, rewritten_extras};
 
-pub(crate) use self::extra_params::flash_param_in_scope;
+pub(crate) use self::extra_params::{flash_param_in_scope, flash_slot_of};
 use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
 use self::walker::walk_body;
 
@@ -587,6 +587,18 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // sites pass extras by position, so they do not see the new name.
     let extra_params: Vec<String> =
         extra_params.iter().map(|k| crate::naming::safe_local(k)).collect();
+    // The flash a partial this view renders reads (`ViewCtx::own_flash`).
+    // A param a render hands a local by its name holds that local there,
+    // and a strict-locals partial takes no flash.
+    let own_flash: [Option<String>; 2] = if is_partial && view.strict_locals.is_some() {
+        Default::default()
+    } else {
+        flash_params(&extra_params).map(|param| {
+            param
+                .filter(|n| !keys.is_some_and(|keys| keys.iter().any(|k| k == n)))
+                .map(str::to_string)
+        })
+    };
 
     // Typed primary params: (name, type, required). Extras (notice/alert/…)
     // are appended afterward as nullable optionals.
@@ -836,6 +848,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
         ivar_locals: std::rc::Rc::new(ivar_locals),
+        own_flash,
     };
 
     // A partial that receives a form builder as a local re-derives the
@@ -4885,6 +4898,16 @@ pub(super) struct ViewCtx {
     /// through [`ViewCtx::ivar_local`], so it names the same local the
     /// params and the body rewrite do.
     pub(super) ivar_locals: std::rc::Rc<IvarLocals>,
+    /// THIS view's flash params (`flash_params`), `notice` then `alert`,
+    /// where they hold the request's flash — what a partial it renders
+    /// reads for its own (`locals_extra_args`). A template's and a
+    /// layout's always do: the controller and the layout wrap pass the
+    /// flash. A partial's do by the same rule one render up, except a
+    /// param some render hands a local by its name, which holds that
+    /// local there. A strict-locals partial has none, and a block param
+    /// or an assigned local of the same name clears it in its scope
+    /// (`ViewCtx::shadow_flash`).
+    pub(super) own_flash: [Option<String>; 2],
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models
@@ -5051,11 +5074,39 @@ impl ViewCtx {
     pub(super) fn with_locals(&self, more: impl IntoIterator<Item = String>) -> Self {
         let mut next = self.clone();
         for n in more {
+            next.shadow_flash(&n);
             if !next.locals.iter().any(|x| x == &n) {
                 next.locals.push(n);
             }
         }
         next
+    }
+
+    /// This scope from `stmt` on, when it assigns a local named as one of
+    /// the flash params (`<% notice = "Local" %>`, at any depth): the
+    /// param holds that local from there, as a block param does.
+    pub(super) fn after_assigning(&self, stmt: &Expr) -> Option<Self> {
+        let hit: Vec<String> =
+            self.own_flash.iter().flatten().filter(|f| assigns_local(stmt, f)).cloned().collect();
+        (!hit.is_empty()).then(|| {
+            let mut next = self.clone();
+            for n in &hit {
+                next.shadow_flash(n);
+            }
+            next
+        })
+    }
+
+    /// A local named as a flash param shadows it, so a partial rendered
+    /// in its scope gets nil for that slot (`locals_extra_args`), never
+    /// the local: Rails reads the request's flash there, which only the
+    /// param held.
+    fn shadow_flash(&mut self, name: &str) {
+        for slot in &mut self.own_flash {
+            if slot.as_deref() == Some(name) {
+                *slot = None;
+            }
+        }
     }
 
     /// This scope with renders looking partials up in exactly `formats`.
@@ -5093,6 +5144,19 @@ impl ViewCtx {
     pub(super) fn render_method(&self, kind: ViewKind, module: &str, stem: &str) -> Symbol {
         crate::lower::view::view_method_name_for(stem, self.render_format(kind, module, stem))
     }
+}
+
+/// Whether `e` assigns the local `name` anywhere in it: `=`, `||=` and
+/// the other compound forms, or a multiple assignment.
+fn assigns_local(e: &Expr, name: &str) -> bool {
+    let is_it = |t: &LValue| matches!(t, LValue::Var { name: n, .. } if n.as_str() == name);
+    let mut found = match &*e.node {
+        ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => is_it(target),
+        ExprNode::MultiAssign { targets, .. } => targets.iter().any(is_it),
+        _ => false,
+    };
+    e.node.for_each_child(&mut |c| found = found || assigns_local(c, name));
+    found
 }
 
 // ── small IR constructors ────────────────────────────────────────

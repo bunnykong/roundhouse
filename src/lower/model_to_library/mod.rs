@@ -32,6 +32,7 @@ mod associations;
 pub(crate) use associations::polymorphic_type_switch;
 pub(crate) mod broadcasts;
 pub(crate) mod markers;
+pub(crate) mod select_aliases;
 pub mod row;
 
 use crate::det::{HashMap, HashSet};
@@ -1616,6 +1617,8 @@ fn build_methods_with_finder_inputs(
     // reads the accumulated list, so a model's own `to_param` (already
     // pushed) wins over the synthesized `@id.to_s`.
     self::markers::push_to_param_method(&mut methods, model);
+    // Not before push_user_methods: its skip guard has to see the model's own methods.
+    self::select_aliases::push_select_alias_methods(&mut methods, model, runtime_relation);
     // Also after push_user_methods: its BODY branches on whether the
     // model carries its own `to_key` (campfire's Message does).
     self::markers::push_dom_record_key_method(&mut methods, model);
@@ -1967,7 +1970,7 @@ fn resolve_model_aliases(
 /// handles separately aren't needed here: missing one of those just
 /// means `resolve_model_aliases` falls through to a refusal instead
 /// of a resolution, never to a WRONG one).
-fn attr_accessor_arg_names(expr: &Expr) -> Vec<Symbol> {
+pub(super) fn attr_accessor_arg_names(expr: &Expr) -> Vec<Symbol> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return Vec::new();
     };
@@ -1983,7 +1986,7 @@ fn attr_accessor_arg_names(expr: &Expr) -> Vec<Symbol> {
 }
 
 /// The name an `attribute :name, …` call declares, when `expr` is one.
-fn attribute_api_arg_name(expr: &Expr) -> Option<Symbol> {
+pub(super) fn attribute_api_arg_name(expr: &Expr) -> Option<Symbol> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return None;
     };

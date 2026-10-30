@@ -332,6 +332,32 @@ pub(crate) fn is_flash_slot_name(name: &str, base: &str) -> bool {
             && !name[base.len()..].is_empty())
 }
 
+/// A view's flash params among its `extras`: the `notice` one, then the
+/// `alert` one. `collect_extra_params` seeds the pair at the front, so
+/// only a leading extra spelling the slot (or its `flash_locals` rename)
+/// is the flash; a `local_assigns[:notice_]` the body reads further on
+/// is an ordinary local, whatever its name.
+pub(crate) fn flash_params(extras: &[String]) -> [Option<&str>; 2] {
+    let mut out = [None, None];
+    let mut at = 0;
+    for (slot, base) in ["notice", "alert"].into_iter().enumerate() {
+        if let Some(name) = extras.get(at).filter(|n| is_flash_slot_name(n, base)) {
+            out[slot] = Some(name.as_str());
+            at += 1;
+        }
+    }
+    out
+}
+
+/// The flash slot (`notice` or `alert`) a partial's extra `name` is, if
+/// it is one of its flash params (`flash_params`).
+pub(crate) fn flash_slot_of(extras: &[String], name: &str) -> Option<&'static str> {
+    ["notice", "alert"]
+        .into_iter()
+        .zip(flash_params(extras))
+        .find_map(|(slot, param)| (param == Some(name)).then_some(slot))
+}
+
 /// The caller's flash param for slot `base` among `in_scope` names.
 /// When both the ivar local (`notice`) and the renamed flash (`notice_`)
 /// are present, the longer spelling is the flash.

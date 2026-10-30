@@ -768,6 +768,41 @@ pub fn compile(src: &str) -> Option<String> {
     Some(encode_alternatives(&encoded))
 }
 
+// A copy of router.rb's `format_extension` list, not read from it: the runtime is Ruby source, not data lowering can load.
+const ROUTER_FORMATS: &str = "html text js css ics csv vcf vtt png jpeg jpg gif bmp tiff svg webp mpeg mp3 mp4 ogg webm otf ttf woff woff2 pdf zip gzip xml rss atom yaml json turbo_stream";
+
+/// A requirement that stops a lazy segment before one of the listed
+/// extensions, the end of the segment or the next `/` (lobsters'
+/// `DOMAINS_IDENTIFIER = /([^\/]+?)(?=\.json|\.rss|$|\/)/`): the segment
+/// itself is the greedy body (`[^\/]+`), and a trailing listed extension
+/// is the `(.:format)` Rails splits off there. Answers the body's source
+/// and the extensions, or None for any other shape.
+pub fn split_format_lookahead(src: &str) -> Option<(String, Vec<String>)> {
+    let (body, look) = src.split_once("(?=")?;
+    let look = look.strip_suffix(')')?;
+    let mut exts = Vec::new();
+    for alt in look.split('|') {
+        match alt {
+            "$" | "/" | "\\/" => {}
+            _ => {
+                let ext = alt.strip_prefix("\\.")?;
+                // Not any word: `Router.match` peels only a registered format, so another listed suffix would stay in the param.
+                if !ROUTER_FORMATS.split(' ').any(|f| f == ext) {
+                    return None;
+                }
+                exts.push(ext.to_string());
+            }
+        }
+    }
+    // Not without `$`: then the segment has to end in one of the extensions, a rule the body alone does not say.
+    if !look.split('|').any(|a| a == "$") || exts.is_empty() {
+        return None;
+    }
+    let body = body.strip_prefix('(').and_then(|b| b.strip_suffix(')')).unwrap_or(body);
+    let body = body.strip_suffix("+?").map(|b| format!("{b}+"))?;
+    Some((body, exts))
+}
+
 /// Combine a route's already-compiled `(param_name, encoded_pattern)`
 /// pairs into the ONE string a `Route` carries as its optional
 /// `seg_constraints` positional (mirrors how `int_params` stays a
@@ -791,6 +826,19 @@ pub fn encode_route_constraints(entries: &[(String, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_format_lookahead_splits_into_its_body_and_extensions() {
+        assert_eq!(
+            super::split_format_lookahead(r"([^\/]+?)(?=\.json|\.rss|$|\/)"),
+            Some((r"[^\/]+".to_string(), vec!["json".to_string(), "rss".to_string()]))
+        );
+        // Not a greedy body (it would swallow the extension), and not without `$`.
+        assert_eq!(super::split_format_lookahead(r"(.+)(?=\.json|\.rss|$|\/)"), None);
+        assert_eq!(super::split_format_lookahead(r"([^\/]+?)(?=\.json|\.rss)"), None);
+        // An extension the router does not peel would stay in the param.
+        assert_eq!(super::split_format_lookahead(r"([^\/]+?)(?=\.foo|$)"), None);
+    }
+
     use super::*;
 
     fn ok(src: &str) -> String {

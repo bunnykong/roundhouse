@@ -651,12 +651,10 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn("param_binds", ci.select([path])["spinel_tests"])
 
-    def test_sponge_random_selects_native_regression_for_its_inputs_and_full_runs(self):
-        suite = "sponge_random"
+    def test_openssl_random_selects_native_regression_for_its_inputs_and_full_runs(self):
+        suite = "openssl_random"
         for path in [
-            "tests/sponge_random.rs",
-            "runtime/spinel/facades/sponge.rb",
-            "runtime/spinel/facades/sponge.rbs",
+            "tests/openssl_random.rs",
             "runtime/spinel/secure_random_stub.rb",
             "runtime/spinel/secure_random_stub.rbs",
         ]:

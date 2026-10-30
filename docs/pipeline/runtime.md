@@ -1895,6 +1895,34 @@ the state set, because `begin`/`ensure` is not available in this file
 surface lives in the ruby-family `connection.rb` reopen). The push and
 the pop are symmetric on every path that returns.
 
+### A select alias is a reader only where the `select` names it in source
+
+Rails reads every extra column of a result set back as an attribute:
+after `select("count(*) AS times, title")` each record answers
+`record.times`. `ingest::select_aliases` finds the `AS` names of a
+`select` whose argument is a string literal (interpolations count as
+values, never as names) and whose model is known: a chain of query
+methods rooted at a model constant, the implicit self of a model's class
+method or scope, or an association scope (its target). The model lowerer
+gives each such alias a reader (`model_to_library::select_aliases`), and
+`instantiate` keeps the row when it carries one. A name a column, an
+association, a method or `Base` already answers gets no reader; a name
+an `attribute :name, :type` declares takes the selected value through
+its casting writer, as Rails' attribute set does (lobsters' `Vote#count`
+and `#usernames` read nil before).
+
+Where the two differ:
+
+- A `select` built at run time, or reached through a receiver the pass
+  cannot place (a local, an association reader), gives no reader; the
+  read stays the `no known method` error it was.
+- An alias written without `AS` (`count(*) times`) is not read.
+- A reader answers the driver's value untyped, and raises Rails'
+  `NoMethodError` on a record whose query did not select it.
+- The strict targets have no runtime Relation to load a custom `select`
+  with, so each alias is an error there
+  (`select_alias_gaps_for_target`).
+
 ### A `has_many :through` reader is a live Relation — only here
 
 `user.rooms`, `room.users`, `user.reachable_messages`: a reader for an
@@ -3320,7 +3348,7 @@ Rails with the gem installed and no `SENTRY_DSN` also transmits
 nothing, so the *delivery* half of this is not a divergence for an
 unconfigured deployment; the lost detail is.
 
-### rack-mini-profiler: the panel and request time on Spinel, nothing on CRuby
+### rack-mini-profiler: the panel, request, SQL and render timings on Spinel, nothing on CRuby
 
 On the Spinel tree the gem is a package, `runtime/gems/rack_mini_profiler/`
 (registered by `src/gems/rack_mini_profiler.rs`, shipped when
@@ -3337,10 +3365,33 @@ tokens, `dp`, `bt`), `/mini-profiler-resources/results` (JSON and the
 share page, client timings included), the asset routes, `?pp=help` and
 the disabled-tool answers.
 
+SQL and render timings come the way the Railtie gets them: it subscribes
+(`monotonic_subscribe`) to `sql.active_record`, `start_processing` /
+`process_action.action_controller` and `render_template` /
+`render_partial.action_view`, and builds the gem's tree from them —
+`Executing: <controller>#<action>`, each `Rendering: <dir>/<file>` node
+taking the earlier siblings and queries that fall inside its window, SQL
+`formatted_command_string`s HTML-escaped, `sql_count`,
+`cached_sql_count`, `duration_milliseconds_in_sql`. Against the real gem
+fed the CRuby tree's events on lobsters (`/`, `/newest`, a story page,
+`/comments`, `/about`): the same nodes, depths, key order and number
+types, and the same statements. Which node a query or a partial lands
+under follows the gem's window test over whole-millisecond start times,
+so on a page served in about a millisecond it varies from run to run, for
+the real gem as for this one.
+
 What differs:
 
-- **Only the request is timed.** SQL and render timings are empty lists;
-  they are the next stages, over the same hooks.
+- **A query has no backtrace and no row count.** `stack_trace_snippet`
+  is `null` (the gem filters `Kernel.caller`; a Spinel binary keeps no
+  Ruby call stack), and `row_count` / `class_name` stay `0` / `null`:
+  the gem fills them from `instantiation.active_record`, which nothing
+  here publishes yet.
+- **A query's duration is the SQLite shim's own time** for the statement,
+  its prepare and every step, published when the statement is done; the
+  `name` is always `"SQL"` (Rails says `Story Load` and so on). The other
+  shims (CRuby, PostgreSQL, JRuby) still publish a zero-length event as
+  the statement starts, and no query-cache hits.
 - **The tools that read CRuby's heap or stack are not there.** The
   Railtie turns on `enable_advanced_debugging_tools` in development; this
   tree keeps it off, so `profile-gc`, `profile-memory`, `env` and
@@ -3375,6 +3426,23 @@ What differs:
 **The middleware is not on the CRuby tree.** It loads the real gem for
 the `authorize_request` gate only, so an authorized page there renders
 without the panel.
+
+### `ActiveSupport::Notifications`: which events the runtime publishes
+
+`sql.active_record` (every statement; on the Spinel SQLite shim timed and
+published when done, a query-cache hit as `cached: true`),
+`start_processing` / `process_action.action_controller` (both
+dispatchers, around the action), and `render_template` /
+`render_partial` / `render_layout` / `render_collection.action_view`
+(`lower::view_instrumentation` brackets each lowered view, and a `render
+collection` loop reports once with its `count` and not per item, as
+Rails' collection renderer does). Identifiers are `app/views/…` relative
+paths where Rails gives absolute ones. Each instrumented path first reads
+a flag `subscribe` keeps, so with no subscriber a statement, a step or a
+view pays one read. Not published: `instantiation.active_record`,
+`render_collection` for a `cached:` collection (its items report as
+partials), jbuilder templates, and the payloads' other keys (`binds`,
+`row_count`, `status`, `view_runtime`, …).
 
 ### `ActionText::ContentHelper.allowed_attributes` answers the list, not `nil`
 

@@ -130,6 +130,11 @@ following statements back where the source has them, among the class's methods (
   `define_method`s per element;
 - a call to one of Ruby's own `Module` methods (`freeze`,
   `self.define_method`);
+- an `alias_method` of a method an app superclass defines, or one
+  [an alias of an inherited method](#an-alias-of-an-inherited-method)
+  resolves (the walk already copies an alias of one the body defines;
+  an alias of a method only a dropped macro defines would raise
+  NameError as the class loads, so it stays dropped);
 - a write through a class-side writer the class or an app ancestor
   defines (`self.require_name = true`, `self.strict ||= :on`);
 - such a write in a class that, itself or through an app ancestor,
@@ -194,6 +199,26 @@ for it. The same call inside a railtie's `initializer`,
 `config.to_prepare` or `ActiveSupport.on_load` block makes `M` a
 dependency of `Other`, which is what a Concern does with it, and the
 block stays where it is.
+
+### An alias of an inherited method
+
+`alias to from` (and `alias_method :to, :from`) in a `lib/` or gem
+source class, naming a method the class body has not defined above it,
+is an alias of an ancestor's method: graphql-client's
+`OperationDefinition < Definition` writes `alias operation_name
+definition_name`. The support walk captures it as the `alias_method`
+call it is, and once every file is walked looks the original up as
+Ruby does, through its app superclasses and their includes
+(`ingest::inherited_alias`). The class's own includes must be app
+modules written above the alias that do not define the original; with
+a `prepend`, the alias stays refused. The Ruby and JRuby trees write the call
+back, in the class's own `class << self` for a class-side alias, so
+`instance_method(:to).original_name` is the original's. Analysis,
+Spinel and the other targets see a copy of the original under the
+alias's name, unless the original calls `super`. A file with an alias
+no app ancestor defines is refused at the alias, including one of a
+core superclass's method (`class Errors < Hash; alias count size`),
+which needs the core classes' signatures.
 
 ## ERB → Ruby → IR
 

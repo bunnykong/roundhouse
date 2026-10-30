@@ -36,6 +36,16 @@ pub struct Comment {
 // Models ----------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SelectAlias {
+    pub name: Symbol,
+    #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+    pub span: Span,
+    // A flag rather than dropping the alias: a declared `attribute` of that name still takes the selected value.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_method: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     pub name: ClassId,
     /// `None` only for anonymous/top-level classes we haven't resolved;
@@ -114,6 +124,10 @@ pub struct Model {
     /// `Rooms::Open` rows say `rooms_open`, not `room`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sti_subclass_names: Vec<ClassId>,
+
+    // Stamped at ingest, not derived per model: the `select` naming them may sit on another model or class.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub select_aliases: Vec<SelectAlias>,
 
     /// The catalog entries this model's messages can reach, its i18n
     /// scope and lookup keys; stamped by `i18n::stamp_models`. Default
