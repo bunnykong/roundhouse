@@ -520,7 +520,12 @@ fn untyped_subexpressions_baseline() {
     // the same collector measures 1109 total on main and 1114 here.
     // Only Base#assign_attributes adds sites (+5). Both totals include
     // the same 3 sanitize_sql_like sites, excluded here (1126 -> 1111).
-    const CEILING: usize = 1111;
+    // MEASURED 1095 on d0a3c8e4 with qualified integer query helpers:
+    // the identical test measures 1114 total on main and 1098 here,
+    // including the same 3 sanitize_sql_like sites. The new String
+    // caller seeds IntegerKeyCast's input; no existing method gains a
+    // site. Lower this ledger to the measured residual (1111 -> 1095).
+    const CEILING: usize = 1095;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

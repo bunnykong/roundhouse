@@ -1265,7 +1265,12 @@ fn every_runtime_method_body_concretely_typed() {
     // the same counter measures 901 on main and 904 with assignment.
     // Only Base#assign_attributes (+1) and UnknownAttributeError#initialize
     // (+2) differ; every other method's count is unchanged.
-    const CEILING: usize = 904;
+    // MEASURED 905 on d0a3c8e4 with integer query strings: the identical
+    // counter measures 904 on main and 905 here. Only Relation's
+    // array_with_ranges_predicate changes (4 -> 5): its String test
+    // reads an element of the existing Array[untyped]. Other methods
+    // are unchanged; the full-context zero-unresolved gate still passes.
+    const CEILING: usize = 905;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
