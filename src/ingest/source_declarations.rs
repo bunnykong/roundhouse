@@ -450,9 +450,15 @@ fn effect_free_call(node: &ruby_prism::CallNode<'_>) -> bool {
 
 // An initializer/receiver can mutate its enclosing namespace even when its
 // resulting value is serialized opaquely. Inspect syntax, never evaluate it.
-struct ValueEffects(bool, bool, bool, String);
+// The last flag distinguishes singleton self from the surrounding lexical owner.
+struct ValueEffects(bool, bool, bool, String, bool);
 impl ValueEffects {
     fn receiver(&mut self, receiver: Option<Node<'_>>, member: Option<&str>, method: &str) {
+        if self.4 && receiver.as_ref().is_none_or(|node| node.as_self_node().is_some()) {
+            // Singleton self is not the enclosing lexical namespace.
+            self.unbounded();
+            return;
+        }
         let target = match receiver {
             None => "self".to_string(),
             Some(node) if node.as_self_node().is_some() => "self".to_string(),
@@ -467,6 +473,25 @@ impl ValueEffects {
         let member = member.map_or("nil".to_string(), |name| format!("{name:?}"));
         self.3.push_str(&format!("{target}.{method}({member})\n"));
     }
+    fn write_target(&mut self, target: &ruby_prism::ConstantPathNode<'_>) {
+        self.0 = true;
+        if let Some(parent) = target.parent() {
+            // Evaluating a dynamic target can itself mutate other namespaces.
+            self.visit(&parent);
+            self.receiver(
+                Some(parent),
+                target.name().as_ref().map(super::util::constant_id_str),
+                RECEIVER_EFFECT,
+            );
+        } else if let Some(name) = target.name() {
+            self.3.push_str(&format!(
+                "::Object.{RECEIVER_EFFECT}({:?})\n",
+                super::util::constant_id_str(&name)
+            ));
+        } else {
+            self.unbounded();
+        }
+    }
     fn unbounded(&mut self) {
         self.3.push_str(&format!("::Object.{UNBOUNDED_EFFECT}()\n"));
     }
@@ -474,7 +499,9 @@ impl ValueEffects {
 impl<'pr> Visit<'pr> for ValueEffects {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         self.0 |= !effect_free_call(node);
-        if !effect_free_call(node) && node.receiver().is_some_and(|n| n.as_self_node().is_none()) {
+        if !effect_free_call(node)
+            && (self.4 || node.receiver().is_some_and(|n| n.as_self_node().is_none()))
+        {
             let member = if matches!(node.name().as_slice(), b"const_set" | b"autoload") {
                 node.arguments()
                     .and_then(|a| a.arguments().iter().next())
@@ -540,28 +567,28 @@ impl<'pr> Visit<'pr> for ValueEffects {
         self.visit(&node.value());
     }
     fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
-        self.0 = true;
+        self.write_target(&node.target());
         self.visit(&node.value());
     }
     fn visit_constant_path_or_write_node(
         &mut self,
         node: &ruby_prism::ConstantPathOrWriteNode<'pr>,
     ) {
-        self.0 = true;
+        self.write_target(&node.target());
         self.visit(&node.value());
     }
     fn visit_constant_path_and_write_node(
         &mut self,
         node: &ruby_prism::ConstantPathAndWriteNode<'pr>,
     ) {
-        self.0 = true;
+        self.write_target(&node.target());
         self.visit(&node.value());
     }
     fn visit_constant_path_operator_write_node(
         &mut self,
         node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>,
     ) {
-        self.0 = true;
+        self.write_target(&node.target());
         self.visit(&node.value());
     }
     fn visit_constant_target_node(&mut self, _: &ruby_prism::ConstantTargetNode<'pr>) {
@@ -575,9 +602,16 @@ impl<'pr> Visit<'pr> for ValueEffects {
         self.0 = true;
         self.unbounded();
     }
-    fn visit_singleton_class_node(&mut self, _: &ruby_prism::SingletonClassNode<'pr>) {
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
         self.0 = true;
-        self.unbounded();
+        self.receiver(Some(node.expression()), None, RECEIVER_EFFECT);
+        self.visit(&node.expression());
+        let previous = self.4;
+        self.4 = true;
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+        self.4 = previous;
     }
     fn visit_yield_node(&mut self, _: &ruby_prism::YieldNode<'pr>) {
         self.0 = true;
@@ -742,7 +776,7 @@ impl RubyProducer {
         }
     }
     fn observe_value(&mut self, value: &Node<'_>) {
-        let mut effects = ValueEffects(false, false, false, String::new());
+        let mut effects = ValueEffects(false, false, false, String::new(), false);
         effects.visit(value);
         self.0.push_str(&effects.3);
         if effects.0 {
@@ -854,11 +888,13 @@ impl<'pr> Visit<'pr> for RubyProducer {
                 self.5.last_mut().unwrap().insert(name);
             }
         }
+        self.observe_value(&receiver);
         if receiver.as_self_node().is_none() {
-            self.receiver_effect(Some(node.expression()), None, RECEIVER_EFFECT);
-            return;
+            self.receiver_effect(Some(receiver), None, RECEIVER_EFFECT);
         }
-        let mut effects = ValueEffects(false, false, true, String::new());
+        // Keep lexical constant receivers in their original scope, but do not
+        // mistake singleton self for that lexical owner.
+        let mut effects = ValueEffects(false, false, true, String::new(), true);
         if let Some(body) = node.body() {
             effects.visit(&body);
         }
@@ -948,7 +984,7 @@ impl<'pr> Visit<'pr> for RubyProducer {
                 // Inspect possible effects without promoting any names from
                 // guarded code. A conditional visibility/method declaration
                 // is harmless; any possible constant definition stays opaque.
-                let mut effects = ValueEffects(false, false, true, String::new());
+                let mut effects = ValueEffects(false, false, true, String::new(), false);
                 effects.visit(&statement);
                 self.0.push_str(&effects.3);
                 if effects.0 {
@@ -1007,7 +1043,7 @@ impl<'pr> Visit<'pr> for RubyProducer {
             if args.len() == 2
                 && let Some(member) = literal_constant_name(&args[0])
             {
-                let mut effects = ValueEffects(false, false, false, String::new());
+                let mut effects = ValueEffects(false, false, false, String::new(), false);
                 effects.visit(&args[1]);
                 if !effects.0 {
                     if node.receiver().is_none_or(|n| n.as_self_node().is_some()) {
@@ -1027,7 +1063,7 @@ impl<'pr> Visit<'pr> for RubyProducer {
         {
             // Registration does not execute now. Check every possible branch
             // for future constant effects without promoting any block names.
-            let mut effects = ValueEffects(false, false, true, String::new());
+            let mut effects = ValueEffects(false, false, true, String::new(), false);
             if let Some(body) = block.body() {
                 effects.visit(&body);
             }
@@ -1059,7 +1095,7 @@ impl<'pr> Visit<'pr> for RubyProducer {
                     }
                 }
             }
-            let mut effects = ValueEffects(false, false, true, String::new());
+            let mut effects = ValueEffects(false, false, true, String::new(), false);
             if let Some(receiver) = node.receiver() {
                 effects.visit(&receiver);
             }
@@ -1078,7 +1114,7 @@ impl<'pr> Visit<'pr> for RubyProducer {
         if node.receiver().is_some_and(|n| n.as_self_node().is_none()) {
             self.receiver_effect(node.receiver(), None, RECEIVER_EFFECT);
         }
-        let mut effects = ValueEffects(false, false, true, String::new());
+        let mut effects = ValueEffects(false, false, true, String::new(), false);
         effects.visit_call_node(node);
         self.0.push_str(&effects.3);
         // An arbitrary omitted call can also affect its lexical namespace.
@@ -1098,14 +1134,14 @@ impl<'pr> Visit<'pr> for RubyProducer {
         self.observe_value(&node.value());
         self.value(super::util::constant_id_str(&node.name()), None);
     }
-    fn visit_constant_and_write_node(&mut self, _: &ruby_prism::ConstantAndWriteNode<'pr>) {
-        self.opaque();
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'pr>) {
+        self.observe_value(&node.as_node());
     }
     fn visit_constant_operator_write_node(
         &mut self,
-        _: &ruby_prism::ConstantOperatorWriteNode<'pr>,
+        node: &ruby_prism::ConstantOperatorWriteNode<'pr>,
     ) {
-        self.opaque();
+        self.observe_value(&node.as_node());
     }
     fn visit_constant_target_node(&mut self, node: &ruby_prism::ConstantTargetNode<'pr>) {
         self.value(super::util::constant_id_str(&node.name()), None);
@@ -1133,21 +1169,86 @@ impl<'pr> Visit<'pr> for RubyProducer {
     }
     fn visit_constant_path_and_write_node(
         &mut self,
-        _: &ruby_prism::ConstantPathAndWriteNode<'pr>,
+        node: &ruby_prism::ConstantPathAndWriteNode<'pr>,
     ) {
-        self.opaque();
+        self.observe_value(&node.as_node());
     }
     fn visit_constant_path_operator_write_node(
         &mut self,
-        _: &ruby_prism::ConstantPathOperatorWriteNode<'pr>,
+        node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>,
     ) {
-        self.opaque();
+        self.observe_value(&node.as_node());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_foreign_write(effect: &str) {
+        for member in ["TOKEN", "OTHER"] {
+            let effect = effect.replace("TOKEN", member);
+            let text = read_ruby_for_check(format!(
+                "module Zork; module Mix; end; module Other; end; {effect}; end"
+            ).as_bytes()).unwrap();
+            assert!(text.contains(&format!("Mix.{RECEIVER_EFFECT}({member:?})")), "{effect}: {text}");
+            let unrelated = if member == "TOKEN" { "OTHER" } else { "TOKEN" };
+            assert!(!text.contains(&format!("Mix.{RECEIVER_EFFECT}({unrelated:?})")), "{text}");
+            assert!(!text.lines().any(|line| line.starts_with("Mix::TOKEN =")),
+                "omitted writes must not become positive declarations: {text}");
+        }
+    }
+
+    #[test]
+    fn review_round2_singleton_body_retains_foreign_receiver_effects() {
+        assert_foreign_write("class << Other; Mix.const_set(:TOKEN, 42); end");
+        let text = read_ruby_for_check(b"module Zork; class << Other; self.const_set(:TOKEN, 42); end; end").unwrap();
+        assert!(text.contains(UNBOUNDED_EFFECT), "singleton self cannot be bound to Zork: {text}");
+        assert!(!text.contains(&format!("self.{RECEIVER_EFFECT}(\"TOKEN\")")), "{text}");
+        let receiver = read_ruby_for_check(b"module Zork; class << Mix.const_set(:TOKEN, 42); end; end").unwrap();
+        assert!(receiver.contains(&format!("Mix.{RECEIVER_EFFECT}(\"TOKEN\")")), "{receiver}");
+    }
+
+    #[test]
+    fn review_round2_singleton_body_retains_qualified_write_effects() {
+        assert_foreign_write("class << Other; Mix::TOKEN = 42; end");
+    }
+
+    #[test]
+    fn review_round2_conditional_retains_qualified_write_effects() {
+        assert_foreign_write("if true; Mix::TOKEN = 42; end");
+        for operation in ["=", "||=", "&&=", "+="] {
+            assert_foreign_write(&format!("if true; Mix::TOKEN {operation} 42; end"));
+        }
+    }
+
+    #[test]
+    fn review_round2_initializer_retains_qualified_write_effects() {
+        assert_foreign_write("HOLDER = (Mix::TOKEN = 42)");
+        let text = read_ruby_for_check(b"module Zork; HOLDER = (receiver(Mix.const_set(:TOKEN, 42))::VALUE = Other.const_set(:ITEM, 1)); end").unwrap();
+        for effect in [UNBOUNDED_EFFECT.to_string(), format!("Mix.{RECEIVER_EFFECT}(\"TOKEN\")"), format!("Other.{RECEIVER_EFFECT}(\"ITEM\")")] {
+            assert!(text.contains(&effect), "lost target or value effect {effect}: {text}");
+        }
+    }
+
+    #[test]
+    fn review_round2_omitted_and_operator_writes_retain_target_and_value_effects() {
+        for operation in ["&&=", "+="] {
+            assert_foreign_write(&format!("Mix::TOKEN {operation} 42"));
+            let local_value = read_ruby_for_check(format!(
+                "module Zork; HOLDER {operation} Mix.const_set(:TOKEN, 42); end"
+            ).as_bytes()).unwrap();
+            assert!(local_value.contains(&format!("Mix.{RECEIVER_EFFECT}(\"TOKEN\")")), "{local_value}");
+            let harmless_value = read_ruby_for_check(format!("module Zork; HOLDER {operation} 42; end").as_bytes()).unwrap();
+            assert!(!harmless_value.contains(RECEIVER_EFFECT), "{harmless_value}");
+            let text = read_ruby_for_check(format!(
+                "module Zork; receiver(Mix.const_set(:TOKEN, 42))::VALUE {operation} Other.const_set(:ITEM, 1); end"
+            ).as_bytes()).unwrap();
+            for effect in [UNBOUNDED_EFFECT.to_string(), format!("Mix.{RECEIVER_EFFECT}(\"TOKEN\")"), format!("Other.{RECEIVER_EFFECT}(\"ITEM\")")] {
+                assert!(text.contains(&effect), "lost target or value effect {effect}: {text}");
+            }
+        }
+    }
 
     #[test]
     fn receiver_effects_retain_literal_ownership_and_unbounded_receivers() {
