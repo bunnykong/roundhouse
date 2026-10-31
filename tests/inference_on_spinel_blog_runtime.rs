@@ -553,6 +553,7 @@ fn untyped_subexpressions_baseline() {
     // answers, reading the untyped `[]` value a second time (+1 in
     // active_record/connection.rb), as `_as_json_only` does.
     // Combined with measured main fe705054f: 1210 + (1157 - 1173) = 1194.
+    // Combined with measured main 0366de59f: 1210 + (1194 - 1210) = 1194.
     const CEILING: usize = 1194;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,

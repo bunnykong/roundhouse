@@ -263,6 +263,18 @@ pub fn helper_id_segments(app: &App) -> crate::det::HashMap<String, Vec<bool>> {
     out
 }
 
+/// The app's `direct` helpers, as the `RouteHelpers` methods a call names
+/// (`fresh_account_logo_path`, `fresh_account_logo_url`). Their bodies
+/// are the blocks the app wrote, so a caller's arguments reach them as
+/// written.
+pub fn direct_helper_names(app: &App) -> crate::det::HashSet<String> {
+    app.routes
+        .direct_helpers
+        .iter()
+        .flat_map(|h| [format!("{}_path", h.name.as_str()), format!("{}_url", h.name.as_str())])
+        .collect()
+}
+
 /// The routes the router dispatches: every flattened route except those
 /// refused for a requirement it cannot enforce.
 pub fn flatten_routes(app: &App) -> Vec<FlatRoute> {

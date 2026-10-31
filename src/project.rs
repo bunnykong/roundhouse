@@ -475,6 +475,63 @@ pub fn target_readme(target: BuildTarget) -> String {
     )
 }
 
+/// The controller's response state, in `@_`-prefixed ivars on the Ruby
+/// family and Spinel trees. The shared `action_controller` runtime keeps
+/// it in `@status`, `@body`, `@content_type` and the rest, but in Ruby
+/// those are the app controller's own ivars too, so a render overwrote
+/// an app's `@status`, and an app's `@headers` broke `response.headers`.
+/// Rails keeps its state in `@_response`, `@_request` and the like. The
+/// strict targets transpile the same source into fields and accessors,
+/// where no app ivar shares them, so they keep it as written.
+///
+/// Every use in these files is renamed, including `Current`'s own
+/// `@request` (a module ivar behind its own `self.request` accessors,
+/// so the rename is consistent in the file). An `attr_*` can't read an
+/// ivar of another name, so the two that name these are written out;
+/// they're matched exactly, and any other `attr_*` naming one is an
+/// error, so a drift in the runtime is a build error here.
+fn controller_state_ivars(files: &mut [(String, String)]) -> Result<(), String> {
+    const NAMES: &[&str] = &[
+        "status", "body", "content_type", "content_type_explicit", "performed", "location", "head_response",
+        "headers", "request",
+    ];
+    const STEMS: &[&str] = &["base", "cache_control", "conditional_get", "current", "default_headers", "inertia"];
+    const ATTRS: &[(&str, &str, &str)] = &[
+        (
+            "base",
+            "    attr_reader   :status, :body, :location, :content_type\n",
+            "    def status\n      @_status\n    end\n\n    def body\n      @_body\n    end\n\n    def location\n      @_location\n    end\n\n    def content_type\n      @_content_type\n    end\n",
+        ),
+        (
+            "current",
+            "    attr_accessor :request\n",
+            "    def request\n      @_request\n    end\n\n    def request=(value)\n      @_request = value\n    end\n",
+        ),
+    ];
+    let ivar = regex::Regex::new(&format!(r"(^|[^@\w])@({})\b", NAMES.join("|"))).expect("ivar pattern");
+    let attr = regex::Regex::new(&format!(r"attr_(reader|writer|accessor)\b[^\n]*:({})\b", NAMES.join("|"))).expect("attr pattern");
+    for stem in STEMS {
+        for path in [format!("runtime/action_controller/{stem}.rb"), format!("sig/runtime/action_controller/{stem}.rbs")] {
+            let Some((_, text)) = files.iter_mut().find(|(p, _)| *p == path) else {
+                return Err(format!("controller_state_ivars: {path} not in the tree"));
+            };
+            if path.ends_with(".rb") {
+                for (owner, narrow, wide) in ATTRS.iter().filter(|(owner, _, _)| owner == stem) {
+                    if !text.contains(narrow) {
+                        return Err(format!("controller_state_ivars: {owner}.rb no longer declares {narrow:?}"));
+                    }
+                    *text = text.replacen(narrow, wide, 1);
+                }
+                if let Some(m) = attr.find(text) {
+                    return Err(format!("controller_state_ivars: {path} has `{}`, which reads an unrenamed ivar", m.as_str()));
+                }
+            }
+            *text = ivar.replace_all(text, "${1}@_${2}").into_owned();
+        }
+    }
+    Ok(())
+}
+
 /// Produce the file set for `target`. `app` must already be ingested
 /// and analyzed. `fixture` is the source-app path on disk — needed
 /// by `Blog` (walks the fixture) and `Ruby` (copies `app/javascript`
@@ -8891,6 +8948,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         }
     }
     widen_key_contract(app, &mut files)?;
+    controller_state_ivars(&mut files)?;
     // Relation Base→untyped rewrite is Spinel-only (see
     // `spinel_relation_model_handle` call sites). `ruby_family_runtime_files`
     // shares this tree and must keep Base for CRuby/JRuby Bar A/B.

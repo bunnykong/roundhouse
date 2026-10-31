@@ -1458,8 +1458,12 @@ fn string_segment_demand(
                         .unwrap_or_else(|| method.as_str().to_string());
                     for (i, arg) in positional.iter().enumerate() {
                         let Some(seg) = segments.get(i) else { break };
-                        let string_record = matches!(&arg.ty, Some(Ty::Class { id, .. }) if string_keyed.contains(id.0.as_str()));
-                        if matches!(arg.ty, Some(Ty::Str)) || string_record {
+                        // A String that can be nil (a nullable column read off a
+                        // record that can be nil, `note.route_param`) is the same
+                        // evidence: Rails writes either with `to_param`.
+                        let arg_ty = arg.ty.as_ref().map(Ty::peel_nilable);
+                        let string_record = matches!(arg_ty, Some(Ty::Class { id, .. }) if string_keyed.contains(id.0.as_str()));
+                        if matches!(arg_ty, Some(Ty::Str)) || string_record {
                             out.entry(helper.clone()).or_default().insert(seg.clone());
                         }
                     }
@@ -1521,7 +1525,7 @@ fn route_for_string_segments(
                         .enumerate()
                     {
                         let Some(seg) = segments.get(i) else { break };
-                        if matches!(arg.ty, Some(Ty::Str)) {
+                        if matches!(arg.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Str)) {
                             out.entry(helper.clone()).or_default().insert(seg.clone());
                         }
                     }
@@ -1688,21 +1692,18 @@ fn format_variant_demand(
     names.sort();
     names.dedup();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
-    // A name the app defines as a method is that method, not a variant:
-    // `widget_from_url` in a class that defines it reads as route
-    // `widget` with format `from` otherwise, and Rails generates no
-    // helper for a name that isn't a route itself.
-    let own = app_method_names(app);
     let mut collect = |e: &Expr| {
         fn walk(
             e: &Expr,
             names: &[String],
             declared: &crate::det::HashSet<String>,
-            own: &crate::det::HashSet<Symbol>,
             out: &mut std::collections::BTreeMap<String, (String, String)>,
         ) {
+            // Only a call the `format:` lowering renamed. Any other
+            // `<route>_<word>_url` is the app's own method (`widget_from_url`
+            // in a class that defines it), or no helper at all in Rails.
             if let ExprNode::Send { recv: None, method, .. } = &*e.node
-                && !own.contains(method)
+                && e.decisions & crate::expr::FORMAT_VARIANT_CALL != 0
             {
                 let raw = method.as_str();
                 if let Some(stem) = raw.strip_suffix("_path").or_else(|| raw.strip_suffix("_url")) {
@@ -1725,28 +1726,11 @@ fn format_variant_demand(
                     }
                 }
             }
-            e.node.for_each_child(&mut |c| walk(c, names, declared, own, out));
+            e.node.for_each_child(&mut |c| walk(c, names, declared, out));
         }
-        walk(e, &names, declared, &own, &mut out);
+        walk(e, &names, declared, &mut out);
     };
     for_each_route_call_site(app, &mut collect);
-    out
-}
-
-/// Every method name the app's own classes define — models, library
-/// classes, controllers — on either side.
-fn app_method_names(app: &App) -> crate::det::HashSet<Symbol> {
-    let mut out = crate::det::HashSet::default();
-    for lc in &app.library_classes {
-        out.extend(lc.methods.iter().map(|m| m.name.clone()));
-    }
-    for model in &app.models {
-        out.extend(model.methods().map(|m| m.name.clone()));
-    }
-    for c in &app.controllers {
-        out.extend(c.actions().map(|a| a.name.clone()));
-        out.extend(c.class_methods().map(|m| m.name.clone()));
-    }
     out
 }
 
