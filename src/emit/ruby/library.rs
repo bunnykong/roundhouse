@@ -4695,7 +4695,13 @@ fn rewrite_helper_calls(
     // normalization as jbuilder. It still resolves Rails.application.domain,
     // preserving apps' canonical-domain overrides. Lobsters' hats page
     // links `request_hat_url` bare.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+    //
+    // Self wins here too: a class that defines `widgets_url` itself
+    // calls that method (Rails mixes url helpers in beneath a class's
+    // own methods, and a plain class has none mixed in at all).
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node
+        && !own_methods.contains(method)
+    {
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));
             if route_helpers.contains(&path_name) {

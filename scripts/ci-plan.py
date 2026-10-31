@@ -119,6 +119,7 @@ SPINEL_TESTS = [
     "model_queries_spinel",
     "default_scope_spinel",
     "default_scope_dynamic_spinel",
+    "acts_as_tenant_spinel",
     "typed_writer_cast_spinel",
     "pundit_source_spinel",
     "row_from_raw_hash_spinel",

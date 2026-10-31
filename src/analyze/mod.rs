@@ -62,6 +62,7 @@ mod fixpoint_rounds;
 pub use fixpoint_rounds::{FixpointRounds, LoopEnd, Restamp};
 mod dirty_retype;
 mod typing_mode;
+mod parallel;
 mod inferred_types;
 pub mod inquiry;
 pub mod indifferent;
@@ -2325,6 +2326,7 @@ impl Analyzer {
             let shared = body::ConstScope::global(map.clone());
             let typer = BodyTyper::new(&self.classes)
                 .with_inquirers(&self.inquirers)
+                .with_i18n(&self.i18n, &self.helper_modules)
                 .with_typed_constants(&resolved)
                 .with_data_factories(&self.data_factories);
             let typer = typer.with_class_factories(&self.class_factories);
@@ -2738,7 +2740,8 @@ impl Analyzer {
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
         let _typing_controllers_a = crate::timings::begin("typing: controllers A");
-        for controller in &mut app.controllers {
+        let controller_meta = parallel::map(&mut app.controllers, |controller| {
+            let mut cache = None;
             // A controller the round did not move still has to produce
             // its metadata: Phase B resolves a dirty child's filters by
             // walking its ancestors' entries, and the view channel is
@@ -2977,9 +2980,7 @@ impl Analyzer {
                     action_bindings.insert(name.clone(), ivars);
                 }
                 if retype {
-                    let (bindings, bodies) = action_meta_cache.entry(controller.name.clone()).or_default();
-                    bindings.extend(action_bindings.clone());
-                    bodies.extend(action_bodies.clone());
+                    cache = Some((action_bindings.clone(), action_bodies.clone()));
                 }
             }
 
@@ -2989,7 +2990,7 @@ impl Analyzer {
             let action_effects: HashMap<Symbol, EffectSet> = HashMap::default();
 
             let layout = controller.layout.clone();
-            meta_by_name.insert(
+            (
                 controller.name.clone(),
                 ControllerMeta {
                     self_ty,
@@ -3000,7 +3001,16 @@ impl Analyzer {
                     class_constants,
                     layout,
                 },
-            );
+                cache,
+            )
+        });
+        for (name, meta, cache) in controller_meta {
+            if let Some((bindings, bodies)) = cache {
+                let entry = action_meta_cache.entry(name.clone()).or_default();
+                entry.0.extend(bindings);
+                entry.1.extend(bodies);
+            }
+            meta_by_name.insert(name, meta);
         }
         drop(_typing_controllers_a);
 
@@ -3052,9 +3062,20 @@ impl Analyzer {
         // closest definition wins on name conflicts (mirrors Ruby
         // method-resolution order).
         let _typing_controllers_b = crate::timings::begin("typing: controllers B");
-        for controller in &mut app.controllers {
+        enum Channel { Action, Layout, Partial }
+        enum Event {
+            View(Channel, Symbol, Vec<(Symbol, Ty)>),
+            Presence(Symbol, Vec<Symbol>),
+            Feeder(Symbol, ClassId),
+            Resolution(ClassId, crate::app::ControllerResolution),
+            IvarEnv(ClassId, HashMap<Symbol, Ty>),
+            Seed((ClassId, Symbol), HashMap<Symbol, Ty>),
+            Refinement((ClassId, Symbol), HashMap<Symbol, Ty>),
+        }
+        let outputs = parallel::map(&mut app.controllers, |controller| {
+            let mut events = Vec::new();
             let ctrl_name = controller.name.clone();
-            let Some(meta) = meta_by_name.get(&ctrl_name) else { continue };
+            let Some(meta) = meta_by_name.get(&ctrl_name) else { return events };
             // Same gate as Phase A, for the same reason: the chained
             // tables, the resolution record and the view channel are
             // this pass's output whether or not the bodies moved.
@@ -3306,7 +3327,7 @@ impl Analyzer {
                     let out: HashMap<Symbol, Ty> = env.into_iter()
                         .map(|(k, v)| (k, v.strip_nil()))
                         .collect();
-                    controller_ivar_env.insert(ctrl_name.clone(), out.clone());
+                    events.push(Event::IvarEnv(ctrl_name.clone(), out.clone()));
                     out
                 };
 
@@ -3326,7 +3347,7 @@ impl Analyzer {
                         {
                             seed.insert(k, v);
                         }
-                        action_seeds.insert((ctrl_name.clone(), action.name.clone()), seed.clone());
+                        events.push(Event::Seed((ctrl_name.clone(), action.name.clone()), seed.clone()));
                         if seed.is_empty() {
                             continue;
                         }
@@ -3418,7 +3439,7 @@ impl Analyzer {
                     if shaped.is_empty() {
                         continue;
                     }
-                    refinements.push(((ctrl_name.clone(), name.clone()), shaped));
+                    events.push(Event::Refinement((ctrl_name.clone(), name.clone()), shaped));
                 }
             }
 
@@ -3504,13 +3525,13 @@ impl Analyzer {
                         }
                     })
                     .collect();
-                controller_resolutions.insert(
+                events.push(Event::Resolution(
                     ctrl_name.clone(),
                     crate::app::ControllerResolution {
                         filter_chain,
                         layout: effective_layout.clone(),
                     },
-                );
+                ));
             }
 
             // Build the per-view ivar map. Each view gets the action's
@@ -3588,39 +3609,12 @@ impl Analyzer {
                     }
                 }
                 if let Some(layout_name) = &effective_layout {
-                    view_feeders
-                        .entry(layout_name.clone())
-                        .or_default()
-                        .insert(ctrl_name.clone());
+                    events.push(Event::Feeder(layout_name.clone(), ctrl_name.clone()));
                     if view_name_for_action(&ctrl_name, action).is_some() {
-                        let (rendering, assigning) = layout_presence.entry(layout_name.clone()).or_default();
-                        *rendering += 1;
-                        for k in ivars.keys() {
-                            *assigning.entry(k.clone()).or_default() += 1;
-                        }
+                        events.push(Event::Presence(layout_name.clone(), ivars.keys().cloned().collect()));
                     }
-                    let layout_map = layout_ivars_by_view
-                        .entry(layout_name.clone())
-                        .or_default();
-                    for (k, v) in &ivars {
-                        // `Ty::Var` / `Ty::Untyped` carry no usable
-                        // shape — they pollute the union without
-                        // refining it. Drop them in either slot:
-                        //   - new is noise → keep prev (or noise if no prev)
-                        //   - prev is noise → take new
-                        // Without this, N controllers each failing to
-                        // type `@user` would either fan a Var into
-                        // every union variant or be order-sensitive.
-                        let noise = |t: &Ty| t.is_unknown();
-                        let merged = match layout_map.remove(k) {
-                            Some(prev) if noise(&prev) => v.clone(),
-                            Some(prev) if noise(v) => prev,
-                            Some(prev) if prev == *v => prev,
-                            Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
-                            None => v.clone(),
-                        };
-                        layout_map.insert(k.clone(), merged);
-                    }
+                    events.push(Event::View(Channel::Layout, layout_name.clone(),
+                        ivars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
                 }
                 // Content-partial seeding: when this action assigns a
                 // string literal to a dynamic-render ivar
@@ -3642,17 +3636,8 @@ impl Analyzer {
                         if !existing_view_names.contains(&partial) {
                             continue;
                         }
-                        let entry = content_partial_ivars.entry(partial).or_default();
-                        for (k, v) in &ivars {
-                            if v.is_open() {
-                                continue;
-                            }
-                            let merged = match entry.remove(k) {
-                                Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
-                                None => v.clone(),
-                            };
-                            entry.insert(k.clone(), merged);
-                        }
+                        events.push(Event::View(Channel::Partial, partial,
+                            ivars.iter().filter(|(_, v)| !v.is_open()).map(|(k, v)| (k.clone(), v.clone())).collect()));
                     }
                 }
                 // Action→view ivar channel. An action's ivars seed
@@ -3707,19 +3692,9 @@ impl Analyzer {
                 view_targets.sort();
                 view_targets.dedup();
                 for view_name in view_targets {
-                    view_feeders.entry(view_name.clone()).or_default().insert(ctrl_name.clone());
-                    let entry = action_ivars_by_view.entry(view_name).or_default();
-                    for (k, v) in &ivars {
-                        let noise = |t: &Ty| t.is_unknown();
-                        let merged = match entry.remove(k) {
-                            Some(prev) if noise(&prev) => v.clone(),
-                            Some(prev) if noise(v) => prev,
-                            Some(prev) if prev == *v => prev,
-                            Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
-                            None => v.clone(),
-                        };
-                        entry.insert(k.clone(), merged);
-                    }
+                    events.push(Event::Feeder(view_name.clone(), ctrl_name.clone()));
+                    events.push(Event::View(Channel::Action, view_name,
+                        ivars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
                 }
             }
 
@@ -3764,45 +3739,53 @@ impl Analyzer {
                                 }
                             }
                         }
-                        view_feeders
-                            .entry(view_name.clone())
-                            .or_default()
-                            .insert(ctrl_name.clone());
+                        events.push(Event::Feeder(view_name.clone(), ctrl_name.clone()));
                         // Not left out of the layout: the inherited page renders through the child's layout as its own actions do.
                         if let Some(layout_name) = &effective_layout {
-                            let (rendering, assigning) = layout_presence.entry(layout_name.clone()).or_default();
-                            *rendering += 1;
-                            for k in ivars.keys() {
-                                *assigning.entry(k.clone()).or_default() += 1;
-                            }
-                            let layout_map = layout_ivars_by_view.entry(layout_name.clone()).or_default();
-                            for (k, v) in &ivars {
-                                let merged = match layout_map.remove(k) {
-                                    Some(prev) if prev.is_unknown() => v.clone(),
-                                    Some(prev) if v.is_unknown() => prev,
-                                    Some(prev) if prev == *v => prev,
-                                    Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
-                                    None => v.clone(),
-                                };
-                                layout_map.insert(k.clone(), merged);
-                            }
+                            events.push(Event::Presence(layout_name.clone(), ivars.keys().cloned().collect()));
+                            events.push(Event::View(Channel::Layout, layout_name.clone(),
+                                ivars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
                         }
-                        let entry = action_ivars_by_view.entry(view_name).or_default();
-                        for (k, v) in &ivars {
-                            let noise = |t: &Ty| t.is_unknown();
-                            let merged = match entry.remove(k) {
-                                Some(prev) if noise(&prev) => v.clone(),
-                                Some(prev) if noise(v) => prev,
-                                Some(prev) if prev == *v => prev,
-                                Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
-                                None => v.clone(),
-                            };
-                            entry.insert(k.clone(), merged);
-                        }
+                        events.push(Event::View(Channel::Action, view_name,
+                            ivars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
                     }
                 }
             }
 
+            events
+        });
+        // Replay precisely the old joins, in input and per-controller order.
+        for event in outputs.into_iter().flatten() {
+            match event {
+                Event::View(channel, view, values) => {
+                    let partial = matches!(channel, Channel::Partial);
+                    let table = match channel {
+                        Channel::Action => &mut action_ivars_by_view,
+                        Channel::Layout => &mut layout_ivars_by_view,
+                        Channel::Partial => &mut content_partial_ivars,
+                    };
+                    let entry = table.entry(view).or_default();
+                    for (k, v) in values {
+                        let merged = match entry.remove(&k) {
+                            Some(prev) if !partial && prev.is_unknown() => v,
+                            Some(prev) if !partial && (v.is_unknown() || prev == v) => prev,
+                            Some(prev) => body::union_of(prev, v),
+                            None => v,
+                        };
+                        entry.insert(k, merged);
+                    }
+                }
+                Event::Presence(layout, keys) => {
+                    let (rendering, assigning) = layout_presence.entry(layout).or_default();
+                    *rendering += 1;
+                    for k in keys { *assigning.entry(k).or_default() += 1; }
+                }
+                Event::Feeder(view, owner) => { view_feeders.entry(view).or_default().insert(owner); }
+                Event::Resolution(owner, value) => { controller_resolutions.insert(owner, value); }
+                Event::IvarEnv(owner, value) => { controller_ivar_env.insert(owner, value); }
+                Event::Seed(key, value) => { action_seeds.insert(key, value); }
+                Event::Refinement(key, value) => { refinements.push((key, value)); }
+            }
         }
         drop(_typing_controllers_b);
         // Flush Phase B's refinements. Later rounds of the whole-program
@@ -4111,14 +4094,18 @@ impl Analyzer {
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::default();
 
         let _typing_library = crate::timings::begin("typing: library");
-        for lc in &mut app.library_classes {
-            if let Some(row) = mailer_with_params.get(&lc.name) {
-                self.classes
-                    .entry(lc.name.clone())
-                    .or_default()
-                    .instance_methods
-                    .insert(params_sym.clone(), Ty::Record { row: row.clone() });
+        // Preserve each mailer's registry write before its original position.
+        let mut start = 0;
+        while start < app.library_classes.len() {
+            if let Some(row) = mailer_with_params.get(&app.library_classes[start].name) {
+                self.classes.entry(app.library_classes[start].name.clone()).or_default()
+                    .instance_methods.insert(params_sym.clone(), Ty::Record { row: row.clone() });
             }
+            let end = (start + 1..app.library_classes.len())
+                .find(|&i| mailer_with_params.contains_key(&app.library_classes[i].name))
+                .unwrap_or(app.library_classes.len());
+            let outputs = parallel::map(&mut app.library_classes[start..end], |lc| {
+            let mut views = Vec::new();
             // Same gate as the controller loops, with one thing it still
             // owes the views half: a MAILER's ivar harvest seeds its
             // template, so the `flow_ivars` walk below runs for one even
@@ -4127,7 +4114,7 @@ impl Analyzer {
             let retype = dirty.is_none_or(|d| d.contains(&lc_name))
                 || mailers_needing_retype.contains(&lc_name);
             if !retype && !mailer_names.contains(&lc_name) {
-                continue;
+                return views;
             }
             let self_id = if lc.is_module {
                 sole_includer.get(&lc.name).cloned().unwrap_or_else(|| lc.name.clone())
@@ -4245,13 +4232,8 @@ impl Analyzer {
                         });
                     }
                     let view_name = Symbol::from(format!("{prefix}/{}", method.name.as_str()).as_str());
-                    if let Some(row) = mailer_with_params.get(&lc_name) {
-                        mailer_params_by_view.insert(view_name.clone(), Ty::Record { row: row.clone() });
-                    }
-                    if ivars.is_empty() {
-                        continue;
-                    }
-                    action_ivars_by_view.entry(view_name).or_default().extend(ivars);
+                    let params = mailer_with_params.get(&lc_name).map(|row| Ty::Record { row: row.clone() });
+                    views.push((view_name, params, ivars));
                 }
             }
 
@@ -4294,6 +4276,13 @@ impl Analyzer {
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
                 }
             }
+            views
+            });
+            for (view, params, ivars) in outputs.into_iter().flatten() {
+                if let Some(params) = params { mailer_params_by_view.insert(view.clone(), params); }
+                if !ivars.is_empty() { action_ivars_by_view.entry(view).or_default().extend(ivars); }
+            }
+            start = end;
         }
         drop(_typing_library);
 
@@ -5893,7 +5882,10 @@ impl Analyzer {
         // description of the argument list that disagrees with the
         // `def`. campfire's `next_involvement_for` emitted exactly
         // that, and spinel gave the param an `sp_SymPolyHash *`.
-        let mut sites: Vec<SendSite> = Vec::new();
+        struct Work<'a> {
+            owner: Option<&'a ClassId>, roots: Vec<(&'a Expr, bool)>,
+        }
+        let mut work = Vec::new();
         let params_by_method = Self::param_shapes(app);
         let defined = Self::defined_methods(app);
         // Class-level reverse call graph, rebuilt alongside the param
@@ -5903,14 +5895,12 @@ impl Analyzer {
         self.callers_by_target.clear();
         for model in &app.models {
             for method in model.methods() {
-                let from = sites.len();
-                self.collect_send_sites(&method.body, Some(&model.name), method.receiver == MethodReceiver::Class, helpers, &mut sites);
-                self.record_callers(&model.name, &sites[from..]);
+                let roots = vec![(&method.body, method.receiver == MethodReceiver::Class)];
+                work.push(Work { owner: Some(&model.name), roots });
             }
             for scope_item in model.scopes() {
-                let from = sites.len();
-                self.collect_send_sites(&scope_item.body, Some(&model.name), true, helpers, &mut sites);
-                self.record_callers(&model.name, &sites[from..]);
+                let roots = vec![(&scope_item.body, true)];
+                work.push(Work { owner: Some(&model.name), roots });
             }
             // A block-form lifecycle hook (`after_create_commit -> {
             // room.receive(self) }`) is a method body that only becomes
@@ -5921,9 +5911,8 @@ impl Analyzer {
             for item in model.body.iter() {
                 let ModelBodyItem::Unknown { expr, .. } = item else { continue };
                 if let Some(body) = block_callback_body(expr) {
-                    let from = sites.len();
-                    self.collect_send_sites(body, Some(&model.name), false, helpers, &mut sites);
-                    self.record_callers(&model.name, &sites[from..]);
+                    let roots = vec![(body, false)];
+                    work.push(Work { owner: Some(&model.name), roots });
                     continue;
                 }
                 // A class-body call of the model's own class method
@@ -5933,56 +5922,77 @@ impl Analyzer {
                 if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
                     && model.methods().any(|m| m.receiver == MethodReceiver::Class && m.name == *method)
                 {
-                    let from = sites.len();
-                    self.collect_send_sites(expr, Some(&model.name), true, helpers, &mut sites);
-                    self.record_callers(&model.name, &sites[from..]);
+                    let roots = vec![(expr, true)];
+                    work.push(Work { owner: Some(&model.name), roots });
                 }
             }
         }
         for lc in &app.library_classes {
             for method in &lc.methods {
-                let from = sites.len();
-                self.collect_send_sites(&method.body, Some(&lc.name), method.receiver == MethodReceiver::Class, helpers, &mut sites);
-                self.record_callers(&lc.name, &sites[from..]);
+                let roots = vec![(&method.body, method.receiver == MethodReceiver::Class)];
+                work.push(Work { owner: Some(&lc.name), roots });
             }
         }
         for controller in &app.controllers {
             for action in controller.actions() {
-                let from = sites.len();
+                let mut roots = Vec::new();
                 let defaults = action.opt_params.iter().map(|(_, d)| d).chain(action.kw_params.iter().filter_map(|(_, d)| d.as_ref()));
                 for body in defaults.chain(std::iter::once(&action.body)) {
-                    self.collect_send_sites(body, Some(&controller.name), false, helpers, &mut sites);
+                    roots.push((body, false));
                 }
-                self.record_callers(&controller.name, &sites[from..]);
+                work.push(Work { owner: Some(&controller.name), roots });
             }
             for method in controller.class_methods() {
-                let from = sites.len();
+                let mut roots = Vec::new();
                 for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
-                    self.collect_send_sites(default, Some(&controller.name), true, helpers, &mut sites);
+                    roots.push((default, true));
                 }
-                self.collect_send_sites(&method.body, Some(&controller.name), true, helpers, &mut sites);
-                self.record_callers(&controller.name, &sites[from..]);
+                roots.push((&method.body, true));
+                work.push(Work { owner: Some(&controller.name), roots });
             }
             // A class-body macro call (`preload_site_configs %w[a], only:
             // :show`) is the call site that types the class method.
             for item in &controller.body {
                 if let crate::dialect::ControllerBodyItem::ClassIvarInit { expr, .. } = item {
-                    let from = sites.len();
-                    self.collect_send_sites(expr, Some(&controller.name), true, helpers, &mut sites);
-                    self.record_callers(&controller.name, &sites[from..]);
+                    let roots = vec![(expr, true)];
+                    work.push(Work { owner: Some(&controller.name), roots });
                 }
             }
         }
         // WithViews: param sites only — no `record_callers` (no ClassId).
         if matches!(scope, UnifyScope::WithViews) {
             for view in &app.views {
-                self.collect_send_sites(&view.body, None, false, helpers, &mut sites);
+                work.push(Work { owner: None, roots: vec![(&view.body, false)] });
             }
             if let Some(seeds) = &app.seeds {
-                self.collect_send_sites(seeds, None, false, helpers, &mut sites);
+                work.push(Work { owner: None, roots: vec![(seeds, false)] });
             }
         }
 
+        // Walk immutable trees concurrently; replay caller boundaries and sites in order.
+        let mut sites = Vec::new();
+        if crate::par::workers_for(work.len()) == 1 {
+            // As with ingest's word index, serial work keeps one accumulator.
+            for item in work {
+                let from = sites.len();
+                for (root, class_body) in item.roots {
+                    self.collect_send_sites(root, item.owner, class_body, helpers, &mut sites);
+                }
+                if let Some(owner) = item.owner { self.record_callers(owner, &sites[from..]); }
+            }
+        } else {
+        let collected = crate::par::map(&work, |item| {
+            let mut sites = Vec::new();
+            for (root, class_body) in &item.roots {
+                self.collect_send_sites(root, item.owner, *class_body, helpers, &mut sites);
+            }
+            sites
+        });
+        for (item, item_sites) in work.into_iter().zip(collected) {
+            if let Some(owner) = item.owner { self.record_callers(owner, &item_sites); }
+            sites.extend(item_sites);
+        }
+        }
         self.apply_param_sites(sites, &params_by_method, &defined);
         // Production signatures keep their production callers' shape.
         // Fold before adding test-owned observations: a same-named test
@@ -10579,3 +10589,6 @@ mod concern_method_snapshot_tests {
         assert_eq!(snapshot[&ClassId(Symbol::from("A"))][0].name.as_str(), "second");
     }
 }
+
+#[cfg(test)]
+mod ordered_worker_tests;

@@ -7693,6 +7693,7 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport", "numericality_number"),
     ("ActiveSupport", "cast_boolean"),
     ("ActiveSupport", "cast_datetime"),
+    ("ActiveSupport", "change_time_usec"),
     ("ActiveSupport", "errors_to_hash"),
     ("ActiveSupport", "errors_messages"),
     ("ActiveSupport", "errors_attribute_names"),

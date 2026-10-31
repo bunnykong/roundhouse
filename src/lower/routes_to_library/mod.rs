@@ -349,7 +349,17 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // `direct :name do … end` helpers — not routes, so they never reach
     // `flat`; they ride here because they live in the same module and
     // their `route_for` bodies need the flattened table to resolve.
-    funcs.extend(direct::lower_direct_helpers(&module_path, app, &flat));
+    // A `route_for` argument meets its target's signature the way any
+    // other call site does, so the generated helpers' parameter types go
+    // with it.
+    let helper_params: crate::det::HashMap<String, Vec<Ty>> = funcs
+        .iter()
+        .filter_map(|f| match &f.signature {
+            Some(Ty::Fn { params, .. }) => Some((f.name.as_str().to_string(), params.iter().map(|p| (*p.ty).clone()).collect())),
+            _ => None,
+        })
+        .collect();
+    funcs.extend(direct::lower_direct_helpers(&module_path, app, &flat, &helper_params));
     // The `**hash` half of the query string. `query_keys` above covers
     // every key a call site NAMES; a call site that splats a runtime
     // Hash names none, and there is nothing static to read them off —
@@ -1678,14 +1688,22 @@ fn format_variant_demand(
     names.sort();
     names.dedup();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    // A name the app defines as a method is that method, not a variant:
+    // `widget_from_url` in a class that defines it reads as route
+    // `widget` with format `from` otherwise, and Rails generates no
+    // helper for a name that isn't a route itself.
+    let own = app_method_names(app);
     let mut collect = |e: &Expr| {
         fn walk(
             e: &Expr,
             names: &[String],
             declared: &crate::det::HashSet<String>,
+            own: &crate::det::HashSet<Symbol>,
             out: &mut std::collections::BTreeMap<String, (String, String)>,
         ) {
-            if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+            if let ExprNode::Send { recv: None, method, .. } = &*e.node
+                && !own.contains(method)
+            {
                 let raw = method.as_str();
                 if let Some(stem) = raw.strip_suffix("_path").or_else(|| raw.strip_suffix("_url")) {
                     // A real helper of that name wins — never shadow a
@@ -1707,11 +1725,28 @@ fn format_variant_demand(
                     }
                 }
             }
-            e.node.for_each_child(&mut |c| walk(c, names, declared, out));
+            e.node.for_each_child(&mut |c| walk(c, names, declared, own, out));
         }
-        walk(e, &names, declared, &mut out);
+        walk(e, &names, declared, &own, &mut out);
     };
     for_each_route_call_site(app, &mut collect);
+    out
+}
+
+/// Every method name the app's own classes define — models, library
+/// classes, controllers — on either side.
+fn app_method_names(app: &App) -> crate::det::HashSet<Symbol> {
+    let mut out = crate::det::HashSet::default();
+    for lc in &app.library_classes {
+        out.extend(lc.methods.iter().map(|m| m.name.clone()));
+    }
+    for model in &app.models {
+        out.extend(model.methods().map(|m| m.name.clone()));
+    }
+    for c in &app.controllers {
+        out.extend(c.actions().map(|a| a.name.clone()));
+        out.extend(c.class_methods().map(|m| m.name.clone()));
+    }
     out
 }
 

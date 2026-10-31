@@ -7,6 +7,10 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/time_change_usec.rs"]
+mod time_change_usec_contract;
+#[path = "emit_and_run/time_change_usec.rs"]
+mod time_change_usec;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -40,6 +44,8 @@ mod active_model_attributes_form;
 mod association_query_arguments;
 #[path = "emit_and_run/tableless_params.rs"]
 mod tableless_params;
+#[path = "emit_and_run/splatted_accessor_params.rs"]
+mod splatted_accessor_params;
 #[path = "emit_and_run/active_model_superclass.rs"]
 mod active_model_superclass;
 #[path = "emit_and_run/arel_nodes.rs"]
@@ -417,6 +423,8 @@ mod uniqueness_association_attribute;
 mod default_scope_static;
 #[path = "emit_and_run/default_scope_dynamic.rs"]
 mod default_scope_dynamic;
+#[path = "emit_and_run/acts_as_tenant.rs"]
+mod acts_as_tenant;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]
@@ -20560,3 +20568,7 @@ mod find_each_mailer;
 
 #[path = "emit_and_run/model_class_attribute.rs"]
 mod model_class_attribute;
+#[path = "support/record_slice_app.rs"]
+mod record_slice_app;
+#[path = "emit_and_run/record_slice.rs"]
+mod record_slice;

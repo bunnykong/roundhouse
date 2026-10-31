@@ -1295,7 +1295,12 @@ fn every_runtime_method_body_concretely_typed() {
     // condition's value and the model's column types untyped (+7 in
     // active_record/relation.rb).
     // Combined with measured main f3eda5be2: 917 + (912 - 911) = 918.
-    const CEILING: usize = 918;
+    // MEASURED 919 on 2026-10-31 (on 918): the ruby-family `Base#slice`
+    // parses a temporal column's stored text into the Time its reader
+    // answers, reading the untyped `[]` value a second time (+1 in
+    // active_record/connection.rb), as `_as_json_only` does.
+    // Combined with measured main fe705054f: 919 + (912 - 911) = 920.
+    const CEILING: usize = 920;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

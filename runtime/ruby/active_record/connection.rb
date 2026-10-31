@@ -484,6 +484,32 @@ module ActiveRecord
       self[name] = value
     end
 
+    # Rails' `slice(*methods)`: the named attributes, String-keyed (Rails
+    # wraps the Hash in a HashWithIndifferentAccess), from Symbol or
+    # String names, flattened as Rails flattens them. Rails reads each
+    # name through `public_send`; this runtime reads it through the `[]`
+    # column indexer, as `read_attribute` does, so a name that is not a
+    # column raises instead of answering a nil Rails would never give.
+    # The indexer hands back a temporal column's stored text, so that
+    # one is parsed into the Time its reader answers.
+    def slice(*names)
+      columns = self.class.schema_columns
+      time_columns = self.class.schema_time_columns
+      h = {}
+      names.flatten.each do |n|
+        name = n.to_sym
+        unless columns.include?(name)
+          raise NotImplementedError, "slice reads columns only; #{name} is not a column of #{self.class.name}"
+        end
+        h[name.to_s] = if time_columns.include?(name)
+          ActiveSupport.present_db(ActiveSupport.parse_db_time(self[name]))
+        else
+          self[name]
+        end
+      end
+      h
+    end
+
     def saved_changes?
       !saved_changes.empty?
     end
@@ -1290,6 +1316,13 @@ module ActiveRecord
         Db.finalize(stmt)
       end
       rows
+    end
+
+    # Rails' `composite_primary_key?`: whether the model keys its records
+    # on several columns. Every model here keys on one (a composite table
+    # is keyed on the column its model declares), so the answer is false.
+    def self.composite_primary_key?
+      false
     end
 
     def self.record_timestamps=(value)
