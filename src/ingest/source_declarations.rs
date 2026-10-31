@@ -522,6 +522,13 @@ impl<'pr> Visit<'pr> for ValueEffects {
             {
                 self.receiver(node.receiver(), method.as_deref(), MIXIN_OVERRIDE);
             }
+            if method
+                .as_ref()
+                .is_none_or(|name| effect_contract(name.as_bytes()) || effect_hook(name.as_bytes()))
+            {
+                self.0 = true;
+                self.receiver(node.receiver(), None, RECEIVER_EFFECT);
+            }
         }
         if matches!(
             node.name().as_slice(),
@@ -644,10 +651,12 @@ impl<'pr> Visit<'pr> for ValueEffects {
         {
             self.receiver(None, method.as_deref(), MIXIN_OVERRIDE);
         }
-        if super::util::symbol_value(&node.new_name())
-            .is_none_or(|name| effect_contract(name.as_bytes()))
+        if method
+            .as_ref()
+            .is_none_or(|name| effect_contract(name.as_bytes()) || effect_hook(name.as_bytes()))
         {
             self.0 = true;
+            self.receiver(None, None, RECEIVER_EFFECT);
         }
     }
     fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
@@ -715,6 +724,14 @@ impl<'pr> Visit<'pr> for MixinOverrides {
             } else {
                 self.0
                     .extend(["include", "prepend", "extend"].map(String::from));
+            }
+        }
+        if let Some(receiver) = node.receiver() {
+            self.visit(&receiver);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
             }
         }
         if let Some(block) = node.block() {
@@ -921,8 +938,9 @@ impl<'pr> Visit<'pr> for RubyProducer {
         }
         if name
             .as_ref()
-            .is_none_or(|name| effect_contract(name.as_bytes()))
+            .is_none_or(|name| effect_contract(name.as_bytes()) || effect_hook(name.as_bytes()))
         {
+            self.receiver_effect(None, None, RECEIVER_EFFECT);
             self.opaque();
         }
     }
@@ -1080,9 +1098,10 @@ impl<'pr> Visit<'pr> for RubyProducer {
                         .iter()
                         .next()
                         .and_then(|n| super::util::symbol_value(&n))
-                        .is_some_and(|name| effect_contract(name.as_bytes()))
+                        .is_none_or(|name| effect_contract(name.as_bytes()) || effect_hook(name.as_bytes()))
                 })
             {
+                self.receiver_effect(node.receiver(), None, RECEIVER_EFFECT);
                 self.opaque();
                 if let Some(method) = node
                     .arguments()
@@ -1291,6 +1310,7 @@ mod tests {
 
     #[test]
     fn overridden_and_aliased_mixin_calls_are_not_literal_ancestry() {
+        let mut failures = Vec::new();
         for method in ["include", "prepend", "extend"] {
             let pure =
                 read_ruby_for_check(format!("module Mix; {method} Empty; end").as_bytes()).unwrap();
@@ -1300,16 +1320,93 @@ mod tests {
                 format!("alias_method :{method}, :custom"),
                 format!("alias {method} custom"),
                 format!("class << self; def {method}(*); end; end"),
+                format!("private_class_method def self.{method}(*); end"),
+                format!("private def self.{method}(*); end"),
+                format!("(def self.{method}(*); end).to_s"),
             ] {
                 let text = read_ruby_for_check(
                     format!("module Mix; {declaration}; {method} Empty; end").as_bytes(),
                 )
                 .unwrap();
-                assert!(
-                    !text.lines().any(|line| line == format!("{method} Empty")),
-                    "{declaration}: {text}"
-                );
-                assert!(text.contains(MIXIN_OVERRIDE), "{declaration}: {text}");
+                if text.lines().any(|line| line == format!("{method} Empty"))
+                    || !text.contains(MIXIN_OVERRIDE)
+                {
+                    failures.push(format!("{declaration}: {text}"));
+                }
+            }
+            let unrelated = read_ruby_for_check(format!(
+                "module Mix; private_class_method def self.unrelated(*); end; {method} Empty; end"
+            ).as_bytes()).unwrap();
+            assert!(unrelated.lines().any(|line| line == format!("{method} Empty")), "{unrelated}");
+        }
+        assert!(failures.is_empty(), "missed wrapped overrides:\n{}", failures.join("\n"));
+    }
+
+    fn effect_barriers(text: &str) -> (bool, bool, bool) {
+        (text.contains(OPAQUE_CONSTANTS), text.contains(RECEIVER_EFFECT), text.contains(UNBOUNDED_EFFECT))
+    }
+
+    const ALIASED_HOOKS: &[&str] = &[
+        "const_missing", "const_added", "method_added", "singleton_method_added",
+        "inherited", "included", "extended", "prepended", "append_features",
+        "prepend_features", "extend_object",
+    ];
+
+    #[test]
+    fn aliased_effect_hooks_are_incomplete_like_definitions() {
+        let mut failures = Vec::new();
+        for hook in ALIASED_HOOKS {
+            for singleton in [false, true] {
+                let project = |body: &str| {
+                    let body = format!("def lookup(*); end; {body}");
+                    let body = if singleton { format!("class << self; {body}; end") } else { body };
+                    read_ruby_for_check(format!("module Hooks; {body}; end").as_bytes()).unwrap()
+                };
+                let definition = project(&format!("def {hook}(*); end"));
+                assert!(definition.contains(OPAQUE_CONSTANTS), "definition control: {definition}");
+                for alias in [format!("alias_method :{hook}, :lookup"), format!("alias {hook} lookup")] {
+                    let text = project(&alias);
+                    if effect_barriers(&text) != effect_barriers(&definition) {
+                        failures.push(format!("singleton={singleton}, {alias}: expected {:?}, got {:?}: {text}", effect_barriers(&definition), effect_barriers(&text)));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "aliased hooks differ from definitions:\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn aliased_effect_hooks_in_omitted_values_and_guards_are_not_pure() {
+        let mut failures = Vec::new();
+        for hook in ALIASED_HOOKS {
+            for initializer in [false, true] {
+                let project = |body: &str| {
+                    let body = if initializer { format!("HOLDER = ({body})") } else { format!("if true; {body}; end") };
+                    read_ruby_for_check(format!("module Hooks; def lookup(*); end; {body}; end").as_bytes()).unwrap()
+                };
+                let definition = project(&format!("def {hook}(*); end"));
+                assert!(definition.contains(OPAQUE_CONSTANTS), "definition control: {definition}");
+                for alias in [format!("alias_method :{hook}, :lookup"), format!("alias {hook} lookup")] {
+                    let text = project(&alias);
+                    if effect_barriers(&text) != effect_barriers(&definition) {
+                        failures.push(format!("initializer={initializer}, {alias}: expected {:?}, got {:?}: {text}", effect_barriers(&definition), effect_barriers(&text)));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "omitted aliased hooks treated as pure:\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn ordinary_aliases_do_not_add_constant_effects() {
+        for alias in ["alias_method :resolve, :lookup", "alias resolve lookup"] {
+            for body in [format!("def lookup(*); end; {alias}"),
+                format!("class << self; def lookup(*); end; {alias}; end"),
+                format!("def lookup(*); end; if true; {alias}; end"),
+                format!("def lookup(*); end; HOLDER = ({alias})")]
+            {
+                let text = read_ruby_for_check(format!("module Hooks; {body}; end").as_bytes()).unwrap();
+                assert_eq!(effect_barriers(&text), (false, false, false), "ordinary alias control: {body}: {text}");
             }
         }
     }
