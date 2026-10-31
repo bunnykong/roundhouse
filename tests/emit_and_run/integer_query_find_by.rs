@@ -293,3 +293,296 @@ puts "String and boolean constraints compose"
 fn integer_query_strings_keep_integer_boolean_casts() {
     assert_query_parity(app(), MODEL_BODY, BOOLEAN_STRING_QUERIES);
 }
+
+fn native_review_control(schema: &str, models: &str, script: &str) {
+    let oracle =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/rails_oracle.rb");
+    let native = format!(
+        r##"
+require {oracle:?}
+unless RailsOracle.available?("activerecord", sqlite3: ">= 2.9")
+  warn "skipping native review control: #{{RailsOracle.label}} or sqlite3 unavailable"
+  exit 77
+end
+RailsOracle.activate("activerecord", sqlite3: ">= 2.9")
+require "active_record"
+ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
+ActiveRecord::Schema.verbose = false
+{schema}
+{models}
+{script}
+"##
+    );
+    let output = emit_and_run::ruby()
+        .args(["-e", &native])
+        .output()
+        .expect("Rails review control");
+    if output.status.code() == Some(77) {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn integer_query_columns(source: &str) -> &str {
+    source
+        .split("def self.schema_integer_query_columns")
+        .nth(1)
+        .expect("integer query evidence")
+        .split("\n  end")
+        .next()
+        .unwrap()
+}
+
+#[test]
+fn query_cast_evidence_excludes_every_attribute_and_normalizes_declaration() {
+    let cases = [
+        "attribute :number, ActiveRecord::Type::String.new",
+        "attribute :number, :string, limit: 8",
+        "attribute \"number\", :string",
+        "self.attribute :number, :string",
+        "Widget.attribute :number, :string",
+        "def self.zero_to_nil(n); n == 0 ? nil : n; end\n  normalizes :number, with: method(:zero_to_nil)",
+        "normalizes :number, with: ->(n) { n == 0 ? nil : n }, apply_to_nil: [false].first",
+        "normalizes \"number\", with: ->(n) { n == 0 ? nil : n }",
+        "self.normalizes :number, with: ->(n) { n == 0 ? nil : n }",
+        "Widget.normalizes :number, with: ->(n) { n == 0 ? nil : n }",
+    ];
+    // Run Rails first, including forms whose complete lowering remains a gap.
+    for body in cases {
+        let positive = if body.contains("normalizes") {
+            "[1]"
+        } else {
+            "[]"
+        };
+        native_review_control(
+            "ActiveRecord::Schema.define { create_table(:widgets) { |t| t.integer :number; t.integer :phase; t.string :label } }",
+            &format!("class Widget < ActiveRecord::Base\n{body}\nend"),
+            &format!(
+                r##"
+Widget.connection.execute("INSERT INTO widgets(id,number) VALUES(0,0),(1,1),(2,NULL)")
+raise unless Widget.where(number: "1suffix").order(:id).pluck(:id) == {positive}
+raise unless Widget.where.not(number: "abc").order(:id).pluck(:id) == [0,1]
+"##
+            ),
+        );
+    }
+    let mut failures = Vec::new();
+    for body in cases {
+        let (emitted, _errors) = app()
+            .write(
+                "app/models/widget.rb",
+                &format!("class Widget < ApplicationRecord\n{body}\nend\n"),
+            )
+            .emit(roundhouse::project::BuildTarget::Ruby);
+        let source = std::fs::read_to_string(emitted.join("app/models/widget.rb")).unwrap();
+        let columns = integer_query_columns(&source);
+        assert!(
+            columns.contains(":id") && columns.contains(":phase"),
+            "unrelated columns lost: {body}: {columns}"
+        );
+        if columns.contains(":number") {
+            failures.push(format!("{body}: {columns}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "decorated columns retained plain integer evidence:\n{}",
+        failures.join("\n")
+    );
+    for body in &cases[..4] {
+        app()
+            .write(
+                "app/models/widget.rb",
+                &format!("class Widget < ApplicationRecord\n{body}\nend\n"),
+            )
+            .run_ruby(
+                r##"
+Widget.connection.execute("INSERT INTO widgets(id,number) VALUES(0,0),(1,1),(2,NULL)")
+raise unless Widget.where(number: "1suffix").order(:id).pluck(:id) == []
+raise unless Widget.where.not(number: "abc").order(:id).pluck(:id) == [0,1]
+"##,
+            )
+            .assert_passes();
+    }
+}
+
+#[test]
+fn query_cast_evidence_handles_multiple_and_computed_declaration_names() {
+    let multi = "def self.zero_to_nil(n); n == 0 ? nil : n; end\n  normalizes :number, :phase, with: method(:zero_to_nil)";
+    native_review_control(
+        "ActiveRecord::Schema.define { create_table(:widgets) { |t| t.integer :number; t.integer :phase } }",
+        &format!("class Widget < ActiveRecord::Base\n{multi}\nend"),
+        r##"Widget.connection.execute("INSERT INTO widgets(id,number,phase) VALUES(0,0,0),(1,1,1),(2,NULL,NULL)")
+raise unless Widget.where.not(number: "abc").pluck(:id) == [0,1]
+raise unless Widget.where.not(phase: "abc").pluck(:id) == [0,1]
+"##,
+    );
+    let computed =
+        "attribute ENV.fetch(\"ROUNDHOUSE_REVIEW_ATTRIBUTE_COLUMN\", \"number\"), :string";
+    native_review_control(
+        "ActiveRecord::Schema.define { create_table(:widgets) { |t| t.integer :number; t.integer :phase } }",
+        &format!("class Widget < ActiveRecord::Base\n{computed}\nend"),
+        r##"Widget.connection.execute("INSERT INTO widgets(id,number) VALUES(0,0),(1,1),(2,NULL)")
+raise unless Widget.where(number: "1suffix").pluck(:id) == []
+"##,
+    );
+    for (body, unknown) in [(multi, false), (computed, true)] {
+        let (emitted, _errors) = app()
+            .write(
+                "app/models/widget.rb",
+                &format!("class Widget < ApplicationRecord\n{body}\nend\n"),
+            )
+            .emit(roundhouse::project::BuildTarget::Ruby);
+        let source = std::fs::read_to_string(emitted.join("app/models/widget.rb")).unwrap();
+        let columns = integer_query_columns(&source);
+        assert!(
+            !columns.contains(":number") && !columns.contains(":phase"),
+            "{body}: {columns}"
+        );
+        if unknown {
+            assert!(
+                !columns.contains(":id"),
+                "unknown declaration target: {columns}"
+            );
+        } else {
+            assert!(columns.contains(":id"), "{columns}");
+        }
+    }
+}
+
+const REFERENCE_SCHEMA: &str = r##"ActiveRecord::Schema.define do
+  create_table(:owners, id: :string)
+  create_table(:uuid_owners, id: :uuid)
+  create_table(:widgets) do |t|
+    t.references :owner, type: :string
+    t.belongs_to :uuid_owner, type: :uuid
+    t.references :integer_owner, type: :bigint
+  end
+end
+"##;
+const REFERENCE_MODELS: &str = "class Owner < ActiveRecord::Base; end\nclass UuidOwner < ActiveRecord::Base; end\nclass Widget < ActiveRecord::Base; end\n";
+const REFERENCE_QUERIES: &str = r##"
+Widget.connection.execute("INSERT INTO widgets(id,owner_id,uuid_owner_id,integer_owner_id) VALUES(1,'7suffix','a0000000-0000-0000-0000-000000000007',7),(2,'other','a0000000-0000-0000-0000-000000000008',8)")
+checks = [
+  [Widget.where(owner_id: "7suffix"), [1]],
+  [Widget.where.not(owner_id: "7suffix"), [2]],
+  [Widget.where(uuid_owner_id: "a0000000-0000-0000-0000-000000000007"), [1]],
+  [Widget.where.not(uuid_owner_id: "a0000000-0000-0000-0000-000000000007"), [2]],
+  [Widget.where(integer_owner_id: "7suffix"), [1]]
+]
+checks.each do |relation, expected|
+  actual = relation.order(:id).pluck(:id)
+  raise "#{relation.to_sql}: #{actual.inspect}" unless actual == expected
+end
+puts "reference query types match"
+"##;
+
+fn reference_query_app() -> emit_and_run::Overlay {
+    app()
+        .write("db/schema.rb", REFERENCE_SCHEMA)
+        .write(
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord; end\n",
+        )
+        .write(
+            "app/models/owner.rb",
+            "class Owner < ApplicationRecord; end\n",
+        )
+        .write(
+            "app/models/uuid_owner.rb",
+            "class UuidOwner < ApplicationRecord; end\n",
+        )
+}
+
+const REFERENCE_MIGRATION: &str = r##"class CreateReferenceColumns < ActiveRecord::Migration[8.1]
+  def change
+    create_table(:owners, id: :string)
+    create_table(:uuid_owners, id: :uuid)
+    create_table(:widgets)
+    add_reference :widgets, :owner, type: :string
+    add_belongs_to :widgets, :uuid_owner, type: :uuid
+    add_reference :widgets, :integer_owner, type: :bigint
+  end
+end
+"##;
+
+fn reference_migration_app() -> emit_and_run::Overlay {
+    reference_query_app().remove("db/schema.rb").write(
+        "db/migrate/001_create_reference_columns.rb",
+        REFERENCE_MIGRATION,
+    )
+}
+
+#[test]
+fn reference_queries_keep_the_declared_column_type() {
+    native_review_control(REFERENCE_SCHEMA, REFERENCE_MODELS, REFERENCE_QUERIES);
+    let adds = REFERENCE_MIGRATION
+        .replace(
+            "class CreateReferenceColumns < ActiveRecord::Migration[8.1]",
+            "ActiveRecord::Schema.define do",
+        )
+        .replace("  def change", "");
+    let adds = adds.strip_suffix("end\n").unwrap();
+    native_review_control(adds, REFERENCE_MODELS, REFERENCE_QUERIES);
+    let factories: [fn() -> emit_and_run::Overlay; 2] =
+        [reference_query_app, reference_migration_app];
+    let mut failures = Vec::new();
+    for factory in factories {
+        let (emitted, errors) = factory().emit(roundhouse::project::BuildTarget::Ruby);
+        assert!(errors.is_empty(), "{}", errors.join("\n"));
+        let source = std::fs::read_to_string(emitted.join("app/models/widget.rb")).unwrap();
+        let columns = integer_query_columns(&source);
+        if !columns.contains(":integer_owner_id")
+            || columns.contains(":owner")
+            || columns.contains(":uuid_owner")
+        {
+            failures.push(columns.to_string());
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "references lost their declared column types: {failures:?}"
+    );
+    for factory in factories {
+        factory().run_ruby(REFERENCE_QUERIES).assert_passes();
+    }
+}
+
+#[test]
+fn reference_query_type_is_not_inferred_from_the_target_key() {
+    // Reference IR denotes integer storage, as Rails' default reference does.
+    native_review_control(
+        r##"ActiveRecord::Schema.define do
+  create_table(:owners, id: :string)
+  create_table(:uuid_owners, id: :uuid)
+  create_table(:widgets) { |t| t.references :owner; t.references :uuid_owner }
+end"##,
+        REFERENCE_MODELS,
+        r##"
+raise unless Widget.columns_hash["owner_id"].type == :integer
+raise unless Widget.columns_hash["uuid_owner_id"].type == :integer
+Widget.connection.execute("INSERT INTO widgets(id,owner_id,uuid_owner_id) VALUES(1,7,7)")
+raise unless Widget.where(owner_id: "7suffix").pluck(:id) == [1]
+raise unless Widget.where(uuid_owner_id: "7suffix").pluck(:id) == [1]
+"##,
+    );
+    let (emitted, errors) = app().write("db/schema.rb",
+        "ActiveRecord::Schema.define do\n  create_table(:owners, id: :string)\n  create_table(:uuid_owners, id: :uuid)\n  create_table(:widgets) { |t| t.references :owner; t.references :uuid_owner }\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord; end\n")
+        .write("app/models/owner.rb", "class Owner < ApplicationRecord; end\n")
+        .write("app/models/uuid_owner.rb", "class UuidOwner < ApplicationRecord; end\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let source = std::fs::read_to_string(emitted.join("app/models/widget.rb")).unwrap();
+    let columns = integer_query_columns(&source);
+    assert!(
+        columns.contains(":owner") && columns.contains(":uuid_owner"),
+        "default references are integer columns: {columns}"
+    );
+}
