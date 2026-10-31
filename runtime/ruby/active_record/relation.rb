@@ -3224,7 +3224,8 @@ module ActiveRecord
     # Only this model's known integer columns supply cast evidence. A
     # qualified column on another table and raw SQL retain their own path.
     def integer_query_column?(col)
-      prefix = "#{@model.table_name}."
+      table_name = @model.table_name
+      prefix = "#{table_name}."
       name = col.start_with?(prefix) ? col[prefix.length, col.length].to_s : col
       !name.include?(".") && @model.schema_integer_query_columns.include?(name.to_sym)
     end
