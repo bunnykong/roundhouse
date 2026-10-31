@@ -894,6 +894,21 @@ fn w088_review_unknown_relation_hook_dispatch_is_explicitly_refused() {
 
 #[test]
 fn w088_review_subclass_forms_keep_routes_parameter_keys_and_errors() {
+    // The oracle below pins this release; unit partitions do not install
+    // its optional ActionView and ActionPack components.
+    let oracle = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let probe = std::process::Command::new("ruby")
+        .env("RH_RAILS_ORACLE", "8.1.4")
+        .args(["-e", &format!("require {oracle:?}\nputs RailsOracle.available?(\"activerecord\", \"actionview\", \"actionpack\", sqlite3: \">= 2.9\")")])
+        .output()
+        .expect("Rails oracle availability probe");
+    let available = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    assert!(probe.status.success() && matches!(available.as_str(), "true" | "false"),
+        "Rails oracle availability probe failed: {available}\n{}", String::from_utf8_lossy(&probe.stderr));
+    if available == "false" {
+        eprintln!("skipping: Rails 8.1.4 form oracle requires activerecord, actionview, actionpack and sqlite3 >= 2.9");
+        return;
+    }
     const SCHEMA: &str = "ActiveRecord::Schema.define do\ncreate_table(:rooms) { |t| t.string :name; t.string :type }\nend\n";
     const ROOM: &str = "class Room < ActiveRecord::Base\nattr_accessor :user_ids_input\nend\n";
     const DIRECT: &str = "class Rooms::Direct < Room\nend\n";
