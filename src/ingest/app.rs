@@ -32,7 +32,7 @@ use super::library_class::{
     ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model_with_enum_constants;
-use super::routes::{EngineRouteSource, RouteHelperSource, ingest_routes_with_engines};
+use super::routes::{EngineRouteSource, RouteHelperSource, ingest_route_file, merge_route_files};
 use super::schema::{ingest_migration, ingest_schema};
 use super::structure_sql::ingest_structure_sql;
 use super::test::{ingest_test_bases, ingest_test_files};
@@ -319,7 +319,11 @@ fn keep_initializer_defined(
 /// Admission is based on the callable retained from app source, not a target's
 /// spelling. Inherited, reopened, macro-defined and instance-only endpoints
 /// cannot establish that the mounted constant itself implements Rack's call.
-fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> super::routes::RackAppTargets {
+///
+/// The candidates and the app and boot sources' writes are the same for
+/// every route file, so they are read once; `RackAppScan::targets` adds
+/// each route file's own writes.
+fn literal_rack_apps(app: &App, dir: &Path, boot_sources: impl FnOnce() -> Vec<Vec<u8>>) -> RackAppScan {
     use crate::dialect::{MethodReceiver, MethodVisibility};
     let mut counts: HashMap<ClassId, usize> = HashMap::default();
     for class in &app.library_classes {
@@ -364,7 +368,7 @@ fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> supe
         Some(class.name.0.as_str().to_string())
     }).collect();
     if candidates.is_empty() {
-        return super::routes::RackAppTargets::default();
+        return RackAppScan::default();
     }
     // Method ownership is not binding ownership: file-level and qualified
     // writes can replace the constant after its class declaration. Inspect
@@ -376,24 +380,44 @@ fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> supe
             writes.read(file.text.as_bytes());
         }
     }
-    for source in boot_and_routes {
-        writes.read(source);
+    for source in boot_sources() {
+        writes.read(&source);
     }
-    let mut rebound = HashSet::default();
-    candidates.retain(|name| {
-        let binding = super::routes::RackAppTargets::binding_name(name);
-        let reassigned = writes.names.iter().any(|written| {
-            [name.as_str(), binding].iter().any(|name| {
-                *name == written.as_str() || name.strip_prefix(written.as_str()).is_some_and(|rest| rest.starts_with("::"))
-            })
-        });
-        if reassigned { rebound.insert(binding.to_string()); }
-        !writes.unknown && !reassigned
-    });
-    super::routes::RackAppTargets { callable: candidates, rebound }
+    RackAppScan { candidates, writes }
 }
 
 #[derive(Default)]
+struct RackAppScan {
+    candidates: HashSet<String>,
+    writes: RackBindingWrites,
+}
+
+impl RackAppScan {
+    fn targets(&self, route_sources: &[Vec<u8>]) -> super::routes::RackAppTargets {
+        if self.candidates.is_empty() {
+            return super::routes::RackAppTargets::default();
+        }
+        let mut writes = self.writes.clone();
+        for source in route_sources {
+            writes.read(source);
+        }
+        let mut candidates = self.candidates.clone();
+        let mut rebound = HashSet::default();
+        candidates.retain(|name| {
+            let binding = super::routes::RackAppTargets::binding_name(name);
+            let reassigned = writes.names.iter().any(|written| {
+                [name.as_str(), binding].iter().any(|name| {
+                    *name == written.as_str() || name.strip_prefix(written.as_str()).is_some_and(|rest| rest.starts_with("::"))
+                })
+            });
+            if reassigned { rebound.insert(binding.to_string()); }
+            !writes.unknown && !reassigned
+        });
+        super::routes::RackAppTargets { callable: candidates, rebound }
+    }
+}
+
+#[derive(Default, Clone)]
 struct RackBindingWrites {
     namespace: Vec<String>,
     names: HashSet<String>,
@@ -2067,9 +2091,75 @@ end
     app.generated_helper_methods =
         super::generated_helpers::ingest_generated_helpers(&app, vfs, dir, &model_files);
 
-    let routes_path = dir.join("config/routes.rb");
-    if vfs.exists(&routes_path) {
-        if let Some(source) = read_or_ledger(vfs, &routes_path)? {
+    // The route files Rails loads into the application's route set: the
+    // app's `config/routes.rb`, then each in-repo engine's own. An engine
+    // draws into the app (`Rails.application.routes.draw`), so its named
+    // routes are the app's helpers: an app can keep none in its own
+    // `config/routes.rb` and draw every route from its components'.
+    // Rails unshifts each engine's file onto the reloader's paths in
+    // initializer order and the app's last, so the app's file leads and
+    // the engines follow in reverse load order.
+    //
+    // UNMEASURED: the engines' load order. Rails defines them in the
+    // order `config/application.rb`'s requires reach them; that walk is
+    // not modeled here, so the engines are taken sorted by directory.
+    let mut engine_dirs: Vec<PathBuf> = path_gems
+        .iter()
+        .filter(|gem| !source_gems.iter().any(|source| source.mount == **gem))
+        .filter(|gem| declares_rails_engine(vfs, &gem.join("lib")))
+        .cloned()
+        .collect();
+    engine_dirs.sort();
+    let mut route_roots: Vec<PathBuf> = Vec::new();
+    if vfs.exists(&dir.join("config/routes.rb")) {
+        route_roots.push(dir.to_path_buf());
+    }
+    route_roots.extend(
+        engine_dirs
+            .iter()
+            .rev()
+            .filter(|engine| vfs.exists(&engine.join("config/routes.rb")))
+            .cloned(),
+    );
+    if !route_roots.is_empty() {
+        let block_wrappers = mapper_extension_block_methods(&app, vfs, dir, &engine_dirs);
+        // The constants the route files read, folded from their owners
+        // as a model body's are, for `constraints:` values. A route
+        // names a controller's constant as often as a model's, so its
+        // table also takes the controllers, which the enum inputs above
+        // leave out on purpose (a controller is not a model's input).
+        let mut route_inputs = super::model::EnumConstants::default();
+        let mut route_files: Vec<PathBuf> = enum_input_files.iter().cloned().collect();
+        for root in &roots {
+            let controllers_dir = dir.join(root).join("controllers");
+            if vfs.is_dir(&controllers_dir) {
+                route_files.extend(read_rb_files(vfs, &controllers_dir)?);
+            }
+        }
+        // A controller can also be an autoload input (an app that adds
+        // `app/controllers/concerns` to its autoload paths); recorded
+        // twice, its constants would count as written twice and fold
+        // nowhere.
+        route_files.sort();
+        route_files.dedup();
+        for file in &route_files {
+            if let Ok(text) = vfs.read(file) {
+                route_inputs.record_again(&text, &file.display().to_string());
+            }
+        }
+        for file in &boot_files {
+            if let Some(text) = read_or_ledger(vfs, file)? {
+                route_inputs.record_boot(&text, &file.display().to_string());
+            }
+        }
+        route_inputs.finish();
+        let mut drawn = Vec::new();
+        let rack_scan = literal_rack_apps(&app, dir, || {
+            boot_files.iter().filter_map(|file| vfs.read(file).ok()).collect()
+        });
+        for root in &route_roots {
+            let routes_path = root.join("config/routes.rb");
+            let Some(source) = read_or_ledger(vfs, &routes_path)? else { continue };
             // `draw(:name)` split files — Rails loads
             // `config/routes/<name>.rb` into the same DSL context, and
             // Mastodon-class apps keep most of their route table there.
@@ -2082,7 +2172,7 @@ end
             // the bare stem when it is unambiguous, for `draw(:name)` calls
             // written against a flat `config/routes/` layout.
             let mut draw_files: HashMap<String, (Vec<u8>, String)> = HashMap::default();
-            let routes_dir = dir.join("config/routes");
+            let routes_dir = root.join("config/routes");
             if vfs.is_dir(&routes_dir) {
                 for entry in read_rb_files(vfs, &routes_dir)? {
                     let Some(rel) = entry.strip_prefix(&routes_dir).ok().and_then(|p| p.to_str())
@@ -2094,37 +2184,6 @@ end
                     draw_files.insert(key, (split_source, entry.display().to_string()));
                 }
             }
-            let block_wrappers = mapper_extension_block_methods(&app, vfs, dir);
-            // The constants the route files read, folded from their owners
-            // as a model body's are, for `constraints:` values. A route
-            // names a controller's constant as often as a model's, so its
-            // table also takes the controllers, which the enum inputs above
-            // leave out on purpose (a controller is not a model's input).
-            let mut route_inputs = super::model::EnumConstants::default();
-            let mut route_files: Vec<PathBuf> = enum_input_files.iter().cloned().collect();
-            for root in &roots {
-                let controllers_dir = dir.join(root).join("controllers");
-                if vfs.is_dir(&controllers_dir) {
-                    route_files.extend(read_rb_files(vfs, &controllers_dir)?);
-                }
-            }
-            // A controller can also be an autoload input (an app that adds
-            // `app/controllers/concerns` to its autoload paths); recorded
-            // twice, its constants would count as written twice and fold
-            // nowhere.
-            route_files.sort();
-            route_files.dedup();
-            for file in &route_files {
-                if let Ok(text) = vfs.read(file) {
-                    route_inputs.record_again(&text, &file.display().to_string());
-                }
-            }
-            for file in &boot_files {
-                if let Some(text) = read_or_ledger(vfs, file)? {
-                    route_inputs.record_boot(&text, &file.display().to_string());
-                }
-            }
-            route_inputs.finish();
             let mut route_consts = super::model::ClassConsts::default();
             for text in std::iter::once(&source).chain(draw_files.values().map(|(s, _)| s)) {
                 let parsed = ruby_prism::parse(text);
@@ -2137,13 +2196,13 @@ end
                     .unwrap_or_default();
                 route_consts.merge(super::model::ClassConsts::collect(&top, &routes_path.display().to_string()));
             }
-            let routes = super::routes::with_route_constants(route_consts, || {
-                let rack_sources: Vec<_> = std::iter::once(source.clone())
+            let file_routes = super::routes::with_route_constants(route_consts, || {
+                let route_sources: Vec<_> = std::iter::once(source.clone())
                     .chain(draw_files.values().map(|(text, _)| text.clone()))
-                    .chain(boot_files.iter().filter_map(|file| vfs.read(file).ok()))
                     .collect();
-                let rack_apps = literal_rack_apps(&app, dir, &rack_sources);
-                ingest_routes_with_engines(
+                let rack_apps = rack_scan.targets(&route_sources);
+                ingest_route_file(
+                    root == dir,
                     &source,
                     &routes_path.display().to_string(),
                     &draw_files,
@@ -2154,25 +2213,29 @@ end
                     &load_helper_sources,
                 )
             });
-            if let Some(routes) = unwrap_or_record(routes)? {
-                // `to: redirect("/x")` routes point at actions nobody
-                // wrote, so write them: one controller, one action per
-                // redirect, each a `redirect_to <literal>, status: …`. It
-                // is the shape an app uses by hand for the same thing, and
-                // it keeps the redirect out of every emitter's route kind.
-                if !routes.redirects.is_empty() {
-                    app.controllers.push(synthesize_redirect_controller(&routes.redirects));
-                    // The inherited runtime calls this helper, outside app call-site inference.
-                    let signatures = crate::rbs::parse_app_signatures(
-                        "class RoundhouseRedirectsController\n  def same_host_location: (String location) -> String\n  def absolute_redirect_location: (String location) -> String\nend\n",
-                    ).expect("routing redirect policy signature parses");
-                    for (owner, methods) in signatures {
-                        app.rbs_signatures.entry(owner).or_default().extend(methods);
-                    }
-                }
-                app.routes = routes;
-                synthesize_rails_health_controller(&mut app);
+            if let Some(file_routes) = unwrap_or_record(file_routes)? {
+                drawn.push(file_routes);
             }
+        }
+        if !drawn.is_empty() {
+            let routes = merge_route_files(drawn);
+            // `to: redirect("/x")` routes point at actions nobody
+            // wrote, so write them: one controller, one action per
+            // redirect, each a `redirect_to <literal>, status: …`. It
+            // is the shape an app uses by hand for the same thing, and
+            // it keeps the redirect out of every emitter's route kind.
+            if !routes.redirects.is_empty() {
+                app.controllers.push(synthesize_redirect_controller(&routes.redirects));
+                // The inherited runtime calls this helper, outside app call-site inference.
+                let signatures = crate::rbs::parse_app_signatures(
+                    "class RoundhouseRedirectsController\n  def same_host_location: (String location) -> String\n  def absolute_redirect_location: (String location) -> String\nend\n",
+                ).expect("routing redirect policy signature parses");
+                for (owner, methods) in signatures {
+                    app.rbs_signatures.entry(owner).or_default().extend(methods);
+                }
+            }
+            app.routes = routes;
+            synthesize_rails_health_controller(&mut app);
         }
     }
 
@@ -12846,11 +12909,16 @@ fn mapper_extension_block_methods<V: Vfs + ?Sized>(
     app: &App,
     vfs: &V,
     dir: &Path,
+    engine_dirs: &[PathBuf],
 ) -> crate::det::HashSet<String> {
     const TARGET: &str = "Routing::Mapper";
     let mut modules: Vec<String> = Vec::new();
-    for sub in ["config/initializers", "lib"] {
-        let d = dir.join(sub);
+    // The app's own, then each in-repo engine's: an engine's `lib` can
+    // carry the Mapper extension its own route file draws with.
+    let scanned = [dir].into_iter().chain(engine_dirs.iter().map(PathBuf::as_path)).flat_map(|root| {
+        ["config/initializers", "lib"].into_iter().map(move |sub| root.join(sub))
+    });
+    for d in scanned {
         if !vfs.is_dir(&d) {
             continue;
         }

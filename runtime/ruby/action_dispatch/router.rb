@@ -221,11 +221,25 @@ module ActionDispatch
     def self.match_path(method, path, table, format, unpeeled)
       method_upcase = method.to_s.upcase
       path_parts = path.split("/")
-      hit = scan_routes(method_upcase, path_parts, table, format, unpeeled)
+      hit = scan_root_aware(method_upcase, path_parts, table, format, unpeeled)
       if hit.nil? && method_upcase == "HEAD"
-        return scan_routes("GET", path_parts, table, format, unpeeled)
+        return scan_root_aware("GET", path_parts, table, format, unpeeled)
       end
       hit
+    end
+
+    # `scan_routes`, retried once for the root path. `"/".split("/")` is
+    # empty, so no pattern with a `:name` segment can match it — but
+    # Rails compiles `/:path` with `constraints: { path: /.*/ }` (Core's
+    # storefront catch-all `match ":path"`) to `\A/(.*)\z`, which does
+    # match `/` with an empty capture. The retry reads `/` as one empty
+    # segment; `match_parts` accepts an empty value only where the
+    # route's own constraint admits it, so an unconstrained `/:id` or a
+    # `*glob` still refuses the root, as in Rails.
+    def self.scan_root_aware(method_upcase, path_parts, table, format, unpeeled)
+      hit = scan_routes(method_upcase, path_parts, table, format, unpeeled)
+      return hit unless hit.nil? && path_parts.empty?
+      scan_routes(method_upcase, ["", ""], table, format, unpeeled)
     end
 
     # One pass of the table for one verb, over the already-split path.
@@ -361,10 +375,10 @@ module ActionDispatch
         at = glob >= 0 && i > glob ? i + extra : i
         ap = path_parts[at]
         if pp.start_with?("*")
-          # Rails' glob is `.+?` and a `.+` requirement's span is `.+`: an empty one (`/files//edit`) is no match.
-          return nil if glob_rest(path_parts, i, i + extra + 1).empty?
           # A requirement that admits `/` runs on the whole span, as Rails reads it over the rest of the path.
           span_pattern = segment_pattern_for(seg_constraints, pp)
+          # Rails' glob is `.+?`: an empty span (`/files//edit`) is no match. A requirement replaces it, so `.*` takes the empty root (`/:path, path: /.*/`) and `.+` does not.
+          return nil if span_pattern.empty? && glob_rest(path_parts, i, i + extra + 1).empty?
           return nil if !span_pattern.empty? && !segment_pattern_match(span_pattern, glob_rest(path_parts, i, i + extra + 1))
           params[pp[1..]] = glob_rest(path_parts, i, i + extra + 1)
         elsif pp.start_with?(":")
@@ -378,6 +392,9 @@ module ActionDispatch
             return nil
           end
           pattern_for_name = segment_pattern_for(seg_constraints, name)
+          # A dynamic segment is `[^/.?]+` unless the route constrains
+          # it: an empty value needs a constraint that admits it.
+          return nil if seg.empty? && pattern_for_name.empty?
           if !pattern_for_name.empty? && !segment_pattern_match(pattern_for_name, seg)
             return nil
           end

@@ -2199,6 +2199,7 @@ mod tests {
             action: Symbol::from(action),
             as_name: String::new(),
             required_params: params.len(),
+            required_path: None,
             path_params: params,
             named: false,
             helpers_enabled: false,
@@ -2208,6 +2209,7 @@ mod tests {
             constraints: vec![],
             seg_patterns: vec![],
             refused: None,
+            format_required: false,
         }
     }
 

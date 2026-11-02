@@ -1149,7 +1149,11 @@ fn escape_str(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            // C# ends a line at U+0085, U+2028 and U+2029 too, which a
+            // regular literal can't hold raw (CS1010).
+            c if (c as u32) < 0x20 || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}') => {
+                out.push_str(&format!("\\u{:04X}", c as u32))
+            }
             _ => out.push(c),
         }
     }
@@ -1171,7 +1175,11 @@ fn escape_interp_text(s: &str) -> String {
             '\u{0C}' => out.push_str("\\f"),
             '{' => out.push_str("{{"),
             '}' => out.push_str("}}"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            // C# ends a line at U+0085, U+2028 and U+2029 too, which a
+            // regular literal can't hold raw (CS1010).
+            c if (c as u32) < 0x20 || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}') => {
+                out.push_str(&format!("\\u{:04X}", c as u32))
+            }
             _ => out.push(c),
         }
     }
@@ -2052,11 +2060,12 @@ pub(super) fn emit_begin_rescue(
     ensure: Option<&Expr>,
     arm: &dyn Fn(&Expr) -> String,
 ) -> String {
-    let mut try_body = arm(body);
-    if let Some(eb) = else_branch {
-        try_body.push('\n');
-        try_body.push_str(&arm(eb));
-    }
+    // With an `else`, the else branch's value is the block's: the body
+    // runs as statements, or a `return` from it skips the else.
+    let try_body = match else_branch {
+        Some(eb) => [emit_discarded(body), arm(eb)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"),
+        None => arm(body),
+    };
     let mut out = format!("try {{\n{}\n}}", indent(&try_body));
     if !rescues.is_empty() {
         let mut chain = String::new();
@@ -2089,6 +2098,46 @@ pub(super) fn emit_begin_rescue(
         out.push_str(&format!(" finally {{\n{}\n}}", indent(&emit_stmt(en))));
     }
     out
+}
+
+/// A body whose value is discarded: statements as `emit_stmt` writes them,
+/// except a value expression, which C# doesn't take as a statement
+/// (CS0201), is written as a discard so it still runs (and can raise).
+fn emit_discarded(e: &Expr) -> String {
+    if let ExprNode::Seq { exprs } = &*e.node {
+        return exprs.iter().map(emit_discarded).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+    }
+    let is_value = matches!(
+        &*e.node,
+        ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. }
+            | ExprNode::Array { .. }
+            | ExprNode::Hash { .. }
+            | ExprNode::StringInterp { .. }
+            | ExprNode::BoolOp { .. }
+            | ExprNode::Range { .. }
+    );
+    if is_value {
+        return format!("_ = {};", emit_expr(e));
+    }
+    // A send is classified by the C# it emits, not its Ruby name: `n + 1`
+    // and `items.empty?` (`(items.Count == 0)`) are values, while
+    // `items << 1` (`items.Add(1L)`, void) is a call. A call ends in its
+    // argument list and opens with neither a parenthesis nor a negation
+    // (`!(x)` is a value). A block send's loop (`items.each { … }` is a
+    // `foreach (…) { … }`) is a statement; an initializer (`new …{ … }`)
+    // is a value.
+    if let ExprNode::Send { .. } = &*e.node {
+        let emitted = emit_expr(e);
+        let text = emitted.trim();
+        let call = text.ends_with(')') && !text.starts_with('(') && !text.starts_with('!');
+        let block_statement = text.ends_with('}') && !text.starts_with("new ");
+        if !call && !block_statement {
+            return format!("_ = {text};");
+        }
+    }
+    emit_stmt(e)
 }
 
 pub(super) fn emit_stmt(e: &Expr) -> String {
@@ -2414,5 +2463,16 @@ fn nilable_prop_conversion(base: &str, value: &Expr) -> Option<String> {
         Ty::Float => Some(format!("({v} is null ? (double?)null : Convert.ToDouble({v}))")),
         Ty::Bool => Some(format!("({v} is null ? (bool?)null : Convert.ToBoolean({v}))")),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::{escape_interp_text, escape_str};
+
+    #[test]
+    fn line_terminators_are_escaped_in_string_literals() {
+        assert_eq!(escape_str("a\u{85}b\u{2028}c\u{2029}d"), "a\\u0085b\\u2028c\\u2029d");
+        assert_eq!(escape_interp_text("a\u{2028}{b}"), "a\\u2028{{b}}");
     }
 }

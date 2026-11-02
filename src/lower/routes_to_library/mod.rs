@@ -960,6 +960,19 @@ fn build_helper_function(
     // extension is a literal here, so it costs the base helper nothing.
     ext: Option<&str>,
 ) -> LibraryFunction {
+    // `scope format: true`: the helper takes the format as one more
+    // required, last segment param (`count.:format`).
+    let format_required;
+    let route = if route.format_required && route.required_path.is_none() {
+        let mut r = route.clone();
+        r.path.push_str(".:format");
+        r.path_params.push("format".to_string());
+        r.required_params = r.path_params.len();
+        format_required = r;
+        &format_required
+    } else {
+        route
+    };
     let slug_id = model_overrides_to_param(route.controller.0.as_str(), helper_name, app);
     // Slugness is PER PARAM: a nested parent's segment names its model
     // directly (`story_id` in `/stories/:story_id/suggestions` → Story,
@@ -1142,8 +1155,14 @@ fn build_helper_function(
             kind: crate::ty::ParamKind::Keyword { required: false },
         });
     }
-    let mut body = if required < seg_params.len() {
-        build_optional_path_expr(path, &seg_params, required, &slug_params)
+    let mut body = if route.required_path.is_some() || required < seg_params.len() {
+        build_optional_path_expr(
+            path,
+            route.required_path.as_deref(),
+            &seg_params,
+            required,
+            &slug_params,
+        )
     } else {
         build_path_expr(path, &seg_params, &slug_params)
     };
@@ -2128,7 +2147,8 @@ fn build_path_expr(
     let mut buf = String::new();
     let mut chars = path.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == ':' {
+        // `:name` is a segment, `*name` a glob (the rest of the path).
+        if c == ':' || c == '*' {
             // Read identifier
             let mut ident = String::new();
             while let Some(&nc) = chars.peek() {
@@ -2144,10 +2164,10 @@ fn build_path_expr(
                     parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
                 }
                 parts.push(InterpPart::Expr {
-                    expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))),
+                    expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident)), c == '*'),
                 });
             } else {
-                buf.push(':');
+                buf.push(c);
                 buf.push_str(&ident);
             }
         } else {
@@ -2163,124 +2183,230 @@ fn build_path_expr(
     )
 }
 
-/// Build a path expr for a route whose trailing params come from Rails
-/// optional groups: the required prefix always renders, each optional
-/// param's segment is appended only when the arg is non-nil.
-/// `/top(/:length(/page/:page))` (required=0) →
+/// Build a path expr for a route with Rails optional groups: the always
+/// present segments render unconditionally, and each optional segment
+/// renders only when its param is non-nil, wherever in the path the group
+/// sits. `/top(/:length(/page/:page))` →
 /// `"/top" + (length.nil? ? "" : "/#{length}")
-///        + (page.nil?   ? "" : "/page/#{page}")`.
-/// The leading `/` of an optional group stays with its chunk, so
-/// `top_path()` yields `"/top"`, not `"/top/"`.
+///        + (page.nil?   ? "" : "/page/#{page}")`;
+/// `(/:locale)/cart` → `(locale.nil? ? "" : "/#{locale}") + "/cart"`.
+///
+/// `shortest` is the path with every group dropped; a segment of `path`
+/// the shortest lacks is optional. Without it (a hand-built route), the
+/// params from `seg_params[required..]` mark the optional segments and a
+/// literal after one stays with its group. A group's literal segments
+/// stay with the param they precede, so `top_path()` is `"/top"`, not
+/// `"/top/"`.
 fn build_optional_path_expr(
     path: &str,
+    shortest: Option<&str>,
     seg_params: &[String],
     required: usize,
     slug_params: &crate::det::HashSet<String>,
 ) -> Expr {
     let optional: crate::det::HashSet<&str> =
-        seg_params[required..].iter().map(|s| s.as_str()).collect();
-    let mut base_parts: Vec<InterpPart> = Vec::new();
-    // (param-name, its conditionally-appended segment parts)
-    let mut chunks: Vec<(String, Vec<InterpPart>)> = Vec::new();
-    let mut buf = String::new();
-    let mut in_optional = false;
-    let mut chars = path.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != ':' {
-            buf.push(c);
-            continue;
-        }
-        let mut ident = String::new();
-        while let Some(&nc) = chars.peek() {
-            if nc.is_alphanumeric() || nc == '_' {
-                ident.push(nc);
-                chars.next();
-            } else {
-                break;
+        seg_params[required.min(seg_params.len())..].iter().map(|s| s.as_str()).collect();
+    let segments: Vec<&str> = path.split('/').collect();
+    let kept: Vec<&str> = shortest.map(|s| s.split('/').collect()).unwrap_or_default();
+    // A segment's text as parts: literal text and the params it names.
+    let segment_parts = |segment: &str, slash: bool| -> (Vec<InterpPart>, Option<String>) {
+        let mut parts: Vec<InterpPart> =
+            vec![InterpPart::Text { value: if slash { "/" } else { "" }.to_string() }];
+        let mut first_optional = None;
+        let mut buf = String::new();
+        let mut chars = segment.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != ':' && c != '*' {
+                buf.push(c);
+                continue;
             }
-        }
-        if !seg_params.iter().any(|p| p == &ident) {
-            buf.push(':');
-            buf.push_str(&ident);
-            continue;
-        }
-        if optional.contains(ident.as_str()) {
-            let mut chunk: Vec<InterpPart> = Vec::new();
-            if !in_optional {
-                // First optional param: split pending text at its last `/`
-                // — that slash opens the optional group and belongs to the
-                // chunk; everything before it is the always-present base.
-                let split = buf.rfind('/').unwrap_or(0);
-                let (base_text, chunk_prefix) = buf.split_at(split);
-                if !base_text.is_empty() {
-                    base_parts.push(InterpPart::Text { value: base_text.to_string() });
+            let mut ident = String::new();
+            while let Some(&nc) = chars.peek() {
+                if nc.is_alphanumeric() || nc == '_' {
+                    ident.push(nc);
+                    chars.next();
+                } else {
+                    break;
                 }
-                if !chunk_prefix.is_empty() {
-                    chunk.push(InterpPart::Text { value: chunk_prefix.to_string() });
-                }
-                in_optional = true;
-            } else if !buf.is_empty() {
-                chunk.push(InterpPart::Text { value: buf.clone() });
             }
-            chunk.push(InterpPart::Expr { expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))) });
-            chunks.push((ident.clone(), chunk));
+            if !seg_params.iter().any(|p| p == &ident) {
+                buf.push(c);
+                buf.push_str(&ident);
+                continue;
+            }
+            match parts.last_mut() {
+                Some(InterpPart::Text { value }) => value.push_str(&buf),
+                _ if !buf.is_empty() => parts.push(InterpPart::Text { value: buf.clone() }),
+                _ => {}
+            }
             buf.clear();
-        } else {
-            // Required param — stays in the always-present base.
-            if !buf.is_empty() {
-                base_parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
+            if optional.contains(ident.as_str()) && first_optional.is_none() {
+                first_optional = Some(ident.clone());
             }
-            base_parts.push(InterpPart::Expr { expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))) });
+            parts.push(InterpPart::Expr { expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident)), c == '*') });
+        }
+        if !buf.is_empty() {
+            match parts.last_mut() {
+                Some(InterpPart::Text { value }) => value.push_str(&buf),
+                _ => parts.push(InterpPart::Text { value: buf }),
+            }
+        }
+        (parts, first_optional)
+    };
+    // The path as an ordered list: text that always renders, and the
+    // segments that render only when their param is present.
+    enum Piece {
+        Always(Vec<InterpPart>),
+        When(String, Vec<InterpPart>),
+    }
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut pending: Vec<InterpPart> = Vec::new();
+    let mut next_kept = 0usize;
+    for (i, segment) in segments.iter().enumerate() {
+        if i == 0 && segment.is_empty() {
+            // The path's leading slash; every segment brings its own.
+            next_kept = usize::from(!kept.is_empty());
+            continue;
+        }
+        // A group inside a segment (`web-pixel-:id@:v(~:glue)`): the
+        // shortest segment is the always-present head, the rest the group.
+        if let Some(head) = kept.get(next_kept).filter(|head| {
+            !head.is_empty() && head.len() < segment.len() && segment.starts_with(**head)
+        }) {
+            let (head_parts, _) = segment_parts(head, true);
+            let (tail_parts, tail_param) = segment_parts(&segment[head.len()..], false);
+            next_kept += 1;
+            match pieces.last_mut() {
+                Some(Piece::Always(before)) => {
+                    before.extend(head_parts);
+                    merge_adjacent_text(before);
+                }
+                _ => pieces.push(Piece::Always(head_parts)),
+            }
+            match tail_param {
+                Some(param) => pieces.push(Piece::When(param, tail_parts)),
+                None => pending.extend(tail_parts),
+            }
+            continue;
+        }
+        let (parts, first_optional) = segment_parts(segment, true);
+        let in_shortest = match shortest {
+            Some(_) => {
+                let hit = kept.get(next_kept) == Some(segment);
+                if hit {
+                    next_kept += 1;
+                }
+                hit
+            }
+            None => first_optional.is_none() && pending.is_empty() && !optional_ahead(&segments[i..], &optional),
+        };
+        if in_shortest {
+            match pieces.last_mut() {
+                Some(Piece::Always(before)) => {
+                    before.extend(parts);
+                    merge_adjacent_text(before);
+                }
+                _ => pieces.push(Piece::Always(parts)),
+            }
+            continue;
+        }
+        pending.extend(parts);
+        if let Some(param) = first_optional {
+            pieces.push(Piece::When(param, std::mem::take(&mut pending)));
         }
     }
-    if !buf.is_empty() {
-        match chunks.last_mut() {
-            Some((_, last)) => last.push(InterpPart::Text { value: buf }),
-            None => base_parts.push(InterpPart::Text { value: buf }),
+    // A literal tail of an optional group (`(/:id/edit)`) stays with
+    // the group's last param.
+    if !pending.is_empty() {
+        if let Some(Piece::When(_, chunk)) =
+            pieces.iter_mut().rev().find(|p| matches!(p, Piece::When(..)))
+        {
+            chunk.extend(pending);
         }
     }
-    let mut result = parts_to_expr(base_parts);
-    for (pname, chunk) in chunks {
-        // `<param>.nil? ? "" : "<segment>"`
-        let cond = with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(var_ref(&pname)),
-                    method: Symbol::from("nil?"),
-                    args: vec![],
-                    block: None,
-                    parenthesized: false,
-                },
+    let rooted = !pieces.iter().any(|p| matches!(p, Piece::Always(_)));
+    let mut result: Option<Expr> = None;
+    let mut first_when = true;
+    for piece in pieces {
+        let expr = match piece {
+            Piece::Always(parts) => parts_to_expr(parts),
+            Piece::When(pname, chunk) => {
+                // `<param>.nil? ? "" : "<segment>"`
+                let cond = with_ty(
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: Some(var_ref(&pname)),
+                            method: Symbol::from("nil?"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        },
+                    ),
+                    Ty::Bool,
+                );
+                // A path made only of optional groups is `/` with none
+                // of them present.
+                let absent = if rooted && first_when { "/" } else { "" };
+                first_when = false;
+                with_ty(
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::If {
+                            cond,
+                            then_branch: lit_str(absent.to_string()),
+                            else_branch: parts_to_expr(chunk),
+                        },
+                    ),
+                    Ty::Str,
+                )
+            }
+        };
+        result = Some(match result {
+            None => expr,
+            Some(left) => with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(left),
+                        method: Symbol::from("+"),
+                        args: vec![expr],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                Ty::Str,
             ),
-            Ty::Bool,
-        );
-        let ternary = with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::If {
-                    cond,
-                    then_branch: lit_str(String::new()),
-                    else_branch: parts_to_expr(chunk),
-                },
-            ),
-            Ty::Str,
-        );
-        result = with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(result),
-                    method: Symbol::from("+"),
-                    args: vec![ternary],
-                    block: None,
-                    parenthesized: false,
-                },
-            ),
-            Ty::Str,
-        );
+        });
     }
-    result
+    result.unwrap_or_else(|| lit_str("/".to_string()))
+}
+
+/// Join neighbouring literal parts so `"/a" + "/b"` renders as `"/a/b"`.
+fn merge_adjacent_text(parts: &mut Vec<InterpPart>) {
+    let mut merged: Vec<InterpPart> = Vec::with_capacity(parts.len());
+    for part in parts.drain(..) {
+        match (merged.last_mut(), part) {
+            (Some(InterpPart::Text { value: before }), InterpPart::Text { value }) => {
+                before.push_str(&value);
+            }
+            (_, part) => merged.push(part),
+        }
+    }
+    *parts = merged;
+}
+
+/// Does any later segment of the path name an optional param? Without a
+/// shortest variant this is the only signal a literal belongs to an
+/// optional group: it sits before an optional param, in its run.
+fn optional_ahead(rest: &[&str], optional: &crate::det::HashSet<&str>) -> bool {
+    rest.iter().any(|seg| {
+        seg.split([':', '*']).skip(1).any(|tail| {
+            let ident: String =
+                tail.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            optional.contains(ident.as_str())
+        })
+    })
 }
 
 /// Collapse `InterpPart`s to an expr: empty → `""`, a lone text →
@@ -2486,8 +2612,10 @@ fn var_ref(name: &str) -> Expr {
 
 /// A path param's value as Rails writes it into the URL: through
 /// `Journey::Router::Utils.escape_segment`, so `"a/b"` is `a%2Fb` and a
-/// `?` or `#` stays inside the segment. An Integer id needs none.
-fn segment_value(var: Expr) -> Expr {
+/// `?` or `#` stays inside the segment. A `*glob` param is the rest of
+/// the path, so Rails takes `escape_path` for it and its `/`s stay.
+/// An Integer id needs none.
+fn segment_value(var: Expr, glob: bool) -> Expr {
     if matches!(var.ty, Some(Ty::Int)) {
         return var;
     }
@@ -2496,11 +2624,16 @@ fn segment_value(var: Expr) -> Expr {
         Expr::new(span, ExprNode::Send { recv: Some(var), method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false }),
         Ty::Str,
     );
-    let helpers = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] });
+    let (owner, method) = if glob {
+        (vec![Symbol::from("ActionDispatch"), Symbol::from("Router")], "escape_path")
+    } else {
+        (vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")], "escape_segment")
+    };
+    let helpers = Expr::new(span, ExprNode::Const { path: owner });
     with_ty(
         Expr::new(span, ExprNode::Send {
             recv: Some(helpers),
-            method: Symbol::from("escape_segment"),
+            method: Symbol::from(method),
             args: vec![text],
             block: None,
             parenthesized: true,
