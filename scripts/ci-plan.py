@@ -743,6 +743,8 @@ def select(
             "tests/spinel_toolchain/gradual_returns.rs",
         }:
             reasons.append(f"{path}: unit (gradual-return regression inputs)")
+        if path.startswith("tests/support/controller_content_type_writer/"):
+            reasons.append(f"{path}: unit (controller_content_type_writer)")
         if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
             targets.update(("ruby", "jruby"))
             smoke.update(("ruby", "jruby"))
