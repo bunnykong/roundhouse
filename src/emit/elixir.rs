@@ -481,6 +481,35 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                     model_extras,
                     &[],
                 );
+            // Elixir keeps no application superclass link. Reject before the
+            // framework stub can conceal a missing application hook.
+            let requests = crate::lower::controller_to_library::action_override::request_controllers(&app.controllers);
+            let routes = crate::lower::flatten_routes(app);
+            for class in &raw_controller_lcs {
+                if !routes.iter().any(|r| r.controller == class.name)
+                    || !requests.iter().any(|c| c.name == class.name)
+                    || class.methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Instance
+                        && m.name.as_str() == "process_action")
+                {
+                    continue;
+                }
+                let mut parent = class.parent.as_ref();
+                for _ in 0..raw_controller_lcs.len() {
+                    let Some(ancestor) = parent.and_then(|id| raw_controller_lcs.iter().find(|c| &c.name == id)) else { break; };
+                    if let Some(hook) = ancestor.methods.iter().find(|m| {
+                        m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() == "process_action"
+                    }) {
+                        crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                            hook.name_span,
+                            Some(crate::ident::Symbol::from("elixir")),
+                            "inherited_process_action",
+                            format!("{} inherits {}#process_action; Elixir requires a local application hook for request dispatch", class.name.0, ancestor.name.0),
+                        ));
+                        return out;
+                    }
+                    parent = ancestor.parent.as_ref();
+                }
+            }
             // Materialize the AC baseline into each concrete controller
             // FIRST — the base `initialize` is what seeds the response-state
             // struct fields (params/session/flash/request_format/status/…),

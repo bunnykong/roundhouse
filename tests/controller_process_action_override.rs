@@ -1674,6 +1674,86 @@ fn go_refuses_inherited_framework_super_but_keeps_source_hooks_without_super() {
     assert!(errors.is_empty(),"{errors:?}");
 }
 
+fn inherited_dispatch_files(owner: &str, calls_super: bool) -> Vec<(String, String)> {
+    let hook = format!("  private\n  def process_action(action)\n    {}\n    self\n  end\n", if calls_super { "super(action)" } else { "head :forbidden" });
+    let parent = if owner == "parent" { "HookParentController" } else { "ApplicationController" };
+    let mut files: Vec<_> = emit_and_run::controller_dispatch_files("ordinary")
+        .into_iter().map(|(path, body)| (path.to_string(), body)).collect();
+    for (path, body) in &mut files {
+        match path.as_str() {
+            "app/controllers/application_controller.rb" => *body = format!("class ApplicationController < ActionController::Base\n{}end\n", if owner == "application" { &hook } else { "" }),
+            "app/controllers/vault_controller.rb" => *body = format!("class VaultController < {parent}\n  def show; head :ok; end\n{}end\n", if owner == "own" { &hook } else { "" }),
+            "app/views/vault/index.html.erb" => { *path = "app/views/vault/show.html.erb".into(); *body = "unused\n".into(); },
+            "config/routes.rb" => *body = "Rails.application.routes.draw do\n  get \"/probe\", to: \"vault#show\"\nend\n".into(),
+            _ => {},
+        }
+    }
+    if owner == "parent" {
+        files.push(("app/controllers/hook_parent_controller.rb".into(), format!("class HookParentController < ApplicationController\n{hook}end\n")));
+    }
+    files
+}
+
+#[test]
+fn elixir_refuses_inherited_hooks_before_framework_materialization() {
+    let mut missing = Vec::new();
+    for owner in ["application", "parent"] {
+        for calls_super in [true, false] {
+            let (_, app, errors) = fixture(&inherited_dispatch_files(owner, calls_super)).emit_with_app(BuildTarget::Elixir);
+            let file = if owner == "application" { "application_controller.rb" } else { "hook_parent_controller.rb" };
+            if !errors.iter().any(|e| e.message.contains("inherited_process_action") && e.message.contains("process_action")
+                && app.sources.get(e.span.file.0.saturating_sub(1) as usize).is_some_and(|s| s.path.ends_with(file))) {
+                missing.push(format!("{owner}/super={calls_super}: {errors:?}"));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "missing inherited hook refusals: {missing:?}");
+}
+
+#[test]
+fn go_refusal_distinguishes_the_same_inherited_hook_variants() {
+    for owner in ["application", "parent"] {
+        for calls_super in [true, false] {
+            let (_, errors) = fixture(&inherited_dispatch_files(owner, calls_super)).emit(BuildTarget::Go);
+            if calls_super {
+                assert!(errors.iter().any(|e| e.contains("inherited_process_action")), "{owner}: {errors:?}");
+            } else {
+                assert!(errors.is_empty(), "{owner}: {errors:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn elixir_keeps_own_hooks_and_ordinary_application_methods() {
+    for (owner, calls_super) in [("own", true), ("own", false), ("ordinary", false)] {
+        let (_, errors) = fixture(&inherited_dispatch_files(owner, calls_super)).emit(BuildTarget::Elixir);
+        assert!(errors.is_empty(), "{owner}: {errors:?}");
+    }
+    let files = inherited_dispatch_files("ordinary", false);
+    let (_, errors) = fixture(&files).edit("app/controllers/vault_controller.rb", "  def show; head :ok; end", "  def show; head :ok; end\n  def _roundhouse_dispatch_action(action); head :im_a_teapot; end").emit(BuildTarget::Elixir);
+    assert!(errors.is_empty(), "{errors:?}");
+    let (_, errors) = fixture(&inherited_dispatch_files("parent", false))
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n").emit(BuildTarget::Elixir);
+    assert!(errors.is_empty(), "an unrouted hook must not be refused: {errors:?}");
+    // Elixir's earlier same-name class/instance check may reject this
+    // invalid replacement before the inherited-hook check runs.
+    let files = inherited_dispatch_files("application", true).into_iter().map(|(path, body)| {
+        let body = if path == "app/controllers/vault_controller.rb" {
+            body.replace("  def show; head :ok; end", "  def show; head :ok; end\n  def self.process_action(action); self; end")
+        } else { body };
+        (PathBuf::from(path), body.into_bytes())
+    }).collect();
+    let mut app = ingest_app_from_tree(files).expect("ingest class hook control");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let (result, errors) = roundhouse::emit::diagnostics::scope(|| {
+        roundhouse::project::target_files(&app, std::path::Path::new("."), BuildTarget::Elixir)
+    });
+    assert!(result.is_err() || errors.iter().any(|e| e.severity == Severity::Error), "a class hook cannot replace the instance hook");
+
+
+}
+
 #[test]
 fn rails_oracle_request_dispatch_filters_and_string_selectors() {
     if !require_rails_oracle() {return;}
