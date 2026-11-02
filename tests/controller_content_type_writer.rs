@@ -136,7 +136,12 @@ fn an_unresolved_assignment_value_is_not_changed_into_gradual_or_string() {
             let mut context = Ctx { self_ty: Some(Ty::Class { id: id.clone(), args: vec![].into() }),
                 instance_body: true, ..Ctx::default() };
             context.local_bindings.insert(Symbol::from("value"), value.clone());
-            assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expression, &context), value);
+            let actual = BodyTyper::new(&classes).analyze_expr(&mut expression, &context);
+            assert_eq!(actual, value);
+            if let (Ty::Untyped { why: actual }, Ty::Untyped { why: expected }) = (&actual, &value) {
+                assert_eq!(actual.is_gradual(), expected.is_gradual());
+                assert_eq!(actual.is_pending_only(), expected.is_pending_only());
+            }
             assert_eq!(expression.diagnostic().is_some(), matches!(value, Ty::Var { .. }));
         }
     }
