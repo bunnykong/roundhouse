@@ -902,10 +902,9 @@ impl<'a> BodyTyper<'a> {
                 // A local rescue handles the ordinary Kernel#raise fallback.
                 // Returns and breaks still cross it; a handler/ensure can exit too.
                 let catches = rescues.iter().any(|r| r.classes.is_empty() || r.classes.iter().any(|c| {
-                    matches!(&*c.node, ExprNode::Const { path } if {
-                        let parts = path.iter().map(Symbol::as_str).filter(|p| !p.is_empty()).collect::<Vec<_>>();
-                        matches!(parts.as_slice(), ["StandardError"] | ["Exception"] | ["RuntimeError"])
-                    })
+                    matches!(&*c.node, ExprNode::Const { .. })
+                        && matches!(c.ty.as_ref(), Some(Ty::Class { id, .. })
+                            if matches!(id.0.as_str(), "StandardError" | "Exception" | "RuntimeError"))
                 }));
                 self.block_has_escaping_exit(body, breaks, returns, raises && !catches)
                     || rescues.iter().any(|r| scan(&r.body))
@@ -5562,6 +5561,33 @@ mod tests {
             body,
             block_style: BlockStyle::Do,
         })
+    }
+
+    #[test]
+    fn local_rescue_uses_the_resolved_exception_class() {
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        for (written, resolved, escapes) in [
+            ("StandardError", Some("Foo::StandardError"), true),
+            ("Exception", Some("Foo::Exception"), true),
+            ("RuntimeError", Some("Foo::RuntimeError"), true),
+            ("StandardError", Some("StandardError"), false),
+            ("Catch", Some("StandardError"), false),
+            ("StandardError", None, true),
+        ] {
+            let mut class = synth(ExprNode::Const { path: vec![Symbol::from(written)] });
+            class.ty = resolved.map(|name| Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() });
+            let mut value = synth(ExprNode::Lit { value: Literal::Str { value: "x".into() } });
+            value.ty = Some(Ty::Str);
+            let expr = synth(ExprNode::BeginRescue {
+                body: synth(ExprNode::Raise { value }),
+                rescues: vec![crate::expr::RescueClause { classes: vec![class], binding: None,
+                    body: synth(ExprNode::Lit { value: Literal::Nil }) }],
+                else_branch: None, ensure: None, implicit: false,
+            });
+            assert_eq!(typer.block_has_escaping_exit(&expr, false, false, true), escapes,
+                "{written} resolved to {resolved:?}");
+        }
     }
 
     #[test]
