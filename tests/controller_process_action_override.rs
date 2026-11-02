@@ -1711,6 +1711,24 @@ fn elixir_refuses_inherited_hooks_before_framework_materialization() {
 }
 
 #[test]
+fn elixir_refuses_a_local_super_that_reaches_an_application_hook() {
+    for owner in ["application", "parent"] {
+        let base = inherited_dispatch_files(owner, false);
+        let local_super = "  def show; head :ok; end\n  private\n  def process_action(action); super(action); self; end";
+        let (_, app, errors) = fixture(&base)
+            .edit("app/controllers/vault_controller.rb", "  def show; head :ok; end", local_super)
+            .emit_with_app(BuildTarget::Elixir);
+        let file = if owner == "application" { "application_controller.rb" } else { "hook_parent_controller.rb" };
+        assert!(errors.iter().any(|e| e.message.contains("inherited_process_action")
+            && e.span.file.0.checked_sub(1).and_then(|n| app.sources.get(n as usize)).is_some_and(|s| s.path.ends_with(file))), "{owner}: {errors:?}");
+        let (_, errors) = fixture(&base)
+            .edit("app/controllers/vault_controller.rb", "  def show; head :ok; end", "  def show; head :ok; end\n  private\n  def process_action(action); head :accepted; self; end")
+            .emit(BuildTarget::Elixir);
+        assert!(errors.is_empty(), "local no-super hook: {owner}: {errors:?}");
+    }
+}
+
+#[test]
 fn go_refusal_distinguishes_the_same_inherited_hook_variants() {
     for owner in ["application", "parent"] {
         for calls_super in [true, false] {
@@ -1762,7 +1780,8 @@ fn rails_oracle_request_dispatch_filters_and_string_selectors() {
             .filter(|(path,_)| path.starts_with("app/controllers/")).collect();
         controllers.sort_by_key(|(path,_)| *path);
         let source=controllers.into_iter().map(|(_,body)| body).collect::<Vec<_>>().join("\n");
-        let program=format!(r#"gem "actionpack", "8.1.4"
+        let program=format!(r#"{oracle}
+RailsOracle.activate("actionpack")
 require "action_controller"
 require "action_controller/test_case"
 {source}
@@ -1773,7 +1792,7 @@ require "action_controller/test_case"
  c.process(action)
  puts c.response.status
 end
-"#);
+"#, oracle = include_str!("support/rails_oracle.rb"));
         let output=ruby_command().args(["-e",&program]).output().unwrap();
         assert!(output.status.success(),"{kind}: {}",String::from_utf8_lossy(&output.stderr));
         let expected=if kind=="string_selector" {"403\n202\n"} else if kind=="parent_no_super" {"403\n403\n"} else {"200\n403\n"};

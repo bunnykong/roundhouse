@@ -483,13 +483,18 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                 );
             // Elixir keeps no application superclass link. Reject before the
             // framework stub can conceal a missing application hook.
+            fn calls_super(body: &crate::expr::Expr) -> bool {
+                let mut found = matches!(&*body.node, crate::expr::ExprNode::Super { .. });
+                body.node.for_each_child(&mut |child| found |= calls_super(child));
+                found
+            }
             let requests = crate::lower::controller_to_library::action_override::request_controllers(&app.controllers);
             let routes = crate::lower::flatten_routes(app);
             for class in &raw_controller_lcs {
                 if !routes.iter().any(|r| r.controller == class.name)
                     || !requests.iter().any(|c| c.name == class.name)
                     || class.methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Instance
-                        && m.name.as_str() == "process_action")
+                        && m.name.as_str() == "process_action" && !calls_super(&m.body))
                 {
                     continue;
                 }
@@ -503,7 +508,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                             hook.name_span,
                             Some(crate::ident::Symbol::from("elixir")),
                             "inherited_process_action",
-                            format!("{} inherits {}#process_action; Elixir requires a local application hook for request dispatch", class.name.0, ancestor.name.0),
+                            format!("{} inherits {}#process_action; Elixir cannot dispatch through an application parent", class.name.0, ancestor.name.0),
                         ));
                         return out;
                     }
