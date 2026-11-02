@@ -1967,6 +1967,16 @@ pub(crate) fn insert_framework_stubs(
         fn_sig(vec![], Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
     );
     flash_cls.instance_methods.insert(
+        Symbol::from("to_session_value"),
+        fn_sig(vec![], Ty::Union { variants: vec![Ty::Hash {
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Union { variants: vec![
+                Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) },
+            ].into() }),
+        }, Ty::Nil].into() }),
+    );
+    flash_cls.instance_methods.insert(
         Symbol::from("notice"),
         fn_sig(vec![], nullable_str.clone()),
     );
@@ -4352,6 +4362,8 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr, locals: &IvarLocals) -> Expr 
     let mut out = Expr::new(expr.span, new_node);
     // `@article.class::STATES` stays a path (`expr::CONST_PATH`).
     out.decisions |= expr.decisions & crate::expr::CONST_PATH;
+    // A grounded `iso8601` (`to_rfc3339`) stays one: the Ruby emit prints `iso8601` by this flag.
+    out.decisions |= expr.decisions & crate::expr::GROUNDED_TIME_FORMAT;
     // Not a fresh, untyped node: the i18n lowering's `[]` names and values are typed `Array[String]`
     out.ty = expr.ty.clone();
     out

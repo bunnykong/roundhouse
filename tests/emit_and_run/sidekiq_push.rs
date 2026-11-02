@@ -30,8 +30,23 @@ const SIDEKIQ: &str = "  config.active_job.queue_adapter = :sidekiq\n";
 /// refuses one without a `url:`.
 const REDIS_CLIENT: &str = "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"REDIS_URL\", \"redis://localhost:6379/0\") }\nend\n";
 
-fn on_sidekiq() -> emit_and_run::Overlay {
+/// real-blog's Article and Comment declare `broadcasts_to`, whose create
+/// and update broadcasts push `Turbo::Streams::ActionBroadcastJob` on
+/// `:sidekiq`, as Rails does (`tests/broadcast_job.rs` covers that push).
+/// The tests here record their own job's push, or need an app with no
+/// jobs at all, so they start from the blog without those declarations.
+fn real_blog_without_broadcasts() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
+        .edit("app/models/article.rb", "  broadcasts_to ->(_article) { \"articles\" }, inserts_by: :prepend\n", "")
+        .edit(
+            "app/models/comment.rb",
+            "  broadcasts_to ->(comment) { \"article_#{comment.article_id}_comments\" }, target: \"comments\"\n",
+            "",
+        )
+}
+
+fn on_sidekiq() -> emit_and_run::Overlay {
+    real_blog_without_broadcasts()
         .write("app/jobs/article_job.rb", JOB)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", ENQUEUE)
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
@@ -161,7 +176,7 @@ fn the_worker_role_runs_the_apps_jobs() {
 
 #[test]
 fn an_app_on_sidekiq_with_no_jobs_gets_no_redis() {
-    let (emitted, errors) = emit_and_run::real_blog()
+    let (emitted, errors) = real_blog_without_broadcasts()
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
         .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit(BuildTarget::Spinel);
@@ -475,7 +490,7 @@ puts "after commit push passed"
 /// same hold Phase 1's in-process queue has.
 #[test]
 fn an_after_commit_job_is_pushed_at_commit() {
-    let run = emit_and_run::real_blog()
+    let run = real_blog_without_broadcasts()
         .write("app/jobs/commit_job.rb", COMMIT_JOB)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", COMMIT_ENQUEUE)
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
@@ -537,7 +552,7 @@ fn strict_targets_warn_once_and_emit_the_same_tree() {
         assert!(w.message.contains(target.as_str()), "{}", w.message);
     }
 
-    let (_, no_jobs, _) = emit_and_run::real_blog()
+    let (_, no_jobs, _) = real_blog_without_broadcasts()
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
         .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
         .emit_with_app(BuildTarget::Ruby);
@@ -562,7 +577,7 @@ fn strict_targets_warn_once_and_emit_the_same_tree() {
         files.sort();
         files
     };
-    let plain = emit_and_run::real_blog()
+    let plain = real_blog_without_broadcasts()
         .write("app/jobs/article_job.rb", JOB)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", ENQUEUE);
     let with = tree(on_sidekiq());
@@ -693,7 +708,7 @@ puts "collider passed"
 /// arguments reach the payload unchanged, scheduled or not.
 #[test]
 fn a_job_whose_parameters_are_named_queue_at_and_q_still_pushes_its_arguments() {
-    let run = emit_and_run::real_blog()
+    let run = real_blog_without_broadcasts()
         .write("app/jobs/collider_job.rb", COLLIDER_JOB)
         .edit("app/models/article.rb", "  validates :title, presence: true\n", COLLIDER_ENQUEUE)
         .edit("config/environments/production.rb", "  config.active_job.queue_adapter = :solid_queue\n", SIDEKIQ)
