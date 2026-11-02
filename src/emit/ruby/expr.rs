@@ -2067,6 +2067,22 @@ mod tests {
     }
 
     #[test]
+    fn forwarded_proc_keeps_loose_arity_and_nonlocal_return() {
+        for (source, prefix, suffix) in [
+            ("[1].map(&proc { |a, b| [a, b] })", "got = ", "; abort(got.inspect) unless got == [[1, nil]]"),
+            ("[1].each(&proc { return :escaped })", "def run; ", "; :after; end; abort unless run == :escaped"),
+            ("[1].map(&lambda { |a, b| [a, b] })", "begin; ", "; abort 'lambda arity changed'; rescue ArgumentError; end"),
+        ] {
+            let parsed = ruby_prism::parse(source.as_bytes());
+            let statement = parsed.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+            let expr = crate::ingest::ingest_expr(&statement, "proc.rb").unwrap();
+            let emitted = emit_expr(&expr);
+            let output = std::process::Command::new("ruby").args(["-e", &format!("{prefix}{emitted}{suffix}")]).output().unwrap();
+            assert!(output.status.success(), "{source}: {emitted}: {}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    #[test]
     fn forwarded_params_fetch_preserves_string_key_rewrites() {
         for source in ["params.fetch(:id) { fallback.call }", "params.fetch(:id, &fallback)",
             "(true ? params : params).fetch(:id, &fallback)"] {

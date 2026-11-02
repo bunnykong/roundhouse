@@ -3218,7 +3218,9 @@ fn backfill_value_signature(method: &mut MethodDef, body_ty: Ty) {
     if method.signature.is_some()
         || method.block_param.is_some()
         || !(scalar_or_nullable_scalar(&body_ty)
-            || !body_ty.is_open() && !matches!(body_ty, Ty::Nil) && returning_rescue(&method.body))
+            // An unseeded callback has no inferred parameter slots yet.
+            // Treating that Fn as closed would publish a false zero-arity ABI.
+            || !body_ty.is_open() && !matches!(body_ty, Ty::Nil | Ty::Fn { .. }) && returning_rescue(&method.body))
         || contains_return(&method.body)
     {
         return;
@@ -3501,6 +3503,15 @@ mod tests {
         assert_eq!(fallback.ty, Some(Ty::Bottom));
         assert!(ret.inference_eq(expr.ty.as_ref().unwrap()));
         assert!(!ret.is_open() && !matches!(&**ret, Ty::Nil));
+    }
+
+    #[test]
+    fn uncalled_rescued_lambda_does_not_publish_zero_arity() {
+        let app = app("  def task; ->(x) { x } rescue raise(TypeError, \"bad\"); end");
+        let model = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+        let class = lower_model_to_library_class(model, &app.schema);
+        let task = class.methods.iter().find(|m| m.name.as_str() == "task").unwrap();
+        assert!(task.signature.is_none(), "an unseeded callback is not a closed return contract");
     }
 
     #[test]

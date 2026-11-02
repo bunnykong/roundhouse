@@ -1182,8 +1182,20 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let block = match c.block() {
                 Some(block_node) => {
                     let mut block = ingest_call_block(&block_node, file, &method)?;
-                    if block_node.as_block_argument_node().is_some_and(|arg|
-                        !arg.expression().is_some_and(|expr| expr.as_symbol_node().is_some())) {
+                    if block_node.as_block_argument_node().is_some_and(|arg| {
+                        // Keep the attached-block form for an immediate proc: the
+                        // shared Lambda IR cannot preserve its loose arity and
+                        // nonlocal return when rendered as a lambda value.
+                        !arg.expression().is_some_and(|expr| {
+                            expr.as_symbol_node().is_some()
+                                || expr.as_call_node().is_some_and(|call| {
+                                    constant_id_str(&call.name()) == "proc"
+                                        && call.receiver().is_none()
+                                        && call.arguments().is_none()
+                                        && call.block().is_some_and(|b| b.as_block_node().is_some())
+                                })
+                        })
+                    }) {
                         if let Some(block) = block.as_mut() { block.decisions |= crate::expr::FORWARDED_BLOCK; }
                     }
                     block
