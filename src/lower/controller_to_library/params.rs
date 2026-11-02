@@ -404,6 +404,16 @@ pub(crate) fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     }
 }
 
+/// A scalar field's declared type when a merge or a `[]=` writes it a
+/// value other than a String; `None` for a field that holds only the
+/// request's String.
+pub(crate) fn written_scalar_ty(spec: &ParamsSpec, field: &Symbol) -> Option<Ty> {
+    if spec.nested_fields.contains_key(field) || spec.file_fields.contains(field) {
+        return None;
+    }
+    Some(field_ty(spec, field)).filter(|ty| *ty != Ty::Str)
+}
+
 /// A merged-only key's type on the Ruby family: what the merges write, or
 /// nil before one runs.
 fn merged_only_ty(spec: &ParamsSpec, field: &Symbol) -> Option<Ty> {

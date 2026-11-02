@@ -496,6 +496,12 @@ fn keyword_target_gates_distinguish_ordinary_super_from_full_forwarding() {
                     if construct.as_str() == "keyword splat in ordinary super"
                         || construct.as_str() == "keyword splat into full argument forwarding")
             }).collect();
+            if target == BuildTarget::Spinel
+                && expected == "keyword splat into full argument forwarding"
+            {
+                assert!(gates.is_empty(), "{diagnostics:?}");
+                continue;
+            }
             assert_eq!(gates.len(), 1, "{target:?}: {source}: {diagnostics:?}");
             let gate = gates[0];
             assert_eq!(gate.severity, Severity::Error);
@@ -547,7 +553,6 @@ fn declaration_only_forwarders_are_gated_on_unverified_targets() {
     for target in [
         BuildTarget::Rust,
         BuildTarget::Typescript,
-        BuildTarget::Spinel,
         BuildTarget::Roda,
     ] {
         let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
@@ -1199,4 +1204,62 @@ end
         forwards.is_empty(),
         "extend-module super(...) must not residual: {forwards:?}"
     );
+}
+
+
+#[test]
+fn spinel_preserves_verified_full_forwarding_declarations_and_calls() {
+    use roundhouse::project::{BuildTarget, target_files};
+    let source = "class Probe; def self.call(...); 17; end; def self.run; options={value:7}; call(**options); end; end";
+    let mut app = analyzed(source);
+    roundhouse::session::analyze_and_lower_for(&mut app, BuildTarget::Spinel);
+    let (files, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+        target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Spinel)
+    });
+    assert!(diagnostics.iter().all(|d| d.severity != Severity::Error), "{diagnostics:?}");
+    let files = files.expect("native project");
+    let output = files.iter().find(|(p, _)| p == "app/models/probe.rb").unwrap().1.as_str();
+    assert!(output.contains("def self.call(...)"), "{output}");
+    assert!(output.contains("call(**options)"), "{output}");
+}
+
+
+#[test]
+fn spinel_keeps_full_forwarding_to_an_unrepresented_super_refused() {
+    use roundhouse::project::{BuildTarget, target_files};
+    let source = "class ErrorPacket < StandardError; def initialize(...); super(...); end; end";
+    let mut app = analyzed(source);
+    roundhouse::session::analyze_and_lower_for(&mut app, BuildTarget::Spinel);
+    let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+        target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Spinel)
+    });
+    assert!(diagnostics.iter().any(|d| d.severity == Severity::Error
+        && d.message.contains("full argument forwarding")), "{diagnostics:?}");
+}
+
+
+#[test]
+fn spinel_refuses_unrepresented_super_in_a_default() {
+    use roundhouse::project::{BuildTarget, target_files};
+    let app = analyzed("class ErrorPacket < StandardError; def initialize(message = super, ...); end; end");
+    let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+        target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Spinel)
+    });
+    assert!(diagnostics.iter().any(|d| d.severity == Severity::Error
+        && d.message.contains("full argument forwarding")), "{diagnostics:?}");
+}
+
+#[test]
+fn spinel_refuses_unrepresented_super_in_a_controller() {
+    use roundhouse::project::{BuildTarget, target_files};
+    let mut app = ingest_app_from_tree(HashMap::from([(
+        PathBuf::from("app/controllers/packet_controller.rb"),
+        b"class PacketController < ActionController::Base; def show(...); super; end; end".to_vec(),
+    )])).unwrap();
+    Analyzer::new(&app).analyze(&mut app);
+    let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+        target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Spinel)
+    });
+    assert!(diagnostics.iter().any(|d| d.severity == Severity::Error
+        && d.message.contains("full argument forwarding")), "{diagnostics:?}");
 }

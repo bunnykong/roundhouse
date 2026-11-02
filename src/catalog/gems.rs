@@ -43,6 +43,7 @@ pub enum GemTy {
     Bool,
     Float,
     Sym,
+    Nil,
     /// Gradual escape: the gem returns an object we don't model
     /// structurally. Dispatch resolves and the choice propagates.
     Untyped,
@@ -61,6 +62,7 @@ impl GemTy {
             GemTy::Bool => Ty::Bool,
             GemTy::Float => Ty::Float,
             GemTy::Sym => Ty::Sym,
+            GemTy::Nil => Ty::Nil,
             GemTy::Untyped => Ty::Untyped,
             GemTy::Instance(path) => Ty::Class {
                 id: ClassId(Symbol::from(path)),
@@ -87,6 +89,17 @@ pub struct GemClass {
 /// The catalog. One entry per gem class/module; add a gem by adding a
 /// row.
 pub const GEM_CATALOG: &[GemClass] = &[
+    GemClass {
+        name: "Faye::WebSocket",
+        class_methods: &[("websocket?", GemTy::Bool)],
+        instance_methods: &[("on", GemTy::Nil), ("send", GemTy::Bool),
+            ("close", GemTy::Untyped), ("rack_response", GemTy::Untyped)],
+    },
+    GemClass {
+        name: "EventMachine",
+        class_methods: &[("schedule", GemTy::Untyped)],
+        instance_methods: &[],
+    },
     // Faker — synthetic data. Production code shouldn't call it, but
     // lobsters' /cabinet dev-tools page renders sample content
     // inline; every generator returns a String.

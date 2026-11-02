@@ -1221,6 +1221,9 @@ impl Analyzer {
                 }
             } else {
                 classes.entry(id.clone()).or_default().source_instance_methods.insert(method.name.clone());
+                if expr_calls_super(&method.body) {
+                    classes.entry(id.clone()).or_default().delegating_instance_methods.insert(method.name.clone());
+                }
             }
             if method.receiver == crate::dialect::MethodReceiver::Instance
                 && method.name.as_str() == "initialize"

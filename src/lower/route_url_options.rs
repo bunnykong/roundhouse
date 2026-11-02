@@ -561,10 +561,14 @@ fn hash_read(e: &Expr) -> bool {
 /// `value.nil? ? fallback : present`.
 fn nil_or(value: Expr, fallback: Expr, present: Expr) -> Expr {
     let span = value.span;
-    let cond = Expr::new(
+    let mut cond = Expr::new(
         span,
         ExprNode::Send { recv: Some(value), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false },
     );
+    // This pass runs after the body typer, so nothing else will type the
+    // synthesized send; left untyped under a typed receiver it reads as
+    // a dispatch failure (`no known method nil? on Integer?`).
+    cond.ty = Some(crate::ty::Ty::Bool);
     let mut out = Expr::new(span, ExprNode::If { cond, then_branch: fallback, else_branch: present });
     out.ty = Some(crate::ty::Ty::Str);
     out

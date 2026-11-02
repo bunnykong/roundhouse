@@ -468,3 +468,145 @@ fn float_domain_error_constant_executes_after_emission() {
     stdlib_app().write("app/services/float_domain_probe.rb", FLOAT_DOMAIN_SOURCE)
         .run_ruby(FLOAT_DOMAIN_SCRIPT).assert_passes();
 }
+
+const GZIP_SOURCE: &str = r#"require "openssl"
+require "zlib"
+require "stringio"
+class GzipProbe
+  def self.compress(text)
+    writer = Zlib::Deflate.new(Zlib::BEST_COMPRESSION, Zlib::MAX_WBITS + 16)
+    bytes = writer.deflate(text, Zlib::FINISH)
+    writer.close
+    bytes
+  end
+  def self.decompress(bytes)
+    reader = ::Zlib::GzipReader.new(StringIO.new(bytes))
+    reader.read
+  rescue Zlib::Error
+    "rejected"
+  end
+end
+"#;
+
+const GZIP_SCRIPT: &str = r#"
+bytes = GzipProbe.compress("sample")
+raise "gzip round trip" unless GzipProbe.decompress(bytes) == "sample"
+raise "malformed gzip accepted" unless GzipProbe.decompress("not gzip") == "rejected"
+puts "gzip: round trip and rejection checks passed"
+"#;
+
+#[test]
+fn whole_gzip_execute_after_emission() {
+    stdlib_app().write("app/models/gzip_probe.rb", GZIP_SOURCE)
+        .run_ruby(GZIP_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn whole_gzip_execute_in_native_spinel() {
+    stdlib_app().write("app/models/gzip_probe.rb", GZIP_SOURCE)
+        .run_spinel(GZIP_SCRIPT).assert_passes();
+}
+
+#[test]
+fn gzip_and_digest_remain_unavailable_on_strict_targets() {
+    for constant in ["Zlib::Deflate", "Zlib::GzipReader", "Zlib::Error",
+                     "Zlib::BEST_COMPRESSION", "Zlib::MAX_WBITS", "Zlib::FINISH",
+                     "OpenSSL::Digest::SHA1", "OpenSSL::Digest::SHA256"] {
+        let source = format!("class ConstantProbe\n  def self.value\n    {constant}\n  end\nend\n");
+        let (_, errors) = stdlib_app().write("app/models/constant_probe.rb", &source)
+            .emit(roundhouse::project::BuildTarget::Rust);
+        assert!(errors.iter().any(|e| e.contains("bundled_constant") && e.contains(constant)),
+                "{constant}: {errors:?}");
+    }
+}
+
+
+const DIGEST_SOURCE: &str = r#"require "openssl"
+class DigestProbe
+  def self.sha1(text)
+    OpenSSL::Digest::SHA1.new(text).hexdigest
+  end
+  def self.sha256(text)
+    ::OpenSSL::Digest::SHA256.new(text).hexdigest
+  end
+  def self.sha1_class(text)
+    OpenSSL::Digest::SHA1.digest(text).unpack1("H*")
+  end
+  def self.sha256_class(text)
+    OpenSSL::Digest::SHA256.hexdigest(text)
+  end
+end
+"#;
+const DIGEST_SCRIPT: &str = r#"
+raise "SHA1" unless DigestProbe.sha1("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d"
+raise "SHA256" unless DigestProbe.sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+raise "SHA1 class method" unless DigestProbe.sha1_class("abc") == DigestProbe.sha1("abc")
+raise "SHA256 class method" unless DigestProbe.sha256_class("abc") == DigestProbe.sha256("abc")
+puts "SHA1 and SHA256 digest objects passed"
+"#;
+#[test]
+fn openssl_digest_subclasses_execute_after_emission() {
+    stdlib_app().write("app/models/digest_probe.rb", DIGEST_SOURCE)
+        .run_ruby(DIGEST_SCRIPT).assert_passes();
+}
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn openssl_digest_subclasses_execute_in_native_spinel() {
+    stdlib_app().write("app/models/digest_probe.rb", DIGEST_SOURCE)
+        .run_spinel(DIGEST_SCRIPT).assert_passes();
+}
+
+#[test]
+fn buffered_stdlib_calls_refuse_unqualified_intermediate_results() {
+    let mut admitted = Vec::new();
+    for expression in [
+        "OpenSSL::Cipher.new(\"aes-256-gcm\").update(\"sample\")",
+        "Zlib::Deflate.new.deflate(\"sample\")",
+        "Zlib::Deflate.new.deflate(\"sample\", 0)",
+        "Zlib::Deflate.new.deflate(\"sample\", 2 + 2)",
+        "Zlib::Deflate.new.send(:deflate, \"sample\")",
+        "Zlib::Deflate.new.deflate(\"sample\", 4) { |part| part }",
+        "Zlib::Deflate.new.method(:deflate)",
+        "Zlib::GzipReader.new(StringIO.new(\"\")).read(0)",
+    ] {
+        let source = format!("class BufferProbe\n  def self.value\n    {expression}\n  end\nend\n");
+        for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Spinel] {
+            let (_, errors) = stdlib_app().write("app/models/buffer_probe.rb", &source).emit(target);
+            let refused = if expression.starts_with("OpenSSL") { !errors.is_empty() }
+                else { errors.iter().any(|e| e.contains("buffered zlib result")) };
+            if !refused { admitted.push(format!("{expression}, {target:?}: {errors:?}")); }
+        }
+    }
+    assert!(admitted.is_empty(), "unqualified calls admitted: {admitted:?}");
+}
+
+#[test]
+fn a_shadowed_finish_is_not_the_stdlib_finish() {
+    let (_, errors) = stdlib_app().write("app/models/buffer_probe.rb",
+        "module Zlib\n  FINISH = 0\nend\nclass BufferProbe\n  def self.value\n    Zlib::Deflate.new.deflate(\"sample\", Zlib::FINISH)\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().any(|e| e.contains("buffered zlib result")), "{errors:?}");
+}
+
+#[test]
+fn a_source_deflate_override_keeps_its_contract() {
+    stdlib_app().write("app/models/buffer_probe.rb",
+        "require \"zlib\"\nmodule Zlib\n  class Deflate\n    def deflate(text)\n      text + \"!\"\n    end\n  end\nend\nclass BufferProbe\n  def self.value\n    Zlib::Deflate.new.deflate(\"sample\")\n  end\nend\n")
+        .run_ruby("raise \"override lost\" unless BufferProbe.value == \"sample!\"").assert_passes();
+}
+
+#[test]
+fn an_inherited_zlib_constructor_keeps_the_subclass_override() {
+    stdlib_app().write("app/models/buffer_probe.rb",
+        "require \"zlib\"\nclass ChildDeflate < Zlib::Deflate\n  def deflate(text)\n    text\n  end\nend\nclass BufferProbe\n  def self.value\n    ChildDeflate.new.deflate(\"sample\")\n  end\nend\n")
+        .run_ruby("raise \"subclass override lost\" unless BufferProbe.value == \"sample\"").assert_passes();
+}
+
+#[test]
+fn a_zlib_override_forwarding_to_super_is_not_qualified() {
+    let (_, errors) = stdlib_app().write("app/models/buffer_probe.rb",
+        "require \"zlib\"\nclass ChildDeflate < Zlib::Deflate\n  def deflate(text)\n    super(text)\n  end\nend\nclass BufferProbe\n  def self.value\n    ChildDeflate.new.deflate(\"sample\")\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().any(|e| e.contains("buffered zlib result")), "{errors:?}");
+}

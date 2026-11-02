@@ -99,6 +99,9 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     // `packages/openssl` (same values) on spinel.
     ("OpenSSL::SSL", "VERIFY_NONE", || Ty::Int),
     ("OpenSSL::SSL", "VERIFY_PEER", || Ty::Int),
+    ("Zlib", "BEST_COMPRESSION", || Ty::Int),
+    ("Zlib", "MAX_WBITS", || Ty::Int),
+    ("Zlib", "FINISH", || Ty::Int),
     // `URI::RFC2396_PARSER.escape(url)` — lobsters' webmention job. The
     // uri library's on the ruby family, spinel's `packages/uri` on spinel;
     // DEFAULT_PARSER is RFC 3986's, as on Ruby 3.4.
@@ -119,7 +122,7 @@ fn uri_rfc3986_parser() -> Ty {
 }
 
 /// Owners of value Consts that Ruby defines as modules, not classes.
-const CORE_VALUE_MODULES: &[&str] = &["URI", "Math"];
+const CORE_VALUE_MODULES: &[&str] = &["URI", "Math", "Zlib"];
 
 /// Ruby's top-level value Consts: `STDERR.puts "…"` (discourse's
 /// warnings) reads the process's own stream, which `$stderr` is only

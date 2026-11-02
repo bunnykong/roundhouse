@@ -3058,10 +3058,15 @@ fn target_files_inner(
     report_dynamic_association_joins(app, target);
     report_typescript_array_sends(app, target);
     report_dry_struct_stdlib(app, target);
-    // Full forwarding currently has a native Ruby contract only. A
-    // declaration must be gated even when its body never forwards.
+    // Spinel carries verified native packets too. Source-contract refusals
+    // still apply: a target's binder cannot repair an unverified destination.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         for (span, policy) in crate::analyze::forwarding::keyword_calls(app) {
+            if target == BuildTarget::Spinel
+                && policy == crate::analyze::forwarding::KeywordPolicy::Native
+            {
+                continue;
+            }
             if !matches!(policy, crate::analyze::forwarding::KeywordPolicy::Legacy | crate::analyze::forwarding::KeywordPolicy::NativeLibrary) {
                 let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
                     ("keyword splat in ordinary super",
@@ -3077,6 +3082,11 @@ fn target_files_inner(
     }
     // Controller actions too: their `*rest`, `**` and `...` reach the
     // emitted `def` through the same `Param`s (`Action::formal_params`).
+    let unverified_supers = if target == BuildTarget::Spinel {
+        crate::analyze::forwarding::unverified_full_super_declarations(app)
+    } else {
+        Vec::new()
+    };
     let actions = crate::analyze::forwarding::controller_defs(app);
     for method in crate::analyze::forwarding::methods(app)
         .map(|(_, m)| m)
@@ -3087,14 +3097,13 @@ fn target_files_inner(
         }
         report_positional_rest_param(method, target);
         if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
-            let keyword_rest = method
-                .params
-                .iter()
-                .any(|p| p.keyword && p.rest && !p.forwarding);
             let full_forwarding = method.params.iter().any(|p| p.forwarding);
-            // Spinel carries both named `**details` and anonymous `**`
-            // keyword-rest parameters. Full `...` forwarding stays refused.
-            if matches!(target, BuildTarget::Spinel) && keyword_rest && !full_forwarding {
+            // Spinel preserves `...`, named `**details` and anonymous `**`.
+            // An external `super(...)` still needs a verified destination;
+            // Spinel cannot bind a full packet to an unrepresented ancestor.
+            if target == BuildTarget::Spinel
+                && !unverified_supers.contains(&method.name_span)
+            {
                 continue;
             }
             let construct = if full_forwarding {
@@ -4460,7 +4469,7 @@ fn ruby_family_runtime_files(
     let _body_names = crate::lower::model_to_library::schema::share_model_body_names(&app.models, &Default::default());
     let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
 
-    files.retain(|(p, _)| p != "runtime/db.rb");
+    files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/faye_websocket.rb");
     // The spinel SQL-functions file is FFI; CRuby writes its own below
     // (the sqlite3 gem's `create_function`), JRuby has none yet.
     files.retain(|(p, _)| p != "runtime/sql_functions.rb");
@@ -8051,7 +8060,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
-        | "StringScanner" | "Zlib::GzipWriter"
+        | "StringScanner" | "Zlib::GzipWriter" | "Zlib::Deflate" | "Zlib::GzipReader" | "Zlib::Error"
+        | "Zlib::BEST_COMPRESSION" | "Zlib::MAX_WBITS" | "Zlib::FINISH"
+        | "OpenSSL::Digest::SHA1" | "OpenSSL::Digest::SHA256"
         // runtime/spinel/integration_session.rb and the ruby tree's twin.
         | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
         // runtime/spinel/solid_queue.rb.
@@ -8439,6 +8450,18 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 target,
                 "bundled_constant",
                 format!("Regexp::{flag} is Ruby's option bit, which the {target} emit has no Regexp to read"),
+            );
+        }
+        // These are Integer values, so the class/module gate does not see them.
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Const { path } = &*expr.node
+            && let ["Zlib", flag @ ("BEST_COMPRESSION" | "MAX_WBITS" | "FINISH")] = path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..]
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "bundled_constant",
+                format!("Zlib::{flag} is a bundled zlib constant, which the {target} runtime does not supply"),
             );
         }
         // Typed as IO for the Ruby family; a strict emit spelled them as names its runtime does not define.

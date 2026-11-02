@@ -199,6 +199,7 @@ require_relative "runtime/tep/tep"
 # Gem packages (runtime/gems/<gem>/) load right after this line, which
 # `project::apply_gem_packages` finds: they register their hooks here.
 require_relative "runtime/request_hooks"
+require_relative "runtime/faye_websocket"
 # Spinel-only CGI reopen: `require "cgi"` reaches spinel's bundled package
 # and this adds `parse`, which upstream moved to `cgi/core`. CRuby/JRuby use
 # the stdlib. No longer needs to follow tep — the escapes were routed to
