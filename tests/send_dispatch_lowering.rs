@@ -319,3 +319,14 @@ fn a_trailing_name_two_classes_share_counts_no_call_site() {
         "an ambiguous trailing name must not resolve to either class:\n{out}"
     );
 }
+
+/// A receiver whose type is a union with an untyped arm can be any class at run time, so its call
+/// must keep every same-named target general: here `pager` is `Paging::Pager` or a parsed value.
+#[test]
+fn a_receiver_union_with_an_untyped_arm_keeps_the_selector_dynamic() {
+    let source = format!(
+        "{PARAM_SELECTOR_SOURCE}\nclass Feed\n  def pick(relation, flag, raw, direction)\n    pager = flag ? Paging::Pager : JSON.parse(raw)\n    pager.load(relation, direction, 3)\n  end\nend\n"
+    );
+    let (out, _) = ground_and_emit(&source);
+    assert!(out.contains("public_send(direction"), "a call on an untyped-armed union must keep the dynamic send:\n{out}");
+}

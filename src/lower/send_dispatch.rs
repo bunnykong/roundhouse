@@ -221,6 +221,7 @@ fn apply_param_selector_dispatch(
                         Some((_, ty)) => {
                             let unknown = match ty {
                                 None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => true,
+                                Some(t) if t.has_untyped_arm() => true,
                                 Some(Ty::Class { id, .. }) => target_classes.contains(id),
                                 _ => false,
                             };
