@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
 
-const GITHUB_BLOB: &str = "https://github.com/rubys/roundhouse/blob/main/";
-const GITHUB_TREE: &str = "https://github.com/rubys/roundhouse/tree/main/";
+const GITHUB_BLOB: &str = "https://github.com/roundhouse-rb/roundhouse/blob/main/";
+const GITHUB_TREE: &str = "https://github.com/roundhouse-rb/roundhouse/tree/main/";
 
 /// Every page: (repository path, site path). README.md is the guide's
 /// index page; RELEASES.md rides along because every page links to it.
@@ -190,11 +190,11 @@ mod tests {
         assert_eq!(rewrite_link("../../RELEASES.md", src, site, &p), "../releases.html");
         assert_eq!(
             rewrite_link("../pipeline/runtime.md#deliberate-divergences-from-rails", src, site, &p),
-            "https://github.com/rubys/roundhouse/blob/main/docs/pipeline/runtime.md#deliberate-divergences-from-rails"
+            "https://github.com/roundhouse-rb/roundhouse/blob/main/docs/pipeline/runtime.md#deliberate-divergences-from-rails"
         );
         assert_eq!(
             rewrite_link("../../editors/vscode/", src, site, &p),
-            "https://github.com/rubys/roundhouse/tree/main/editors/vscode"
+            "https://github.com/roundhouse-rb/roundhouse/tree/main/editors/vscode"
         );
         assert_eq!(rewrite_link("#two-modes", src, site, &p), "#two-modes");
         assert_eq!(rewrite_link("https://x.test/a", src, site, &p), "https://x.test/a");
@@ -233,7 +233,7 @@ mod tests {
             // Exactly one GitHub link into docs/guide/: the footnote's
             // "this page in the repository". A second one is a guide
             // link that failed to resolve to its rendered page.
-            let github_guide = out.matches("href=\"https://github.com/rubys/roundhouse/blob/main/docs/guide/").count();
+            let github_guide = out.matches("href=\"https://github.com/roundhouse-rb/roundhouse/blob/main/docs/guide/").count();
             let own_footnote = usize::from(src.starts_with("docs/guide"));
             assert_eq!(github_guide, own_footnote, "{} links to a guide page by GitHub URL", src.display());
         }

@@ -246,16 +246,17 @@ broaden comparison masks merely to turn CI green.
 
 ## Publication is separate
 
-PR checks never deploy Pages. Both publication workflows accept only canonical
-`rubys/roundhouse` main. Neither workflow publishes a PR or fork branch.
+PR checks never deploy Pages. Both publication workflows accept only
+`roundhouse-rb/roundhouse` main. Neither workflow publishes a PR or fork
+branch.
 
 ### Update the site without full validation
 
-1. Merge the site changes into `rubys/roundhouse` main.
+1. Merge the site changes into `roundhouse-rb/roundhouse` main.
 2. Start the site-only workflow:
 
    ```sh
-   gh workflow run publish-site.yml --repo rubys/roundhouse --ref main
+   gh workflow run publish-site.yml --repo roundhouse-rb/roundhouse --ref main
    ```
 
 3. Check the **Publish site** run. Its `site` job checks the assembled files;

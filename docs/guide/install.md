@@ -30,11 +30,11 @@ The installer script picks the right archive and puts `roundhouse` in
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/rubys/roundhouse/releases/latest/download/roundhouse-installer.sh | sh
+  https://github.com/roundhouse-rb/roundhouse/releases/latest/download/roundhouse-installer.sh | sh
 ```
 
 Or download the archive from the
-[releases page](https://github.com/rubys/roundhouse/releases), unpack
+[releases page](https://github.com/roundhouse-rb/roundhouse/releases), unpack
 it, and put the one file somewhere on your `PATH`. There is nothing
 else in the archive that the binary needs.
 
@@ -77,14 +77,14 @@ bindings with bindgen, which loads clang's own resource headers.
 Then either install straight from the repository:
 
 ```sh
-cargo install --locked --git https://github.com/rubys/roundhouse --bin roundhouse
+cargo install --locked --git https://github.com/roundhouse-rb/roundhouse --bin roundhouse
 roundhouse --version
 ```
 
 or build in a checkout:
 
 ```sh
-git clone https://github.com/rubys/roundhouse
+git clone https://github.com/roundhouse-rb/roundhouse
 cd roundhouse
 cargo build --release --bin roundhouse
 ./target/release/roundhouse --version

@@ -67,7 +67,7 @@ not contact an application service.
 ```sh
 gem install bundler -v 2.6.9 --no-document
 gem install minitest -v 6.0.6 --no-document
-git remote add upstream https://github.com/rubys/roundhouse # if absent
+git remote add upstream https://github.com/roundhouse-rb/roundhouse # if absent
 git fetch upstream main
 git rev-parse upstream/main
 # Compiler sources chosen for this snapshot:

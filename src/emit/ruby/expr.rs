@@ -1368,10 +1368,14 @@ fn emit_send_base_with_forwarded_block(
 ) -> String {
     let mut args_s: Vec<String> = args.iter().map(emit_keyword_forward_arg).collect();
     let m = method.as_str();
+    // `...` is a send argument packet, never an index or infix operand.
+    // Preserve explicit call syntax even for operator/setter method names
+    // and `self`, before any surface-syntax prettification below.
+    let packet = args.iter().any(|a| a.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 || matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. }));
     // A receiverless call, or one the typer folded onto `self`, is the
     // backtick literal. An override of `` ` `` still runs through that
     // syntax. An explicit other receiver stays a normal send.
-    if forwarded_block.is_none() && m == "`" && args.len() == 1 && recv.is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
+    if !packet && forwarded_block.is_none() && m == "`" && args.len() == 1 && recv.is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
         if let Some(literal) = emit_backtick_literal(&args[0]) {
             return literal;
         }
@@ -1403,10 +1407,7 @@ fn emit_send_base_with_forwarded_block(
             }
         }
     }
-    // `...` is a send argument packet, never an index or infix operand.
-    // Preserve explicit call syntax even for operator/setter method names
-    // and `self`, before any surface-syntax prettification below.
-    let packet = args.iter().any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. }));
+    // Key conversion precedes forwarding a block; packets are not keys.
     if !packet && let Some(r) = recv && is_string_keyed_hash(r)
         && let Some(access) = emit_str_hash_access(r, m, args, forwarded_block)
     {

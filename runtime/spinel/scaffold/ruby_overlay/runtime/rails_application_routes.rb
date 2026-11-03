@@ -95,7 +95,8 @@ module Rails
         raise ActionController::RoutingError, "No route matches #{path.inspect}" if matched.nil?
 
         params = matched.path_params
-        controller = CONTROLLER_PATHS[matched.controller] || RouteTable::CONTROLLER_PATHS[matched.controller]
+        controller = CONTROLLER_PATHS[matched.controller] ||
+                     (defined?(::RouteTable) ? ::RouteTable::CONTROLLER_PATHS[matched.controller] : nil)
         recognized = { controller: controller || matched.controller.to_s, action: matched.action.to_s }
         params.each { |name, value| recognized[name.to_sym] = value unless name == "format" }
         recognized[:format] = params["format"] if params.key?("format")
@@ -116,17 +117,58 @@ module Rails
       # The table that the dispatcher composes, built once.
       # `RouteTable.table` makes new Route objects on each call. The
       # routes emit defines `RouteTable.root` only for an app with a
-      # root route. Rails `recognize_path` skips a redirect route and
-      # tries the later routes, so the table leaves the redirect routes
-      # out.
+      # root route, and no `RouteTable` for an app that draws none (Core
+      # keeps its routes in component files). Rails `recognize_path` skips
+      # a redirect route and tries the later routes, so the table leaves
+      # the redirect routes out.
       def self.table
-        @table ||= ((RouteTable.respond_to?(:root) ? [RouteTable.root] : []) +
-                    RouteTable.table + ActiveStorage::Routes.table)
+        @table ||= (drawn_table + ActiveStorage::Routes.table)
                    .reject { |route| route.controller == :roundhouse_redirects }
       end
+
+      def self.drawn_table
+        return [] unless defined?(::RouteTable)
+
+        (::RouteTable.respond_to?(:root) ? [::RouteTable.root] : []) + ::RouteTable.table
+      end
+      private_class_method :drawn_table
     end
 
+    # `Rails.application.routes.url_helpers`: the module an app extends or
+    # includes to get the named route helpers. Every `<name>_path` the
+    # emitted RouteHelpers answers is answered here too, and `<name>_url`
+    # is that path under `protocol://host[:port]`, so a call on the module
+    # (`UrlHelpers.posts_path`) and one through a class or singleton that
+    # includes it agree. A name no drawn route explains is a NoMethodError
+    # as in Rails.
     module UrlHelpers
+      module Dispatch
+        URL_KEYS = %i[host protocol port only_path script_name].freeze
+
+        def method_missing(name, *args, **kwargs, &block)
+          text = name.to_s
+          return super unless text.end_with?("_path", "_url")
+          path_name = text.end_with?("_url") ? "#{text.delete_suffix("_url")}_path" : text
+          return super unless defined?(::RouteHelpers) && ::RouteHelpers.respond_to?(path_name)
+
+          path = ::RouteHelpers.public_send(path_name, *args, **kwargs.reject { |key, _| URL_KEYS.include?(key) })
+          return path if text == path_name || kwargs[:only_path]
+          host = kwargs[:host]
+          raise ArgumentError, "Missing host to link to! Please provide the :host parameter, set default_url_options[:host], or set :only_path to true" if host.nil?
+          port = kwargs[:port] ? ":#{kwargs[:port]}" : ""
+          "#{kwargs[:protocol] || "http"}://#{host}#{port}#{kwargs[:script_name]}#{path}"
+        end
+
+        def respond_to_missing?(name, include_private = false)
+          text = name.to_s
+          return super unless text.end_with?("_path", "_url")
+          path_name = text.end_with?("_url") ? "#{text.delete_suffix("_url")}_path" : text
+          (defined?(::RouteHelpers) && ::RouteHelpers.respond_to?(path_name)) || super
+        end
+      end
+      include Dispatch
+      extend Dispatch
+
       def self.root_url(host: "localhost", protocol: "http")
         "#{protocol}://#{host}#{RouteHelpers.root_path}"
       end

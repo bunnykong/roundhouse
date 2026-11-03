@@ -149,15 +149,73 @@ pub fn apply_tag_builder_lowering(
     // answers it. A class with its own `tag` — `belongs_to :tag`, a
     // `tag` column, `attr_reader :tag`, a `def tag` — calls ITS reader
     // (`tag.title`), and rewriting that compiled to `"<title></title>"`.
-    let owns_tag = classes_owning_tag(app, registry);
+    let owns_tag = classes_owning(app, registry, "tag", false);
+    // An app's own `stylesheet_link_tag` (an app/helpers method or a
+    // `helper_method`) is what Rails calls; it is left to the app. So is
+    // a class's own, which its bare call reaches, found as `tag`'s is.
+    let app_stylesheet = app_defines_stylesheet_link_tag(app);
+    // Not a helper module a class includes: in a view, Rails' helper
+    // answers the helper's call (one defining it is `app_stylesheet`).
+    // A class method counts: a class body's bare call reaches it. A
+    // helper is an owner when an app module it includes defines it
+    // (`helpers_including`).
+    let mut owns_stylesheet = classes_owning(app, registry, "stylesheet_link_tag", true);
+    owns_stylesheet.retain(|c| !app.helper_modules.contains(c));
+    owns_stylesheet.extend(helpers_including(app, "stylesheet_link_tag"));
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         let own_tag = owner.is_some_and(|c| owns_tag.contains(c));
-        rewrite(body, own_tag, &models, &helpers, &sti_stems, &mut diags)
+        let own_stylesheet = app_stylesheet || owner.is_some_and(|c| owns_stylesheet.contains(c));
+        rewrite(body, own_tag, own_stylesheet, &models, &helpers, &sti_stems, &mut diags)
     });
     diags
 }
 
-/// Classes whose bodies read a bare `tag` as their own method: APP
+/// An app's own `stylesheet_link_tag` that a view's or helper's bare call
+/// reaches: an instance method of an `app/helpers` module, or a
+/// controller's `helper_method`. A helper's `def self.stylesheet_link_tag`
+/// is not one (`helper_method_index` holds both kinds).
+pub(crate) fn app_defines_stylesheet_link_tag(app: &App) -> bool {
+    let name = Symbol::from("stylesheet_link_tag");
+    let in_helper = app.library_classes.iter().filter(|lc| app.helper_modules.contains(&lc.name)).any(|lc| {
+        lc.methods.iter().any(|m| m.name == name && matches!(m.receiver, crate::dialect::MethodReceiver::Instance))
+    });
+    in_helper || app.view_visible_controller_methods.contains(&name)
+}
+
+/// The `app/helpers` modules that include, directly or through other app
+/// modules, a module defining an instance `method`: Ruby's lookup finds
+/// that one ahead of ActionView's. Read from the app's own declarations
+/// (the registry gives a helper module the view surface), instance
+/// methods only, not the helpers themselves.
+pub(crate) fn helpers_including(app: &App, method: &str) -> HashSet<ClassId> {
+    let name = Symbol::from(method);
+    let by_name: HashMap<&ClassId, &crate::dialect::LibraryClass> =
+        app.library_classes.iter().map(|lc| (&lc.name, lc)).collect();
+    let defines = |lc: &crate::dialect::LibraryClass| {
+        lc.methods.iter().any(|m| m.name == name && matches!(m.receiver, crate::dialect::MethodReceiver::Instance))
+    };
+    app.helper_modules
+        .iter()
+        .filter(|helper| {
+            let mut stack: Vec<&ClassId> = by_name.get(helper).map(|lc| lc.includes.iter().collect()).unwrap_or_default();
+            let mut seen = HashSet::default();
+            while let Some(c) = stack.pop() {
+                if !seen.insert(c) {
+                    continue;
+                }
+                let Some(lc) = by_name.get(c) else { continue };
+                if defines(lc) {
+                    return true;
+                }
+                stack.extend(lc.includes.iter());
+            }
+            false
+        })
+        .cloned()
+        .collect()
+}
+
+/// Classes whose bodies read a bare `method` (`tag`) as their own: APP
 /// classes with a `tag` instance method — the registry's
 /// `instance_methods` already hold associations, columns and `attr_*`
 /// readers alongside `def`s — directly or through an app module they
@@ -172,7 +230,12 @@ pub fn apply_tag_builder_lowering(
 /// `include ActionView::Helpers::TagHelper` is dropped by the analyzer
 /// as a view-helper marker, so a model that really uses the builder
 /// keeps the rewrite.
-fn classes_owning_tag(app: &App, registry: &HashMap<ClassId, ClassInfo>) -> HashSet<ClassId> {
+fn classes_owning(
+    app: &App,
+    registry: &HashMap<ClassId, ClassInfo>,
+    method: &str,
+    class_side: bool,
+) -> HashSet<ClassId> {
     let app_classes: HashSet<&ClassId> = app
         .models
         .iter()
@@ -180,20 +243,24 @@ fn classes_owning_tag(app: &App, registry: &HashMap<ClassId, ClassInfo>) -> Hash
         .chain(app.library_classes.iter().map(|lc| &lc.name))
         .chain(app.controllers.iter().map(|c| &c.name))
         .collect();
-    let tag = Symbol::from("tag");
+    let tag = Symbol::from(method);
     let has_tag = |class: &ClassId| {
-        // Self, then app ancestors (includes and parents), each once.
-        let mut stack = vec![class];
+        // Self, then app ancestors (includes and parents), each once. A
+        // class method counts on the class and its parents only: an
+        // included module's `def self.…` isn't the includer's.
+        let mut stack = vec![(class, false)];
         let mut seen = HashSet::default();
-        while let Some(c) = stack.pop() {
+        while let Some((c, included)) = stack.pop() {
             if !app_classes.contains(c) || !seen.insert(c) {
                 continue;
             }
             let Some(info) = registry.get(c) else { continue };
-            if info.instance_methods.contains_key(&tag) {
+            if info.instance_methods.contains_key(&tag)
+                || (class_side && !included && info.class_methods.contains_key(&tag))
+            {
                 return true;
             }
-            stack.extend(info.includes.iter().chain(info.parent.iter()));
+            stack.extend(info.includes.iter().map(|m| (m, true)).chain(info.parent.iter().map(|p| (p, included))));
         }
         false
     };
@@ -365,19 +432,20 @@ fn is_tag_helper(recv: &Expr) -> bool {
 }
 
 /// `own_tag`: the body's class answers `tag` itself, so neither `tag.x`
-/// nor `tag(:x)` is the builder there (see [`classes_owning_tag`]). The
+/// nor `tag(:x)` is the builder there (see [`classes_owning`]). The
 /// other helpers this pass expands have names of their own and still
 /// apply.
 fn rewrite(
     expr: &mut Expr,
     own_tag: bool,
+    own_stylesheet: bool,
     models: &crate::det::HashSet<String>,
     helpers: &crate::det::HashSet<String>,
     sti_stems: &crate::det::HashMap<String, Vec<String>>,
     diags: &mut Vec<Diagnostic>,
 ) {
     expr.node.for_each_child_mut(&mut |child| {
-        rewrite(child, own_tag, models, helpers, sti_stems, diags)
+        rewrite(child, own_tag, own_stylesheet, models, helpers, sti_stems, diags)
     });
 
     if rewrite_turbo_frame_tag(expr, models) {
@@ -387,6 +455,9 @@ fn rewrite(
         return;
     }
     if rewrite_button_tag(expr) {
+        return;
+    }
+    if !own_stylesheet && rewrite_stylesheet_link_tag(expr) {
         return;
     }
     if rewrite_button_to_block(expr) {
@@ -558,6 +629,54 @@ fn rewrite_button_tag(expr: &mut Expr) -> bool {
     }
     parts.push(InterpPart::Text { value: "</button>".to_string() });
     let mut built = string_interp(parts);
+    qualify_view_helpers(&mut built);
+    *expr = html_safe(built, span);
+    true
+}
+
+/// `stylesheet_link_tag(name[, opts])` written in a HELPER body: the same
+/// `ViewHelpers.stylesheet_link_tag(name, opts)` the view walker lowers
+/// the ERB spelling to (`view_to_library::helpers`), qualified for a
+/// helper module. A helper module never reached the walker, so the call
+/// stayed bare, with no module defining it (#1593).
+///
+/// Left as written, and refused at analyze (`analyze::diagnostics::
+/// helper_stylesheet_link_tags`): a Symbol name, which in a view is a
+/// stylesheet group (`:app`, `:all`) expanded from the view's stylesheet
+/// list, which a helper body doesn't have; and arguments other than a
+/// name and an optional literal options hash (a splat, forwarded
+/// arguments, a computed options expression).
+fn rewrite_stylesheet_link_tag(expr: &mut Expr) -> bool {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "stylesheet_link_tag" || expr.span.is_synthetic() {
+        return false;
+    }
+    let opaque = |e: &Expr| {
+        matches!(
+            &*e.node,
+            ExprNode::Splat { .. }
+                | ExprNode::KeywordSplat { .. }
+                | ExprNode::ForwardArgs
+                | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
+        )
+    };
+    let shape_ok = match &args[..] {
+        [name] => !opaque(name) && !matches!(&*name.node, ExprNode::Hash { .. }),
+        [name, opts] => {
+            !opaque(name)
+                && matches!(&*opts.node, ExprNode::Hash { entries, .. } if !entries.iter().any(|(k, v)| opaque(k) || opaque(v)))
+        }
+        _ => false,
+    };
+    // Declined shapes are refused at analyze (`helper_stylesheet_link_tags`).
+    if !shape_ok || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } }) {
+        return false;
+    }
+    let span = expr.span;
+    let mut built = view_helpers_call("stylesheet_link_tag", args.clone());
     qualify_view_helpers(&mut built);
     *expr = html_safe(built, span);
     true

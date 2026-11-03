@@ -145,8 +145,9 @@ pub struct ParamsSpec {
     /// `Roundhouse::ParamValue` member read with `Params.nested`.
     pub nested_fields: BTreeMap<Symbol, NestedKey>,
     pub written: BTreeMap<Symbol, Vec<Ty>>,
-    /// Keys only a `.merge(k: v)` after the permit adds: the request
-    /// never carries them, so their type is what the merge writes.
+    /// Keys only a `.merge(k: v)` after the permit or a
+    /// `.reverse_merge(k: v)` default adds: the request never carries
+    /// them, so their type is what the merges write.
     pub merged_only: std::collections::BTreeSet<Symbol>,
     pub wants_assign: bool,
 }
@@ -402,6 +403,16 @@ pub(crate) fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     } else {
         Ty::Union { variants: variants.into() }
     }
+}
+
+/// A scalar field's declared type when a merge or a `[]=` writes it a
+/// value other than a String; `None` for a field that holds only the
+/// request's String.
+pub(crate) fn written_scalar_ty(spec: &ParamsSpec, field: &Symbol) -> Option<Ty> {
+    if spec.nested_fields.contains_key(field) || spec.file_fields.contains(field) {
+        return None;
+    }
+    Some(field_ty(spec, field)).filter(|ty| *ty != Ty::Str)
 }
 
 /// A merged-only key's type on the Ruby family: what the merges write, or
@@ -771,12 +782,17 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 {
                     direct.extend(fields.into_iter().map(|f| (spec.class_id.clone(), f)));
                 }
-                if let ExprNode::Send { recv: Some(chain), method, args, block: None, .. } = &*expr.node
+                if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node
                     && method.as_str() == "merge"
                     && let [arg] = args.as_slice()
-                    && let ExprNode::Hash { entries, .. } = &*arg.node
+                    && let Some((entries, chain)) = match (&*recv.node, &*arg.node) {
+                        (_, ExprNode::Hash { entries, .. }) => Some((entries, recv)),
+                        (ExprNode::Hash { entries, .. }, _) => Some((entries, arg)),
+                        _ => None,
+                    }
                     && let Some((_, permitted, _)) = match_permit_call_full(chain)
-                    && let Some(class) = match_permit_call_full(expr).and_then(|(resource, fields, _)| {
+                    && let Some(class) = match_reverse_merge(expr).or_else(|| match_permit_call_full(expr))
+                        .and_then(|(resource, fields, _)| {
                         specs.find(&resource, &fields, &nested_signature(expr)).map(|spec| spec.class_id.clone())
                     })
                 {
@@ -1150,7 +1166,7 @@ fn collect_from_expr(
         // register a second, narrower class for the same call site.
         return;
     }
-    walk_children(expr, &mut |c| collect_from_expr(c, controller, index, specs, report));
+    expr.node.for_each_child(&mut |c| collect_from_expr(c, controller, index, specs, report));
 }
 
 /// Record the NON-SCALAR permit keys this pass drops.
@@ -1305,26 +1321,78 @@ pub fn model_assign_name(spec: &ParamsSpec) -> Symbol {
     Symbol::from(format!("assign_from_{}", crate::naming::snake_case(spec.class_id.0.as_str())))
 }
 
-/// First permit list in `expr`, in the same pre-order the collector
-/// uses — the way a `<resource>_params` helper body names its spec.
+/// The permit list a `<resource>_params` helper returns: the first one,
+/// when every value `body` can return is a permit. Not the collector's
+/// walk: it also reaches a permit in a condition, pattern, rescue list,
+/// loop or lambda, which the helper does not return.
 pub fn first_permit_in(body: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<String>)> {
-    first_permit_at(body)
-}
-
-fn first_permit_at(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<String>)> {
-    if let Some((resource, fields, _)) = match_reverse_merge(expr) {
-        return Some((resource, fields, nested_signature(expr)));
-    }
-    if let Some((resource, fields)) = match_permit_call(expr) {
-        return Some((resource, fields, nested_signature(expr)));
-    }
-    let mut found = None;
-    walk_children(expr, &mut |c| {
-        if found.is_none() {
-            found = first_permit_at(c);
+    let mut returned = Vec::new();
+    for_each_outside_lambdas(body, &mut |e| {
+        if let ExprNode::Return { value } = &*e.node {
+            returned.push(value);
         }
     });
-    found
+    returned.push(body);
+    let mut permits = Vec::new();
+    let only_permits = returned.into_iter().all(|value| collect_returned_permits(value, body, &mut Vec::new(), &mut permits));
+    if only_permits { permits.into_iter().next() } else { None }
+}
+
+/// Push the permit list of each value `expr` can evaluate to, or answer
+/// false when one of them is not a permit. A local read resolves to the
+/// values `body` writes to that local.
+fn collect_returned_permits<'a>(
+    expr: &'a Expr,
+    body: &'a Expr,
+    resolving: &mut Vec<Symbol>,
+    permits: &mut Vec<(Symbol, Vec<Symbol>, Vec<String>)>,
+) -> bool {
+    if let Some((resource, fields, _)) = match_reverse_merge(expr) {
+        permits.push((resource, fields, nested_signature(expr)));
+        return true;
+    }
+    if let Some((resource, fields)) = match_permit_call(expr) {
+        permits.push((resource, fields, nested_signature(expr)));
+        return true;
+    }
+    let sources: Vec<&Expr> = match &*expr.node {
+        ExprNode::Var { name, .. } if resolving.contains(name) => return true,
+        ExprNode::Var { name, .. } => {
+            let mut written = Vec::new();
+            for_each_outside_lambdas(body, &mut |e| match &*e.node {
+                ExprNode::Assign { target: LValue::Var { name: target, .. }, value }
+                | ExprNode::OpAssign { target: LValue::Var { name: target, .. }, value, .. }
+                    if target == name => written.push(value),
+                _ => {}
+            });
+            resolving.push(name.clone());
+            let only_permits = !written.is_empty()
+                && written.into_iter().all(|value| collect_returned_permits(value, body, resolving, permits));
+            resolving.pop();
+            return only_permits;
+        }
+        ExprNode::Seq { exprs } => exprs.last().into_iter().collect(),
+        ExprNode::If { then_branch, else_branch, .. } => vec![then_branch, else_branch],
+        ExprNode::Case { arms, .. } if arms.iter().any(|arm| matches!(arm.pattern, Pattern::Wildcard)) => {
+            arms.iter().map(|arm| &arm.body).collect()
+        }
+        ExprNode::CaseMatch { arms, else_body, .. } => arms.iter().map(|arm| &arm.body).chain(else_body).collect(),
+        ExprNode::BeginRescue { body: begun, rescues, else_branch, .. } => std::iter::once(else_branch.as_ref().unwrap_or(begun))
+            .chain(rescues.iter().map(|rescue| &rescue.body))
+            .collect(),
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } | ExprNode::Return { value } => vec![value],
+        ExprNode::BoolOp { left, right, .. } | ExprNode::RescueModifier { expr: left, fallback: right } => vec![left, right],
+        ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "except" => vec![recv],
+        _ => Vec::new(),
+    };
+    !sources.is_empty() && sources.into_iter().all(|source| collect_returned_permits(source, body, resolving, permits))
+}
+
+fn for_each_outside_lambdas<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+    f(expr);
+    if !matches!(&*expr.node, ExprNode::Lambda { .. }) {
+        expr.node.for_each_child(&mut |child| for_each_outside_lambdas(child, f));
+    }
 }
 
 /// Map each `<x>_params`-shaped helper to the spec its body declares.
@@ -1749,6 +1817,13 @@ fn match_reverse_merge(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbol>)
     Some((resource, fields, nested))
 }
 
+/// The params class a Form 4 expression lowers to, as
+/// [`params_source_class`] answers for the other forms.
+pub(super) fn reverse_merge_class(expr: &Expr, specs: &ParamsSpecs) -> Option<ClassId> {
+    let (resource, fields, _) = match_reverse_merge(expr)?;
+    specs.find(&resource, &fields, &nested_signature(expr)).map(|spec| spec.class_id.clone())
+}
+
 /// The expression a body returns: the last statement, through nested Seqs
 /// and an explicit `return`.
 pub(super) fn body_tail(body: &Expr) -> &Expr {
@@ -1889,56 +1964,6 @@ fn is_bare_params(e: &Expr) -> bool {
         &*e.node,
         ExprNode::Ivar { name } if name.as_str() == "params"
     )
-}
-
-fn walk_children<F: FnMut(&Expr)>(expr: &Expr, f: &mut F) {
-    use crate::expr::InterpPart;
-    match &*expr.node {
-        ExprNode::Seq { exprs } => exprs.iter().for_each(f),
-        ExprNode::If { cond, then_branch, else_branch } => {
-            f(cond);
-            f(then_branch);
-            f(else_branch);
-        }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv.as_ref() {
-                f(r);
-            }
-            args.iter().for_each(&mut *f);
-            if let Some(b) = block.as_ref() {
-                f(b);
-            }
-        }
-        ExprNode::Apply { fun, args, block } => {
-            f(fun);
-            args.iter().for_each(&mut *f);
-            if let Some(b) = block.as_ref() {
-                f(b);
-            }
-        }
-        ExprNode::BoolOp { left, right, .. } => {
-            f(left);
-            f(right);
-        }
-        ExprNode::Lambda { body, .. } => f(body),
-        ExprNode::Assign { value, .. } => f(value),
-        ExprNode::Array { elements, .. } => elements.iter().for_each(&mut *f),
-        ExprNode::Hash { entries, .. } => {
-            for (k, v) in entries {
-                f(k);
-                f(v);
-            }
-        }
-        ExprNode::StringInterp { parts } => {
-            for p in parts {
-                if let InterpPart::Expr { expr } = p {
-                    f(expr);
-                }
-            }
-        }
-        ExprNode::Return { value } => f(value),
-        _ => {}
-    }
 }
 
 /// Companion slot naming: `bio` → `bio_provided`.
@@ -2442,7 +2467,7 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
                     ExprNode::Send {
                         recv: Some(Expr::new(
                             Span::synthetic(),
-                            ExprNode::Const { path: vec![owner.0.clone()] },
+                            ExprNode::Const { path: owner.const_path() },
                         )),
                         method: Symbol::from("new"),
                         args: Vec::new(),
@@ -2478,7 +2503,7 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
                 params_hash_ty())
         } else {
             with_ty(Expr::new(Span::synthetic(), ExprNode::Send {
-                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![owner.0.clone()] })),
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: owner.const_path() })),
                 method: Symbol::from("__rh_scalar_values"),
                 args: vec![var(&sub, hash_ty.clone()), names],
                 block: None, parenthesized: true,
@@ -3125,7 +3150,7 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
             let (_, permitted) = match_permit_call(&args[0])?;
             let spec = specs.find(&resource, &fields, &nested_signature(e))?;
             let arg = factory_arg(&args[0], guard, e.span);
-            Some(build_from_raw_defaults(&spec.class_id, entries, &permitted, e.span, arg))
+            Some(build_from_raw_defaults(&spec.class_id, entries, &permitted, e.span, arg, &|k| merged_only_ty(spec, k).is_some()))
         };
         if let ExprNode::Return { value } = &*e.node {
             if std::ptr::eq(value, tail) {
@@ -3156,8 +3181,9 @@ fn build_from_raw_defaults(
     permitted: &[Symbol],
     span: Span,
     arg: Expr,
+    typed: &dyn Fn(&Symbol) -> bool,
 ) -> Expr {
-    let ExprNode::Seq { exprs } = *build_from_raw_merge(class_id, entries, span, arg, &|_| false).node else {
+    let ExprNode::Seq { exprs } = *build_from_raw_merge(class_id, entries, span, arg, typed).node else {
         unreachable!("build_from_raw_merge returns a Seq")
     };
     // `_p = from_raw(...)`, then a (value, flag) setter pair per Symbol
@@ -3380,7 +3406,7 @@ fn expect_present_args(params_ivar: Expr, resource: Expr, keys: &ExpectKeys) -> 
 fn build_from_raw_call(class_id: &ClassId, span: Span, arg: Expr) -> Expr {
     let class_const = Expr::new(
         span,
-        ExprNode::Const { path: vec![class_id.0.clone()] },
+        ExprNode::Const { path: class_id.const_path() },
     );
     // `@params` directly — the synthesized `from_raw` dives into the
     // nested resource key itself (`sub = params.fetch("<resource>", {})`),

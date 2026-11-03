@@ -6,7 +6,7 @@
   "publisher": "rubys",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rubys/roundhouse",
+    "url": "https://github.com/roundhouse-rb/roundhouse",
     "directory": "editors/vscode"
   },
   "license": "MIT OR Apache-2.0",

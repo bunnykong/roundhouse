@@ -28,7 +28,7 @@ module Tep
       # Rails/websocket-driver has no closing-handshake deadline. Tep chooses
       # five seconds so a silent peer cannot retain a parked receiver forever.
       CLOSE_TIMEOUT_SECONDS = 5
-      attr_accessor :max_frame_size, :subprotocol
+      attr_accessor :max_frame_size, :subprotocol, :faye_text_only
       # Callback slots. Each holds a subclass of Tep::WebSocket::Handler
       # (or the base) that gets `handle_event(event)` called when the
       # corresponding wire event arrives. Defaults to a no-op base
@@ -36,6 +36,7 @@ module Tep
       attr_accessor :h_open, :h_message, :h_close, :h_ping, :h_pong, :h_error
 
       def initialize(fd)
+        @faye_text_only = false
         @fd             = fd
         @closed         = false
         @closing        = false

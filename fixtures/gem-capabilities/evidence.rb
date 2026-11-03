@@ -8,7 +8,7 @@ require "time"
 module Evidence
   ROUNDHOUSE = "f3d192810b53c61a73a52017e23d67df80265f72"
   SPINEL = "7147b681fd885ac1038f78474b010f2ab2d58402"
-  ORIGINS = {"roundhouse" => "https://github.com/rubys/roundhouse", "spinel" => "https://github.com/matz/spinel"}.freeze
+  ORIGINS = {"roundhouse" => "https://github.com/roundhouse-rb/roundhouse", "spinel" => "https://github.com/matz/spinel"}.freeze
 
   def self.capture(*argv, dir:, env: {})
     started = Time.now.utc.iso8601

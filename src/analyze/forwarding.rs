@@ -91,6 +91,42 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// Ruby preserves an unresolved `super(...)`, but a static target may need
+/// the destination's source declaration to implement its argument binder.
+pub(crate) fn unverified_full_super_declarations(app: &App) -> Vec<Span> {
+    let actions = controller_defs(app);
+    let contracts = SourceContractIndex::new(app, &actions);
+    fn unverified(
+        app: &App,
+        contracts: &SourceContractIndex<'_>,
+        owner: &ClassId,
+        method: &MethodDef,
+        expr: &Expr,
+    ) -> bool {
+        if let ExprNode::Super { args } = &*expr.node
+            && args.as_ref().is_none_or(|args| has_forwarding(args))
+            && destination(app, contracts, Some((owner, method)), expr, None).is_none()
+        {
+            return true;
+        }
+        let mut found = false;
+        expr.node.for_each_child(&mut |child| {
+            found |= unverified(app, contracts, owner, method, child);
+        });
+        found
+    }
+    methods(app)
+        .chain(actions.iter().map(|(owner, method)| (owner, method)))
+        .filter(|(_, method)| method.params.iter().any(|param| param.forwarding))
+        .filter(|(owner, method)| {
+            unverified(app, &contracts, owner, method, &method.body)
+                || method.params.iter().filter_map(|param| param.default.as_ref())
+                    .any(|default| unverified(app, &contracts, owner, method, default))
+        })
+        .map(|(_, method)| method.name_span)
+        .collect()
+}
+
 /// Every controller action as the `MethodDef` `controller_to_library`
 /// builds from it (`Action::formal_params`). Controllers lower after
 /// these checks run; without this view an action's `**` or `...` would
@@ -117,7 +153,8 @@ pub(crate) fn controller_defs(app: &App) -> Vec<(ClassId, MethodDef)> {
     for controller in &app.controllers {
         for action in controller.actions() {
             let params = action.formal_params();
-            let body = if has_packet(&action.body)
+            let body = if params.iter().any(|param| param.forwarding)
+                || has_packet(&action.body)
                 || params.iter().any(|p| p.default.as_ref().is_some_and(has_packet))
             {
                 action.body.clone()
@@ -567,6 +604,7 @@ pub(crate) enum KeywordPolicy {
     Native,
     NativeLibrary,
     Legacy,
+    LegacyRubySplat,
     Refuse,
     RefuseOrdinarySuper,
 }
@@ -684,11 +722,24 @@ fn keyword_calls_with_index(
                     KeywordPolicy::Legacy
                 }
             };
+            let policy = if policy == KeywordPolicy::Legacy
+                && matches!(&*e.node, ExprNode::Send { .. })
+                && destination(app, contracts, context, e, None).map(|d| d.method)
+                    .or_else(|| match &*e.node {
+                        ExprNode::Send { recv: None, method, .. } if helper_fallback =>
+                            app.helper_method_index.get(method).and_then(|owner|
+                                contracts.effective_call(owner, method, MethodReceiver::Instance)).map(|(m, _)| m),
+                        _ => None,
+                    }).is_none_or(|m| !m.params.iter().any(|p| p.keyword || p.from_keyword || p.from_kwrest))
+            { KeywordPolicy::LegacyRubySplat } else { policy };
             plans
                 .entry(e.span)
                 .and_modify(|previous| {
                     if *previous != policy {
-                        *previous = KeywordPolicy::Refuse;
+                        *previous = if matches!((*previous, policy),
+                            (KeywordPolicy::Legacy | KeywordPolicy::LegacyRubySplat,
+                             KeywordPolicy::Legacy | KeywordPolicy::LegacyRubySplat))
+                        { KeywordPolicy::Legacy } else { KeywordPolicy::Refuse };
                     }
                 })
                 .or_insert(policy);

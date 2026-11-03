@@ -114,7 +114,7 @@ fn controller_keyword_forwarding_into_optional_keywords_keeps_the_keyword() {
 
 /// The ruby family carries the formals; every other target says it
 /// cannot, as it does for the same formals on a model method. Spinel
-/// carries `*rest` and `**` but not `...`.
+/// carries `*rest`, `**` and verified `...` declarations.
 #[test]
 fn controller_formals_are_reported_where_no_target_carries_them() {
     use roundhouse::project::BuildTarget;
@@ -153,11 +153,6 @@ fn controller_formals_are_reported_where_no_target_carries_them() {
             assert!(got.iter().any(|d| d.contains(needle)), "{target:?} must report {needle}: {got:?}");
         }
     }
-    let spinel = reported(BuildTarget::Spinel);
-    assert!(spinel.iter().any(|d| d.contains("full argument forwarding")), "{spinel:?}");
-    assert!(
-        !spinel.iter().any(|d| d.contains("rest parameter") || d.contains("keyword rest declaration")),
-        "{spinel:?}"
-    );
+    assert!(reported(BuildTarget::Spinel).is_empty());
     assert!(reported(BuildTarget::Ruby).is_empty());
 }

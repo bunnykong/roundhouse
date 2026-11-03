@@ -975,9 +975,86 @@ module ActionView
     end
   
     def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
-      href = digested_asset_path("#{name}.css")
+      href = stylesheet_href(name.to_s)
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
       "<link#{attrs}>"
+    end
+
+    # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`, type
+    # :stylesheet): a blank source is ""; a URL (`scheme://`, `//`, `cid:`,
+    # `data:`) as given; otherwise `.css` unless the name already ends in it,
+    # then the pipeline unless the path is absolute, with a `?…`/`#…` tail
+    # kept at the end. String ops only: no portable Regexp.
+    def self.stylesheet_href(source)
+      return "" if blank_source?(source)
+      return source if asset_url?(source)
+      cut = first_char_index(source, "?")
+      fragment = first_char_index(source, "#")
+      # Two flat statements, not `a && (b || c)` (Crystal's and Go's emits
+      # drop those parentheses) nor a nested modifier `if` (Python's emit
+      # writes it on one line).
+      cut = fragment if fragment >= 0 && cut < 0
+      cut = fragment if fragment >= 0 && fragment < cut
+      # Rails splits a tail of at least one character after the mark.
+      cut = source.length if cut < 0 || cut == source.length - 1
+      path = source[0, cut]
+      tail = source[cut, source.length - cut]
+      path = path + ".css" unless css_extname?(path)
+      path = digested_asset_path(path) unless path.start_with?("/")
+      path + tail
+    end
+
+    # Rails' asset `URI_REGEXP`: `[-a-z]+://` (any case), `cid:`, `data:`, `//`.
+    def self.asset_url?(source)
+      return true if source.start_with?("//")
+      lower = source.downcase
+      return true if lower.start_with?("cid:") || lower.start_with?("data:")
+      i = scheme_letter_count(lower)
+      i > 0 && lower[i, 3] == "://"
+    end
+
+    # Rails' `String#blank?`: empty, or every character `[[:space:]]`.
+    def self.blank_source?(s)
+      i = 0
+      while i < s.length
+        return false unless " \t\n\u000b\u000c\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000".include?(s[i, 1])
+        i += 1
+      end
+      true
+    end
+
+    # How many of `s`'s first characters are `-` or `a`-`z`. Its own
+    # method, a counter loop at the top, as Elixir's loop lowering takes it.
+    def self.scheme_letter_count(s)
+      i = 0
+      while i < s.length
+        return i unless "-abcdefghijklmnopqrstuvwxyz".include?(s[i, 1])
+        i += 1
+      end
+      s.length
+    end
+
+    # `File.extname(path) == ".css"`: the last segment ends in `.css` after
+    # a name (`.css` alone has no extname).
+    def self.css_extname?(path)
+      slash = -1
+      i = 0
+      while i < path.length
+        slash = i if path[i, 1] == "/"
+        i += 1
+      end
+      base = path[slash + 1, path.length - slash - 1]
+      base.length > 4 && base.end_with?(".css")
+    end
+
+    # The index of the first `ch` in `s`, or -1.
+    def self.first_char_index(s, ch)
+      i = 0
+      while i < s.length
+        return i if s[i, 1] == ch
+        i += 1
+      end
+      -1
     end
 
     # `<script src>` include for a JS source. The source resolves through
@@ -1396,6 +1473,139 @@ module ActionView
       else
         %( value="#{html_escape(value.to_s)}")
       end
+    end
+
+    # Rails 8.1.4's `current_page?(path)` for a path or a URL (actionview
+    # url_helper.rb): false unless the request is a GET or HEAD; the path,
+    # percent-decoded, against the request's path (its fullpath when the
+    # path has a query), percent-decoded too, each without the `/` before
+    # its query or at its end. A decoded `scheme://…` is compared with the
+    # request's protocol and host (with port) in front of that path.
+    # Compared as bytes, as Rails compares the unescaped strings in
+    # BINARY. `ingest::current_page` writes the call with the request's
+    # parts, as Strings, so no target needs a request type here:
+    # `request_origin` is its protocol and host with port
+    # (`http://example.org:8080`).
+    def self.current_page_match?(request_method, request_path, request_fullpath, request_origin, path)
+      return false unless request_method == "GET" || request_method == "HEAD"
+      url = percent_decoded(path.bytes)
+      here = first_byte_index(url, 63) >= 0 ? request_fullpath : request_path
+      here_bytes = percent_decoded(here.bytes)
+      here_bytes = joined_bytes(request_origin.bytes, here_bytes) if scheme_at_line_start?(url)
+      same_bytes?(trailing_slash_trimmed(url), trailing_slash_trimmed(here_bytes))
+    end
+
+    # Rails' `%r{^\w+://}`: at the start, or after a newline, one or more
+    # word bytes (ASCII letters, digits, `_`) and then `://`.
+    def self.scheme_at_line_start?(bytes)
+      run = 0
+      i = 0
+      while i < bytes.length
+        b = byte_at(bytes, i)
+        if b == 10
+          run = 0
+        elsif run > 0 && b == 58 && i + 2 < bytes.length && byte_at(bytes, i + 1) == 47 && byte_at(bytes, i + 2) == 47
+          return true
+        elsif run >= 0 && word_byte?(b)
+          run = run + 1
+        else
+          run = -1
+        end
+        i += 1
+      end
+      false
+    end
+
+    def self.word_byte?(byte)
+      return true if byte >= 48 && byte <= 57
+      return true if byte >= 65 && byte <= 90
+      return true if byte >= 97 && byte <= 122
+      byte == 95
+    end
+
+    def self.joined_bytes(a, b)
+      out = []
+      i = 0
+      while i < a.length + b.length
+        if i < a.length
+          out << byte_at(a, i)
+        else
+          out << byte_at(b, i - a.length)
+        end
+        i += 1
+      end
+      out
+    end
+
+    # Each valid `%HH` as its byte; an invalid one, and a `+`, stay as
+    # written (URI's `unescape`, which `current_page?` uses).
+    # One `while` stepping by 1, with `skip` passing over a sequence's
+    # two hex digits: the shape Elixir's loop lowering takes.
+    def self.percent_decoded(bytes)
+      out = []
+      skip = 0
+      i = 0
+      while i < bytes.length
+        b = byte_at(bytes, i)
+        if skip > 0
+          skip = skip - 1
+        elsif b == 37 && i + 2 < bytes.length && hex_value(byte_at(bytes, i + 1)) >= 0 && hex_value(byte_at(bytes, i + 2)) >= 0
+          out << hex_value(byte_at(bytes, i + 1)) * 16 + hex_value(byte_at(bytes, i + 2))
+          skip = 2
+        else
+          out << b
+        end
+        i += 1
+      end
+      out
+    end
+
+    # The byte at `i`, an Integer on every target.
+    def self.byte_at(bytes, i)
+      bytes[i]
+    end
+
+    # An ASCII hex digit's value, or -1.
+    def self.hex_value(byte)
+      return byte - 48 if byte >= 48 && byte <= 57
+      return byte - 55 if byte >= 65 && byte <= 70
+      return byte - 87 if byte >= 97 && byte <= 102
+      -1
+    end
+
+    # The index of the first `byte` in `bytes`, or -1.
+    def self.first_byte_index(bytes, byte)
+      i = 0
+      while i < bytes.length
+        return i if byte_at(bytes, i) == byte
+        i += 1
+      end
+      -1
+    end
+
+    # Rails' `remove_trailing_slash!`: the byte before the first `?` (with
+    # none, or one at the start, the last byte) is dropped if it is `/`.
+    def self.trailing_slash_trimmed(bytes)
+      q = first_byte_index(bytes, 63)
+      at = q > 0 ? q - 1 : bytes.length - 1
+      return bytes if at < 0 || byte_at(bytes, at) != 47
+      out = []
+      i = 0
+      while i < bytes.length
+        out << byte_at(bytes, i) unless i == at
+        i += 1
+      end
+      out
+    end
+
+    def self.same_bytes?(a, b)
+      return false unless a.length == b.length
+      i = 0
+      while i < a.length
+        return false unless byte_at(a, i) == byte_at(b, i)
+        i += 1
+      end
+      true
     end
 
     # Inverse of `html_escape`'s nil-discipline: returns html_escape

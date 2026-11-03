@@ -59,6 +59,9 @@ BASE = [
 # selected (scheduled full, or a change that owns them). Unselected skips
 # must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
+# Canonical home after the org transfer. Forks and the retired rubys/
+# name stay rejected.
+CANONICAL_REPOSITORY = "roundhouse-rb/roundhouse"
 CORE = ["spinel-build", "spinel-toolchain", "spinel-compare"]
 JRUBY_BIND_INPUTS = {
     "tests/param_binds_jruby.rb",
@@ -74,6 +77,7 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "spinel_faye_websocket",
     "spinel_websocket_lifecycle",
     "select_alias_index",
     "date_columns_spinel",
@@ -496,6 +500,7 @@ def native_coverage(path):
         or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
         or path == "tests/support/db_concurrency_spinel.rb"
         or path == "tests/support/gradual_returns.rs"
+        or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
@@ -510,6 +515,10 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
+        suites.add("spinel_net_http_start")
+    if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":
+        suites.add("spinel_faye_websocket")
     if path.startswith(("tests/spinel_websocket_lifecycle", "runtime/spinel/tep/websocket")) or path in {
         "runtime/spinel/tep/net.rb", "runtime/spinel/tep/server_threaded.rb",
     }:
@@ -748,6 +757,10 @@ def select(
             "tests/spinel_toolchain/gradual_returns.rs",
         }:
             reasons.append(f"{path}: unit (gradual-return regression inputs)")
+        if path in {"tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"}:
+            reasons.append(f"{path}: unit (emit_and_run), spinel-toolchain (ordinary class-body calls)")
+            spinel = True
+            jobs_selected.update(CORE)
         if path.startswith("tests/support/controller_content_type_writer/"):
             reasons.append(f"{path}: unit (controller_content_type_writer)")
         if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
@@ -1253,6 +1266,15 @@ def _advisory_complete(job, need, advisory, plan=None):
     return all(need.get("outputs", {}).get(key) == "success" for key in keys)
 
 
+def publication_caller_allowed(repository, ref, event_name):
+    """True only for scheduled / dispatched Full validation on canonical main."""
+    return (
+        repository == CANONICAL_REPOSITORY
+        and ref == "refs/heads/main"
+        and event_name in {"schedule", "workflow_dispatch"}
+    )
+
+
 def write_outputs(values):
     output = os.environ.get("GITHUB_OUTPUT")
     lines = "".join(
@@ -1374,10 +1396,10 @@ def main():
                 "Ruby+Spinel only (extra-language SDKs not selected)"
             )
     publish = os.environ.get("CI_PUBLISH") == "true"
-    if publish and (
-        os.environ["GITHUB_REPOSITORY"] != "rubys/roundhouse"
-        or os.environ["GITHUB_REF"] != "refs/heads/main"
-        or event_name not in {"schedule", "workflow_dispatch"}
+    if publish and not publication_caller_allowed(
+        os.environ["GITHUB_REPOSITORY"],
+        os.environ["GITHUB_REF"],
+        event_name,
     ):
         raise ValueError("publication is only allowed by canonical main's full caller")
     plan = select(
@@ -1421,7 +1443,10 @@ def main():
             "compare": plan["compare"],
             "spinel-tests": plan["spinel_tests"],
             "spinel-framework-shards": plan["spinel_framework_shards"],
-            "spinel-timings": {"toolchain": timings.get("toolchain", {})},
+            "spinel-timings": {
+                "framework": timings.get("framework", {}),
+                "toolchain": timings.get("toolchain", {}),
+            },
             "smoke": plan["smoke"],
             "smoke-extra": plan["smoke_extra"],
             "extras-advisory": plan["extras_advisory"],

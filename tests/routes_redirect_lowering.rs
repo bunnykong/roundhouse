@@ -228,6 +228,19 @@ fn a_multiline_status_redirect_is_served() {
     assert!(emitted.contains("status: :moved_permanently"), "status 301; got:\n{emitted}");
 }
 
+/// Whether a route at `path` is dispatched. A shape Roundhouse cannot
+/// serve keeps its URL helper as a helper-only entry on the unmodeled
+/// endpoint controller, which is not a served route.
+fn served(app: &roundhouse::App, path: &str) -> bool {
+    app.routes.entries.iter().any(|e| {
+        matches!(
+            e,
+            roundhouse::dialect::RouteSpec::Explicit { path: p, controller, .. }
+                if p == path && controller.0.as_str() != "RoundhouseUnmodeledEndpoint"
+        )
+    })
+}
+
 #[test]
 fn a_block_that_builds_a_string_is_served() {
     let app = app_with(
@@ -245,10 +258,7 @@ fn a_block_that_builds_a_string_is_served() {
         emitted.contains("def claim") && emitted.contains("status: :moved_permanently"),
         "status beside the block survived; got:\n{emitted}"
     );
-    assert!(
-        !app.routes.entries.iter().any(|entry| format!("{entry:?}").contains("/not_a_string")),
-        "a non-string block stays dropped"
-    );
+    assert!(!served(&app, "/not_a_string"), "a non-string block is never dispatched");
     assert!(emitted.contains("item_slug"), "req and params[]; got:\n{emitted}");
     assert!(emitted.contains("request.query_string"), "req renamed; got:\n{emitted}");
 }
@@ -303,30 +313,9 @@ fn an_if_publishes_a_string_assigned_on_both_branches() {
         emitted.contains("def branched") && emitted.contains("query_string"),
         "a string assigned on both branches is the redirect; got:\n{emitted}"
     );
-    assert!(
-        !app.routes.entries.iter().any(|entry| matches!(
-            entry,
-            roundhouse::dialect::RouteSpec::Explicit { path, .. } if path == "/half"
-        )),
-        "one branch leaves the name unset; routes = {:?}",
-        app.routes.entries
-    );
-    assert!(
-        !app.routes.entries.iter().any(|entry| matches!(
-            entry,
-            roundhouse::dialect::RouteSpec::Explicit { path, .. } if path == "/flag"
-        )),
-        "empty? is a boolean, not a string; routes = {:?}",
-        app.routes.entries
-    );
-    assert!(
-        !app.routes.entries.iter().any(|entry| matches!(
-            entry,
-            roundhouse::dialect::RouteSpec::Explicit { path, .. } if path == "/present"
-        )),
-        "present? is a boolean, not a string; routes = {:?}",
-        app.routes.entries
-    );
+    assert!(!served(&app, "/half"), "one branch leaves the name unset: never dispatched");
+    assert!(!served(&app, "/flag"), "empty? is a boolean, not a string: never dispatched");
+    assert!(!served(&app, "/present"), "present? is a boolean, not a string: never dispatched");
     assert!(emitted.contains("def stripped"), "strip stays a string; got:\n{emitted}");
 }
 
@@ -336,14 +325,8 @@ fn a_block_redirect_is_still_dropped_with_its_ledger_line() {
     let app = app_with(
         "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect { |params, request| request.user }\n",
     );
-    assert!(
-        !app.routes.entries.iter().any(|e| matches!(
-            e,
-            roundhouse::dialect::RouteSpec::Explicit { path, .. } if path == "/old"
-        )),
-        "routes = {:?}",
-        app.routes.entries
-    );
+    // The route keeps its URL helper (Rails names it) but is never served.
+    assert!(!served(&app, "/old"), "routes = {:?}", app.routes.entries);
 }
 
 #[test]
@@ -392,11 +375,8 @@ fn a_path_option_redirect_is_the_same_location_as_a_positional_string() {
         "status: still applies beside path:; got:\n{emitted}"
     );
     assert!(
-        !app.routes.entries.iter().any(|e| matches!(
-            e,
-            roundhouse::dialect::RouteSpec::Explicit { path, .. } if path == "/store/:name"
-        )),
-        "a host-changing options redirect stays dropped; routes = {:?}",
+        !served(&app, "/store/:name"),
+        "a host-changing options redirect is never dispatched; routes = {:?}",
         app.routes.entries
     );
 }

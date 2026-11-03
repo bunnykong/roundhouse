@@ -7,7 +7,7 @@
 //! `ingest_resources_route`'s own kwarg loop fell through every
 //! unrecognized key, `constraints:` included, to a silent `_ => {}` —
 //! the resource was always built with `constraints: IndexMap::new()`.
-//! A member route (`POST /widgets/:id/`, from a `member do … end`
+//! A member route (`POST /widgets/:id`, from a `member do … end`
 //! block) therefore carried no requirement on `:id` and matched a
 //! sibling collection path Rails routes elsewhere (`POST
 //! /widgets/callback`), because the member route is registered first
@@ -75,7 +75,7 @@ fn find<'a>(routes: &'a [FlatRoute], method: HttpMethod, path: &str) -> &'a Flat
 #[test]
 fn inline_constraint_reaches_the_member_route() {
     let r = flat();
-    let check = find(&r, HttpMethod::Post, "/widgets/:id/");
+    let check = find(&r, HttpMethod::Post, "/widgets/:id");
     assert_eq!(
         check.constraints,
         vec![("id".to_string(), "[A-Z][A-Z]\\d+".to_string())],

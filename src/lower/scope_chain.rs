@@ -294,7 +294,9 @@ pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol 
 /// name is inert unless that call ALSO chains into a known scope.
 ///
 /// `class` is the same fact for a model's CLASS methods, keyed by the
-/// model as well, because the receiver there is the constant itself:
+/// defining model as well, because the receiver there is the constant
+/// itself (a subclass reaches the entry through
+/// [`UserMethodReturns::class_method_owner`]):
 /// lobsters' `Comment.recent_threads(user)` ends in `Comment.joins(…)
 /// .where(…)`, and without the entry the chain after it
 /// (`.merge(…).for_presentation.joins(:story)`) lost its model — the
@@ -305,7 +307,7 @@ pub struct UserMethodReturns {
     pub instance: HashMap<Symbol, Option<ClassId>>,
     pub class: HashMap<(ClassId, Symbol), ClassId>,
     /// Class methods defined on that model itself. Ancestors stay on
-    /// the ancestor: [`UserMethodReturns::defines_class_method`] walks
+    /// the ancestor: [`UserMethodReturns::class_method_owner`] walks
     /// [`Self::parents`], the same question `ClassInfo::source_class_method`
     /// answers for the typer. Copying every ancestor method onto each
     /// descendant made the two indexes disagree about who defined it.
@@ -321,17 +323,22 @@ impl UserMethodReturns {
         Self::default()
     }
 
-    /// A source `def self.<method>` on `model` or one of its parents.
-    pub fn defines_class_method(&self, model: &ClassId, method: &Symbol) -> bool {
+    /// The model whose source `def self.<method>` a call on `model`
+    /// reaches: `model` itself or its nearest parent that defines it.
+    pub fn class_method_owner<'a>(
+        &'a self,
+        model: &'a ClassId,
+        method: &Symbol,
+    ) -> Option<&'a ClassId> {
         let mut current = Some(model);
         for _ in 0..32 {
-            let Some(id) = current else { return false };
+            let id = current?;
             if self.class_methods.contains(&(id.clone(), method.clone())) {
-                return true;
+                return Some(id);
             }
             current = self.parents.get(id);
         }
-        false
+        None
     }
 }
 
@@ -1052,6 +1059,11 @@ pub fn build_assoc_class_methods(
     let mut wanted: Vec<&(Symbol, Symbol)> = demand.iter().collect();
     wanted.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
     for (aname, mname) in wanted {
+        if is_relation_chain_method(mname.as_str())
+            || crate::catalog::is_relation_context_builder(mname.as_str())
+        {
+            continue;
+        }
         for owner in models {
             let Some((target, _)) = assocs.has_many_fk(&owner.name, aname) else { continue };
             // An association the seed cannot reproduce (`as:`, a
@@ -1093,6 +1105,11 @@ pub fn build_assoc_class_methods(
     wanted_models
         .sort_by(|a, b| (a.0 .0.as_str(), a.1.as_str()).cmp(&(b.0 .0.as_str(), b.1.as_str())));
     for (target, mname) in wanted_models {
+        if is_relation_chain_method(mname.as_str())
+            || crate::catalog::is_relation_context_builder(mname.as_str())
+        {
+            continue;
+        }
         if scopes.get(target).is_some_and(|s| s.contains_key(mname)) {
             continue;
         }
@@ -1250,10 +1267,16 @@ fn relation_return_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<Class
                 }
                 // A hop must preserve the relation. `where`-family and
                 // the chain methods qualify; on the ROOT constant, any
-                // method could be a scope — accept it there (checked
-                // when we reach the Const).
+                // method could be a scope — accept it there, unless the
+                // catalog knows the name and no entry of it answers a
+                // relation (`pluck`, `ids`, `count`, `create!`).
                 if let Some(m) = const_model(r, models) {
-                    return Some(m);
+                    let mut entries = crate::catalog::lookup_any(method.as_str()).peekable();
+                    let answers_other = entries.peek().is_some()
+                        && entries.all(|entry| {
+                            entry.return_kind != Some(crate::catalog::ReturnKind::RelationOfSelf)
+                        });
+                    return (!answers_other).then_some(m);
                 }
                 if !is_relation_chain_method(method.as_str()) {
                     return None;
@@ -4869,10 +4892,8 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return keeps.then_some(m);
                 }
-                if matches!(method.as_str(), "pluck" | "pick")
-                    && ctx.user_returns.defines_class_method(&m, &method)
-                {
-                    let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
+                if let Some(owner) = ctx.user_returns.class_method_owner(&m, &method) {
+                    let returns = ctx.user_returns.class.get(&(owner.clone(), method.clone())).cloned();
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return returns;
                 }
@@ -4903,9 +4924,8 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(relation_new(span, &m)), counted, args, block, parenthesized);
                     return None;
                 }
-                let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
                 *expr = put(span, Some(r), method, args, block, parenthesized);
-                return returns;
+                return None;
             }
 
             // Scope/chain/terminal on an association read: `self.<has_many>.

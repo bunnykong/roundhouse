@@ -488,9 +488,8 @@ fn restore_kwrest_on_typed_send(expr: &mut Expr, sigs: &Signatures) {
     let params = params.clone();
     let ExprNode::Send { args, .. } = &mut *expr.node else { return };
     restore_kwrest_splat(args, &params);
-    // A callee with no keyword parameter takes the Hash positionally, so
-    // the Ruby emitter must not write the source's `**` back over it.
-    if params.iter().all(|p| !p.keyword) {
+    // Flattened keyword parameters still use the established positional ABI.
+    if params.iter().any(|p| p.from_keyword || p.from_kwrest) && params.iter().all(|p| !p.keyword) {
         for arg in args.iter_mut() {
             arg.decisions &= !crate::expr::ERASED_KEYWORD_SPLAT;
         }

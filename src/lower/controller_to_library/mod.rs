@@ -1680,7 +1680,7 @@ fn class_side_clone_names(controller: &Controller) -> Vec<Symbol> {
     out
 }
 
-fn helper_method_marked_names(controller: &Controller) -> Vec<Symbol> {
+pub(crate) fn helper_method_marked_names(controller: &Controller) -> Vec<Symbol> {
     let mut marked: Vec<Symbol> = Vec::new();
     for item in &controller.body {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };

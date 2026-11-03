@@ -114,6 +114,101 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// A `current_page?` that `ingest::current_page` left as written: Rails
+/// answers it through `url_for(options)` (an options hash, or
+/// `check_parameters:`/`method:`), which the runtime does not model.
+fn unlowered_current_page(app: &App) -> Vec<Diagnostic> {
+    // The app's own `current_page?` is a call like any other: a body it
+    // answers is left out of `for_each_view_context_body`.
+    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: None, method, .. } = &*expr.node
+            && method.as_str() == "current_page?"
+            && !expr.span.is_synthetic()
+        {
+            let reason = "only a path or URL argument is modeled (not an options hash, a splat, `check_parameters:` or `method:`)";
+            out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
+        }
+        // `ingest::current_page` rewrites before types: a path analysis
+        // can't type as a String (a record, which Rails passes to
+        // `url_for`; a Hash; a value that may be nil) would reach the
+        // runtime's `path.bytes`.
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+            && method.as_str() == "current_page_match?"
+            && matches!(&*r.node, ExprNode::Const { path } if path.len() == 2 && path[0].as_str() == "ActionView" && path[1].as_str() == "ViewHelpers")
+            && args.get(4).is_some_and(|path| !matches!(path.ty, Some(crate::ty::Ty::Str)))
+            && !expr.span.is_synthetic()
+        {
+            let reason = "its argument is not known to be a String path or URL; a record or an options hash goes through Rails' `url_for`, which is not modeled";
+            out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    let mut out = Vec::new();
+    crate::ingest::current_page::for_each_view_context_body(app, &mut |body| visit(body, &mut out));
+    out
+}
+
+/// `stylesheet_link_tag` in an `app/helpers` method that
+/// `tag_builder::rewrite_stylesheet_link_tag` leaves as written: a Symbol
+/// name (a stylesheet group a view expands from its stylesheet list, which
+/// a helper doesn't have) or arguments other than a name and an optional
+/// literal options hash. Nothing answers the bare call in a helper module.
+/// An app's own `stylesheet_link_tag` is a call like any other.
+fn helper_stylesheet_link_tags(app: &App) -> Vec<Diagnostic> {
+    if crate::lower::tag_builder::app_defines_stylesheet_link_tag(app) {
+        return Vec::new();
+    }
+    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node
+            && method.as_str() == "stylesheet_link_tag"
+            && !expr.span.is_synthetic()
+        {
+            let opaque = |e: &Expr| {
+                matches!(
+                    &*e.node,
+                    ExprNode::Splat { .. }
+                        | ExprNode::KeywordSplat { .. }
+                        | ExprNode::ForwardArgs
+                        | ExprNode::ForwardKeywords
+                        | ExprNode::ForwardKeywordsWithPairs { .. }
+                )
+            };
+            let shape_ok = match &args[..] {
+                [n] => !opaque(n) && !matches!(&*n.node, ExprNode::Hash { .. }),
+                [n, o] => {
+                    !opaque(n)
+                        && matches!(&*o.node, ExprNode::Hash { entries, .. } if !entries.iter().any(|(k, v)| opaque(k) || opaque(v)))
+                }
+                _ => false,
+            };
+            let symbol = args.first().is_some_and(|n| matches!(&*n.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } }));
+            // A block: Rails' helper takes none, and the lowering leaves it.
+            if !shape_ok || symbol || block.is_some() {
+                let reason = if symbol {
+                    "in a helper method, a Symbol names a stylesheet group (`:app`, `:all`) that only a view expands; pass the stylesheet's name"
+                } else {
+                    "in a helper method, only a stylesheet name and an optional literal options hash are modeled"
+                };
+                out.push(Diagnostic::unsupported(expr.span, None, "stylesheet_link_tag", reason));
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    let mut out = Vec::new();
+    // A helper including an app module with its own `stylesheet_link_tag`
+    // calls that one, which the lowering leaves as written.
+    let own = crate::lower::tag_builder::helpers_including(app, "stylesheet_link_tag");
+    for lc in app.library_classes.iter().filter(|lc| app.helper_modules.contains(&lc.name) && !own.contains(&lc.name)) {
+        for method in &lc.methods {
+            for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                visit(default, &mut out);
+            }
+            visit(&method.body, &mut out);
+        }
+    }
+    out
+}
+
 /// A `time_tag` that `ingest::time_tag` left as written, with the reason
 /// its `lowering` gives (no text argument and no block, whose text Rails
 /// makes with `I18n.l(t, format: …)`, or a shape it does not model).
@@ -466,6 +561,8 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     }
     out.extend(attribute_macro_refusals(app));
     out.extend(unlowered_form_builder_calls(app));
+    out.extend(unlowered_current_page(app));
+    out.extend(helper_stylesheet_link_tags(app));
     out.extend(unlowered_time_tags(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));

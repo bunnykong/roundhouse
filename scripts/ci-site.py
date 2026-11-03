@@ -15,7 +15,7 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
-REPOSITORY = "rubys/roundhouse"
+REPOSITORY = "roundhouse-rb/roundhouse"
 SCHEMA = 1
 METADATA = "ci/site-publication.json"
 SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -46,8 +46,12 @@ def write_json(path, value):
 
 
 def publication_context(env):
-    if (env.get("GITHUB_REPOSITORY"), env.get("GITHUB_REF"), env.get("GITHUB_EVENT_NAME")) != (REPOSITORY, "refs/heads/main", "workflow_dispatch"):
-        raise ValueError("site publication requires a manual run on rubys/roundhouse main")
+    if (env.get("GITHUB_REPOSITORY"), env.get("GITHUB_REF"), env.get("GITHUB_EVENT_NAME")) != (
+        REPOSITORY,
+        "refs/heads/main",
+        "workflow_dispatch",
+    ):
+        raise ValueError("site publication requires a manual run on roundhouse-rb/roundhouse main")
     source = env.get("GITHUB_SHA", "")
     if not SHA.fullmatch(source):
         raise ValueError("missing immutable source SHA")
@@ -55,8 +59,13 @@ def publication_context(env):
 
 
 class GitHub:
+    def __init__(self, repository=None):
+        self.repository = repository or os.environ.get("GITHUB_REPOSITORY", REPOSITORY)
+        if self.repository != REPOSITORY:
+            raise ValueError("site API access is limited to the canonical repository")
+
     def get(self, path):
-        return json.loads(run("gh", "api", f"repos/{REPOSITORY}/{path}"))
+        return json.loads(run("gh", "api", f"repos/{self.repository}/{path}"))
 
     def pages(self, path, key=None):
         separator = "&" if "?" in path else "?"
@@ -70,14 +79,24 @@ class GitHub:
 
     def download(self, artifact, destination):
         with Path(destination).open("wb") as stream:
-            subprocess.run(["gh", "api", f"repos/{REPOSITORY}/actions/artifacts/{artifact['id']}/zip"], stdout=stream, check=True, timeout=180)
+            subprocess.run(
+                ["gh", "api", f"repos/{self.repository}/actions/artifacts/{artifact['id']}/zip"],
+                stdout=stream,
+                check=True,
+                timeout=180,
+            )
         match = DIGEST.fullmatch(artifact.get("digest", ""))
         if not match or sha256(destination) != match[1]:
             raise ValueError("the deployed site artifact failed its SHA-256 check")
 
 
 def deployment_run(status):
-    match = re.fullmatch(rf"https://github\.com/{re.escape(REPOSITORY)}/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)", status.get("log_url", ""))
+    # log_url may still spell a pre-transfer owner; trust is the canonical
+    # Actions API check in trusted_baseline, not the host path spelling.
+    match = re.fullmatch(
+        r"https://github\.com/[^/]+/[^/]+/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)",
+        status.get("log_url", ""),
+    )
     if status.get("state") != "success" or not match:
         raise ValueError("deployment has no successful canonical Actions job")
     return tuple(map(int, match.groups()))

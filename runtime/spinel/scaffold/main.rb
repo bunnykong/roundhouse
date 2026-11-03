@@ -537,6 +537,7 @@ module Main
     # StrStrHash and the `request_obj.env = env` assignment warns on the
     # StrStr->StrPoly mismatch. Writing Strings into the poly field in place
     # is a valid poly-member write and never constructs the competing hash.
+    request_obj.env["REQUEST_METHOD"] = verb
     user_agent = req.req_headers.fetch("user-agent", "")
     # `request.headers` follows Rails' HTTP-to-CGI env mapping. Copy all
     # parsed headers, not just those the dispatcher itself reads: cache
@@ -667,6 +668,12 @@ module Main
       # Not a 500: Rails' rescue_responses answer these with 422.
       res.status = 422
       res.body = "<h1>422 Unprocessable Content</h1>"
+      return
+    end
+
+    socket = request_obj.env["roundhouse.websocket"]
+    if socket.is_a?(Faye::WebSocket)
+      res.start_websocket(socket.accept_key, socket.driver)
       return
     end
 

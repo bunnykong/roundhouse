@@ -41,8 +41,14 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_only_manual_canonical_main_can_publish(self):
         self.assertEqual(site.publication_context(context()), SHA)
-        for key, value in [("GITHUB_REPOSITORY", "Shopify/roundhouse"), ("GITHUB_REF", "refs/heads/topic"), ("GITHUB_EVENT_NAME", "pull_request"), ("GITHUB_SHA", "main")]:
-            with self.subTest(key=key), self.assertRaises(ValueError):
+        for key, value in [
+            ("GITHUB_REPOSITORY", "Shopify/roundhouse"),
+            ("GITHUB_REPOSITORY", "rubys/roundhouse"),
+            ("GITHUB_REF", "refs/heads/topic"),
+            ("GITHUB_EVENT_NAME", "pull_request"),
+            ("GITHUB_SHA", "main"),
+        ]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 site.publication_context(context() | {key: value})
 
     def test_uses_successful_deployment_attempt_not_overall_run_or_newer_artifact(self):
@@ -58,7 +64,8 @@ class ProvenanceTests(unittest.TestCase):
             (self.workflow, "repository", {"full_name": "Shopify/roundhouse"}),
             (self.workflow, "path", ".github/workflows/ci.yml"), (self.workflow, "event", "pull_request"),
             (self.job, "conclusion", "failure"), (self.job, "run_id", 101),
-            (self.status, "log_url", "https://github.com/elsewhere/roundhouse/actions/runs/100/job/200"),
+            (self.status, "log_url", "https://example.invalid/not-an-actions-url"),
+            (self.status, "state", "failure"),
         ]:
             before = copy.deepcopy(record)
             with self.subTest(key=key, value=value):
@@ -67,6 +74,12 @@ class ProvenanceTests(unittest.TestCase):
                     self.choose()
                 record.clear()
                 record.update(before)
+
+    def test_pre_transfer_log_url_spelling_is_trusted_via_canonical_api_fields(self):
+        self.status["log_url"] = "https://github.com/rubys/roundhouse/actions/runs/100/job/200"
+        selected = self.choose()
+        self.assertEqual(selected["artifact"]["id"], 2)
+        self.assertEqual(selected["run_id"], 100)
 
     def test_does_not_fall_back_when_deployed_artifact_expired_or_is_ambiguous(self):
         for candidates in [[artifact(1), artifact(2, expired=True)], [artifact(1), artifact(2, digest=None)], [artifact(2), artifact(2, id=99)]]:

@@ -435,6 +435,108 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "", ViewHelpers.optional_value_attr("")
   end
 
+  # Rails 8.1.4's `current_page?(path)` answers (actionview url_helper.rb),
+  # on the request's method, path, fullpath and protocol with host.
+  def test_current_page_match_answers_a_get_or_head_only
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org", "/events")
+    assert_equal true, ViewHelpers.current_page_match?("HEAD", "/events", "/events", "http://example.org", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("POST", "/events", "/events", "http://example.org", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events/1", "/events/1", "http://example.org", "/events")
+  end
+
+  def test_current_page_match_reads_the_query_only_when_the_path_has_one
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", "http://example.org", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org", "/events?order=asc")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", "http://example.org", "/events?order=asc")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events?order=desc", "http://example.org", "/events?order=asc")
+  end
+
+  def test_current_page_match_drops_a_trailing_slash
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events/", "/events/", "http://example.org", "/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org", "/events/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", "http://example.org", "/")
+  end
+
+  def test_current_page_match_percent_decodes_both_sides
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", "http://example.org", "/café")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", "http://example.org", "/caf%C3%A9")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a+b", "/a+b", "http://example.org", "/a+b")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a%2Bb", "/a%2Bb", "http://example.org", "/a+b")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a%20b", "/a%20b", "http://example.org", "/a b")
+  end
+
+  def test_current_page_match_compares_a_url_with_the_request_protocol_and_host
+    o = "http://example.org"
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("HEAD", "/events", "/events", o, "http://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("POST", "/events", "/events", o, "http://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://other.example/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "https://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "HTTP://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://EXAMPLE.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "my_app2://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org:8080", "http://example.org:8080/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org:8080", "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "https://example.org", "https://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "https://example.org", "http://example.org/events")
+  end
+
+  def test_current_page_match_decodes_and_trims_a_url_as_a_path
+    o = "http://example.org"
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http%3A%2F%2Fexample.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://example.org/events/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events/", "/events/", o, "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", o, "http://example.org/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", o, "http://example.org")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", o, "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", o, "http://example.org/events?order=asc")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://example.org/events?order=asc")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", o, "http://example.org/café")
+  end
+
+  # `^` matches after a newline too, so a `scheme://` there makes it a URL.
+  def test_current_page_match_reads_a_scheme_after_a_newline
+    o = "http://example.org"
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "/x\nhttp://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/x%0Ahttp://y", "/x%0Ahttp://y", o, "/x\nhttp://y")
+  end
+
+  # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`).
+  # Rails' `source.blank?`: empty, or only whitespace (`[[:space:]]`), is "".
+  def test_stylesheet_href_answers_empty_for_a_blank_source
+    assert_equal "", ViewHelpers.stylesheet_href(" ")
+    assert_equal "", ViewHelpers.stylesheet_href("\t")
+    assert_equal "", ViewHelpers.stylesheet_href(" \n ")
+    assert_equal "", ViewHelpers.stylesheet_href("\u00a0")
+    assert_equal "", ViewHelpers.stylesheet_href("\u3000")
+  end
+
+  def test_stylesheet_href_keeps_a_url_or_blank_as_given
+    assert_equal "https://cdn.example.org/theme.css", ViewHelpers.stylesheet_href("https://cdn.example.org/theme.css")
+    assert_equal "HTTP://cdn.example.org/theme.css", ViewHelpers.stylesheet_href("HTTP://cdn.example.org/theme.css")
+    assert_equal "//cdn.example.org/theme.css", ViewHelpers.stylesheet_href("//cdn.example.org/theme.css")
+    assert_equal "data:text/css,body{}", ViewHelpers.stylesheet_href("data:text/css,body{}")
+    assert_equal "cid:theme", ViewHelpers.stylesheet_href("cid:theme")
+    assert_equal "", ViewHelpers.stylesheet_href("")
+  end
+
+  def test_stylesheet_href_keeps_an_absolute_path_off_the_pipeline
+    assert_equal "/static/theme.css", ViewHelpers.stylesheet_href("/static/theme.css")
+    assert_equal "/static/theme.css", ViewHelpers.stylesheet_href("/static/theme")
+    assert_equal "/static/theme.min.css", ViewHelpers.stylesheet_href("/static/theme.min")
+  end
+
+  def test_stylesheet_href_adds_css_once_and_keeps_a_tail
+    assert_equal ViewHelpers.digested_asset_path("theme.css"), ViewHelpers.stylesheet_href("theme.css")
+    assert_equal ViewHelpers.digested_asset_path("theme.css"), ViewHelpers.stylesheet_href("theme")
+    assert_equal ViewHelpers.digested_asset_path("theme.min.css"), ViewHelpers.stylesheet_href("theme.min")
+    assert_equal ViewHelpers.digested_asset_path("dir.v2/theme.css"), ViewHelpers.stylesheet_href("dir.v2/theme")
+    assert_equal ViewHelpers.digested_asset_path("theme.css") + "?v=2", ViewHelpers.stylesheet_href("theme?v=2")
+    assert_equal ViewHelpers.digested_asset_path("theme.css") + "?v=2", ViewHelpers.stylesheet_href("theme.css?v=2")
+    assert_equal ViewHelpers.digested_asset_path("theme.css") + "#x", ViewHelpers.stylesheet_href("theme#x")
+  end
+
   def test_escape_or_empty_returns_escaped_value
     assert_equal "hello", ViewHelpers.escape_or_empty("hello")
     assert_equal "&lt;b&gt;hi&lt;/b&gt;", ViewHelpers.escape_or_empty("<b>hi</b>")

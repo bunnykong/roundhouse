@@ -133,6 +133,12 @@ module Tep
         op = frame.opcode
         return 0 if driver.close_finished?
         return 0 if driver.closing? && op != Tep::WebSocket::OPCODE_CLOSE && op != Tep::WebSocket::OPCODE_PING
+        if driver.faye_text_only && (op == Tep::WebSocket::OPCODE_CONTINUATION ||
+            (!frame.fin && (op == Tep::WebSocket::OPCODE_TEXT || op == Tep::WebSocket::OPCODE_BINARY)))
+          driver.finish_close(Tep::WebSocket::CLOSE_UNSUPPORTED, "Faye fragmentation is not supported")
+          driver.close(Tep::WebSocket::CLOSE_UNSUPPORTED, "Faye fragmentation is not supported")
+          return 0
+        end
         if op == Tep::WebSocket::OPCODE_TEXT
           Connection.dispatch_message(driver, frame.payload, true)
         elsif op == Tep::WebSocket::OPCODE_BINARY
@@ -170,6 +176,19 @@ module Tep
       end
 
       def self.dispatch_message(driver, data, text)
+        if driver.faye_text_only
+          unless text
+            driver.finish_close(Tep::WebSocket::CLOSE_UNSUPPORTED, "Faye binary messages are not supported")
+            driver.close(Tep::WebSocket::CLOSE_UNSUPPORTED, "Faye binary messages are not supported")
+            return 0
+          end
+          data = data.dup.force_encoding(Encoding::UTF_8)
+          unless data.valid_encoding?
+            driver.finish_close(Tep::WebSocket::CLOSE_INVALID_UTF8, "Could not decode a text frame as UTF-8")
+            driver.close(Tep::WebSocket::CLOSE_INVALID_UTF8, "Could not decode a text frame as UTF-8")
+            return 0
+          end
+        end
         evt = Tep::WebSocket::Event.new
         evt.data = data
         driver.h_message.handle_event(evt)

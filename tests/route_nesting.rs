@@ -215,26 +215,16 @@ fn a_scope_path_prefixes_outside_the_parent_nesting() {
     );
 }
 
-/// KNOWN DIVERGENCE, measured and written down rather than guessed at.
-///
 /// A `namespace` nests INSIDE the parent while a `scope path:` goes
 /// OUTSIDE it — Rails 8.1, same enclosing `resources :users`:
 ///
 ///   namespace :admin       → /users/:user_id/admin/notes  user_admin_notes
 ///   scope path: :px, as: :ax → /px/users/:user_id/cap      ax_user_cap
 ///
-/// Roundhouse emits the SCOPE behavior for both, because
-/// `ingest_namespace_route` lowers `namespace` to the same
-/// `RouteSpec::Scope` variant — so the flattener cannot tell them apart
-/// (it produces `admin_user_notes` at `/admin/users/:user_id/notes`).
-/// Fixing it means distinguishing the two in the IR and giving `Ctx` an
-/// inner-path accumulator alongside `ns_path`.
-///
-/// Ignored rather than deleted: neither lobsters nor campfire nests a
-/// `namespace` inside a resource block, so nothing is broken today, and
-/// the expectation is already written for whoever needs it.
+/// Rails' `namespace` inside a resource block is `nested { super }`, so
+/// `ingest_namespace_route` marks its scope `nest`: the parent's path and
+/// name land before the namespace's own.
 #[test]
-#[ignore = "namespace-inside-resources nests differently from scope; unexercised by the corpus"]
 fn namespace_inside_a_resource_keeps_the_nesting() {
     // Rails: user_admin_notes GET /users/:user_id/admin/notes
     let r = routes_of(

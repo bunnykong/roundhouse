@@ -56,18 +56,11 @@ fn the_spinel_tree_loads_the_encoder_its_controllers_call() {
     assert!(encoder.contains("def self.encode(value)"), "{encoder}");
 }
 
-/// The bytes are the CRuby tree's for the same actions, and Rails 8.1.4's
-/// under `load_defaults 8.1`: `as_json` first, a Time as `iso8601(3)`, a
-/// Symbol as its name, `<`, `>` and `&` not escaped.
-#[test]
-#[ignore = "requires the Spinel toolchain"]
-fn values_outside_the_primitive_path_render_as_rails_does() {
-    app()
-        .run_spinel(r#"
+const ASSERTIONS: &str = r#"
 require_relative "app/controllers/payloads_controller"
 controller = PayloadsController.new
 controller.process_action(:settings)
-raise "wrong content type" unless controller.content_type == "application/json"
+raise "wrong content type: #{controller.content_type.inspect}" unless controller.content_type == "application/json; charset=utf-8"
 raise controller.body unless controller.body == '{"theme":"dark","saved":{"size":12,"tags":["a","<b>"],"extra":null}}'
 controller = PayloadsController.new
 controller.process_action(:count)
@@ -80,6 +73,19 @@ controller = PayloadsController.new
 controller.process_action(:stamp)
 raise controller.body unless controller.body == '{"at":"2026-07-01T12:34:56.000Z","badge":{"label":"new","icon":"<i>"},"state":"open"}'
 puts "json render passed"
-"#)
-        .assert_passes();
+"#;
+
+/// Default unit coverage of the same encoder/header contract as the native lane.
+#[test]
+fn values_outside_the_primitive_path_run_on_cruby() {
+    app().run_ruby(ASSERTIONS).assert_passes();
+}
+
+/// The bytes are the CRuby tree's for the same actions, and Rails 8.1.4's
+/// under `load_defaults 8.1`: `as_json` first, a Time as `iso8601(3)`, a
+/// Symbol as its name, `<`, `>` and `&` not escaped.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn values_outside_the_primitive_path_render_as_rails_does() {
+    app().run_spinel(ASSERTIONS).assert_passes();
 }

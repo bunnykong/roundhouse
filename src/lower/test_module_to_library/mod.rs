@@ -58,8 +58,9 @@ pub fn ruby_family_absolute_test_urls(modules: &[TestModule]) -> Vec<TestModule>
     modules
         .iter()
         .map(|tm| {
-            let shadows: crate::det::HashSet<Symbol> =
+            let mut shadows: crate::det::HashSet<Symbol> =
                 tm.helpers.iter().map(|h| h.name.clone()).chain(tm.included_module_methods().cloned()).collect();
+            shadows.extend(ancestor_helper_names(tm, modules));
             let rewrite = |e: &Expr| absolute_test_url(e, &shadows);
             let mut tm = tm.clone();
             for t in &mut tm.tests {
@@ -249,7 +250,7 @@ pub fn lower_test_modules_with_inner_opts(
     let mut out: Vec<LoweredTestModule> = Vec::new();
     let mut all_lcs: Vec<LibraryClass> = test_modules
         .iter()
-        .map(|tm| build_library_class(tm, route_id_segments))
+        .map(|tm| build_library_class(tm, test_modules, route_id_segments))
         .map(|mut lc| {
             for m in &mut lc.methods {
                 m.body = crate::lower::rewrite_fixture_calls(&m.body, &fixture_names);
@@ -794,17 +795,46 @@ fn collect_self_setter_ivars(body: &Expr, out: &mut HashMap<Symbol, Ty>) {
     }
 }
 
+/// The instance methods the test modules above `tm` define or include.
+/// A test class inherits its parent's `foo_url` helper, so a call to it in a subclass
+/// is that helper, not the route helper of the same name.
+fn ancestor_helper_names(tm: &TestModule, modules: &[TestModule]) -> Vec<Symbol> {
+    let mut names = Vec::new();
+    let mut seen: Vec<&ClassId> = vec![&tm.name];
+    let mut next = tm.parent.as_ref();
+    while let Some(parent) = next {
+        if seen.contains(&parent) {
+            break;
+        }
+        seen.push(parent);
+        let Some(found) = modules.iter().find(|m| &m.name == parent) else { break };
+        // Instance methods only, its own and its included modules', as
+        // `TestModule::defines_instance_method` reads them.
+        names.extend(
+            found
+                .helpers
+                .iter()
+                .filter(|h| h.receiver == MethodReceiver::Instance)
+                .map(|h| h.name.clone())
+                .chain(found.included_module_methods().cloned()),
+        );
+        next = found.parent.as_ref();
+    }
+    names
+}
+
 /// Single-module entry point — kept for tests/probes. For whole-app
 /// emit, prefer the bulk entry which threads a shared registry.
 pub fn lower_test_module_to_library_class(
     tm: &TestModule,
     route_id_segments: &crate::det::HashMap<String, Vec<bool>>,
 ) -> LibraryClass {
-    build_library_class(tm, route_id_segments)
+    build_library_class(tm, &[], route_id_segments)
 }
 
 fn build_library_class(
     tm: &TestModule,
+    all_modules: &[TestModule],
     route_id_segments: &crate::det::HashMap<String, Vec<bool>>,
 ) -> LibraryClass {
     // Inline setup body at the start of every test method. The
@@ -820,6 +850,7 @@ fn build_library_class(
         .iter()
         .map(|h| h.name.clone())
         .chain(tm.included_module_methods().cloned())
+        .chain(ancestor_helper_names(tm, all_modules))
         .filter(|n| n.as_str().ends_with("_path") || n.as_str().ends_with("_url"))
         .collect();
     let mut methods: Vec<MethodDef> = tm

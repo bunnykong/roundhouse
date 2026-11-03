@@ -153,7 +153,7 @@ pub(super) fn apply_with_plans(
         if plans.get(&e.span) == Some(&KeywordPolicy::NativeLibrary) {
             e.decisions |= crate::expr::NATIVE_KEYWORD_ARGUMENTS;
         }
-        if plans.get(&e.span) == Some(&KeywordPolicy::Legacy)
+        if matches!(plans.get(&e.span), Some(KeywordPolicy::Legacy | KeywordPolicy::LegacyRubySplat))
             && e.decisions & crate::expr::NATIVE_KEYWORD_ARGUMENTS == 0
         {
             // `lower::kwsplat` resolves a callee through the receiver's
@@ -207,7 +207,7 @@ pub(super) fn apply_with_plans(
                 for arg in args {
                     if let ExprNode::KeywordSplat { value } = &mut *arg.node {
                         *arg = std::mem::replace(value, super::typing::nil_lit());
-                        if callee_unresolved {
+                        if callee_unresolved || plans.get(&e.span) == Some(&KeywordPolicy::LegacyRubySplat) {
                             arg.decisions |= crate::expr::ERASED_KEYWORD_SPLAT;
                         }
                     }
