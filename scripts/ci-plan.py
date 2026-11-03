@@ -748,6 +748,11 @@ def select(
     wasm = site = spinel = False
     reasons = []
     for path in paths:
+        if path in {"runtime/ruby/action_controller/base.rb", "runtime/ruby/action_controller/base.rbs"}:
+            targets.update(EXTRA_COMPARE_TARGETS)
+            spinel_tests.add("render_json_encoder_spinel")
+            reasons.append(f"{path}: shared controller runtime on every extra language")
+
         if path in {"tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"}:
             reasons.append(f"{path}: unit (emit_and_run), spinel-toolchain (ordinary class-body calls)")
             spinel = True
