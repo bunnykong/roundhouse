@@ -929,6 +929,11 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
 fn controller_dispatch_supported(classes: &[crate::dialect::LibraryClass]) -> bool {
     use crate::dialect::MethodReceiver;
     use crate::expr::{Expr, ExprNode};
+    fn calls_super(body: &Expr) -> bool {
+        let mut found = matches!(&*body.node, ExprNode::Super { .. });
+        body.node.for_each_child(&mut |child| found |= calls_super(child));
+        found
+    }
     fn calls_dispatch(body: &Expr) -> bool {
         let mut found = matches!(&*body.node, ExprNode::Send { recv: Some(recv), method, .. }
             if method.as_str() == "_roundhouse_process_action" && matches!(&*recv.node, ExprNode::SelfRef));
@@ -940,6 +945,7 @@ fn controller_dispatch_supported(classes: &[crate::dialect::LibraryClass]) -> bo
     }).cloned();
     for class in classes {
         let own_hook = hook(class);
+        let parent_super = own_hook.as_ref().is_some_and(|m| !m.name_span.is_synthetic() && calls_super(&m.body));
         let missing_dispatch = own_hook.as_ref().is_some_and(|m| calls_dispatch(&m.body))
             && !class.methods.iter().any(|m| m.name.as_str() == "_roundhouse_process_action");
         let mut inherited = None;
@@ -956,13 +962,13 @@ fn controller_dispatch_supported(classes: &[crate::dialect::LibraryClass]) -> bo
                 parent = ancestor.parent.as_ref();
             }
         }
-        if missing_dispatch || inherited.is_some() {
+        if missing_dispatch || inherited.is_some() || parent_super {
             let method = inherited.or(own_hook).expect("unsupported hook");
             crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
                 method.name_span,
                 Some(crate::ident::Symbol::from("go")),
                 "inherited_process_action",
-                format!("{} cannot bind an inherited framework-super process_action to its concrete Go dispatcher", class.name.0),
+                format!("{} cannot bind an inherited or super process_action to its concrete Go dispatcher", class.name.0),
             ));
             return false;
         }

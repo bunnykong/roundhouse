@@ -1729,6 +1729,32 @@ fn elixir_refuses_a_local_super_that_reaches_an_application_hook() {
 }
 
 #[test]
+fn go_refuses_controller_super_that_would_skip_a_parent_denial() {
+    let mut missing = Vec::new();
+    for owner in ["application", "parent"] {
+        for with_action in [false, true] {
+            let mut files = inherited_dispatch_files(owner, false);
+            for (path, body) in &mut files {
+                if (owner == "application" && path.ends_with("application_controller.rb"))
+                    || (owner == "parent" && path.ends_with("hook_parent_controller.rb"))
+                {
+                    *body = body.replace("    head :forbidden\n    self", "    head :forbidden");
+                    if with_action { *body = body.replace("  private\n", "  def parent_action; head :ok; end\n  private\n"); }
+                }
+                if path.ends_with("vault_controller.rb") {
+                    *body = body.replace("  def show; head :ok; end", "  def show; head :ok; end\n  private\n  def process_action(action); super(action); self; end");
+                }
+            }
+            let (_, errors) = fixture(&files).emit(BuildTarget::Go);
+            if !errors.iter().any(|e| e.contains("inherited_process_action")) {
+                missing.push(format!("{owner}/actions={with_action}"));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "parent denial can be skipped: {missing:?}");
+}
+
+#[test]
 fn go_refusal_distinguishes_the_same_inherited_hook_variants() {
     for owner in ["application", "parent"] {
         for calls_super in [true, false] {
