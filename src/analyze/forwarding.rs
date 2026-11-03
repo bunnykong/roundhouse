@@ -3,6 +3,9 @@
 //! flattened; model named rest/block declarations are not fully retained.
 //! Do not silently forward into those approximations or an unknown callee.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::det::{HashMap, HashSet};
 
 use crate::App;
@@ -51,7 +54,7 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
                 Some(
                     "full declarations of this method overlap an ingest-time call rewrite whose source dispatch is not retained",
                 )
-            } else if !contracts.verified_hierarchy(owner, &mut HashSet::default()) {
+            } else if !contracts.verified(owner) {
                 Some("forwarding declarations in reopened class fragments are not verified")
             } else if method.receiver == MethodReceiver::Class
                 && app.models.iter().any(|m| &m.name == owner)
@@ -246,7 +249,7 @@ fn walk(
                 enclosing.name_span,
                 enclosing.receiver,
             )
-            || !contracts.verified_hierarchy(owner, &mut HashSet::default())
+            || !contracts.verified(owner)
         {
             Some("anonymous keyword forwarding source declaration cannot be verified")
         } else {
@@ -563,40 +566,7 @@ fn virtual_destinations<'a>(
     {
         return Ok(vec![]);
     }
-    fn descends(
-        contracts: &SourceContractIndex<'_>,
-        child: &ClassId,
-        owner: &ClassId,
-        seen: &mut HashSet<ClassId>,
-    ) -> bool {
-        child == owner
-            || (seen.insert(child.clone())
-                && (contracts
-                    .parent(child)
-                    .is_some_and(|p| descends(contracts, p, owner, seen))
-                    || contracts
-                        .includes(child)
-                        .iter()
-                        .any(|m| descends(contracts, m, owner, seen))))
-    }
-    let mut candidates = Vec::new();
-    for child in
-        contracts.virtual_owners.iter().copied().filter(|child| {
-            *child != owner && descends(contracts, child, owner, &mut HashSet::default())
-        })
-    {
-        // Completeness depends on the descendant's entire reachable lookup
-        // chain, including reopened included modules.
-        if !contracts.verified_hierarchy(child, &mut HashSet::default()) {
-            return Err(
-                "forwarding virtual dispatch through reopened fragments cannot be verified",
-            );
-        }
-        if let Some(candidate) = contracts.effective_call(child, method, enclosing.receiver) {
-            candidates.push((child.clone(), candidate));
-        }
-    }
-    Ok(candidates)
+    contracts.virtual_calls(owner, method, enclosing.receiver)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1016,6 +986,17 @@ struct SourceContractIndex<'a> {
     /// Keep the model alongside the span so an unrelated sibling receiver
     /// does not inherit another model's loss, while descendants still do.
     unretained_models: HashSet<(Span, ClassId)>,
+    /// Reverse lookup edges: the fragments naming a class as their
+    /// superclass or including it as a module.
+    children: HashMap<ClassId, Vec<ClassId>>,
+    /// Each class's positions in `virtual_owners`.
+    owner_positions: HashMap<ClassId, Vec<usize>>,
+    /// Memos of pure functions of the lookup hierarchy, which is complete
+    /// once `new` has added every fragment. Later mutation
+    /// (`constructor::index_unmodeled_lookup_mutations`) touches only the
+    /// constructor-lookup sets, which none of these read.
+    verified: RefCell<HashMap<ClassId, bool>>,
+    descendants: RefCell<HashMap<ClassId, Rc<Vec<usize>>>>,
 }
 
 /// Whether a branch of `defs` (or of a conditional nested in it) defines `initialize` or `self.new`.
@@ -1056,6 +1037,10 @@ impl<'a> SourceContractIndex<'a> {
             native_keyword_selectors: HashSet::default(),
             unretained: HashSet::default(),
             unretained_models: HashSet::default(),
+            children: HashMap::default(),
+            owner_positions: HashMap::default(),
+            verified: RefCell::default(),
+            descendants: RefCell::default(),
         };
         let mut class_owners = HashSet::default();
         for class in classes(app) {
@@ -1132,6 +1117,17 @@ impl<'a> SourceContractIndex<'a> {
         }
         for (owner, method) in actions {
             index.add_methods(owner, std::iter::once(method), false);
+        }
+        for (child, parent) in &index.parents {
+            index.children.entry((*parent).clone()).or_default().push(child.clone());
+        }
+        for (child, modules) in &index.includes {
+            for module in modules {
+                index.children.entry(module.clone()).or_default().push(child.clone());
+            }
+        }
+        for (position, owner) in index.virtual_owners.iter().enumerate() {
+            index.owner_positions.entry((*owner).clone()).or_default().push(position);
         }
         // Includes association-extension methods, matching the public method
         // inventory used by the former conservative selector scan.
@@ -1320,6 +1316,70 @@ impl<'a> SourceContractIndex<'a> {
                 .all(|module| self.verified_hierarchy(module, seen))
     }
 
+    /// `verified_hierarchy` from a fresh walk, memoized.
+    fn verified(&self, owner: &ClassId) -> bool {
+        if let Some(&known) = self.verified.borrow().get(owner) {
+            return known;
+        }
+        let answer = self.verified_hierarchy(owner, &mut HashSet::default());
+        self.verified.borrow_mut().insert(owner.clone(), answer);
+        answer
+    }
+
+    /// Positions in `virtual_owners`, ascending, of the classes other than
+    /// `owner` whose superclass/include edges reach `owner`: the classes a
+    /// self-send in `owner` may dispatch on. A reverse walk from `owner`
+    /// reaches exactly the classes a forward walk from each would find
+    /// `owner` on, so this is the old per-class `descends` filter, in the
+    /// same order.
+    fn descendant_positions(&self, owner: &ClassId) -> Rc<Vec<usize>> {
+        if let Some(known) = self.descendants.borrow().get(owner) {
+            return known.clone();
+        }
+        let mut reached: HashSet<&ClassId> = HashSet::default();
+        let mut pending = vec![owner];
+        while let Some(node) = pending.pop() {
+            for child in self.children.get(node).into_iter().flatten() {
+                if reached.insert(child) {
+                    pending.push(child);
+                }
+            }
+        }
+        let mut positions: Vec<usize> = reached
+            .into_iter()
+            .filter(|class| *class != owner)
+            .flat_map(|class| self.owner_positions.get(class).into_iter().flatten().copied())
+            .collect();
+        positions.sort_unstable();
+        let positions = Rc::new(positions);
+        self.descendants.borrow_mut().insert(owner.clone(), positions.clone());
+        positions
+    }
+
+    /// The overrides a self-send of `method` in `owner` may reach, in
+    /// `virtual_owners` order; an error when one of those classes'
+    /// lookup chains runs through reopened fragments.
+    fn virtual_calls(
+        &self,
+        owner: &ClassId,
+        method: &Symbol,
+        receiver: MethodReceiver,
+    ) -> Result<Vec<(ClassId, (&'a MethodDef, bool))>, &'static str> {
+        let mut candidates = Vec::new();
+        for &position in self.descendant_positions(owner).iter() {
+            let child = self.virtual_owners[position];
+            // Completeness depends on the descendant's entire reachable
+            // lookup chain, including reopened included modules.
+            if !self.verified(child) {
+                return Err("forwarding virtual dispatch through reopened fragments cannot be verified");
+            }
+            if let Some(candidate) = self.effective_call(child, method, receiver) {
+                candidates.push((child.clone(), candidate));
+            }
+        }
+        Ok(candidates)
+    }
+
     fn declaration(
         &self,
         owner: &ClassId,
@@ -1327,7 +1387,7 @@ impl<'a> SourceContractIndex<'a> {
         receiver: MethodReceiver,
         seen: &mut HashSet<ClassId>,
     ) -> Option<(&'a MethodDef, bool)> {
-        if !self.verified_hierarchy(owner, &mut HashSet::default()) || !seen.insert(owner.clone()) {
+        if !self.verified(owner) || !seen.insert(owner.clone()) {
             return None;
         }
         let declarations = match receiver {

@@ -1348,6 +1348,11 @@ pub struct AssocRegistry {
     /// even though the receiver's class is statically unknown; ambiguous
     /// names are never tracked.
     has_many_by_name: HashMap<Symbol, Option<(ClassId, Symbol)>>,
+    /// Every name in `has_many_unseedable`, `has_many_owner_key` or
+    /// `has_many_poly`, for the owner-less question
+    /// `is_unseedable(None, _)` asks. Built with `has_many_by_name`,
+    /// once every declaration is final.
+    unseedable_names: crate::det::HashSet<Symbol>,
     /// model -> its REAL table name, straight off the ingested `Model`.
     ///
     /// Not `pluralize_snake(class_name)`, which is a second copy of a
@@ -1569,7 +1574,10 @@ impl AssocRegistry {
     /// ambiguous name still qualifies (the rewriter may resolve it
     /// from the owner's type).
     fn is_has_many_name(&self, name: &Symbol) -> bool {
-        self.has_many_fk.keys().any(|(_, a)| a == name)
+        // `has_many_by_name` gains a key exactly when `has_many_fk` holds
+        // an entry under that name (`build_assoc_registry`), so this is
+        // the same answer without scanning every has_many per call.
+        self.has_many_by_name.contains_key(name)
     }
     fn has_many_by_name(&self, assoc: &Symbol) -> Option<&(ClassId, Symbol)> {
         self.has_many_by_name.get(assoc).and_then(|o| o.as_ref())
@@ -1597,11 +1605,7 @@ impl AssocRegistry {
     fn is_unseedable(&self, owner: Option<&ClassId>, assoc: &Symbol) -> bool {
         match owner {
             Some(m) => self.has_many_unseedable.contains(&(m.clone(), assoc.clone())),
-            None => {
-                self.has_many_unseedable.iter().any(|(_, a)| a == assoc)
-                    || self.has_many_owner_key.keys().any(|(_, a)| a == assoc)
-                    || self.has_many_poly.keys().any(|(_, a)| a == assoc)
-            }
+            None => self.unseedable_names.contains(assoc),
         }
     }
     /// The owner column `model.<assoc>`'s foreign key matches
@@ -1763,6 +1767,7 @@ impl AssocRegistry {
             aliased_join_tails,
             has_many_fk,
             has_many_by_name: _,
+            unseedable_names: _,
             tables: _,
             has_many_unseedable,
             has_many_owner_key,
@@ -2171,6 +2176,14 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
             reg.has_many_by_name.insert(name, None);
         }
     }
+    let unseedable_names: crate::det::HashSet<Symbol> = reg
+        .has_many_unseedable
+        .iter()
+        .chain(reg.has_many_owner_key.keys())
+        .chain(reg.has_many_poly.keys())
+        .map(|(_, name)| name.clone())
+        .collect();
+    reg.unseedable_names = unseedable_names;
     reg
 }
 

@@ -1796,9 +1796,22 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // `ActionText::Attachable` (campfire declares it one level down,
     // through `User::Mentionable`). Ruby-family only, like the
     // `MessageVerifier` the mint runs through.
+    let _span = crate::timings::begin("scope lowering: preload");
     let attachable = crate::lower::attachable::attachable_models(app);
+    // Per-class lookups by name, indexed once: a scan of `app.models`
+    // (and, for the STI walk below, of `app.library_classes`) per class
+    // made this pass quadratic in the class count. First entry wins, as
+    // the scans' `find` did.
+    let mut model_named: HashMap<&ClassId, &crate::dialect::Model> = HashMap::default();
+    for m in &app.models {
+        model_named.entry(&m.name).or_insert(m);
+    }
+    let mut library_parent: HashMap<&ClassId, Option<&ClassId>> = HashMap::default();
+    for other in &app.library_classes {
+        library_parent.entry(&other.name).or_insert(other.parent.as_ref());
+    }
     for lc in lcs.iter_mut() {
-        if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
+        if let Some(model) = model_named.get(&lc.name).copied() {
             crate::lower::rich_text::push_preload_scope_methods(&mut lc.methods, model);
             if crate::lower::plain_text_attr::record_table_present(&app.schema) {
                 crate::lower::plain_text_attr::push_preload_scope_methods(&mut lc.methods, model);
@@ -1812,6 +1825,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // `broadcasts_to` on `:sidekiq`: the create and update broadcasts
     // enqueue Turbo::Streams::ActionBroadcastJob, as turbo-rails does.
     crate::lower::broadcast_job::apply_ruby(lcs, app);
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: registries");
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
     let query_arguments = crate::lower::scope_chain::query_arguments::QueryArguments::build(app);
@@ -1824,6 +1839,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // has to be inserted on the MODEL.
     let (assoc_class_methods, declined) =
         crate::lower::scope_chain::survey_assoc_class_methods(app, &assocs, &scopes);
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: ground");
     for lc in lcs.iter_mut() {
         for method in &mut lc.methods {
             crate::lower::scope_chain::ground_literal_model_dispatch(&mut method.body, app, &assocs);
@@ -1877,6 +1894,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     {
         return;
     }
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: setup");
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
     let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
@@ -1892,9 +1911,11 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     };
     query_arguments.rewrite(lcs, &regs);
     let sole_includers = app.sole_includer_of_modules();
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: bodies");
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
-        let is_model = app.models.iter().any(|m| m.name == lc.name);
+        let is_model = model_named.contains_key(&lc.name);
         // A model CONCERN is a model body too — the third family
         // `lower::for_each_model_body` names. `module User::Bannable`'s
         // instance methods run on a `User`, so a bare `bans.create!` in
@@ -1912,7 +1933,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             .then(|| lc.name.0.as_str().rsplit_once("::").map(|(ns, _)| ns.to_string()))
             .flatten()
             .map(|ns| crate::ident::ClassId(crate::ident::Symbol::from(ns.as_str())))
-            .filter(|ns| app.models.iter().any(|m| &m.name == ns))
+            .filter(|ns| model_named.contains_key(ns))
             // An STI SUBCLASS is the same fact by inheritance rather
             // than by namespace: `Rooms::Open < Room` declares no table,
             // so it is not a model, but its instance methods run on a
@@ -1928,14 +1949,10 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 let mut cursor = lc.parent.clone();
                 for _ in 0..8 {
                     let parent = cursor?;
-                    if app.models.iter().any(|m| m.name == parent) {
+                    if model_named.contains_key(&parent) {
                         return Some(parent);
                     }
-                    cursor = app
-                        .library_classes
-                        .iter()
-                        .find(|other| other.name == parent)
-                        .and_then(|other| other.parent.clone());
+                    cursor = library_parent.get(&parent).copied().flatten().cloned();
                 }
                 None
             })
@@ -1944,9 +1961,9 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 (lc.is_module && !is_model)
                     .then(|| sole_includers.get(&lc.name).cloned())
                     .flatten()
-                    .filter(|owner| app.models.iter().any(|m| &m.name == owner))
+                    .filter(|owner| model_named.contains_key(owner))
             });
-        if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
+        if let Some(model) = model_named.get(&lc.name).copied() {
             crate::lower::model_to_library::push_scope_methods(
                 &mut lc.methods,
                 model,
@@ -2134,6 +2151,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
         }
     }
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: variants");
     // Fixed-arity relation entry points, generated AFTER every body
     // rewrite above: their forward bodies mention scope names on model
     // constants, which `rewrite_call_site` would re-thread if it saw
