@@ -326,6 +326,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         },
     },
     Recognizer {
+        name: "JSON response escaping (action_controller.escape_json_responses / active_support.escape_js_separators_in_json)",
+        origins: INIT_APP,
+        levels: ANY,
+        reads: |p| super::json_response_config::reads(p.node),
+    },
+    Recognizer {
         name: "forgery_protection_verification_strategy",
         origins: INIT_APP,
         levels: ANY,

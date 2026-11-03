@@ -153,6 +153,15 @@ class Routing(unittest.TestCase):
                 self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
                 self.assertTrue(any("ordinary class-body calls" in why for why in plan["reasons"]))
 
+    def test_shared_controller_base_runs_every_extra_language(self):
+        for suffix in ("rb", "rbs"):
+            with self.subTest(suffix=suffix):
+                plan = ci.select([f"runtime/ruby/action_controller/base.{suffix}"])
+                self.assertIn("compare-extra", plan["jobs"])
+                self.assertEqual(plan["extra_compare"], ci.EXTRA_COMPARE_TARGETS)
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("render_json_encoder_spinel", plan["spinel_tests"])
+
     def test_websocket_lifecycle_sources_and_helpers_run_the_native_suite(self):
         for path in [
             "runtime/spinel/tep/net.rb", "runtime/spinel/tep/server_threaded.rb",

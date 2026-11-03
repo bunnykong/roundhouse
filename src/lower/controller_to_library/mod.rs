@@ -1526,6 +1526,23 @@ fn build_methods(
         }
     }
 
+    match controller_json_escape(controller, all_controllers) {
+        Ok(Some(value)) => {
+            let mut method = synthesize_controller_string_method(controller, "json_render_escape", "");
+            method.body.node = Box::new(ExprNode::Lit { value: Literal::Bool { value } });
+            method.signature = Some(crate::lower::typing::fn_sig(vec![], Ty::Bool));
+            methods.push(method);
+        }
+        Ok(None) => {}
+        Err(span) => {
+            let mut d = crate::lower::residue_diagnostic("controller_render", "escape_json_responses", span,
+                "controller_json_escape_not_modelled",
+                "controller escape_json_responses override, inheritance interaction or statement placement is not modelled".into());
+            d.severity = crate::diagnostic::Severity::Error;
+            crate::emit::diagnostics::push(d);
+        }
+    }
+
     // Class-side methods are already seeded at the start of build_methods;
     // do not append them again (duplicate defs break several emitters).
 
@@ -1548,6 +1565,63 @@ fn build_methods(
     );
 
     methods
+}
+
+/// Class-attribute inheritance is represented by an ordinary virtual instance
+/// hook. Only unconditional literal writes and literal class predicates are
+/// established here; unknown class-body execution is a named refusal.
+fn controller_json_escape(controller: &Controller, all: &[Controller]) -> Result<Option<bool>, Span> {
+    fn boolean(e: &Expr) -> Option<bool> {
+        match &*e.node {
+            ExprNode::Lit { value: Literal::Bool { value } } => Some(*value),
+            ExprNode::Return { value } => boolean(value),
+            ExprNode::Seq { exprs } if exprs.len() == 1 => boolean(&exprs[0]),
+            _ => None,
+        }
+    }
+    fn write(e: &Expr) -> Option<&Expr> {
+        match &*e.node {
+            ExprNode::Assign { target: crate::expr::LValue::Attr { recv, name }, value }
+                if name.as_str() == "escape_json_responses" && matches!(&*recv.node, ExprNode::SelfRef) => Some(value),
+            ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+                if method.as_str() == "escape_json_responses=" && matches!(&*recv.node, ExprNode::SelfRef) && args.len() == 1 => Some(&args[0]),
+            _ => None,
+        }
+    }
+    fn contains_write(e: &Expr) -> bool {
+        if write(e).is_some() { return true; }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| { found |= contains_write(c); });
+        found
+    }
+    let mut assigned = None;
+    let mut getter = None;
+    let mut predicate = None;
+    for item in &controller.body {
+        match item {
+            ControllerBodyItem::ClassMethod { method, .. } if method.name.as_str() == "escape_json_responses=" => return Err(method.body.span),
+            ControllerBodyItem::ClassMethod { method, .. }
+                if matches!(method.name.as_str(), "escape_json_responses" | "escape_json_responses?") => {
+                if !method.params.is_empty() || method.block_param.is_some() || method.has_anonymous_block { return Err(method.body.span); }
+                let value = boolean(&method.body).ok_or(method.body.span)?;
+                if method.name.as_str().ends_with('?') { predicate = Some(value); }
+                else { getter = Some(value); }
+            }
+            ControllerBodyItem::Unknown { expr, .. } => {
+                if let Some(value) = write(expr) { assigned = Some(boolean(value).ok_or(expr.span)?); }
+                else if contains_write(expr) { return Err(expr.span); }
+            }
+            ControllerBodyItem::Action { action, .. } if action.name.as_str() == "json_render_escape" => return Err(action.body.span),
+            _ => {}
+        }
+    }
+    if predicate.is_none() && (assigned.is_some() || getter.is_some())
+        && ancestor_chain(controller, all).iter().any(|parent| parent.class_methods().any(|m|
+            matches!(m.name.as_str(), "escape_json_responses" | "escape_json_responses?")))
+    {
+        return Err(controller_provenance_span(controller).unwrap_or_default());
+    }
+    Ok(predicate.or(getter).or(assigned))
 }
 
 /// Replace any prior def of `name`, then push the AOT string-literal

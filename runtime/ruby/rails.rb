@@ -523,6 +523,21 @@ module Rails
       {}
     end
 
+    # The standalone shell for partial trees follows Rails 8.1. An actual
+    # application.rb reopens these with Rails' legacy class defaults when
+    # it has neither load_defaults nor an explicit setting.
+    def action_controller_escape_json_responses
+      false
+    end
+
+    def active_support_escape_js_separators_in_json
+      false
+    end
+
+    def active_support_escape_html_entities_in_json
+      true
+    end
+
     # `config.action_controller.perform_caching` (AbstractController::
     # Caching's default) and actionpack-page_caching's
     # `page_cache_directory` (its Railtie's `||=` with the app's

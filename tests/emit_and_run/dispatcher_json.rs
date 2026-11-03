@@ -59,6 +59,14 @@ fn review_fixture(name: &str, oracle: bool) {
     let mut script = String::new();
     let mut expected = observations(&fs::read_to_string(source.join("rails.jsonl")).unwrap());
     if oracle {
+        if name == "render-classes" {
+            script.push_str(&format!(
+                "require {:?}\nexit 77 unless RailsOracle.available?(\"actionpack\", \"railties\")\n\
+                 RailsOracle.activate(\"actionpack\", \"railties\")\nrequire \"rails\"\n\
+                 require \"action_controller/railtie\"\nload {:?}\nDispatcherRenderClasses::Application.initialize!\n",
+                root.join("tests/support/rails_oracle.rb"), source.join("config/application.rb"),
+            ));
+        }
         script.push_str(&format!(
             "require {:?}\nexit 77 unless RailsOracle.available?(\"actionpack\")\n\
              RailsOracle.activate(\"actionpack\")\nrequire \"action_controller\"\n\

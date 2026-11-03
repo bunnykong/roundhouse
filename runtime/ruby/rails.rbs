@@ -79,6 +79,9 @@ module Rails
     def propshaft_asset_path: (String source) -> String
     def forgery_protection_verification_strategy: () -> String
     def public_file_server_headers: () -> Hash[String, String]
+    def action_controller_escape_json_responses: () -> bool
+    def active_support_escape_html_entities_in_json: () -> bool
+    def active_support_escape_js_separators_in_json: () -> bool
     def action_controller_perform_caching: () -> bool
     def active_job_queue_adapter: () -> String
     def action_controller_page_cache_directory: () -> String

@@ -332,7 +332,7 @@ module ActionController
         # Same encoder a literal prop is lowered to. It walks a Hash or
         # Array and calls `as_json` on a record. The method lives in the
         # JSON runtime, so this file does not define it.
-        page.prop_json(name, ActionController::JsonRender.encode(raw))
+        page.prop_json(name, ActionController::JsonRender.encode_escaped(raw))
       end
       nil
     end
@@ -344,7 +344,7 @@ module ActionController
     # for `instance_exec` of a proc that is not a literal at the call,
     # and this method is the one body every target runs.
     def inertia_exec(work)
-      ActionController::JsonRender.encode(work.call)
+      ActionController::JsonRender.encode_escaped(work.call)
     end
 
     def inertia_root_html(use_script_element)
