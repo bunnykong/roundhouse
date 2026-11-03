@@ -2782,6 +2782,7 @@ pub fn target_files(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    crate::lower::controller_to_library::action_override::check_target(app, target)?;
     // Stage 0 of the specializer: the identity. Nothing is specialized
     // yet, so none of the trimming or refusals below apply — every construct is
     // residue, and the residue runs on Rails.

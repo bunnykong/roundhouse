@@ -312,7 +312,7 @@ func main() {\n\
         // Cast inserted around the Str-flowing-into-Int arg. Without
         // extras, the controller-only ty_coerce_insertion pass can't
         // resolve Post_find and the coercion never fires.
-        if !controller_dispatch_supported(&controller_lcs) {
+        if !crate::lower::controller_to_library::action_override::go_super_dispatch_supported(&controller_lcs) {
             return Vec::new();
         }
         let lowered_controllers = lower::lower_for_go_with_extras(controller_lcs, &lowered_models);
@@ -922,58 +922,6 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
         path: output_path(OutputKind::RoutesTable).path,
         content: s,
     }
-}
-
-// Go embeds parent pointers; an inherited method keeps its parent's receiver.
-// It cannot call a dispatcher that exists only on the concrete child.
-fn controller_dispatch_supported(classes: &[crate::dialect::LibraryClass]) -> bool {
-    use crate::dialect::MethodReceiver;
-    use crate::expr::{Expr, ExprNode};
-    fn calls_super(body: &Expr) -> bool {
-        let mut found = matches!(&*body.node, ExprNode::Super { .. });
-        body.node.for_each_child(&mut |child| found |= calls_super(child));
-        found
-    }
-    fn calls_dispatch(body: &Expr) -> bool {
-        let mut found = matches!(&*body.node, ExprNode::Send { recv: Some(recv), method, .. }
-            if method.as_str() == "_roundhouse_process_action" && matches!(&*recv.node, ExprNode::SelfRef));
-        body.node.for_each_child(&mut |child| found = found || calls_dispatch(child));
-        found
-    }
-    let hook = |class: &crate::dialect::LibraryClass| class.methods.iter().find(|m| {
-        m.receiver == MethodReceiver::Instance && m.name.as_str() == "process_action"
-    }).cloned();
-    for class in classes {
-        let own_hook = hook(class);
-        let parent_super = own_hook.as_ref().is_some_and(|m| !m.name_span.is_synthetic() && calls_super(&m.body));
-        let missing_dispatch = own_hook.as_ref().is_some_and(|m| calls_dispatch(&m.body))
-            && !class.methods.iter().any(|m| m.name.as_str() == "_roundhouse_process_action");
-        let mut inherited = None;
-        if own_hook.is_none() && class.methods.iter().any(|m| m.name.as_str() == crate::lower::controller_to_library::action_override::ENTRY) {
-            let mut parent = class.parent.as_ref();
-            let mut seen = crate::det::HashSet::default();
-            while let Some(id) = parent {
-                if !seen.insert(id.clone()) { break; }
-                let Some(ancestor) = classes.iter().find(|c| &c.name == id) else { break; };
-                if let Some(method) = hook(ancestor) {
-                    if calls_dispatch(&method.body) { inherited = Some(method); }
-                    break;
-                }
-                parent = ancestor.parent.as_ref();
-            }
-        }
-        if missing_dispatch || inherited.is_some() || parent_super {
-            let method = inherited.or(own_hook).expect("unsupported hook");
-            crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
-                method.name_span,
-                Some(crate::ident::Symbol::from("go")),
-                "inherited_process_action",
-                format!("{} cannot bind an inherited or super process_action to its concrete Go dispatcher", class.name.0),
-            ));
-            return false;
-        }
-    }
-    true
 }
 
 /// Emit `app/v2/dispatch.go` — `Dispatch(controller, action, path_params,

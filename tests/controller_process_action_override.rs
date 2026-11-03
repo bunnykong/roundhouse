@@ -1665,12 +1665,12 @@ fn representative_overrides_compile_with_their_final_sidecars() {
 
 
 #[test]
-fn go_refuses_inherited_framework_super_but_keeps_source_hooks_without_super() {
+fn go_refuses_inherited_hooks_but_keeps_own_hooks_without_super() {
     for kind in ["parent_hook", "parent_action_hook"] {
         let (_,errors)=emit_and_run::controller_dispatch_app(kind).emit(BuildTarget::Go);
         assert!(errors.iter().any(|e| e.contains("inherited_process_action")),"{kind}: {errors:?}");
     }
-    let (_,errors)=emit_and_run::controller_dispatch_app("parent_no_super").emit(BuildTarget::Go);
+    let (_,errors)=emit_and_run::controller_dispatch_app("string_selector").emit(BuildTarget::Go);
     assert!(errors.is_empty(),"{errors:?}");
 }
 
@@ -1759,11 +1759,7 @@ fn go_refusal_distinguishes_the_same_inherited_hook_variants() {
     for owner in ["application", "parent"] {
         for calls_super in [true, false] {
             let (_, errors) = fixture(&inherited_dispatch_files(owner, calls_super)).emit(BuildTarget::Go);
-            if calls_super {
-                assert!(errors.iter().any(|e| e.contains("inherited_process_action")), "{owner}: {errors:?}");
-            } else {
-                assert!(errors.is_empty(), "{owner}: {errors:?}");
-            }
+            assert!(errors.iter().any(|e| e.contains("inherited_process_action")), "{owner}: {errors:?}");
         }
     }
 }
@@ -1823,5 +1819,73 @@ end
         assert!(output.status.success(),"{kind}: {}",String::from_utf8_lossy(&output.stderr));
         let expected=if kind=="string_selector" {"403\n202\n"} else if kind=="parent_no_super" {"403\n403\n"} else {"200\n403\n"};
         assert_eq!(String::from_utf8_lossy(&output.stdout),expected,"{kind}");
+    }
+}
+
+#[test]
+fn inherited_process_action_support_is_checked_for_every_target() {
+    let mut missing = Vec::new();
+    for &target in BuildTarget::TRANSPILE {
+        for owner in ["application", "parent"] {
+            for calls_super in [false, true] {
+                let mut input = inherited_dispatch_files(owner, calls_super);
+                input.reverse(); // Source-file order must not change inherited lookup.
+                let (_, app, errors) = fixture(&input).emit_with_app(target);
+                let supported = matches!(
+                    target,
+                    BuildTarget::Ruby
+                        | BuildTarget::Jruby
+                        | BuildTarget::Spinel
+                        | BuildTarget::Python
+                        | BuildTarget::Futamura
+                ) || (matches!(target, BuildTarget::Crystal | BuildTarget::Typescript) && !calls_super);
+                let diagnostic = errors
+                    .iter()
+                    .find(|e| e.message.contains("inherited_process_action"));
+                if supported {
+                    assert!(
+                        diagnostic.is_none(),
+                        "{target:?}/{owner}/{calls_super}: {errors:?}"
+                    );
+                } else {
+                    let file = if owner == "application" {
+                        "application_controller.rb"
+                    } else {
+                        "hook_parent_controller.rb"
+                    };
+                    if !diagnostic.is_some_and(|e| {
+                        e.message.contains("process_action")
+                            && e.message.contains(target.as_str())
+                            && e.span
+                                .file
+                                .0
+                                .checked_sub(1)
+                                .and_then(|n| app.sources.get(n as usize))
+                                .is_some_and(|s| s.path.ends_with(file))
+                    }) {
+                        missing.push(format!("{target:?}/{owner}/super={calls_super}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "missing named target refusals: {missing:?}"
+    );
+}
+
+#[test]
+fn a_controller_owning_process_action_does_not_get_the_inherited_shape_refusal() {
+    for &target in BuildTarget::TRANSPILE {
+        for calls_super in [false, true] {
+            let (_, errors) = fixture(&inherited_dispatch_files("own", calls_super)).emit(target);
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| e.contains("inherited_process_action")),
+                "{target:?}/super={calls_super}: {errors:?}"
+            );
+        }
     }
 }

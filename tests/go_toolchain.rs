@@ -278,10 +278,10 @@ func TestFlashEachYieldsPopulatedFields(t *testing.T) {
 #[test]
 #[ignore = "requires the Go toolchain"]
 fn overridden_request_dispatch_runs_scoped_callbacks() {
-    for kind in ["auth_only", "auth_except", "ordinary", "concern_hook", "parent_no_super"] {
+    for kind in ["auth_only", "auth_except", "ordinary", "concern_hook"] {
         let (out, errors) = emit_and_run::controller_dispatch_app(kind).emit(roundhouse::project::BuildTarget::Go);
         assert!(errors.is_empty(), "{errors:?}");
-        let expected_index = if kind == "parent_no_super" { 403 } else { 200 };
+        let expected_index = 200;
         std::fs::write(out.join("app/v2/request_dispatch_test.go"), format!(r#"package v2
 import("net/http/httptest"; "testing")
 func TestRequestDispatch(t *testing.T) {{

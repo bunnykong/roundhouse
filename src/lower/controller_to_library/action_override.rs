@@ -676,3 +676,123 @@ pub(super) fn refresh_return_contracts(
         "controller return contracts did not stabilize",
     ));
 }
+
+/// Validate request lookup before a target materializes framework methods.
+/// The source owner remains the diagnostic site, including action-less bases.
+pub(crate) fn check_target(
+    app: &crate::App,
+    target: crate::build_target::BuildTarget,
+) -> Result<(), String> {
+    use crate::build_target::BuildTarget;
+    if matches!(
+        target,
+        BuildTarget::Blog
+            | BuildTarget::Ruby
+            | BuildTarget::Jruby
+            | BuildTarget::Spinel
+            | BuildTarget::Python
+            | BuildTarget::Futamura
+    ) {
+        return Ok(());
+    }
+    let routes = crate::lower::flatten_routes(app);
+    let mut diagnostics = Vec::new();
+    for controller in &app.controllers {
+        if !routes.iter().any(|r| r.controller == controller.name) {
+            continue;
+        }
+        let own = controller
+            .actions()
+            .find(|a| a.name.as_str() == "process_action");
+        // Preserve the existing Go/Elixir refusals for a local super chain.
+        // A local method without super stops lookup before its parent.
+        if own.is_some_and(|a| {
+            !matches!(target, BuildTarget::Go | BuildTarget::Elixir) || !super::calls_super(&a.body)
+        }) {
+            continue;
+        }
+        let mut parent = controller.parent.as_ref();
+        let mut seen = crate::det::HashSet::default();
+        while let Some(id) = parent {
+            if !seen.insert(id.clone()) {
+                break;
+            }
+            let Some(ancestor) = app.controllers.iter().find(|c| &c.name == id) else {
+                break;
+            };
+            if let Some(hook) = ancestor
+                .actions()
+                .find(|a| a.name.as_str() == "process_action")
+            {
+                if matches!(target, BuildTarget::Crystal | BuildTarget::Typescript) && !super::calls_super(&hook.body) {
+                    break;
+                }
+                diagnostics.push(inherited_diagnostic(hook.name_span, target, format!(
+                    "{} inherits {}#process_action; inherited process_action is unsupported on target {}",
+                    controller.name.0, ancestor.name.0, target.as_str(),
+                )));
+                break;
+            }
+            parent = ancestor.parent.as_ref();
+        }
+    }
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    let message = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for diagnostic in diagnostics {
+        crate::emit::diagnostics::push(diagnostic);
+    }
+    Err(message)
+}
+
+fn inherited_diagnostic(
+    span: crate::span::Span,
+    target: crate::build_target::BuildTarget,
+    message: String,
+) -> crate::diagnostic::Diagnostic {
+    crate::diagnostic::Diagnostic::unsupported(
+        span,
+        Some(Symbol::from(target.as_str())),
+        "inherited_process_action",
+        message,
+    )
+}
+
+// Go's remaining failures concern a source super or a framework-super method
+// on its own receiver, rather than the inherited request shape checked above.
+pub(crate) fn go_super_dispatch_supported(classes: &[LibraryClass]) -> bool {
+    fn calls_dispatch(body: &Expr) -> bool {
+        let mut found = matches!(&*body.node, ExprNode::Send { recv: Some(recv), method, .. }
+            if method.as_str() == DISPATCH && matches!(&*recv.node, ExprNode::SelfRef));
+        body.node
+            .for_each_child(&mut |child| found |= calls_dispatch(child));
+        found
+    }
+    for class in classes {
+        let Some(method) = class.methods.iter().find(|m| {
+            m.receiver == MethodReceiver::Instance && m.name.as_str() == "process_action"
+        }) else {
+            continue;
+        };
+        let parent_super = !method.name_span.is_synthetic() && super::calls_super(&method.body);
+        let missing_dispatch = calls_dispatch(&method.body)
+            && !class.methods.iter().any(|m| m.name.as_str() == DISPATCH);
+        if parent_super || missing_dispatch {
+            crate::emit::diagnostics::push(inherited_diagnostic(
+                method.name_span,
+                crate::build_target::BuildTarget::Go,
+                format!(
+                    "{}#process_action cannot bind its super to target go's concrete dispatcher",
+                    class.name.0
+                ),
+            ));
+            return false;
+        }
+    }
+    true
+}
