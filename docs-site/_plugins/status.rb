@@ -355,17 +355,30 @@ end
     site = config.dig("status", "site")
     previous, continuity = [], "new"
     unless offline?
-      3.times do |attempt|
-        h = json("#{site}/status-history.json")
-        previous = h.fetch("points")
-        continuity = h["continuity"] == "interrupted" ? "interrupted" : "continuous"
+      body = nil
+      4.times do |attempt|
+        body = fetch("#{site}/status-history.json")
         break
       rescue NotFound
         break
       rescue StandardError => e
-        next sleep(2) if attempt < 2
+        next sleep(2**attempt) if attempt < 3
+        # A publishing build that can't read the deployed history would replace it with one
+        # point. Fail instead: the deployed history stays, and the next build tries again.
+        raise "status-history.json could not be carried forward: #{e.message[0, 160]}" if ENV["ROUNDHOUSE_STATUS"] == "on"
         continuity = "interrupted"
         status["history_error"] = "not carried forward: #{e.message[0, 160]}"
+      end
+      if body
+        begin
+          h = JSON.parse(body)
+          previous = h.fetch("points").select { |p| p.is_a?(Hash) && p["at"] }
+          continuity = h["continuity"] == "interrupted" ? "interrupted" : "continuous"
+        rescue StandardError => e
+          # Unreadable history can't be recovered; start again, and say so.
+          continuity = "interrupted"
+          status["history_error"] = "the deployed history was unreadable: #{e.message[0, 160]}"
+        end
       end
     end
     specs = status.dig("specs", "data")
