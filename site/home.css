@@ -98,6 +98,9 @@ code { font: 0.88em var(--mono); color: var(--rh-text); background: var(--rh-sur
 }
 /* "Mind the gap": a station sign drawn in the same line work as the illustration. */
 .gap-sign { position: absolute; right: 22px; bottom: 18px; z-index: 2; display: flex; align-items: center; gap: 9px; padding: 5px 11px 4px 8px; border: 1px solid color-mix(in srgb, var(--rh-text) 26%, transparent); border-radius: 2px; color: color-mix(in srgb, var(--rh-text) 62%, transparent); font: 500 10px/1 var(--rh-font-sign); letter-spacing: 0.16em; text-transform: uppercase; }
+.gap-sign .go { margin-left: 2px; opacity: 0.7; transition: transform 0.15s, opacity 0.15s; }
+.gap-sign:hover, .gap-sign:focus-visible { color: var(--rh-text); border-color: color-mix(in srgb, var(--rh-text) 55%, transparent); }
+.gap-sign:hover .go, .gap-sign:focus-visible .go { opacity: 1; transform: translateX(2px); }
 .roundel { position: relative; width: 16px; height: 16px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--rh-sign-ring) 70%, transparent); }
 .roundel::after { content: ""; position: absolute; left: -6px; right: -6px; top: 50%; height: 5px; transform: translateY(-50%); background: var(--rh-bg-deep); border: 1px solid color-mix(in srgb, var(--rh-text) 55%, transparent); }
 
