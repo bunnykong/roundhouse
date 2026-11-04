@@ -39,7 +39,7 @@
         <a href="ide/">IDE</a>
         <a href="playground/">Playground</a>
         <a href="studio/">Studio</a>
-        <a href="bench/">Benchmarks</a>
+        <a href="progress/">Progress</a>
         <a href="docs/guide/">Docs</a>
         <a class="nav-git" href="https://github.com/roundhouse-rb/roundhouse">GitHub <svg class="icon"><use href="#icon-external"/></svg></a>
       </nav>
@@ -65,8 +65,18 @@
                srcset="roundhouse-workshop-960.webp 960w, roundhouse-workshop.webp 1668w"
                sizes="(min-width: 960px) 62vw, 100vw"
                alt="A line drawing of a roundhouse: a locomotive arrives on red rails at a turntable, and builders, a Go gopher, a Rust crab and a crystal locomotive work in the bays around it.">
-          <figcaption><a class="gap-sign" href="apps/lobsters.html" title="See where Roundhouse stops today, on a real app"><span class="roundel" aria-hidden="true"></span>Mind the implementation gap<span class="go" aria-hidden="true">→</span></a></figcaption>
+          <figcaption><a class="gap-sign" href="progress/#gaps" title="See the measured gaps, and where to help"><span class="roundel" aria-hidden="true"></span>Mind the implementation gap<span class="go" aria-hidden="true">→</span></a></figcaption>
         </figure>
+
+<section class="workshop" aria-labelledby="workshop-title">
+  <p class="label" id="workshop-title">Inside the workshop <a href="progress/">All progress <span aria-hidden="true">→</span></a></p>
+  <ul>
+    <li><a href="progress/#gaps" data-morsel="specs"><b hidden></b><span>How Lobsters’ own tests fare on the compiled app</span><small hidden></small></a></li>
+    <li><a href="progress/#cause-unclassified" data-morsel="triage"><b hidden></b><span>Failures waiting for a first look</span><small hidden></small></a></li>
+    <li><a href="progress/#activity" data-morsel="merged"><b hidden></b><span>Who’s building, week by week</span><small hidden></small></a></li>
+    <li><a href="progress/#activity" data-morsel="firsts"><b hidden></b><span>The newest contributors</span><small hidden></small></a></li>
+  </ul>
+</section>
 
         <div class="apps">
           <p class="label">Four apps, each proving something different</p>
@@ -200,16 +210,16 @@
           <div>
             <h2>Faster, even in Ruby.</h2>
             <div class="prose">
-              <p>Lowering Rails to plain Ruby pays off on CRuby too. On the reference blog, with the same interpreter, YJIT and Puma, the generated Ruby serves 2.7× to 5.4× the requests per second of stock Rails, depending on the endpoint. On the JVM the gap on <code>/articles</code> is 11.2×.</p>
+              <p>Lowering Rails to plain Ruby pays off on CRuby too. On the reference blog, with the same interpreter, YJIT and Puma, the generated Ruby serves <span data-bench="range">2.7× to 5.4×</span> the requests per second of stock Rails, depending on the endpoint. On the JVM the gap on <code>/articles</code> is <span data-bench="jvm_articles">11.2×</span>.</p>
             </div>
             <p class="pills"><a class="pill" href="bench/">Benchmarks and methodology</a></p>
           </div>
           <div>
             <div class="stats">
-              <p class="stat">5.0×<small>/articles · CRuby + YJIT</small></p>
-              <p class="stat">11.2×<small>/articles · JRuby</small></p>
+              <p class="stat"><span data-bench="articles">5.0×</span><small>/articles · CRuby + YJIT</small></p>
+              <p class="stat"><span data-bench="jvm_articles">11.2×</span><small>/articles · JRuby</small></p>
             </div>
-            <p class="footnote">Bench run of 2026-11-01, one reference app on one machine. CRuby: the same Ruby, YJIT and Puma on both sides. JRuby: the generated Ruby against stock Rails 8.0 on the JVM.</p>
+            <p class="footnote">Bench environment captured <span data-bench="date">2026-11-01</span>, one reference app on one machine. CRuby: the same Ruby, YJIT and Puma on both sides. JRuby: the generated Ruby against stock Rails 8.0 on the JVM.</p>
           </div>
         </div>
       </section>
@@ -263,8 +273,9 @@
         <h2 id="closing-title">Our chat room runs on Spinel.</h2>
         <p class="copy">Contributors talk in Campfire, compiled by Roundhouse and running on Spinel, so everyone in it is also testing it.</p>
         <p class="copy">A pull request doesn’t need a conversation first. Open one, or an issue, and ask for an invite.</p>
+        <p class="copy welcome" data-morsel="welcome" hidden></p>
         <div class="actions">
-          <a class="button primary" href="apps/lobsters.html">See where it breaks <svg class="icon"><use href="#icon-right"/></svg></a>
+          <a class="button primary" href="progress/#gaps">See where it breaks <svg class="icon"><use href="#icon-right"/></svg></a>
           <a class="button" href="https://github.com/roundhouse-rb/roundhouse#contributing">Contribute on GitHub <svg class="icon"><use href="#icon-external"/></svg></a>
         </div>
         <nav class="tools" aria-label="Project tools">

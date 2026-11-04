@@ -105,6 +105,20 @@ code { font: 0.88em var(--mono); color: var(--rh-text); background: var(--rh-sur
 .roundel::after { content: ""; position: absolute; left: -6px; right: -6px; top: 50%; height: 5px; transform: translateY(-50%); background: var(--rh-bg-deep); border: 1px solid color-mix(in srgb, var(--rh-text) 55%, transparent); }
 
 /* The four apps */
+/* Inside the workshop: live numbers from /status.json, each a way into Progress. Text-only without data. */
+.workshop { grid-column: 1 / -1; }
+.workshop .label { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin: 0 0 12px; font: 600 10.5px var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--rh-text-dim); }
+.workshop .label a { letter-spacing: 0.08em; color: var(--rh-text-muted); }
+.workshop .label a:hover { color: var(--rh-accent); }
+.workshop ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-block: 1px solid var(--rh-line); }
+.workshop li + li { border-left: 1px solid var(--rh-line); }
+.workshop li a { display: flex; flex-direction: column; gap: 4px; height: 100%; padding: 16px 20px; }
+.workshop li:first-child a { padding-left: 0; }
+.workshop b { font-size: 28px; line-height: 1.15; font-weight: 500; letter-spacing: -0.03em; color: var(--rh-heading); font-variant-numeric: tabular-nums; }
+.workshop span { font-size: 13.5px; line-height: 1.45; color: var(--rh-text-2); }
+.workshop small { font: 11px var(--mono); color: var(--rh-text-dim); }
+.workshop li a:hover span { color: var(--rh-accent); }
+.closing .welcome { color: var(--rh-text-muted); }
 .apps { grid-column: 1 / -1; }
 .apps .label { margin: 0 0 14px; font: 600 10.5px var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--rh-text-dim); }
 .apps ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
@@ -241,6 +255,11 @@ code { font: 0.88em var(--mono); color: var(--rh-text); background: var(--rh-sur
   .hero h1 { font-size: clamp(26px, 6.9vw, 48px); white-space: normal; }
   .lede, .status { margin-left: auto; margin-right: auto; }
   .apps ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workshop { text-align: left; }
+  .workshop ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workshop li:nth-child(odd) { border-left: 0; }
+  .workshop li:nth-child(odd) a { padding-left: 0; }
+  .workshop li:nth-child(n+3) { border-top: 1px solid var(--rh-line); }
   .apps { text-align: left; }
   .two-col, .why .two-col, .spinel-head { grid-template-columns: minmax(0, 1fr); gap: 32px; }
   .section-head { flex-direction: column; align-items: flex-start; gap: 16px; }

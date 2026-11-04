@@ -25,7 +25,9 @@ try {
     const page = await browser.newPage();
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
-    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    // status.json is optional data the home page reads (written by the docs build); a site
+    // restored from before it existed has none, and the page keeps its written text.
+    page.on("console", message => { if (message.type() === "error" && !message.location().url.endsWith("/status.json")) errors.push(message.text()); });
     const response = await page.goto(`http://127.0.0.1:8099/${path.split("/").map(encodeURIComponent).join("/")}`, { waitUntil: "networkidle" });
     assert(response?.ok(), `${path}: HTTP ${response?.status()}`);
     assert.deepEqual(errors, [], `${path}: browser errors`);
