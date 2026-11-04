@@ -495,7 +495,7 @@ fn collect_fields(methods: &[MethodDef], nullable_columns: &[Symbol]) -> Vec<Fie
 /// `@foo = ...` write already serves as the Go reader, so emitting
 /// the method on top of it would collide. Detect this de-facto
 /// attr_reader shape and let the field stand alone.
-fn is_trivial_ivar_reader(m: &MethodDef) -> bool {
+pub(super) fn is_trivial_ivar_reader(m: &MethodDef) -> bool {
     use crate::expr::ExprNode;
     // Predicate-suffixed reader: `def persisted?; @persisted; end`.
     // Ivar names never carry `?`/`!`/`=` — strip suffixes from the

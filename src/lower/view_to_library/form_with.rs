@@ -1614,6 +1614,7 @@ mod tests {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect::<HashMap<_, _>>(),
             ),
+            nilable_ivar_models: Default::default(),
         }
     }
 

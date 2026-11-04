@@ -830,6 +830,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             .collect();
     }
 
+    let (ivar_models, nilable_ivar_models) = view_ivar_models(app, &view.name, &ivar_locals);
     let mut ctx = ViewCtx {
         locals,
         // Only layouts consult arg_name (emit_yield → the `body` local);
@@ -872,7 +873,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         yielding_partials: lx.yielding_partials.clone(),
         record_carries_yield: body_arg,
         view_name: crate::lower::view::fragment_template_path(view.name.as_str(), view.format.as_str()),
-        ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
+        ivar_models: std::rc::Rc::new(ivar_models),
+        nilable_ivar_models: std::rc::Rc::new(nilable_ivar_models),
         record_classes: std::rc::Rc::new(app.view_ivar_types.get(&view.name).into_iter()
             .chain(app.partial_local_types.get(&view.name)).flat_map(|types| types.iter())
             .filter_map(|(name, ty)| match ty.peel_nilable() {
@@ -4134,12 +4136,6 @@ fn mentions_relation(ty: &crate::ty::Ty) -> bool {
     }
 }
 
-/// This view's ivar name → model snake-singular, for every ivar the
-/// analyzer typed as a model class (`App::view_ivar_types`). The
-/// singular is what Rails' `param_key` yields, so a form built on
-/// `@edit_user` names its fields `user[...]` the way Rails does. Ivars
-/// whose type is anything else (a collection, a scalar, untyped) are
-/// left out — the caller falls back to its own convention.
 /// This view's ivars the analyzer typed `String` (`App::view_ivar_types`).
 fn view_str_ivars(app: &App, view_name: &Symbol) -> crate::det::HashSet<String> {
     app.view_ivar_types
@@ -4154,19 +4150,41 @@ fn view_str_ivars(app: &App, view_name: &Symbol) -> crate::det::HashSet<String> 
         .unwrap_or_default()
 }
 
-fn view_ivar_models(app: &App, view_name: &Symbol) -> crate::det::HashMap<String, String> {
+/// This view's ivar name → model snake-singular, for every ivar the
+/// analyzer typed as a model class (`App::view_ivar_types`), or as one or
+/// nil (`find_by`, `first`, `last`). The singular is what Rails'
+/// `param_key` yields, so a form built on `@edit_user` names its fields
+/// `user[...]` the way Rails does. Ivars whose type is anything else (a
+/// collection, a scalar, untyped) are left out — the caller falls back to
+/// its own convention.
+///
+/// Each entry is keyed by the ivar's name and by the local the body
+/// rewrite reads it as (`ivar_local_names`: `@class` → `class_`), since
+/// the readers see either. The second map holds the same keys for the
+/// ivars that may be nil: a form names its fields after the model either
+/// way, but a cache key must not call the record's `cache_key_with_version`
+/// (`walker::is_record`).
+fn view_ivar_models(
+    app: &App,
+    view_name: &Symbol,
+    locals: &IvarLocals,
+) -> (crate::det::HashMap<String, String>, crate::det::HashSet<String>) {
+    let mut models = crate::det::HashMap::default();
+    let mut nilable = crate::det::HashSet::default();
     let Some(ivars) = app.view_ivar_types.get(view_name) else {
-        return crate::det::HashMap::default();
+        return (models, nilable);
     };
-    ivars
-        .iter()
-        .filter_map(|(name, ty)| match ty {
-            crate::ty::Ty::Class { id, .. } => {
-                Some((name.as_str().to_string(), app.model_param_key(id.0.as_str())))
+    for (name, ty) in ivars.iter() {
+        let crate::ty::Ty::Class { id, .. } = ty.peel_nilable() else { continue };
+        let model = app.model_param_key(id.0.as_str());
+        for key in [name.as_str().to_string(), ivar_local(locals, name.as_str())] {
+            if !matches!(ty, crate::ty::Ty::Class { .. }) {
+                nilable.insert(key.clone());
             }
-            _ => None,
-        })
-        .collect()
+            models.insert(key, model.clone());
+        }
+    }
+    (models, nilable)
 }
 
 pub(crate) fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
@@ -5077,6 +5095,8 @@ pub(super) struct ViewCtx {
     pub(super) view_name: String,
     pub(super) ivar_models:
         std::rc::Rc<crate::det::HashMap<String, String>>,
+    /// The `ivar_models` keys whose ivar may be nil (`view_ivar_models`).
+    pub(super) nilable_ivar_models: std::rc::Rc<crate::det::HashSet<String>>,
     /// Full class identities for this view's ivars and partial locals.
     pub(super) record_classes: std::rc::Rc<crate::det::HashMap<String, String>>,
     /// This view's ivars the analyzer typed `String` — markup a

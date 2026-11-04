@@ -2725,17 +2725,20 @@ end
             warn_i18n(format!("rails-i18n {version}: plural rules are read as rails-i18n {}'s, which may differ from this version's", crate::i18n::rails_i18n::RULES_VERSION));
         }
     }
-    let (catalog, problems) = crate::i18n::Catalog::load_with_gems(&default_locale(vfs, dir), &gem_files, &mut files);
+    let (mut catalog, problems) = crate::i18n::Catalog::load_with_gems(&default_locale(vfs, dir), &gem_files, &mut files);
     for (file, problem) in problems {
         survey::record(&IngestError::Unsupported { file, message: format!("locale file not loaded: {problem}") });
     }
-    app.i18n = catalog;
-    app.i18n.missing = missing_policy(vfs, dir);
-    let (available, fallbacks, available_unknown) = locale_settings(vfs, dir, &app.i18n.locale, &files);
-    app.i18n.load_locales(available, fallbacks, &gem_files, &mut files);
-    app.i18n.available_unknown = available_unknown;
-    app.i18n.field_error_proc = field_error_proc_file(vfs, dir);
-    app.i18n.plurals = plural_rules(vfs, dir, app.gem_lock.as_ref(), &app.i18n);
+    catalog.missing = missing_policy(vfs, dir);
+    let (available, fallbacks, available_unknown) = locale_settings(vfs, dir, &catalog.locale, &files);
+    catalog.load_locales(available, fallbacks, &gem_files, &mut files);
+    catalog.available_unknown = available_unknown;
+    catalog.field_error_proc = field_error_proc_file(vfs, dir);
+    catalog.plurals = plural_rules(vfs, dir, app.gem_lock.as_ref(), &catalog);
+    catalog.freeze();
+    // Shared, not copied, by the analyzer and the lowerings that read it:
+    // on a large app the catalog is hundreds of megabytes.
+    app.i18n = std::sync::Arc::new(catalog);
     crate::i18n::stamp_models(&mut app);
 
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
@@ -3238,6 +3241,7 @@ end
     let (rake_tasks_source, rake_task_gaps) = super::rake_tasks::ingest(vfs, dir);
     app.rake_tasks_source = rake_tasks_source;
     app.rake_task_gaps = rake_task_gaps;
+    crate::timings::phase("ingest: compact", || app.compact_units());
     Ok(app)
 }
 

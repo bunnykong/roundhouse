@@ -20698,3 +20698,5 @@ fn full_forwarding_keeps_the_native_argument_contract() {
     run.assert_passes();
     assert_eq!(run.stdout, "full forwarding contract passed\n");
 }
+#[path = "emit_and_run/form_with_nilable_record.rs"]
+mod form_with_nilable_record;

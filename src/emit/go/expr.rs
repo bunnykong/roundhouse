@@ -2729,7 +2729,7 @@ fn go_field_ident(ruby_name: &str) -> String {
     go_method_name(&normalized)
 }
 
-fn go_method_ident(ruby_name: &str) -> String {
+pub(super) fn go_method_ident(ruby_name: &str) -> String {
     // Mirror rust's `sanitize_ident` (src/emit/rust/expr/util.rs):
     // `?` predicate suffix maps to `_pred`, `!` maps to `_bang`. The `?`
     // affix (vs a bare strip) keeps a column predicate distinct from its

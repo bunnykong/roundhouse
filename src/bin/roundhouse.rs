@@ -351,6 +351,36 @@ fn run_transpile(
     allow_unsupported: bool,
     survey: bool,
 ) -> Result<(), String> {
+    // The concern-accessor admission check observes the analyzed app.
+    // Ingest would analyze a clone of the whole app for it; a target that
+    // analyzes the app anyway observes that analysis instead, and ingests
+    // again with the probe only when it overturns a refusal
+    // (`ingest::defer_accessor_surface`). `ROUNDHOUSE_DEFER_ACCESSOR_SURFACE=0`
+    // keeps the probe.
+    let defer = !matches!(target, BuildTarget::Roda | BuildTarget::Futamura)
+        && std::env::var_os("ROUNDHOUSE_DEFER_ACCESSOR_SURFACE").is_none_or(|value| value != "0");
+    if transpile(target, input, out, allow_unsupported, survey, defer)? == Transpiled::Overturned {
+        transpile(target, input, out, allow_unsupported, survey, false)?;
+    }
+    Ok(())
+}
+
+#[derive(PartialEq)]
+enum Transpiled {
+    Written,
+    /// The analyzed app does not occupy a name ingest refused: nothing
+    /// was written.
+    Overturned,
+}
+
+fn transpile(
+    target: BuildTarget,
+    input: &std::path::Path,
+    out: &std::path::Path,
+    allow_unsupported: bool,
+    survey: bool,
+    defer: bool,
+) -> Result<Transpiled, String> {
     if !input.exists() {
         return Err(format!("input {} does not exist", input.display()));
     }
@@ -368,12 +398,18 @@ fn run_transpile(
     // Ingest inside a parse-diagnostic scope so Prism syntax errors —
     // which the error-recovering parser otherwise drops on the floor —
     // are collected and routed through the same report as emit gaps.
-    let (app_result, parse_diags) =
-        roundhouse::ingest::prism::scope(|| ingest_app(input));
+    let ((app_result, parse_diags), mut deferred) = roundhouse::timings::phase("ingest", || {
+        let ingest = || roundhouse::ingest::prism::scope(|| ingest_app(input));
+        if defer { roundhouse::ingest::defer_accessor_surface(ingest) } else { (ingest(), None) }
+    });
     let mut survey_gaps =
         if survey { roundhouse::ingest::survey::drain() } else { Vec::new() };
     let mut app = match app_result {
-        Ok(app) => app,
+        Ok(app) => {
+            #[cfg(feature = "memory-census")]
+            roundhouse::memory_census::census("after ingest", &app);
+            app
+        }
         Err(e) => {
             // Ingest failed outright. Surface any syntax errors first: a
             // malformed file is usually the root cause of the construct
@@ -448,7 +484,13 @@ fn run_transpile(
         roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
         Vec::new()
     } else {
-        roundhouse::session::analyze_and_lower_for(&mut app, target)
+        let diags = roundhouse::session::analyze_and_lower_for(&mut app, target);
+        if let Some(deferred) = deferred.take() {
+            if !roundhouse::timings::phase("concern-accessor-surface", || deferred.confirm(&app)) {
+                return Ok(Transpiled::Overturned);
+            }
+        }
+        diags
     };
 
     // Analyze-time diagnostics — the same type errors roundhouse-check
@@ -694,7 +736,17 @@ fn run_transpile(
     // Gate passed (or every error was downgraded): materialize the emit
     // output, propagating any hard emit failure now.
     let files = files_result?;
-    project::write_to_dir(&files, out)?;
+    #[cfg(feature = "memory-census")]
+    roundhouse::memory_census::note(
+        "after emit",
+        format_args!(
+            "{} files, {:.1}MB of text held before writing; live heap {:.1}MB",
+            files.len(),
+            files.iter().map(|(path, content)| path.len() + content.len()).sum::<usize>() as f64 / 1e6,
+            roundhouse::memory_census::live_bytes() as f64 / 1e6,
+        ),
+    );
+    roundhouse::timings::phase("write: text files", || project::write_to_dir(&files, out))?;
     // The app's own binary files — images, fonts, binary test fixtures.
     // They never became `EmittedFile`s (that type's content is a
     // `String`), so before this they were dropped without a word.
@@ -712,5 +764,5 @@ fn run_transpile(
     // seconds on a large app and frees nothing the exit would not.
     std::mem::forget(app);
     std::mem::forget(files);
-    Ok(())
+    Ok(Transpiled::Written)
 }

@@ -296,3 +296,80 @@ func TestRequestDispatch(t *testing.T) {{
         assert!(run.status.success(), "{kind}: {}\n{}",String::from_utf8_lossy(&run.stdout),String::from_utf8_lossy(&run.stderr));
     }
 }
+
+/// #1714: a model test calling `Article.create!` and `article.persisted?`.
+fn bang_test_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().write(
+        "test/models/bang_test.rb",
+        "require \"test_helper\"\n\nclass BangTest < ActiveSupport::TestCase\n  test \"create! saves a record\" do\n    article = Article.create!(title: \"Bang\", body: \"A body long enough to pass.\")\n    assert article.persisted?\n    assert_not article.new_record?\n    draft = Article.create(title: \"\", body: \"\")\n    assert_not draft.persisted?\n  end\nend\n",
+    )
+}
+
+/// The Go test calls what the Go emit defines: a class method by its
+/// model function (`Article_create_bang`, `Article_create`), a
+/// predicate with `Pred` (`NewRecordPred()`), and a predicate the
+/// runtime's `ActiveRecord::Base` reads straight off an ivar
+/// (`persisted?`) by the field the library emit reads (`Persisted`).
+#[test]
+fn a_model_test_calls_bang_and_predicate_methods_by_their_go_names() {
+    let (emitted, errors) = bang_test_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = std::fs::read_to_string(emitted.join("app/v2/bang_test.go")).expect("bang_test.go");
+    for want in ["Article_create_bang(map", "Article_create(map", ".Persisted)", ".NewRecordPred()"] {
+        assert!(test.contains(want), "missing {want}:\n{test}");
+    }
+    assert!(!test.contains("!(map") && !test.contains("?()"), "{test}");
+}
+
+#[test]
+#[ignore]
+fn a_model_test_with_bang_and_predicate_calls_runs() {
+    let (emitted, errors) = bang_test_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestCreateSavesARecord", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestCreateSavesARecord"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A model that defines `persisted?` itself: the library emit writes it as
+/// `PersistedPred()`, and the test calls that, not the field.
+fn persisted_override_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  def persisted?\n    false\n  end\n",
+        )
+        .write(
+            "test/models/persisted_override_test.rb",
+            "require \"test_helper\"\n\nclass PersistedOverrideTest < ActiveSupport::TestCase\n  test \"the override answers\" do\n    article = Article.create!(title: \"Bang\", body: \"A body long enough to pass.\")\n    assert_not article.persisted?\n  end\nend\n",
+        )
+}
+
+#[test]
+fn a_model_test_calls_a_models_own_persisted_override() {
+    let (emitted, errors) = persisted_override_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = std::fs::read_to_string(emitted.join("app/v2/persisted_override_test.go")).expect("persisted_override_test.go");
+    assert!(test.contains("article.PersistedPred()") && !test.contains("article.Persisted)"), "{test}");
+}
+
+#[test]
+#[ignore]
+fn a_model_test_with_a_persisted_override_runs() {
+    let (emitted, errors) = persisted_override_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheOverrideAnswers", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheOverrideAnswers"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}

@@ -639,7 +639,9 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
     let _cache = install_plan_cache(Some(Default::default()));
     TABLE.with(|t| *t.borrow_mut() = Default::default());
     RUNTIME_SITES.with(|r| *r.borrow_mut() = Default::default());
-    let catalog = app.i18n.or_rails_default().clone();
+    // A handle on the shared catalog, not a copy: the walk below borrows `app` mutably.
+    let shared = std::sync::Arc::clone(&app.i18n);
+    let catalog = shared.or_rails_default();
     let controllers: crate::det::HashMap<crate::ident::ClassId, String> = app
         .controllers
         .iter()
@@ -1660,7 +1662,7 @@ mod phase_cache_tests {
         let catalog = |text: &str| {
             let mut c = Catalog::default();
             c.locale = "en".into();
-            c.entries.insert("label".into(), text.into());
+            c.entries.building().insert("label".into(), text.into());
             c
         };
         let (first, second) = (catalog("first"), catalog("second"));

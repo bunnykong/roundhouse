@@ -144,7 +144,7 @@ pub struct Analyzer {
     /// `content_type.attachment?` as Bool on a `Str` receiver.
     inquirers: crate::det::HashSet<Symbol>,
     /// The app's translations, for `t` / `I18n.t` (see `crate::i18n`).
-    i18n: crate::i18n::Catalog,
+    i18n: std::sync::Arc<crate::i18n::Catalog>,
     /// `app/helpers` modules, whose bodies run in a view and take
     /// ActionView's `t`.
     helper_modules: crate::det::HashSet<ClassId>,
@@ -1335,7 +1335,7 @@ impl Analyzer {
             host_folded: HashMap::default(),
             refined_action_bindings: HashMap::default(),
             inquirers: inquiry::inquirer_methods(app),
-            i18n: app.i18n.clone(),
+            i18n: std::sync::Arc::clone(&app.i18n),
             helper_modules: app.helper_method_index.values().cloned().collect(),
             helper_index: helper_instance_index(app),
             open_classes: open_classes::OpenClasses::of(app),
@@ -1376,6 +1376,13 @@ impl Analyzer {
     /// completion) can *enumerate* what dispatch can *resolve*.
     pub fn class_registry(&self) -> &HashMap<ClassId, ClassInfo> {
         &self.classes
+    }
+
+    /// The class registry, with everything else the analysis kept
+    /// dropped: the lowerings read only the registry, and the rest (the
+    /// call-site, constant and signature caches) grows with the app.
+    pub fn into_class_registry(self) -> HashMap<ClassId, ClassInfo> {
+        self.classes
     }
 
     /// Parameter types unified from call sites for `class#method`
@@ -11196,4 +11203,50 @@ mod finder_reopening_tests {
     fn source_finder_reopenings_are_ambiguous_in_both_model_orders() { check(false); }
     #[test]
     fn source_finder_reopenings_are_ambiguous_in_both_library_orders() { check(true); }
+}
+
+#[cfg(feature = "memory-census")]
+impl Analyzer {
+    /// Drop the analyzer one field at a time and report what each held
+    /// (`ROUNDHOUSE_MEMORY_CENSUS=1`), keeping the class registry the
+    /// lowerings read, as [`Analyzer::into_class_registry`] does; its size
+    /// is measured on a copy. Destructured without `..`, so a new field has
+    /// to be listed here; `Copy` fields own no heap.
+    pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
+        let Analyzer { classes, upload_array_fields, materialized_associations, inferred_params, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks } = self;
+        let mut freed: Vec<(&str, i64)> = vec![
+            ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
+            ("upload_array_fields", crate::memory_census::freed_by(|| drop(upload_array_fields))),
+            ("materialized_associations", crate::memory_census::freed_by(|| drop(materialized_associations))),
+            ("inferred_params", crate::memory_census::freed_by(|| drop(inferred_params))),
+            ("declared_signatures", crate::memory_census::freed_by(|| drop(declared_signatures))),
+            ("adapter", crate::memory_census::freed_by(|| drop(adapter))),
+            ("concern_folded", crate::memory_census::freed_by(|| drop(concern_folded))),
+            ("host_folded", crate::memory_census::freed_by(|| drop(host_folded))),
+            ("inquirers", crate::memory_census::freed_by(|| drop(inquirers))),
+            ("i18n", crate::memory_census::freed_by(|| drop(i18n))),
+            ("helper_modules", crate::memory_census::freed_by(|| drop(helper_modules))),
+            ("helper_index", crate::memory_census::freed_by(|| drop(helper_index))),
+            ("open_classes", crate::memory_census::freed_by(|| drop(open_classes))),
+            ("refined_action_bindings", crate::memory_census::freed_by(|| drop(refined_action_bindings))),
+            ("const_resolver", crate::memory_census::freed_by(|| drop(const_resolver))),
+            ("source_indexed", crate::memory_census::freed_by(|| drop(source_indexed))),
+            ("typed_constants", crate::memory_census::freed_by(|| drop(typed_constants))),
+            ("data_factories", crate::memory_census::freed_by(|| drop(data_factories))),
+            ("class_factories", crate::memory_census::freed_by(|| drop(class_factories))),
+            ("data_factories_without_custom_initialize", crate::memory_census::freed_by(|| drop(data_factories_without_custom_initialize))),
+            ("view_seeds", crate::memory_census::freed_by(|| drop(view_seeds))),
+            ("callers_by_target", crate::memory_census::freed_by(|| drop(callers_by_target))),
+            ("controller_action_meta_cache", crate::memory_census::freed_by(|| drop(controller_action_meta_cache))),
+            ("fixpoint_rounds", crate::memory_census::freed_by(|| drop(fixpoint_rounds))),
+            ("fixpoint_checks", crate::memory_census::freed_by(|| drop(fixpoint_checks))),
+        ];
+        let total: i64 = freed.iter().map(|(_, bytes)| bytes).sum();
+        freed.sort_by_key(|(name, bytes)| (-bytes, *name));
+        for (name, bytes) in freed.iter().filter(|(_, bytes)| *bytes >= 1_000_000) {
+            crate::memory_census::note("analyzer", format_args!("field {name}: {:.1}MB", *bytes as f64 / 1e6));
+        }
+        crate::memory_census::note("analyzer", format_args!("total {:.1}MB", total as f64 / 1e6));
+        classes
+    }
 }
