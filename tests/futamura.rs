@@ -8,14 +8,14 @@
 //! later one is measured against the same contract: the app's own
 //! suite, run by Rails, passes against the emitted tree.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-futamura-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir(&format!("roundhouse-futamura-{name}"));
     dir
 }
 
@@ -1770,8 +1770,7 @@ mod runtime_stats {
     // stay valid Ruby with it.
     #[test]
     fn emitted_runtime_has_an_opt_in_stats_block_and_stays_valid_ruby() {
-        let dir = std::env::temp_dir().join(format!("roundhouse-futamura-stats-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = super::scratch::dir("roundhouse-futamura-stats");
         let src = dir.join("src");
         let out = dir.join("out");
         fs::create_dir_all(src.join("app/models")).unwrap();

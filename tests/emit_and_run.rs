@@ -5,6 +5,8 @@
 //! disagree: `check` is clean and the emitted program fails. Each is a
 //! complete statement of the fix: make it pass and drop the `#[ignore]`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -63,6 +65,8 @@ mod stylesheet_helper;
 mod stylesheet_source;
 #[path = "emit_and_run/time_tag.rs"]
 mod time_tag;
+#[path = "emit_and_run/attribute_name_escape.rs"]
+mod attribute_name_escape;
 #[path = "emit_and_run/multiparameter_params.rs"]
 mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]
@@ -428,6 +432,8 @@ mod conditional_get;
 mod nil_body_length;
 #[path = "emit_and_run/inline_filter_guard.rs"]
 mod inline_filter_guard;
+#[path = "emit_and_run/concern_guarded_filter.rs"]
+mod concern_guarded_filter;
 #[path = "emit_and_run/before_action_return.rs"]
 mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]
@@ -4034,8 +4040,7 @@ fn oj_overlay(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
 /// would raise.
 #[test]
 fn oj_stand_in_is_ruby_only() {
-    let dir = std::env::temp_dir().join(format!("rh-oj-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-oj-targets");
     for (path, text) in [
         ("config/initializers/oj.rb", "Oj.mimic_JSON\nOj.optimize_rails\n"),
         (
@@ -4311,8 +4316,7 @@ fn faraday_holder_name_does_not_declare_the_gem_on_ruby() {
 /// off the shipping targets — `gem_refusal` used to see only emit bodies.
 #[test]
 fn faraday_superclass_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-super-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-super");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4373,8 +4377,7 @@ fn faraday_superclass_is_refused_off_ruby_and_jruby() {
 /// those parents live on `Controller`, not on a LibraryClass yet.
 #[test]
 fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-ctrl-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-ctrl");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4426,8 +4429,7 @@ fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
 /// LibraryClasses.
 #[test]
 fn faraday_test_module_superclass_is_refused_on_spinel() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-tm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-tm");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4510,8 +4512,7 @@ raise r.inspect unless r == [:gave_up, 3]"#,
 /// Off Ruby and JRuby, each Retryable reference is refused.
 #[test]
 fn retryable_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-retryable-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-retryable-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4619,8 +4620,7 @@ raise "malformed" unless Token.read("not-a-token") == :malformed"#,
 /// Off Ruby and JRuby, each JWT reference is refused.
 #[test]
 fn jwt_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-jwt-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-jwt-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4782,8 +4782,7 @@ end
 /// include are refused.
 #[test]
 fn elastic_apm_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-elastic-apm-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-elastic-apm-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4940,8 +4939,7 @@ raise "block 404" unless Remote.status_of(base, "/missing") == 404
 /// Off Ruby and JRuby, each RestClient reference is refused.
 #[test]
 fn rest_client_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-rest-client-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-rest-client-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -5012,8 +5010,7 @@ fn rest_client_is_refused_off_ruby_and_jruby() {
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]
 fn faraday_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -20671,12 +20668,18 @@ mod csrf_meta_tag_alias;
 
 #[path = "emit_and_run/link_to_blob.rs"]
 mod link_to_blob;
+#[path = "emit_and_run/validates_rule_gaps.rs"]
+mod validates_rule_gaps;
 
 #[path = "emit_and_run/render_partial_block.rs"]
 mod render_partial_block;
 
 #[path = "emit_and_run/python_route_format.rs"]
 mod python_route_format;
+#[path = "emit_and_run/partial_local_shadows_helper.rs"]
+mod partial_local_shadows_helper;
+#[path = "emit_and_run/partial_reads_caller_ivar.rs"]
+mod partial_reads_caller_ivar;
 
 #[path = "emit_and_run/python_nested_modifier_if.rs"]
 mod python_nested_modifier_if;
@@ -20686,6 +20689,8 @@ mod namespaced_class_consts;
 
 #[path = "emit_and_run/boolop_precedence.rs"]
 mod boolop_precedence;
+#[path = "emit_and_run/unknown_class_association.rs"]
+mod unknown_class_association;
 
 #[path = "support/full_forwarding.rs"]
 mod full_forwarding;

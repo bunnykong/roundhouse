@@ -1,5 +1,7 @@
 //! A nested request-params read runs on the ruby-family targets and is refused, by name, on a strict one.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::Path;
 
 use roundhouse::diagnostic::{DiagnosticKind, Severity};
@@ -25,8 +27,7 @@ fn copy_tree(src: &Path, dst: &Path) {
 
 #[test]
 fn nested_params_are_ledgered_and_refused_by_a_strict_emit() {
-    let dir = std::env::temp_dir().join(format!("roundhouse-params-residue-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("roundhouse-params-residue");
     copy_tree(roundhouse::fixtures::real_blog(), &dir);
     let controller = dir.join("app/controllers/articles_controller.rb");
     let source = std::fs::read_to_string(&controller).unwrap().replacen(

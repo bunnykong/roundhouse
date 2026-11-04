@@ -8,6 +8,8 @@
 //! :name` / `teardown :name` are read too (`setup :name` was dropped
 //! from a class body). A block statement a test class does not model is
 //! refused by name.
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -68,8 +70,7 @@ end
 
 /// Rails' answer: the same files under activesupport 8.1.4.
 fn native() -> String {
-    let dir = std::env::temp_dir().join(format!("rh-test-helper-concerns-native-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("rh-test-helper-concerns-native");
     let test = ORDER_TEST.replace("require \"test_helper\"\n", "");
     let script = format!(
         "gem \"activesupport\", \"8.1.4\"\nrequire \"active_support\"\nrequire \"active_support/test_case\"\nrequire \"minitest/autorun\"\n\

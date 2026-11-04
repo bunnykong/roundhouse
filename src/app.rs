@@ -65,14 +65,17 @@ pub struct ConcernGuardedItem {
 /// deliverable — the thing ingesters produce and emitters consume.
 
 /// A `validates` call kept for its custom keys (`ingest::each_validator`):
-/// the model, the call's span and source text, and each key with the app
-/// `EachValidator` class it names.
+/// the model, the call's span and source text, each key with the app
+/// `EachValidator` class it names, and the call's built-in rules.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EachValidatorCall {
     pub model: ClassId,
     pub span: Span,
     pub text: String,
     pub keys: Vec<(String, String)>,
+    /// The call's lowered built-in rules, by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -622,6 +625,11 @@ pub struct App {
     /// computed from the bodies as they stand.
     #[serde(skip)]
     pub helper_diagnostics: Option<Vec<crate::diagnostic::Diagnostic>>,
+    /// Associations whose class nothing in the program defines (a gem's
+    /// model: `has_many :widgets, class_name: "Vendor::Widget"`), refused
+    /// as naming that constant is; set by analysis.
+    #[serde(skip)]
+    pub unknown_association_targets: Vec<crate::diagnostic::Diagnostic>,
     /// Every `app/helpers/**/*_helper.rb` module, including one whose
     /// method names a later helper all redefines (and so owns in
     /// `helper_method_index`).
@@ -1291,6 +1299,7 @@ impl App {
             concern_spliced_actions: HashMap::default(),
             unreachable_views: BTreeSet::new(),
             helper_diagnostics: None,
+            unknown_association_targets: Vec::new(),
             helper_modules: BTreeSet::new(),
             concern_spliced_class_methods: HashMap::default(),
             concern_class_side_spans: crate::det::HashSet::default(),

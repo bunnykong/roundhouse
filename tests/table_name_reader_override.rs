@@ -6,10 +6,12 @@
 //! conventional `details`, had no columns, and every column reader
 //! (`dimension_unit`, `weight_value`, …) was `no known method`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(name: &str, body: &str) -> String {
-    let root = std::env::temp_dir().join(format!("rh_table_name_reader_override_{}_{name}", std::process::id()));
+    let root = scratch::dir(&format!("rh_table_name_reader_override_{name}"));
     let files = [
         ("roundhouse.yml", "test_paths:\n  - test\n".to_string()),
         ("db/structure.sql", "CREATE TABLE public.item_details (\n    id bigint NOT NULL,\n    dimension_unit character varying NOT NULL\n);\n".to_string()),

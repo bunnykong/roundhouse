@@ -5,13 +5,15 @@
 //! `each_cons(2).with_object([])`). The analyzer knew none of these, so
 //! every such site read as `no known method`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
 fn check(name: &str, body: &str) -> String {
-    let root = std::env::temp_dir().join(format!("rh_array_batches_typing_{}_{name}", std::process::id()));
+    let root = scratch::dir(&format!("rh_array_batches_typing_{name}"));
     let files = [
         ("roundhouse.yml", "test_paths:\n  - test\n".to_string()),
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :accounts do |t|\n    t.string :name\n  end\nend\n".to_string()),

@@ -16,14 +16,30 @@ echo ""
 
 # Create Rails app (minimal, with Tailwind for nice styling).
 # RAILS_NEW_VERSION pins the generator (e.g. 8.0.5) for sibling fixtures
-# on an older Rails line; the app's Gemfile then locks that version, so
-# the scaffold/db/test commands below inherit it via the app bundle.
+# on an older Rails line, or the exact version the tests assume. The app's
+# lock is pinned to it below, so the scaffold/db/test commands inherit
+# it via the app bundle.
 if [ -n "${RAILS_NEW_VERSION:-}" ]; then
   rails "_${RAILS_NEW_VERSION}_" new "$APP_NAME" --skip-git --skip-docker --css tailwind
 else
   rails new "$APP_NAME" --skip-git --skip-docker --css tailwind
 fi
 cd "$APP_NAME"
+
+# `rails new` writes `gem "rails", "~> X.Y.Z"`, which also admits a later
+# X.Y.Z.N patch release, and its bundle install locks the newest one.
+# Lock RAILS_NEW_VERSION exactly by bundling once against an exact
+# requirement, then restore the generated Gemfile line: Bundler keeps a
+# locked version that still satisfies it, so the Gemfile stays as
+# `rails new` wrote it while the app runs RAILS_NEW_VERSION.
+if [ -n "${RAILS_NEW_VERSION:-}" ]; then
+  cp Gemfile Gemfile.generated
+  sed -i.bak "s/^gem \"rails\", .*/gem \"rails\", \"${RAILS_NEW_VERSION}\"/" Gemfile
+  rm -f Gemfile.bak
+  bundle install --quiet
+  mv Gemfile.generated Gemfile
+  bundle install --quiet
+fi
 
 # Generate Article scaffold
 rails generate scaffold Article title:string body:text

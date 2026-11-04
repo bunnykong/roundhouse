@@ -23,6 +23,8 @@
 //! db_pg_lane.rb shows the one hook it must define.
 #![allow(dead_code)]
 
+#[path = "scratch.rs"]
+mod scratch;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -271,8 +273,7 @@ pub fn run_lane(lane: &Lane) {
     let base = option_env!("CARGO_TARGET_TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join(format!("roundhouse-{test}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir_in(&base, &format!("roundhouse-{test}"));
     std::fs::create_dir_all(dir.join("sig")).unwrap();
     let _cleanup = ScratchDir(dir.clone());
 

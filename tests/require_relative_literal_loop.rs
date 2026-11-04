@@ -3,6 +3,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -82,8 +84,7 @@ fn native(lib: &Path) -> Vec<String> {
 
 #[test]
 fn a_require_relative_loop_over_a_literal_list_loads_each_file_it_names() {
-    let root = std::env::temp_dir().join(format!("roundhouse-require-relative-literal-loop-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-require-relative-literal-loop");
     let lib = root.join("adaptkit/lib");
     for (path, text) in FILES {
         let file = lib.join(path);

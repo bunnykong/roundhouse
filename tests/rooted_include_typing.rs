@@ -6,6 +6,8 @@
 //! include, and the module's `mixes_in_class_methods(ClassMethods)` never gave
 //! the includer `current`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -14,7 +16,7 @@ use std::process::Command;
 const API_CLIENT: &str = "module Vendor\n  module ApiClient\n    extend T::Sig\n    extend T::Helpers\n\n    module ClassMethods\n      extend T::Sig\n\n      sig { returns(Integer) }\n      def current = 1\n    end\n\n    sig { returns(T::Boolean) }\n    def internal_access? = false\n\n    mixes_in_class_methods(ClassMethods)\n  end\nend\n";
 
 fn check(name: &str, include: &str) -> String {
-    let root = std::env::temp_dir().join(format!("rh_rooted_include_typing_{}_{name}", std::process::id()));
+    let root = scratch::dir(&format!("rh_rooted_include_typing_{name}"));
     let account = format!("class Account < ApplicationRecord\n  include {include}\n\n  #: -> untyped\n  def self.use = [Account.current.zzz, new.internal_access?.yyy]\nend\n");
     let files = [
         ("roundhouse.yml".to_string(), "test_paths:\n  - test\n".to_string()),

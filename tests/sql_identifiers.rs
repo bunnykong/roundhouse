@@ -1,6 +1,8 @@
 //! Physical SQL names come from schema/Model.table metadata, not Ruby
 //! identifiers. These tests do not widen literal self.table_name admission.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -245,7 +247,7 @@ fn emitted_models_execute_crud_and_qualified_projections() {
         .collect();
     assert!(errors.is_empty(), "synthetic app errors: {errors:?}");
     let root =
-        std::env::temp_dir().join(format!("roundhouse-sql-identifiers-{}", std::process::id()));
+        scratch::dir("roundhouse-sql-identifiers");
     std::fs::create_dir_all(&root).unwrap();
     let files = target_files(&app, Path::new("."), BuildTarget::Ruby).expect("Ruby project");
     write_to_dir(&files, &root).unwrap();
@@ -343,8 +345,7 @@ puts 'emitted SQLite CRUD, filtered reads, reload, aliases and isolation passed'
 fn ddl_survives_python_and_rust_source_literals() {
     let app = app();
     let expected = render_schema_sql(&app.schema);
-    let root = std::env::temp_dir().join(format!("roundhouse-sql-literals-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root = scratch::dir("roundhouse-sql-literals");
     let python = roundhouse::emit::python::emit(&app)
         .into_iter()
         .find(|f| f.path == Path::new("app/schema_sql.py"))
@@ -389,7 +390,7 @@ fn ddl_survives_go_source_literal() {
     let app = app();
     let expected = render_schema_sql(&app.schema);
     let root =
-        std::env::temp_dir().join(format!("roundhouse-sql-go-literal-{}", std::process::id()));
+        scratch::dir("roundhouse-sql-go-literal");
     std::fs::create_dir_all(&root).unwrap();
     let go = roundhouse::emit::go::emit(&app)
         .into_iter()
@@ -414,8 +415,7 @@ fn ddl_survives_go_source_literal() {
 fn ddl_survives_crystal_source_literals() {
     let app = app();
     let expected = render_schema_sql(&app.schema);
-    let root = std::env::temp_dir().join(format!("roundhouse-sql-crystal-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root = scratch::dir("roundhouse-sql-crystal");
     let crystal = roundhouse::emit::crystal::emit(&app)
         .into_iter()
         .find(|f| f.path == Path::new("src/schema.cr"))

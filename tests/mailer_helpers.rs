@@ -10,6 +10,8 @@
 //! resolves here; now the declarations are taken as modelled, and a
 //! template's call to an undeclared app helper is reported instead.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use roundhouse::project::BuildTarget;
 
 fn helper(name: &str, body: &str) -> (String, String) {
@@ -42,9 +44,7 @@ fn warnings() -> Vec<String> {
     files.extend(mailer("ProbeModMailer", "probe_mod_mailer", "  helper ShoutHelper", "<%= shout('m') %>"));
     files.extend(mailer("ProbeAllMailer", "probe_all_mailer", "  helper :all", "x"));
     files.extend(mailer("ProbeBlockMailer", "probe_block_mailer", "  helper do\n    def blocky\n      \"b\"\n    end\n  end", "x"));
-    let root = std::env::temp_dir().join(format!("roundhouse-mailer-helpers-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = scratch::dir("roundhouse-mailer-helpers");
     let source = root.join("app");
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
     for (path, text) in &files {

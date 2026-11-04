@@ -2,6 +2,8 @@
 //! The adapters expose the same status/body pair; Rails' default exception
 //! is the 429 that ActionDispatch's exception middleware would return.
 
+#[path = "../support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 use super::emit_and_run;
 
@@ -65,8 +67,7 @@ fn controller_oracle_available(mut cmd: Command, helper: &std::path::Path) -> bo
 #[test]
 fn controller_oracle_skips_when_the_controller_gems_are_missing() {
     let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/rails_oracle.rb");
-    let empty = std::env::temp_dir().join(format!("roundhouse-rate-limit-no-gems-{}", std::process::id()));
-    std::fs::create_dir_all(&empty).expect("empty gem directory");
+    let empty = scratch::dir("roundhouse-rate-limit-no-gems");
     let mut cmd = oracle_command();
     cmd.env("RH_RAILS_ORACLE", "8.1.4").env("GEM_HOME", &empty).env("GEM_PATH", &empty);
     let available = controller_oracle_available(cmd, &helper);

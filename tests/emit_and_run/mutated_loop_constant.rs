@@ -21,8 +21,7 @@ fn a_loop_over_a_constant_appended_to_is_not_unrolled_from_its_first_value() {
 /// The Ruby emit has no runtime-defined methods to fall back on either: the loop it cannot unroll is reported, not dropped silently.
 #[test]
 fn the_ruby_emit_reports_the_loop_it_drops() {
-    let root = std::env::temp_dir().join(format!("roundhouse-dropped-define-loop-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = super::scratch::dir("roundhouse-dropped-define-loop");
     for (path, body) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         (

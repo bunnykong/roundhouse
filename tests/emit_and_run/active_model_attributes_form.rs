@@ -8,6 +8,8 @@
 //!
 //! The model path's Attributes API cast only `:boolean`, and the include
 //! was reported as unresolved.
+#[path = "../support/scratch.rs"]
+mod scratch;
 use super::emit_and_run;
 
 const FORM: &str = r#"class Form::Confirm
@@ -170,8 +172,7 @@ fn an_attribute_over_a_column_of_another_type_keeps_the_column() {
 /// column's type; a matching one and the enum's are not.
 #[test]
 fn an_attribute_over_a_column_of_another_type_is_reported() {
-    let root = std::env::temp_dir().join(format!("roundhouse-attribute-over-column-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-attribute-over-column");
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
@@ -349,8 +350,7 @@ fn a_source_reader_beside_a_default_on_ruby() {
 fn reported_default(decl: &str) -> Vec<String> {
     static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let root = std::env::temp_dir().join(format!("roundhouse-reported-default-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("roundhouse-reported-default-{n}"));
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());

@@ -1,12 +1,12 @@
 //! `ROUNDHOUSE_TIMINGS=1` prints a lap line after each post-analyze pass,
 //! so a slow pass is named; nothing is printed without it.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(timings: bool) -> String {
-    static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("rh_timings_pass_laps_{}_{run}", std::process::id()));
+    let root = scratch::dir(&format!("rh_timings_pass_laps_{timings}"));
     let files = [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :widgets do |t|\n    t.string :title\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),

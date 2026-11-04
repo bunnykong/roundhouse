@@ -3,6 +3,8 @@
 //! app/javascript at /assets/<path within it>. campfire's layout links
 //! its stylesheets that way, and before this every one was a 404.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -17,9 +19,7 @@ fn write(root: &Path, rel: &str, body: &str) {
 
 #[test]
 fn app_assets_are_staged_at_their_propshaft_paths() {
-    let dir = std::env::temp_dir().join(format!("roundhouse-rake-assets-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-rake-assets");
     let root = dir.as_path();
     fs::write(root.join("Rakefile"), RAKEFILE).unwrap();
     write(root, "app/assets/stylesheets/_reset.css", "html{}");

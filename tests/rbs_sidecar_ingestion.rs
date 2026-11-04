@@ -3,6 +3,8 @@
 //! Covers the file-system scan + RBS parse + namespace-preserving
 //! merge path end-to-end.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::Path;
 
@@ -11,9 +13,7 @@ use roundhouse::ingest::ingest_app;
 use roundhouse::ty::Ty;
 
 fn scratch_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-rbs-sidecar-{name}"));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create scratch dir");
+    let dir = scratch::dir(&format!("roundhouse-rbs-sidecar-{name}"));
     dir
 }
 

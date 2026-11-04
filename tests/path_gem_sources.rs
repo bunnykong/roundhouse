@@ -1,3 +1,5 @@
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -94,15 +96,10 @@ mod on_disk {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "roundhouse_{name}_{}_{}",
-            std::process::id(),
-            SystemTime::now()
+        let root = scratch::dir(&format!("roundhouse_{name}_{}", SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).expect("create temporary root");
+                .as_nanos()));
         root.canonicalize().expect("canonicalize temporary root")
     }
 

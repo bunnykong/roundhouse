@@ -5,6 +5,8 @@
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 const RBI: &str = "module GraphQL; end\nmodule GraphQL::Batch; end\n\nclass GraphQL::Batch::Loader\n  def load(key); end\n\n  class << self\n    def for(*, **, &); end\n  end\nend\n";
@@ -16,7 +18,7 @@ const RECORD_LOADER: &str = "module GraphQL\n  module Kit\n    module Batch\n   
 const UNREACHED: &str = "return\n\nclass Unreached\n  #: -> Integer\n  def count = 1\nend\n";
 
 fn check(name: &str, account: &str) -> String {
-    let root = std::env::temp_dir().join(format!("rh_guarded_declaration_typing_{}_{name}", std::process::id()));
+    let root = scratch::dir(&format!("rh_guarded_declaration_typing_{name}"));
     let gem = "vendor/gems/fakegql-1.0/lib/fakegql";
     let files = [
         ("roundhouse.yml".to_string(), "test_paths:\n  - test\n"),

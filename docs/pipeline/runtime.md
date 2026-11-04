@@ -3411,6 +3411,54 @@ with `Journey::Router::Utils.escape_fragment`, which leaves `/`, `?` and
 use, which percent-encodes them. Every anchor the corpus writes is a
 slug, a tag or a `dom_id`, so nothing can tell the difference today.
 
+### `default_url_options` gives a route helper its segments, in the shapes we read
+
+A URL-tenant app writes `scope ":blog"` and answers `{ path_params: {
+blog: current_blog } }` from `default_url_options`. Rails'
+`handle_positional_args` (actionpack 8.1.4, `route_set.rb:290`) then
+binds fewer positionals than the route has segments to the segments
+those options leave open, so `post_path(@post)` is `/acme/posts/1`; a
+segment the call names (`post_path(@post, blog: "x")`) is never a
+positional's, with or without the options. `lower::route_param_recall`
+binds the call the same way, and gives the controller a
+`url_options_path_parameters` method: the request's path parameters
+with the options' segments laid over them, which the call reads and the
+controller hands its views in place of the request's. It is evaluated
+per call, in the controller, as Rails evaluates `url_options`.
+
+It reads a Hash literal (`path_params:` a Hash literal too), `super`,
+`merge` of those, and `if cond` around one with no segments on the
+other branch, and a `compact`, `reject`, `slice`, … of one that gives
+no segment; each controller its own definition or the one it inherits.
+A `def default_url_options(options = {})` is read as Rails'
+`url_options` calls it, with no arguments: a read of an optional param
+is its default when that is a literal. A required param raises there,
+and a bare `super` passes the optional ones on to Base's
+`default_url_options`, which takes none, so Rails raises for both; they
+are unread, as is a read of any other param.
+Any other shape, a record value, and a value or guard that reads the
+method's own context (`super`, `yield`, `binding`, `__method__`) keeps
+the helpers' positional binding, and `check` warns at its `def`. A nil
+value leaves its segment out of the overlay, so every call needing it
+raises, as Rails raises for a nil segment (a `KeyError` here, a
+`UrlGenerationError` there); an empty String builds `//`, as Rails'
+does. Where it differs from Rails:
+
+* **A plain key is not also a query.** `{ blog: current_blog }` fills
+  the segment, but Rails also appends it to a route without one
+  (`health_path` is `/health?blog=acme`), and we do not.
+* **A false guard reads the request's segment.** Under `if
+  current_blog`, a call Rails would bind from the first segment, and
+  raise for, reads the request's `:blog`; when the guard reads the same
+  parameter it is absent too, and the read raises.
+* **Without the options, a short call with an options Hash** still
+  binds the Hash to a segment: `edit_post_path(@post, tab: "x")` builds
+  `/1/posts/{tab: "x"}/edit` where Rails raises for the missing `:id`.
+* **The views of a controller's own directory** take its options, and
+  every other view (a layout, `shared/`) ApplicationController's.
+  App helper modules, `url_for(@post)`, `polymorphic_path`,
+  `redirect_to @post` and mailers do not take the segments yet.
+
 ### An exception reported to Sentry reaches stderr, and loses its detail
 
 `Sentry.capture_exception` is a façade in `runtime/ruby/gem_facades.rb`

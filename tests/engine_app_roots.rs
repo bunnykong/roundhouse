@@ -8,6 +8,8 @@
 //! `app/` is a symbolic link, and an engine-shaped directory the
 //! lockfile does not name.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -282,12 +284,7 @@ mod on_disk {
 
     /// Create an isolated application root without host-system path aliases.
     fn unique_tmp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "roundhouse_{name}_{}_{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let dir = scratch::dir(&format!("roundhouse_{name}_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
         // `/var` → `/private/var` on macOS: the app's own path must
         // not itself contain a link.
         dir.canonicalize().expect("canonicalize temp dir")

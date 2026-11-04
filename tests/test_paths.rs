@@ -1,6 +1,7 @@
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use roundhouse::app::App;
 use roundhouse::ingest::{IngestError, ingest_app, ingest_app_from_tree};
@@ -12,14 +13,7 @@ fn temp_dir() -> PathBuf {
 fn unique_tmp_dir(name: &str) -> PathBuf {
     // macOS $TMPDIR sits under the /var -> /private/var symlink; ingest
     // reports resolved paths, so the root must be resolved too.
-    temp_dir().join(format!(
-        "roundhouse_{name}_{}_{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    scratch::dir(&format!("roundhouse_{name}"))
 }
 
 fn test_source(class_name: &str) -> String {

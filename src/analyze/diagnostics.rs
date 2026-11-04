@@ -655,6 +655,8 @@ fn diagnose_controller_output_collisions(app: &App, out: &mut Vec<Diagnostic>) {
 pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     let mut out = app.routes.diagnostics.clone();
     diagnose_controller_output_collisions(app, &mut out);
+    // A `default_url_options` whose path segments the route helpers do not take.
+    out.extend(crate::lower::route_param_recall::diagnose(app));
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
@@ -804,6 +806,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         Some(taken) => out.extend(taken.iter().cloned()),
         None => out.extend(diagnose_helper_modules(app)),
     }
+    out.extend(app.unknown_association_targets.iter().cloned());
     for class in &app.library_classes {
         for initializer in &class.class_ivar_initializers {
             diagnose_expr(initializer, &mut out);

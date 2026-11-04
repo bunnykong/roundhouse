@@ -14,6 +14,8 @@
 //! against what Rails 8.1.3 + jbuilder 2.15.1 render for the same
 //! templates and rows.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -148,10 +150,7 @@ fn the_partial_is_rendered_where_it_stands() {
 #[test]
 fn the_templates_render_what_jbuilder_renders() {
     let files = emitted();
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-jbuilder-partial-merge-{}",
-        std::process::id()
-    ));
+    let dir = scratch::dir("roundhouse-jbuilder-partial-merge");
     for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

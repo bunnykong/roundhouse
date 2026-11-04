@@ -16,6 +16,8 @@
 //!
 //!     cargo test --test go_smoke -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -1997,10 +1999,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
 }
 
 fn emit_to_scratch() -> PathBuf {
-    let scratch = std::env::temp_dir().join("roundhouse-go-smoke");
-    if scratch.exists() {
-        std::fs::remove_dir_all(&scratch).expect("clean scratch");
-    }
+    let scratch = scratch::dir("roundhouse-go-smoke");
     std::fs::create_dir_all(&scratch).expect("mkdir scratch");
 
     let app = ingest_with_analyzer();

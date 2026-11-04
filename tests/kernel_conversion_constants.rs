@@ -12,6 +12,8 @@
 //! class defines, and `Pathname(pathname)`, which answers its argument
 //! itself, stays refused.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -34,8 +36,7 @@ const REPORT: &str = "p Limits.report\n";
 
 #[test]
 fn kernel_conversion_constants_are_typed_and_run_like_native() {
-    let dir = std::env::temp_dir().join(format!("roundhouse-kernel-conv-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-kernel-conv");
     std::fs::write(dir.join("limits.rb"), LIMITS).unwrap();
     // Rails has loaded both libraries; the emitted tree writes the requires.
     let native = emit_and_run::ruby()
@@ -134,8 +135,7 @@ fn another_class_s_uri_method_does_not_lift_the_refusal() {
 fn a_pathname_converted_from_a_pathname_stays_refused() {
     let source = "module Paths\n  ORIGINAL = Pathname.new(\"/tmp\").freeze\n  CONVERTED = Pathname(ORIGINAL)\n\n  \
                   def self.report = [ORIGINAL.equal?(CONVERTED), CONVERTED.frozen?]\nend\n";
-    let dir = std::env::temp_dir().join(format!("roundhouse-kernel-identity-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-kernel-identity");
     std::fs::write(dir.join("paths.rb"), source).unwrap();
     let native = emit_and_run::ruby()
         .arg("-e")
@@ -161,8 +161,7 @@ fn an_instance_side_uri_does_not_shadow_kernel_s_in_the_class_body() {
     let endpoints = "class Endpoints\n  include Stripper\n  URL = URI(\"https://example.com/api\")\n\n  \
                      def self.host = URL.host\n\n  def label = URI(\"  label  \")\nend\n";
     let report = "p [Endpoints.host, Endpoints.new.label]\n";
-    let dir = std::env::temp_dir().join(format!("roundhouse-kernel-side-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-kernel-side");
     std::fs::write(dir.join("stripper.rb"), stripper).unwrap();
     std::fs::write(dir.join("endpoints.rb"), endpoints).unwrap();
     let native = emit_and_run::ruby()

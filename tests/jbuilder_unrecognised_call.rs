@@ -19,6 +19,8 @@
 //! 2.15.1 render for the same templates and the rows `(1, "a")` and
 //! `(2, "b")`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -213,7 +215,7 @@ fn view<'a>(files: &'a [(String, String)], name: &str) -> &'a str {
 /// Each template on CRuby with two widgets: its JSON, or the class and
 /// message of what it raises.
 fn render_all(tag: &str, files: &[(String, String)]) -> HashMap<String, String> {
-    let dir = std::env::temp_dir().join(format!("roundhouse-jbuilder-unrecognised-call-{tag}-{}", std::process::id()));
+    let dir = scratch::dir(&format!("roundhouse-jbuilder-unrecognised-call-{tag}"));
     for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

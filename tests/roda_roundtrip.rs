@@ -27,6 +27,8 @@
 //! (fixtures/roda-blog/test/blog_test.rb — "a transpiled version of
 //! this app must pass it unchanged") against the converted tree.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,7 +36,7 @@ use roundhouse::lower::flatten_routes;
 use roundhouse::App;
 
 fn scratch_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-roda-{tag}"))
+    scratch::dir(&format!("roundhouse-roda-{tag}"))
 }
 
 /// Ingest-shape Rails app (NO analyze_and_lower — the converter's
@@ -45,9 +47,6 @@ fn ingest_rails() -> App {
 }
 
 fn write_conversion(scratch: &Path) {
-    if scratch.exists() {
-        std::fs::remove_dir_all(scratch).expect("clean scratch");
-    }
     let rails = ingest_rails();
     let files = roundhouse::emit::roda::emit(&rails);
     for f in files {

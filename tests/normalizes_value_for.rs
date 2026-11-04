@@ -13,6 +13,8 @@
 //! `apply_to_nil: true` left the declaration unapplied, and
 //! `normalize_value_for` had no lowering ("no known method").
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -90,8 +92,7 @@ fn apply_to_nil_and_normalize_value_for_on_spinel() {
 fn not_lowered_warnings(decls: &str) -> Vec<String> {
     static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let root = std::env::temp_dir().join(format!("roundhouse-normalizes-claim-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("roundhouse-normalizes-claim-{n}"));
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());

@@ -35,6 +35,8 @@
 //!
 //! The declaration was reported and dropped, and no writer existed.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -439,8 +441,7 @@ fn nested_attributes_replace_and_required_destroy_on_spinel() {
 /// Emit real-blog for `target` with Article's first two lines replaced by
 /// `article_head`; the CLI's stderr.
 fn emit_stderr(name: &str, target: &str, article_head: &str) -> String {
-    let root = std::env::temp_dir().join(format!("roundhouse-nested-attributes-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("roundhouse-nested-attributes-{name}"));
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
@@ -474,8 +475,7 @@ fn a_custom_primary_key_stays_reported() {
 /// so there the declaration stays the reported gap it was.
 #[test]
 fn a_strict_target_keeps_the_declaration_reported() {
-    let root = std::env::temp_dir().join(format!("roundhouse-nested-attributes-strict-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-nested-attributes-strict");
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());

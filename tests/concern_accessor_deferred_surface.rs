@@ -6,6 +6,8 @@
 //! does not, the refusal is overturned and the compiler ingests again with
 //! the probe, so the emitted tree is still the probe's.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -194,7 +196,7 @@ fn findings(report: &str, root: &Path) -> Vec<String> {
 }
 
 fn assert_compiler_matches_probe(name: &str, files: &[(String, String)]) -> String {
-    let scratch = std::env::temp_dir().join(format!("rh_deferred_surface_{}_{name}", std::process::id()));
+    let scratch = scratch::dir(&format!("rh_deferred_surface_{name}"));
     let (probe_root, deferred_root) = (scratch.join("probe"), scratch.join("deferred"));
     let (probe_tree, probe_report) = transpile(&probe_root, files, false);
     let (tree, report) = transpile(&deferred_root, files, true);

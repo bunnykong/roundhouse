@@ -1,3 +1,5 @@
+#[path = "support/scratch.rs"]
+mod scratch;
 use roundhouse::emit::ruby::emit_lowered_models;
 use roundhouse::ingest::ingest_app_from_tree;
 
@@ -119,10 +121,7 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 
 #[test]
 fn a_controller_where_on_all_month_renders_sql_bounds() {
-    let dir = std::env::temp_dir().join("roundhouse-time-calendar-where");
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).expect("clean scratch");
-    }
+    let dir = scratch::dir("roundhouse-time-calendar-where");
     copy_tree(roundhouse::fixtures::real_blog(), &dir);
     let controller = dir.join("app/controllers/articles_controller.rb");
     let source = std::fs::read_to_string(&controller).expect("read controller").replacen(

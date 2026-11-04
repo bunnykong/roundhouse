@@ -24,6 +24,8 @@
 //! (article_broadcasts, views suite) tracked in
 //! `project_lowered_ir_gaps_for_runnability`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -424,7 +426,7 @@ puts "rails health contract passed"
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-spinel-{tag}"))
+    scratch::dir(&format!("roundhouse-spinel-{tag}"))
 }
 
 fn copy_tree(src: &Path, dst: &Path) {
@@ -453,9 +455,6 @@ fn copy_tree(src: &Path, dst: &Path) {
 /// once `test/test_helper.rb` started requiring `main.rb` (whose chain
 /// is complete). Deleted in favour of the set that ships.
 fn generate_project(fixture: &Path, scratch: &Path) {
-    if scratch.exists() {
-        std::fs::remove_dir_all(scratch).expect("clean scratch");
-    }
     std::fs::create_dir_all(scratch).expect("create scratch");
 
     let mut app = ingest_app(fixture).expect("ingest");

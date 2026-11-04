@@ -3,6 +3,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -32,8 +34,7 @@ fn eager_loading_leaves_a_plain_gems_unrequired_files_unloaded() {
 }
 
 fn unloaded_namespace(eager: bool) {
-    let root = std::env::temp_dir().join(format!("roundhouse-gem-source-unloaded-namespace-{}-{eager}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("roundhouse-gem-source-unloaded-namespace-{eager}"));
     let lib = root.join("coinkit/lib");
     std::fs::create_dir_all(lib.join("rubocop/cop/coinkit")).unwrap();
     std::fs::write(lib.join("coinkit.rb"), COINKIT).unwrap();

@@ -4,6 +4,8 @@
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,8 +75,7 @@ fn an_app_without_postgresql_still_grounds_try() {
 fn the_kept_try_answers_like_rails_on_the_runtime() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = emit(true);
-    let dir = std::env::temp_dir().join(format!("rh-try-guard-pg-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("rh-try-guard-pg");
     let mut script = format!(
         "require {:?}\n",
         root.join("runtime/spinel/active_support_tryable.rb").display().to_string()

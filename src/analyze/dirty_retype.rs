@@ -120,6 +120,16 @@ pub(super) fn dirty_classes_for_retype(
         qi += 1;
         let names = moved_by_class.get(&id).cloned().unwrap_or_default();
         for child in children.get(&id).cloned().unwrap_or_default() {
+            // A `super` records no call site, so a child's own method of a
+            // moved name, which may read the moved one through it, is no
+            // caller of it: the child is dirty itself. The spread below
+            // reaches a subclass anyway, but not a model or plain class
+            // that includes a module.
+            if classes.get(&child).is_some_and(|c| {
+                names.iter().any(|n| c.source_instance_methods.contains(n) || c.source_class_methods.contains(n))
+            }) {
+                dirty.insert(child.clone());
+            }
             let entry = moved_by_class.entry(child.clone()).or_default();
             let before = entry.len();
             entry.extend(names.iter().cloned());
@@ -145,12 +155,29 @@ pub(super) fn dirty_classes_for_retype(
     // Descendants and included modules share one worklist so a module
     // pulled in for concern-ivar seeding also dirties its other
     // includers (children). Separate passes left those siblings clean.
+    //
+    // Only its controller (and module) includers, though: the ivar
+    // environment `concern_ivar_env_of` gives a module comes from the
+    // controllers that include it, and a controller re-types the
+    // concern's spliced actions against it (Phase B′). A model or plain
+    // class that includes the module reads nothing of that environment;
+    // what it reads of the module is the module's method table, and a
+    // change there reaches it through the moved names above in the
+    // round it happens. Dirtying every includer of a shared mixin pushed
+    // the frontier over its budget whenever one of them moved, and every
+    // round then re-typed the whole app.
+    let controllers: HashSet<&ClassId> = app.controllers.iter().map(|c| &c.name).collect();
+    let is_module = |id: &ClassId| classes.get(id).is_some_and(|c| c.is_module);
     let mut queue: Vec<ClassId> = dirty.iter().cloned().collect();
     let mut qi = 0;
     while qi < queue.len() {
         let id = queue[qi].clone();
         qi += 1;
+        let module = is_module(&id);
         for child in children.get(&id).cloned().unwrap_or_default() {
+            if module && !controllers.contains(&child) && !is_module(&child) {
+                continue;
+            }
             if dirty.insert(child.clone()) {
                 queue.push(child);
             }

@@ -4,6 +4,8 @@
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -41,11 +43,7 @@ fn gem_files() -> Vec<(String, String)> {
 /// The log native Ruby writes: the logging files in `Dir[]`'s order.
 fn native_order() -> Vec<String> {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let lib = std::env::temp_dir().join(format!(
-        "rh_gem_source_glob_require_{}_{}",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    let lib = scratch::dir(&format!("rh_gem_source_glob_require_{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     for (path, content) in gem_files() {
         let full = lib.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();

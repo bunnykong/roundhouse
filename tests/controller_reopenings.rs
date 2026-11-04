@@ -1,3 +1,5 @@
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -288,7 +290,7 @@ fn a_single_controller_keeps_its_action_and_nested_class() {
 #[test]
 fn the_cli_refuses_to_write_a_colliding_controller_for_every_compiled_target() {
     let scratch =
-        std::env::temp_dir().join(format!("rh_controller_collision_{}", std::process::id()));
+        scratch::dir("rh_controller_collision");
     let source = scratch.join("source");
     for (path, text) in [
         (

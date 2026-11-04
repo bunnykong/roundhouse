@@ -1,5 +1,7 @@
 //! Re-emitting identical project files must not invalidate native builds.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -11,10 +13,7 @@ fn scratch(tag: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "roundhouse-write-{tag}-{}-{unique}",
-        std::process::id()
-    ))
+    scratch::dir(&format!("roundhouse-write-{tag}-{unique}"))
 }
 
 fn age(path: &Path) -> SystemTime {

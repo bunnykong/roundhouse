@@ -4,6 +4,8 @@
 //! its reads are coverage notes naming the initializer, while an unrelated
 //! or namespaced namesake stays an error.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check_continue(root: &std::path::Path) -> String {
@@ -17,7 +19,7 @@ fn check_continue(root: &std::path::Path) -> String {
 
 #[test]
 fn reads_of_a_constant_an_initializer_assigns_are_coverage_notes() {
-    let root = std::env::temp_dir().join(format!("roundhouse-initializer-constants-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-initializer-constants");
     for (path, source) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("config/initializers/000-stats.rb", "::STATS = Object.new\nclass Rack::Attack\n  ADMIN_ROLES = []\nend\n"),
@@ -61,7 +63,7 @@ fn reads_of_a_constant_an_initializer_assigns_are_coverage_notes() {
 
 #[test]
 fn an_initializer_class_named_only_in_a_comment_is_not_kept() {
-    let root = std::env::temp_dir().join(format!("roundhouse-initializer-comment-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-initializer-comment");
     for (path, source) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         // Kept, its body would report the constant nothing defines.

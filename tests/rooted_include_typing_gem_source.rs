@@ -5,6 +5,8 @@
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -14,7 +16,7 @@ const GEM_API_CLIENT: &str = "module Fakeav\n  module ApiClient\n    extend T::S
 
 
 fn check_gem(name: &str, include: &str) -> String {
-    let root = std::env::temp_dir().join(format!("rh_rooted_include_typing_gem_{}_{name}", std::process::id()));
+    let root = scratch::dir(&format!("rh_rooted_include_typing_gem_{name}"));
     let account = format!("class Account < ApplicationRecord\n  include {include}\n\n  #: -> untyped\n  def self.use = [Account.current.zzz, new.internal_access?.yyy]\nend\n");
     let files = [
         ("roundhouse.yml".to_string(), "test_paths:\n  - test\n".to_string()),

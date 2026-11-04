@@ -4,6 +4,8 @@
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 
 const PG_RB: &str = "ActiveSupport.on_load(:active_record_postgresqladapter) do\n  self.create_unlogged_tables = true if Rails.env.test?\nend\n";
@@ -41,8 +43,7 @@ fn copy_tree(from: &Path, to: &Path) {
 
 fn probe_app(tag: &str) -> Dir {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/tiny-blog");
-    let dir = Dir(std::env::temp_dir().join(format!("roundhouse-relocatable-{tag}-{}", std::process::id())));
-    let _ = std::fs::remove_dir_all(&dir.0);
+    let dir = Dir(scratch::dir(&format!("roundhouse-relocatable-{tag}")));
     copy_tree(&fixture, &dir.0);
     let write = |rel: &str, text: &str| {
         let path = dir.0.join(rel);

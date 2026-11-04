@@ -17,6 +17,8 @@
 //!
 //!     cargo test --test rust_toolchain -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,13 +36,10 @@ use roundhouse::emit::rust;
 use roundhouse::ingest::ingest_app;
 
 fn scratch_dir(fixture: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-rust-check-{fixture}"))
+    scratch::dir(&format!("roundhouse-rust-check-{fixture}"))
 }
 
 fn generate_project(fixture_path: &Path, out: &Path) {
-    if out.exists() {
-        std::fs::remove_dir_all(out).expect("clean scratch");
-    }
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
@@ -367,10 +366,7 @@ async fn articles_index_is_two_queries_not_n_plus_one() {
 #[test]
 #[ignore]
 fn filters_that_read_action_name_compile() {
-    let app_dir = scratch_dir("action-name-app");
-    if app_dir.exists() {
-        std::fs::remove_dir_all(&app_dir).expect("clean app copy");
-    }
+    let app_dir = scratch_dir("action-name-app").join("app");
     let copied = Command::new("cp")
         .arg("-R")
         .arg(roundhouse::fixtures::real_blog())

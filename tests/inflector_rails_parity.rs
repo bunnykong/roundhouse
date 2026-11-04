@@ -10,6 +10,8 @@
 //! The hand-rolled approximation this replaced was wrong on 39 of these
 //! 86 plurals and 47 of the singulars.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 const PAIRS: &[(&str, &str)] = &[
     ("search", "searches"), ("switch", "switches"), ("fix", "fixes"),
     ("box", "boxes"), ("process", "processes"), ("address", "addresses"),
@@ -115,8 +117,7 @@ fn app_inflections_override_the_defaults() {
 /// arguments, a regex rule) parses into the declarations.
 #[test]
 fn inflections_initializer_is_read() {
-    let dir = std::env::temp_dir().join(format!("rh-inflect-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-inflect");
     std::fs::create_dir_all(dir.join("config/initializers")).unwrap();
     std::fs::write(
         dir.join("config/initializers/inflections.rb"),

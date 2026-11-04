@@ -10,12 +10,13 @@
 //!   does `defined?` of anything but a constant path.
 //! - `File.binwrite`: no known method before.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn spinel_build(tag: &str, files: &[(&str, &str)]) -> (bool, String) {
-    let dir: PathBuf = std::env::temp_dir().join(format!("rh-strict-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir: PathBuf = scratch::dir(&format!("rh-strict-{tag}"));
     let base: &[(&str, &str)] = &[
         ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
         (

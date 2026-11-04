@@ -28,6 +28,8 @@
 //! `models/article_broadcasts_test.rb` shipped for months without
 //! ever running.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -35,7 +37,7 @@ use roundhouse::ingest::ingest_app;
 use roundhouse::project::BuildTarget;
 
 fn scratch_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-ruby-{tag}"))
+    scratch::dir(&format!("roundhouse-ruby-{tag}"))
 }
 
 /// Recursively copy a tree. Used to seed the scratch dir with
@@ -71,9 +73,6 @@ fn copy_tree(src: &Path, dst: &Path) {
 /// A toolchain test should exercise what ships. `target_files` IS what
 /// ships, so ask it.
 fn generate_project(fixture: &Path, scratch: &Path) {
-    if scratch.exists() {
-        std::fs::remove_dir_all(scratch).expect("clean scratch");
-    }
     std::fs::create_dir_all(scratch).expect("create scratch");
 
     let mut app = ingest_app(fixture).expect("ingest");

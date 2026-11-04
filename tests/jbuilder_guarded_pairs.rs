@@ -11,6 +11,8 @@
 //! plain Structs for records) against what Rails 8.1 + jbuilder 2.15
 //! render for the same templates and rows.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -161,10 +163,7 @@ fn a_begin_with_an_ensure_is_left_alone() {
 #[test]
 fn the_templates_render_what_jbuilder_renders() {
     let files = emitted();
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-jbuilder-guarded-pairs-{}",
-        std::process::id()
-    ));
+    let dir = scratch::dir("roundhouse-jbuilder-guarded-pairs");
     // The emitted tree as it is laid out. `app/views.rb` is the views
     // index a partial call requires; it holds nothing these templates
     // need.

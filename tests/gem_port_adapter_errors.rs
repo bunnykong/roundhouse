@@ -4,6 +4,8 @@
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 
 use roundhouse::project::BuildTarget;
@@ -34,14 +36,7 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 fn app(postgres: bool) -> TempDir {
-    let dir = std::env::temp_dir().join(format!(
-        "rh-gem-port-adapter-errors-{}-{}-{:?}",
-        postgres,
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir(&format!("rh-gem-port-adapter-errors-{postgres}"));
     copy_tree(&Path::new(MANIFEST_DIR).join("fixtures/tiny-blog"), &dir);
     let write = |rel: &str, text: &str| {
         let path = dir.join(rel);

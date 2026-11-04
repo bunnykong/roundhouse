@@ -12,6 +12,8 @@
 //! Elixir join as their emit_method gains the single standalone-fn
 //! entry point. Each addition is ~5 lines in this file.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -97,11 +99,7 @@ fn active_support_squish_bang_emits_for_rust() {
         "ActiveSupport.squish! must emit a mutating Rust function:\n{emitted}"
     );
 
-    let scratch = std::env::temp_dir().join(format!(
-        "roundhouse-runtime-rust-squish-bang-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&scratch).expect("create generated Rust scratch directory");
+    let scratch = scratch::dir("roundhouse-runtime-rust-squish-bang");
     let source = format!(
         r#"{emitted}
 #[test]

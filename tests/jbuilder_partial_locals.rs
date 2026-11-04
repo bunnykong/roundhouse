@@ -18,6 +18,8 @@
 //! plain Struct for the record) against what Rails 8.1 + jbuilder 2.15
 //! render for the same templates and row.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -174,10 +176,7 @@ fn a_partial_takes_the_locals_its_callers_pass() {
 #[test]
 fn the_templates_render_what_jbuilder_renders() {
     let files = emitted();
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-jbuilder-partial-locals-{}",
-        std::process::id()
-    ));
+    let dir = scratch::dir("roundhouse-jbuilder-partial-locals");
     for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

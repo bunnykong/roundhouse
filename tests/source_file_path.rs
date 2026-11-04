@@ -9,6 +9,8 @@
 //!
 //! Native Ruby is the oracle. Both runs start from a cwd outside the app.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -42,10 +44,7 @@ const EXPECTED: &str = "true\ntrue\ntrue\ntrue\ntrue\n";
 
 fn elsewhere(tag: &str) -> std::path::PathBuf {
     // `__dir__` is a realpath; resolve macOS's /var -> /private/var link.
-    let dir = std::env::temp_dir().canonicalize().unwrap().join(format!("roundhouse-cwd-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    scratch::dir(&format!("roundhouse-cwd-{tag}"))
 }
 
 #[test]

@@ -8,6 +8,8 @@
 
 #![cfg(unix)]
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -23,11 +25,7 @@ fn scratch(name: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "bench-paired-{name}-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir(&format!("bench-paired-{name}-{unique}"));
     dir
 }
 

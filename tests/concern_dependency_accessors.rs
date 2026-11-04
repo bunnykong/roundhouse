@@ -4,6 +4,8 @@
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -66,7 +68,7 @@ fn a_module_level_concern_dependency_supplies_its_accessor_to_the_model() {
 #[ignore = "fork spec: postgresql"]
 fn a_dependency_of_a_load_hook_included_extension_supplies_its_accessor() {
     let check = |extension_include: &str| {
-        let root = std::env::temp_dir().join(format!("rh_concern_dependency_accessors_{}_{}", std::process::id(), extension_include.len()));
+        let root = scratch::dir(&format!("rh_concern_dependency_accessors_{}", extension_include.len()));
         let files = [
             ("roundhouse.yml", "test_paths:\n  - test\n".to_string()),
             ("db/structure.sql", "CREATE TABLE main.accounts (\n    id bigint NOT NULL,\n    type character varying\n);\n".to_string()),

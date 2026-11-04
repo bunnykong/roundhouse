@@ -181,3 +181,20 @@ mod tests {
         assert!(got.contains("\\/"), "{got}");
     }
 }
+
+/// Is `pattern` a Regexp: a regex literal, or an expression typed
+/// `Regexp` (a pattern constant)? `gsub(pattern, "lit")` lowers to the
+/// target's regex replace only then; a String needle would be emitted as
+/// a regex receiver it is not.
+pub fn is_regexp_pattern(pattern: &crate::expr::Expr) -> bool {
+    if matches!(
+        &*pattern.node,
+        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Regex { .. } }
+    ) {
+        return true;
+    }
+    matches!(
+        pattern.ty.as_ref().map(|t| t.peel_nilable()),
+        Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+    )
+}

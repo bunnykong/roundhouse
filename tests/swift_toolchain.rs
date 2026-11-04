@@ -19,6 +19,8 @@
 //!
 //!     cargo test --test swift_toolchain -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -39,7 +41,7 @@ use roundhouse::emit::swift;
 use roundhouse::ingest::ingest_app;
 
 fn scratch_dir(fixture: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-swift-check-{fixture}"))
+    scratch::dir(&format!("roundhouse-swift-check-{fixture}"))
 }
 
 fn generate_project(fixture_path: &Path, out: &Path) {

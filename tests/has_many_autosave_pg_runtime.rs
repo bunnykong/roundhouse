@@ -3,6 +3,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests. A test the compiler
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 #[path = "support/pg_probe.rs"]
@@ -207,7 +209,7 @@ const FILES: &[(&str, &str)] = &[
 
 fn native_sqlite() -> Vec<String> {
     let oracle = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
-    let dir = std::env::temp_dir().join(format!("rh_has_many_autosave_native_{}", std::process::id()));
+    let dir = scratch::dir("rh_has_many_autosave_native");
     for (path, text) in FILES.iter().chain([&("db/schema.rb", SCHEMA)]) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

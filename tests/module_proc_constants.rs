@@ -17,6 +17,8 @@
 //! The control is CRuby running the same source against the pinned
 //! ActiveSupport (tests/support/rails_oracle.rb).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -27,8 +29,7 @@ const ORACLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_o
 fn native(program: &str) -> String {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("rh_module_proc_constants_{}_{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir(&format!("rh_module_proc_constants_{n}"));
     std::fs::write(dir.join("main.rb"), format!("require {ORACLE:?}\n{program}")).unwrap();
     let out = Command::new("ruby").arg("main.rb").current_dir(&dir).output().expect("ruby is on PATH");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();

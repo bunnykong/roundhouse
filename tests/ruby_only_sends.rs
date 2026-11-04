@@ -12,6 +12,8 @@
 //! `array_batches_typing`, `container_index_constructor`,
 //! `include_query_receivers` and `rational_literal`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 const MODEL: &str = r#"class Article < ApplicationRecord
@@ -103,8 +105,7 @@ fn build(root: &std::path::Path, target: &str) -> (bool, String) {
 
 #[test]
 fn only_the_ruby_family_emits_the_ruby_only_sends() {
-    let root = std::env::temp_dir().join(format!("rh_ruby_only_sends_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("rh_ruby_only_sends");
     for (path, text) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"articles\" do |t|\n    t.string \"title\"\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
@@ -138,8 +139,7 @@ fn only_the_ruby_family_emits_the_ruby_only_sends() {
 /// call to it is not refused as Kernel's.
 #[test]
 fn an_app_method_named_integer_is_not_refused_as_kernel_s() {
-    let root = std::env::temp_dir().join(format!("rh_ruby_only_sends_shadow_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("rh_ruby_only_sends_shadow");
     for (path, text) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"articles\" do |t|\n    t.string \"title\"\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),

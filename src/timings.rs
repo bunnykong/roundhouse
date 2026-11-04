@@ -113,6 +113,14 @@ pub fn phase<T>(name: impl std::fmt::Display, f: impl FnOnce() -> T) -> T {
     result
 }
 
+/// Print one `roundhouse-timing:` line with no duration: a count or a
+/// summary a phase wants beside its timing.
+pub fn note(message: impl std::fmt::Display) {
+    if *ENABLED {
+        eprintln!("roundhouse-timing: {message}");
+    }
+}
+
 /// Start a timed span that prints when dropped. `None` when timings are off.
 pub fn begin(name: impl std::fmt::Display) -> Option<Guard> {
     if !*ENABLED {

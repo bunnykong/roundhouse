@@ -10,6 +10,8 @@
 //! and the real class serves. An app that names neither keeps the façade
 //! and declares nothing.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::Path;
 
 use roundhouse::ingest::ingest_app;
@@ -40,8 +42,7 @@ end
 
 fn spinel_files(tag: &str, extra: Option<&str>) -> Vec<(String, String)> {
     let fixture = roundhouse::fixtures::real_blog().to_path_buf();
-    let dir = std::env::temp_dir().join(format!("roundhouse-html-packages-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("roundhouse-html-packages-{tag}"));
     for sub in ["app", "config", "db"] {
         copy_dir(&fixture.join(sub), &dir.join(sub));
     }

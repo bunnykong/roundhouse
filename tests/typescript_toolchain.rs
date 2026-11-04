@@ -12,6 +12,8 @@
 //!
 //!     cargo test --test typescript_toolchain -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -47,13 +49,10 @@ use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
 
 fn scratch_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-ts-check-{tag}"))
+    scratch::dir(&format!("roundhouse-ts-check-{tag}"))
 }
 
 fn generate_project(fixture_path: &Path, out: &Path) {
-    if out.exists() {
-        std::fs::remove_dir_all(out).expect("clean scratch");
-    }
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
@@ -75,9 +74,6 @@ fn generate_project_with_profile(
     out: &Path,
     profile: &roundhouse::profile::DeploymentProfile,
 ) {
-    if out.exists() {
-        std::fs::remove_dir_all(out).expect("clean scratch");
-    }
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");

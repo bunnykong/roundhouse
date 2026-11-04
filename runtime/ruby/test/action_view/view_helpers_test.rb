@@ -627,6 +627,49 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %( data-turbo="false"), ViewHelpers.render_attrs({ "data-turbo": false })
   end
 
+  # Attribute NAMES go through Rails' `ERB::Util.xml_name_escape`, as
+  # `tag_option` does: a first character that cannot start an XML name
+  # and any later one that cannot continue it become `_`, so a key never
+  # closes the attribute or opens another one. Expected strings MEASURED
+  # against actionview 8.1.4 with these exact calls.
+  def test_content_tag_escapes_a_data_key_name
+    out = ViewHelpers.content_tag(:p, "x", data: { "x onmouseover=alert(1) z": "v" })
+    assert_equal %(<p data-x_onmouseover_alert_1__z="v">x</p>), out
+  end
+
+  # One key per call: the Swift runtime renders attributes sorted by
+  # key, so a multi-key Hash is not in Rails' order there.
+  def test_content_tag_escapes_a_top_level_key_name
+    assert_equal %(<p a_b_c="v">x</p>), ViewHelpers.content_tag(:p, "x", "a b=c": "v")
+    assert_equal %(<p _st="w">x</p>), ViewHelpers.content_tag(:p, "x", "1st": "w")
+    assert_equal %(<p x_y="z">x</p>), ViewHelpers.content_tag(:p, "x", "x\"y": "z")
+    assert_equal %(<p _a="y">x</p>), ViewHelpers.content_tag(:p, "x", "-a": "y")
+    assert_equal %(<p a_b="z">x</p>), ViewHelpers.content_tag(:p, "x", "a>b": "z")
+  end
+
+  def test_content_tag_escapes_an_aria_key_name
+    out = ViewHelpers.content_tag(:p, "x", aria: { "label by": "v" })
+    assert_equal %(<p aria-label_by="v">x</p>), out
+  end
+
+  # A name that escapes to "" is NO attribute. Written as ` ="…"`, the
+  # HTML parser reads `="foo` as a name and the value's later words as
+  # attributes of their own. Stricter than Rails for a blank Symbol key,
+  # which Rails writes as ` ="…"`; a blank String key Rails skips.
+  def test_content_tag_drops_a_name_that_escapes_to_nothing
+    assert_equal %(<p>x</p>), ViewHelpers.content_tag(:p, "x", " ": "foo onmouseover=alert(1) x")
+    assert_equal "", ViewHelpers.render_attrs({ " ": "v" })
+  end
+
+  def test_content_tag_keeps_valid_key_names
+    assert_equal %(<p class="c">x</p>), ViewHelpers.content_tag(:p, "x", class: "c")
+    assert_equal %(<p id="i">x</p>), ViewHelpers.content_tag(:p, "x", id: "i")
+    assert_equal %(<p data-turbo-confirm="ok">x</p>), ViewHelpers.content_tag(:p, "x", data: { turbo_confirm: "ok" })
+    assert_equal %(<p aria-labelledby="l">x</p>), ViewHelpers.content_tag(:p, "x", aria: { labelledby: "l" })
+    assert_equal %(<p @a:b-c.d_9="v">x</p>), ViewHelpers.content_tag(:p, "x", "@a:b-c.d_9": "v")
+    assert_equal %(<p :x="w">x</p>), ViewHelpers.content_tag(:p, "x", ":x": "w")
+  end
+
   # FormBuilder + form_with tests retired alongside the runtime
   # classes themselves — the lowerer macro-inlines form_with and
   # form.label/text_field/text_area/submit at lower time (Stages 1a

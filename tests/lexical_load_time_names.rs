@@ -13,6 +13,8 @@
 //!
 //! Native Ruby is the oracle.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -84,8 +86,7 @@ const FILES: &[(&str, &str)] = &[
 
 #[test]
 fn native_ruby_resolves_lexical_names() {
-    let app = std::env::temp_dir().join(format!("roundhouse-lexical-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&app);
+    let app = scratch::dir("roundhouse-lexical");
     let mut requires = String::new();
     for (path, text) in FILES {
         let full = app.join(path);

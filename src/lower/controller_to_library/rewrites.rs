@@ -54,7 +54,7 @@ pub(super) fn partial_view_call(
     locals: &[(Symbol, Expr)],
     module_name: Option<&str>,
     partials: &super::PartialMap,
-    request: Option<(Option<&str>, &str)>,
+    request: Option<(Option<&str>, &str, bool)>,
     span: Span,
 ) -> Option<Expr> {
     partial_view_call_with_record(partial, locals, None, module_name, partials, request, span)
@@ -75,7 +75,7 @@ pub(super) fn partial_view_call_with_record(
     record_override: Option<&Expr>,
     module_name: Option<&str>,
     partials: &super::PartialMap,
-    request: Option<(Option<&str>, &str)>,
+    request: Option<(Option<&str>, &str, bool)>,
     span: Span,
 ) -> Option<Expr> {
     let (module_dir, base_name) = match partial.rsplit_once('/') {
@@ -107,7 +107,7 @@ pub(super) fn partial_view_call_with_record(
     }
     // An action's render passes its own action, controller and path parameters, as a view's call passes them to a partial.
     let request_value = |name: &str| -> Option<Expr> {
-        let (action, controller) = request?;
+        let (action, controller, overlaid) = request?;
         // Not over a strict partial's own declared default (`action_name: "fallback"`).
         if contract.declared.iter().any(|d| d == name) {
             return None;
@@ -129,7 +129,7 @@ pub(super) fn partial_view_call_with_record(
                     ExprNode::Send { recv: None, method: Symbol::from("controller_path"), args: vec![], block: None, parenthesized: false },
                 ),
             }),
-            "path_parameters" => Some(ivar("path_parameters", span)),
+            "path_parameters" => Some(view_path_parameters(overlaid, span)),
             // The request's flash, as the action's own view gets it
             // (`flash_lookup`): a `render partial: "shared/flash"` in a
             // turbo-stream response reads `notice`. By slot
@@ -169,6 +169,8 @@ pub(super) fn rewrite_render_to_views(
     // where a template this controller lacks may still live. See the
     // `subclass_template_hook` arm below.
     inheritor_modules: &[String],
+    // Whether the controller has `route_param_recall::OVERLAY`, which its views take as the request's path parameters.
+    overlaid: bool,
 ) -> Expr {
     // A controller with no Views module of its own (ApplicationController)
     // still renders: `allow_browser`'s fallback is `render template:
@@ -260,7 +262,7 @@ pub(super) fn rewrite_render_to_views(
                 }
                 if let Some(pname) = partial_name {
                     let view_call =
-                        partial_view_call(&pname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str())), e.span)?;
+                        partial_view_call(&pname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str(), overlaid)), e.span)?;
                     if to_string {
                         return Some(view_call);
                     }
@@ -334,7 +336,7 @@ pub(super) fn rewrite_render_to_views(
                         }
                     }
                     let view_call =
-                        partial_view_call(tname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str())), e.span)?;
+                        partial_view_call(tname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str(), overlaid)), e.span)?;
                     let mut new_args = vec![view_call];
                     if !rest.is_empty() {
                         new_args.push(Expr::new(e.span, ExprNode::Hash { entries: rest, kwargs: true }));
@@ -921,7 +923,7 @@ pub(super) fn rewrite_render_to_views(
                     });
                 }
                 if pass_path_parameters {
-                    view_args.push(ivar("path_parameters", e.span));
+                    view_args.push(view_path_parameters(overlaid, e.span));
                 }
             }
             // Digit-leading stems (`about/404`) carry a `_` prefix on the
@@ -3692,6 +3694,17 @@ fn params_require_permit(resource: Symbol, fields: Vec<Symbol>, span: Span) -> E
 
 fn nil_expr(span: Span) -> Expr {
     Expr::new(span, ExprNode::Lit { value: Literal::Nil })
+}
+
+/// The path parameters an action hands its views: the request's, with
+/// `default_url_options`' segments laid over them when the controller
+/// has the `route_param_recall::OVERLAY` method.
+fn view_path_parameters(overlaid: bool, span: Span) -> Expr {
+    if !overlaid {
+        return ivar("path_parameters", span);
+    }
+    let method = Symbol::from(crate::lower::route_param_recall::OVERLAY);
+    Expr::new(span, ExprNode::Send { recv: None, method, args: vec![], block: None, parenthesized: false })
 }
 
 fn ivar(name: &str, span: Span) -> Expr {

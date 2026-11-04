@@ -3,6 +3,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -58,8 +60,7 @@ fn a_gem_namespace_holding_only_autoloads_is_defined_when_eager_loading() {
 }
 
 fn autoload_only_namespace(eager: bool) {
-    let root = std::env::temp_dir().join(format!("roundhouse-gem-autoload-only-namespace-{}-{eager}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("roundhouse-gem-autoload-only-namespace-{eager}"));
     let lib = root.join("profkit/lib");
     for (path, text) in FILES {
         let file = lib.join(path);

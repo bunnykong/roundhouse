@@ -9,11 +9,12 @@
 //! class is registered under, and every reader on it failed dispatch.
 //! Ruby resolves the name from where it is written; so must the typer.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(files: &[(&str, &str)]) -> String {
-    let dir = std::env::temp_dir().join(format!("rh_lexical_nested_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh_lexical_nested");
     for (path, src) in files {
         let full = dir.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();

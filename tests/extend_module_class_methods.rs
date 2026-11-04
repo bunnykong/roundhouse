@@ -6,13 +6,14 @@
 //! `User.with_current`. Only `include` was folded into the registry, so
 //! every such call (10 for `current` alone) was an unknown method.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(files: &[(&str, &str)]) -> String {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("rh_extend_mod_{}_{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("rh_extend_mod_{n}"));
     for (path, src) in files {
         let full = dir.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();

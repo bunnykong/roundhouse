@@ -1,6 +1,8 @@
 //! Literal source-backed isolated engines compose through the ordinary route
 //! scope; external Rack, dynamic and helper-bearing mounts remain explicit errors.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -10,14 +12,10 @@ struct Fixture(PathBuf);
 impl Fixture {
     /// Reserve a unique parent for one test's app and emitted projects.
     fn new(label: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "roundhouse-engine-mount-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
+        let root = scratch::dir(&format!("roundhouse-engine-mount-{label}-{}", std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
-        ));
+                .as_nanos()));
         Self(root)
     }
 

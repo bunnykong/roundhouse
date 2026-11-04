@@ -20,6 +20,8 @@
 //! against what Rails 8.1 + jbuilder 2.15 render for the same
 //! templates, row and ivars.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -269,10 +271,7 @@ fn a_local_and_an_ivar_of_one_name_stay_apart() {
 fn the_templates_render_what_jbuilder_renders() {
     let app = app();
     let files = emitted(ruby::emit_lowered_jbuilder_views(&app));
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-jbuilder-partial-ivars-{}",
-        std::process::id()
-    ));
+    let dir = scratch::dir("roundhouse-jbuilder-partial-ivars");
     for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

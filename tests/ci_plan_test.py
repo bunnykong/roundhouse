@@ -1434,6 +1434,55 @@ class Results(unittest.TestCase):
                     ci.spinel_toolchain_shard(tests, 0),
                 )
 
+    def test_bundled_tests_recorded_with_their_compile_share_spread_across_shards(self):
+        # #1781: a test whose contract runs from a shared bundle finishes in well under a second, and
+        # recording only that put every bundled test on one shard, which then paid all their compiles.
+        heavy = {"heavy0": 600, "heavy1": 500, "heavy2": 400}
+        bundled = [f"bundled{i:02}" for i in range(16)]
+        share = 60
+        true_cost = {**heavy, **{t: 1 + share for t in bundled}}
+        tests = sorted(true_cost)
+
+        def plan(recorded):
+            timings = {"toolchain": {**heavy, **{t: recorded for t in bundled}}}
+            shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(4)]
+            self.assertEqual(sorted(t for s in shards for t in s), tests)
+            loads = [sum(true_cost[t] for t in s) for s in shards]
+            loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
+            return shards, loads
+
+        shards, loads = plan(recorded=1)
+        self.assertEqual(max(sum(t in bundled for t in s) for s in shards), len(bundled))
+        self.assertGreater(max(loads) - min(loads), len(bundled) * share // 2)
+        shards, loads = plan(recorded=1 + share)
+        self.assertLessEqual(max(sum(t in bundled for t in s) for s in shards), len(bundled) // 2)
+        self.assertLess(max(loads) - min(loads), max(heavy.values()))
+
+    def test_run_tests_charges_each_bundled_test_its_share_of_the_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "records.jsonl"
+            bundle = Path(tmp) / "bundle"
+            bundle.mkdir()
+            for raw, expected in [
+                ('{"a": 120.4, "c": 50, "b": "slow", "d": -1}', {"a": 120, "b": 1}),
+                ("not json", {"a": 1, "b": 1}),
+                ("[]", {"a": 1, "b": 1}),
+                (None, {"a": 1, "b": 1}),
+            ]:
+                with self.subTest(raw=raw):
+                    out.unlink(missing_ok=True)
+                    (bundle / "seconds.json").unlink(missing_ok=True)
+                    if raw is not None:
+                        (bundle / "seconds.json").write_text(raw)
+                    env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": str(out), "RH_SPINEL_BUNDLE": str(bundle)}
+                    subprocess.run(
+                        ["python3", spec.origin, "run-tests", "--kind", "toolchain", "--parallel", "2",
+                         "--", "true"],
+                        input="a\nb\n", capture_output=True, text=True, env=env, check=True,
+                    )
+                    records = [json.loads(line) for line in out.read_text().splitlines()]
+                    self.assertEqual({r["name"]: r["seconds"] for r in records}, expected)
+
     def test_merge_averages_passing_records_into_the_last_seconds(self):
         merged = ci.merge_timings(
             {"toolchain": {"a": 100, "b": 50}},

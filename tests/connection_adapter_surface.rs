@@ -8,15 +8,15 @@
 //! which Rails' `AbstractAdapter` defines and the runtime never needed.
 //! Each was reported as an unknown method of the connection.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static RUN: AtomicUsize = AtomicUsize::new(0);
 
 fn check(files: &[(&str, &str)]) -> String {
-    let dir = std::env::temp_dir()
-        .join(format!("rh_connection_adapter_{}_{}", std::process::id(), RUN.fetch_add(1, Ordering::SeqCst)));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("rh_connection_adapter_{}", RUN.fetch_add(1, Ordering::SeqCst)));
     for (path, src) in files {
         let full = dir.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();

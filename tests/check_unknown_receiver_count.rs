@@ -3,13 +3,14 @@
 //! missing method passes. In a library class nothing else reports them.
 //! The count sits beside the error total so that an error that goes
 //! away by becoming such a send is visible as a reclassification.
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(args: &[&str], files: &[(&str, &str)]) -> String {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("rh_unknown_sends_{}_{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("rh_unknown_sends_{n}"));
     for (path, text) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),

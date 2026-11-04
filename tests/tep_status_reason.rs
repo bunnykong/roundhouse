@@ -1,4 +1,6 @@
 //! Tep's status line uses the registered reason for conflicts and validation errors.
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::Path;
 use std::process::Command;
 
@@ -27,7 +29,7 @@ fn conflict_and_validation_status_lines_match_rails() {
 #[ignore = "requires the native Spinel compiler; set SPINEL to its path"]
 fn conflict_and_validation_reasons_run_on_spinel() {
     let dir =
-        std::env::temp_dir().join(format!("roundhouse-status-reasons-{}", std::process::id()));
+        scratch::dir("roundhouse-status-reasons");
     std::fs::create_dir_all(&dir).unwrap();
     let binary = dir.join("reasons");
     let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());

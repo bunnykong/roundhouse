@@ -6,6 +6,8 @@
 //! time. The run itself is
 //! `typescript_toolchain::real_blog_class_constants_run_under_tsx`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -113,8 +115,7 @@ fn a_constant_shadowing_an_ancestors_static_is_typed_any() {
 /// ruby target, which keeps every constant, reports none.
 #[test]
 fn the_cli_reports_each_constant_the_typescript_emit_leaves_out() {
-    let root = std::env::temp_dir().join(format!("roundhouse-ts-constants-cli-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-ts-constants-cli");
     for (path, body) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
         ("app/models/gauge.rb", "class Gauge\n  WEIGHTS = { \"a\" => 1 }.freeze\n  ALIAS = WEIGHTS\n  STARTED = Time.now\n  LEVEL = 3\n\n  def self.LEVEL\n    4\n  end\n\n  def self.size\n    WEIGHTS.size\n  end\nend\n"),

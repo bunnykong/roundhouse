@@ -2,10 +2,12 @@
 //! ActionController::Base. Only the Ruby family's runtime issues and
 //! verifies the token, so every other target names the gap as a warning.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn forgery_warnings(target: &str, fixture: &str) -> Vec<String> {
-    let out_dir = std::env::temp_dir().join(format!("roundhouse-forgery-{fixture}-{target}-{}", std::process::id()));
+    let out_dir = scratch::dir(&format!("roundhouse-forgery-{fixture}-{target}"));
     let out = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
         .args(["--target", target, "--allow-unsupported", "-o"])
         .arg(&out_dir)

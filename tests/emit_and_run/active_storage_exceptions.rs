@@ -2,6 +2,8 @@
 //! classes and type guards. The emitted runtime must define the same
 //! names and parents, including the service/preview/transformer errors.
 
+#[path = "../support/scratch.rs"]
+mod scratch;
 use super::emit_and_run;
 
 const EXCEPTIONS: &[(&str, &str)] = &[
@@ -223,7 +225,7 @@ fn an_unknown_active_storage_exception_stays_refused() {
 
 #[test]
 fn active_storage_exception_methods_are_still_checked() {
-    let root = std::env::temp_dir().join(format!("roundhouse-storage-methods-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-storage-methods");
     std::fs::create_dir_all(root.join("app/models")).unwrap();
     std::fs::write(
         root.join("app/models/application_record.rb"),

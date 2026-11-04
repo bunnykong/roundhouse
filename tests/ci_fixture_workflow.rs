@@ -1,3 +1,5 @@
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 
 fn fixture_job() -> serde_yaml_ng::Value {
@@ -84,8 +86,8 @@ fn source_reuse_is_pr_only_and_never_grants_a_validation_receipt() {
         "${{ steps.fixture-cache.outcome == 'success' && steps.fixture-cache.outputs.cache-hit == 'true' }}"
     );
     for command in [
-        "gem install rails --no-document",
-        "bin/rh fixture",
+        "gem install rails -v 8.1.4 --no-document",
+        "bin/rh fixture --rails 8.1.4",
         "cd fixtures && ../scripts/create-store store",
     ] {
         let step = steps.iter().find(|step| step["run"] == command).unwrap();
@@ -145,8 +147,7 @@ fn fixture_keys_change_with_day_recipe_and_observed_tools() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("fixture-key-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("fixture-key-{unique}"));
     for (name, script) in [
         (
             "ruby",
@@ -240,7 +241,7 @@ fn shared_store_validation_is_frozen_and_preserves_both_failure_paths() {
         .unwrap()
         .as_nanos();
     let root =
-        std::env::temp_dir().join(format!("store-validation-{}-{unique}", std::process::id()));
+        scratch::dir(&format!("store-validation-{unique}"));
     let app = root.join("fixtures/store");
     fs::create_dir_all(app.join("bin")).unwrap();
     for (path, body) in [
@@ -303,8 +304,7 @@ fn fixture_gem_environment_is_exported_before_ruby_setup() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("fixture-env-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("fixture-env-{unique}"));
     let runner_temp = root.join("runner temp");
     let env_file = root.join("env");
     let result = Command::new("bash")
@@ -345,8 +345,7 @@ fn fixture_archive_omits_scratch_but_keeps_source_and_seeded_blog_database() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("fixture-pack-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("fixture-pack-{unique}"));
     let retained = [
         "fixtures/real-blog/app/models/article.rb",
         "fixtures/real-blog/storage/development.sqlite3",

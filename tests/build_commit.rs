@@ -1,6 +1,8 @@
 //! Exercise Cargo's actual build-script invalidation with ordinary and
 //! linked Git checkouts. A missing rerun-if-changed path causes every
 //! no-op build to rerun, even when the embedded commit remains correct.
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -76,10 +78,7 @@ impl Fixture {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "roundhouse-build-stamp-{}-{nonce}",
-            std::process::id()
-        ));
+        let root = scratch::dir(&format!("roundhouse-build-stamp-{nonce}"));
         let repo = root.join("repo");
         let linked = root.join("linked");
         let counter = root.join("build-runs");

@@ -5,6 +5,8 @@
 //! Skips when `ruby` with the sqlite3 gem is not on the machine; the CI
 //! core job has it.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -13,8 +15,7 @@ use roundhouse::ingest::ingest_app;
 use roundhouse::project::BuildTarget;
 
 fn tree() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-relation-runtime-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("roundhouse-relation-runtime");
     for (path, body) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n    t.integer \"parent_id\"\n    t.datetime \"read_at\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),

@@ -2,15 +2,15 @@
 //! bindings must not invent StandardError and produce method-error cascades.
 //! Resolved exception classes retain their checked Exception surface.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static RUN: AtomicUsize = AtomicUsize::new(0);
 
 fn check(files: &[(&str, &str)]) -> String {
-    let dir = std::env::temp_dir()
-        .join(format!("rh_rescued_exception_{}_{}", std::process::id(), RUN.fetch_add(1, Ordering::SeqCst)));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("rh_rescued_exception_{}", RUN.fetch_add(1, Ordering::SeqCst)));
     for (path, src) in files {
         let full = dir.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();

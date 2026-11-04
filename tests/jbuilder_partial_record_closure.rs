@@ -14,6 +14,8 @@
 //! ivar of the closure, the controller's `@params`, typed as the
 //! String-keyed request Hash so `params[:q]` reads `"q"`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -102,7 +104,7 @@ fn the_template_takes_what_its_partial_reads_and_the_controller_passes_it() {
 #[test]
 fn the_templates_render_what_jbuilder_renders() {
     let files = emitted(BuildTarget::Ruby);
-    let dir = std::env::temp_dir().join(format!("roundhouse-jbuilder-record-closure-{}", std::process::id()));
+    let dir = scratch::dir("roundhouse-jbuilder-record-closure");
     for (path, source) in files.iter().filter(|(p, _)| p.starts_with("app/views/widgets/") && p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

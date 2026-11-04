@@ -10,6 +10,8 @@
 //!
 //! Native Ruby on the same source is the oracle.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -41,7 +43,7 @@ const REPORT: &str = "Numlab::Probe.report.each { |r| p r }\n";
 #[test]
 fn numbered_parameters_stay_where_ruby_reads_them() {
     let dir =
-        std::env::temp_dir().join(format!("roundhouse-numbered-param-{}", std::process::id()));
+        scratch::dir("roundhouse-numbered-param");
     std::fs::create_dir_all(&dir).unwrap();
     let probe = dir.join("probe.rb");
     std::fs::write(&probe, PROBE).unwrap();

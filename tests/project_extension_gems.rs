@@ -1,5 +1,7 @@
 //! Extension facts must describe the gem that runs, not just a typed name.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -16,10 +18,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "roundhouse-extension-gems-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
-        ));
-        std::fs::create_dir_all(&path).unwrap();
+        let path = scratch::dir(&format!("roundhouse-extension-gems-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
         Self(path)
     }
 

@@ -9,6 +9,8 @@
 //! app never calls the method gets neither the file nor its require
 //! (`project::apply_pagination_demand`); campfire, which does, keeps both.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::Path;
 
 use roundhouse::ingest::ingest_app;
@@ -31,11 +33,7 @@ fn copy_dir(from: &Path, to: &Path) {
 
 fn spinel_files(paginates: bool) -> Vec<(String, String)> {
     let fixture = roundhouse::fixtures::real_blog().to_path_buf();
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-pagination-demand-{}-{paginates}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("roundhouse-pagination-demand-{paginates}"));
     for sub in ["app", "config", "db"] {
         copy_dir(&fixture.join(sub), &dir.join(sub));
     }

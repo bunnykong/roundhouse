@@ -11,6 +11,8 @@
 //! the CRuby tree installs them through the sqlite3 gem on every pooled
 //! connection (`runtime/sql_functions.rb`, called from `Db.open_pool`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -66,9 +68,7 @@ fn fixture() -> PathBuf {
     // Tests run in parallel, so each call must clear only its own tree.
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir()
-        .join(format!("roundhouse-sql-functions-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("roundhouse-sql-functions-{n}"));
     for (path, body) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
@@ -140,8 +140,7 @@ fn the_installed_functions_answer_what_the_apps_blocks_would() {
         eprintln!("skipping: ruby with the sqlite3 gem not available");
         return;
     }
-    let dir = std::env::temp_dir().join(format!("roundhouse-sql-functions-run-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-sql-functions-run");
     std::fs::write(dir.join("sql_functions.rb"), installer()).unwrap();
     let out = Command::new("ruby")
         .arg("-rsqlite3")

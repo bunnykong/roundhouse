@@ -15,15 +15,13 @@
 //! the gap never reached the punch list, undercounting the app's
 //! real gap total.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn app() -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse_alias_survey_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = scratch::dir(&format!("roundhouse_alias_survey_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     let files = [
         (
             "app/models/application_record.rb",

@@ -7,17 +7,15 @@
 //! `load_client.then { |client| … }` as `no known method then on
 //! Promise`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn check(name: &str, account: &str) -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "rh_own_then_dispatch_{}_{name}_{n}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("rh_own_then_dispatch_{name}_{n}"));
     let files = [
         ("roundhouse.yml", "test_paths:\n  - test\n"),
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :accounts do |t|\n    t.string :name\n  end\nend\n"),

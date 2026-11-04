@@ -33,6 +33,8 @@
 //!
 //!       cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -208,11 +210,7 @@ fn run_on_cruby(name: &str, script: &str) -> (Output, PathBuf) {
     let (files, errors) = emit(&app, BuildTarget::Ruby);
     assert_no_errors("Ruby emission", &errors);
 
-    let scratch =
-        std::env::temp_dir().join(format!("roundhouse-tiny-api-{name}-{}", std::process::id()));
-    if scratch.exists() {
-        std::fs::remove_dir_all(&scratch).expect("clean scratch");
-    }
+    let scratch = scratch::dir(&format!("roundhouse-tiny-api-{name}"));
     roundhouse::project::write_to_dir(&files, &scratch).expect("write the Ruby tree");
     let script = format!(
         "require File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{REQUEST}{script}"
@@ -412,13 +410,7 @@ fn emit_spinel(name: &str) -> PathBuf {
     let (files, errors) = emit(&app, BuildTarget::Spinel);
     assert_no_errors("Spinel emission", &errors);
 
-    let scratch = std::env::temp_dir().join(format!(
-        "roundhouse-tiny-api-spinel-{name}-{}",
-        std::process::id()
-    ));
-    if scratch.exists() {
-        std::fs::remove_dir_all(&scratch).expect("clean scratch");
-    }
+    let scratch = scratch::dir(&format!("roundhouse-tiny-api-spinel-{name}"));
     roundhouse::project::write_to_dir(&files, &scratch).expect("write the Spinel tree");
     scratch
 }

@@ -10,6 +10,8 @@
 //!
 //!     cargo test --test csharp_toolchain -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -30,13 +32,10 @@ use roundhouse::emit::csharp;
 use roundhouse::ingest::ingest_app;
 
 fn scratch_dir(fixture: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-csharp-check-{fixture}"))
+    scratch::dir(&format!("roundhouse-csharp-check-{fixture}"))
 }
 
 fn generate_project(fixture_path: &Path, out: &Path) {
-    if out.exists() {
-        std::fs::remove_dir_all(out).expect("clean scratch");
-    }
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");

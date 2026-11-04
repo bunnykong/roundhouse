@@ -7,6 +7,8 @@
 //!
 //! A Proc default was reported and left out, so the mail had no `to:`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -63,9 +65,7 @@ fn a_proc_default_is_computed_by_mail_on_spinel() {
 
 /// The warnings ingest and `target`'s lowering give for the test app.
 fn lowered_warnings(target: BuildTarget) -> Vec<String> {
-    let root = std::env::temp_dir().join(format!("roundhouse-mailer-proc-default-{}-{}", std::process::id(), target.as_str()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = scratch::dir(&format!("roundhouse-mailer-proc-default-{}", target.as_str()));
     let source = root.join("app");
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
     for (path, text) in [

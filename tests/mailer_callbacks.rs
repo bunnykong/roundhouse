@@ -8,6 +8,8 @@
 //!
 //! Each callback was reported and dropped, so the action ran without them.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -85,9 +87,7 @@ end
 fn lowered_warnings(files: &[(&str, &str)], target: BuildTarget) -> Vec<String> {
     static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let run = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("roundhouse-mailer-callbacks-{}-{run}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = scratch::dir(&format!("roundhouse-mailer-callbacks-{run}"));
     let source = root.join("app");
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
     for (path, text) in files {

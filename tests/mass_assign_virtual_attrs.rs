@@ -7,6 +7,8 @@
 //! virtuals; the constructor now routes the same ones. Answers are
 //! activerecord 8.1.4's (`rails_answers_the_table`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -227,8 +229,7 @@ const PRIVATE_ATTR_FORMS: [(&str, &str); 3] = [
 #[test]
 fn a_private_attr_writer_is_refused_at_ingest() {
     for (key, model) in PRIVATE_ATTR_FORMS {
-        let root = std::env::temp_dir().join(format!("roundhouse-private-attr-{}-{key}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch::dir(&format!("roundhouse-private-attr-{key}"));
         for (path, body) in [
             ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
             ("app/models/member.rb", model),

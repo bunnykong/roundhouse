@@ -1,5 +1,7 @@
 //! Sparse overlay emission and in-place application through the public API and CLI.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,9 +12,7 @@ struct Tree(PathBuf);
 
 impl Tree {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("roundhouse-fractal-apply-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root = scratch::dir(&format!("roundhouse-fractal-apply-{name}"));
         Self(root)
     }
 

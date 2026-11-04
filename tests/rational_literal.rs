@@ -6,6 +6,8 @@
 //! the value, so ingest builds the Kernel `Rational` call from Prism's
 //! numerator and denominator. Native Ruby on the same source is the oracle.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -36,8 +38,7 @@ const CONFIG: &str = "Rails.application.configure do\n  config.eager_load = fals
 
 #[test]
 fn rational_literals_keep_their_exact_value_like_native() {
-    let dir = std::env::temp_dir().join(format!("roundhouse-rational-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-rational");
     let rat = dir.join("limits.rb");
     std::fs::write(&rat, RAT).unwrap();
     let native = emit_and_run::ruby()

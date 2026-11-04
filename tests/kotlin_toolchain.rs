@@ -16,6 +16,8 @@
 //!
 //!     cargo test --test kotlin_toolchain -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -36,13 +38,10 @@ use roundhouse::emit::kotlin;
 use roundhouse::ingest::ingest_app;
 
 fn scratch_dir(fixture: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-kotlin-check-{fixture}"))
+    scratch::dir(&format!("roundhouse-kotlin-check-{fixture}"))
 }
 
 fn generate_project(fixture_path: &Path, out: &Path) {
-    if out.exists() {
-        std::fs::remove_dir_all(out).expect("clean scratch");
-    }
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");

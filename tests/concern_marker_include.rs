@@ -5,11 +5,12 @@
 //! unused instance methods, nothing calls them that way, and the
 //! module's real methods still reach every includer.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(files: &[(&str, &str)]) -> String {
-    let dir = std::env::temp_dir().join(format!("rh_concern_marker_include_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh_concern_marker_include");
     for (path, src) in files {
         let full = dir.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();

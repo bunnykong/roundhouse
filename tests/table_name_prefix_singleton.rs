@@ -6,10 +6,12 @@
 //! for `charges`, bound no schema row, and its columns (`product_key`, …)
 //! were `no known method`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(name: &str, namespace: &str) -> String {
-    let root = std::env::temp_dir().join(format!("rh_table_name_prefix_singleton_{}_{name}", std::process::id()));
+    let root = scratch::dir(&format!("rh_table_name_prefix_singleton_{name}"));
     let files = [
         ("roundhouse.yml", "test_paths:\n  - test\n".to_string()),
         ("db/structure.sql", "CREATE TABLE public.billing_charges (\n    id bigint NOT NULL,\n    product_key character varying NOT NULL\n);\n".to_string()),
@@ -61,7 +63,7 @@ fn an_extend_self_prefix_overrides_the_outer_one() {
 
 #[test]
 fn a_nested_empty_prefix_overrides_the_outer_one() {
-    let root = std::env::temp_dir().join(format!("rh_table_name_prefix_singleton_{}_empty", std::process::id()));
+    let root = scratch::dir("rh_table_name_prefix_singleton_empty");
     let files = [
         ("roundhouse.yml", "test_paths:\n  - test\n"),
         ("db/structure.sql", "CREATE TABLE public.vaults (\n    id bigint NOT NULL,\n    label character varying NOT NULL\n);\n"),

@@ -5,6 +5,8 @@
 //! same thing. It used to reach emit as `self_instance_type` and print
 //! `RoundhouseUnsupportedSelfInstance`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use roundhouse::App;
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::ruby::emit_library;
@@ -61,7 +63,7 @@ fn a_class_side_new_is_the_rbs_instance_type() {
         .expect("shelf.rbs");
     assert!(shelf.contains("def self.first_label: () -> String"), "{shelf}");
 
-    let path = std::env::temp_dir().join(format!("rh_widget_{}.rbs", std::process::id()));
+    let path = scratch::dir("rh_widget").join("widget.rbs");
     std::fs::write(&path, &rbs).unwrap();
     let parsed = std::process::Command::new("ruby")
         .args(["-rrbs", "-e", "RBS::Parser.parse_signature(File.read(ARGV[0]))"])

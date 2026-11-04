@@ -12,6 +12,8 @@
 //! (`ActiveSupport.presence(x)` for a receiver with no static type).
 //! An `if` condition is left to the view-condition rewrite.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -192,7 +194,7 @@ fn presence_in_a_template_condition_is_grounded() {
 #[test]
 fn the_partial_renders_what_jbuilder_renders() {
     let files = emitted();
-    let dir = std::env::temp_dir().join(format!("roundhouse-jbuilder-presence-{}", std::process::id()));
+    let dir = scratch::dir("roundhouse-jbuilder-presence");
     for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

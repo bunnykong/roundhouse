@@ -13,6 +13,8 @@
 //!
 //!     cargo test --test uuid_key_ruby -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -134,11 +136,7 @@ fn emit_and_run_oracle(fixture: &Path, scratch: &Path, oracle: &str, ok: &str) {
 }
 
 fn fresh_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).expect("clean scratch");
-    }
-    std::fs::create_dir_all(&dir).expect("create scratch");
+    let dir = scratch::dir(name);
     dir
 }
 

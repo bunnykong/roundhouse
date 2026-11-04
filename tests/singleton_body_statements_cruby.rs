@@ -5,6 +5,8 @@
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -84,7 +86,7 @@ p [WritersGem.singleton_class.constants(false).sort, (WritersGem::WRITERS rescue
 
 #[test]
 fn a_gem_source_singleton_body_loop_runs_on_the_singleton_class_as_in_cruby() {
-    let gem = std::env::temp_dir().join(format!("rh_writers_gem_native_{}", std::process::id()));
+    let gem = scratch::dir("rh_writers_gem_native");
     for (path, text) in GEM_FILES {
         let file = gem.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

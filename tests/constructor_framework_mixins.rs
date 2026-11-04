@@ -11,6 +11,8 @@
 //!    Any `super`, a prepend, an `initialize` from a concern's
 //!    `included do` or `define_method` keeps the refusal.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -138,8 +140,7 @@ fn an_initialize_from_a_concerns_included_do_keeps_the_refusal() {
 fn an_own_initialize_shadows_a_source_mixins_on_ruby() {
     const MIXIN: &str = "module Kit\n  module Supplier\n    def initialize(*args, **kw)\n      @x = [:mixin]\n    end\n  end\nend\n";
     const REQ: &str = "module Kit\n  class Req\n    include Supplier\n\n    def initialize(verb, url, allow_local: false)\n      @x = [verb, url, allow_local]\n    end\n\n    def describe\n      @x\n    end\n  end\nend\n";
-    let dir = std::env::temp_dir().join(format!("roundhouse-ctor-mixins-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-ctor-mixins");
     for (name, src) in [("mixin.rb", MIXIN), ("req.rb", REQ), ("caller.rb", CALLER)] {
         std::fs::write(dir.join(name), src).unwrap();
     }

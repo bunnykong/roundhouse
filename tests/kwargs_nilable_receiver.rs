@@ -17,6 +17,8 @@
 //! calling on the dropped `nil` branch raises `NoMethodError` in Ruby
 //! either way, so narrowing it away never changes that call's behavior.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -25,12 +27,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static RUN: AtomicUsize = AtomicUsize::new(0);
 
 fn native(files: &[(&str, &str)], script: &str) -> String {
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-nilable-kwargs-{}-{}",
-        std::process::id(),
-        RUN.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir(&format!("roundhouse-nilable-kwargs-{}", RUN.fetch_add(1, Ordering::Relaxed)));
     let mut requires = String::new();
     for (name, source) in files {
         let path = dir.join(name);

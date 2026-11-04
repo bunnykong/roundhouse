@@ -6,6 +6,8 @@
 //! gradual; a type nobody declares is reported. The binding runs no
 //! code, so the emitted Ruby keeps only the statements around it.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
@@ -203,8 +205,7 @@ fn the_binding_emits_nothing_but_a_used_value() {
 /// family emits it as nothing and builds.
 #[test]
 fn only_the_ruby_family_emits_a_self_binding() {
-    let root = std::env::temp_dir().join(format!("rh_self_binding_targets_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("rh_self_binding_targets");
     for (path, text) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"articles\" do |t|\n    t.string \"title\"\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),

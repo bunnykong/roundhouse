@@ -1730,18 +1730,27 @@ module ActionView
         # as a bare (undeclared) assignment — to `name`, which in DOM
         # scope is a const global (TS2588), and to an `inner_name` the
         # sibling lines then couldn't find (TS2304).
-        name = k.to_s
-        unless v.nil?
+        # Every NAME written goes through `xml_name_escape`, as Rails'
+        # `tag_option` does: a key is data too, and unescaped it could
+        # close the attribute and open another.
+        name = xml_name_escape(k.to_s)
+        # A name that escapes to "" (a blank key) is NO attribute: written
+        # as ` ="…"`, the parser reads `="foo` as a name and the value's
+        # later words as attributes. Rails writes a blank Symbol key that
+        # way; this is stricter on purpose.
+        unless v.nil? || name == ""
           if v.is_a?(Hash)
             v.each do |inner_k, inner_v|
-              inner_name = inner_k.to_s.tr("_", "-")
-              unless inner_v.nil?
+              # Rails escapes the whole `data-<inner>` name, prefix
+              # included, after the dasherize.
+              inner_name = xml_name_escape(k.to_s + "-" + inner_k.to_s.tr("_", "-"))
+              unless inner_v.nil? || inner_name == ""
                 # Coerce untyped Hash values to String before
                 # html_escape; html_escape's contract is
                 # `(String) -> String` and the untyped values flowing
                 # through Hash[String, untyped] need explicit
                 # stringification.
-                out = out + " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
+                out = out + " #{inner_name}=\"#{html_escape(inner_v.to_s)}\""
               end
             end
           elsif boolean_attr?(name)
@@ -1766,6 +1775,46 @@ module ActionView
         end
       end
       out
+    end
+
+    # Rails' `ERB::Util.xml_name_escape` (activesupport 8.1.4,
+    # core_ext/erb/util.rb), which `tag_option` applies to every
+    # attribute name: a blank name is "", a valid XML name is itself,
+    # and otherwise a first character outside the name-START set and
+    # each later character outside the name set become "_".
+    #
+    # The ASCII part of those sets is exact: start is `@ : A-Z _ a-z`,
+    # and a later character may also be `- . 0-9`. NON-ASCII is
+    # conservative: Rails keeps most characters from U+00C0 up (`é`
+    # stays `é`), and here a non-ASCII character becomes "_" — one per
+    # character on CRuby, and on a target whose regexps match bytes or
+    # UTF-16 units, one per unit. Either way the name is plain ASCII.
+    # Keeping one would need Rails' Unicode ranges in a character class,
+    # which not every target's regexp engine reads the same. Likewise
+    # "blank" is ASCII whitespace only: a name of Unicode spaces renders
+    # "_"s where Rails gives "".
+    #
+    # The SHAPE is Rails' own (a gsub over the name, then the first
+    # character), spelled with what every target emits and runs on every
+    # page: a constant pattern, `gsub` with a String replacement, and
+    # `[i, n]` slices of an ASCII String. Not a byte walk: elixir has no
+    # `while`, and swift marks a call that can raise (`erb_url_byte`)
+    # `throws`, which an attribute loop's closure cannot call. No `\A`
+    # anchor either (JavaScript has none): the first character is
+    # sliced out and checked on its own. A valid name — every name a
+    # template writes by hand — is one scan and comes back as itself.
+    XML_NAME_INVALID_CHAR = /[^@:A-Z_a-z.0-9-]/.freeze
+    XML_NAME_INVALID_START = /[^@:A-Z_a-z]/.freeze
+    XML_NAME_BLANK_CHAR = /[\t\n\x0b\f\r ]/.freeze
+
+    def self.xml_name_escape(name)
+      escaped = name.gsub(XML_NAME_INVALID_CHAR, "_")
+      return "" if escaped != name && name.gsub(XML_NAME_BLANK_CHAR, "") == ""
+      return escaped if escaped == ""
+      head = escaped[0, 1].to_s
+      fixed = head.gsub(XML_NAME_INVALID_START, "_")
+      return name if fixed == head && escaped == name
+      fixed + escaped[1, escaped.length - 1].to_s
     end
 
     # The TEXT of one attribute value, before escaping: `to_s` here,

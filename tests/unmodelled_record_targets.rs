@@ -6,6 +6,8 @@
 //! nothing. Under `--survey` the report is a recorded gap, and the output
 //! is written.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::{Command, Output};
 
 const HELPERS: &str = r#"module Tools
@@ -34,8 +36,7 @@ impl App {
     }
 
     fn with(tag: &str, extra: &[(&str, &str)]) -> Self {
-        let root = std::env::temp_dir().join(format!("roundhouse-unmodelled-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch::dir(&format!("roundhouse-unmodelled-{tag}"));
         for (path, body) in [
             ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n"),
             ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),

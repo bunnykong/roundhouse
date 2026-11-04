@@ -992,17 +992,34 @@ def record_timing(kind, name, seconds, ok):
             f.write(json.dumps({"kind": kind, "name": name, "seconds": max(round(seconds), 1), "ok": ok}) + "\n")
 
 
-def run_timed(kind, name, command):
+def run_timed(kind, name, command, charged=0):
     start = time.monotonic()
     status = subprocess.run(command).returncode
-    record_timing(kind, name, time.monotonic() - start, status == 0)
+    record_timing(kind, name, time.monotonic() - start + charged, status == 0)
     return status
+
+
+def bundle_seconds():
+    """Each test's share of the shared Spinel bundle compiles it took part in, written by spinel_bundle_build.
+
+    A bundled test runs a prebuilt binary in well under a second; recording only that let the
+    planner pile every bundled test onto one shard, which then paid all their compiles (#1781).
+    """
+    path = os.environ.get("RH_SPINEL_BUNDLE", "")
+    try:
+        data = json.loads((Path(path) / "seconds.json").read_text()) if path else {}
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {name: seconds for name, seconds in data.items() if positive_seconds(seconds)}
 
 
 def run_tests(kind, tests, parallel, command):
     """Each test in its own process, so each one's seconds can be recorded."""
+    charged = bundle_seconds()
     with ThreadPoolExecutor(max_workers=max(parallel, 1)) as pool:
-        statuses = list(pool.map(lambda t: run_timed(kind, t, [*command, t]), tests))
+        statuses = list(pool.map(lambda t: run_timed(kind, t, [*command, t], charged.get(t, 0)), tests))
     failed = [t for t, status in zip(tests, statuses) if status != 0]
     print(f"{len(tests) - len(failed)} passed, {len(failed)} failed")
     for test in failed:

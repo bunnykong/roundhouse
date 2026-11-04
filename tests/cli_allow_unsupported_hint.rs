@@ -3,6 +3,8 @@
 //! project-boundary refusals fail with or without it, so the hint must
 //! only be printed when the flag would actually write the output.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,14 +13,10 @@ const HINT: &str = "rerun with --allow-unsupported";
 /// A minimal app whose `posts` table is created with `create_table_args`
 /// and holds `extra_column`.
 fn app(name: &str, create_table_args: &str, extra_column: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse_hint_{name}_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
+    let root = scratch::dir(&format!("roundhouse_hint_{name}_{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
-    ));
+            .as_nanos()));
     let files = [
         (
             "app/models/application_record.rb",

@@ -5,6 +5,8 @@
 //! as a PATH gem of `Gemfile.lock`. The fork listed the autoloads in one
 //! table in app/models.rb; here the program of the file that writes each
 //! `autoload` registers it.
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -79,8 +81,7 @@ fn native(lib: &Path) -> Vec<String> {
 
 #[test]
 fn a_literal_gem_autoload_of_a_file_with_requires_loads_its_program() {
-    let root = std::env::temp_dir().join(format!("roundhouse-gem-autoload-in-place-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-gem-autoload-in-place");
     let lib = root.join("kafka-kit/lib");
     for (path, text) in FILES {
         let file = lib.join(path);

@@ -19,6 +19,8 @@
 //! An unsupplied `**options` means `{}` in Ruby, which makes the skip
 //! UNSCOPED — off every action, not off none.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use roundhouse::App;
 use roundhouse::dialect::{ControllerBodyItem, FilterKind};
 use roundhouse::ingest::ingest_app_from_tree;
@@ -1232,7 +1234,7 @@ fn blog_target_copies_configuration_source_without_emitting_state() {
 
     let mut app = configuration_app(WINDOW_SETTINGS, "configure_window mode: :month").unwrap();
     roundhouse::session::analyze_and_lower(&mut app);
-    let root = std::env::temp_dir().join(format!("roundhouse-concern-blog-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-concern-blog");
     std::fs::create_dir_all(root.join("app/controllers/concerns")).unwrap();
     std::fs::write(root.join("app/controllers/concerns/window_settings.rb"), WINDOW_SETTINGS).unwrap();
     let result = target_files(&app, &root, BuildTarget::Blog);

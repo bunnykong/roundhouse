@@ -6,6 +6,8 @@
 //!
 //!     ruby tests/sti_disabled/oracle.rb
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -187,9 +189,7 @@ fn a_model_with_sti_turned_off_keeps_type_as_an_attribute_on_spinel() {
 fn scratch(name: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("roundhouse-sti-disabled-{name}-{}-{n}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir(&format!("roundhouse-sti-disabled-{name}-{n}"));
     dir
 }
 

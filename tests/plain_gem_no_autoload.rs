@@ -3,6 +3,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -45,8 +47,7 @@ const SCRIPT: &str = "require \"ak\" unless defined?(Ak)\nputs Ak::Client.descri
 const LOCK: &str = "PATH\n  remote: vendor/gems/ak-1.0.0\n  specs:\n    ak (1.0.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  ak!\n";
 
 fn run(eager: bool) {
-    let root = std::env::temp_dir().join(format!("roundhouse-plain-gem-no-autoload-{}-{eager}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("roundhouse-plain-gem-no-autoload-{eager}"));
     for (path, text) in FILES.iter().map(|(p, t)| (format!("lib/{p}"), *t)).chain([("strict.rb".to_string(), STRICT)]) {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
