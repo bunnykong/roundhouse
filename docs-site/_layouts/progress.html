@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ page.title | escape }} · Roundhouse</title>
+<meta name="description" content="{{ page.description | escape }}">
+<link rel="stylesheet" href="{{ '/brand.css' | relative_url }}">
+<link rel="stylesheet" href="{{ '/docs/assets/docs.css' | relative_url }}">
+<link rel="stylesheet" href="{{ '/progress/progress.css' | relative_url }}">
+<script defer src="{{ '/progress/progress.js' | relative_url }}"></script>
+</head>
+<body class="progress-page">
+<a class="skip" href="#main">Skip to content</a>
+{% include site-header.html active="progress" %}
+<main id="main" class="progress">
+{{ content }}
+</main>
+<footer class="progress-footer">
+  <span>Built {{ site.data.progress.built }} from <a href="{{ site.repo_docs.github }}/commit/{{ site.data.status.site_sha }}"><code>{{ site.data.progress.site_sha }}</code></a>. Each result keeps its own date: see <a href="#sources">About these numbers</a>.</span>
+  <span><a href="{{ site.repo_docs.github }}/blob/main/docs-site/progress/index.html">Edit this page</a> · Roundhouse · MIT / Apache-2.0</span>
+</footer>
+</body>
+</html>

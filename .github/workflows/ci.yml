@@ -3265,10 +3265,19 @@ jobs:
           working-directory: ./docs-site
       - name: Render the docs pages (→ _site/docs)
         if: needs.plan.outputs.site == 'true'
+        env:
+          # Public pull requests, issues and runs need no extra token permissions;
+          # the token only lifts the API rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
+          # Project status is collected only for builds that publish; others stay offline.
+          ROUNDHOUSE_STATUS: ${{ needs.plan.outputs.publish == 'true' && 'on' || 'off' }}
         run: |
           (cd docs-site && bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site")
           rm -rf _site/docs
           cp -R "$RUNNER_TEMP/docs-site/docs" _site/docs
+          rm -rf _site/progress
+          cp -R "$RUNNER_TEMP/docs-site/progress" _site/progress
+          cp "$RUNNER_TEMP/docs-site/status.json" "$RUNNER_TEMP/docs-site/status-history.json" _site/
           echo "docs pages:"; find _site/docs -name '*.html' | sort
 
       # Live SharedWorker blog demo → _site/blog/. Emits real-blog under

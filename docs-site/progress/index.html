@@ -1,0 +1,311 @@
+---
+layout: progress
+title: Progress
+description: What runs, what still differs from Rails, and where you can help. Measured results with their dates, scope and evidence.
+permalink: /progress/
+---
+{%- assign p = site.data.progress -%}
+{%- assign st = p.states -%}
+<section class="intro wrap">
+  <p class="eyebrow">Progress</p>
+  <h1>Mind the gap. Then help close it.</h1>
+  <p class="lede">What runs, what still differs from Rails, and where you can help. Every result names its app, its test and its date, and links to the evidence.</p>
+  <p class="status">Early, and not ready for production. These measures test different things, so they aren’t added up into one score.</p>
+  <nav class="jump" aria-label="On this page">
+    <a href="#gaps">The gap</a><a href="#over-time">Over time</a><a href="#routes">Frozen routes</a><a href="#targets">Target checks</a><a href="#benchmarks">Speed</a><a href="#activity">Who’s building</a><a href="#help">Join in</a>
+  </nav>
+</section>
+
+{%- comment -%} B. The implementation gap {%- endcomment -%}
+<section class="module wrap" id="gaps" aria-labelledby="gaps-title">
+  <p class="eyebrow">The implementation gap</p>
+  <h2 id="gaps-title">Lobsters’ own tests, run against the compiled app.</h2>
+  {%- if p.gap %}{% assign g = p.gap %}
+  {%- if st.specs.note %}<p class="notice">{{ st.specs.note }}</p>{% endif %}
+  {%- if g.headline %}
+  <div class="figure-row">
+    <p class="hero-figure"><b>{{ g.failed }}</b><span>failing examples</span></p>
+    <ul class="side-figures">
+      <li><b>{{ g.passed }}</b> passed of {{ g.total }} run</li>
+      {%- if g.pending > 0 %}<li><b>{{ g.pending }}</b> pending</li>{% endif %}
+      {%- if g.outside > 0 %}<li><b>{{ g.outside }}</b> {% if g.outside == 1 %}error{% else %}errors{% endif %} outside the examples</li>{% endif %}
+    </ul>
+  </div>
+  {%- elsif g.canary_ok == false %}
+  <p class="notice">The harness didn’t establish that these results came from the emitted code, so the counts are withheld. <a href="{{ g.report_url }}">Read the report</a>.</p>
+  {%- else %}
+  <p class="notice">The published totals don’t agree ({{ g.problems | join: "; " }}), so the counts are withheld until the source is fixed. <a href="{{ g.report_url }}">Read the report</a>.</p>
+  {%- endif %}
+  <p class="qualifier">Lobsters’ model specs against the emitted Ruby, on Ruby {{ g.ruby | escape }}. {{ g.scope.spec_files_run }} of {{ g.scope.spec_files_in_suite }} spec files ran. {{ g.scope.excluded | escape }}</p>
+  <p class="meta">Run {{ st.specs.observed }} · Lobsters <a href="{{ g.lobsters_url }}"><code>{{ g.lobsters_sha }}</code></a> · Roundhouse <a href="{{ g.roundhouse_url }}"><code>{{ g.roundhouse_sha }}</code></a> · <a href="{{ g.report_url }}">Full report</a> · <a href="{{ '/apps/lobsters.html' | relative_url }}">About the Lobsters app</a></p>
+
+  <h3>Where the failures lead</h3>
+  <p class="aside">Each group is a piece of work. Open one for its examples and a first step; you don’t need to know the compiler to start.</p>
+  <ul class="worklist">
+    {%- for c in g.groups %}
+    <li><details class="work" id="{{ c.anchor }}">
+      <summary>
+        <span class="count">{{ c.failures }}</span>
+        <span class="what"><b>{{ c.title | escape }}</b><span class="area">{{ c.area }}</span></span>
+        <span class="step">{{ c.step }}</span>
+      </summary>
+      <div class="work-body">
+        {%- if c.note %}<p>{{ c.note | escape }}</p>{% endif %}
+        {%- if c.examples.size > 0 %}
+        <p class="label">Examples from this run</p>
+        <ul class="examples">
+          {%- for e in c.examples %}<li>{{ e.name | escape }}{% if e.error %}<code>{{ e.error | escape }}</code>{% endif %}</li>{% endfor %}
+        </ul>
+        {%- if c.more > 0 %}<p class="aside">And {{ c.more }} more in the report.</p>{% endif %}
+        {%- endif %}
+        <p class="label">Closes when</p>
+        <p>An acceptance check is still to be written for this group. A good start: reduce a named failure, add a regression test, and check the answer against Rails.</p>
+        <p class="links"><a href="{{ g.report_url }}">Read the evidence</a><a href="{{ c.related_url }}">Find related issues and pull requests</a><a href="{{ '/docs/development/debugging.html' | relative_url }}">Debugging guide</a></p>
+      </div>
+    </details></li>
+    {%- endfor %}
+  </ul>
+  {%- if g.stale_rules.size > 0 %}
+  <details class="work quiet" id="cause-rules">
+    <summary><span class="count">{{ g.stale_rules.size }}</span><span class="what"><b>Rules with no matches in this run</b><span class="area">Help verify</span></span><span class="step">They may be cleared, or their failure messages may have changed.</span></summary>
+    <div class="work-body">
+      <p>Each rule names a failure that used to appear. No failure matched it this time. That isn’t proof of a fix: recheck the original reproducer before the rule is retired.</p>
+      <ul class="rules">
+        {%- for c in g.stale_rules %}<li id="{{ c.anchor }}"><b>{{ c.title | escape }}</b> <code>{{ c.slug }}</code> <span class="area">{{ c.area }}</span> <a href="{{ c.related_url }}">Related work</a></li>{% endfor %}
+      </ul>
+    </div>
+  </details>
+  {%- endif %}
+  {%- else %}
+  <p class="notice">{{ st.specs.note }} The model specs run Lobsters’ own tests against the emitted Ruby; <a href="https://roundhouse-rb.dev/bench/lobsters-specs/">the report</a> has the latest result.</p>
+  {%- endif %}
+</section>
+
+{%- comment -%} C. Over time {%- endcomment -%}
+<section class="module wrap" id="over-time" aria-labelledby="over-time-title">
+  <p class="eyebrow">Over time</p>
+  <h2 id="over-time-title">Is the gap closing?</h2>
+  {%- assign t = p.over_time %}
+  {%- if t.count == 0 %}
+  <p class="aside">History starts with this page. Each nightly run will add a point.</p>
+  {%- else %}
+  <p class="aside">{% if t.change %}{{ t.change }} A change in the count isn’t a diagnosis of its cause.{% else %}History starts with this page, on {{ t.since }}. Waiting for another comparable run.{% endif %}{% if t.interrupted %} History is incomplete before {{ t.since }}.{% endif %}</p>
+  <figure class="chart-frame">
+    {{ t.chart }}
+    <figcaption>Failing Lobsters model examples, one point per nightly run. A line breaks where the app revision or the scope changed, or a run is missing.</figcaption>
+  </figure>
+  <details class="table-view">
+    <summary>Table view</summary>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Failing examples by run">
+      <table>
+        <thead><tr><th scope="col">Run</th><th scope="col" class="num">Failing</th><th scope="col" class="num">Run</th><th scope="col" class="num">Spec files</th><th scope="col" class="num">Outside errors</th><th scope="col">Lobsters</th><th scope="col">Roundhouse</th><th scope="col">Note</th></tr></thead>
+        <tbody>{% for r in t.rows %}<tr><td>{{ r.date }}</td><td class="num">{{ r.failed }}</td><td class="num">{{ r.total }}</td><td class="num">{{ r.files }}</td><td class="num">{{ r.outside }}</td><td><code>{{ r.lobsters_sha }}</code></td><td><code>{{ r.roundhouse_sha }}</code></td><td>{{ r.note }}</td></tr>{% endfor %}</tbody>
+      </table>
+    </div>
+  </details>
+  {%- endif %}
+</section>
+
+{%- comment -%} D. Frozen Lobsters routes {%- endcomment -%}
+<section class="module wrap" id="routes" aria-labelledby="routes-title">
+  <p class="eyebrow">The frozen Lobsters benchmark</p>
+  <h2 id="routes-title">Every request, replayed against Rails.</h2>
+  <p class="aside">A fixed Lobsters snapshot, replayed request by request on Rails and on the compiled app, and the pages compared. The model specs above track current Lobsters.</p>
+  {%- assign r = p.replay %}
+  {%- if st.replay.available %}
+  {%- if st.replay.note %}<p class="notice">{{ st.replay.note }}</p>{% endif %}
+  {%- if r.all_failed %}<p class="notice">The latest replay didn’t complete for any compiled lane, so there is no route comparison from it. That run is a gap too: the stage and message are below.</p>{% endif %}
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Latest replay by lane">
+    <table>
+      <thead><tr><th scope="col">Lane</th><th scope="col">Latest outcome</th><th scope="col">Route comparison</th></tr></thead>
+      <tbody>
+        {%- for l in r.lanes %}
+        <tr><td>{{ l.label | escape }}</td><td><span class="result {% if l.ok %}ok{% else %}fail{% endif %}">{% if l.ok %}✓{% else %}✕{% endif %} {{ l.outcome | escape }}</span>{% if l.detail %}<code class="detail">{{ l.detail | escape }}</code>{% endif %}</td><td>{{ l.comparison | escape }}</td></tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="meta">Replay {{ st.replay.observed }} · {{ r.workload | escape }} · <a href="{{ r.source }}">Raw results</a></p>
+  {%- else %}
+  <p class="notice">Latest replay unavailable. The route ledger below is still readable.</p>
+  {%- endif %}
+
+  <h3>Work recorded for the frozen routes</h3>
+  {%- if st.routes.available %}
+  {%- if r.entries.size == 0 %}
+  <p class="aside">No declared route gaps in the ledger. The latest comparison above is the measure.</p>
+  {%- else %}
+  <p class="aside">When the replay runs, these are the routes known not to match yet, from <a href="{{ site.repo_docs.github }}/blob/main/bench/lobsters/declared-gaps.json">the route ledger</a>. Each names the work that closes it.</p>
+  <div class="routes">
+    {%- for e in r.entries %}
+    <details class="work" id="{{ e.anchor }}">
+      <summary><code class="route">{{ e.route | escape }}</code><span class="what"><b>{{ e.reason | truncatewords: 14 | escape }}</b><span class="area">Ledger: {{ e.status | escape }} · since {{ e.since | escape }}</span></span></summary>
+      <div class="work-body">
+        <p>{{ e.reason | escape }}</p>
+        {%- if e.detail %}<p class="aside">{{ e.detail | escape }}</p>{% endif %}
+        <p class="label">What closes it</p>
+        <p>{% if e.closes_with %}{{ e.closes_with | escape }}{% else %}An acceptance check still needs describing.{% endif %}</p>
+        <p class="links">{% if e.issue_url %}<a href="{{ e.issue_url }}">The issue</a>{% endif %}<a href="{{ site.repo_docs.github }}/issues?q={{ e.route | url_encode }}">Find related issues and pull requests</a><a href="{{ '/docs/development/compiler-changes.html' | relative_url }}">Changing the compiler</a></p>
+      </div>
+    </details>
+    {%- endfor %}
+  </div>
+  {%- endif %}
+  {%- else %}
+  <p class="notice">Route ledger unavailable.</p>
+  {%- endif %}
+</section>
+
+{%- comment -%} E. Archive checks {%- endcomment -%}
+<section class="module wrap" id="targets" aria-labelledby="targets-title">
+  <p class="eyebrow">Target checks</p>
+  <h2 id="targets-title">Does each published build start and serve?</h2>
+  {%- if p.targets %}{% assign a = p.targets %}
+  {%- if st.archives.note %}<p class="notice">{{ st.archives.note }}</p>{% endif %}
+  <p class="aside"><b class="inline-figure">{{ a.headline }}</b>{% if a.not_selected > 0 %}; {{ a.not_selected }} more ran but weren’t selected for this run’s publication{% endif %}. These are smoke checks on the downloadable archives: they don’t measure all of Rails, or everything an app does. <a href="{{ '/docs/guide/rails-coverage.html' | relative_url }}">Rails coverage</a> is the hand-kept feature map.</p>
+  <div class="checks">
+    {%- for app in a.apps %}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="{{ app.app }} checks">
+      <table>
+        <caption>{{ app.app }}</caption>
+        <thead><tr><th scope="col">Output</th><th scope="col">Result</th></tr></thead>
+        <tbody>{% for row in app.rows %}<tr><td>{{ row.name }}</td><td><span class="result {{ row.class }}">{% case row.class %}{% when "ok" %}✓{% when "fail" %}✕{% else %}–{% endcase %} {{ row.result }}</span>{% if row.detail %}<span class="detail">{{ row.detail | escape }}</span>{% endif %}</td></tr>{% endfor %}</tbody>
+      </table>
+    </div>
+    {%- endfor %}
+  </div>
+  <p class="meta">{% if st.archives.observed %}Run started {{ st.archives.observed }}{% else %}Run time not published{% endif %}{% if a.run_conclusion %}; the run as a whole concluded “{{ a.run_conclusion }}”{% endif %} · <a href="{{ a.run_url }}">The run</a> · <a href="{{ site.repo_docs.github }}/commit/{{ a.source_sha_full }}"><code>{{ a.source_sha }}</code></a>{% if a.unchecked.size > 0 %} · Also published without a named smoke check: {{ a.unchecked | join: ", " }}{% endif %}</p>
+  {%- else %}
+  <p class="notice">Archive check results unavailable. {{ st.archives.note }}</p>
+  {%- endif %}
+</section>
+
+{%- comment -%} F. Benchmarks {%- endcomment -%}
+<section class="module wrap" id="benchmarks" aria-labelledby="bench-title">
+  <p class="eyebrow">Speed</p>
+  <h2 id="bench-title">Faster, even in Ruby.</h2>
+  {%- if p.bench %}{% assign b = p.bench %}
+  {%- if st.bench.note %}<p class="notice">{{ st.bench.note }}</p>{% endif %}
+  {%- if b.headline %}
+  <p class="aside"><b class="inline-figure">{{ b.headline }}</b> the requests per second of Rails on the reference blog’s <code>/articles</code>: generated Ruby against Rails on CRuby + YJIT, one worker, medians across {{ b.runs }} runs. One app on one machine; speed says nothing about parity.</p>
+  <figure class="chart-frame short">{{ b.chart }}</figure>
+  {%- else %}
+  <p class="notice">Comparable results are unavailable for this selection.</p>
+  {%- endif %}
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Speed-up by runtime and endpoint">
+    <table>
+      <caption>Generated Ruby against Rails, same runtime</caption>
+      <thead><tr><th scope="col">Runtime</th>{% for e in b.endpoints %}<th scope="col" class="num">{{ e }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for pair in b.pairs %}<tr><td>{{ pair.label }}</td>{% for v in pair.ratios %}<td class="num">{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+    </table>
+  </div>
+  <details class="table-view">
+    <summary>All measured configurations on <code>/articles</code></summary>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="All configurations">
+      <table>
+        <thead><tr><th scope="col">Configuration</th><th scope="col" class="num">req/s</th><th scope="col" class="num">p50 ms</th><th scope="col" class="num">p99 ms</th><th scope="col" class="num">RSS MiB</th><th scope="col" class="num">req/s per GiB</th><th scope="col" class="num">Runs</th><th scope="col" class="num">Error responses</th></tr></thead>
+        <tbody>{% for row in b.table %}<tr><td><code>{{ row.target }}</code></td><td class="num">{{ row.req_sec }}</td><td class="num">{{ row.p50 }}</td><td class="num">{{ row.p99 }}</td><td class="num">{{ row.rss }}</td><td class="num">{{ row.per_gib }}</td><td class="num">{{ row.runs }}</td><td class="num">{{ row.errors }}</td></tr>{% endfor %}</tbody>
+      </table>
+    </div>
+  </details>
+  <p class="meta">Environment captured {{ b.env_date | default: "on an unpublished date" }}{% if b.env_sha %} at <code>{{ b.env_sha }}</code>{% endif %}; the results file has no shared run identifier. · <a href="{{ '/bench/' | relative_url }}">Benchmarks and methodology</a></p>
+  {%- else %}
+  <p class="notice">Benchmark results unavailable. <a href="{{ '/bench/' | relative_url }}">Benchmarks and methodology</a>.</p>
+  {%- endif %}
+</section>
+
+{%- comment -%} Activity: who is building, never ranked {%- endcomment -%}
+<section class="module wrap" id="activity" aria-labelledby="activity-title">
+  <p class="eyebrow">Who’s building</p>
+  <h2 id="activity-title">The workshop is busy.</h2>
+  {%- if p.activity %}{% assign ac = p.activity %}
+  <p class="aside"><b class="inline-figure">{{ ac.merged_7d }}</b> pull requests merged in the last seven days, by {{ ac.people_7d }} people; {{ ac.merged_all }} since the project started taking them. Merged pull requests measure activity, not correctness: the gap above is the measure of progress.</p>
+  <figure class="chart-frame">
+    {{ ac.chart }}
+    <figcaption>Pull requests merged per week, Monday to Sunday. * This week, so far.</figcaption>
+  </figure>
+  <details class="table-view">
+    <summary>Table view</summary>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Merged pull requests by week">
+      <table><thead><tr><th scope="col">Week of</th><th scope="col" class="num">Merged</th></tr></thead>
+        <tbody>{% for w in ac.weeks %}<tr><td>{{ w.week }}{% if w.partial %} (so far){% endif %}</td><td class="num">{{ w.merged }}</td></tr>{% endfor %}</tbody></table>
+    </div>
+  </details>
+
+  {%- if ac.firsts.size > 0 %}
+  <h3>Welcome</h3>
+  <p class="aside">{{ ac.firsts.size }} people had their first pull request merged in the last 30 days.</p>
+  <ul class="firsts">
+    {%- for f in ac.firsts %}
+    <li><img src="{{ f.avatar }}&amp;s=64" alt="" width="32" height="32" loading="lazy"><span><a href="{{ f.url }}">{{ f.login | escape }}</a> <a class="pr" href="{{ f.first_pr.url }}">{{ f.first_pr.title | escape }}</a></span><span class="date">{{ f.date }}</span></li>
+    {%- endfor %}
+  </ul>
+  {%- endif %}
+
+  <h3>Everyone who merged work in the last 30 days</h3>
+  <p class="aside">{{ ac.contributors_30d }} people, in alphabetical order.</p>
+  <ul class="people">
+    {%- for person in ac.people_30d %}<li><a href="{{ person.url }}"><img src="{{ person.avatar }}&amp;s=64" alt="" width="32" height="32" loading="lazy">{{ person.login | escape }}</a></li>{% endfor %}
+  </ul>
+  <details class="table-view">
+    <summary>Latest merges</summary>
+    <ul class="recent">
+      {%- for m in ac.recent %}<li><a href="{{ m.url }}">#{{ m.number }} {{ m.title | escape }}</a> <span class="date">{{ m.author | escape }} · {{ m.date }}</span></li>{% endfor %}
+    </ul>
+  </details>
+  {%- else %}
+  <p class="notice">Activity unavailable. <a href="{{ site.repo_docs.github }}/pulls?q=is%3Apr+is%3Amerged">Merged pull requests on GitHub</a>.</p>
+  {%- endif %}
+</section>
+
+{%- comment -%} G. Join in {%- endcomment -%}
+<section class="module wrap" id="help" aria-labelledby="help-title">
+  <p class="eyebrow">Join in</p>
+  <h2 id="help-title">Make one gap easier to understand.</h2>
+  <p class="lede">A small reproducer, a clearer error report, a test or a documentation fix all help. Your first contribution doesn’t have to be a compiler patch.</p>
+  <ul class="paths">
+    <li><a href="#cause-unclassified"><b>I know Rails</b><span>Take one untriaged failure. Write the smallest Rails example that shows it, with the answer Rails gives and the one we give.</span></a></li>
+    <li><a href="#cause-rules"><b>I like writing tests</b><span>Pick a rule with no matches and rerun its original case: is it fixed, or did the failure change?</span></a></li>
+    <li><a href="{{ '/docs/development/compiler-changes.html' | relative_url }}"><b>I want to work on the compiler</b><span>Choose a named group, find its stage in the ownership map, and land the fix with a regression test.</span></a></li>
+    <li><a href="{{ '/docs/development/' | relative_url }}"><b>I’m new here</b><span>Set up a checkout and try a command from the guide. If a step confused you, fixing it helps the next person.</span></a></li>
+  </ul>
+  {%- assign hp = p.help %}
+  {%- if hp %}
+  {%- assign gfi = hp.good_first_issue.issues %}{% assign hw = hp.help_wanted.issues %}
+  {%- if gfi.size == 0 and hw.size == 0 %}
+  <p class="aside">No issues are labelled for a first contribution right now; the failure groups above are a good place to start.</p>
+  {%- else %}
+  <h3>Issues asking for help</h3>
+  <ul class="recent">
+    {%- for i in gfi %}<li><a href="{{ i.url }}">#{{ i.number }} {{ i.title | escape }}</a> <span class="date">good first issue{% if i.assignees.size > 0 %} · assigned{% endif %}</span></li>{% endfor %}
+    {%- for i in hw %}<li><a href="{{ i.url }}">#{{ i.number }} {{ i.title | escape }}</a> <span class="date">help wanted{% if i.assignees.size > 0 %} · assigned{% endif %}</span></li>{% endfor %}
+  </ul>
+  {%- endif %}
+  {%- endif %}
+  <p class="aside">Search for related work before you start, and say on the issue what you’re looking into, so two people don’t chase the same failure. A pull request doesn’t need a conversation first. Contributors also talk in a chat room that runs on Campfire, compiled by Roundhouse on Spinel: once you’ve opened an issue or pull request, ask there for an invite.</p>
+  <p class="actions"><a class="button primary" href="{{ site.repo_docs.github }}#contributing">How to contribute</a><a class="button" href="{{ site.repo_docs.github }}/issues">Open issues</a></p>
+</section>
+
+{%- comment -%} H. About these numbers {%- endcomment -%}
+<section class="module wrap" id="sources" aria-labelledby="sources-title">
+  <p class="eyebrow">About these numbers</p>
+  <h2 id="sources-title">Where each result comes from.</h2>
+  <p class="aside">Model examples are Lobsters’ own tests; frozen routes are a replayed request workload; target checks start each published archive; benchmarks time one reference app. None of them is a count of Rails features.</p>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Sources">
+    <table>
+      <thead><tr><th scope="col">Source</th><th scope="col">Observed</th><th scope="col">This build</th></tr></thead>
+      <tbody>{% for s in p.sources %}<tr><td>{% if s.url %}<a href="{{ s.url }}">{{ s.name }}</a>{% else %}{{ s.name }}{% endif %}</td><td>{{ s.observed }}{% if s.stale %} <span class="result unknown">stale</span>{% endif %}</td><td>{{ s.fetch }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+  {%- if p.gap %}
+  <details class="table-view">
+    <summary>Compiler warnings are a different measure</summary>
+    <p class="aside">The emit of Lobsters raised {{ p.gap.warning_total }} warnings. Warnings are the modeling-debt ledger: expected, and not the same as broken features. They aren’t added to the failures above.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Warnings by kind">
+      <table><thead><tr><th scope="col">Kind</th><th scope="col" class="num">Warnings</th></tr></thead>
+        <tbody>{% for w in p.gap.warning_kinds %}<tr><td>{{ w.kind }}</td><td class="num">{{ w.count }}</td></tr>{% endfor %}</tbody></table>
+    </div>
+  </details>
+  {%- endif %}
+  <p class="meta">Raw data: <a href="{{ '/status.json' | relative_url }}">status.json</a> · <a href="{{ '/status-history.json' | relative_url }}">status-history.json</a> · <a href="{{ '/docs/releases.html' | relative_url }}">Release snapshots</a></p>
+</section>

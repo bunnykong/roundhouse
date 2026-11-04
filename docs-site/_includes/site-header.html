@@ -1,0 +1,26 @@
+<header class="site-header">
+  <div class="bar">
+    <div class="bar-left">
+      {%- if include.menu %}
+      <button class="menu-btn" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="docs-sidebar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      {%- endif %}
+      <a class="brand" href="{{ '/' | relative_url }}" aria-label="Roundhouse home">
+        <img class="mark" src="{{ '/logo-on-dark.svg' | relative_url }}" alt="" width="28" height="28">
+        Roundhouse
+      </a>
+      {%- if include.chip %}
+      <a class="chip" href="{{ include.chip_url | relative_url }}">{{ include.chip }}</a>
+      {%- endif %}
+    </div>
+    <nav class="site-nav" aria-label="Site">
+      <a class="optional" href="{{ '/ide/' | relative_url }}">IDE</a>
+      <a class="optional" href="{{ '/playground/' | relative_url }}">Playground</a>
+      <a class="optional" href="{{ '/studio/' | relative_url }}">Studio</a>
+      <a class="optional{% if include.active == 'progress' %} is-active{% endif %}" href="{{ '/progress/' | relative_url }}"{% if include.active == 'progress' %} aria-current="page"{% endif %}>Progress</a>
+      <a class="optional{% if include.active == 'docs' %} is-active{% endif %}" href="{{ '/docs/guide/' | relative_url }}">Docs</a>
+      <a href="{{ site.repo_docs.github }}">GitHub</a>
+    </nav>
+  </div>
+</header>

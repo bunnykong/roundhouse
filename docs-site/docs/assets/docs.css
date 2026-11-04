@@ -132,3 +132,11 @@ svg { flex: none; }
   .pager .next { grid-column: 1; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* Skip link, and the sidebar's way to Progress. */
+.skip { position: absolute; left: 1rem; top: -3rem; z-index: 100; padding: .5rem .9rem; background: var(--rh-action); color: var(--rh-action-ink); border-radius: .4rem; font-weight: 600; }
+.skip:focus { top: .75rem; }
+.sidebar-progress { display: block; margin: .4rem 0 0; padding: .7rem .8rem; border: 1px solid var(--line); border-radius: .6rem; font-size: .84rem; line-height: 1.35; color: var(--fg); transition: border-color .15s; }
+.sidebar-progress span { color: var(--accent); }
+.sidebar-progress:hover { border-color: var(--accent-line); }
+@media (max-width: 360px) { .chip { display: none; } }

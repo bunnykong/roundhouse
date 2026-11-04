@@ -11,31 +11,12 @@
 <script defer src="{{ '/docs/assets/docs.js' | relative_url }}"></script>
 </head>
 <body class="docs">
-<header class="site-header">
-  <div class="bar">
-    <div class="bar-left">
-      <button class="menu-btn" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="docs-sidebar">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-      </button>
-      <a class="brand" href="{{ '/' | relative_url }}" aria-label="Roundhouse home">
-        <img class="mark" src="{{ '/logo-on-dark.svg' | relative_url }}" alt="" width="28" height="28">
-        Roundhouse
-      </a>
-      <a class="chip" href="{{ '/docs/guide/' | relative_url }}">Docs</a>
-    </div>
-    <nav class="site-nav" aria-label="Site">
-      <a class="optional" href="{{ '/ide/' | relative_url }}">IDE</a>
-      <a class="optional" href="{{ '/playground/' | relative_url }}">Playground</a>
-      <a class="optional" href="{{ '/studio/' | relative_url }}">Studio</a>
-      <a class="optional" href="{{ '/bench/' | relative_url }}">Benchmarks</a>
-      <a class="optional is-active" href="{{ '/docs/guide/' | relative_url }}">Docs</a>
-      <a href="{{ site.repo_docs.github }}">GitHub</a>
-    </nav>
-  </div>
-</header>
+<a class="skip" href="#main">Skip to content</a>
+{% include site-header.html menu=true chip="Docs" chip_url="/docs/guide/" active="docs" %}
 
 <div class="docs-grid">
   <aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+    <a class="sidebar-progress" href="{{ '/progress/' | relative_url }}">Progress: the gaps, and where to help <span aria-hidden="true">→</span></a>
     {% for section in site.data.docs_nav %}
     <p class="nav-section" id="nav-{{ forloop.index }}">{{ section.title }}</p>
     <ul aria-labelledby="nav-{{ forloop.index }}">
@@ -54,7 +35,7 @@
   </script>
   <div class="scrim" hidden></div>
 
-  <main class="docs-main">
+  <main class="docs-main" id="main">
     <div class="docs-topline">
       <span class="crumb">{{ page.section | escape }}</span>
       <a class="md-link" href="{{ page.source_url }}" title="{{ page.source_path }}">

@@ -1,5 +1,7 @@
-# The docs pages of roundhouse-rb.dev. Build: bundle exec jekyll build (from this directory);
-# CI copies the output's docs/ into _site/docs (see .github/workflows/ci.yml, build-site).
+# The docs pages and /progress/ of roundhouse-rb.dev. Build: bundle exec jekyll build (from this
+# directory); CI copies the output's docs/, progress/, status.json and status-history.json into
+# _site (see .github/workflows/ci.yml, build-site). Previews: ROUNDHOUSE_STATUS=off builds offline;
+# ROUNDHOUSE_STATUS_FROM=path/to/status.json renders a saved snapshot (_plugins/status.rb).
 title: Roundhouse
 description: Rails is the specification; deployment is a build flag.
 url: https://roundhouse-rb.dev
@@ -55,3 +57,10 @@ repo_docs:
     docs/data/schema-routes-seeds.md: Schema, routes, seeds
     docs/ractor-ledger.md: Ractor ledger
     docs/pipeline/specialization.md: Specialization
+
+# Project status for the Progress page and the home page's numbers (_plugins/status.rb).
+status:
+  site: https://roundhouse-rb.dev
+  repo: roundhouse-rb/roundhouse
+  lobsters_bench: https://roundbench.showcase.party/lobsters
+  weeks: 12
