@@ -758,7 +758,9 @@ fn emit_lowered_controllers_from_lcs(
                     unique = false;
                 }
             }
-            if !unique {
+            // Omit the class only where a scope reports why; otherwise
+            // the collision would vanish with the controller.
+            if !unique && crate::emit::diagnostics::active() {
                 return Vec::new();
             }
             let file_stem = crate::naming::underscore(lc.name.0.as_str());

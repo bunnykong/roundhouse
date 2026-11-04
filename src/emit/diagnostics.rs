@@ -53,6 +53,11 @@ pub fn scope<T>(f: impl FnOnce() -> T) -> (T, Vec<Diagnostic>) {
     (result, collected)
 }
 
+/// Whether a [`scope`] is collecting diagnostics on this thread.
+pub fn active() -> bool {
+    EMIT_DIAGS.with(|c| c.borrow().is_some())
+}
+
 /// Push a diagnostic into the active emit buffer. A no-op when called
 /// outside a [`scope`] — the caller's degrade stub still stands, the
 /// diagnostic is just not collected.

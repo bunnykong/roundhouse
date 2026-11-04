@@ -1042,8 +1042,7 @@ fn an_aliased_concern_hook_cannot_change_the_name_used_by_super() {
     );
 }
 
-#[test]
-fn a_remaining_method_collision_refuses_both_the_class_and_its_sidecar() {
+fn remaining_collision_app() -> roundhouse::App {
     let files = vec![
         (
             "db/schema.rb",
@@ -1073,6 +1072,12 @@ end
         .collect();
     let mut app = ingest_app_from_tree(tree).unwrap();
     roundhouse::session::analyze_and_lower(&mut app);
+    app
+}
+
+#[test]
+fn a_remaining_method_collision_refuses_both_the_class_and_its_sidecar() {
+    let app = remaining_collision_app();
     let (emitted, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
         roundhouse::emit::ruby::emit_lowered_controllers(&app)
     });
@@ -1086,6 +1091,19 @@ end
     assert!(!emitted.iter().any(
         |f| f.path.ends_with("probe_controller.rb") || f.path.ends_with("probe_controller.rbs")
     ));
+}
+
+/// Outside a diagnostics scope nothing can report the collision, so the controller is still emitted
+/// rather than silently omitted.
+#[test]
+fn a_remaining_method_collision_outside_a_diagnostics_scope_keeps_the_controller() {
+    let app = remaining_collision_app();
+    let emitted = roundhouse::emit::ruby::emit_lowered_controllers(&app);
+    assert!(
+        emitted.iter().any(|f| f.path.ends_with("probe_controller.rb")),
+        "{:?}",
+        emitted.iter().map(|f| f.path.clone()).collect::<Vec<_>>()
+    );
 }
 
 fn parent_order_files(around_first: bool) -> Vec<(String, String)> {
