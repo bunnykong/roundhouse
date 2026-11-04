@@ -6,6 +6,7 @@
 # here (for SVG) or by Liquid's `escape` (everywhere else).
 
 require "cgi"
+require "date"
 require "time"
 
 module RoundhouseProgress
@@ -30,7 +31,9 @@ module RoundhouseProgress
   BENCH_PAIRS = [%w[ruby rails CRuby\ +\ YJIT], %w[ruby-int rails-int CRuby,\ no\ JIT], %w[jruby rails-jruby JRuby], %w[truffleruby rails-truffleruby TruffleRuby]].freeze
 
   def h(text) = CGI.escapeHTML(text.to_s)
-  def date(iso) = iso && Time.parse(iso).utc.strftime("%-d %b %Y")
+  # A calendar date ("2026-09-14") stays that day in any build time zone.
+  def day(iso) = iso.to_s.match?(/\A\d{4}-\d{2}-\d{2}\z/) ? Date.parse(iso) : Time.parse(iso).utc
+  def date(iso) = iso && day(iso).strftime("%-d %b %Y")
   def datetime(iso) = iso && Time.parse(iso).utc.strftime("%-d %b %Y, %H:%M UTC")
   def short(sha) = sha.to_s[0, 7]
   def num(n) = n.is_a?(Integer) ? n.to_s.gsub(/\B(?=(\d{3})+\z)/, ",") : n.to_s
@@ -43,7 +46,7 @@ module RoundhouseProgress
     note = if feed["cached"] then "Couldn't refresh this source. Showing the saved result from #{datetime(observed) || "an unknown date"}."
            elsif stale then "Last result #{datetime(observed)}; no newer result is available."
            end
-    { "available" => true, "observed" => datetime(observed), "observed_date" => date(observed), "stale" => !!stale, "cached" => feed["cached"], "note" => note }
+    { "available" => true, "observed" => datetime(observed), "observed_date" => date(observed), "observed_short" => observed && Time.parse(observed).utc.strftime("%-d %b"), "stale" => !!stale, "cached" => feed["cached"], "note" => note }
   end
 
   # --- Charts (inline SVG; colours are brand tokens, set in progress.css) -----
@@ -66,9 +69,9 @@ module RoundhouseProgress
     end
   end
 
-  def svg(width, height, title, desc, body)
-    id = "c#{title.hash.abs.to_s(36)}"
-    %(<svg class="chart" viewBox="0 0 #{width} #{height}" role="group" aria-labelledby="#{id}-t #{id}-d"><title id="#{id}-t">#{h(title)}</title>) +
+  def svg(width, height, title, desc, body, cls: nil)
+    id = "c#{"#{title}#{width}".hash.abs.to_s(36)}"
+    %(<svg class="chart#{" #{cls}" if cls}" viewBox="0 0 #{width} #{height}" role="group" aria-labelledby="#{id}-t #{id}-d"><title id="#{id}-t">#{h(title)}</title>) +
       %(<desc id="#{id}-d">#{h(desc)}</desc>#{body}</svg>)
   end
 
@@ -81,46 +84,21 @@ module RoundhouseProgress
     end.join
   end
 
-  def weekly_chart(weekly)
-    w, hgt, left, right, top, bottom = 720, 220, 44, 8, 16, 34
-    max, ticks = nice_max(weekly.map { |p| p["merged"] }.max.to_i)
-    y_of = ->(v) { top + (hgt - top - bottom) * (1 - v / max.to_f) }
-    slot = (w - left - right) / weekly.size.to_f
-    bw = [slot - 2, 44].min.floor
-    bars = weekly.each_with_index.map do |p, i|
-      x = (left + i * slot + (slot - bw) / 2).round(1)
-      y = y_of.(p["merged"]).round(1)
+  # Merged pull requests per week, as data for HTML bars. Heights are relative
+  # to the busiest week, which carries the only direct label.
+  def weekly_bars(weekly)
+    max = weekly.map { |p| p["merged"] }.max.to_i
+    weekly.each_with_index.map do |p, i|
       tip = "Week of #{date(p["week"])}: #{plural(p["merged"], "pull request")} merged#{" so far" if p["partial"]}"
-      label = Time.parse(p["week"]).strftime("%-d %b")
-      %(<g class="mark#{" partial" if p["partial"]}" role="img" tabindex="0" data-tip="#{h(tip)}" aria-label="#{h(tip)}">) +
-        %(<rect class="hit" x="#{(left + i * slot).round(1)}" y="#{top}" width="#{slot.round(1)}" height="#{hgt - top - bottom}"/>) +
-        (p["merged"].positive? ? %(<path class="bar" d="#{bar_path(x, y, bw, (hgt - bottom - y).round(1))}"/>) : "") +
-        %(<text class="tick" x="#{(x + bw / 2.0).round(1)}" y="#{hgt - bottom + 18}" text-anchor="middle">#{h(label)}#{"*" if p["partial"]}</text></g>)
-    end.join
-    last = weekly[-2] || weekly[-1]
-    svg(w, hgt, "Pull requests merged per week", "#{weekly.size} weeks; the last week is still in progress. Most recent full week: #{num(last["merged"])}.",
-        grid(left, w - right, y_of, max, ticks: ticks) + %(<line class="axis" x1="#{left}" x2="#{w - right}" y1="#{y_of.(0)}" y2="#{y_of.(0)}"/>) + bars)
+      { "label" => day(p["week"]).strftime("%-d %b"), "merged" => num(p["merged"]), "partial" => p["partial"], "tip" => tip,
+        "pct" => max.zero? ? 0 : (p["merged"] * 100.0 / max).round(1), "peak" => p["merged"] == max && max.positive?,
+        "show_label" => i.zero? || i == weekly.size - 1 }
+    end
   end
 
-  def bench_chart(pair, endpoint)
-    w, left, right, row = 720, 150, 96, 36
-    hgt = row * pair.size + 8
-    max = pair.map { |r| r["req_sec"] }.max
-    bars = pair.each_with_index.map do |r, i|
-      y = 4 + i * row + 10
-      bw = ((w - left - right) * r["req_sec"] / max).round(1)
-      tip = "#{r["label"]}: #{num(r["req_sec"].round)} requests per second on #{endpoint}"
-      %(<g class="mark" role="img" tabindex="0" data-tip="#{h(tip)}" aria-label="#{h(tip)}"><rect class="hit" x="0" y="#{y - 8}" width="#{w}" height="#{row}"/>) +
-        %(<text class="bar-label" x="#{left - 12}" y="#{y + 12}" text-anchor="end">#{h(r["label"])}</text>) +
-        %(<path class="bar" d="#{bar_path(left, y, bw, 16, horizontal: true)}"/>) +
-        %(<text class="value" x="#{left + bw + 8}" y="#{y + 12}">#{num(r["req_sec"].round)} req/s</text></g>)
-    end.join
-    svg(w, hgt, "Requests per second on #{endpoint}", pair.map { |r| "#{r["label"]} #{num(r["req_sec"].round)}" }.join("; "),
-        %(<line class="axis" x1="#{left}" x2="#{left}" y1="0" y2="#{hgt}"/>) + bars)
-  end
-
-  def gap_chart(points)
-    w, hgt, left, right, top, bottom = 720, 220, 44, 64, 16, 34
+  # Drawn twice, wide and narrow, so its text stays legible; CSS shows one.
+  def gap_chart(points, w: 480, cls: "wide")
+    hgt, left, right, top, bottom = 150, 40, 44, 12, 26
     max, ticks = nice_max(points.map { |p| p["failed"] }.max.to_i)
     y_of = ->(v) { top + (hgt - top - bottom) * (1 - v / max.to_f) }
     times = points.map { |p| Time.parse(p["observed_at"]).to_f }
@@ -139,19 +117,20 @@ module RoundhouseProgress
     lx, ly = x_of.(times.last).round(1), y_of.(last["failed"]).round(1)
     first_date = Time.parse(points.first["observed_at"]).strftime("%-d %b")
     last_date = Time.parse(last["observed_at"]).strftime("%-d %b")
-    xticks = %(<text class="tick" x="#{x_of.(times.first).round(1)}" y="#{hgt - bottom + 18}" text-anchor="#{span.zero? ? "middle" : "start"}">#{h(first_date)}</text>) +
-             (span.zero? ? "" : %(<text class="tick" x="#{lx}" y="#{hgt - bottom + 18}" text-anchor="end">#{h(last_date)}</text>))
+    xticks = %(<text class="tick" x="#{x_of.(times.first).round(1)}" y="#{hgt - bottom + 17}" text-anchor="#{span.zero? ? "middle" : "start"}">#{h(first_date)}</text>) +
+             (span.zero? ? "" : %(<text class="tick" x="#{lx}" y="#{hgt - bottom + 17}" text-anchor="end">#{h(last_date)}</text>))
     svg(w, hgt, "Failing Lobsters model examples over time", "#{points.size} observation(s); latest #{num(last["failed"])} failing on #{last_date}.",
         grid(left, w - right, y_of, max, ticks: ticks) + %(<line class="axis" x1="#{left}" x2="#{w - right}" y1="#{y_of.(0)}" y2="#{y_of.(0)}"/>) +
-        lines + marks + %(<text class="value" x="#{lx + 10}" y="#{ly + 4}">#{num(last["failed"])}</text>) + xticks)
+        lines + marks + %(<text class="value" x="#{lx + 10}" y="#{ly + 4}">#{num(last["failed"])}</text>) + xticks, cls: cls)
   end
 
   # --- Modules ----------------------------------------------------------------
 
   def gap(feed, repo)
     d = feed["data"]
+    failing = d.dig("examples", "failed").to_i
     group = lambda do |c|
-      { "slug" => c["slug"], "anchor" => "cause-#{c["slug"]}", "title" => c["title"], "failures" => c["failures"],
+      { "slug" => c["slug"], "share" => failing.positive? ? (c["failures"] * 100.0 / failing).round(1) : 0, "anchor" => "cause-#{c["slug"]}", "title" => c["title"], "failures" => c["failures"],
         "area" => c["slug"] == "unclassified" ? "Needs triage" : AREAS.fetch(c["owner"].to_s, "Needs triage"),
         "step" => c["stale_rule"] ? "Recheck its original reproducer before retiring the rule." : STEPS.fetch(c["slug"], "Reproduce a named example."),
         "note" => c["note"], "examples" => c["examples"], "more" => [c["example_count"].to_i - c["examples"].size, 0].max,
@@ -163,6 +142,7 @@ module RoundhouseProgress
     d.slice("scope", "canary_ok", "consistent", "problems", "harness_compensations", "warnings").merge(
       "failed" => num(ex["failed"]), "passed" => num(ex["passed"]), "total" => num(ex["total"]), "pending" => ex["pending"],
       "outside" => ex["errors_outside_examples"], "headline" => d["canary_ok"] && d["consistent"],
+      "pass_pct" => ex["total"].to_i.positive? ? (ex["passed"] * 100.0 / ex["total"]).round(1) : 0,
       "ruby" => d["ruby_pinned"], "lobsters_sha" => short(d["lobsters_sha"]), "lobsters_url" => "https://github.com/lobsters/lobsters/commit/#{d["lobsters_sha"]}",
       "roundhouse_sha" => short(d["roundhouse_sha"]), "roundhouse_url" => "https://github.com/#{repo}/commit/#{d["roundhouse_sha"]}",
       "report_url" => feed["sources"].last, "groups" => active.map(&group), "group_count" => active.count { |c| c["slug"] != "unclassified" },
@@ -191,7 +171,7 @@ module RoundhouseProgress
     end
     {
       "count" => points.size, "since" => date(history["points"].first&.dig("at")), "interrupted" => history["continuity"] == "interrupted",
-      "chart" => points.empty? ? nil : gap_chart(points), "change" => change,
+      "chart" => points.empty? ? nil : gap_chart(points) + gap_chart(points, w: 330, cls: "narrow"), "change" => change,
       "rows" => points.reverse.map do |p|
         { "date" => datetime(p["observed_at"]), "failed" => num(p["failed"]), "total" => num(p["total"]), "files" => p["spec_files_run"],
           "outside" => p["errors_outside_examples"], "lobsters_sha" => short(p["lobsters_sha"]), "roundhouse_sha" => short(p["roundhouse_sha"]),
@@ -209,14 +189,20 @@ module RoundhouseProgress
                    else "Unavailable: the replay didn't complete"
                    end
       { "label" => [l["label"], l["jit"]].compact.join(" · "), "runtime" => l["runtime"], "ok" => ok,
-        "outcome" => ok ? "Completed" : "Stopped at #{l["stage"] || "an unknown stage"}", "detail" => l["detail"], "comparison" => comparison }
+        "reference" => l["kind"] == "rails", "outcome" => ok ? "Completed" : "Stopped at #{l["stage"] || "an unknown stage"}", "detail" => l["detail"], "comparison" => comparison }
     end
     failed = lanes.reject { |l| l["ok"] || l["comparison"] == "Reference" }
     entries = routes_feed&.dig("data", "entries").to_a.sort_by { |e| e["route"] }.map do |e|
       slug = e["route"].delete_prefix("/").gsub(/[^a-z0-9]+/i, "-").gsub(/^-|-$/, "").downcase
       e.merge("anchor" => "route-#{slug.empty? ? "root" : slug}", "area" => AREAS.fetch(e["owner"].to_s, e["owner"]))
     end
-    { "lanes" => lanes, "failed_count" => failed.size, "all_failed" => !lanes.empty? && failed.size == lanes.count { |l| l["comparison"] != "Reference" },
+    compiled = lanes.reject { |l| l["comparison"] == "Reference" }
+    lead = if compiled.empty? then nil
+           elsif compiled.none? { |l| l["ok"] } then "No compiled configuration completed the latest run, so route agreement is unknown."
+           elsif compiled.all? { |l| l["ok"] } then "Every compiled configuration completed the latest run."
+           else "#{compiled.count { |l| l["ok"] }} of #{compiled.size} compiled configurations completed the latest run."
+           end
+    { "lanes" => lanes, "lead" => lead, "failed_count" => failed.size, "compiled" => compiled.size, "completed" => compiled.count { |l| l["ok"] }, "all_failed" => !lanes.empty? && failed.size == lanes.count { |l| l["comparison"] != "Reference" },
       "workload" => feed&.dig("data", "workload"), "source" => feed&.dig("sources", 0), "entries" => entries }
   end
 
@@ -242,8 +228,10 @@ module RoundhouseProgress
     passed = checked.count { |r| r["class"] == "ok" }
     not_selected = checked.count { |r| r["result"] == "Not selected" }
     {
-      "headline" => "#{passed} of #{selected} selected checks passed", "not_selected" => not_selected,
-      "apps" => checked.group_by { |r| r["app"] }.map { |app, rs| { "app" => app, "rows" => rs.sort_by { |r| r["name"].downcase } } },
+      "headline" => "#{passed} of #{selected} selected checks passed", "passed" => passed, "selected" => selected, "not_selected" => not_selected,
+      "failed" => checked.select { |r| r["class"] == "fail" }.map { |r| "#{r["app"]}: #{r["name"]}" },
+      "apps" => checked.group_by { |r| r["app"] }.map { |app, rs| { "app" => app, "rows" => rs.sort_by { |r| r["name"].downcase }.reject { |r| r["result"] == "Not selected" } } }.reject { |x| x["rows"].empty? },
+      "others" => checked.select { |r| r["result"] == "Not selected" }.sort_by { |r| [r["app"], r["name"].downcase] },
       "unchecked" => rows.reject { |r| r["check"] }.map { |r| "#{r["app"]}: #{r["name"]}" },
       "run_url" => d.dig("run", "url") || "https://github.com/roundhouse-rb/roundhouse/actions/runs/#{d["run_id"]}",
       "run_conclusion" => d.dig("run", "conclusion"), "source_sha" => short(d["source_sha"]), "source_sha_full" => d["source_sha"]
@@ -259,15 +247,15 @@ module RoundhouseProgress
       ratios = endpoints.map { |e| (r = RoundhouseStatus.ratio(rows, gen, rails, e)) ? "#{r}×" : "—" }
       { "label" => label, "ratios" => ratios } unless ratios.all?("—")
     end
-    ruby, rails = at.("ruby", "/articles"), at.("rails", "/articles")
+    by_endpoint = endpoints.each_with_index.map { |e, i| { "endpoint" => e, "ratios" => pairs.map { |pr| pr["ratios"][i] } } }
+    ruby = at.("ruby", "/articles")
     headline = RoundhouseStatus.ratio(rows, "ruby", "rails", "/articles")
-    chart = headline && bench_chart([ruby.merge("label" => "Generated Ruby"), rails.merge("label" => "Rails")], "/articles")
     table = rows.select { |r| r["endpoint"] == "/articles" }.sort_by { |r| r["target"] }.map do |r|
       { "target" => r["target"], "req_sec" => r["req_sec"] && num(r["req_sec"].round), "p50" => r["p50_ms"]&.round(1), "p99" => r["p99_ms"]&.round(1),
         "rss" => r["rss_mb"]&.round, "per_gib" => r["rps_per_gb"] && num(r["rps_per_gb"].round), "runs" => r["runs"], "errors" => r["non_2xx"] }
     end
     env = d["environment"]
-    { "headline" => headline && "#{headline}×", "chart" => chart, "runs" => ruby&.dig("runs"), "endpoints" => endpoints, "pairs" => pairs, "table" => table,
+    { "headline" => headline && "#{headline}×", "runs" => ruby&.dig("runs"), "endpoints" => endpoints, "pairs" => pairs, "by_endpoint" => by_endpoint, "table" => table,
       "env_date" => env && date(env["captured_at"]), "env_sha" => env && short(env.dig("git", "sha")), "toolchains" => env&.dig("toolchains").to_h.map { |k, v| "#{k} #{v}" } }
   end
 
@@ -276,9 +264,10 @@ module RoundhouseProgress
     weekly = d["weekly_merged"]
     d.slice("people_30d", "recent").merge(
       "merged_7d" => num(d["merged_7d"]), "people_7d" => d["people_7d"], "merged_all" => num(d["merged_all"].to_i),
-      "contributors_30d" => d["people_30d"].size, "chart" => weekly.empty? ? nil : weekly_chart(weekly),
+      "contributors_30d" => d["people_30d"].size, "bars" => weekly_bars(weekly),
       "weeks" => weekly.reverse.map { |w| { "week" => date(w["week"]), "merged" => num(w["merged"]), "partial" => w["partial"] } },
       "firsts" => d["first_contributions_30d"].map { |p| p.merge("date" => date(p.dig("first_pr", "merged_at"))) },
+      "firsts_alpha" => d["first_contributions_30d"].sort_by { |p| p["login"].downcase },
       "recent" => d["recent"].map { |r| r.merge("date" => date(r["merged_at"])) }
     )
   end

@@ -240,10 +240,11 @@ module RoundhouseStatus
       { "login" => login, "url" => prs.first.dig("author", "url"), "avatar" => prs.first.dig("author", "avatarUrl"), "last_merged_at" => prs.first["mergedAt"] }
     end
 
-    # Each person's first merged pull request: the earliest merge among their
-    # earliest-opened ones. A first merge inside the window is a first contribution.
+    # Each person's first merged pull request: the earliest merge among their 30
+    # earliest-opened merged ones (search can't sort by merge time). A first merge
+    # inside the window is a first contribution.
     firsts = people.each_with_index.map do |p, i|
-      %(u#{i}: search(type: ISSUE, first: 5, query: "repo:#{repo} is:pr is:merged author:#{p["login"]} sort:created-asc") { nodes { ... on PullRequest { number title url mergedAt } } })
+      %(u#{i}: search(type: ISSUE, first: 30, query: "repo:#{repo} is:pr is:merged author:#{p["login"]} sort:created-asc") { nodes { ... on PullRequest { number title url mergedAt } } })
     end
     first_prs = firsts.empty? ? {} : graphql("{ #{firsts.join("\n")} }")
     people.each_with_index do |p, i|
