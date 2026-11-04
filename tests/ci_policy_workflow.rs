@@ -1282,7 +1282,7 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
     for (event, repo, reference, publish, revision, expected) in [
         (
             "schedule",
-            "rubys/roundhouse",
+            "roundhouse-rb/roundhouse",
             "refs/heads/main",
             "false",
             spinel_sha,
@@ -1290,7 +1290,7 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
         ),
         (
             "schedule",
-            "rubys/roundhouse",
+            "roundhouse-rb/roundhouse",
             "refs/heads/main",
             "false",
             "unavailable",
@@ -1298,19 +1298,11 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
         ),
         (
             "schedule",
-            "rubys/roundhouse",
+            "roundhouse-rb/roundhouse",
             "refs/heads/main",
             "false",
             "malformed",
             Some(("true", "master")),
-        ),
-        (
-            "schedule",
-            "roundhouse-rb/roundhouse",
-            "refs/heads/main",
-            "false",
-            spinel_sha,
-            Some(("true", spinel_sha)),
         ),
         (
             "workflow_dispatch",
@@ -1337,16 +1329,24 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
             Some(("false", spinel_sha)),
         ),
         (
+            "schedule",
+            "rubys/roundhouse",
+            "refs/heads/main",
+            "false",
+            spinel_sha,
+            None,
+        ),
+        (
             "workflow_dispatch",
             "rubys/roundhouse",
             "refs/heads/main",
             "true",
             spinel_sha,
-            Some(("true", spinel_sha)),
+            None,
         ),
         (
             "workflow_dispatch",
-            "rubys/roundhouse",
+            "roundhouse-rb/roundhouse",
             "refs/heads/topic",
             "true",
             spinel_sha,
@@ -1390,7 +1390,7 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
             .unwrap()
             .lines()
             .count(),
-        7
+        5
     );
     fs::remove_dir_all(root).unwrap();
 }

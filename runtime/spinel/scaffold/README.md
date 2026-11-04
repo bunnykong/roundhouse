@@ -52,7 +52,7 @@ Both former substrate gaps are now FFI-shaped and landed:
 The original substrate request was tracked in [matz/spinel#214](https://github.com/matz/spinel/issues/214);
 the `sp_net`/`sp_crypto` upstreaming that lets this link cleanly is
 discussed in [OriPekelman/tep#6](https://github.com/OriPekelman/tep/issues/6)
-+ [rubys/roundhouse#1](https://github.com/rubys/roundhouse/issues/1).
++ [roundhouse-rb/roundhouse#1](https://github.com/roundhouse-rb/roundhouse/issues/1).
 
 ## Quick start
 
@@ -83,7 +83,7 @@ and serves the running app on `:3000`:
 
 ```sh
 rm -rf roundhouse
-git clone https://github.com/rubys/roundhouse
+git clone https://github.com/roundhouse-rb/roundhouse
 cd roundhouse
 bin/rh fixture                    # generate the Rails fixture (~60s)
 bin/rh dev ruby                   # transpile + assets + Puma on :3000 (~3-5min cold; ~5s warm)
@@ -340,7 +340,7 @@ from this fixture:
   `csrf_meta_tags` carry the session's token, and a controller under
   `protect_from_forgery with: :exception` refuses a non-GET request
   that does not present it (see the guide's
-  [security posture](https://github.com/rubys/roundhouse/blob/main/docs/guide/rails-coverage.md#security-posture)
+  [security posture](https://github.com/roundhouse-rb/roundhouse/blob/main/docs/guide/rails-coverage.md#security-posture)
   for how this differs from Rails).
 - **Signed stream names.** `turbo_stream_from` writes the name signed
   the way turbo-rails signs it, and a subscribe whose name does not

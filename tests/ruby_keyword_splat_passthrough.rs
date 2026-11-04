@@ -62,3 +62,135 @@ fn native_and_emitted_ruby_keep_a_forwarded_keyword_splat() {
     assert!(emitted.contains("@connection.send(meth, *args, **kwargs, &block)"), "{emitted}");
     assert!(emitted.contains("**options)"), "{emitted}");
 }
+
+#[test]
+fn typed_stdlib_receiver_keeps_keyword_splats() {
+    let source = r#"require "psych"
+class KeywordYaml
+  def self.read
+    options = { symbolize_names: true }
+    Psych.safe_load("---\nx: 1\n", **options).keys.first.class.to_s
+  end
+end
+"#;
+    let run = emit_and_run::real_blog()
+        .write("app/lib/keyword_yaml.rb", source)
+        .run_ruby("puts KeywordYaml.read");
+    run.assert_passes();
+    assert_eq!(run.stdout, "Symbol\n");
+}
+
+#[test]
+fn empty_keyword_splat_omits_an_optional_positional_hash() {
+    let source = r#"class KeywordOptions
+  def options(opts = {value: 5})
+    opts.fetch(:value, 9) * 10
+  end
+  def self.options(opts = {value: 5})
+    opts.fetch(:value, 9) * 10
+  end
+  def self.read
+    empty = {}
+    present = {value: 3}
+    [options(**empty), options(**present), options({}), new.options(**empty)].join(",")
+  end
+end
+"#;
+    let run = emit_and_run::real_blog()
+        .write("app/lib/keyword_options.rb", source)
+        .run_ruby("puts KeywordOptions.read");
+    run.assert_passes();
+    assert_eq!(run.stdout, "50,30,90,50\n");
+}
+
+
+#[test]
+fn positional_options_receive_a_keyword_copy() {
+    let source = r#"class KeywordCopy
+  def mutate(options = {})
+    options[:value] = 9
+  end
+  def self.mutate(options = {})
+    options[:value] = 9
+  end
+  def self.read
+    h = {value: 3}
+    mutate(**h)
+    self.mutate(**h)
+    new.mutate(**h)
+    h[:value]
+  end
+end
+"#;
+    let run = emit_and_run::real_blog()
+        .write("app/lib/keyword_copy.rb", source)
+        .run_ruby("puts KeywordCopy.read");
+    run.assert_passes();
+    assert_eq!(run.stdout, "3\n");
+}
+
+#[test]
+fn operator_splat_keeps_explicit_keyword_call_syntax() {
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", r#"class Options
+  def +(h)
+    h.fetch(:value, 9)
+  end
+end
+class Probe
+  def self.run
+    h = {value: 3}
+    Options.new.+(**h)
+  end
+end
+"#)
+        .run_ruby("puts Probe.run");
+    run.assert_passes();
+    assert_eq!(run.stdout, "3\n");
+}
+
+#[test]
+fn index_writer_splat_keeps_explicit_keyword_call_syntax() {
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", r#"class Options
+  def []=(key, h)
+    h.fetch(:value, 9)
+  end
+end
+class Probe
+  def self.run
+    h = {value: 3}
+    Options.new.[]=(:key, **h)
+  end
+end
+"#)
+        .run_ruby("puts Probe.run");
+    run.assert_passes();
+    assert_eq!(run.stdout, "3\n");
+}
+
+#[test]
+fn marked_and_structural_packets_keep_the_same_call_syntax() {
+    use roundhouse::expr::{Expr, ExprNode, Literal, ERASED_KEYWORD_SPLAT};
+    use roundhouse::{ident::Symbol, span::Span};
+    let span = Span::synthetic();
+    for method in ["+", "[]=", "[]", "value=", "+@", "-@", "!", "~", "`"] {
+        let value = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: "packet".to_string() } });
+        let mut marked = value.clone();
+        marked.decisions |= ERASED_KEYWORD_SPLAT;
+        let structural = Expr::new(span, ExprNode::KeywordSplat { value });
+        let call = |packet| {
+            let mut args = vec![];
+            if method == "[]=" {
+                args.push(Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("key") } }));
+            }
+            args.push(packet);
+            Expr::new(span, ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::SelfRef)), method: Symbol::from(method),
+                args, block: None, parenthesized: true,
+            })
+        };
+        assert_eq!(roundhouse::emit::ruby::emit_expr(&call(marked)),
+                   roundhouse::emit::ruby::emit_expr(&call(structural)), "{method}");
+    }
+}

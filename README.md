@@ -85,7 +85,7 @@ Ruby application packager, does the whole compile in one command:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/rubys/roundhouse/releases/latest/download/roundhouse-installer.sh | sh
+  https://github.com/roundhouse-rb/roundhouse/releases/latest/download/roundhouse-installer.sh | sh
 roundhouse --version
 roundhouse check --continue /path/to/your/rails/app
 ```
@@ -96,7 +96,7 @@ and Linux x86-64 (plus untested macOS-Intel and Windows builds);
 toolchain, a build from the current source is one line:
 
 ```sh
-cargo install --git https://github.com/rubys/roundhouse --bin roundhouse
+cargo install --git https://github.com/roundhouse-rb/roundhouse --bin roundhouse
 ```
 
 [`docs/guide/install.md`](docs/guide/install.md) has both paths and

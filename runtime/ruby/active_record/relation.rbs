@@ -193,6 +193,8 @@ module ActiveRecord
     def select_specs!: (Array[String | Symbol] specs) -> Relation
     def distinct: (?(bool | Symbol | String) value) -> Relation
     def distinct!: (?(bool | Symbol | String) value) -> Relation
+    def optimizer_hints: (*String hints) -> Relation
+    def optimizer_hints!: (*String hints) -> Relation
     def all: () -> Relation
     def includes: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def preload: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation

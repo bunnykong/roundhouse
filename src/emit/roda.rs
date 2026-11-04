@@ -2210,6 +2210,7 @@ mod tests {
             seg_patterns: vec![],
             refused: None,
             format_required: false,
+            mount_root: false,
         }
     }
 

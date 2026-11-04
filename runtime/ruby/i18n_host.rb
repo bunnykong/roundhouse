@@ -10,6 +10,15 @@ module I18nHost
     name
   end
 
+  def self.config_name
+    Thread.current[:roundhouse_i18n_config].to_s
+  end
+
+  def self.set_config_name(name)
+    Thread.current[:roundhouse_i18n_config] = name
+    name
+  end
+
   def self.env_name
     Rails.env.to_s
   end

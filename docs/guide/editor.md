@@ -46,7 +46,7 @@ The client lives in the repository at
 Marketplace yet; installing it takes the repository and `npm`:
 
 ```sh
-git clone https://github.com/rubys/roundhouse
+git clone https://github.com/roundhouse-rb/roundhouse
 cd roundhouse/editors/vscode
 npm install
 ```

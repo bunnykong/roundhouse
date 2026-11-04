@@ -5,12 +5,21 @@
 # otherwise. `deserialize` casts the same way.
 module ActiveRecord
   module Type
-    # What `type_for_attribute` answers: the column's type name.
+    # What `type_for_attribute` answers: the column's type name, and
+    # whether the attribute is `serialize …, coder: JSON`'s.
     class Value
       attr_reader :type
 
-      def initialize(type)
+      def initialize(type, json_coder = false)
         @type = type
+        @json_coder = json_coder
+      end
+
+      # Not ActiveSupport's encoder as Rails' coder: the text asked for is what RoundhouseJsonColumn.dump stores here.
+      def serialize(value)
+        return value unless @json_coder
+        return nil if value.nil?
+        ::JSON.generate(value)
       end
     end
 

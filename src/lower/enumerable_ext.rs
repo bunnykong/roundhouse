@@ -163,7 +163,10 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
         return ground_string_truncate(expr);
     }
     if method.as_str() == "truncate_words" && block.is_none() {
-        return ground_string_truncate_words(expr);
+        return ground_string_truncate_words(expr, None);
+    }
+    if method.as_str() == "truncate_bytes" && block.is_none() {
+        return ground_string_truncate_words(expr, Some("\u{2026}"));
     }
     let wants_block = match method.as_str() {
         "index_by" => true,
@@ -722,7 +725,8 @@ fn ground_string_truncate(expr: &mut Expr) -> bool {
 /// The default separator only: Rails builds a Regexp from `separator:`,
 /// which the runtime does not do at run time, so that call stays as
 /// written.
-fn ground_string_truncate_words(expr: &mut Expr) -> bool {
+/// Not nil for an omitted `truncate_bytes` omission: Rails' default is `"…"`, and an explicit nil means none.
+fn ground_string_truncate_words(expr: &mut Expr, default_omission: Option<&str>) -> bool {
     let span = expr.span;
     let ExprNode::Send { recv, args, parenthesized, .. } = &mut *expr.node else {
         return false;
@@ -732,8 +736,11 @@ fn ground_string_truncate_words(expr: &mut Expr) -> bool {
     }
     let omission = match args.as_slice() {
         [_] => {
-            let mut lit = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Nil });
-            lit.ty = Some(Ty::Nil);
+            let mut lit = match default_omission {
+                Some(value) => Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Str { value: value.into() } }),
+                None => Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Nil }),
+            };
+            lit.ty = Some(if default_omission.is_some() { Ty::Str } else { Ty::Nil });
             lit
         }
         [_, options] => {

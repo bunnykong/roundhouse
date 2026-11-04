@@ -52,15 +52,14 @@
 //! for SessionLogin` when the module no longer defines it. Those
 //! calls go with the method they name.
 //!
-//! Class-side methods are left alone on purpose. A concern's
-//! `class_methods do` block is dead for the same reason — campfire's
-//! `Authentication.allow_unauthenticated_access` calls a bare
-//! `skip_before_action` — but ingest merges `class_methods do` and a
-//! plain `def self.foo` into one `MethodReceiver::Class` list with no
-//! provenance, so pruning them would also delete a module function a
-//! call site may name (`Foo.bar`). No build has demanded it; when one
-//! does, the discriminator is a whole-app scan for `<Module>.<name>`,
-//! not a guess here.
+//! Class-side methods go by provenance instead. A concern's
+//! `class_methods do` (or `module ClassMethods`) gives its methods to
+//! includers only; Rails never defines them on the module, and the
+//! module's copy is the husk Spinel stopped on (solid_queue's
+//! `Record::DistinctValues` reading `connection_pool` with the module as
+//! `self`). Ingest records their name spans
+//! (`App::concern_class_side_spans`), so a plain `def self.foo` on the
+//! module, which a call site may name (`Foo.bar`), stays.
 
 use crate::app::App;
 use crate::dialect::MethodReceiver;
@@ -69,6 +68,13 @@ use crate::ident::{ClassId, Symbol};
 use crate::det::HashSet;
 
 pub fn apply_spliced_concern_body_prune(app: &mut App) {
+    // A concern's `class_methods` live on its includers only: Rails never defines them on the module itself.
+    if !app.concern_class_side_spans.is_empty() {
+        let spans = &app.concern_class_side_spans;
+        for lc in app.library_classes.iter_mut().filter(|lc| lc.is_module) {
+            lc.methods.retain(|m| !(m.receiver == MethodReceiver::Class && spans.contains(&m.name_span)));
+        }
+    }
     // Modules that handed at least one instance method to a controller.
     // Keyed by module, not by controller: one splice anywhere is what
     // makes the module's own copy the second one.

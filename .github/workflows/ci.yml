@@ -580,6 +580,8 @@ jobs:
         run: |
           gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt rest-client elastic-apm
           gem install --no-document activerecord -v '~> 8.1.0'
+          # solid_queue's record models, at the fixture's locked version (tests/support/solid_queue_worker.rs).
+          gem install --no-document --ignore-dependencies solid_queue -v "$(sed -n 's/^    solid_queue (\(.*\))$/\1/p' fixtures/real-blog/Gemfile.lock)"
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8
         with:
@@ -2212,6 +2214,9 @@ jobs:
       - name: cargo test --test emit_and_run render json writer on python
         if: ${{ !cancelled() && matrix.target == 'python' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_python -- --ignored --nocapture --exact
+      - name: cargo test --test emit_and_run route format on python
+        if: ${{ !cancelled() && matrix.target == 'python' }}
+        run: cargo test --locked --test emit_and_run python_route_format::python_requests_take_rails_format_and_requirement -- --ignored --nocapture --exact
       - name: Warm the dotnet CLI (first-run config is not concurrency-safe)
         if: ${{ !cancelled() && matrix.target == 'csharp' }}
         env:
@@ -2331,7 +2336,7 @@ jobs:
         env:
           ROUNDHOUSE_CONTROLLER_ORACLE_REQUIRED: '1'
         run: |
-          gem install --no-document actionpack -v 8.1.4
+          gem install --no-document actionpack:8.1.4 railties:8.1.4
           gem install --no-document sqlite3 -v '~> 2.9'
           cargo nextest run --profile ci \
             --cargo-metadata target/nextest/cargo-metadata.json \

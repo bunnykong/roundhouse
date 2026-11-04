@@ -562,6 +562,10 @@ pub(super) fn push_schema_methods(
     // apply ISO8601-with-offset vs calendar-only without sniffing values.
     push_schema_symbol_list(methods, owner, "schema_columns", table, |_| true);
     push_schema_column_types(methods, owner, table);
+    let json_coder = crate::lower::serialize::json_serialize_columns(model);
+    if table.columns.iter().any(|c| json_coder.contains(&c.name)) {
+        push_schema_symbol_list(methods, owner, "schema_json_coder_columns", table, |c| json_coder.contains(&c.name));
+    }
     push_decode_plucked(methods, owner, table);
     push_schema_symbol_list(methods, owner, "schema_time_columns", table, |c| {
         matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Time)
@@ -624,7 +628,7 @@ pub(super) fn push_schema_methods(
     // lobsters emits.)
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
-    methods.push(synth_initialize(owner, table, model, through_joins, runtime_relation));
+    methods.push(synth_initialize(owner, table, model, &inherited_belongs_to(model, models, table), through_joins, runtime_relation));
 
     // def id; @identifier; end / def id=(value); @identifier = value; end
     // — when the key column is not called `id` and the table has no
@@ -649,6 +653,7 @@ pub(super) fn push_schema_methods(
 
     // def attributes; { col: @col, ... } excluding id; end
     methods.push(synth_attributes(owner, table, model));
+    methods.push(synth_serializable_hash(owner, table));
 
     // def [](name): dispatch by public column name, then selected alias.
     methods.push(synth_index_read(owner, table, model, runtime_relation));
@@ -2750,10 +2755,33 @@ fn guard_unless_nil(lookup: Expr, action: Expr) -> Expr {
     )
 }
 
+/// Not only the model's own: Rails routes `new(job: record)` through an ancestor's `belongs_to` writer too.
+fn inherited_belongs_to(model: &Model, models: &[Model], table: &Table) -> Vec<Association> {
+    let mut seen: crate::det::HashSet<Symbol> = model.associations().map(|a| a.name().clone()).collect();
+    let mut visited: crate::det::HashSet<ClassId> = crate::det::HashSet::default();
+    let mut out = Vec::new();
+    let mut parent = model.parent.clone();
+    while let Some(id) = parent {
+        if !visited.insert(id.clone()) {
+            break;
+        }
+        let Some(ancestor) = models.iter().find(|m| m.name == id) else { break };
+        for assoc in ancestor.associations() {
+            let Association::BelongsTo { foreign_key, polymorphic: false, .. } = assoc else { continue };
+            if table.columns.iter().any(|c| &c.name == foreign_key) && seen.insert(assoc.name().clone()) {
+                out.push(assoc.clone());
+            }
+        }
+        parent = ancestor.parent.clone();
+    }
+    out
+}
+
 fn synth_initialize(
     owner: &ClassId,
     table: &Table,
     model: &Model,
+    inherited: &[Association],
     through_joins: &super::associations::ThroughJoins,
     runtime_relation: super::RuntimeRelation,
 ) -> MethodDef {
@@ -3111,7 +3139,7 @@ fn synth_initialize(
             }
         }
     }
-    for assoc in model.associations() {
+    for assoc in model.associations().chain(inherited.iter()) {
         if let Association::BelongsTo { name, target, foreign_key, polymorphic: false, .. } = assoc
         {
             let lookup = Expr::new(
@@ -3590,6 +3618,40 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+// Not `attributes`: Rails serializes every attribute, `id` among them, through its reader (a Time, an enum's label), not the stored value.
+fn synth_serializable_hash(owner: &ClassId, table: &Table) -> MethodDef {
+    let entries: Vec<(Expr, Expr)> = table
+        .columns
+        .iter()
+        .map(|c| {
+            let read = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send { recv: None, method: c.name.clone(), args: Vec::new(), block: None, parenthesized: false },
+            );
+            (super::lit_str(c.name.as_str().to_string()), read)
+        })
+        .collect();
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
+    let body = with_ty(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false }), hash_ty.clone());
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("serializable_hash"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], hash_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
     }
 }
 

@@ -62,7 +62,80 @@ def git_repository():
             os.chdir(previous)
 
 
+class PublicationBoundary(unittest.TestCase):
+    def test_scheduled_full_on_canonical_main_may_publish(self):
+        for event in ("schedule", "workflow_dispatch"):
+            with self.subTest(event=event):
+                self.assertTrue(
+                    ci.publication_caller_allowed(
+                        ci.CANONICAL_REPOSITORY, "refs/heads/main", event
+                    )
+                )
+
+    def test_forks_retired_name_topic_branches_and_pr_events_cannot_publish(self):
+        for repository, ref, event in [
+            ("Shopify/roundhouse", "refs/heads/main", "schedule"),
+            ("thomasklemm/roundhouse", "refs/heads/main", "workflow_dispatch"),
+            ("rubys/roundhouse", "refs/heads/main", "schedule"),
+            ("rubys/roundhouse", "refs/heads/main", "workflow_dispatch"),
+            ("roundhouse-rb/roundhouse", "refs/heads/topic", "schedule"),
+            ("roundhouse-rb/roundhouse", "refs/heads/main", "push"),
+            ("roundhouse-rb/roundhouse", "refs/heads/main", "pull_request"),
+        ]:
+            with self.subTest(repository=repository, ref=ref, event=event):
+                self.assertFalse(
+                    ci.publication_caller_allowed(repository, ref, event)
+                )
+
+    def test_plan_entrypoint_publish_requires_canonical_full_caller(self):
+        with git_repository() as (root, git):
+            (root / "README.md").write_text("base\n")
+            git("add", ".")
+            git("commit", "-m", "base")
+            head = git("rev-parse", "HEAD")
+            event_path = root / "event.json"
+            event_path.write_text("{}")
+            base_env = {
+                **os.environ,
+                "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_EVENT_NAME": "schedule",
+                "GITHUB_REF": "refs/heads/main",
+                "GITHUB_SHA": head,
+                "GITHUB_OUTPUT": os.devnull,
+                "CI_FULL": "true",
+                "CI_PUBLISH": "true",
+                "CI_SPINEL_REVISION": "a" * 40,
+            }
+            ok = subprocess.run(
+                ["python3", "-B", ci.__file__, "plan"],
+                env={**base_env, "GITHUB_REPOSITORY": ci.CANONICAL_REPOSITORY},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            denied = subprocess.run(
+                ["python3", "-B", ci.__file__, "plan"],
+                env={**base_env, "GITHUB_REPOSITORY": "rubys/roundhouse"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertIn(
+                "publication is only allowed by canonical main's full caller",
+                denied.stderr,
+            )
+
+
 class Routing(unittest.TestCase):
+    def test_shared_controller_base_runs_every_extra_language(self):
+        for suffix in ("rb", "rbs"):
+            with self.subTest(suffix=suffix):
+                plan = ci.select([f"runtime/ruby/action_controller/base.{suffix}"])
+                self.assertIn("compare-extra", plan["jobs"])
+                self.assertEqual(plan["extra_compare"], ci.EXTRA_COMPARE_TARGETS)
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("render_json_encoder_spinel", plan["spinel_tests"])
+
     def test_websocket_lifecycle_sources_and_helpers_run_the_native_suite(self):
         for path in [
             "runtime/spinel/tep/net.rb", "runtime/spinel/tep/server_threaded.rb",
@@ -828,6 +901,9 @@ class Routing(unittest.TestCase):
             "runtime/spinel/http_stub.rbs": "spinel_net_http_start",
             "runtime/spinel/tcp_socket_stub.rb": "spinel_net_http_start",
             "runtime/spinel/tcp_socket_stub.rbs": "spinel_net_http_start",
+            "tests/spinel_net_http_stream.rb": "spinel_net_http_start",
+            "tests/spinel_net_http_raise.rb": "spinel_net_http_start",
+            "tests/spinel_net_http_transport.rb": "spinel_net_http_start",
         }
         for path, binary in cases.items():
             with self.subTest(path=path):

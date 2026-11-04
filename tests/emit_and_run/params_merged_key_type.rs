@@ -256,3 +256,75 @@ puts "merged factory passed"
     run.assert_passes();
     assert!(run.stdout.contains("merged factory passed"), "{}", run.stdout);
 }
+
+fn reverse_merge_overlay(helper: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  attr_accessor :editor_id\n",
+        )
+        .edit("app/controllers/articles_controller.rb", "      params.expect(article: [ :title, :body ])\n", helper)
+}
+
+const REVERSE_MERGE: &str = "      params.expect(article: [ :title, :body ]).reverse_merge(editor_id: 7)\n";
+
+const MERGE_OR_REVERSE_MERGE: &str = "      if params[:draft]\n        params.expect(article: [ :title, :body ]).merge(editor_id: 7)\n      else\n        params.expect(article: [ :title, :body ]).reverse_merge(editor_id: \"none\")\n      end\n";
+
+#[test]
+fn a_reverse_merge_default_the_permit_drops_takes_its_type_on_spinel() {
+    let (emitted, errors) = reverse_merge_overlay(REVERSE_MERGE).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let rbs = std::fs::read_to_string(emitted.join("app/models/article_params.rbs")).expect("rbs");
+    assert!(rbs.contains("attr_writer editor_id: Integer?"), "{rbs}");
+    let rb = std::fs::read_to_string(emitted.join("app/models/article_params.rb")).expect("rb");
+    assert!(!rb.contains("\"editor_id\" =>"), "the String-valued to_h leaves it out:\n{rb}");
+}
+
+#[test]
+fn a_reverse_merge_default_the_permit_drops_is_assigned_as_written_and_not_read_from_the_request() {
+    let (emitted, errors) = reverse_merge_overlay(REVERSE_MERGE).emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/articles_controller.rb")).expect("controller");
+    assert!(controller.contains("_p.editor_id = 7\n"), "the Integer stays an Integer:\n{controller}");
+    let rb = std::fs::read_to_string(emitted.join("app/models/article_params.rb")).expect("rb");
+    assert!(!rb.contains("sub, \"editor_id\")"), "the request's editor_id is not permitted:\n{rb}");
+}
+
+#[test]
+fn a_key_a_merge_and_a_reverse_merge_both_write_takes_both_types_on_spinel() {
+    let (emitted, errors) = reverse_merge_overlay(MERGE_OR_REVERSE_MERGE).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let rbs = std::fs::read_to_string(emitted.join("app/models/article_params.rbs")).expect("rbs");
+    assert!(rbs.contains("attr_writer editor_id: (Integer | String | nil)"), "{rbs}");
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/articles_controller.rb")).expect("controller");
+    assert!(controller.contains("_p.editor_id = 7\n"), "{controller}");
+    assert!(controller.contains("_p.editor_id = \"none\"\n"), "{controller}");
+}
+
+#[test]
+fn a_write_through_a_local_holding_a_reverse_merge_adds_its_type_on_spinel() {
+    let helper = "      article = params.expect(article: [ :title, :body ]).reverse_merge(editor_id: 7)\n      article[:editor_id] = \"none\"\n      article\n";
+    let (emitted, errors) = reverse_merge_overlay(helper).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let rbs = std::fs::read_to_string(emitted.join("app/models/article_params.rbs")).expect("rbs");
+    assert!(rbs.contains("attr_writer editor_id: (String | Integer | nil)"), "{rbs}");
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_key_a_merge_and_a_reverse_merge_both_write_goes_through_the_spinel_writer() {
+    let run = reverse_merge_overlay(MERGE_OR_REVERSE_MERGE).run_spinel_with_rbs(
+        r#"params = ArticleParams.new
+params.editor_id = 7
+raise "merge" unless params.editor_id == 7
+params.editor_id = "none"
+raise "reverse_merge" unless params.editor_id == "none"
+params.editor_id = nil
+raise "nil" unless params.editor_id.nil?
+puts "merged and default writer passed"
+"#,
+    );
+    run.assert_passes();
+    assert!(run.stdout.contains("merged and default writer passed"), "{}", run.stdout);
+}

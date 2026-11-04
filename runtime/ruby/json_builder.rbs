@@ -1,6 +1,8 @@
 module JsonBuilder
   def self.encode_string: (String) -> String
   def self.escape_html_entities: (String) -> String
+  def self.escape_json_response: (String, ?bool) -> String
+  def self.jsonp: (String, String) -> String
   def self.encode_value: (untyped) -> String
   def self.finite_float: (Float?) -> Float?
   def self.encode_datetime: (String?) -> String
@@ -15,6 +17,8 @@ end
 module ActionController
   module JsonRender
     %a{abstract}
-    def self.encode: (untyped value) -> String
+    def self.encode: (untyped value, ?bool) -> String
+    %a{abstract}
+    def self.encode_escaped: (untyped value) -> String
   end
 end

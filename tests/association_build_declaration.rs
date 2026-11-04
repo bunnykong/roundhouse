@@ -176,6 +176,7 @@ fn a_nested_build_and_find_through_a_declared_foreign_key_use_that_key() {
             "    t.integer \"article_id\"\n    t.integer \"reviewed_article_id\"\n",
         )
         .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article, optional: true\n")
+        .edit("app/views/comments/_comment.html.erb", DELETE_BUTTON_FOR_A_COMMENT_WITH_AN_ARTICLE.0, DELETE_BUTTON_FOR_A_COMMENT_WITH_AN_ARTICLE.1)
         .edit(
             "app/models/article.rb",
             "  has_many :comments, dependent: :destroy",
@@ -204,6 +205,16 @@ fn a_nested_build_and_find_through_a_declared_foreign_key_use_that_key() {
         .run_test("test/controllers/comments_controller_test.rb")
         .assert_passes();
 }
+
+/// A comment these tests key by another column has no article, and the
+/// comment partial its broadcast renders builds the delete button's
+/// nested route from `comment.article`, which Rails (and the route guard)
+/// refuses for a nil segment. The partial shows the button only for a
+/// comment with an article; the tests are about the declared key.
+const DELETE_BUTTON_FOR_A_COMMENT_WITH_AN_ARTICLE: (&str, &str) = (
+    "  <%= button_to \"Delete\", [comment.article, comment], method: :delete,\n      class: \"text-red-600 text-sm mt-2\",\n      data: { turbo_confirm: \"Are you sure?\" } %>\n",
+    "  <% if comment.article %>\n  <%= button_to \"Delete\", [comment.article, comment], method: :delete,\n      class: \"text-red-600 text-sm mt-2\",\n      data: { turbo_confirm: \"Are you sure?\" } %>\n  <% end %>\n",
+);
 
 const COMMENTABLE: &str = "module Commentable\n  extend ActiveSupport::Concern\n\n  included do\n    has_many :comments, dependent: :destroy\n  end\nend\n";
 
@@ -234,6 +245,7 @@ fn a_nested_build_and_find_through_a_redeclared_association_use_the_later_declar
             "    t.integer \"article_id\"\n    t.integer \"legacy_article_id\"\n",
         )
         .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article, optional: true\n")
+        .edit("app/views/comments/_comment.html.erb", DELETE_BUTTON_FOR_A_COMMENT_WITH_AN_ARTICLE.0, DELETE_BUTTON_FOR_A_COMMENT_WITH_AN_ARTICLE.1)
         .write("app/models/concerns/commentable.rb", COMMENTABLE)
         .edit(
             "app/models/article.rb",
@@ -678,6 +690,7 @@ fn a_nested_create_and_find_by_through_a_declared_foreign_key_use_that_key() {
             "    t.integer \"article_id\"\n    t.integer \"reviewed_article_id\"\n",
         )
         .edit("app/models/comment.rb", "  belongs_to :article\n", "  belongs_to :article, optional: true\n")
+        .edit("app/views/comments/_comment.html.erb", DELETE_BUTTON_FOR_A_COMMENT_WITH_AN_ARTICLE.0, DELETE_BUTTON_FOR_A_COMMENT_WITH_AN_ARTICLE.1)
         .edit(
             "app/models/article.rb",
             "  has_many :comments, dependent: :destroy",

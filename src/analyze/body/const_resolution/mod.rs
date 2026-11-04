@@ -58,6 +58,15 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("Float", "MAX", || Ty::Float),
     ("Float", "MIN", || Ty::Float),
     ("IO", "NULL", || Ty::Str),
+    // `io.seek(-n, IO::SEEK_CUR)` (tzinfo's zoneinfo reader); CRuby and spinel answer the same values.
+    ("IO", "SEEK_SET", || Ty::Int),
+    ("IO", "SEEK_CUR", || Ty::Int),
+    ("IO", "SEEK_END", || Ty::Int),
+    // `DateTime.jd(jd, …, Date::ITALY)` (tzinfo's DateTimeWithOffset): the Julian day of the Gregorian reform.
+    ("Date", "ITALY", || Ty::Int),
+    ("Date", "ENGLAND", || Ty::Int),
+    ("Date", "GREGORIAN", || Ty::Float),
+    ("Date", "JULIAN", || Ty::Float),
     // `Regexp.new(selector, Regexp::IGNORECASE)` — lobsters' domain selectors.
     ("Regexp", "IGNORECASE", || Ty::Int),
     ("Regexp", "EXTENDED", || Ty::Int),
@@ -131,7 +140,7 @@ const CORE_TOP_CONSTS: &[&str] = &["STDIN", "STDOUT", "STDERR"];
 
 /// `if RUBY_VERSION >= "2.7.1"` (aasm, hashie): the running Ruby's own
 /// version, which a compile-time answer would freeze to the wrong one.
-const CORE_TOP_STR_CONSTS: &[&str] = &["RUBY_VERSION"];
+const CORE_TOP_STR_CONSTS: &[&str] = &["RUBY_VERSION", "RUBY_PLATFORM"];
 
 fn io_ty() -> Ty {
     Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() }
@@ -145,6 +154,7 @@ const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
     ("Encoding", "Object"),
     ("OpenSSL::SSL", "Object"),
     ("Regexp", "Object"),
+    ("Date", "Object"),
 ];
 
 fn encoding_ty() -> Ty {

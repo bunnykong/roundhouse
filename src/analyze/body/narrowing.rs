@@ -526,6 +526,14 @@ fn intersect_variant(current: &Ty, narrower: &Ty) -> Option<Ty> {
 }
 
 /// Remove variants matching `ty` from a union (for `is_a?` else-branch).
+/// Whether `pred` is a lone `x.is_a?(K)` that `x`'s single known type already answers yes.
+pub(super) fn is_a_settled(pred: &NarrowPred, ctx: &Ctx) -> bool {
+    let NarrowPred::IsA(VarKey::Local(name), ty) = pred else { return false };
+    ctx.local_bindings.get(name).is_some_and(|current| {
+        !matches!(current, Ty::Union { .. } | Ty::Var { .. } | Ty::Untyped) && ty_compatible(current, ty)
+    })
+}
+
 fn remove_variant(current: &Ty, ty: &Ty) -> Ty {
     match current {
         Ty::Union { variants } => {

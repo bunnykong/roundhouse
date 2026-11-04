@@ -9,7 +9,7 @@ use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 
-use super::params::{params_source_class, ParamsSpecs};
+use super::params::{params_source_class, reverse_merge_class, ParamsSpecs};
 
 #[derive(Clone, PartialEq, Eq)]
 enum Source {
@@ -63,7 +63,9 @@ impl ParamsSources {
                     if !spec.has_nested_value(&args[0]) { return None; }
                     Some(Source::Nested)
                 }
-            _ => params_source_class(expr, &self.helpers, specs).map(Source::Params),
+            _ => params_source_class(expr, &self.helpers, specs)
+                .or_else(|| reverse_merge_class(expr, specs))
+                .map(Source::Params),
         }
     }
 

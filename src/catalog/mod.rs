@@ -1013,6 +1013,21 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::HashStrUntyped),
     },
+    // Every attribute by its reader (`synth_serializable_hash`), and the record as JSON reads it (runtime `as_json`).
+    CatalogedMethod {
+        name: "serializable_hash",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::HashStrUntyped),
+    },
+    CatalogedMethod {
+        name: "as_json",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::HashStrUntyped),
+    },
     CatalogedMethod {
         name: "errors",
         receiver: ReceiverContext::Instance,

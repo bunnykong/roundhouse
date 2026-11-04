@@ -249,6 +249,22 @@ mod mutable_literals;
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]
 mod auto_source_gem;
+#[path = "support/enumerable_mixin.rs"]
+mod enumerable_mixin_contract;
+#[path = "spinel_toolchain/enumerable_mixin.rs"]
+mod enumerable_mixin;
+#[path = "support/file_level_struct.rs"]
+mod file_level_struct_contract;
+#[path = "spinel_toolchain/file_level_struct.rs"]
+mod file_level_struct;
+#[path = "support/concern_class_side.rs"]
+mod concern_class_side_contract;
+#[path = "spinel_toolchain/concern_class_side.rs"]
+mod concern_class_side;
+#[path = "support/concern_define_loop.rs"]
+mod concern_define_loop_contract;
+#[path = "spinel_toolchain/concern_define_loop.rs"]
+mod concern_define_loop;
 #[path = "support/active_model_serializer.rs"]
 mod active_model_serializer_app;
 #[path = "spinel_toolchain/active_model_serializer.rs"]

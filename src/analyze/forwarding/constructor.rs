@@ -242,6 +242,8 @@ const MIXINS_WITHOUT_CONSTRUCTOR_HOOK: &[(&str, bool)] = &[
     ("ActiveModel::Validations", false),
     ("ActiveModel::Attributes", true),
     ("Sidekiq::Worker", false),
+    ("Enumerable", false),
+    ("Comparable", false),
 ];
 
 /// Whether `name` is a catalog mixin that leaves `question` unaffected.
@@ -503,7 +505,7 @@ fn constructor_contract<'a>(
     contracts: &SourceContractIndex<'a>,
     owner: &ClassId,
 ) -> Option<ConstructorContract<'a>> {
-    if !contracts.verified_hierarchy(owner, &mut HashSet::default()) {
+    if !contracts.verified(owner) {
         return Some(ConstructorContract::UnknownLookup);
     }
     // `new` itself may be replaced: no own `initialize` changes that.

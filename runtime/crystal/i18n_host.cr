@@ -1,6 +1,7 @@
 module I18nHost
   # Not one class variable: HTTP::Server runs each connection in its own fiber, and a fiber that waits lets another request set the locale
   @@locales = {} of UInt64 => String
+  @@configs = {} of UInt64 => String
   @@table : String? = nil
 
   def self.locale_name : String
@@ -12,8 +13,18 @@ module I18nHost
     name
   end
 
+  def self.config_name : String
+    @@configs[Fiber.current.object_id]? || ""
+  end
+
+  def self.set_config_name(name : String) : String
+    @@configs[Fiber.current.object_id] = name
+    name
+  end
+
   def self.reset_request : Nil
     @@locales.delete(Fiber.current.object_id)
+    @@configs.delete(Fiber.current.object_id)
     nil
   end
 

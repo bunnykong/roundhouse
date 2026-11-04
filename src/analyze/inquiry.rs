@@ -76,6 +76,8 @@ pub fn tail_is_inquiry(body: &Expr) -> bool {
         ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, right, .. } => {
             tail_is_inquiry(right)
         }
+        // `x&.inquiry`, which ingests as `(tmp = x) && tmp.inquiry`: the inquirer, or nil.
+        ExprNode::BoolOp { op: crate::expr::BoolOpKind::And, right, .. } => tail_is_inquiry(right),
         ExprNode::Send { .. } => inquirer_value(body).is_some(),
         _ => false,
     }

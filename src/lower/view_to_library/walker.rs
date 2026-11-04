@@ -468,6 +468,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // genuinely a statement (the prior TODO-append swallowed the
         // side effect and broke stack-walking templates).
         ExprNode::Send { recv: Some(_), block: None, .. } => vec![stmt.clone()],
+        ExprNode::Raise { .. } => vec![stmt.clone()],
         // A bare literal — most often the synthesized `nil` arm `<% unless
         // %>` lowers to — renders nothing and does nothing: nothing is
         // dropped, so no residue line.
@@ -1844,6 +1845,7 @@ mod tests {
             model_singulars: Default::default(),
             slug_models: Default::default(),
             bool_readers: Default::default(),
+            time_columns: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
             i18n: Default::default(),
@@ -1862,6 +1864,8 @@ mod tests {
             partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            yielding_partials: Default::default(),
+            record_carries_yield: false,
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
             record_classes: Default::default(),

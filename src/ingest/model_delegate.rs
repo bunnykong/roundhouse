@@ -121,7 +121,8 @@ pub(crate) fn lower_model_delegates(app: &mut crate::App) {
         let blocked = blocked_names
             .get(&model.name)
             .expect("delegate model surface");
-        let method_targets = own_reader_targets(model);
+        let mut method_targets = own_reader_targets(model);
+        method_targets.extend(included_concern_reader_targets(model, &concern_methods));
         let generated = expand_delegates(
             &model.name,
             &methods,
@@ -131,6 +132,7 @@ pub(crate) fn lower_model_delegates(app: &mut crate::App) {
             Some(&supported_target_methods),
             &method_targets,
             &app.sources,
+            &[],
         );
         let mut unexpanded_spans: Vec<_> = unknown_calls
             .iter()
@@ -175,6 +177,45 @@ fn own_reader_targets(model: &Model) -> HashSet<String> {
         .map(|m| m.name.as_str().to_string())
         .filter(|name| !associations.contains(name))
         .collect()
+}
+
+/// The zero-argument instance methods the model's concerns give it
+/// (`job_class` from `SolidQueue::Job::ConcurrencyControls`): Ruby calls
+/// them on the model as its own, so a `delegate … to:` one forwards there.
+fn included_concern_reader_targets(
+    model: &Model,
+    concern_methods: &HashMap<ClassId, (&[MethodDef], &[ClassId])>,
+) -> HashSet<String> {
+    let associations: HashSet<_> = model.associations().map(|a| a.name().as_str().to_string()).collect();
+    // Not one the model defines itself: Ruby dispatch selects the model's, whatever its arity (`own_reader_targets` judges it).
+    let own: HashSet<String> = model
+        .methods()
+        .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance)
+        .map(|m| m.name.as_str().to_string())
+        .collect();
+    let mut pending = crate::analyze::model_includes(model);
+    let mut names = HashSet::default();
+    let mut seen = HashSet::default();
+    while let Some(concern) = pending.pop() {
+        if !seen.insert(concern.clone()) {
+            continue;
+        }
+        if let Some((included_methods, includes)) = concern_methods.get(&concern) {
+            names.extend(
+                included_methods
+                    .iter()
+                    .filter(|m| {
+                        m.receiver == crate::dialect::MethodReceiver::Instance
+                            && exact_positional_arity(m) == Some(0)
+                            && !uses_implicit_block(&m.body)
+                    })
+                    .map(|m| m.name.as_str().to_string())
+                    .filter(|name| !associations.contains(name) && !own.contains(name)),
+            );
+            pending.extend(includes.iter().cloned());
+        }
+    }
+    names
 }
 
 fn included_concern_method_bodies(

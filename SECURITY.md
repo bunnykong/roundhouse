@@ -13,7 +13,7 @@ from everyone.
 - If you found a high level security issue that could be used to exploit a
   compiled app and cause serious damage, please report privately through
   [GitHub's private vulnerability
-  reporting](https://github.com/rubys/roundhouse/security/advisories/new).
+  reporting](https://github.com/roundhouse-rb/roundhouse/security/advisories/new).
   Please include reproduction steps and the targets you checked and if you
   include a patch too, we will be forever grateful.
 

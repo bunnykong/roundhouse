@@ -165,6 +165,9 @@ pub(super) fn ingest_model_with_enum_constants(
         );
         class_consts.import(&stmts, enum_constants, &enum_owners);
         let resolve_constant = |node: &Node<'_>| enum_constants.resolve(node, &enum_owners);
+        // As the library walk does: a `define_method` loop over a literal list unrolls into the `def`s it makes.
+        let _loop_constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(&owner, &stmts));
+        let loop_visibility = super::define_method_loop::named_visibility(&stmts);
         for statement in stmts {
             let definition = visibility::definition(&statement).map(|d| d.as_node());
             let stmt = definition.as_ref().unwrap_or(&statement);
@@ -266,6 +269,22 @@ pub(super) fn ingest_model_with_enum_constants(
             // Ruby's alias reaches the original name's super method and a
             // renamed copy would reach its own. Anything else stays an
             // unknown item.
+            if let Some(methods) = super::define_method_loop::unroll(
+                stmt,
+                &owner,
+                file,
+                crate::dialect::MethodReceiver::Instance,
+                &loop_visibility,
+            ) {
+                let mut leading = Some((leading, leading_blank));
+                for mut method in methods {
+                    visibility.apply(&statement, &mut method);
+                    let (comments, blank) = leading.take().unwrap_or_default();
+                    body.push(ModelBodyItem::Method { method, leading_comments: comments, leading_blank_line: blank });
+                }
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
             if let Some(mut copy) = stmt.as_call_node().and_then(|call| model_alias_method_copy(&call, &body)) {
                 visibility.apply(&statement, &mut copy);
                 body.push(ModelBodyItem::Method {
@@ -324,7 +343,11 @@ pub(super) fn ingest_model_with_enum_constants(
                                 leading_comments: Vec::new(),
                                 leading_blank_line: false,
                             })
-                            .chain(singleton.class_body.into_iter().map(|expr| {
+                            .chain(singleton.class_body.into_iter().map(|mut expr| {
+                                // Its constants live on the singleton class, where the Ruby trees read them (`expr::SINGLETON_BODY`).
+                                if let crate::expr::ExprNode::Assign { target: crate::expr::LValue::Const { .. }, value } = &mut *expr.node {
+                                    value.decisions |= crate::expr::SINGLETON_BODY;
+                                }
                                 ModelBodyItem::Unknown {
                                     expr,
                                     leading_comments: Vec::new(),
@@ -532,6 +555,21 @@ pub(super) fn ingest_model_body_items(
         start: stmt.location().start_offset() as u32,
         end: stmt.location().end_offset() as u32,
     };
+    // Only `serialize` beside the `define_method`s: the other macros are read from the statement, not from a rewritten Expr.
+    let mut macros = Vec::new();
+    if let Some(methods) = super::define_method_loop::unroll_with_macros(stmt, owner, file, &mut macros)
+        && macros.iter().all(|m| matches!(&*m.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "serialize"))
+    {
+        let mut leading = Some(leading_comments);
+        let mut items: Vec<ModelBodyItem> = Vec::new();
+        for expr in macros {
+            items.push(ModelBodyItem::Unknown { expr, leading_comments: leading.take().unwrap_or_default(), leading_blank_line: false });
+        }
+        for method in methods {
+            items.push(ModelBodyItem::Method { method, leading_comments: leading.take().unwrap_or_default(), leading_blank_line: false });
+        }
+        return Ok(items);
+    }
     if let Some(call) = stmt.as_call_node() {
         if with_options::is_with_options(&call) {
             return match with_options::expand(&call, &[], owner, file, class_consts) {

@@ -56,3 +56,20 @@ fn presence_in_a_literal_list_filters_a_param() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// `status.presence_in(%i[pending failed]) || :failed`: a Symbol the list
+/// holds passes through, any other falls to the default, as Rails'
+/// `in?(list) ? self : nil` answers (mission_control-jobs' discards).
+#[test]
+fn presence_in_a_symbol_list_filters_a_symbol() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/status_pick.rb",
+            "class StatusPick\n  def self.pick(status)\n    status.presence_in(%i[pending failed]) || :failed\n  end\nend\n",
+        )
+        .run_ruby(
+            "raise StatusPick.pick(:pending).inspect unless StatusPick.pick(:pending) == :pending\nraise StatusPick.pick(:other).inspect unless StatusPick.pick(:other) == :failed\nraise \"call site\" unless [:pending, :other].map { |s| StatusPick.pick(s) } == [:pending, :failed]\nputs \"symbol presence_in passed\"\n",
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("symbol presence_in passed"), "{}", run.stdout);
+}

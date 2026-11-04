@@ -406,6 +406,11 @@ fn declaration_order_cases() -> Vec<(&'static str, &'static str, &'static str, &
         ("delegate_before_def", "def self.x; \"delegate\"; end\ndelegate :x, to: :class\ndef x; \"method\"; end", "x", "method"),
         ("delegate_after_def", "def self.x; \"delegate\"; end\ndef x; \"method\"; end\ndelegate :x, to: :class", "x", "delegate"),
         ("delegate_alias_snapshot", "def self.x; \"delegate\"; end\ndelegate :x, to: :class\nalias_method :y, :x\ndef x; \"method\"; end", "y + \"|\" + x", "delegate|method"),
+        ("delegate_alias_only", "def self.x; \"delegate\"; end\ndelegate :x, to: :class\nalias_method :y, :x", "y + \"|\" + self.x", "delegate|delegate"),
+        ("delegate_reader_snapshot", "def self.x; \"delegate\"; end\ndelegate :x, to: :class\nalias_method :y, :x\nattr_reader :x", "y + \"|\" + x", "delegate|reader"),
+        ("reader_before_delegate", "def self.x; \"delegate\"; end\nattr_reader :x\ndelegate :x, to: :class", "x", "delegate"),
+        ("delegate_before_reader", "def self.x; \"delegate\"; end\ndelegate :x, to: :class\nattr_reader :x", "x", "reader"),
+        ("repeated_delegate_alias_snapshot", "def first; \"first\"; end\ndef second; \"second\"; end\ndelegate :upcase, to: :first\nalias_method :y, :upcase\ndelegate :upcase, to: :second", "y + \"|\" + upcase", "FIRST|SECOND"),
         ("undef_then_def", "def x; \"first\"; end\nundef_method :x\ndef x; \"last\"; end", "x", "last"),
     ]
 }
@@ -574,6 +579,89 @@ fn declaration_order_does_not_hide_unresolvable_dispatch_collisions() {
             assert!(diagnostics.iter().any(|d| d.severity == Severity::Error
                 && d.message.contains("controller_method_collision")), "refusal declarations={declarations:?}, hook={hook}: {diagnostics:?}");
         }
+    }
+}
+
+#[test]
+fn rails_oracle_routed_delegates_keep_implicit_rendering() {
+    if !require_rails_oracle() { return; }
+    let availability = format!(
+        "{}\nexit(RailsOracle.available?(\"actionpack\", \"railties\") ? 0 : 1)\n",
+        include_str!("support/rails_oracle.rb"),
+    );
+    if !ruby_command().args(["-e", &availability]).output()
+        .is_ok_and(|output| output.status.success())
+    {
+        assert_ne!(std::env::var("ROUNDHOUSE_CONTROLLER_ORACLE_REQUIRED").as_deref(), Ok("1"),
+            "the required Rails application oracle is unavailable");
+        eprintln!("skipping controller oracle: the selected Rails railties is not installed");
+        return;
+    }
+    for hook in [false, true] {
+        let mut files = declaration_order_files("", "\"unused\"", hook);
+        files[1].1 = APPLICATION.replace("ActionController::API", "ActionController::Base");
+        let hook_source = if hook { wrapper(true, "own", false) } else { String::new() };
+        files.last_mut().unwrap().1 = format!(
+            "class ProbeController < ApplicationController\ndef self.index; nil; end\ndelegate :index, to: ProbeController\n{hook_source}end\n"
+        );
+        files.push(("app/views/probe/index.html.erb".into(), "delegated:<%= action_name %>".into()));
+        let mut script = String::from(include_str!("support/rails_oracle.rb"));
+        script.push_str(r#"
+RailsOracle.activate("actionpack", "railties")
+require "action_controller/railtie"
+require "action_dispatch/testing/test_request"
+require "action_dispatch/testing/test_response"
+require "tmpdir"
+require "fileutils"
+class DelegateProbeApplication < Rails::Application
+  config.load_defaults 8.1
+  config.eager_load = false
+  config.secret_key_base = "test" * 32
+  config.logger = Logger.new(File::NULL)
+end
+DelegateProbeApplication.initialize!
+Dir.mktmpdir do |views|
+ActionController::Base.view_paths = [views]
+"#);
+        for (path, source) in &files {
+            if let Some(view) = path.strip_prefix("app/views/") {
+                script.push_str(&format!("FileUtils.mkdir_p(File.dirname(File.join(views, {view:?})))\nFile.write(File.join(views, {view:?}), {source:?})\n"));
+            } else if path.starts_with("app/") && path.ends_with(".rb") {
+                script.push_str(source);
+            }
+        }
+        script.push_str("c = ProbeController.new\nc.set_request!(ActionDispatch::TestRequest.create)\nc.set_response!(ActionDispatch::TestResponse.new)\nc.process(:index)\nputs [c.response.body, c.response.status].join('|')\nend\n");
+        let control = ruby_command().args(["-e", &script]).output().expect("Rails routed delegate");
+        assert!(control.status.success(), "{}", String::from_utf8_lossy(&control.stderr));
+        let reference = String::from_utf8(control.stdout).unwrap();
+        assert_eq!(reference, "delegated:index|200\n", "Rails: hook={hook}");
+        let entry = if hook { "_roundhouse_dispatch_action" } else { "process_action" };
+        let actual = run_emitted_program(&files, &format!(
+            "require_relative 'app/controllers/probe_controller'\nc = ProbeController.new\nc.{entry}(:index)\nputs [c.body, c.status].join('|')\n"
+        ));
+        assert_eq!(actual, reference, "routed delegate: hook={hook}");
+    }
+}
+
+#[test]
+fn rails_oracle_controller_delegate_private_option_survives_lowering() {
+    if !require_rails_oracle() { return; }
+    for hook in [false, true] {
+        let mut files = controller_delegate_files();
+        let source = &mut files.last_mut().unwrap().1;
+        *source = source.replace("delegate :upcase, to: :target", "delegate :upcase, to: :target, private: true");
+        if hook {
+            let at = source.rfind("\nend\n").unwrap();
+            source.insert_str(at, &wrapper(true, "own", false));
+        }
+        let reference = oracle_program(&files, "ProbeController",
+            "puts [c.response.body, ProbeController.private_method_defined?(:upcase), ProbeController.public_method_defined?(:upcase)].join('|')");
+        assert_eq!(reference, "AB|true|false\n", "Rails: hook={hook}");
+        let entry = if hook { "_roundhouse_dispatch_action" } else { "process_action" };
+        let actual = run_emitted_program(&files, &format!(
+            "require_relative 'app/controllers/probe_controller'\nc = ProbeController.new\nc.{entry}(:index)\nputs [c.body, ProbeController.private_method_defined?(:upcase), ProbeController.public_method_defined?(:upcase)].join('|')\n"
+        ));
+        assert_eq!(actual, reference, "private delegate: hook={hook}");
     }
 }
 

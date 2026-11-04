@@ -708,5 +708,9 @@ fn run_transpile(
         out.display(),
         target.as_str()
     );
+    // The process exits next. Freeing the App's trees node by node takes
+    // seconds on a large app and frees nothing the exit would not.
+    std::mem::forget(app);
+    std::mem::forget(files);
     Ok(())
 }

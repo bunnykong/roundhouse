@@ -212,7 +212,7 @@ fn an_unencodable_value_keeps_the_runtime_encoder() {
     let models = file(ruby::emit_lowered_models(&app), "models/story.rb");
     assert!(!models.contains("as_json_str"), "{models}");
     let src = file(ruby::emit_lowered_controllers_with_layout(&app), "stories_controller");
-    assert!(src.contains("ActionController::JsonRender.encode(@stories)"), "{src}");
+    assert!(src.contains("ActionController::JsonRender.encode(@stories, json_render_escape)"), "{src}");
 }
 
 /// A table-backed record with NO `as_json` serializes its columns in

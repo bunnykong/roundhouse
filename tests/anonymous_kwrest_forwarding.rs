@@ -208,9 +208,11 @@ fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
             // method body it is not a gate there; in a constant initializer,
             // which runs while the program loads, and `defined?(@@missing)`
             // it still is.
+            // Spinel carries class variables as Ruby does (its test/class_var_* suite).
             if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby)
                 || (matches!(target, BuildTarget::Spinel)
                     && (construct == "anonymous keyword forwarding"
+                        || construct.starts_with("class variable")
                         || source.contains("def self.call; defined?(MissingPr197)")))
             {
                 assert!(gates.is_empty(), "{target:?}: {diags:?}");
@@ -238,7 +240,8 @@ fn native_initializers_in_test_inner_classes_keep_the_target_boundary() {
         });
         let gates: Vec<_> = diags.iter().filter(|d| matches!(&d.kind,
             DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "class variable write")).collect();
-        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        // Spinel carries class variables as Ruby does (its test/class_var_* suite).
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
             assert!(gates.is_empty(), "{target:?}: {diags:?}");
         } else {
             assert!(!gates.is_empty(), "{target:?}: {diags:?}");

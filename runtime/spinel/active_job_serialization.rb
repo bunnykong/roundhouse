@@ -298,6 +298,65 @@ module ActiveJob
       end
       Time.at(Time.utc(year, mon, day, hour, min, sec).to_i - offset, nsec, :nsec).utc
     end
+
+    # ---- Whole-argument read: Rails' `Arguments.deserialize` ----------
+
+    TIME_WITH_ZONE_SERIALIZER = "ActiveJob::Serializers::TimeWithZoneSerializer"
+    SYMBOL_KEYS_KEY = "_aj_symbol_keys"
+    RUBY2_KEYWORDS_KEY = "_aj_ruby2_keywords"
+    WITH_INDIFFERENT_ACCESS_KEY = "_aj_hash_with_indifferent_access"
+
+    # Not every Rails serializer: Date, DateTime, Duration, BigDecimal, Range, Module and an app's own raise DeserializationError.
+    def self.deserialize(arguments)
+      arguments.map { |argument| deserialize_argument(argument) }
+    rescue ActiveJob::DeserializationError
+      raise
+    rescue StandardError => e
+      raise ActiveJob::DeserializationError, deserialize_message(e.message)
+    end
+
+    def self.deserialize_argument(argument)
+      case argument
+      when nil, true, false, Integer, Float, String
+        argument
+      when Array
+        argument.map { |part| deserialize_argument(part) }
+      when Hash
+        if argument.size == 1 && argument.key?(GLOBALID_KEY)
+          parts = gid_parts(argument)
+          JobRegistry.locate(parts[1], parts[2])
+        elsif argument.key?(SERIALIZER_KEY)
+          deserialize_serialized(argument)
+        else
+          deserialize_hash(argument)
+        end
+      else
+        raise ArgumentError, "Can only deserialize primitive arguments: " + argument.inspect
+      end
+    end
+
+    def self.deserialize_serialized(hash)
+      name = hash[SERIALIZER_KEY].to_s
+      case name
+      when SYMBOL_SERIALIZER
+        hash["value"].to_s.to_sym
+      when TIME_SERIALIZER, TIME_WITH_ZONE_SERIALIZER
+        parse_time(hash["value"].to_s)
+      else
+        raise ArgumentError, "Serializer " + name + " is not known"
+      end
+    end
+
+    # Not a HashWithIndifferentAccess for `_aj_hash_with_indifferent_access`: the runtime has none, so its keys stay Strings.
+    def self.deserialize_hash(hash)
+      symbol_keys = hash[SYMBOL_KEYS_KEY] || hash[RUBY2_KEYWORDS_KEY]
+      result = {}
+      hash.each do |key, value|
+        next if key == SYMBOL_KEYS_KEY || key == RUBY2_KEYWORDS_KEY || key == WITH_INDIFFERENT_ACCESS_KEY
+        result[symbol_keys && symbol_keys.include?(key) ? key.to_sym : key] = deserialize_argument(value)
+      end
+      result
+    end
   end
 
   module Payload
@@ -331,6 +390,105 @@ module ActiveJob
         ",\"timezone\":\"UTC\"" +
         ",\"enqueued_at\":" + Arguments.str(Time.now.utc.iso8601(9)) +
         ",\"scheduled_at\":" + scheduled + "}"
+    end
+  end
+end
+
+module ActiveJob
+  # Rails' job object, for the code that handles one rather than a payload
+  # (solid_queue's records, a batch's callbacks): the `serialize` hash's
+  # fields, read back by `deserialize`. The arguments stay the payload's
+  # JSON text, as Rails keeps them serialized until `perform` reads them.
+  class Base
+    attr_accessor :job_id, :queue_name, :priority, :scheduled_at, :enqueued_at, :executions, :arguments_json, :provider_job_id, :successfully_enqueued, :enqueue_error
+
+    def successfully_enqueued?
+      @successfully_enqueued == true
+    end
+
+    # Rails' `set`: where and when this job is to run.
+    def set(options = {})
+      wait = options[:wait]
+      wait_until = options[:wait_until]
+      @scheduled_at = Time.now + wait.to_f unless wait.nil?
+      @scheduled_at = wait_until unless wait_until.nil?
+      queue = options[:queue]
+      @queue_name = queue.to_s unless queue.nil?
+      priority = options[:priority]
+      @priority = priority.to_i unless priority.nil?
+      self
+    end
+
+    # Not solid_queue's `limits_concurrency` key: no job here declares a limit, so none has one.
+    def concurrency_key
+      nil
+    end
+
+    def serialize
+      JSON.parse(Payload.of(self))
+    end
+
+    def deserialize(job_data)
+      @job_id = job_data["job_id"].to_s
+      queue = job_data["queue_name"]
+      @queue_name = queue.nil? ? "default" : queue.to_s
+      priority = job_data["priority"]
+      @priority = priority.nil? ? nil : priority.to_i
+      @executions = job_data["executions"].to_i
+      @provider_job_id = job_data["provider_job_id"]
+      scheduled = job_data["scheduled_at"]
+      @scheduled_at = scheduled.nil? ? nil : Arguments.parse_time(scheduled.to_s)
+      enqueued = job_data["enqueued_at"]
+      @enqueued_at = enqueued.nil? ? nil : Arguments.parse_time(enqueued.to_s)
+      @arguments_json = JSON.generate(job_data["arguments"])
+      deserialize_extras(job_data)
+      self
+    end
+
+    # What an adapter's extension adds to the hash (solid_queue's batch id); none here.
+    def serialize_extras
+      ""
+    end
+
+    def deserialize_extras(job_data)
+      nil
+    end
+
+    def self.deserialize(job_data)
+      name = job_data["job_class"].to_s
+      job = JobRegistry.instantiate(name)
+      raise NameError, "uninitialized constant " + name if job.nil?
+      job.deserialize(job_data)
+    end
+
+    # Not the job's enqueue callbacks: no job's are modeled in this runtime, and `perform_later` runs none either.
+    def run_callbacks(kind)
+      yield
+    end
+  end
+
+  module Payload
+    # `job.serialize` as JSON, from the job's fields, keys in Rails' order.
+    def self.of(job)
+      provider = job.provider_job_id
+      priority = job.priority
+      "{\"job_class\":" + Arguments.str(job.class.name.to_s) +
+        ",\"job_id\":" + Arguments.str(job.job_id.to_s) +
+        ",\"provider_job_id\":" + (provider.nil? ? "null" : JSON.generate(provider)) +
+        ",\"queue_name\":" + Arguments.str(job.queue_name.nil? ? "default" : job.queue_name.to_s) +
+        ",\"priority\":" + (priority.nil? ? "null" : priority.to_s) +
+        ",\"arguments\":" + (job.arguments_json.nil? ? "[]" : job.arguments_json.to_s) +
+        ",\"executions\":" + job.executions.to_i.to_s +
+        ",\"exception_executions\":{}" +
+        ",\"locale\":\"en\"" +
+        ",\"timezone\":\"UTC\"" +
+        ",\"enqueued_at\":" + time_or_null(job.enqueued_at) +
+        ",\"scheduled_at\":" + time_or_null(job.scheduled_at) +
+        job.serialize_extras + "}"
+    end
+
+    def self.time_or_null(time)
+      time.nil? ? "null" : Arguments.str(time.utc.iso8601(9))
     end
   end
 end

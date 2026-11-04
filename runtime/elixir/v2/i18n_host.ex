@@ -2,6 +2,7 @@ defmodule I18nHost do
   # Not a module attribute: Plug serves each request in a process of its own, and the locale is that request's
   def reset_request() do
     Process.delete(:roundhouse_i18n_locale)
+    Process.delete(:roundhouse_i18n_config)
     nil
   end
 
@@ -11,6 +12,15 @@ defmodule I18nHost do
 
   def set_locale_name(name) do
     Process.put(:roundhouse_i18n_locale, name)
+    name
+  end
+
+  def config_name() do
+    Process.get(:roundhouse_i18n_config, "")
+  end
+
+  def set_config_name(name) do
+    Process.put(:roundhouse_i18n_config, name)
     name
   end
 

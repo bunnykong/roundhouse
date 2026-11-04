@@ -473,15 +473,15 @@ fn unused_accessor_contexts_do_not_reject_an_app() {
     }
 }
 
-/// Accessors are supplied only by direct model splicing. Neither a plain
-/// module nor a non-model class has that replacement for Concern execution.
+/// Accessors are supplied by a direct include into a model or a plain class
+/// (`library_concern_items`). A module, a controller, a test class or an
+/// indirect include has no such replacement for Concern execution.
 #[test]
 fn non_model_and_indirect_accessor_activations_are_errors() {
     use roundhouse::ingest::survey;
     for body in ["attr_accessor :scratch", "attr_accessor :scratch; private :helper"] {
         let concern = format!("module DraftState\n  extend ActiveSupport::Concern\n  def helper; 'helper'; end\n  included {{ {body} }}\nend\n");
         for (path, owner, source) in [
-            ("app/models/support.rb", "Support", "class Support; include DraftState; end"),
             ("app/models/support.rb", "Support", "module Support; include DraftState; end"),
             ("app/controllers/support_controller.rb", "SupportController", "class SupportController < ApplicationController; include DraftState; end"),
             ("test/models/support_test.rb", "SupportTest", "class SupportTest < ActiveSupport::TestCase; include DraftState; end"),
@@ -595,8 +595,10 @@ fn deferred_concern_dependencies_stay_dormant_and_use_lexical_names() {
     assert!(errors.iter().any(|e| e.contains("Scope::Message includes unresolved Scope::DraftState")), "{errors:?}");
     let mut files = files;
     files.insert("app/models/support.rb".into(), b"module Scope; class Support; include ::DraftState; end; end".to_vec());
-    let error = ingest_app_from_tree(files).unwrap_err().to_string();
-    assert!(error.contains("on Scope::Support") && error.contains("concern attr_accessor"), "{error}");
+    // A plain class that includes the Concern itself takes its accessors (`library_concern_items`).
+    let app = ingest_app_from_tree(files).expect("a class including the Concern takes its accessors");
+    let support = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Scope::Support").unwrap();
+    assert!(["scratch", "scratch="].iter().all(|n| support.methods.iter().any(|m| m.name.as_str() == *n)), "{:?}", support.methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>());
 }
 
 #[test]

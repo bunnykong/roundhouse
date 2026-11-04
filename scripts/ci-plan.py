@@ -59,6 +59,9 @@ BASE = [
 # selected (scheduled full, or a change that owns them). Unselected skips
 # must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
+# Canonical home after the org transfer. Forks and the retired rubys/
+# name stay rejected.
+CANONICAL_REPOSITORY = "roundhouse-rb/roundhouse"
 CORE = ["spinel-build", "spinel-toolchain", "spinel-compare"]
 JRUBY_BIND_INPUTS = {
     "tests/param_binds_jruby.rb",
@@ -515,6 +518,8 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
+        suites.add("spinel_net_http_start")
     if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":
         suites.add("spinel_faye_websocket")
     if path.startswith(("tests/spinel_websocket_lifecycle", "runtime/spinel/tep/websocket")) or path in {
@@ -747,6 +752,11 @@ def select(
     wasm = site = spinel = False
     reasons = []
     for path in paths:
+        if path in {"runtime/ruby/action_controller/base.rb", "runtime/ruby/action_controller/base.rbs"}:
+            targets.update(EXTRA_COMPARE_TARGETS)
+            spinel_tests.add("render_json_encoder_spinel")
+            reasons.append(f"{path}: shared controller runtime on every extra language")
+
         if path in {"tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"}:
             reasons.append(f"{path}: unit (emit_and_run), spinel-toolchain (ordinary class-body calls)")
             spinel = True
@@ -1256,6 +1266,15 @@ def _advisory_complete(job, need, advisory, plan=None):
     return all(need.get("outputs", {}).get(key) == "success" for key in keys)
 
 
+def publication_caller_allowed(repository, ref, event_name):
+    """True only for scheduled / dispatched Full validation on canonical main."""
+    return (
+        repository == CANONICAL_REPOSITORY
+        and ref == "refs/heads/main"
+        and event_name in {"schedule", "workflow_dispatch"}
+    )
+
+
 def write_outputs(values):
     output = os.environ.get("GITHUB_OUTPUT")
     lines = "".join(
@@ -1377,10 +1396,10 @@ def main():
                 "Ruby+Spinel only (extra-language SDKs not selected)"
             )
     publish = os.environ.get("CI_PUBLISH") == "true"
-    if publish and (
-        os.environ["GITHUB_REPOSITORY"] != "rubys/roundhouse"
-        or os.environ["GITHUB_REF"] != "refs/heads/main"
-        or event_name not in {"schedule", "workflow_dispatch"}
+    if publish and not publication_caller_allowed(
+        os.environ["GITHUB_REPOSITORY"],
+        os.environ["GITHUB_REF"],
+        event_name,
     ):
         raise ValueError("publication is only allowed by canonical main's full caller")
     plan = select(

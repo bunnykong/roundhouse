@@ -910,6 +910,7 @@ fn tree_call(span: Span, method: &str, ty: Ty, full: &str, options: Option<&Expr
     let options = match options {
         Some(opts) => {
             let mut opts = opts.clone();
+            opts.decisions &= !crate::expr::ERASED_KEYWORD_SPLAT;
             if let ExprNode::Hash { kwargs, .. } = &mut *opts.node {
                 *kwargs = false;
             }
@@ -931,6 +932,7 @@ fn runtime_call(span: Span, args: &[Expr], catalog: &Catalog, site: Site<'_>) ->
     let options = match args.get(1) {
         Some(opts) => {
             let mut opts = opts.clone();
+            opts.decisions &= !crate::expr::ERASED_KEYWORD_SPLAT;
             // Left as keywords the hash would swallow the arguments that follow it.
             if let ExprNode::Hash { kwargs, .. } = &mut *opts.node {
                 *kwargs = false;

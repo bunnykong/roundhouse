@@ -23,4 +23,36 @@ gzipped = Net::HTTP.new("127.0.0.1", port).request(Net::HTTP::Get.new("/gzip"))
 check "a gzip-encoded response is answered decoded", gzipped.body == "decoded widget"
 check "the decoded response drops Content-Encoding", gzipped["content-encoding"].nil?
 
+uri = URI("http://127.0.0.1:#{port}/plain")
+check "GET reads its body before closing the socket", Net::HTTP.get(uri) == "plain widget"
+post = Net::HTTP::Post.new("/plain")
+post.body = "posted"
+check "POST reads its body", Net::HTTP.new(uri.host, uri.port).request(post).body == "plain widget"
+inside = ""
+Net::HTTP.new(uri.host, uri.port).request(Net::HTTP::Get.new("/plain")) do |res|
+  inside = "#{res.code}:#{res.body}"
+end
+check "the request block sees a readable response", inside == "200:plain widget"
+streamed = String.new
+http = Net::HTTP.new(uri.host, uri.port)
+http.request(Net::HTTP::Get.new("/plain")) do |res|
+  res.read_body { |chunk| streamed << chunk }
+end
+check "read_body delivers socket bytes inside the request block", streamed == "plain widget"
+check "a streaming request closes its implicit session", !http.started?
+body = ""
+Net::HTTP.new(uri.host, uri.port).request(Net::HTTP::Get.new("/plain")) { |res| body = res.read_body }
+check "read_body without a block reads the socket", body == "plain widget"
+second = ""
+third = ""
+value = Net::HTTP.start(uri.host, uri.port) do |session|
+  first = session.get("/plain").body
+  second = session.get("/two").body
+  third = session.get("/three").body
+  first
+end
+check "start keeps the socket open through the body read", value == "plain widget"
+check "a second request reconnects after close and reads its own body", second == "second widget"
+check "a third request reconnects after close and reads its own body", third == "third widget"
+check "content_length remains available on the reopened response", plain.content_length == 12
 puts "done"

@@ -26,6 +26,7 @@ module ActiveSupport
   def self.query_value: (String name, Roundhouse::ParamValue item) -> String
   def self.presence: (untyped value) -> untyped
   def self.presence_in: (untyped value, Array[String] list) -> untyped
+  def self.symbol_presence_in: (untyped value, Array[Symbol] list) -> untyped
 
   # `errors[:field]` -> the messages added on that attribute, prefix stripped.
 
@@ -84,6 +85,7 @@ module ActiveSupport
   def self.truncate: (String text, Integer truncate_to, String? omission, String? separator) -> String
   def self.word_space_byte?: (Integer b) -> bool
   def self.truncate_words: (String text, Integer words_count, String? omission) -> String
+  def self.truncate_bytes: (String text, Integer truncate_to, String? omission) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver
   # is a channel's `streams`, a plain Array. It is — an
@@ -158,7 +160,14 @@ module ActiveSupport
     def formatted_offset: () -> String
     def to_s: () -> String
     def now: () -> Time
+    def tzinfo: () -> TimeZoneInfo
   end
+  class TimeZoneInfo
+    def name: () -> String
+    def initialize: (String name) -> void
+    def identifier: () -> String
+  end
+  def self.current_tzinfo: () -> TimeZoneInfo
   def self.parse_tz_rule: (String spec) -> Array[Integer]
   def self.posix_seconds: (String text) -> Integer
   DEFAULT_ZONE: Array[TimeZoneData]

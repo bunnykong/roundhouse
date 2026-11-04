@@ -325,15 +325,14 @@ async function boot() {
   client = createClient({
     workerUrl: new URL("../lib/worker.mjs", import.meta.url),
     wasmUrl: new URL("../lib/roundhouse_wasm.wasm", import.meta.url).href,
-    // 60s, not 30s: this is a HANG detector, and a hang is infinite — the
+    // 120s, not 60s: this is a HANG detector, and a hang is infinite — the
     // only thing the threshold decides is how long a genuinely-working
     // transpile may take before we call it dead. Mastodon, the largest app
-    // in the picker, needs ~30s of honest work here, so 30000 left no
-    // headroom at all: the check went red on 192afe42 and again on
-    // 68f4d828 (a change measured at +0.6% native, 8.02s -> 8.07s), which
-    // is a gate reporting runner variance rather than regressions. Raising
-    // it does not make the transpile faster — that stays on the list.
-    timeoutMs: 60000,
+    // in the picker, now needs close to 60s of honest work on a CI runner,
+    // so 60000 failed the smoke on main-equivalent trees (2026-11-03, docs-site
+    // and gem-engines) as 30000 did before it on 192afe42 and 68f4d828.
+    // Raising it does not make the transpile faster — that stays on the list.
+    timeoutMs: 120000,
     onRestart: (reason) => setStatus(`compiler restarted — ${reason}`, "err"),
   });
   await client.ready();

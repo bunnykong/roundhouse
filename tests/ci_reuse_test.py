@@ -32,7 +32,7 @@ class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.current = {
             "schema": 1,
-            "repository": "rubys/roundhouse",
+            "repository": "roundhouse-rb/roundhouse",
             "pull_request": 321,
             "head_repository": "contributor/roundhouse",
             "branch": "fix",
@@ -62,7 +62,7 @@ class EvidenceTests(unittest.TestCase):
             "name": "store-check",
             "status": "completed",
             "conclusion": "success",
-            "html_url": "https://github.com/rubys/roundhouse/actions/runs/400/job/42",
+            "html_url": "https://github.com/roundhouse-rb/roundhouse/actions/runs/400/job/42",
             "steps": [
                 {"name": "cargo build", "conclusion": "success"},
                 {
@@ -198,7 +198,7 @@ class EvidenceTests(unittest.TestCase):
             self.find()
 
     def test_jobs_and_artifacts_paginate_instead_of_assuming_thirty_jobs(self):
-        api = reuse.GitHub("rubys/roundhouse")
+        api = reuse.GitHub("roundhouse-rb/roundhouse")
         pages = [{"jobs": [{"name": "other"}] * 100}, {"jobs": [self.job]}]
         with patch.object(api, "get", side_effect=pages) as get:
             found = list(api.pages("actions/runs/400/attempts/1/jobs", "jobs"))
@@ -462,7 +462,7 @@ class InputTests(unittest.TestCase):
         return {
             "GITHUB_EVENT_NAME": "pull_request",
             "GITHUB_EVENT_PATH": str(event),
-            "GITHUB_REPOSITORY": "rubys/roundhouse",
+            "GITHUB_REPOSITORY": "roundhouse-rb/roundhouse",
             "GITHUB_RUN_ID": "500",
             "GITHUB_RUN_ATTEMPT": "1",
             "RUNNER_TEMP": str(self.root / "temp"),

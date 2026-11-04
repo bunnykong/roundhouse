@@ -309,6 +309,12 @@ module ActiveJob
     nil
   end
 
+  # Rails' adapter classes, for the extensions an engine mixes into them at boot (`engine_config::carry_boot_mixin`).
+  module QueueAdapters
+    class AsyncAdapter
+    end
+  end
+
   class Base
     # `queue_as :default` — nothing to do at class load. A job queued as
     # a payload carries the name as its `queue_name`, read off the

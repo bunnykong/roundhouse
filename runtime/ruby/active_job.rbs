@@ -43,6 +43,11 @@ module ActiveJob
   def self.perform_held: (Array[String] only) -> Integer
   def self.clear_held: () -> nil
 
+  module QueueAdapters
+    class AsyncAdapter
+    end
+  end
+
   class Base
     def self.queue_as: (?Symbol? name) -> nil
     def self.enqueue_after_transaction_commit=: (bool value) -> nil

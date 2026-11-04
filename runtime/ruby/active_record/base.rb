@@ -678,6 +678,11 @@ module ActiveRecord
       {}
     end
 
+    # Not the answer a record gives: each model overrides it with its columns' readers (`synth_serializable_hash`).
+    def serializable_hash
+      {}
+    end
+
     # Column-name indexer. Subclasses override with a per-column case
     # dispatch over the typed ivars (each model has a fixed set of
     # columns from the schema). The Base implementation raises so a

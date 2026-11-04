@@ -435,6 +435,112 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "", ViewHelpers.optional_value_attr("")
   end
 
+  # Rails 8.1.4's `form.color_field` values (actionview's
+  # `Tags::ColorField#validate_color_string`).
+  def test_color_value_attr_keeps_a_hex_color_lowercased
+    assert_equal %( value="#abcdef"), ViewHelpers.color_value_attr("#ABCDEF")
+    assert_equal %( value="x#12ab34y"), ViewHelpers.color_value_attr("x#12ab34y")
+    assert_equal %( value="swatch #abcdef"), ViewHelpers.color_value_attr("Swatch #ABCDEF")
+  end
+
+  def test_color_value_attr_is_black_without_a_color
+    assert_equal %( value="#000000"), ViewHelpers.color_value_attr(nil)
+    assert_equal %( value="#000000"), ViewHelpers.color_value_attr("red")
+    assert_equal %( value="#000000"), ViewHelpers.color_value_attr("#12345")
+  end
+
+  def test_color_field_value_attr_prefers_the_option
+    assert_equal %( value="#FF0000"), ViewHelpers.color_field_value_attr("#FF0000", "#00ff00")
+    assert_equal %( value="red"), ViewHelpers.color_field_value_attr("red", nil)
+    assert_equal %( value="#00ff00"), ViewHelpers.color_field_value_attr(nil, "#00FF00")
+    # `||=` replaces a false option too; the String "false" is kept.
+    assert_equal %( value="#00ff00"), ViewHelpers.color_field_value_attr(false, "#00FF00")
+    assert_equal %( value="false"), ViewHelpers.color_field_value_attr("false", "#00FF00")
+  end
+
+  # Rails 8.1.4's `form.datetime_local_field` value for a datetime or
+  # date column's text (`DatetimeLocalField`, `%Y-%m-%dT%T`).
+  def test_datetime_local_value_attr_formats_a_stored_time
+    assert_equal %( value="2026-11-01T09:30:15"), ViewHelpers.datetime_local_value_attr("2026-11-01 09:30:15.5")
+    assert_equal %( value="2026-11-01T09:30:15"), ViewHelpers.datetime_local_value_attr("2026-11-01 09:30:15 UTC")
+  end
+
+  def test_datetime_local_value_attr_puts_a_date_at_midnight
+    assert_equal %( value="2026-11-01T00:00:00"), ViewHelpers.datetime_local_value_attr("2026-11-01")
+  end
+
+  def test_datetime_local_value_attr_empty_for_nil
+    assert_equal "", ViewHelpers.datetime_local_value_attr(nil)
+    assert_equal "", ViewHelpers.datetime_local_value_attr("")
+  end
+
+  # Rails 8.1.4's `current_page?(path)` answers (actionview url_helper.rb),
+  # on the request's method, path, fullpath and protocol with host.
+  def test_current_page_match_answers_a_get_or_head_only
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org", "/events")
+    assert_equal true, ViewHelpers.current_page_match?("HEAD", "/events", "/events", "http://example.org", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("POST", "/events", "/events", "http://example.org", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events/1", "/events/1", "http://example.org", "/events")
+  end
+
+  def test_current_page_match_reads_the_query_only_when_the_path_has_one
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", "http://example.org", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org", "/events?order=asc")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", "http://example.org", "/events?order=asc")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events?order=desc", "http://example.org", "/events?order=asc")
+  end
+
+  def test_current_page_match_drops_a_trailing_slash
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events/", "/events/", "http://example.org", "/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org", "/events/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", "http://example.org", "/")
+  end
+
+  def test_current_page_match_percent_decodes_both_sides
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", "http://example.org", "/café")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", "http://example.org", "/caf%C3%A9")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a+b", "/a+b", "http://example.org", "/a+b")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a%2Bb", "/a%2Bb", "http://example.org", "/a+b")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a%20b", "/a%20b", "http://example.org", "/a b")
+  end
+
+  def test_current_page_match_compares_a_url_with_the_request_protocol_and_host
+    o = "http://example.org"
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("HEAD", "/events", "/events", o, "http://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("POST", "/events", "/events", o, "http://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://other.example/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "https://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "HTTP://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://EXAMPLE.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "my_app2://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org:8080", "http://example.org:8080/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org:8080", "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "https://example.org", "https://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "https://example.org", "http://example.org/events")
+  end
+
+  def test_current_page_match_decodes_and_trims_a_url_as_a_path
+    o = "http://example.org"
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http%3A%2F%2Fexample.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://example.org/events/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events/", "/events/", o, "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", o, "http://example.org/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", o, "http://example.org")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", o, "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", o, "http://example.org/events?order=asc")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://example.org/events?order=asc")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", o, "http://example.org/café")
+  end
+
+  # `^` matches after a newline too, so a `scheme://` there makes it a URL.
+  def test_current_page_match_reads_a_scheme_after_a_newline
+    o = "http://example.org"
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "/x\nhttp://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/x%0Ahttp://y", "/x%0Ahttp://y", o, "/x\nhttp://y")
+  end
+
   # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`).
   # Rails' `source.blank?`: empty, or only whitespace (`[[:space:]]`), is "".
   def test_stylesheet_href_answers_empty_for_a_blank_source

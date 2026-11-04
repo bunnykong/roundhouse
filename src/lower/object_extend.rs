@@ -833,7 +833,9 @@ fn stub_sites(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let mut d = Diagnostic::unsupported(expr.span, None, CONSTRUCT, DETAIL);
     d.severity = Severity::Warning;
     diags.push(d);
+    let unreached = expr.decisions & crate::expr::UNCALLED_DEFINER;
     *expr = stub_expr(expr.span);
+    expr.decisions |= unreached;
 }
 
 /// A nil carrying the report — the ruby emitter renders it as the raise.

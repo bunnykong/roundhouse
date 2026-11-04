@@ -130,6 +130,11 @@ pub struct App {
     /// None when the app has no importmap.rb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub importmap: Option<Importmap>,
+    /// An engine's own import map (`MissionControl::Jobs.importmap`), by
+    /// the module it is drawn onto: `Importmap.pins_for_<module>` in the
+    /// emitted tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_importmaps: Vec<(String, Importmap)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inertia: Option<InertiaConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -635,6 +640,11 @@ pub struct App {
     /// descriptions then disagree about the parameter types.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_spliced_class_methods: HashMap<ClassId, HashMap<Symbol, ClassId>>,
+    /// The name spans of the class-side methods a concern's `class_methods
+    /// do` / `module ClassMethods` declares. Rails gives them to includers
+    /// only, never to the module itself (`lower::spliced_concern_bodies`).
+    #[serde(default, skip_serializing_if = "crate::det::HashSet::is_empty")]
+    pub concern_class_side_spans: crate::det::HashSet<crate::span::Span>,
     /// Model DSL declared inside a concern module's `included do`
     /// (`Account::Associations` → its `has_many :statuses` etc.),
     /// keyed by the module and classified as the same
@@ -1198,6 +1208,7 @@ impl App {
             seeds: None,
             boot_program: Vec::new(),
             importmap: None,
+            engine_importmaps: Vec::new(),
             inertia: None,
             vite_manifest: None,
             stylesheets: Vec::new(),
@@ -1259,6 +1270,7 @@ impl App {
             helper_diagnostics: None,
             helper_modules: BTreeSet::new(),
             concern_spliced_class_methods: HashMap::default(),
+            concern_class_side_spans: crate::det::HashSet::default(),
             concern_model_items: HashMap::default(),
             concern_guarded_items: HashMap::default(),
             concern_included_redefs: HashMap::default(),

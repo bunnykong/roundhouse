@@ -41,6 +41,21 @@ module ActiveRecord
     def first: () -> Hash[String, untyped]?
     def each: () { (Hash[String, untyped]) -> void } -> Array[Hash[String, untyped]]
     def map: [U] () { (Hash[String, untyped]) -> U } -> Array[U]
+    def any?: () -> bool
+    def empty?: () -> bool
+  end
+
+  class SchemaCache
+    def columns_hash: (String | Symbol table) -> Hash[String, Column]
+  end
+
+  class Column
+    @name: String
+    @sql_type: String
+    def name: () -> String
+    def sql_type: () -> String
+    def initialize: (String name, String sql_type) -> void
+    def limit: () -> Integer?
   end
 
   class RawConnection
@@ -59,6 +74,8 @@ module ActiveRecord
     def select_value: (String sql) -> untyped
     def data_source_exists?: (String | Symbol name) -> bool
     def column_exists?: (String | Symbol table, String | Symbol column) -> bool
+    def supports_insert_conflict_target?: () -> bool
+    def schema_cache: () -> SchemaCache
     def raw_connection: () -> RawConnection
     def exec_query: (String sql) -> Result
     def select_all: (String sql) -> Result
@@ -86,6 +103,8 @@ module ActiveRecord
   end
 
   class Base
+    def self.table_exists?: () -> bool
+    def self.column_names: () -> Array[String]
     def self.lock: (?(bool | String)? locking) -> Relation
     def readonly?: () -> bool
     def readonly!: () -> Base
@@ -99,7 +118,8 @@ module ActiveRecord
     def saved_changes?: () -> bool
     def attribute_in_database: (Symbol | String name) -> untyped
     def self.schema_column_types: () -> Hash[Symbol, Symbol]
-    def self.type_for_attribute: (String name) -> ActiveRecord::Type::Value
+    def self.schema_json_coder_columns: () -> Array[Symbol]
+    def self.type_for_attribute: (String | Symbol name) -> ActiveRecord::Type::Value
     def self.default_scoped: () -> Relation
     # cache_key / cache_version / cache_key_with_version — see
     # connection.rb for why these live in this ruby-family/Spinel-only
@@ -172,6 +192,7 @@ module ActiveRecord
     def self.delete_by: (Hash[Symbol, untyped] | String conditions) -> Integer
     def self.destroy_by: (Hash[Symbol, untyped] | String conditions) -> Array[Base]
     def self.distinct: (?(bool | Symbol | String) value) -> Relation
+    def self.optimizer_hints: (*String hints) -> Relation
     def self.eager_load: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def self.excluding: (*untyped records) -> Relation
     def self.find_each: () { (Base) -> void } -> Relation

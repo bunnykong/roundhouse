@@ -628,7 +628,7 @@ heap_note = budget_clauses.empty? ? '' : " The managed-heap cells run under a fi
 # #16 is about the BLOG fixture specifically. Pointing campfire's readers
 # at it would be citing the wrong app's caveats at them.
 fixture_caveat = if benchmark.nil? || benchmark == 'blog'
-  %(<p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/rubys/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>)
+  %(<p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/roundhouse-rb/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>)
 else
   ''
 end

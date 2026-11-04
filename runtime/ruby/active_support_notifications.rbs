@@ -29,7 +29,7 @@ module ActiveSupport
     def self.render_listening?: () -> bool
     def self.process_listening?: () -> bool
     def self.monotonic_now: () -> Float
-    def self.instrument: (String name, ?untyped? payload) ?{ () -> untyped } -> untyped
+    def self.instrument: (String name, ?untyped? payload) ?{ (untyped payload) -> untyped } -> untyped
     def self.publish: (String name, Float start, Float finish, Hash[Symbol, untyped] payload) -> nil
     def self.sql: (String statement) -> nil
     def self.subscribed: (untyped callback, String name, ?monotonic: bool) { () -> untyped } -> untyped

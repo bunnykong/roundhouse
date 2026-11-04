@@ -1284,6 +1284,19 @@ pub fn registry_source_with_broadcasts(
     }
     s.push_str("  end\n\n");
 
+    // `ActiveJob::Base.deserialize`'s job, by name: a closed-world `case`, as `perform`'s.
+    s.push_str("  def self.instantiate(job_class)\n");
+    if payload.is_empty() {
+        s.push_str("    nil\n");
+    } else {
+        s.push_str("    case job_class\n");
+        for plan in &payload {
+            s.push_str(&format!("    when {}\n      {}.new\n", ruby_str(&plan.job), plan.job));
+        }
+        s.push_str("    end\n");
+    }
+    s.push_str("  end\n\n");
+
     s.push_str("  def self.discards_deserialization_error(job_class)\n");
     let discarding: Vec<&&JobPlan> =
         payload.iter().filter(|p| p.discards_deserialization_error).collect();

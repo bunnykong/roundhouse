@@ -847,6 +847,21 @@ pub mod bundle {
         Some(emitted)
     }
 
+    // The edits that change a file of the base app rather than add one beside it.
+    fn base_edits(case: &Case) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let in_base = |path: &str| case.base.as_os_str() != EMPTY && case.base.join(path).exists();
+        for edit in &case.edits {
+            match edit {
+                Edit::Write { path, content } if in_base(path) => ("w", path, content).hash(&mut h),
+                Edit::Write { .. } => {}
+                Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
+                Edit::Remove { path } => ("d", path).hash(&mut h),
+            }
+        }
+        h.finish()
+    }
+
     fn clone_edit(e: &Edit) -> Edit {
         match e {
             Edit::Write { path, content } => Edit::Write { path: path.clone(), content: content.clone() },
@@ -883,9 +898,12 @@ pub mod bundle {
             .map(|d| d.filter_map(|e| read_case(&e.ok()?.path())).collect())
             .unwrap_or_default();
         cases.sort_by(|a, b| a.key.cmp(&b.key));
-        let mut groups: BTreeMap<(PathBuf, Vec<String>), Vec<&Case>> = BTreeMap::new();
+        // Not grouped on the base alone: an edit to a file the base already has (its schema,
+        // routes, a model) changes the app every case in the binary boots, so only cases that
+        // make the same such edits share one.
+        let mut groups: BTreeMap<(PathBuf, Vec<String>, u64), Vec<&Case>> = BTreeMap::new();
         for case in &cases {
-            groups.entry((case.base.clone(), case.flags.clone())).or_default().push(case);
+            groups.entry((case.base.clone(), case.flags.clone(), base_edits(case))).or_default().push(case);
         }
         std::fs::create_dir_all(out).expect("bundle out dir");
         let manifest = std::sync::Mutex::new(BTreeMap::new());

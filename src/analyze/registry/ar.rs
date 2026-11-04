@@ -32,7 +32,7 @@ pub(in crate::analyze) fn transaction_ty() -> Ty {
 fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
     const RBS: &str = include_str!("../../../runtime/ruby/active_record/connection.rbs");
     let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) else { return };
-    for name in ["ActiveRecord::Connection", "ActiveRecord::Result", "ActiveRecord::Transaction"] {
+    for name in ["ActiveRecord::Connection", "ActiveRecord::Result", "ActiveRecord::Transaction", "ActiveRecord::SchemaCache", "ActiveRecord::Column"] {
         let id = ClassId(Symbol::from(name));
         let Some(methods) = parsed.get(&id) else { continue };
         let cls = classes.entry(id).or_default();

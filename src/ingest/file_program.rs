@@ -60,6 +60,75 @@ pub(super) fn file_program(
 
 /// The items of a run of top-level statements (`file_program`'s, or a
 /// file-level branch's).
+/// `require "zeitwerk"`, `loader = Zeitwerk::Loader.new` (or `.for_gem`)
+/// and a call on such a local; `loaders` collects the locals.
+pub(super) fn is_zeitwerk(stmt: &ruby_prism::Node<'_>, loaders: &mut Vec<String>) -> bool {
+    // Not a callback (`on_setup`, `on_load`, `eager_load`): those run code the gem wrote, and stay its program's.
+    const SETUP: &[&str] = &[
+        "push_dir", "ignore", "collapse", "setup", "inflector=", "inflector", "inflect", "tag=", "enable_reloading",
+        "log!", "logger=", "do_not_eager_load",
+    ];
+    fn is_loader(node: &ruby_prism::Node<'_>, loaders: &[String]) -> bool {
+        if let Some(read) = node.as_local_variable_read_node() {
+            return loaders.iter().any(|l| l == constant_id_str(&read.name()).as_ref() as &str);
+        }
+        let Some(call) = node.as_call_node() else { return false };
+        let name = constant_id_str(&call.name());
+        let built = matches!(name.as_ref(), "new" | "for_gem")
+            && call.block().is_none()
+            && call.receiver().and_then(|r| super::util::constant_path_of(&r)).is_some_and(|p| p == ["Zeitwerk", "Loader"]);
+        built
+            || (SETUP.contains(&name.as_ref())
+                && call.block().is_none()
+                && call.arguments().is_none_or(|a| a.arguments().iter().all(|arg| inert_arg(&arg)))
+                && call.receiver().is_some_and(|r| is_loader(&r, loaders)))
+    }
+    // Not any argument: one that calls code (`push_dir(setup_dir!)`) runs it at load, which no reader of this setup sees.
+    fn inert_arg(node: &ruby_prism::Node<'_>) -> bool {
+        if node.as_string_node().is_some()
+            || node.as_symbol_node().is_some()
+            || node.as_integer_node().is_some()
+            || node.as_true_node().is_some()
+            || node.as_false_node().is_some()
+            || node.as_nil_node().is_some()
+            || super::source_gems::path_of(node, std::path::Path::new("/")).is_some()
+        {
+            return true;
+        }
+        if let Some(hash) = node.as_keyword_hash_node() {
+            return hash.elements().iter().all(|e| e.as_assoc_node().is_some_and(|a| inert_arg(&a.key()) && inert_arg(&a.value())));
+        }
+        if let Some(hash) = node.as_hash_node() {
+            return hash.elements().iter().all(|e| e.as_assoc_node().is_some_and(|a| inert_arg(&a.key()) && inert_arg(&a.value())));
+        }
+        if let Some(array) = node.as_array_node() {
+            return array.elements().iter().all(|e| inert_arg(&e));
+        }
+        // `Zeitwerk::GemInflector.new(__FILE__)`, the inflector a gem's loader takes.
+        node.as_call_node().is_some_and(|c| {
+            constant_id_str(&c.name()) == "new"
+                && c.receiver().and_then(|r| super::util::constant_path_of(&r)).is_some_and(|p| p == ["Zeitwerk", "GemInflector"])
+                && c.arguments().is_some_and(|a| {
+                    let args: Vec<_> = a.arguments().iter().collect();
+                    matches!(args.as_slice(), [one] if one.as_source_file_node().is_some())
+                })
+        })
+    }
+    if let Some(write) = stmt.as_local_variable_write_node() {
+        if is_loader(&write.value(), loaders) {
+            loaders.push(constant_id_str(&write.name()).to_string());
+            return true;
+        }
+        return false;
+    }
+    let Some(call) = stmt.as_call_node() else { return false };
+    if call.receiver().is_none() && constant_id_str(&call.name()) == "require" {
+        let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        return matches!(args.as_slice(), [one] if one.as_string_node().is_some_and(|s| s.unescaped() == b"zeitwerk"));
+    }
+    call.receiver().is_some() && is_loader(stmt, loaders)
+}
+
 fn program_items(
     statements: &[ruby_prism::Node<'_>],
     file: &str,
@@ -68,6 +137,7 @@ fn program_items(
     span_of: &dyn Fn(&ruby_prism::Node<'_>) -> Span,
 ) -> Vec<ProgramItem> {
     let mut items = Vec::new();
+    let mut loaders: Vec<String> = Vec::new();
     for stmt in statements {
         if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
             // In source order, as Ruby evaluates them; an enclosing
@@ -111,6 +181,15 @@ fn program_items(
         }
         // A constant rides with the file's classes (`carry_file_constants`).
         if stmt.as_constant_write_node().is_some() || stmt.as_constant_path_write_node().is_some() {
+            // Not for a class the walk made of it (`Token = Struct.new(:value)`): that class loads where Ruby assigns it.
+            let name = match (stmt.as_constant_write_node(), stmt.as_constant_path_write_node()) {
+                (Some(write), _) => Some(constant_id_str(&write.name()).to_string()),
+                (_, Some(write)) => super::util::constant_path_of(&write.target().as_node()).map(|p| p.join("::")),
+                _ => None,
+            };
+            if let Some(name) = name.filter(|n| carried.contains(n)) {
+                items.push(ProgramItem::Declared(vec![ClassId(Symbol::from(name.as_str()))]));
+            }
             continue;
         }
         if let Some((name, feature)) = literal_autoload(&stmt) {
@@ -120,6 +199,10 @@ fn program_items(
         // `ActiveSupport.on_load(:x) { … }` is `on_load_reopen`'s, which
         // carries the reopen it can and reports the rest.
         if is_on_load(&stmt) {
+            continue;
+        }
+        // A Zeitwerk loader's files are the gem's files the tree already loads (`source_gems::zeitwerk_dirs`); its setup would point at the gem's dir.
+        if is_zeitwerk(&stmt, &mut loaders) {
             continue;
         }
         // `I18n.load_path += Dir[…]`: the gem's locale files are compiled
@@ -733,4 +816,31 @@ pub(super) fn literal_requires(source: &[u8], file: &str) -> Vec<String> {
     let mut out = Vec::new();
     walk(&statements, &mut out);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_zeitwerk;
+
+    fn setup_statements(source: &str) -> Vec<bool> {
+        let parsed = super::super::prism::parse_silent(source.as_bytes());
+        let program = parsed.node();
+        let mut loaders = Vec::new();
+        program
+            .as_program_node()
+            .unwrap()
+            .statements()
+            .body()
+            .iter()
+            .map(|stmt| is_zeitwerk(&stmt, &mut loaders))
+            .collect()
+    }
+
+    #[test]
+    fn a_setup_call_whose_argument_runs_code_is_the_gems_program() {
+        let read = setup_statements(
+            "loader = Zeitwerk::Loader.new\nloader.inflector = Zeitwerk::GemInflector.new(__FILE__)\nloader.push_dir(File.expand_path(\"..\", __dir__))\nloader.ignore(\"#{__dir__}/tasks\")\nloader.push_dir(setup_dir!)\nloader.inflector = Custom.new(compute_at_load)\nloader.setup\n",
+        );
+        assert_eq!(read, vec![true, true, true, true, false, false, true]);
+    }
 }

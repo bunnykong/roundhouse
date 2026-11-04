@@ -67,6 +67,17 @@ module JsonBuilder
     json.gsub(JSON_HTML_ESCAPE_PATTERN, ESCAPES)
   end
 
+  # The generic targets retain the prior response policy. Ruby, JRuby
+  # and Spinel replace this method in the JSON renderer overlay, where
+  # the application's Rails configuration is available.
+  def self.escape_json_response(json, jsonp = false)
+    escape_html_entities(json)
+  end
+
+  def self.jsonp(json, callback)
+    "/**/#{callback}(#{json})"
+  end
+
   # A Float as Rails' encoder sees it: NaN and the infinities are written
   # `null` (`Float#as_json`), where `JSON.generate` raises on them. The
   # lowerer wraps each Float leaf of a payload it hands `JSON.generate`.

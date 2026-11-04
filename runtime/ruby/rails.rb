@@ -71,6 +71,26 @@ module Rails
 
   # Plain value object, no Pathname subclassing (the runtime stays
   # statically resolvable).
+  # Not ActiveSupport's gem-path rewriting: a silenced frame never shows it, and only a `:noise` reading would.
+  class BacktraceCleaner
+    APP_DIRS_PATTERN = /\A(?:\.\/)?(?:app|config|lib|test|\(\w+(?:-\w+)*\))/
+    RENDER_TEMPLATE_PATTERN = /:in [`'].*_\w+_{2,3}\d+_\d+'/
+
+    def clean(backtrace, kind = :silent)
+      return backtrace if ENV["BACKTRACE"]
+      root = "#{Dir.pwd}/"
+      filtered = backtrace.map do |line|
+        relative = line.start_with?(root) ? line[root.size, line.size - root.size] : line
+        relative.sub(RENDER_TEMPLATE_PATTERN, "")
+      end
+      case kind
+      when :silent then filtered.select { |line| APP_DIRS_PATTERN.match?(line) }
+      when :noise then filtered.reject { |line| APP_DIRS_PATTERN.match?(line) }
+      else filtered
+      end
+    end
+  end
+
   class AppPath
     def initialize(base)
       @base = base
@@ -521,6 +541,21 @@ module Rails
     # (src/ingest/public_file_server_config.rs).
     def public_file_server_headers
       {}
+    end
+
+    # The standalone shell for partial trees follows Rails 8.1. An actual
+    # application.rb reopens these with Rails' legacy class defaults when
+    # it has neither load_defaults nor an explicit setting.
+    def action_controller_escape_json_responses
+      false
+    end
+
+    def active_support_escape_js_separators_in_json
+      false
+    end
+
+    def active_support_escape_html_entities_in_json
+      true
     end
 
     # `config.action_controller.perform_caching` (AbstractController::

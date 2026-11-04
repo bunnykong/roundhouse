@@ -123,8 +123,8 @@ fn non_literal_path_is_unsupported_not_the_resource_name() {
 }
 
 #[test]
-fn dynamic_segment_path_is_unsupported_not_served_without_its_param() {
-    for value in [r#""categories/:category_id/parts""#, r#""files/*rest""#, r#""parts(/:kind)""#] {
+fn glob_and_optional_path_segments_are_unsupported() {
+    for value in [r#""files/*rest""#, r#""parts(/:kind)""#] {
         let err = ingest_routes(
             format!("Rails.application.routes.draw do\n  resources :parts, path: {value}\nend\n")
                 .as_bytes(),
@@ -132,7 +132,7 @@ fn dynamic_segment_path_is_unsupported_not_served_without_its_param() {
         )
         .map(|t| format!("ingested: {t:?}"))
         .expect_err("dynamic path: should be unsupported");
-        assert!(err.to_string().contains("has a dynamic segment"), "{value}: {err}");
+        assert!(err.to_string().contains("has a glob or optional segment"), "{value}: {err}");
     }
 }
 

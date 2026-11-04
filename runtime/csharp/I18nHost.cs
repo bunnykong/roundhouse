@@ -9,6 +9,7 @@ public static class I18nHost
     private sealed class Scope
     {
         public string Name = "";
+        public string Config = "";
     }
 
     // Not the name itself in the AsyncLocal: a value set inside an async before_action reverts when it returns, so each request holds one Scope it mutates
@@ -28,6 +29,14 @@ public static class I18nHost
     public static string SetLocaleName(string name)
     {
         Here().Name = name;
+        return name;
+    }
+
+    public static string ConfigName() => Here().Config;
+
+    public static string SetConfigName(string name)
+    {
+        Here().Config = name;
         return name;
     }
 

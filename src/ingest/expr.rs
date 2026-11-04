@@ -37,6 +37,7 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // ingester keeps going. Errors are recorded into the per-thread
     // collector for the post-run punch list. See `survey.rs`.
     match ingest_expr_strict(node, file) {
+        Ok(e) if node.as_call_node().is_some() => Ok(super::engine_helpers::rewrite(proc_new_as_proc(e), file)),
         Ok(e) => Ok(proc_new_as_proc(e)),
         Err(err) if super::survey::is_active() => {
             super::survey::record(&err);
@@ -1433,13 +1434,11 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // `unwrap_or(0)` that stood here was silent, and it was
             // reached: `0xffffffff` does not fit an `i32`, so campfire's
             // `ipaddr.to_i & 0xffffffff` emitted `& 0`.
-            let Some(v) = super::util::integer_i64(&i.value()) else {
-                return Err(IngestError::Unsupported {
-                    file: file.to_string(),
-                    message: "integer literal does not fit in a 64-bit integer".to_string(),
-                });
-            };
-            ExprNode::Lit { value: Literal::Int { value: v } }
+            match super::util::integer_i64(&i.value()) {
+                Some(v) => ExprNode::Lit { value: Literal::Int { value: v } },
+                // Not refused whole: Ruby's Integer has no width, so the literal is its 32-bit limbs shifted together (tzinfo's `0x10000000000000000`).
+                None => return Ok(wide_integer(&i.value(), span)),
+            }
         }
         n if n.as_float_node().is_some() => {
             let f = n.as_float_node().unwrap();
@@ -4836,4 +4835,23 @@ fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option
         }
     }
     Some(body)
+}
+
+fn wide_integer(value: &ruby_prism::Integer<'_>, span: Span) -> Expr {
+    let (negative, digits) = value.to_u32_digits();
+    let lit = |v: i64| Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v } });
+    let send = |recv: Expr, method: &str, arg: Option<Expr>| {
+        let mut e = Expr::new(
+            span,
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args: arg.into_iter().collect(), block: None, parenthesized: true },
+        );
+        e.decisions |= crate::expr::WIDE_INTEGER_LITERAL;
+        e
+    };
+    let mut limbs = digits.iter().rev();
+    let mut acc = lit(i64::from(*limbs.next().unwrap_or(&0)));
+    for limb in limbs {
+        acc = send(send(acc, "<<", Some(lit(32))), "|", Some(lit(i64::from(*limb))));
+    }
+    if negative { send(acc, "-@", None) } else { acc }
 }

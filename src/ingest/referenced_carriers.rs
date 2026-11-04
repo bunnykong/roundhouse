@@ -29,9 +29,18 @@ pub(super) fn surface_referenced_carriers(app: &mut App, sources: &[SourceFile])
             if *last != CARRIER || owner.is_empty() {
                 return;
             }
-            let owner = owner.join("::");
+            let written = owner.join("::");
+            // Not only the written path: a relative one is looked up from each namespace of the site, innermost first.
+            let scopes: Vec<&str> = site.map(|s| s.split("::").collect()).unwrap_or_default();
+            let Some(owner) = (0..=scopes.len())
+                .rev()
+                .map(|k| if k == 0 { written.clone() } else { format!("{}::{written}", scopes[..k].join("::")) })
+                .find(|candidate| known.contains(candidate))
+            else {
+                return;
+            };
             // The owner's own `base.extend Owner::ClassMethods` is the bridge the fold already stands for
-            if site == Some(owner.as_str()) || !known.contains(&owner) {
+            if site == Some(owner.as_str()) {
                 return;
             }
             let name = format!("{owner}::{CARRIER}");

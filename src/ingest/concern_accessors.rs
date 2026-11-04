@@ -251,6 +251,8 @@ fn validate_activation(
         &includes.iter().map(|(id, edges)| (id.clone(), edges.clone())).collect(),
         framework_shadows,
     );
+    let library_classes: HashSet<crate::ClassId> =
+        app.library_classes.iter().filter(|lc| !lc.is_module).map(|lc| lc.name.clone()).collect();
     for (owner, direct) in &includes {
         // A survey source refusal already diagnosed an omitted class.
         if deferred.contains(owner) || (!retained.contains(owner) && !modules.contains(owner)) {
@@ -284,10 +286,12 @@ fn validate_activation(
                     let supplied = direct.contains(&id) && model.as_ref().is_some_and(|m| m.body.iter().any(|item| {
                         matches!(item, ModelBodyItem::Unknown { expr: carried, .. } if carried.span == expr.span)
                     }));
+                    // A library class takes a direct include's plain accessors from `library_concern_items`.
+                    let supplied = supplied || (model.is_none() && direct.contains(&id) && library_classes.contains(owner) && is_supported(item));
                     if !supplied && reported.insert(expr.span) {
                         unwrap_or_record::<()>(Err(IngestError::Unsupported {
                             file: app.sources[(expr.span.file.0 - 1) as usize].path.clone(),
-                            message: format!("concern attr_accessor on {}: only direct model inclusion is supported", owner.0),
+                            message: format!("concern attr_accessor on {}: only a direct include by a model or class is supported", owner.0),
                         }))?;
                     }
                 }

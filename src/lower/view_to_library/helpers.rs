@@ -331,6 +331,19 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             );
             Some(view_helpers_call("javascript_importmap_tags", vec![pins, (*entry).clone()]))
         }
+        EngineImportmapTags { entry, module } => {
+            let pins = super::send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Importmap")] },
+                )),
+                &crate::lower::importmap_to_library::engine_pins_name(module),
+                vec![],
+                None,
+                true,
+            );
+            Some(view_helpers_call("javascript_importmap_tags", vec![pins, (*entry).clone()]))
+        }
         JavascriptImportmapTags { entry: None } => {
             let pins = super::send(
                 Some(Expr::new(
@@ -809,6 +822,29 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     // to the runtime `link_to`, taking its ternary sibling with it.
     if matches!(&*url.node, ExprNode::StringInterp { .. }) {
         return Some(rewrite_helpers_in_expr(url, ctx));
+    }
+    // An Active Storage Blob, Attachment or Attached links where Rails'
+    // `resolve("ActiveStorage::Blob")` / `resolve("ActiveStorage::Attachment")`
+    // route it: `rails_blob_path`, the blob's redirect route. Keyed off
+    // the type, ahead of the name convention below, which read a `blob`
+    // local as `blob_path(blob.id)`. A nilable one (`Attached#blob` is
+    // `Blob?`) too: the runtime answers "" for nil rather than raising.
+    if let Some(crate::ty::Ty::Class { id, .. }) = url.ty.as_ref().map(crate::ty::Ty::peel_nilable)
+        && matches!(id.0.as_str(), "ActiveStorage::Blob" | "ActiveStorage::Attachment" | "ActiveStorage::Attached")
+    {
+        return Some(route_helpers_call("rails_blob_path", vec![rewrite_helpers_in_expr(url, ctx)]));
+    }
+    // The `active_storage/blobs/_blob` override's own record local, which
+    // stays untyped (`record_arg_ty`): a Blob from the app's own render,
+    // or Action Text's Attachment, which answers `blob` as Rails' delegates
+    // to it. Either links to the blob's redirect route.
+    let is_record_local = match &*url.node {
+        ExprNode::Var { name, .. } => name.as_str() == ctx.arg_name,
+        ExprNode::Send { recv: None, method, args, .. } => args.is_empty() && method.as_str() == ctx.arg_name,
+        _ => false,
+    };
+    if ctx.resource_dir == "active_storage/blobs" && !ctx.arg_name.is_empty() && is_record_local {
+        return Some(route_helpers_call("rails_blob_path", vec![rewrite_helpers_in_expr(url, ctx)]));
     }
     // A read `case_class_narrow` pinned to a model (`ma.item` inside
     // `when ModMail`) links through that model's route.

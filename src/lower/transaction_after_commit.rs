@@ -28,6 +28,20 @@ fn rewrite(expr: &mut Expr) {
 }
 
 fn rewrite_node(expr: &mut Expr) {
+    // Rails' `ActiveRecord.after_all_transactions_commit { … }`: with the one database the runtime opens, the open transaction's `after_commit`.
+    if let ExprNode::Send { recv: Some(recv), method, args, block: Some(_), .. } = &mut *expr.node
+        && method.as_str() == "after_all_transactions_commit"
+        && args.is_empty()
+        && matches!(&*recv.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["ActiveRecord"])
+    {
+        let span = recv.span;
+        let base = Expr::new(span, ExprNode::Const { path: vec!["ActiveRecord".into(), "Base".into()] });
+        *recv = Expr::new(
+            span,
+            ExprNode::Send { recv: Some(base), method: "current_transaction".into(), args: Vec::new(), block: None, parenthesized: false },
+        );
+        *method = "after_commit".into();
+    }
     let ExprNode::Send { recv: Some(recv), method, args, block, parenthesized } = &mut *expr.node else {
         return;
     };

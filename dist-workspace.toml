@@ -10,7 +10,7 @@
 #
 # The install line a release will offer:
 #   curl --proto '=https' --tlsv1.2 -LsSf \
-#     https://github.com/rubys/roundhouse/releases/latest/download/roundhouse-installer.sh | sh
+#     https://github.com/roundhouse-rb/roundhouse/releases/latest/download/roundhouse-installer.sh | sh
 
 [workspace]
 members = ["cargo:."]

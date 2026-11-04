@@ -155,6 +155,11 @@ class String
     end
   end
 
+  # Not `options[:omission] || "…"`: AS reads an explicit `omission: nil` as no omission.
+  def truncate_bytes(truncate_to, omission: "\u2026")
+    ActiveSupport.truncate_bytes(self, truncate_to, omission)
+  end
+
   # `html_safe` promotes to the marked type; plain strings answer
   # `html_safe?` false so the escape-aware `html_escape` escapes them.
   # (Both were identity/true in the earlier positional-only world —

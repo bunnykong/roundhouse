@@ -89,6 +89,7 @@ module ActiveRecord
       @havings = []
       @select_sql = nil
       @distinct = false
+      @optimizer_hints = ""
       @limit = nil
       @offset = nil
       @includes = []
@@ -1196,6 +1197,22 @@ module ActiveRecord
     # `distinct(true)`), `false` turns it off.
     def distinct(value = true)
       spawn.distinct!(value)
+    end
+
+    # Rails' `optimizer_hints("INDEX(t i)")`: written into the SELECT as
+    # `/*+ … */`, which MySQL's optimizer reads and SQLite takes for a comment.
+    def optimizer_hints(*hints)
+      spawn.optimizer_hints!(*hints)
+    end
+
+    def optimizer_hints!(*hints)
+      unload_records
+      hints.each do |hint|
+        text = hint.to_s.strip
+        next if text.empty?
+        @optimizer_hints = @optimizer_hints.empty? ? text : "#{@optimizer_hints} #{text}"
+      end
+      self
     end
 
     def distinct!(value = true)
@@ -2956,7 +2973,8 @@ module ActiveRecord
     def select_sql_with(default_cols)
       cols = @select_sql.nil? ? default_cols : @select_sql
       distinct = @distinct ? "DISTINCT " : ""
-      sql = "#{cte_prefix}SELECT #{distinct}#{cols} FROM #{from_source}"
+      hints = @optimizer_hints.empty? ? "" : "/*+ #{@optimizer_hints} */ "
+      sql = "#{cte_prefix}SELECT #{hints}#{distinct}#{cols} FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
       sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0

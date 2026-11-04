@@ -49,7 +49,9 @@ fn emit_model(app: &mut roundhouse::App, suffix: &str) -> String {
 }
 
 #[test]
-fn private_delegate_visibility_is_preserved_for_models_and_library_classes() {
+/// Rails' `delegate` defines its forwarders with `module_eval`, which starts
+/// public: a `private` above the declaration does not reach them.
+fn a_delegate_after_private_is_public_for_models_and_library_classes() {
     let mut files = tree("");
     files.insert(
         PathBuf::from("app/models/account.rb"),
@@ -80,7 +82,7 @@ fn private_delegate_visibility_is_preserved_for_models_and_library_classes() {
         .expect("model delegate");
     assert_eq!(
         account_delegate.visibility,
-        roundhouse::dialect::MethodVisibility::Private
+        roundhouse::dialect::MethodVisibility::Public
     );
     let service = app
         .library_classes
@@ -94,7 +96,7 @@ fn private_delegate_visibility_is_preserved_for_models_and_library_classes() {
         .expect("library-class delegate");
     assert_eq!(
         service_delegate.visibility,
-        roundhouse::dialect::MethodVisibility::Private
+        roundhouse::dialect::MethodVisibility::Public
     );
 }
 
@@ -495,11 +497,68 @@ fn an_unreproducible_option_is_left_alone() {
         r#"class Filter
   attr_reader :content
 
-  delegate :fragment, to: :content, private: true
+  delegate :fragment, to: :content, private: Rails.env.test?
 end
 "#,
     );
     assert!(!out.contains("def fragment"), "got:\n{out}");
+}
+
+/// Enumerable reached through an included module still calls `each` with a block.
+#[test]
+fn enumerable_through_an_included_module_forwards_each_s_block() {
+    let out = emit(
+        r#"module Listing
+  include Enumerable
+end
+
+class Filter
+  include Listing
+
+  attr_reader :items
+
+  delegate :each, to: :items
+end
+"#,
+    );
+    assert!(out.contains("def each(&block)\n    items.each(&block)\n  end"), "got:\n{out}");
+}
+
+/// `private: true` makes the forwarders private, as Rails' `private(*method_names)` after defining them does.
+#[test]
+fn private_true_makes_the_forwarder_private() {
+    let out = emit(
+        r#"class Filter
+  attr_reader :content
+
+  delegate :fragment, to: :content, private: true
+end
+"#,
+    );
+    assert!(out.contains("def fragment\n    content.fragment\n  end\n  private :fragment"), "got:\n{out}");
+}
+
+/// A delegated name called only with a block hands the block on, as Rails' `(...)` forwarder does;
+/// Enumerable calls `each` so, with no call site in the class to show it.
+#[test]
+fn a_block_only_call_and_enumerables_each_forward_the_block() {
+    let out = emit(
+        r#"class Filter
+  include Enumerable
+
+  attr_reader :content, :items
+
+  delegate :each, to: :items
+  delegate :each_fragment, to: :content
+
+  def fragments
+    each_fragment { |f| f }
+  end
+end
+"#,
+    );
+    assert!(out.contains("def each(&block)\n    items.each(&block)\n  end"), "got:\n{out}");
+    assert!(out.contains("def each_fragment(&block)\n    content.each_fragment(&block)\n  end"), "got:\n{out}");
 }
 
 #[test]
@@ -635,6 +694,28 @@ end
         !out.contains("def []="),
         "variable-arity indexers need forwarding:\n{out}"
     );
+}
+
+/// A Hash's `[]` takes exactly one key and `[]=` a key and a value, so
+/// over an ivar `initialize` sets to a Hash the forwarders take those
+/// (mission_control-jobs' `IdentifiedElements`).
+#[test]
+fn index_operators_over_a_hash_ivar_forward_their_key() {
+    let out = run_emitted(
+        r#"class Filter
+  delegate :[], :[]=, :empty?, to: :items
+
+  def initialize
+    @items = {}
+  end
+
+  private
+    attr_reader :items
+end
+"#,
+        "f = Filter.new\nputs f.empty?\nf[\"a\"] = 1\nputs f[\"a\"]\nputs f.empty?\n",
+    );
+    assert_eq!(out, "true\n1\nfalse\n");
 }
 
 fn run_emitted(source: &str, exercise: &str) -> String {

@@ -128,6 +128,12 @@ pub(super) fn dirty_classes_for_retype(
             }
         }
     }
+    // `foo.map` is typed from `each` (`enumerable_view`), with no `map` entry of its own to move.
+    for names in moved_by_class.values_mut() {
+        if names.contains(&Symbol::from("each")) {
+            names.extend(crate::analyze::body::ENUMERABLE_METHODS.iter().map(|m| Symbol::from(*m)));
+        }
+    }
     for (id, names) in &moved_by_class {
         for name in names {
             if let Some(callers) = callers_by_target.get(&(id.clone(), name.clone())) {

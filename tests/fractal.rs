@@ -504,9 +504,7 @@ impl Pass for Scoped {
 /// not take.
 const UNREAD: &str = r#"class Unread < ActiveRecord::Migration[7.0]
   def change
-    change_table :accounts do |t|
-      t.string :slug
-    end
+    create_join_table :accounts, :tags
   end
 end
 "#;

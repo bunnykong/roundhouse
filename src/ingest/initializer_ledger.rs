@@ -326,6 +326,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         },
     },
     Recognizer {
+        name: "JSON response escaping (action_controller.escape_json_responses / active_support.escape_js_separators_in_json)",
+        origins: INIT_APP,
+        levels: ANY,
+        reads: |p| super::json_response_config::reads(p.node),
+    },
+    Recognizer {
         name: "forgery_protection_verification_strategy",
         origins: INIT_APP,
         levels: ANY,
@@ -906,6 +912,11 @@ fn judge_all(
                 Verdict::Consumed("isolate_namespace (literal, admitted engine)")
             } else if let Some(reason) = inert_reason(&st.node, src) {
                 Verdict::Inert(reason)
+            } else if let Some(read) = super::engine_config::engine_statement(&st.node, path) {
+                match read {
+                    super::engine_config::EngineStatement::Consumed(reason) => Verdict::Consumed(reason),
+                    super::engine_config::EngineStatement::Inert(reason) => Verdict::Inert(reason),
+                }
             } else {
                 Verdict::Unconsumed
             }
@@ -1463,6 +1474,32 @@ fn absolute(dir: &Path, relative: &str) -> String {
 
 /// The whole ledger, file by file, in report order: host initializers,
 /// `config/application.rb`, then each engine's initializers and class body.
+/// The boot statements of the engine `engine_name` at `engine_dir` that
+/// nothing accounts for, as `statement (path:line)`, read as if its mount
+/// were admitted: its `config/initializers` and its class body.
+pub(super) fn engine_unaccounted<V: Vfs + ?Sized>(vfs: &V, engine_dir: &Path, engine_name: &str) -> Vec<String> {
+    let mut ledgers = Vec::new();
+    let initializers = engine_dir.join("config/initializers");
+    if vfs.is_dir(&initializers) {
+        for entry in read_rb_files(vfs, &initializers).unwrap_or_default() {
+            let Ok(bytes) = vfs.read(&entry) else { continue };
+            ledgers.push(initializer_ledger(Origin::EngineInitializer, engine_name, &entry, &bytes, &[]));
+        }
+    }
+    let admitted: HashSet<String> = std::iter::once(engine_name.to_string()).collect();
+    for entry in read_rb_files(vfs, &engine_dir.join("lib")).unwrap_or_default() {
+        let Ok(bytes) = vfs.read(&entry) else { continue };
+        if bytes.windows(10).any(|w| w == b"Rails::Eng") {
+            ledgers.extend(engine_class_ledgers(&entry, &bytes, &admitted, &[]));
+        }
+    }
+    ledgers
+        .into_iter()
+        .flat_map(|l| l.findings)
+        .map(|f| format!("`{}` ({}:{})", f.statement, f.path, f.line))
+        .collect()
+}
+
 pub fn ledger<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,

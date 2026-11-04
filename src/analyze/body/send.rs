@@ -502,6 +502,22 @@ impl<'a> BodyTyper<'a> {
                 }
             }
         }
+        // `each_with_object(memo) { |elem, memo| … }` yields the seed object itself beside each element.
+        if !class_object_receiver
+            && matches!(method.as_str(), "each_with_object" | "with_object")
+            && let ([elem, memo], [seed]) = (params.as_slice(), args)
+            && let Some(seed_ty) = seed.ty.clone()
+        {
+            let elem_ty = match recv_ty.map(super::narrowing::remove_nil) {
+                Some(Ty::Hash { key, value }) => Some(Ty::Tuple { elems: vec![(*key).clone(), (*value).clone()].into() }),
+                other => other.as_ref().and_then(|r| self.block_params_for(Some(r), &Symbol::from("each"), false)).and_then(|v| v.first().cloned()),
+            };
+            if let Some(elem_ty) = elem_ty {
+                new_ctx.local_bindings.insert(elem.clone(), elem_ty);
+            }
+            new_ctx.local_bindings.insert(memo.clone(), seed_ty);
+            return new_ctx;
+        }
         // `Thread.new(state) { |state| ... }` forwards constructor
         // arguments to the block. Unlike iterator methods, the yielded
         // values come from this call's positional arguments rather than
@@ -619,6 +635,9 @@ impl<'a> BodyTyper<'a> {
         class_object_receiver: bool,
     ) -> Option<Vec<Ty>> {
         let recv_ty = recv_ty?;
+        if !class_object_receiver && let Some(view) = self.enumerable_view(Some(recv_ty), method) {
+            return self.block_params_for(Some(&view), method, false);
+        }
         if matches!(recv_ty, Ty::Class { id, .. } if id.0.as_str() == PARAM_VALUE) {
             return match method.as_str() {
                 "each_with_index" | "each_with_object" => Some(vec![param_value_ty(), Ty::Int]),
@@ -629,6 +648,12 @@ impl<'a> BodyTyper<'a> {
                 }
                 _ => None,
             };
+        }
+        // `ActiveSupport::Notifications.instrument(name, payload) { |payload| … }` yields its payload Hash, as Rails' does (and solid_queue's `SolidQueue.instrument` through it).
+        if method.as_str() == "instrument"
+            && matches!(recv_ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "ActiveSupport::Notifications" | "SolidQueue"))
+        {
+            return Some(vec![Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }]);
         }
         // `then` / `yield_self` / `tap` yield the RECEIVER itself, on
         // every type — Kernel methods, not container ones, so they are
@@ -973,12 +998,13 @@ impl<'a> BodyTyper<'a> {
         &self,
         recv: Option<&crate::expr::Expr>,
         method: &Symbol,
+        self_ty: Option<&Ty>,
     ) -> Option<Ty> {
         if method.as_str() != "loaded?" {
             return None;
         }
         let ExprNode::Send {
-            recv: Some(owner),
+            recv: owner,
             method: assoc,
             args,
             block: None,
@@ -986,6 +1012,11 @@ impl<'a> BodyTyper<'a> {
         } = &*recv?.node
         else {
             return None;
+        };
+        // A reader with no receiver is the enclosing model's own (`recurring_executions.loaded?`), as `lower::assoc_loaded` resolves it.
+        let owner_ty = match owner {
+            Some(owner) => owner.ty.as_ref(),
+            None => self_ty,
         };
         // `association(:name).loaded?` — the reflection spelling of the
         // same question, for any association with a flat predicate.
@@ -1019,7 +1050,7 @@ impl<'a> BodyTyper<'a> {
         // Typed owners that miss the flat predicate return None — do
         // not fall through to the unique-name path (that is for
         // untyped view locals only).
-        match owner.ty.as_ref() {
+        match owner_ty {
             Some(Ty::Class { id, .. }) => {
                 return has_flat(id).then_some(Ty::Bool);
             }
@@ -1253,6 +1284,49 @@ impl<'a> BodyTyper<'a> {
         })
     }
 
+    /// What an `include Enumerable` instance answers `method` as: the
+    /// Array its `each` iterates, when the class's own `each` hands its
+    /// block to that collection's (`ClassInfo::each_forwards_block`) and
+    /// nothing nearer the instance defines `method`. Only the methods
+    /// Spinel's Enumerable answers as CRuby's does on such a class.
+    pub(super) fn enumerable_view(&self, recv_ty: Option<&Ty>, method: &Symbol) -> Option<Ty> {
+        let Some(Ty::Class { id, .. }) = recv_ty else { return None };
+        if !ENUMERABLE_METHODS.contains(&method.as_str()) {
+            return None;
+        }
+        let classes = self.classes();
+        let owns = |c: &ClassInfo| c.instance_methods.contains_key(method) || c.class_methods.contains_key(method);
+        let mut current = Some(id.clone());
+        let mut elem = None;
+        let mut seen = 0;
+        while let Some(cid) = current {
+            seen += 1;
+            let info = classes.get(&cid)?;
+            if seen > 64 || owns(info) || info.open {
+                return None;
+            }
+            if elem.is_none() && info.instance_methods.contains_key(&Symbol::from("each")) {
+                if !info.each_forwards_block {
+                    return None;
+                }
+                elem = match unwrap_fn_ret(&info.instance_methods[&Symbol::from("each")]) {
+                    Ty::Array { elem } => Some(elem),
+                    _ => return None,
+                };
+            }
+            for module in &info.includes {
+                if module_has_enumerable(classes, module, 0) {
+                    return elem.map(|elem| Ty::Array { elem });
+                }
+                if classes.get(module).is_some_and(owns) {
+                    return None;
+                }
+            }
+            current = info.parent.clone();
+        }
+        None
+    }
+
     pub(super) fn dispatch(
         &self,
         recv_ty: Option<&Ty>,
@@ -1319,6 +1393,9 @@ impl<'a> BodyTyper<'a> {
                 };
                 return self.dispatch(Some(&as_array), method, block_ret, args);
             }
+        }
+        if let Some(view) = self.enumerable_view(recv_ty, method) {
+            return self.dispatch(Some(&view), method, block_ret, args);
         }
         // `self[:generated_at]` / `read_attribute(:generated_at)` read
         // the attribute TYPECAST, so `Time?` for a datetime column and
@@ -3656,6 +3733,11 @@ pub(super) fn hash_method(
         "to_a" => Ty::Array {
             elem: std::sync::Arc::new(Ty::Tuple { elems: vec![key.clone(), value.clone()].into() }),
         },
+        "partition" => Ty::Array {
+            elem: std::sync::Arc::new(Ty::Array {
+                elem: std::sync::Arc::new(Ty::Tuple { elems: vec![key.clone(), value.clone()].into() }),
+            }),
+        },
         "dup" | "clone" | "deep_dup" => Ty::Hash {
             key: std::sync::Arc::new(key.clone()),
             value: std::sync::Arc::new(value.clone()),
@@ -3946,7 +4028,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // `index`/`rindex` → the substring position or nil.
         "index" | "rindex" => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         "bytes" => Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
-        "chars" | "lines" | "split" | "scan" | "each_char" => Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+        "chars" | "lines" | "split" | "scan" | "each_char" | "grapheme_clusters" => Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         // `String#count(chars)` — how many of the given characters occur.
         "count" => Ty::Int,
         // `String#ascii_only?`, `valid_encoding?` and
@@ -4004,7 +4086,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "pluralize" | "singularize" | "camelize" | "camelcase"
         | "underscore" | "dasherize" | "titleize" | "titlecase"
         | "humanize" | "demodulize" | "deconstantize" | "classify"
-        | "foreign_key" | "parameterize" | "truncate" | "truncate_words"
+        | "foreign_key" | "parameterize" | "truncate" | "truncate_words" | "truncate_bytes"
         | "squish" | "remove" | "indent"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),
@@ -4042,6 +4124,8 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
         "match?" => Ty::Bool,
         "=~" => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         "<=>" | "<" | ">" | "<=" | ">=" => Ty::Bool,
+        // ActiveSupport `Object#presence_in(list)`: the receiver when the list holds it, else nil.
+        "presence_in" => Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() },
         _ => unknown(),
     }
 }
@@ -4265,6 +4349,22 @@ fn gradual_array(ty: &Ty) -> bool {
         _ => false,
     }
 }
+
+/// `Enumerable` itself, or a module that includes it, at any depth.
+fn module_has_enumerable(classes: &crate::det::HashMap<ClassId, ClassInfo>, module: &ClassId, depth: usize) -> bool {
+    module.0.as_str() == "Enumerable"
+        || (depth < 16
+            && classes.get(module).is_some_and(|m| m.includes.iter().any(|inner| module_has_enumerable(classes, inner, depth + 1))))
+}
+
+/// Enumerable's methods that Spinel answers on an app class including it exactly as CRuby does.
+pub(crate) const ENUMERABLE_METHODS: &[&str] = &[
+    "all?", "any?", "collect", "collect_concat", "compact", "count", "detect", "drop", "drop_while", "each_cons",
+    "each_slice", "each_with_index", "each_with_object", "entries", "filter", "filter_map", "find", "find_all",
+    "find_index", "first", "flat_map", "group_by", "include?", "inject", "map", "max", "max_by", "member?", "min",
+    "min_by", "minmax", "none?", "one?", "partition", "reduce", "reject", "reverse_each", "select", "sort", "sort_by",
+    "sum", "take", "take_while", "tally", "to_a", "uniq", "zip",
+];
 
 fn unwrap_fn_ret(ty: &Ty) -> Ty {
     match ty {

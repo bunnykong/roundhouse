@@ -101,12 +101,41 @@ pub(super) fn resolve(
     class: &mut LibraryClass,
     sources: &[crate::span::SourceFile],
 ) {
+    let analysis_delegate = |name: &str, span: Span| {
+        !span.is_synthetic()
+            && span.start == span.end
+            && controller.body.iter().any(|item| {
+                matches!(item, ControllerBodyItem::Unknown { expr, .. }
+                    if expr.span.file == span.file && expr.span.start == span.start
+                        && crate::ingest::delegate::declared_names(expr).iter().any(|declared| {
+                            declared == name || method_name_for_action(declared) == name
+                        }))
+            })
+    };
+    // The pre-analysis surface is not a second source definition. Replay
+    // the original call below, in its position among definitions and aliases.
+    let mut analysis_delegates = Vec::new();
+    class.methods.retain(|method| {
+        if method.receiver == MethodReceiver::Instance
+            && analysis_delegate(method.name.as_str(), method.name_span)
+        {
+            analysis_delegates.push(method.clone());
+            false
+        } else {
+            true
+        }
+    });
     let mut declared = crate::det::HashSet::default();
     let mut current = crate::det::HashMap::default();
     let mut unresolved_delegates = Vec::new();
     class.unknown_calls.clear();
 
     for item in &controller.body {
+        if matches!(item, ControllerBodyItem::Action { action, .. }
+            if analysis_delegate(action.name.as_str(), action.name_span))
+        {
+            continue;
+        }
         let source = match item {
             ControllerBodyItem::Action { action, .. } => Some((
                 false,
@@ -260,6 +289,14 @@ pub(super) fn resolve(
                 unresolved_delegates.append(&mut class.unknown_calls);
                 for method in forwarders {
                     let key = (false, method.name.clone());
+                    let visibility = method.visibility;
+                    // Keep the already-lowered action's callbacks and implicit
+                    // render, but only for this declaration's own forwarder.
+                    let mut method = analysis_delegates.iter().find(|candidate| {
+                        candidate.name.as_str() == method_name_for_action(method.name.as_str())
+                            && candidate.name_span == method.name_span
+                    }).cloned().unwrap_or(method);
+                    method.visibility = visibility;
                     define(&mut class.methods, &mut declared, &mut current, key, method);
                 }
             }

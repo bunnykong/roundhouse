@@ -692,6 +692,15 @@ module ActionController
   # file would have to satisfy every strict target's type system for
   # a feature none of them exercise yet.
   class Base
+    # A virtual instance hook preserves the rendering subclass's policy
+    # in inherited callback and rescue bodies without runtime Class lookup.
+    def json_render_escape
+      # Generic targets have no Rails.application configuration runtime.
+      # Keep Rails' framework default, as JsonBuilder.escape_json_response
+      # does; the Ruby-family render overlay reads the application setting.
+      true
+    end
+
     def self.allow_forgery_protection
       ActionController.forgery_flag
     end

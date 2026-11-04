@@ -58,6 +58,12 @@ pub(super) fn mark() -> Option<usize> {
     SURVEY_STATE.with(|s| s.borrow().as_ref().map(Vec::len))
 }
 
+/// The first error recorded since `mark`, as its message.
+pub(super) fn first_since(mark: Option<usize>) -> Option<String> {
+    let length = mark?;
+    SURVEY_STATE.with(|s| s.borrow().as_ref().and_then(|buf| buf.get(length).map(|e| e.to_string())))
+}
+
 /// Forget what was recorded since `mark`: an ingest pass that is run again.
 pub(super) fn rewind(mark: Option<usize>) {
     if let Some(length) = mark {
