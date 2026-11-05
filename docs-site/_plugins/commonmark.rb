@@ -11,6 +11,7 @@ require "cgi"
 require "set"
 require "commonmarker"
 require "rouge"
+require "sanitize"
 
 module Jekyll
   module Converters
@@ -34,30 +35,48 @@ module Jekyll
           tfoot th thead tr u ul var
         ].to_set.freeze
 
+        # The security boundary for raw HTML: an HTML5 parser keeps these elements,
+        # attributes and URL schemes and drops the rest (event handlers, style,
+        # javascript: in any encoding), as GitHub's filter does.
+        SANITIZE = Sanitize::Config.freeze_config(
+          elements: PROSE_TAGS.to_a,
+          attributes: {
+            all: %w[id title lang dir],
+            "a" => %w[href name aria-label data-footnote-ref data-footnote-backref data-footnote-backref-idx],
+            "img" => %w[src alt width height align],
+            "input" => %w[type checked disabled],
+            "ol" => %w[start type reversed],
+            "td" => %w[align colspan rowspan], "th" => %w[align colspan rowspan],
+            "details" => %w[open], "section" => %w[data-footnotes], "blockquote" => %w[cite], "q" => %w[cite],
+            "p" => %w[align], "div" => %w[align]
+          },
+          protocols: {
+            "a" => { "href" => ["http", "https", "mailto", :relative] },
+            "img" => { "src" => ["http", "https", :relative] },
+            "blockquote" => { "cite" => ["http", "https", :relative] }, "q" => { "cite" => ["http", "https", :relative] }
+          }
+        )
+
         def convert(content)
           html = Commonmarker.to_html(content, options: OPTIONS, plugins: { syntax_highlighter: nil })
           html = html.gsub(%r{<a href="#[^"]*"[^>]*class="anchor"[^>]*></a>}, "")
-          highlight(escape_unknown_tags(html))
+          html = Sanitize.fragment(escape_unknown_tags(html), SANITIZE)
+          # Column alignment as pulldown-cmark writes it (`align` is obsolete HTML),
+          # and an empty header cell as a plain cell: it names no column.
+          html = html.gsub(/<(t[dh]) align="(left|center|right)">/, '<\1 style="text-align: \2">')
+                     .gsub(%r{<th( style="[^"]*")?></th>}, '<td\1></td>')
+          highlight(html)
         end
 
         private
 
-        # Leaves <pre> and <code> contents alone (already escaped text). Allowed tags
-        # lose event-handler attributes and javascript: URLs.
+        # Display, not security: a tag outside PROSE_TAGS shows as text. Code is
+        # already escaped, so only raw HTML is affected, including raw HTML in a
+        # <pre>.
         def escape_unknown_tags(html)
-          html.split(%r{(<pre\b.*?</pre>|<code\b.*?</code>)}m).map.with_index do |part, i|
-            next part if i.odd?
-            part.gsub(%r{</?([a-zA-Z][\w-]*)\b[^>]*>}) do |tag|
-              PROSE_TAGS.include?(Regexp.last_match(1).downcase) ? clean_attributes(tag) : CGI.escapeHTML(tag)
-            end
-          end.join
-        end
-        
-        UNSAFE_ATTRIBUTE = /\s(?:on[a-z]+|style|srcdoc|formaction)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i
-        UNSAFE_URL = /\s(href|src)\s*=\s*(["']?)\s*(?:javascript|vbscript|data):[^"'\s>]*\2/i
-        
-        def clean_attributes(tag)
-          tag.gsub(UNSAFE_ATTRIBUTE, "").gsub(UNSAFE_URL) { %( #{Regexp.last_match(1)}="#") }
+          html.gsub(%r{</?([a-zA-Z][\w-]*)\b[^>]*>}) do |tag|
+            PROSE_TAGS.include?(Regexp.last_match(1).downcase) ? tag : CGI.escapeHTML(tag)
+          end
         end
 
         def highlight(html)
@@ -72,7 +91,8 @@ module Jekyll
 
         def block(body, lang)
           klass = lang ? "language-#{CGI.escapeHTML(lang)} highlighter-rouge" : "highlighter-rouge"
-          %(<div class="#{klass}"><div class="highlight"><pre class="highlight"><code>#{body}</code></pre></div></div>)
+          # tabindex: code wider than the page scrolls from the keyboard too, as on GitHub.
+          %(<div class="#{klass}"><div class="highlight"><pre class="highlight" tabindex="0"><code>#{body}</code></pre></div></div>)
         end
       end
     end

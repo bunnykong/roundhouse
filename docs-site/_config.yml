@@ -10,6 +10,9 @@ baseurl: ""
 # CommonMark with GitHub's extensions, as GitHub and src/guide.rs render docs/ (see _plugins/commonmark.rb).
 markdown: RoundhouseCommonmark
 
+# The build takes about a second; a disk cache would keep converted pages stale when the plugins change.
+disable_disk_cache: true
+
 exclude:
   - Gemfile
   - Gemfile.lock

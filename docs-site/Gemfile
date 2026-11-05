@@ -4,6 +4,8 @@ source "https://rubygems.org"
 gem "jekyll", "~> 4.4"
 # CommonMark + GitHub extensions, as GitHub and src/guide.rs render these files.
 gem "commonmarker", "~> 2.5"
+# An HTML5-parser allowlist for the raw HTML a doc may hold, as GitHub filters it.
+gem "sanitize", "~> 7.0"
 
 group :development do
   gem "webrick", "~> 1.9" # jekyll serve

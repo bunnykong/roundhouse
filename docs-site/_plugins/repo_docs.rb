@@ -128,10 +128,15 @@ module RepoDocs
     # Linkable headings.
     html = html.gsub(%r{<h([234]) id="([^"]+)">(.*?)</h\1>}m) do
       level, id, inner = Regexp.last_match(1), Regexp.last_match(2), Regexp.last_match(3)
-      %(<h#{level} id="#{id}"><a class="heading-link" href="##{id}">#{inner}</a></h#{level}>)
+      # A heading that holds a link can't be one (links don't nest): it gets a mark beside it.
+      if inner.match?(/<a\b/)
+        %(<h#{level} id="#{id}">#{inner} <a class="heading-mark" href="##{id}" aria-label="Link to this section"></a></h#{level}>)
+      else
+        %(<h#{level} id="#{id}"><a class="heading-link" href="##{id}">#{inner}</a></h#{level}>)
+      end
     end
-    # Wide tables scroll inside their own box.
-    html.gsub("<table>", %(<div class="table-wrap"><table>)).gsub("</table>", "</table></div>")
+    # Wide tables scroll inside their own box, which the keyboard can reach.
+    html.gsub("<table>", %(<div class="table-wrap" tabindex="0"><table>)).gsub("</table>", "</table></div>")
   end
 
 # Fail the build when converted HTML still holds Markdown block syntax or a

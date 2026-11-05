@@ -53,10 +53,11 @@
       b.textContent = "Copy";
       b.addEventListener("click", function () {
         var code = block.querySelector("code");
-        navigator.clipboard.writeText(code ? code.innerText : "").then(function () {
-          b.textContent = "Copied";
+        function say(text) {
+          b.textContent = text;
           setTimeout(function () { b.textContent = "Copy"; }, 1400);
-        });
+        }
+        navigator.clipboard.writeText(code ? code.innerText : "").then(function () { say("Copied"); }, function () { say("Couldn’t copy"); });
       });
       block.appendChild(b);
     });
