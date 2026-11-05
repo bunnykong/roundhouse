@@ -434,6 +434,7 @@ module RoundhouseStatus
         page = Jekyll::PageWithoutAFile.new(site, site.source, "/", name)
         page.content = JSON.pretty_generate(data) + "\n"
         page.data["layout"] = nil
+        page.data["render_with_liquid"] = false # titles and excerpts from outside may hold {{ }} or {% %}
         site.pages << page
       end
       return if @logged
