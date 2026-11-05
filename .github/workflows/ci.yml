@@ -3707,9 +3707,9 @@ jobs:
   # Finish Pages assembly without keeping blog smoke jobs behind Campfire.
   docs-site:
     # The docs pages and Progress, built offline from this checkout: the check
-    # for a change to docs-site/. It needs no compiler, fixture or WASM, and
-    # only the summary waits on it. Publication renders the same pages, with
-    # live status, in assemble-site.
+    # for a change to docs-site/, and nothing else selects it. It needs no
+    # compiler, fixture or WASM, and only the summary waits on it. Publication
+    # renders the same pages, with live status, in assemble-site.
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'docs-site') }}
     runs-on: ubuntu-latest

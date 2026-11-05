@@ -214,7 +214,10 @@ class Routing(unittest.TestCase):
         for path in ["docs/pipeline/runtime.md", "RELEASES.md", "docs/roda-sequel-plan.md", "src/emit/ruby.rs", "site/index.html"]:
             with self.subTest(path=path):
                 self.assertNotIn("docs-site", ci.select([path])["jobs"])
-        self.assertIn("docs-site", ci.select([], full=True)["jobs"])
+        # Full validation doesn't add it: shared-code merges run full mode, and
+        # publication already renders the docs in assemble-site.
+        self.assertNotIn("docs-site", ci.select([], full=True)["jobs"])
+        self.assertNotIn("docs-site", ci.select([], full=True, publish=True)["jobs"])
 
     def test_shared_emitters_select_cross_target_full_coverage(self):
         for path in [

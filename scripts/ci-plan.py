@@ -867,7 +867,6 @@ def select(
         smoke.update(TARGETS)
         wasm = site = spinel = True
         reasons.append("full validation requested")
-        jobs_selected.add("docs-site")
         jobs_selected.update(SPINEL)
         jobs_selected.update(SPINEL_FULL_OR_PATH)
         spinel_tests.update(SPINEL_TESTS)
