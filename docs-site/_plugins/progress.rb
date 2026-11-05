@@ -22,6 +22,9 @@ module RoundhouseProgress
     "expectation-mismatch" => "Reduce one wrong answer to a few lines.",
     "symbol-into-integer" => "Find the first value whose type differs from Rails."
   }.freeze
+  # The same first steps, as the few words a link can carry.
+  ACTIONS = { "unclassified" => "Reproduce and classify", "expectation-mismatch" => "Reduce one wrong answer",
+              "symbol-into-integer" => "Find the first mismatch" }.freeze
   CLOSES = "Reduce a named failure, add a regression test, and check the answer against Rails."
 
   TARGETS = { "ruby" => "Ruby", "rust" => "Rust", "go" => "Go", "typescript" => "TypeScript", "elixir" => "Elixir", "crystal" => "Crystal",
@@ -124,6 +127,66 @@ module RoundhouseProgress
         lines + marks + %(<text class="value" x="#{lx + 10}" y="#{ly + 4}">#{num(last["failed"])}</text>) + xticks, cls: cls)
   end
 
+  # --- Figures beside the results (180 x 24; the table row carries the numbers) --
+
+  def fig(label, body, w: 180, hgt: 24)
+    %(<svg class="fig" width="#{w}" height="#{hgt}" viewBox="0 0 #{w} #{hgt}" role="img" aria-label="#{h(label)}">#{body}</svg>)
+  end
+
+  def mark(title, shape) = %(<g><title>#{h(title)}</title>#{shape}</g>)
+
+  # Passed, then the gap: the failing part is drawn as an empty, dashed track.
+  def gap_meter(passed, total)
+    w = total.positive? ? (178.0 * passed / total).round(1) : 0
+    fig("#{num(passed)} of #{num(total)} examples pass; the dashed gap is the #{num(total - passed)} that fail",
+        mark("#{num(passed)} pass", %(<rect class="f-pass" x="0" y="7" width="#{w}" height="10" rx="3"/>)) +
+        mark("#{num(total - passed)} fail: the gap", %(<rect class="f-gap" x="#{(w + 2.5).round(1)}" y="7.5" width="#{(177.5 - w).clamp(0, 178).round(1)}" height="9" rx="3"/>)))
+  end
+
+  # One square per item: green with a tick when it passed, red with a cross when
+  # it failed, a dashed outline with a cross when it didn't finish. A wider space
+  # separates groups.
+  def unit_marks(items, label)
+    x = 0
+    body = items.each_with_index.map do |item, i|
+      x += 10 if i.positive? && item["group"] != items[i - 1]["group"]
+      shape = if item["ok"]
+        %(<rect class="f-ok" x="#{x}" y="4" width="16" height="16" rx="3"/><text class="f-tick" x="#{x + 8}" y="15.5" text-anchor="middle">✓</text>)
+      elsif item["failed"]
+        %(<rect class="f-bad" x="#{x}" y="4" width="16" height="16" rx="3"/><text class="f-tick" x="#{x + 8}" y="15.5" text-anchor="middle">✕</text>)
+      else
+        %(<rect class="f-open" x="#{x + 0.5}" y="4.5" width="15" height="15" rx="3"/><text class="f-cross" x="#{x + 8}" y="15.5" text-anchor="middle">✕</text>)
+      end
+      x += 20
+      mark(item["title"], shape)
+    end.join
+    fig(label, body, w: [x, 180].max)
+  end
+
+  # Throughput against Rails on one scale: Rails is 1.
+  def ratio_bars(ratio)
+    w = 178.0
+    rails, gen = ratio >= 1 ? [(w / ratio).round(1), w] : [w, (w * ratio).round(1)]
+    fig("Requests per second on /articles: Rails 1, generated Ruby #{ratio}",
+        mark("Rails: 1×", %(<rect class="f-ref" x="0" y="3" width="#{rails}" height="7" rx="2"/>)) +
+        %(<text class="f-label" x="#{(rails + 6).round(1)}" y="10">Rails</text>) +
+        mark("Generated Ruby: #{ratio}×", %(<rect class="f-pass" x="0" y="14" width="#{gen}" height="7" rx="2"/>)))
+  end
+
+  # Merged per week, small: the current week is dashed because it isn't over.
+  def weeks_spark(weekly)
+    max = weekly.map { |p| p["merged"] }.max.to_i
+    body = weekly.each_with_index.map do |p, i|
+      hgt = max.zero? ? 1.5 : [26.0 * p["merged"] / max, 1.5].max.round(1)
+      x = i * 18
+      tip = "Week of #{date(p["week"])}: #{num(p["merged"])} merged#{" so far" if p["partial"]}"
+      mark(tip, p["partial"] ? %(<rect class="f-week partial" x="#{x + 0.5}" y="#{(28.5 - hgt).round(1)}" width="11" height="#{[hgt - 1, 0.5].max.round(1)}" rx="2"/>)
+                             : %(<rect class="f-week" x="#{x}" y="#{(28 - hgt).round(1)}" width="12" height="#{hgt}" rx="2"/>))
+    end.join
+    label = "Merged per week, #{date(weekly.first["week"])} to #{date(weekly.last["week"])}: " + weekly.map { |p| "#{num(p["merged"])}#{" so far" if p["partial"]}" }.join(", ")
+    fig(label, body, w: [weekly.size * 18 - 6, 12].max, hgt: 28)
+  end
+
   # --- Modules ----------------------------------------------------------------
 
   def gap(feed, repo)
@@ -133,6 +196,7 @@ module RoundhouseProgress
       { "slug" => c["slug"], "share" => failing.positive? ? (c["failures"] * 100.0 / failing).round(1) : 0, "anchor" => "cause-#{c["slug"]}", "title" => c["title"], "failures" => c["failures"],
         "area" => c["slug"] == "unclassified" ? "Needs triage" : AREAS.fetch(c["owner"].to_s, "Needs triage"),
         "step" => c["stale_rule"] ? "Recheck its original reproducer before retiring the rule." : STEPS.fetch(c["slug"], "Reproduce a named example."),
+        "action" => c["stale_rule"] ? "Recheck the reproducer" : ACTIONS.fetch(c["slug"], "Reproduce a named example"),
         "note" => c["note"], "examples" => c["examples"], "more" => [c["example_count"].to_i - c["examples"].size, 0].max,
         "related_url" => "https://github.com/#{repo}/issues?q=#{CGI.escape(c["slug"])}" }
     end
@@ -146,6 +210,8 @@ module RoundhouseProgress
       "ruby" => d["ruby_pinned"], "lobsters_sha" => short(d["lobsters_sha"]), "lobsters_url" => "https://github.com/lobsters/lobsters/commit/#{d["lobsters_sha"]}",
       "roundhouse_sha" => short(d["roundhouse_sha"]), "roundhouse_url" => "https://github.com/#{repo}/commit/#{d["roundhouse_sha"]}",
       "report_url" => feed["sources"].last, "groups" => active.map(&group), "group_count" => active.count { |c| c["slug"] != "unclassified" },
+      "smaller_count" => [active.size - 3, 0].max, "smaller_examples" => num(active.drop(3).sum { |c| c["failures"] }),
+      "figure" => d["canary_ok"] && d["consistent"] ? gap_meter(ex["passed"].to_i, ex["total"].to_i) : nil,
       "unclassified" => d["causes"].find { |c| c["slug"] == "unclassified" }&.dig("failures").to_i,
       "stale_rules" => d["causes"].select { |c| c["stale_rule"] }.sort_by { |c| c["slug"] }.map(&group),
       "warning_kinds" => d.dig("warnings", "by_kind").sort_by { |_, n| -n }.map { |k, n| { "kind" => k.tr("_", " "), "count" => num(n) } },
@@ -202,7 +268,9 @@ module RoundhouseProgress
            elsif compiled.all? { |l| l["ok"] } then "Every compiled configuration completed the latest run."
            else "#{compiled.count { |l| l["ok"] }} of #{compiled.size} compiled configurations completed the latest run."
            end
-    { "lanes" => lanes, "lead" => lead, "failed_count" => failed.size, "compiled" => compiled.size, "completed" => compiled.count { |l| l["ok"] }, "all_failed" => !lanes.empty? && failed.size == lanes.count { |l| l["comparison"] != "Reference" },
+    figure = compiled.empty? ? nil : unit_marks(compiled.map { |l| { "ok" => l["ok"], "title" => "#{l["label"]}: #{l["ok"] ? "completed" : l["outcome"].downcase}", "group" => 0 } },
+                                                 "#{compiled.count { |l| l["ok"] }} of #{compiled.size} compiled configurations completed")
+    { "lanes" => lanes, "lead" => lead, "figure" => figure, "failed_count" => failed.size, "compiled" => compiled.size, "completed" => compiled.count { |l| l["ok"] }, "all_failed" => !lanes.empty? && failed.size == lanes.count { |l| l["comparison"] != "Reference" },
       "workload" => feed&.dig("data", "workload"), "source" => feed&.dig("sources", 0), "entries" => entries }
   end
 
@@ -227,10 +295,15 @@ module RoundhouseProgress
     selected = d["rows"].count { |r| r["check"] && r["selected"] }
     passed = checked.count { |r| r["class"] == "ok" }
     not_selected = checked.count { |r| r["result"] == "Not selected" }
+    apps = checked.group_by { |r| r["app"] }.map { |app, rs| { "app" => app, "rows" => rs.sort_by { |r| r["name"].downcase }.reject { |r| r["result"] == "Not selected" } } }.reject { |x| x["rows"].empty? }
+    failed = checked.select { |r| r["class"] == "fail" }.map { |r| "#{r["app"]} on #{r["name"]}" }
+    marks = apps.flat_map { |x| x["rows"].map { |r| { "ok" => r["class"] == "ok", "failed" => r["class"] == "fail", "title" => "#{r["app"]} · #{r["name"]}: #{r["result"].downcase}", "group" => x["app"] } } }
     {
       "headline" => "#{passed} of #{selected} selected checks passed", "passed" => passed, "selected" => selected, "not_selected" => not_selected,
       "failed" => checked.select { |r| r["class"] == "fail" }.map { |r| "#{r["app"]}: #{r["name"]}" },
-      "apps" => checked.group_by { |r| r["app"] }.map { |app, rs| { "app" => app, "rows" => rs.sort_by { |r| r["name"].downcase }.reject { |r| r["result"] == "Not selected" } } }.reject { |x| x["rows"].empty? },
+      "apps" => apps, "apps_label" => apps.map { |x| x["app"] }.join(" + "),
+      "failed_text" => failed.empty? ? nil : "#{failed.size > 1 ? "#{failed[0..-2].join(", ")} and #{failed[-1]}" : failed[0]} failed",
+      "figure" => marks.empty? ? nil : unit_marks(marks, "#{passed} of #{selected} selected checks passed#{"; #{failed.join(", ")} failed" unless failed.empty?}"),
       "others" => checked.select { |r| r["result"] == "Not selected" }.sort_by { |r| [r["app"], r["name"].downcase] },
       "unchecked" => rows.reject { |r| r["check"] }.map { |r| "#{r["app"]}: #{r["name"]}" },
       "run_url" => d.dig("run", "url") || "https://github.com/roundhouse-rb/roundhouse/actions/runs/#{d["run_id"]}",
@@ -255,7 +328,7 @@ module RoundhouseProgress
         "rss" => r["rss_mb"]&.round, "per_gib" => r["rps_per_gb"] && num(r["rps_per_gb"].round), "runs" => r["runs"], "errors" => r["non_2xx"] }
     end
     env = d["environment"]
-    { "headline" => headline && "#{headline}×", "runs" => ruby&.dig("runs"), "endpoints" => endpoints, "pairs" => pairs, "by_endpoint" => by_endpoint, "table" => table,
+    { "headline" => headline && "#{headline}×", "figure" => headline && ratio_bars(headline.to_f), "runs" => ruby&.dig("runs"), "endpoints" => endpoints, "pairs" => pairs, "by_endpoint" => by_endpoint, "table" => table,
       "env_date" => env && date(env["captured_at"]), "env_sha" => env && short(env.dig("git", "sha")), "toolchains" => env&.dig("toolchains").to_h.map { |k, v| "#{k} #{v}" } }
   end
 
@@ -264,7 +337,7 @@ module RoundhouseProgress
     weekly = d["weekly_merged"]
     d.slice("people_30d", "recent").merge(
       "merged_7d" => num(d["merged_7d"]), "people_7d" => d["people_7d"], "merged_all" => num(d["merged_all"].to_i),
-      "contributors_30d" => d["people_30d"].size, "bars" => weekly_bars(weekly),
+      "contributors_30d" => d["people_30d"].size, "bars" => weekly_bars(weekly), "spark" => weekly.empty? ? nil : weeks_spark(weekly),
       "weeks" => weekly.reverse.map { |w| { "week" => date(w["week"]), "merged" => num(w["merged"]), "partial" => w["partial"] } },
       "firsts" => d["first_contributions_30d"].map { |p| p.merge("date" => date(p.dig("first_pr", "merged_at"))) },
       "firsts_alpha" => d["first_contributions_30d"].sort_by { |p| p["login"].downcase },
@@ -281,7 +354,20 @@ module RoundhouseProgress
     now = Time.parse(status["generated_at"])
     repo = site.config.dig("status", "repo")
     states = SOURCE_NAMES.keys.to_h { |k| [k, state(k, status[k], now)] }
-    view = { "built" => datetime(status["generated_at"]), "site_sha" => short(status["site_sha"]), "states" => states, "repo" => repo }
+    # The results table shows one date when its rows share it; a row that differs,
+    # or isn't current, carries its own.
+    rows = %w[specs replay archives bench].select { |k| states.dig(k, "available") }
+    dates = rows.map { |k| states.dig(k, "observed_date") }.uniq
+    common = dates.size == 1 ? dates.first : nil
+    rows.each do |k|
+      st = states[k]
+      own = st["observed_short"] || "Date not published"
+      st["when"] = if st["cached"] then "Saved result, #{own}"
+                   elsif st["stale"] then "#{own}, not current"
+                   elsif common.nil? then own
+                   end
+    end
+    view = { "built" => datetime(status["generated_at"]), "site_sha" => short(status["site_sha"]), "states" => states, "repo" => repo, "results_date" => common }
     view["gap"] = gap(status["specs"], repo) if states.dig("specs", "available")
     view["over_time"] = over_time(site.data["status_history"])
     view["replay"] = replay(status["replay"], status["routes"])
