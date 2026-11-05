@@ -61,7 +61,7 @@ discussed in [OriPekelman/tep#6](https://github.com/OriPekelman/tep/issues/6)
 System tools to install once. All available via standard package
 managers:
 
-- **Ruby 3.4 or later** with bundler (ships with Ruby).
+- **Ruby 4.0.9 or later** with bundler (ships with Ruby).
 - **Node.js + npm** — Tailwind CSS build for the asset pipeline.
 - **SQLite system library** — preinstalled on macOS;
   `apt install libsqlite3-dev` on Ubuntu / Debian. The `sqlite3`
@@ -69,7 +69,7 @@ managers:
 
 The end-to-end demo path additionally needs:
 
-- **Rails gem** — `gem install rails`. Used by `bin/rh fixture` to
+- **Rails gem** — `gem install rails -v 8.1.4`. Used by `bin/rh fixture` to
   generate the Rails fixture via `rails new`.
 - **Rust + cargo** — install via [rustup](https://rustup.rs). Used
   to build the Roundhouse transpiler.

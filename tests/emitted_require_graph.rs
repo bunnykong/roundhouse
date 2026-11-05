@@ -147,9 +147,8 @@ fn spinel_target_require_graph_is_closed() {
 /// Separate from the `require_relative` graph above and for the same
 /// reason: the rule was written down once, inside `spin_shape`, so only
 /// the spinel tree got it. Ruby 4.0 autoloads `Set` and `Pathname` and
-/// hides the gap; Ruby 3.4 — what the scaffold claims and what
-/// `campfire-conformance` runs — raises, and campfire lost two test
-/// files to a `Pathname()` in a helper. Every ruby-family target is
+/// hides the gap; Ruby 3.4, the minimum when this was written, raised,
+/// and campfire lost two test files to a `Pathname()` in a helper. Every ruby-family target is
 /// checked here so the next target to be added is checked too.
 fn assert_no_missing_bundled_requires(files: &[(String, String)], label: &str) {
     let gaps = roundhouse::project::missing_bundled_requires(files);

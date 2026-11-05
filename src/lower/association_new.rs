@@ -2,7 +2,9 @@
 //!
 //! A method named like an association can return an unrelated class. The
 //! reader must have the declared collection's analyzed type before `.new`
-//! becomes `.build`.
+//! becomes `.build`. An untyped owner's reader is untyped too. There the
+//! owner's name must name a model that declares the collection, as
+//! `scope_chain` requires before it lowers the same owner's `build`.
 
 use crate::det::{HashMap, HashSet};
 
@@ -224,19 +226,20 @@ fn rewrite(expr: &mut Expr, assocs: &Associations, self_model: Option<&ClassId>)
     if !args.is_empty() {
         return;
     }
-    let model = match owner {
-        None => self_model,
-        Some(owner) if matches!(&*owner.node, ExprNode::SelfRef) => self_model,
-        Some(owner) if matches!(&*owner.node, ExprNode::Const { .. }) => None,
+    let (model, by_name) = match owner {
+        None => (self_model.cloned(), false),
+        Some(owner) if matches!(&*owner.node, ExprNode::SelfRef) => (self_model.cloned(), false),
+        Some(owner) if matches!(&*owner.node, ExprNode::Const { .. }) => (None, false),
         Some(owner) if matches!(&*owner.node, ExprNode::Send { method, .. } if method.as_str() == "class") => {
-            None
+            (None, false)
         }
         Some(owner) => match owner.ty.as_ref().map(Ty::peel_nilable) {
-            Some(Ty::Class { id, .. }) => Some(id),
-            _ => None,
+            Some(Ty::Class { id, .. }) => (Some(id.clone()), false),
+            Some(Ty::Untyped) => (super::scope_chain::owner_name_class(owner), true),
+            _ => (None, false),
         },
     };
-    let Some(target) = model.and_then(|id| assocs.target(id, name)) else {
+    let Some(target) = model.as_ref().and_then(|id| assocs.target(id, name)) else {
         return;
     };
     let is_collection = match read.ty.as_ref().map(Ty::peel_nilable) {
@@ -244,6 +247,7 @@ fn rewrite(expr: &mut Expr, assocs: &Associations, self_model: Option<&ClassId>)
             matches!(elem.peel_nilable(), Ty::Class { id, .. } if id == target)
         }
         Some(Ty::Relation { of }) => of == target,
+        Some(Ty::Untyped) => by_name,
         _ => false,
     };
     if is_collection {

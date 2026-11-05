@@ -11,18 +11,19 @@ Install Rust through rustup; the selected toolchain is
 `rust-version`. Keep the stack budgets in [`.cargo/config.toml`](../../.cargo/config.toml).
 Toolchain upgrades need native and browser/WASM verification.
 
-Use the MRI line in [`.ruby-version`](../../.ruby-version). CI selects its
-latest patch through `env.MRI_RUBY` in the workflow; `bin/rh doctor` reads
+Use the MRI version in [`.ruby-version`](../../.ruby-version). CI pins the same
+patch through `env.MRI_RUBY` in the workflow; `bin/rh doctor` reads
 the local minimum from that file. Git and Ruby run `bin/rh verify --plan`; execution
 also needs Cargo. Python 3 is optional for its hosted-coverage preview.
 The default suite loads Ruby gems as well as Rust code. Prepare them and
 the generated fixtures:
 
 ```sh
-gem install rails rails-html-sanitizer sqlite3 bcrypt rack minitest rake --no-document
-gem install activerecord -v '~> 8.1.0' --no-document
+gem install rails -v 8.1.4 --no-document
+gem install rails-html-sanitizer sqlite3 bcrypt rack minitest rake --no-document
+gem install activerecord -v 8.1.4 --no-document
 (cd runtime/spinel/scaffold && bundle install)   # framework_tests_ruby runs through this bundle
-bin/rh fixture
+bin/rh fixture --rails 8.1.4
 (cd fixtures && ../scripts/create-store store)
 bin/rh doctor
 cargo build --locked

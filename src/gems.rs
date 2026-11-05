@@ -30,6 +30,17 @@ pub(crate) enum Marker {
     AnyText(&'static [&'static str]),
 }
 
+/// CRuby-preloaded libraries supplied on the Ruby family and Spinel:
+/// (require feature, namespace, modeled classes). An app declaration
+/// reopens these constants; it does not replace the library.
+pub(crate) const PRELOADED: &[(&str, &str, &[&str])] = &[
+    ("did_you_mean", "DidYouMean", &["DidYouMean::SpellChecker"]),
+];
+
+pub(crate) fn preloaded_constant(name: &str) -> bool {
+    PRELOADED.iter().any(|(_, namespace, classes)| *namespace == name || classes.contains(&name))
+}
+
 mod rack_mini_profiler;
 
 /// Not a section of `gem_facades.rb`: a package keeps one gem's Ruby, signatures and assets under `runtime/gems/<dir>/`, so it moves as a unit.
@@ -905,10 +916,14 @@ pub(crate) fn is_stdlib_namespace(root: &str) -> bool {
         "TSort", "UNIXSocket", "URI", "Warning", "WeakRef", "YAML", "Zlib", "TCPSocket", "UDPSocket", "Addrinfo",
     ];
     RUBY_OWN.contains(&root)
+        || PRELOADED.iter().any(|(_, namespace, _)| namespace.eq_ignore_ascii_case(root))
         || FATES.iter().any(|(gem, fate)| matches!(fate, GemFate::Stdlib) && namespace_of(gem).eq_ignore_ascii_case(root))
 }
 
 pub fn fate_of(name: &str) -> GemFate {
+    if PRELOADED.iter().any(|(feature, _, _)| *feature == name) {
+        return GemFate::Stdlib;
+    }
     if let Some((_, fate)) = FATES.iter().find(|(n, _)| *n == name) {
         return *fate;
     }

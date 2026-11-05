@@ -74,11 +74,7 @@ else
   equal(nil, ActiveSupport.parse_db_date(nil))
   equal(nil, ActiveSupport.parse_db_date(""))
   date_value("2024-02-29", ActiveSupport.parse_db_date("2024-02-29"))
-  begin
-    ActiveSupport.parse_db_date("2023-02-29")
-    raise "invalid calendar date was silently accepted"
-  rescue Date::Error
-  end
+  equal(nil, ActiveSupport.parse_db_date("2023-02-29")) # Rails' date reader returns nil.
   [17, Time.utc(2024, 1, 31)].each do |invalid|
     begin
       ActiveSupport.format_db_date(invalid)

@@ -77,6 +77,7 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "did_you_mean",
     "spinel_faye_websocket",
     "spinel_websocket_lifecycle",
     "select_alias_index",
@@ -520,6 +521,17 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path in {
+        "src/ingest/settled_conditionals.rs",
+        "src/lower/defined_const_fold.rs",
+        "src/analyze/body/const_resolution/mod.rs",
+        "src/analyze/body/mod.rs",
+        "src/analyze/registry/stdlib.rs",
+        "src/gems.rs",
+        "src/project.rs",
+        "tests/stdlib_gem_fates.rs",
+    } or path.startswith("tests/did_you_mean/"):
+        suites.add("did_you_mean")
     if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
         suites.add("spinel_net_http_start")
     if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":

@@ -52,12 +52,14 @@ pub(super) fn member_key(local: &Symbol, attr: &Symbol) -> Symbol {
 pub(super) struct Probe<'a> {
     pub reader: &'a dyn Fn(&Symbol) -> Option<Ty>,
     pub member: &'a dyn Fn(&Symbol, &Symbol) -> Option<Ty>,
+    /// The condition sits in a class method, where `self` is the class.
+    pub class_side: bool,
 }
 
 impl<'a> Probe<'a> {
     /// Locals and `self` readers only (no member reads).
     pub fn without_members(reader: &'a dyn Fn(&Symbol) -> Option<Ty>) -> Self {
-        Probe { reader, member: &|_, _| None }
+        Probe { reader, member: &|_, _| None, class_side: false }
     }
 }
 
@@ -148,7 +150,7 @@ pub(super) fn extract_narrowing_with(cond: &Expr, probe: &Probe) -> Option<Narro
                 }
                 ("is_a?" | "kind_of?" | "instance_of?", [arg]) => {
                     let key = var_key(target)?;
-                    let ty = const_to_ty(arg)?;
+                    let ty = const_to_ty(arg).or_else(|| self_class_arg(arg).filter(|_| probe.class_side))?;
                     Some(NarrowPred::IsA(key, ty))
                 }
                 // `if x.attr`: a bare read of a stable member is a truthiness
@@ -267,6 +269,21 @@ fn var_key(e: &Expr, probe: &Probe) -> Option<VarKey> {
     }
 }
 
+/// `x.is_a?(self)` in a class method, as fugit's `Cron.parse` opens with
+/// `return s if s.is_a?(self)`: the class the method's `self` is.
+fn self_class_arg(e: &Expr) -> Option<Ty> {
+    let (ExprNode::SelfRef, Some(ty @ Ty::Class { id, .. })) = (&*e.node, &e.ty) else { return None };
+    // Not inside `Class.new`/`Module.new`: `self` there is the class being built, which its type does not name.
+    if matches!(id.0.as_str(), "Class" | "Module") {
+        return None;
+    }
+    // Not the nominal class as typed: a class method reopened on `Array` narrows to the structural Array, as `is_a?(Array)` does; `Store::String` stays nominal.
+    if id.0.as_str().contains("::") {
+        return Some(ty.clone());
+    }
+    Some(class_name_to_ty(&id.0, true, std::slice::from_ref(&id.0)))
+}
+
 fn is_nil_lit(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
 }
@@ -284,7 +301,12 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
     };
     let name = path.last()?;
     let core = path.len() == 1 || (path.len() == 2 && path[0].as_str().is_empty());
-    Some(match name.as_str() {
+    Some(class_name_to_ty(name, core, path))
+}
+
+/// The type an `is_a?` against the class named `name` narrows to.
+fn class_name_to_ty(name: &Symbol, core: bool, path: &[Symbol]) -> Ty {
+    match name.as_str() {
         "Integer" => Ty::Int,
         // `Numeric` covers Int and Float in Ruby's hierarchy. Union
         // both so subsequent dispatch resolves either via int_method
@@ -318,7 +340,7 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
             )),
             args: vec![].into(),
         },
-    })
+    }
 }
 
 pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -> Ctx {

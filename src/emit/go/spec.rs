@@ -352,7 +352,14 @@ fn emit_test_send_go(
             }
         }
         Some(r) => {
-            let recv_s = emit_test_expr_go(r, ctx);
+            // A `Model.new(…)` receiver is a `&Model{…}` literal, which
+            // takes parentheses before a selector: `&Article{…}.FeaturedPred()`
+            // would take the address of the call's result, and at the top
+            // of an `if` condition Go reads its `{` as the block's.
+            let recv_s = match emit_test_expr_go(r, ctx) {
+                s if s.starts_with('&') => format!("({s})"),
+                s => s,
+            };
             let is_class_call = matches!(&*r.node, ExprNode::Const { .. });
             // Class-level calls flatten to `ClassMethod(args)` — Go
             // has no class methods, and our persistence emitter laid

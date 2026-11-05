@@ -3333,6 +3333,15 @@ pub(crate) fn counted_terminal(method: &Symbol, args: &[Expr], block: Option<&Ex
 /// model that doesn't declare the collection, answers None and the
 /// chain keeps its source shape.
 fn owner_model_from_name<'a>(owner: &Expr, assocs: &'a AssocRegistry) -> Option<&'a ClassId> {
+    let id = owner_name_class(owner)?;
+    assocs.tables.get_key_value(&id).map(|(model, _)| model)
+}
+
+/// The class an owner expression's name camelizes to: `@room`, `room`
+/// and `Current.room` name `Room`. Whether a model has that name is the
+/// caller's check. `association_new` resolves an untyped owner of `.new`
+/// with it, so the `build` it writes resolves here to the same model.
+pub(crate) fn owner_name_class(owner: &Expr) -> Option<ClassId> {
     let name = match &*owner.node {
         ExprNode::Ivar { name } => name.as_str(),
         ExprNode::Var { name, .. } => name.as_str(),
@@ -3343,8 +3352,7 @@ fn owner_model_from_name<'a>(owner: &Expr, assocs: &'a AssocRegistry) -> Option<
         ExprNode::Send { method, args, block: None, .. } if args.is_empty() => method.as_str(),
         _ => return None,
     };
-    let id = ClassId(Symbol::from(crate::naming::camelize(name).as_str()));
-    assocs.tables.get_key_value(&id).map(|(model, _)| model)
+    Some(ClassId(Symbol::from(crate::naming::camelize(name).as_str())))
 }
 
 /// The `(owner model, target, foreign key)` a `<owner>.<has_many>` read

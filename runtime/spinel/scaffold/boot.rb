@@ -70,6 +70,7 @@ require_relative "runtime/active_support_duration"
 # Blank-predicate helper for receivers `src/lower/blank.rs` had no static
 # type to ground on. Before anything that can hold a `present?` site.
 require_relative "runtime/active_support_ext"
+require_relative "runtime/active_support_calendar"
 require_relative "runtime/active_model_validator"
 require_relative "runtime/rails"
 # Not part of runtime/rails: the instrumented Notifications paths keep per-thread state the strict targets' typing gate does not follow.

@@ -333,6 +333,23 @@ class Routing(unittest.TestCase):
         self.assertNotIn("build-wasm", plan["jobs"])
         self.assertIn("generated_columns_spinel", plan["spinel_tests"])
 
+    def test_did_you_mean_inputs_select_the_native_contract(self):
+        for path in [
+            "src/ingest/settled_conditionals.rs",
+            "src/lower/defined_const_fold.rs",
+            "src/analyze/body/const_resolution/mod.rs",
+            "src/analyze/body/mod.rs",
+            "src/analyze/registry/stdlib.rs",
+            "src/gems.rs",
+            "src/project.rs",
+            "tests/did_you_mean.rs",
+            "tests/stdlib_gem_fates.rs",
+            "tests/did_you_mean/suggest_message.rb",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("did_you_mean", ci.select([path])["spinel_tests"])
+        self.assertIn("did_you_mean", ci.select([], full=True)["spinel_tests"])
+
     def test_campfire_latest_is_not_planned(self):
         # Dropped: tip drift against once-campfire main is not a standing job.
         self.assertNotIn("campfire-latest", ci.SPINEL_LANE)
@@ -951,6 +968,18 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["spinel_tests"], [binary])
 
+    def test_sqlite_date_quote_inputs_select_the_native_regression(self):
+        for path in [
+            "runtime/spinel/sqlite_adapter.rb",
+            "tests/date_columns_spinel.rs",
+            "tests/date_columns_spinel.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("date_columns_spinel", plan["spinel_tests"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_interpreter_only_files_do_not_start_native_work(self):
         for path, targets in {
             "runtime/spinel/db_jruby.rb": ["jruby"],
@@ -1140,7 +1169,6 @@ class Routing(unittest.TestCase):
 
     def test_packaging_and_unknown_target_changes_keep_the_ruby_floor(self):
         for path in [
-            "src/project.rs",
             "src/emit/newlang.rs",
             "tests/framework_tests_newlang.rs",
             "scripts/ci-plan.py",
@@ -1184,7 +1212,7 @@ class Routing(unittest.TestCase):
             self.assertTrue(plan["extras_advisory"])
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope="unknown")["jobs"],
-            ci.BASE,
+            [*ci.BASE, "spinel-build", "spinel-framework", "spinel-toolchain", "spinel-compare"],
         )
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope="unknown")["smoke"],
@@ -1882,7 +1910,7 @@ class ProjectScope(unittest.TestCase):
         )
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope=None)["jobs"],
-            ci.BASE,
+            [*ci.BASE, "spinel-build", "spinel-framework", "spinel-toolchain", "spinel-compare"],
         )
 
     def test_builder_text_inside_strings_or_comments_is_not_a_rust_item(self):

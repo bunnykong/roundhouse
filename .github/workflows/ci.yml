@@ -40,13 +40,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # CI selects the latest patch on this MRI line. The local minimum lives in
+  # CI runs exactly this MRI patch, which is also the local minimum in
   # .ruby-version; keep both anchors aligned. Exact repro pins remain separate.
-  MRI_RUBY: '3.4'
+  MRI_RUBY: '4.0.9'
   # The next MRI line, exercised by compare-ruby-next as a forward-
   # compatibility lane. MRI_RUBY stays the supported minimum; once this
   # line has run green for a while, swap the two.
-  MRI_RUBY_NEXT: '4.0'
+  MRI_RUBY_NEXT: '4.1.0-preview1'
   # The Rails apps the /ide/ + /playground/ demos ship (in-browser). Pinned
   # so the page — and any blog post's claims about it — stay stable against
   # upstream churn; bump deliberately. Each bundle embeds the app's LICENSE
@@ -973,7 +973,7 @@ jobs:
           repository: roundhouse-rb/spinel-pg
           ref: ${{ env.SPINEL_PG_SHA }}
           path: spinel-pg
-      # Not the runner's system Ruby: a suite compares the binary with CRuby, and the baseline's messages are 3.4's
+      # Not the runner's system Ruby: a suite compares the binary with CRuby, and the baseline's messages must match this Ruby's
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -1940,7 +1940,7 @@ jobs:
   # transpiled server against Rails over HTTP. Matrixed from nine
   # near-identical jobs; every per-target difference (toolchain install +
   # versions) is a guarded step below. ruby/setup-ruby runs LAST on every
-  # target so its MRI 3.4 wins PATH when Rails boots — required by the JVM
+  # target so its MRI wins PATH when Rails boots — required by the JVM
   # targets (setup-java/gradle otherwise leave system Ruby 3.2 resolving
   # bin/rails; see the old compare-kotlin note) and harmless everywhere
   # else. fail-fast off so one target's failure doesn't cancel the rest
@@ -2057,7 +2057,7 @@ jobs:
         uses: astral-sh/setup-uv@v10.2.0
         with:
           cache-dependency-glob: src/emit/python/pyproject.rs
-      # setup-ruby LAST — see the job comment (MRI 3.4 must win PATH).
+      # setup-ruby LAST — see the job comment (MRI must win PATH).
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -2385,9 +2385,9 @@ jobs:
 
   # compare-jruby: same emitted tree as compare-ruby but served by Puma
   # on the JVM via JRuby with the JDBC db backend (runtime/db.rb =
-  # db_jruby.rb). The Rails reference runs under CRuby 3.4 (the default
+  # db_jruby.rb). The Rails reference runs under CRuby MRI_RUBY (the default
   # `ruby`); the target is launched with an explicit `jruby`, so the two
-  # setup-ruby steps are ordered jruby-first / CRuby-last to leave 3.4 as
+  # setup-ruby steps are ordered jruby-first / CRuby-last to leave MRI_RUBY as
   # the default. JRuby must be >= 10 — the runtime uses Fiber[:k] storage
   # (Ruby 3.2+), which JRuby 9.4 (Ruby 3.1) lacks. No node/tailwind:
   # assets aren't built (the DOM diff compares asset tags, not files —

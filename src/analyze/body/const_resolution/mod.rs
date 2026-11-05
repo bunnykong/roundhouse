@@ -222,12 +222,15 @@ fn core_rbs() -> &'static str {
     .as_str()
 }
 
-/// Library namespaces an app `include`s to name their classes bare
+/// Default-gem namespaces, and library namespaces an app `include`s to name their classes bare
 /// (svg-graph's `include REXML`, then `Document.new`, `Comment.new`): Ruby
 /// looks the name up in the included module before `Object`, so the app's
 /// own top-level `Comment` model is not the one meant. Only the classes
 /// spinel's package defines too (`packages/rexml`).
 const STDLIB_NAMESPACES_RBS: &str = "\
+module DidYouMean\n\
+  class SpellChecker\n  end\n\
+end\n\
 module REXML\n\
   class Child\n  end\n\
   class Parent < Child\n  end\n\

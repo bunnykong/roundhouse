@@ -20,6 +20,10 @@ use std::process::Command;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/go_test_literal_receiver.rs"]
+mod go_test_literal_receiver;
+#[path = "support/go_action_controller_api.rs"]
+mod go_action_controller_api;
 #[path = "support/go_conditional_operand.rs"]
 mod go_conditional_operand;
 #[path = "support/i18n_locales_app.rs"]
@@ -350,6 +354,57 @@ fn a_model_test_with_a_persisted_override_runs() {
         .expect("run go test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("--- PASS: TestTheOverrideAnswers"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1803: an assertion on a method of a new record parses and runs.
+#[test]
+#[ignore]
+fn an_assertion_on_a_new_records_method_runs() {
+    let (emitted, errors) = go_test_literal_receiver::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestANewArticleIsRecentAndNotFeatured", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestANewArticleIsRecentAndNotFeatured"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1804: a controller under `ActionController::API` builds and answers.
+#[test]
+#[ignore]
+fn an_api_controller_runs() {
+    let (emitted, errors) = go_action_controller_api::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestAnAPIControllerAnswers", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestAnAPIControllerAnswers"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1804: tiny-api (`ApplicationController < ActionController::API`) on
+/// Go. Nothing else builds it for Go. Its controllers embed the runtime's
+/// controller base now; the package still has other gaps (a uuid key typed
+/// as `int64`, `render json:` in a helper), so this pins only that
+/// `ActionControllerAPI` is no longer named.
+#[test]
+#[ignore]
+fn tiny_api_names_no_action_controller_api_type() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/tiny-api");
+    let scratch = scratch_dir("tiny-api");
+    generate_project(&fixture, &scratch);
+    go_mod_tidy(&scratch);
+    let vet = Command::new("go").args(["vet", "./..."]).current_dir(&scratch).output().expect("run go vet");
+    let stderr = String::from_utf8_lossy(&vet.stderr);
+    assert!(!stderr.contains("ActionControllerAPI"), "{stderr}");
+    let controller = std::fs::read_to_string(scratch.join("app/v2/application_controller.go")).unwrap();
+    assert!(controller.contains("*ActionControllerBase"), "{controller}");
 }
 
 /// #1696: the issue's reduction parses: its conditional operand of `&&`

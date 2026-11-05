@@ -317,6 +317,7 @@ impl Facts {
         let Some(lock) = &self.lock else { return false };
         if self.segments.contains(head)
             || RUNTIME_PROVIDED.contains(&head)
+            || crate::gems::preloaded_constant(head)
             || BASE_FRAMEWORKS.contains(&head)
             || FRAMEWORKS.iter().any(|(root, _)| *root == head)
             || self.written_as_definition(head)

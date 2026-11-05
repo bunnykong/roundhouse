@@ -4,6 +4,7 @@ use crate::dialect::{ConditionalDefinitions, LibraryClass};
 use crate::expr::ExprNode;
 
 pub(super) fn settle(app: &mut App) {
+    let resolver = app.const_resolver.for_sources(&app.sources);
     let known: crate::det::HashSet<String> = app
         .library_classes
         .iter()
@@ -13,7 +14,7 @@ pub(super) fn settle(app: &mut App) {
     for lc in app.library_classes.iter_mut() {
         let records = std::mem::take(&mut lc.conditional_definitions);
         for record in records {
-            match settled_arm(&record, &known) {
+            match settled_arm(&record, &known, &resolver) {
                 Some(kept) => drop_other_arms(lc, &record, kept),
                 None => lc.conditional_definitions.push(record),
             }
@@ -22,14 +23,14 @@ pub(super) fn settle(app: &mut App) {
 }
 
 /// The arm Ruby runs, or `usize::MAX` for none (an `if` without `else` whose condition is false).
-fn settled_arm(record: &ConditionalDefinitions, known: &crate::det::HashSet<String>) -> Option<usize> {
+fn settled_arm(record: &ConditionalDefinitions, known: &crate::det::HashSet<String>, resolver: &crate::analyze::ConstResolver) -> Option<usize> {
     if !matches!(record.arms.len(), 1 | 2)
         || record.arms.get(1).is_some_and(|a| a.condition.is_some())
         || record.arms.iter().any(|a| !a.nested.is_empty() || !a.declarations.is_empty())
     {
         return None;
     }
-    let holds = settled(record.arms[0].condition.as_ref()?, known)? != record.negated;
+    let holds = settled(record.arms[0].condition.as_ref()?, known, resolver)? != record.negated;
     Some(match (holds, record.arms.len()) {
         (true, _) => 0,
         (false, 2) => 1,
@@ -38,22 +39,26 @@ fn settled_arm(record: &ConditionalDefinitions, known: &crate::det::HashSet<Stri
 }
 
 /// A load-time condition whose answer the running Ruby (3.4 or later) and Spinel give alike.
-fn settled(cond: &crate::expr::Expr, known: &crate::det::HashSet<String>) -> Option<bool> {
+fn settled(cond: &crate::expr::Expr, known: &crate::det::HashSet<String>, resolver: &crate::analyze::ConstResolver) -> Option<bool> {
     match &*cond.node {
         ExprNode::Defined { operand } => {
             let ExprNode::Const { path } = &*operand.node else { return None };
             let name = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
-            known.contains(&name).then_some(true)
+            // CRuby preloads these libraries; project assembly loads their
+            // package on Spinel. Resolve the actual reference so a lexical
+            // app constant with the same spelling does not select this arm.
+            (known.contains(&name) || crate::gems::PRELOADED.iter().flat_map(|(_, _, classes)| *classes)
+                .any(|class| resolver.is_runtime_class(operand.span, path, class))).then_some(true)
         }
-        ExprNode::Send { recv: Some(r), method, args, .. } if method.as_str() == "!" && args.is_empty() => settled(r, known).map(|b| !b),
-        ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "!" && args.len() == 1 => settled(&args[0], known).map(|b| !b),
+        ExprNode::Send { recv: Some(r), method, args, .. } if method.as_str() == "!" && args.is_empty() => settled(r, known, resolver).map(|b| !b),
+        ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "!" && args.len() == 1 => settled(&args[0], known, resolver).map(|b| !b),
         ExprNode::BoolOp { op, left, right, .. } => {
-            let l = settled(left, known);
+            let l = settled(left, known, resolver);
             match op {
                 crate::expr::BoolOpKind::Or if l == Some(true) => Some(true),
                 crate::expr::BoolOpKind::And if l == Some(false) => Some(false),
                 crate::expr::BoolOpKind::Or | crate::expr::BoolOpKind::And => {
-                    let r = settled(right, known)?;
+                    let r = settled(right, known, resolver)?;
                     l.map(|_| r)
                 }
             }

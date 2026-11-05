@@ -847,6 +847,12 @@ fn embedded_parent_type(class: &LibraryClass) -> Option<String> {
     if is_core_exception_root(raw) || matches!(raw, "Object" | "BasicObject") {
         return None;
     }
+    // `ActionController::API` has the runtime's one controller base, as
+    // the ruby emit gives it: Rails' API leaves out view, cookie and CSRF
+    // modules, which an API app's controllers don't call.
+    if raw == "ActionController::API" {
+        return Some(sanitize_type_name("ActionController::Base"));
+    }
     Some(sanitize_type_name(raw))
 }
 

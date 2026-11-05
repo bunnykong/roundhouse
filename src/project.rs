@@ -131,7 +131,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              Roda/Sequel; everything else is a `ROUNDHOUSE-TODO` comment \
              carrying the original Rails source for manual conversion.\n\n\
              ## Prerequisites\n\
-             - Ruby 3.4+ (with bundler)\n\
+             - Ruby 4.0.9+ (with bundler)\n\
              - SQLite (system library)\n\n\
              ## Install dependencies\n\
              ```sh\n\
@@ -159,7 +159,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              specimen — see `SPECIMEN.md` for the full architecture \
              document (layout, runtime, ruleset, limitations).\n\n\
              ## Prerequisites\n\
-             - Ruby 3.4+ (with bundler)\n\
+             - Ruby 4.0.9+ (with bundler)\n\
              - Node.js + npm — Tailwind/Turbo asset build (only when the \
              source app ships stylesheets/JS; a JS-less app skips this)\n\
              - SQLite (system library)\n\n\
@@ -1765,6 +1765,7 @@ fn inject_date_package_into_boot(boot: &mut String) -> Result<(), String> {
         "# Date package — only when the app uses Date or DateTime.\n",
         "require \"date\"\n",
         "require_relative \"runtime/active_support_date_parsing\"\n",
+        "require_relative \"runtime/active_support_date_calendar\"\n",
         "require_relative \"runtime/active_record_date_serialization\"\n",
     );
     if boot.contains("require_relative \"runtime/active_support_date_parsing\"") {
@@ -1792,6 +1793,7 @@ fn inject_cruby_date_calendar_helpers(boot: &mut String) -> Result<(), String> {
     let inject = concat!(
         "# Date calendar helpers — shared with Spinel (invariant 2).\n",
         "require_relative \"runtime/active_support_date_parsing\"\n",
+        "require_relative \"runtime/active_support_date_calendar\"\n",
     );
     if boot.contains("require_relative \"runtime/active_support_date_parsing\"") {
         return Ok(());
@@ -7604,7 +7606,7 @@ const SPINEL_LACKS: &[&str] = &[
 fn apply_app_requires(files: &mut [(String, String)], app: &App, target: RequireTarget) {
     let provided_by_tree = |lib: &str| {
         let require_line = format!("require {lib:?}");
-        BUNDLED.iter().filter(|(_, feature)| *feature == lib).any(|(konst, _)| {
+        bundled_libraries().filter(|(konst, feature)| *feature == lib && !crate::gems::preloaded_constant(konst)).any(|(konst, _)| {
             files.iter().any(|(p, c)| {
                 p.ends_with(".rb") && defines_constant(c, konst) && !requires_feature(c, &require_line)
             })
@@ -8577,7 +8579,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "UNIXServer" | "UNIXSocket" | "Open3" | "Find")
         // The rexml gem on the ruby family, spinel's `packages/rexml`.
         || name == "REXML"
-        || name.starts_with("REXML::");
+        || name.starts_with("REXML::")
+        || crate::gems::preloaded_constant(name);
     if !bundled {
         return None;
     }
@@ -9608,6 +9611,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // serialization.
     const DATE_PACKAGE_FILES: &[&str] = &[
         "runtime/active_support_date_parsing.rb",
+        "runtime/active_support_date_calendar.rb",
         "runtime/active_record_date_serialization.rb",
         "sig/runtime/active_support_date_parsing.rbs",
         "sig/runtime/active_record_date_serialization.rbs",
@@ -12015,7 +12019,8 @@ fn names_constant(src: &str, konst: &str) -> bool {
                     && matches!(after, None | Some(b')' | b',' | b']')))
                     || (before.ends_with("#{") && after == Some(&b'}'))
             };
-            let tail_ok = value
+            let tail_ok = (crate::gems::PRELOADED.iter().any(|(_, namespace, _)| *namespace == konst)
+                && b.get(tail).is_none_or(|c| !ident(*c))) || value
                 || matches!(b.get(tail), Some(b'.' | b'[' | b'('))
                 || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'))
                 // Only right after the keyword or a rescue-list comma: `raise "Timeout waiting"` names no constant.
@@ -12290,6 +12295,10 @@ const BUNDLED: [(&str, &str); 30] = [
     ("Psych", "psych"),
 ];
 
+fn bundled_libraries() -> impl Iterator<Item = (&'static str, &'static str)> {
+    BUNDLED.into_iter().chain(crate::gems::PRELOADED.iter().map(|(feature, namespace, _)| (*namespace, *feature)))
+}
+
 /// Every gap in a tree, as `(file index, require line)`. One walk,
 /// read by both the pass that writes the requires and the gate that
 /// checks a tree for missing ones — a second copy is how the rule
@@ -12304,8 +12313,11 @@ const BUNDLED: [(&str, &str); 30] = [
 /// `require "stringio"` mask a missing one in `app/models/story.rb`.)
 fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
     let mut gaps = Vec::new();
-    for (konst, feature) in BUNDLED {
+    for (konst, feature) in bundled_libraries() {
         let require_line = format!("require {feature:?}");
+        // CRuby preloads these libraries, so an app's declaration reopens
+        // them. Load each package before that declaration on Spinel too.
+        let preloaded = crate::gems::preloaded_constant(konst);
         // The program defines the constant itself, so the bundled
         // library is not what the name refers to. A file that REQUIRES
         // the library and then opens the constant is not that: it is a
@@ -12313,14 +12325,14 @@ fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
         // stub table and the socket seam in front of spinel's
         // `packages/net`, keeping the package's classes), and every
         // other file naming the constant still needs the require.
-        if files.iter().any(|(p, c)| {
+        if !preloaded && files.iter().any(|(p, c)| {
             p.ends_with(".rb") && defines_constant(c, konst) && !requires_feature(c, &require_line)
         }) {
             continue;
         }
         for (i, (path, content)) in files.iter().enumerate() {
             if path.ends_with(".rb")
-                && names_constant(content, konst)
+                && (names_constant(content, konst) || (preloaded && defines_constant(content, konst)))
                 && !requires_feature(content, &require_line)
                 && !gaps.contains(&(i, require_line.clone()))
             {
@@ -12357,10 +12369,9 @@ pub fn missing_bundled_requires(files: &[(String, String)]) -> Vec<String> {
 /// **Not spinel-only, though it lived inside `spin_shape` until now.**
 /// The two CRuby autoloads are the ones a dev box hides: `Pathname()`
 /// (campfire's `app/helpers/cable_helper.rb` calls the Kernel
-/// conversion method) resolves bare on Ruby 4.0 and raises on 3.4, and
-/// 3.4 is what the scaffold README claims and what
-/// `campfire-conformance` pins — two test files died on a clean runner
-/// that passed on a laptop. The other eight raise on every CRuby, so
+/// conversion method) resolved bare on Ruby 4.0 and raised on 3.4, the minimum this was
+/// written against — two test files died on a clean runner that passed
+/// on a laptop. The other eight raise on every CRuby, so
 /// the ruby family needs this table at least as much as spinel does.
 ///
 /// The three conditions mirror spinel's own check: the constant is

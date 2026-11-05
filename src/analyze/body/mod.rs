@@ -1358,7 +1358,14 @@ impl<'a> BodyTyper<'a> {
                         let id = class.as_ref().clone();
                         if self.classes().contains_key(&id) || *runtime {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
-                            qualify_resolved_path(path, &id);
+                            if *runtime && crate::gems::preloaded_constant(id.0.as_str()) {
+                                // Object:: and Object aliases name this same preloaded
+                                // namespace. Its resolved name lets BUNDLED load the package.
+                                *path = std::iter::once(Symbol::from(""))
+                                    .chain(id.0.as_str().split("::").map(Symbol::from)).collect();
+                            } else {
+                                qualify_resolved_path(path, &id);
+                            }
                             Ty::Class { id, args: vec![].into() }
                         } else {
                             unknown()
@@ -1792,7 +1799,7 @@ impl<'a> BodyTyper<'a> {
                 self.propagate_match_bindings(left, &mut seeded, true);
                 let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
                 let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &seeded);
-                let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member });
+                let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member, class_side: ctx.class_side });
                 let mut right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
                         narrowing::apply_narrowing(&seeded, p, true)
@@ -3177,7 +3184,7 @@ impl<'a> BodyTyper<'a> {
                 self.propagate_match_bindings(cond, &mut base, true);
                 let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
                 let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &base);
-                let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member });
+                let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member, class_side: ctx.class_side });
                 let mut then_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),
@@ -3816,7 +3823,7 @@ impl<'a> BodyTyper<'a> {
                             _ => false,
                         };
                         if then_diverges && else_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe { class_side: ctx.class_side, ..narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx)) }) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
                             }
                         }
@@ -3831,7 +3838,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         let else_diverges = matches!(else_branch.ty.as_ref(), Some(Ty::Bottom));
                         if else_diverges && then_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe { class_side: ctx.class_side, ..narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx)) }) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, true);
                             }
                         }

@@ -251,6 +251,10 @@ mod mutable_literals;
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]
 mod auto_source_gem;
+#[path = "support/untyped_calendar.rs"]
+mod untyped_calendar_contract;
+#[path = "spinel_toolchain/untyped_calendar.rs"]
+mod untyped_calendar;
 #[path = "support/enumerable_mixin.rs"]
 mod enumerable_mixin_contract;
 #[path = "spinel_toolchain/enumerable_mixin.rs"]

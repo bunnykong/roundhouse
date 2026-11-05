@@ -147,6 +147,8 @@ GEM
       rubocop (>= 1.84, < 2.0)
     ruby-progressbar (1.13.0)
     securerandom (0.4.1)
+    sqlite3 (2.9.3)
+      mini_portile2 (~> 2.8.0)
     sqlite3 (2.9.3-aarch64-linux-gnu)
     sqlite3 (2.9.3-aarch64-linux-musl)
     sqlite3 (2.9.3-arm-linux-gnu)
@@ -268,6 +270,7 @@ CHECKSUMS
   rubocop_spinel (0.1.0) sha256=b9db0e7292b42a156a9dcd73a10dbcb141514b5bedd22739b78099236db98fe5
   ruby-progressbar (1.13.0) sha256=80fc9c47a9b640d6834e0dc7b3c94c9df37f08cb072b7761e4a71e22cff29b33
   securerandom (0.4.1) sha256=cc5193d414a4341b6e225f0cb4446aceca8e50d5e1888743fac16987638ea0b1
+  sqlite3 (2.9.3) sha256=e5ca871c87241bfdaf0e4a90d5177f4e4fe7af5f6951f88b4644339cc76e47ae
   sqlite3 (2.9.3-aarch64-linux-gnu) sha256=ca6dd1cf6c037ccc8d3e5837190cc61ef15466092014951235641b5c4c8ab4ee
   sqlite3 (2.9.3-aarch64-linux-musl) sha256=ff017a36c463d02e9f0be7a6224521371128024e6a05ed16994afa5c037afbba
   sqlite3 (2.9.3-arm-linux-gnu) sha256=fd8b74337a66bdaf746b97d65e6c9a2faff803c8f72d6b107fb880972815d072

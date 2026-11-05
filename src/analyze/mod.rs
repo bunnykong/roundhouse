@@ -5214,7 +5214,7 @@ impl Analyzer {
         let mut seen: crate::det::HashSet<(&ClassId, &Symbol)> =
             crate::det::HashSet::default();
         for (class_id, method, _, _, _) in sites {
-            if class_id == caller || !seen.insert((class_id, method)) {
+            if class_id == caller || *class_id == unknown_receiver() || !seen.insert((class_id, method)) {
                 continue;
             }
             self.callers_by_target
@@ -6026,7 +6026,8 @@ impl Analyzer {
         // into `Str | Untyped`, which is `untyped` with extra steps.
         // The refined round strictly dominates the one before it, so
         // the earlier observation has nothing to contribute.
-        self.inferred_params.clear();
+        // The round before's rows: a guess may widen a concern's slot, which only the fold below types from its includers.
+        let prev_rows = std::mem::take(&mut self.inferred_params);
         let helpers = &app.helper_method_index;
         // A CALLEE'S KEYWORD PARAMETER IS NOT ITS KWARGS HASH. The
         // fourth slot carries a call's trailing `kwargs: true` entries
@@ -6153,9 +6154,33 @@ impl Analyzer {
             sites.extend(item_sites);
         }
         }
+        let (sites, guessed) = expand_unknown_receivers(sites, app);
         self.open_param_slots.clear();
         let mut open = std::mem::take(&mut self.open_param_slots);
-        let observations = self.param_observations(sites, params_by_method, defined, &mut open);
+        let mut observations = self.param_observations(sites, params_by_method, defined, &mut open);
+        // Not a row of its own: the site may be another class's method of the name, so it only widens a parameter some typed site reaches.
+        // Not each position past a `*rest`: they all fill the one slot, so a typed `f("a")` reaches what a guessed `f("a", :b)` passes second.
+        let slot = |key: &ParamKey, i: usize| {
+            let rest = params_by_method.get(key).and_then(|shape| shape.slots.iter().position(|(_, kind)| matches!(kind, ParamKind::Rest)));
+            rest.filter(|r| i >= *r).unwrap_or(i)
+        };
+        let typed: BTreeSet<(ParamKey, usize)> = observations
+            .iter()
+            .map(|(key, tys)| (key, tys.as_slice()))
+            .chain(prev_rows.iter().map(|(key, row)| (key, row.as_slice())))
+            .flat_map(|(key, tys)| tys.iter().enumerate().filter(|(_, t)| !t.is_unknown()).map(move |(i, _)| (key.clone(), slot(key, i))))
+            .collect();
+        let mut guessed_open = BTreeSet::new();
+        let guessed = self.param_observations(guessed, params_by_method, defined, &mut guessed_open);
+        for (key, tys) in guessed {
+            let tys = tys
+                .into_iter()
+                .enumerate()
+                .map(|(i, t)| if typed.contains(&(key.clone(), slot(&key, i))) { t } else { Ty::Var { var: NO_EVIDENCE } })
+                .collect();
+            observations.push((key, tys));
+        }
+        open.extend(guessed_open.into_iter().filter(|(key, i)| typed.contains(&(key.clone(), slot(key, *i)))));
         self.open_param_slots = open;
         let mut rows = std::mem::take(&mut self.inferred_params);
         self.unify_memo.fold(scope, &mut rows, observations);
@@ -6216,6 +6241,7 @@ impl Analyzer {
         params_by_method: &HashMap<ParamKey, ParamShape>,
         defined: &BTreeSet<ParamKey>,
     ) {
+        let sites = sites.into_iter().filter(|site| site.0 != unknown_receiver()).collect();
         let observations = self.param_observations(sites, params_by_method, defined, &mut BTreeSet::new());
         fold_param_observations(&mut self.inferred_params, observations);
     }
@@ -6776,6 +6802,10 @@ impl Analyzer {
                 // so Class-only receivers would leave callers of
                 // `records.first.foo` off the frontier.
                 let recv_classes: Vec<ClassId> = match recv {
+                    // Not dropped: `unify_params_from_call_sites` reads it as a call any class defining the method may take.
+                    Some(r) if r.ty.as_ref().is_none_or(|t| t.is_unknown()) && !matches!(&*r.node, ExprNode::Const { .. }) => {
+                        vec![unknown_receiver()]
+                    }
                     Some(r) => r
                         .ty
                         .as_ref()
@@ -8267,6 +8297,42 @@ impl Analyzer {
 
 /// A pending observation that is no evidence the argument goes untyped; the join reads it as any other `Var`.
 const NO_EVIDENCE: crate::ident::TyVar = crate::ident::TyVar(1);
+
+/// The class a site whose receiver the analysis could not type is keyed to.
+fn unknown_receiver() -> ClassId {
+    ClassId(Symbol::from("?"))
+}
+
+/// The sites apart from the untyped-receiver ones, and those, under
+/// `App::pins_unresolved_params`, as calls of every library class that
+/// defines the instance method (raabro's `Tree#subgather`, which fugit
+/// calls with a Symbol on a tree the analysis does not type); otherwise
+/// dropped, as such a site always was.
+fn expand_unknown_receivers(sites: Vec<SendSite>, app: &App) -> (Vec<SendSite>, Vec<SendSite>) {
+    let unknown = unknown_receiver();
+    if !sites.iter().any(|site| site.0 == unknown) {
+        return (sites, Vec::new());
+    }
+    let mut defining: HashMap<&Symbol, Vec<&ClassId>> = HashMap::default();
+    if app.pins_unresolved_params {
+        for lc in &app.library_classes {
+            for m in lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance) {
+                defining.entry(&m.name).or_default().push(&lc.name);
+            }
+        }
+    }
+    let (mut direct, mut guessed) = (Vec::with_capacity(sites.len()), Vec::new());
+    for site in sites {
+        if site.0 != unknown {
+            direct.push(site);
+            continue;
+        }
+        for class in defining.get(&site.1).into_iter().flatten() {
+            guessed.push(((*class).clone(), site.1.clone(), site.2.clone(), site.3.clone(), site.4));
+        }
+    }
+    (direct, guessed)
+}
 
 fn leaves_unknown(t: &Ty) -> bool {
     match t {

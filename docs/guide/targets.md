@@ -18,7 +18,7 @@ is tested — which is the honest measure of how much to trust it.
 | `swift` | Swift package | Swift 6+; on Linux `libsqlite3-dev` |
 | `python` | Python project (`uv`) | Python 3.11+, `uv` |
 | `csharp` | .NET solution | .NET SDK 10+ |
-| `ruby` | Ruby tree — the framework runtime in Ruby, no Rails | Ruby [3.4+](../../.ruby-version), bundler, SQLite; Node for the asset build |
+| `ruby` | Ruby tree — the framework runtime in Ruby, no Rails | Ruby [4.0.9+](../../.ruby-version), bundler, SQLite; Node for the asset build |
 
 All ten serve on `:3000`, speak Action Cable at `/cable`, use SQLite at
 `storage/development.sqlite3`, and are seeded by

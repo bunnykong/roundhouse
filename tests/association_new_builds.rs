@@ -38,3 +38,24 @@ puts "assoc new"
 "#)
         .assert_passes();
 }
+
+/// A form object holds its owner in an `attr_accessor`, which the
+/// analyzer types as untyped, so the owner's `comments` read is untyped
+/// too. `article.comments.new(...)` there stayed `Array#new`.
+#[test]
+fn an_association_new_on_an_untyped_owner_builds_with_the_foreign_key() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/comment_draft.rb",
+            "class CommentDraft\n  include ActiveModel::Model\n\n  attr_accessor :article, :commenter\n\n  def save\n    @comment = article.comments.new(commenter: commenter, body: \"draft\")\n    @comment.save\n  end\nend\n",
+        )
+        .run_ruby(r#"
+Article.delete_all
+a = Article.create!(title: "Owner", body: "Long enough body")
+raise "save returned false" unless CommentDraft.new(article: a, commenter: "amy").save
+c = Comment.last
+raise "untyped owner assoc.new: #{c.inspect}" unless c && c.article_id == a.id && c.commenter == "amy"
+puts "untyped owner assoc new"
+"#)
+        .assert_passes();
+}

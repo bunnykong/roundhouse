@@ -1357,6 +1357,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("join", Ty::Str), ("shelljoin", Ty::Str),
         ("split", str_arr()), ("shellsplit", str_arr()), ("shellwords", str_arr()),
     ], &[]);
+    // CRuby's default gem; Spinel ships the same SpellChecker in its
+    // did_you_mean package. The dictionary can contain Strings or Symbols.
+    register_stdlib_class(classes, "DidYouMean::SpellChecker", &[
+        ("new", class("DidYouMean::SpellChecker")),
+    ], &[("correct", untyped_arr())]);
     register_stdlib_class(classes, "Process", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_MONOTONIC", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_REALTIME", &[], &[]);

@@ -3379,6 +3379,15 @@ pub(crate) fn indexed_pluck(method: &Symbol, elem: &Ty, args: &[crate::expr::Exp
         Ty::Hash { value, .. } if **value == Ty::Untyped => Ty::Untyped,
         Ty::Hash { value, .. } => super::union_of((**value).clone(), Ty::Nil),
         Ty::Untyped | Ty::Var { .. } => Ty::Untyped,
+        Ty::Union { variants } => variants
+            .iter()
+            .map(|variant| match indexed_pluck(method, variant, args)? {
+                Ty::Array { elem } => Some((*elem).clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .reduce(super::union_of)?,
         _ => return None,
     };
     Some(Ty::Array { elem: std::sync::Arc::new(value) })

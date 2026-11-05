@@ -13,17 +13,21 @@ module ActiveSupport
   # adapter's nil representation for a nullable column.
   def self.parse_db_date(value)
     return nil if value.nil? || value == ""
-    Date.iso8601(value)
+    # Rails reads complete calendar fields even when a Date formatter adds a prefix.
+    parts = Date._parse(value, false)
+    return nil if parts[:year].nil? || parts[:mon].nil? || parts[:mday].nil?
+    Date.new(parts[:year], parts[:mon], parts[:mday])
+  rescue ArgumentError
+    nil
   end
 
   def self.format_db_date(value)
     return nil if value.nil?
     return nil if value.is_a?(String) && value == ""
-    # `instance_of?(Date)` — DateTime is a Date subclass but carries a
-    # clock; a date column stores the civil day only (Rails).
-    return value.iso8601 if value.instance_of?(Date)
+    # Preserve Date formatting and DateTime's existing civil-day normalization.
     if value.is_a?(Date)
-      return Date.new(value.year, value.month, value.day).iso8601
+      date = value.is_a?(DateTime) ? Date.new(value.year, value.month, value.day) : value
+      return date.strftime("%Y-%m-%d")
     end
     return Date.iso8601(value).iso8601 if value.is_a?(String)
     raise TypeError, "expected Date, String, or nil"

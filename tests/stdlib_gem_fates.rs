@@ -9,6 +9,7 @@ use roundhouse::ingest::ingest_app_from_tree;
 fn qualified_standard_libraries_are_not_unknown_gems() {
     let missing: Vec<_> = [
         "date",
+        "did_you_mean",
         "find",
         "openssl",
         "set",
@@ -25,7 +26,6 @@ fn qualified_standard_libraries_are_not_unknown_gems() {
 #[test]
 fn unqualified_standard_libraries_keep_the_previous_source_choice() {
     for gem in [
-        "did_you_mean",
         "fiddle",
         "fileutils",
         "forwardable",

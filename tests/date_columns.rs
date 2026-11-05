@@ -7,6 +7,175 @@ use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::project::{BuildTarget, target_files};
 use roundhouse::ty::Ty;
 
+#[test]
+fn sqlite_date_quotes_match_rails_with_and_without_optional_helpers() {
+    use std::process::Command;
+    let oracle = Command::new("ruby")
+        .args([
+            "-e",
+            r#"
+require_relative 'tests/support/rails_oracle'
+unless RailsOracle.available?('activerecord')
+  warn "skipping date quote control: #{RailsOracle.label} unavailable"
+  exit 77
+end
+RailsOracle.activate('activerecord')
+require 'active_record'
+require 'active_support/all'
+class DateQuoteOracle
+  include ActiveRecord::ConnectionAdapters::Quoting
+  def default_timezone; :utc; end
+end
+ORACLE = DateQuoteOracle.new
+def quote_date_value(value)
+  "'" + ORACLE.quoted_date(value.to_date).gsub("'", "''") + "'"
+end
+require_relative 'tests/date_columns_spinel'
+"#,
+        ])
+        .output()
+        .expect("run Rails date-column control");
+    if oracle.status.code() == Some(77) {
+        eprintln!("{}", String::from_utf8_lossy(&oracle.stderr));
+        return;
+    }
+    assert!(
+        oracle.status.success(),
+        "{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let expected = "'2024-02-29'\n'2024-03-01'\n'2024-02-29'\n'-0001-01-02'\n'10000-01-02'\n'2024-02-29'\n'written:2024-02-29'\n'written:2024-02-29'\n'included:2024-02-29'\n'2024-03-01'\n'2024-03-01'\n'2024-03-01'\n";
+    assert_eq!(String::from_utf8_lossy(&oracle.stdout), expected);
+    let mut failures = Vec::new();
+    for helper in [false, true] {
+        let script = format!(
+            r#"
+require 'time'
+raise 'time must expose Date' unless defined?(Date)
+require_relative 'runtime/spinel/db_cruby'
+require_relative 'runtime/spinel/active_support_time_parsing'
+{}
+require_relative 'runtime/spinel/sqlite_adapter'
+def quote_date_value(value); SqliteAdapter.escape_value(value); end
+require_relative 'tests/date_columns_spinel'
+raise 'nil' unless SqliteAdapter.escape_value(nil) == 'NULL'
+raise 'true' unless SqliteAdapter.escape_value(true) == '1'
+raise 'false' unless SqliteAdapter.escape_value(false) == '0'
+raise 'integer' unless SqliteAdapter.escape_value(42) == '42'
+raise 'float' unless SqliteAdapter.escape_value(1.5) == "'1.5'"
+raise 'string' unless SqliteAdapter.escape_value("a'b") == "'a''b'"
+raise 'empty' unless SqliteAdapter.escape_value('') == "''"
+raise 'time' unless SqliteAdapter.escape_value(Time.new(2024, 3, 1, 0, 30, 0, '+14:00')) ==
+  "'2024-02-29 10:30:00.000000'"
+"#,
+            if helper {
+                "require_relative 'runtime/spinel/active_support_date_parsing'"
+            } else {
+                ""
+            }
+        );
+        let actual = Command::new("ruby")
+            .args(["--enable-frozen-string-literal", "-e", &script])
+            .output()
+            .expect("run actual SQLite adapter");
+        if !actual.status.success() || actual.stdout != oracle.stdout {
+            failures.push(format!(
+                "helper={helper}: status={}\nstdout={}\nstderr={}",
+                actual.status,
+                String::from_utf8_lossy(&actual.stdout),
+                String::from_utf8_lossy(&actual.stderr)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn sqlite_date_writer_and_predicates_match_rails() {
+    use std::process::Command;
+    let oracle = Command::new("ruby")
+        .args([
+            "-e",
+            r#"
+require_relative 'tests/support/rails_oracle'
+unless RailsOracle.available?('activerecord', 'railties', sqlite3: '>= 2.9')
+  warn "skipping stored-date control: #{RailsOracle.label} or sqlite3 >= 2.9 unavailable"
+  exit 77
+end
+RailsOracle.activate('activerecord', 'railties', sqlite3: '>= 2.9')
+require 'rails'
+require 'active_record/railtie'
+require 'active_support/all'
+ENV['DATABASE_URL'] = 'sqlite3::memory:'
+class DateQuoteApplication < Rails::Application
+  config.root = Dir.pwd
+  config.load_defaults 8.1
+  config.eager_load = false
+  config.secret_key_base = 'synthetic-date-quote-control'
+  config.logger = Logger.new(File::NULL)
+end
+DateQuoteApplication.initialize!
+ActiveRecord.default_timezone = :utc
+ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
+CONNECTION = ActiveRecord::Base.connection
+TYPE = ActiveRecord::Type::Date.new
+def quote_date_value(value); CONNECTION.quote(TYPE.serialize(value)); end
+require_relative 'tests/date_columns_spinel'
+CONNECTION.create_table(:date_quote_events) { |table| table.date :due_on }
+class DateQuoteEvent < ActiveRecord::Base
+end
+date_quote_values.each do |value|
+  DateQuoteEvent.delete_all
+  DateQuoteEvent.create!(due_on: value)
+  raise 'Rails date query missed its row' unless DateQuoteEvent.where(due_on: value).count == 1
+  puts CONNECTION.quote(CONNECTION.select_value('SELECT due_on FROM date_quote_events'))
+  puts DateQuoteEvent.first.due_on.iso8601
+end
+puts 'SQLite date roundtrips passed'
+['unparseable', '2024-02', '2024-02-30', '0000-00-00'].each do |text|
+  puts TYPE.deserialize(text).nil?
+end
+"#,
+        ])
+        .output()
+        .expect("run initialized Rails stored-date control");
+    if oracle.status.code() == Some(77) {
+        eprintln!("{}", String::from_utf8_lossy(&oracle.stderr));
+        return;
+    }
+    assert!(
+        oracle.status.success(),
+        "{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let actual = Command::new("ruby")
+        .args([
+            "--enable-frozen-string-literal",
+            "-e",
+            r#"
+require 'time'
+require_relative 'runtime/ruby/active_record/connection_pool'
+require_relative 'runtime/spinel/db_cruby'
+require_relative 'runtime/spinel/active_support_time_parsing'
+require_relative 'runtime/spinel/active_support_date_parsing'
+require_relative 'runtime/spinel/sqlite_adapter'
+def quote_date_value(value); SqliteAdapter.escape_value(value); end
+require_relative 'tests/date_columns_spinel'
+check_date_storage
+['unparseable', '2024-02', '2024-02-30', '0000-00-00'].each do |text|
+  puts ActiveSupport.parse_db_date(text).nil?
+end
+"#,
+        ])
+        .output()
+        .expect("run actual SQLite date writer and predicate");
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.stdout, oracle.stdout);
+}
 const SCHEMA: &str = r#"ActiveRecord::Schema.define do
   create_table "calendar_entries" do |t|
     t.date "due_on"

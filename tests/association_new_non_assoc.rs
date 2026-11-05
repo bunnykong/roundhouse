@@ -32,3 +32,18 @@ fn model_class_readers_named_like_an_association_keep_new() {
         .run_ruby("raise 'wrong class note' unless Memo2.new.class_draft('hi').text == 'hi'\nraise 'wrong bare note' unless Memo2.draft('hi').text == 'hi'\nraise 'wrong desk note' unless Desk.new.draft('hi').text == 'hi'")
         .assert_passes();
 }
+
+#[test]
+fn an_untyped_owner_not_named_after_a_model_keeps_new() {
+    emit_and_run::real_blog()
+        .write(
+            "app/lib/inbox.rb",
+            "class Note\n  attr_reader :text\n  def initialize(text)\n    @text = text\n  end\nend\n\nclass Inbox\n  def comments\n    Note\n  end\nend\n",
+        )
+        .write(
+            "app/models/inbox_draft.rb",
+            "class InboxDraft\n  include ActiveModel::Model\n\n  attr_accessor :inbox\n\n  def draft(text)\n    inbox.comments.new(text)\n  end\nend\n",
+        )
+        .run_ruby("raise 'wrong untyped note' unless InboxDraft.new(inbox: Inbox.new).draft('hi').text == 'hi'")
+        .assert_passes();
+}

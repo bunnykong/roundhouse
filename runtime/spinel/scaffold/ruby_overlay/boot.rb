@@ -110,6 +110,7 @@ require_relative "runtime/type_toolkit"
 # reopen above; it now takes the same lowered call every other
 # ruby-family target does, so the two stay one behaviour.
 require_relative "runtime/active_support_ext"
+require_relative "runtime/active_support_calendar"
 require_relative "runtime/active_model_validator"
 # ActiveSupport::JSON.encode straight through the C generator when the
 # value is already JSON-native; the shared walk otherwise.
