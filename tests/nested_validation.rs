@@ -13,6 +13,8 @@
 //! never saw an edited child and saved without it; the check ran after
 //! every `validates`; and each child added its own copy of an error.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -105,8 +107,7 @@ fn has_many_autosave_validates_and_saves_loaded_children_on_ruby() {
 // prefixes "Comments[1] body …") and `counter_cache:` here.
 #[test]
 fn an_ignored_association_option_is_reported() {
-    let root = std::env::temp_dir().join(format!("roundhouse-ignored-assoc-option-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-ignored-assoc-option");
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());

@@ -273,12 +273,12 @@ fn the_models_own_mapping_stays_a_gap() {
 }
 
 /// Reading a mapping for another owner records nothing itself: a Hash
-/// value ingest cannot take (an Integer past 64 bits) is the gap of the
+/// value ingest cannot take (a Rational past 64 bits) is the gap of the
 /// file that writes it, once, and a mapping it makes uncomputable is the
 /// referencing enum's gap, not a second report of that value.
 #[test]
 fn reading_another_owners_mapping_records_no_gap_of_its_own() {
-    const BIG: &str = "99999999999999999999999";
+    const BIG: &str = "99999999999999999999999r";
     let gadget = format!("class Gadget < ApplicationRecord\n  enum :status, {{ draft: 0, big: {BIG} }}\nend\n");
     let (_, alone) = ingest(&[("app/models/gadget.rb", &gadget)]);
     let widget = format!("class Widget < ApplicationRecord\n  enum :status, Gadget.statuses\n  enum :role, Sprocket.vendors.merge(huge: {BIG})\nend\n");

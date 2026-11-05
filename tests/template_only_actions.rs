@@ -5,6 +5,8 @@
 //! `before_action` feeds the template and every target has an action to
 //! route to. `tests/emit_and_run.rs` pins that the emitted app serves it.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -151,7 +153,7 @@ fn roda_template_only_actions_do_not_silently_drop_inherited_callbacks() {
 #[ignore = "requires the real Roda, Sequel, sqlite3 and render gems"]
 fn roda_template_only_protected_request_fails_closed() {
     let app = template_only_roda_app("before_action :require_login, only: :show");
-    let scratch = std::env::temp_dir().join(format!("roundhouse-template-only-roda-{}", std::process::id()));
+    let scratch = scratch::dir("roundhouse-template-only-roda");
     for file in roundhouse::emit::roda::emit(&app) {
         let path = scratch.join(file.path);
         std::fs::create_dir_all(path.parent().unwrap()).expect("create output parent");

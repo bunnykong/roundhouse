@@ -853,6 +853,61 @@ const FAMILIES: &[(&str, GemFate)] = &[
 ];
 
 /// Classify a gem by name.
+/// Whether a standard-library gem's namespace is `root` (Ruby ships it whether or not the lockfile lists it).
+/// The known gems the lockfile lacks whose own nested namespace sits
+/// below every locked gem's (tzinfo-data's `TZInfo::Data` under tzinfo's
+/// `TZInfo`): Ruby has nothing under such a namespace to find. Built once
+/// per lockfile; [`AbsentGemNamespaces::owner`] asks it per constant.
+pub(crate) struct AbsentGemNamespaces {
+    locked: Vec<Vec<String>>,
+    absent: Vec<(&'static str, Vec<String>)>,
+}
+
+impl AbsentGemNamespaces {
+    pub(crate) fn new(lock: &Lockfile) -> Self {
+        let split = |ns: &str| ns.split("::").map(|s| s.to_ascii_lowercase()).collect::<Vec<_>>();
+        let nested = |gem: &str| gem.split('-').map(camelize).collect::<Vec<_>>().join("::");
+        let locked = lock
+            .specs
+            .iter()
+            .flat_map(|(name, _)| std::iter::once(nested(name)).chain(namespace_candidates(name)).map(|ns| split(&ns)).collect::<Vec<_>>())
+            .collect();
+        // Not a standard-library gem, which Ruby ships whether or not the lockfile lists it (net-http's `Net::HTTP`), nor one roundhouse models, which the emitted Gemfile declares when the app uses it (faraday-multipart).
+        let absent = FATES
+            .iter()
+            .filter(|(gem, fate)| matches!(fate, GemFate::Infrastructure | GemFate::Unknown) && lock.version_of(gem).is_none())
+            .map(|(gem, _)| (*gem, split(&nested(gem))))
+            .filter(|(_, ns)| ns.len() >= 2)
+            .collect();
+        Self { locked, absent }
+    }
+
+    /// The absent gem and its namespace's depth, for a constant under it.
+    pub(crate) fn owner(&self, path: &str) -> Option<(&'static str, usize)> {
+        let segs: Vec<String> = path.trim_start_matches("::").split("::").filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()).collect();
+        let under = |ns: &[String]| ns.len() <= segs.len() && ns.iter().zip(&segs).all(|(a, b)| a == b);
+        let (gem, ns) = self.absent.iter().find(|(_, ns)| under(ns))?;
+        let locked = self.locked.iter().filter(|ns| under(ns)).map(|ns| ns.len()).max().unwrap_or(0);
+        (ns.len() > locked).then_some((*gem, ns.len()))
+    }
+}
+
+pub(crate) fn is_stdlib_namespace(root: &str) -> bool {
+    // Ruby's core and the standard library it ships, gem-packaged or not.
+    const RUBY_OWN: &[&str] = &[
+        "Abbrev", "Base64", "Benchmark", "BigDecimal", "Comparable", "Coverage", "CSV", "Date", "DateTime", "Digest", "DRb",
+        "Encoding", "English", "ERB", "Errno", "Etc", "Fiber", "Fiddle", "FileUtils", "Find", "Forwardable", "GC",
+        "GetoptLong", "IO", "IPAddr", "JSON", "Kernel", "Logger", "Marshal", "Math", "Matrix", "Monitor", "MonitorMixin",
+        "Mutex", "Net", "NKF", "ObjectSpace", "Observable", "Open3", "OpenSSL", "OpenStruct", "OptionParser", "PP",
+        "Pathname", "PrettyPrint", "Prime", "Process", "Psych", "Racc", "Ractor", "RbConfig", "RDoc", "Readline",
+        "Reline", "Resolv", "Rinda", "Ripper", "RubyVM", "SecureRandom", "Set", "Shellwords", "Signal", "Singleton",
+        "Socket", "StringIO", "StringScanner", "Syslog", "Tempfile", "Thread", "Time", "Timeout", "TracePoint",
+        "TSort", "UNIXSocket", "URI", "Warning", "WeakRef", "YAML", "Zlib", "TCPSocket", "UDPSocket", "Addrinfo",
+    ];
+    RUBY_OWN.contains(&root)
+        || FATES.iter().any(|(gem, fate)| matches!(fate, GemFate::Stdlib) && namespace_of(gem).eq_ignore_ascii_case(root))
+}
+
 pub fn fate_of(name: &str) -> GemFate {
     if let Some((_, fate)) = FATES.iter().find(|(n, _)| *n == name) {
         return *fate;

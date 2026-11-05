@@ -9,6 +9,8 @@
 //! plain class. It is now, except for a name nil answers (kept a gap:
 //! Rails calls it on nil) and the shapes plain delegation already keeps.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -52,8 +54,7 @@ fn a_models_allow_nil_delegate_answers_nil_for_a_nil_target_on_spinel() {
 }
 
 fn warnings_for(delegates: &str) -> Vec<String> {
-    let root = std::env::temp_dir().join(format!("roundhouse-delegate-allow-nil-{}-{}", std::process::id(), delegates.len()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("roundhouse-delegate-allow-nil-{}", delegates.len()));
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());

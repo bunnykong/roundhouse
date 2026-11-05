@@ -7,6 +7,8 @@
 //! breaks OCRAN with nothing here going red, so they are pinned here. Change
 //! one deliberately, together with OCRAN.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -22,8 +24,7 @@ fn roundhouse(args: &[&str]) -> (i32, String) {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-ocran-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("roundhouse-ocran-{name}"));
     dir
 }
 

@@ -376,6 +376,62 @@ fn an_engine_class_body_reports_initializers_and_hooks_but_not_requires() {
     assert!(ledger.iter().all(|d| d.severity == Severity::Warning));
 }
 
+const SETTLED_ENGINE: &str = r##"module Catalog
+  mattr_accessor :label, default: "x"
+
+  class Engine < Rails::Engine
+    isolate_namespace Catalog
+
+    rake_tasks do
+      load "catalog/tasks.rb"
+    end
+
+    console do
+      puts "catalog"
+    end
+
+    config.catalog = ActiveSupport::OrderedOptions.new unless config.try(:catalog)
+
+    config.before_initialize do
+      config.catalog.each do |key, value|
+        Catalog.public_send("#{key}=", value)
+      end
+    end
+
+    initializer "catalog.extensions" do
+      ActiveSupport.on_load :active_job do
+        ActiveJob.extend Catalog::Lookup
+      end
+    end
+
+    initializer "catalog.middleware" do |app|
+      if app.config.api_only
+        config.middleware.use ActionDispatch::Flash
+      end
+    end
+  end
+end
+"##;
+
+/// An engine's statements the engine's own boot accounts for leave the
+/// ledger: blocks only a `rails` command runs, the config namespace it
+/// copies onto a module, the load-hook mixins the ingest carries, an
+/// initializer whose only branch the host's config never takes, and the
+/// `before_initialize` boot replays; the engine is then admitted, so its
+/// `isolate_namespace` is consumed too.
+#[test]
+fn an_engines_settled_boot_statements_leave_the_ledger() {
+    let (_, ledger) = ingest(&engine_tree(SETTLED_ENGINE, &[]));
+    assert!(statements(&ledger).is_empty(), "{:?}", statements(&ledger));
+}
+
+#[test]
+fn an_engine_initializer_whose_branch_the_host_takes_stays_on_the_ledger() {
+    let application = "module Shop\n  class Application < Rails::Application\n    config.api_only = true\n  end\nend\n";
+    let (_, ledger) = ingest(&engine_tree(SETTLED_ENGINE, &[("config/application.rb", application)]));
+    assert!(statements(&ledger).contains(&"initializer \"catalog.middleware\""), "{:?}", statements(&ledger));
+}
+
 #[test]
 fn an_admitted_engines_literal_isolate_namespace_is_consumed() {
     // Exactly one literal `isolate_namespace`, plain lib, no initializers:

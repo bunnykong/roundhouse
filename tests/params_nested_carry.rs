@@ -14,6 +14,8 @@
 //! record with a "non-scalar" warning, so the writer never ran. Strict
 //! targets keep that warning.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -225,8 +227,7 @@ fn the_narrow_record_reads_no_nested_key_on_spinel() {
 /// records, each carrying its own key alone.
 #[test]
 fn two_helpers_differing_only_by_a_nested_key_get_two_records() {
-    let root = std::env::temp_dir().join(format!("roundhouse-params-nested-two-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-params-nested-two");
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
@@ -326,8 +327,7 @@ fn an_expect_hash_key_reaches_the_writer_on_ruby() {
 /// stays dropped there, with its warning; the ruby family carries it.
 #[test]
 fn a_strict_target_keeps_the_warning() {
-    let root = std::env::temp_dir().join(format!("roundhouse-params-nested-carry-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-params-nested-carry");
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());

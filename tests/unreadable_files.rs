@@ -10,15 +10,12 @@
 //! map with no such concept), so this exercises `ingest_app` against a
 //! REAL temp directory built with `std::fs`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 
 fn unique_tmp_dir(name: &str) -> PathBuf {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("roundhouse_{name}_{}_{}", std::process::id(), std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()));
-    dir
+    scratch::dir(&format!("roundhouse_{name}"))
 }
 
 /// A minimal Rails app tree with one readable view and one dangling

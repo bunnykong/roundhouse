@@ -524,7 +524,7 @@ pub(super) fn ingest_devise_for(
         as_prefix: None,
         defaults: IndexMap::new(),
         nest: false,
-        suppress_helpers: false, within: ResourceScope::Nested,
+        suppress_helpers: false, mount: false, within: ResourceScope::Nested,
         entries,
     }))
 }

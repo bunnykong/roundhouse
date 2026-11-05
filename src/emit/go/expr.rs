@@ -497,19 +497,28 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 let primitive_kind = |t: &Option<Ty>| {
                     matches!(t, Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float))
                 };
+                // A conditional whose branches are both non-nil scalars is
+                // truthy in Ruby whichever runs, 0 and "" included, so `||`
+                // never takes its fallback; `cmp.Or` would, on Go's zero.
+                if let ExprNode::If { then_branch, else_branch, .. } = &*left.node
+                    && primitive_kind(&then_branch.ty)
+                    && primitive_kind(&else_branch.ty)
+                {
+                    return emit_expr_as_value(ctx, left);
+                }
                 if primitive_kind(&left.ty) || primitive_kind(&right.ty) {
                     return format!(
                         "cmp.Or({}, {})",
-                        emit_expr(ctx, left),
-                        emit_expr(ctx, right)
+                        emit_expr_as_value(ctx, left),
+                        emit_expr_as_value(ctx, right)
                     );
                 }
                 let left_go = super::ty::go_ty_stub(left.ty.as_ref());
                 if left_go.starts_with("map[") || left_go.starts_with("[]") {
                     return format!(
                         "func() {left_go} {{ if v := {}; v != nil {{ return v }}; return {} }}()",
-                        emit_expr(ctx, left),
-                        emit_expr(ctx, right)
+                        emit_expr_as_value(ctx, left),
+                        emit_expr_as_value(ctx, right)
                     );
                 }
             }
@@ -518,10 +527,12 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 BoolOpKind::And => "&&",
             };
             // `&&` binds tighter than `||` here as in Ruby, so an `||`
-            // operand under `&&` keeps its parentheses.
+            // operand under `&&` keeps its parentheses. A conditional
+            // operand (`(x ? a : b) && c`) is a value, which Go writes as
+            // a func literal: its `if` is a statement.
             let operand = |e: &Expr| match &*e.node {
                 ExprNode::BoolOp { op: BoolOpKind::Or, .. } if matches!(op, BoolOpKind::And) => format!("({})", emit_expr(ctx, e)),
-                _ => emit_expr(ctx, e),
+                _ => emit_expr_as_value(ctx, e),
             };
             format!("{} {} {}", operand(left), op_s, operand(right))
         }
@@ -2729,7 +2740,7 @@ fn go_field_ident(ruby_name: &str) -> String {
     go_method_name(&normalized)
 }
 
-fn go_method_ident(ruby_name: &str) -> String {
+pub(super) fn go_method_ident(ruby_name: &str) -> String {
     // Mirror rust's `sanitize_ident` (src/emit/rust/expr/util.rs):
     // `?` predicate suffix maps to `_pred`, `!` maps to `_bang`. The `?`
     // affix (vs a bare strip) keeps a column predicate distinct from its
@@ -4436,7 +4447,7 @@ fn static_is_a(r: &Expr, r_s: &str, class: &str) -> Option<String> {
 /// pointer, so unbox it (nil stays nil). Keyed by name because these
 /// are hand-written runtime functions, not LibraryClass methods with
 /// a param table.
-const UNTYPED_ARG_HELPERS: &[&str] = &["encode_value", "optional_value_attr"];
+const UNTYPED_ARG_HELPERS: &[&str] = &["encode_value", "optional_value_attr", "color_value_attr", "color_field_value_attr", "datetime_local_value_attr"];
 
 /// Unbox a nullable-column argument at an `interface{}` seam, in
 /// place — the call itself still renders through the normal path (its

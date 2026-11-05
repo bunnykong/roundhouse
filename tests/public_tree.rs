@@ -6,12 +6,13 @@
 //! named `vendor` (meant for bundled gems), at every depth. The page
 //! rendered and every script under it answered 404.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::PathBuf;
 
 fn app_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rh-public-tree-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-public-tree");
     let files: &[(&str, &str)] = &[
         ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
         ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),

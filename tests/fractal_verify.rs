@@ -3,6 +3,8 @@
 //! scope does not. Needs `ruby` on the path; without it every test that
 //! boots Ruby returns early.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -41,8 +43,7 @@ impl Fixture {
 
     /// As [`Fixture::new`], with the rewrites made by `pass`.
     fn with_pass(name: &str, original: &str, rewritten: &str, rewrites: &[&str], pass: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("roundhouse-fractal-verify-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = scratch::dir(&format!("roundhouse-fractal-verify-{name}"));
         put(&root.join("app"), MODEL, original);
         put(&root.join("overlay"), MODEL, rewritten);
         put(&root.join("overlay"), MANIFEST, &format!(r#"{{"compiled": ["{MODEL}"], "passes": ["{pass}"], "rewritten": ["{MODEL}"]}}"#));

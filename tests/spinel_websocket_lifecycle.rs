@@ -1,6 +1,8 @@
 //! The real threaded WebSocket runtime over loopback sockets. The ordinary
 //! test uses CRuby OS bindings; the ignored lane compiles the same fixture
 //! with Spinel, including its green-thread IO waits and native socket writes.
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -329,8 +331,7 @@ fn websocket_lifecycle_over_real_sockets() {
 #[ignore = "requires the native Spinel compiler; set SPINEL to its path"]
 fn websocket_lifecycle_on_spinel() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dir = std::env::temp_dir().join(format!("roundhouse-ws-lifecycle-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-ws-lifecycle");
     struct Cleanup(PathBuf);
     impl Drop for Cleanup {
         fn drop(&mut self) {

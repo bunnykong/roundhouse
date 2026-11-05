@@ -17,6 +17,8 @@
 //!
 //! Every case runs with the controllers in both input orders.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::PathBuf;
 
 use roundhouse::Symbol;
@@ -213,7 +215,7 @@ fn a_block_filter_with_an_unread_action_list_still_writes_for_the_view() {
         let source = format!(
             "class PostsController < ApplicationController\n  ACTIONS = [:index].freeze\n  {filter}\n  def index; end\nend\n"
         );
-        let root = std::env::temp_dir().join(format!("before-action-unread-{}-{name}", std::process::id()));
+        let root = scratch::dir(&format!("before-action-unread-{name}"));
         for (path, contents) in files(&[("posts", &source)], "posts/index", "<%= @x.zzz %>") {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -13,6 +13,8 @@
 //! no status change raised `undefined method 'empty?' for nil`
 //! (`UpdateDiscoveryDataForConditionChangeset#should_trigger_update?`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::PathBuf;
 
 const FILES: &[(&str, &str)] = &[
@@ -47,8 +49,7 @@ end
 
 fn emit() -> (String, String) {
     let root: PathBuf =
-        std::env::temp_dir().join(format!("rh_dup_nilable_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+        scratch::dir("rh_dup_nilable");
     for (path, text) in FILES {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

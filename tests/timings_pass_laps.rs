@@ -1,10 +1,12 @@
 //! `ROUNDHOUSE_TIMINGS=1` prints a lap line after each post-analyze pass,
 //! so a slow pass is named; nothing is printed without it.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(timings: bool) -> String {
-    let root = std::env::temp_dir().join(format!("rh_timings_pass_laps_{}_{timings}", std::process::id()));
+    let root = scratch::dir(&format!("rh_timings_pass_laps_{timings}"));
     let files = [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :widgets do |t|\n    t.string :title\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
@@ -39,4 +41,19 @@ fn each_post_analyze_pass_prints_a_lap_line() {
 fn no_lap_line_without_the_timings_variable() {
     let text = check(false);
     assert!(!text.contains("post-analyze pass:"), "{text}");
+}
+
+#[cfg(feature = "memory-census")]
+#[test]
+fn each_timing_line_reports_its_own_heap_peak() {
+    let text = check(true);
+    let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("roundhouse-timing:") && l.contains(", live peak ")).collect();
+    assert!(!lines.is_empty(), "{text}");
+    for line in lines {
+        let number = |label: &str| -> u64 {
+            let at = line.find(label).unwrap_or_else(|| panic!("no `{label}` in {line}")) + label.len();
+            line[at..].split_whitespace().next().unwrap().parse().unwrap()
+        };
+        assert!(number("phase peak ") <= number("live peak "), "{line}");
+    }
 }

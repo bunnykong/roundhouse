@@ -7,6 +7,8 @@
 //! proposal is refused and reported. A test pass that swaps literal text
 //! makes rewrites observable.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -151,9 +153,7 @@ fn base_files() -> Vec<(&'static str, &'static str)> {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-fractal-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir(&format!("roundhouse-fractal-{name}"));
     dir
 }
 
@@ -504,9 +504,7 @@ impl Pass for Scoped {
 /// not take.
 const UNREAD: &str = r#"class Unread < ActiveRecord::Migration[7.0]
   def change
-    change_table :accounts do |t|
-      t.string :slug
-    end
+    create_join_table :accounts, :tags
   end
 end
 "#;

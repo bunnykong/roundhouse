@@ -118,6 +118,9 @@ pub struct FlatRoute {
     /// inside, so the helper takes the format as a required last param.
     /// The router still peels the suffix off like any other.
     pub format_required: bool,
+    /// The root of an isolated engine at its mount: Rails generates its
+    /// helper as the mount's script name joined with `/` (`/catalog/`).
+    pub mount_root: bool,
 }
 
 /// The `defaults` key that carries `scope format: true` through a
@@ -386,6 +389,8 @@ struct Ctx {
     /// unlike an ordinary scope's, which prefixes the whole nesting.
     within: ResourceScope,
     inner_path: String,
+    /// The path an isolated engine is mounted at, inside its scope.
+    mount_path: Option<String>,
 }
 
 /// One enclosing resource.
@@ -768,6 +773,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     seg_patterns,
                     refused,
                     format_required: ctx.format_required(),
+                    mount_root: false,
                 });
             }
         }
@@ -827,6 +833,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 seg_patterns: vec![],
                 refused: None,
                 format_required: false,
+                mount_root: ctx.mount_path.as_deref() == Some(ctx.ns_path.as_str()),
             });
         }
         RouteSpec::Resources {
@@ -1072,12 +1079,13 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                             seg_patterns: seg_patterns.clone(),
                             refused: refused.clone(),
                             format_required: ctx.format_required(),
+                            mount_root: false,
                         });
                     }
                 }
             }
         }
-        RouteSpec::Scope { path, module, as_prefix, defaults, nest, suppress_helpers, within, entries } => {
+        RouteSpec::Scope { path, module, as_prefix, defaults, nest, suppress_helpers, mount, within, entries } => {
             let mut child = ctx.clone();
             if !within.is_nested() {
                 child.within = *within;
@@ -1132,6 +1140,9 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 } else {
                     child.inner_path = prefix_path(&ctx.inner_path, &segment);
                 }
+            }
+            if *mount {
+                child.mount_path = Some(child.ns_path.clone());
             }
             if let Some(m) = module {
                 for seg in m.split('/').filter(|s| !s.is_empty()) {

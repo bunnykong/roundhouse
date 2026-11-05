@@ -1,3 +1,5 @@
+#[path = "../support/scratch.rs"]
+mod scratch;
 use super::emit_and_run;
 
 /// `default_scope { where(col: literal) }` applies to every query on the
@@ -238,8 +240,7 @@ puts "default scope sti passed"
 /// model-DSL warning on every target.
 #[test]
 fn the_cli_reports_default_scope_only_where_it_is_not_applied() {
-    let root = std::env::temp_dir().join(format!("roundhouse-default-scope-cli-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-default-scope-cli");
     for (path, body) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("app/models/gadget.rb", "class Gadget < ApplicationRecord\n  default_scope { where(archived: false) }\nend\n"),

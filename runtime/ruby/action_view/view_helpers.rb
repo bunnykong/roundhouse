@@ -1205,8 +1205,44 @@ module ActionView
     # lands as C# `object`, and C# rejects any non-null default on a
     # reference-typed parameter (CS1763); `to_s` maps nil → "".
     def self.content_tag(name, content = nil, opts = EMPTY_HTML_OPTS)
-      n = name.to_s
-      "<#{n}#{render_attrs(opts.to_h)}>#{html_escape(content.to_s)}</#{n}>"
+      n = content_tag_name(name.to_s)
+      "<#{n}#{render_attrs(opts.to_h)}>#{content_tag_pre(n)}#{html_escape(content.to_s)}</#{n}>"
+    end
+
+    # `content_tag(name[, opts]) do … end` in a template: the block's
+    # captured markup, already escaped, is the content (Rails'
+    # `capture`), so it is written as it is.
+    def self.content_tag_html(name, html, opts = EMPTY_HTML_OPTS)
+      n = content_tag_name(name.to_s)
+      "<#{n}#{render_attrs(opts.to_h)}>#{content_tag_pre(n)}#{html}</#{n}>"
+    end
+
+    # Rails' `ensure_valid_html5_tag_name` (`/\A[a-zA-Z][^\s\/>]*\z/`):
+    # a letter, then no whitespace, `/` or `>`, else ArgumentError, so a
+    # dynamic name never writes past the tag. Bytes, not the Regexp (no
+    # portable match?).
+    def self.content_tag_name(name)
+      bytes = name.bytes
+      ok = bytes.length > 0
+      i = 0
+      while i < bytes.length
+        b = erb_url_byte(bytes, i)
+        if i == 0
+          ok = (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+        elsif b == 32 || (b >= 9 && b <= 13) || b == 47 || b == 62
+          ok = false
+        end
+        i += 1
+      end
+      raise ArgumentError, "Invalid HTML5 tag name: #{name}" unless ok
+      name
+    end
+
+    # Rails' `PRE_CONTENT_STRINGS`: a textarea's content follows a
+    # newline, which the HTML parser drops, so a leading newline of the
+    # content's own survives.
+    def self.content_tag_pre(name)
+      name == "textarea" ? "\n" : ""
     end
 
     # Emit the importmap script + per-pin modulepreload hints + a
@@ -1475,6 +1511,78 @@ module ActionView
       end
     end
 
+    # ` value="…"` for a `form.color_field` with no `value:` (Rails
+    # 8.1.4's `ColorField#render`): the record's value through
+    # `validate_color_string`, so nil, or a value with no color, is
+    # "#000000". Takes the column's value as `optional_value_attr` does.
+    def self.color_value_attr(value)
+      if value.nil?
+        %( value="#000000")
+      else
+        %( value="#{html_escape(validated_color(value.to_s))}")
+      end
+    end
+
+    # `ColorField#render`'s `options["value"] ||= …` for a computed
+    # `value:`: the option as given, or the record's value through
+    # `color_value_attr` when it is nil or false (`||=`). One call, so the
+    # option is evaluated once. `false` is a non-String whose `to_s` is
+    # "false" (`render_attrs`'s boolean-attribute check, keeping the
+    # String "false"): `option == false` does not type on C# (no
+    # `object == bool`) or Swift (`Any` is not `Bool`).
+    def self.color_field_value_attr(option, value)
+      if option.nil? || (!option.is_a?(String) && option.to_s == "false")
+        color_value_attr(value)
+      else
+        %( value="#{html_escape(option.to_s)}")
+      end
+    end
+
+    # ` value="…"` for a `form.datetime_local_field` on a datetime or
+    # date column (Rails 8.1.4's `DatetimeLocalField`, `%Y-%m-%dT%T`),
+    # from the value's text: a stored timestamp, or a Time's `to_s`,
+    # starts `YYYY-MM-DD HH:MM:SS` (any fraction or zone after it is
+    # dropped), and a date is `YYYY-MM-DD`, at midnight. nil, or the
+    # empty text an unsaved record's column reads as, writes no value.
+    # The text is the app zone's wall time when that zone is UTC, which
+    # analyze requires for a datetime column.
+    def self.datetime_local_value_attr(value)
+      return "" if value.nil?
+      s = value.to_s
+      if s.empty?
+        ""
+      elsif s.length >= 19
+        %( value="#{html_escape(s[0, 10] + "T" + s[11, 8])}")
+      elsif s.length == 10
+        %( value="#{html_escape(s + "T00:00:00")}")
+      else
+        %( value="#{html_escape(s)}")
+      end
+    end
+
+    # `s` lowercased when it holds `#` and six hex digits anywhere (the
+    # Regexp is unanchored), else "#000000". Probes with `s[i, n]` and
+    # `include?`, not the Regexp (no portable match?).
+    def self.validated_color(s)
+      i = 0
+      while i + 7 <= s.length
+        return s.downcase if s[i, 1] == "#" && hex_digits?(s[i + 1, 6])
+        i += 1
+      end
+      "#000000"
+    end
+
+    # Every character of `s` is a hex digit. Its own method: no nested
+    # `while` (Elixir).
+    def self.hex_digits?(s)
+      i = 0
+      while i < s.length
+        return false unless "0123456789abcdefABCDEF".include?(s[i, 1])
+        i += 1
+      end
+      true
+    end
+
     # Rails 8.1.4's `current_page?(path)` for a path or a URL (actionview
     # url_helper.rb): false unless the request is a GET or HEAD; the path,
     # percent-decoded, against the request's path (its fullpath when the
@@ -1658,18 +1766,27 @@ module ActionView
         # as a bare (undeclared) assignment — to `name`, which in DOM
         # scope is a const global (TS2588), and to an `inner_name` the
         # sibling lines then couldn't find (TS2304).
-        name = k.to_s
-        unless v.nil?
+        # Every NAME written goes through `xml_name_escape`, as Rails'
+        # `tag_option` does: a key is data too, and unescaped it could
+        # close the attribute and open another.
+        name = xml_name_escape(k.to_s)
+        # A name that escapes to "" (a blank key) is NO attribute: written
+        # as ` ="…"`, the parser reads `="foo` as a name and the value's
+        # later words as attributes. Rails writes a blank Symbol key that
+        # way; this is stricter on purpose.
+        unless v.nil? || name == ""
           if v.is_a?(Hash)
             v.each do |inner_k, inner_v|
-              inner_name = inner_k.to_s.tr("_", "-")
-              unless inner_v.nil?
+              # Rails escapes the whole `data-<inner>` name, prefix
+              # included, after the dasherize.
+              inner_name = xml_name_escape(k.to_s + "-" + inner_k.to_s.tr("_", "-"))
+              unless inner_v.nil? || inner_name == ""
                 # Coerce untyped Hash values to String before
                 # html_escape; html_escape's contract is
                 # `(String) -> String` and the untyped values flowing
                 # through Hash[String, untyped] need explicit
                 # stringification.
-                out = out + " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
+                out = out + " #{inner_name}=\"#{html_escape(inner_v.to_s)}\""
               end
             end
           elsif boolean_attr?(name)
@@ -1694,6 +1811,46 @@ module ActionView
         end
       end
       out
+    end
+
+    # Rails' `ERB::Util.xml_name_escape` (activesupport 8.1.4,
+    # core_ext/erb/util.rb), which `tag_option` applies to every
+    # attribute name: a blank name is "", a valid XML name is itself,
+    # and otherwise a first character outside the name-START set and
+    # each later character outside the name set become "_".
+    #
+    # The ASCII part of those sets is exact: start is `@ : A-Z _ a-z`,
+    # and a later character may also be `- . 0-9`. NON-ASCII is
+    # conservative: Rails keeps most characters from U+00C0 up (`é`
+    # stays `é`), and here a non-ASCII character becomes "_" — one per
+    # character on CRuby, and on a target whose regexps match bytes or
+    # UTF-16 units, one per unit. Either way the name is plain ASCII.
+    # Keeping one would need Rails' Unicode ranges in a character class,
+    # which not every target's regexp engine reads the same. Likewise
+    # "blank" is ASCII whitespace only: a name of Unicode spaces renders
+    # "_"s where Rails gives "".
+    #
+    # The SHAPE is Rails' own (a gsub over the name, then the first
+    # character), spelled with what every target emits and runs on every
+    # page: a constant pattern, `gsub` with a String replacement, and
+    # `[i, n]` slices of an ASCII String. Not a byte walk: elixir has no
+    # `while`, and swift marks a call that can raise (`erb_url_byte`)
+    # `throws`, which an attribute loop's closure cannot call. No `\A`
+    # anchor either (JavaScript has none): the first character is
+    # sliced out and checked on its own. A valid name — every name a
+    # template writes by hand — is one scan and comes back as itself.
+    XML_NAME_INVALID_CHAR = /[^@:A-Z_a-z.0-9-]/.freeze
+    XML_NAME_INVALID_START = /[^@:A-Z_a-z]/.freeze
+    XML_NAME_BLANK_CHAR = /[\t\n\x0b\f\r ]/.freeze
+
+    def self.xml_name_escape(name)
+      escaped = name.gsub(XML_NAME_INVALID_CHAR, "_")
+      return "" if escaped != name && name.gsub(XML_NAME_BLANK_CHAR, "") == ""
+      return escaped if escaped == ""
+      head = escaped[0, 1].to_s
+      fixed = head.gsub(XML_NAME_INVALID_START, "_")
+      return name if fixed == head && escaped == name
+      fixed + escaped[1, escaped.length - 1].to_s
     end
 
     # The TEXT of one attribute value, before escaping: `to_s` here,

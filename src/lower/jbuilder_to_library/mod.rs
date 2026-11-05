@@ -169,9 +169,9 @@ pub fn lower_jbuilder_to_library_classes(
     let empty_ivars: crate::det::HashMap<Symbol, crate::ty::Ty> =
         crate::det::HashMap::default();
     // Collect once for every view — `ground_jbuilder_library` walks
-    // value-position blank predicates after typing (shared with the
-    // single-template entry so Ruby emit and every other target agree).
-    let blank_defs = crate::lower::blank::AppDefinitions::collect(app);
+    // value-position blank predicates after typing. This batch entry is
+    // used by strict targets, which retain their native trim lowering.
+    let blank_defs = crate::lower::blank::AppDefinitions::collect(app, false);
     for lc in &mut lcs {
         for method in &mut lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
@@ -241,7 +241,7 @@ pub fn lower_jbuilder_to_library_class(view: &View, app: &App) -> LibraryClass {
     // (`json.note(widget.note.presence || "none")`): the app-wide blank
     // lowering walks no view, and the Spinel runtime has no such method
     // on String or nil. Ground them as every app body's are.
-    let defs = crate::lower::blank::AppDefinitions::collect(app);
+    let defs = crate::lower::blank::AppDefinitions::collect(app, true);
     ground_jbuilder_library(&mut lc, &defs, type_method_body_solo);
     lc
 }

@@ -4,6 +4,8 @@
 //! reopens that base; an app class the gem does not define keeps the
 //! Object-extension error.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check_continue(root: &std::path::Path) -> String {
@@ -64,7 +66,7 @@ fn assert_attribution(out: &str) {
 
 #[test]
 fn as_json_on_a_serializer_is_a_note_naming_the_gem() {
-    let root = std::env::temp_dir().join(format!("roundhouse-gem-serializer-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-gem-serializer");
     write_app(&root, &[]);
     assert_attribution(&check_continue(&root));
     std::fs::remove_dir_all(root).unwrap();
@@ -72,7 +74,7 @@ fn as_json_on_a_serializer_is_a_note_naming_the_gem() {
 
 #[test]
 fn as_json_on_a_serializer_stays_a_note_when_the_app_reopens_its_base() {
-    let root = std::env::temp_dir().join(format!("roundhouse-gem-serializer-reopened-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-gem-serializer-reopened");
     write_app(
         &root,
         &[("lib/patches/serializer_include.rb", "module ActiveModel\n  class Serializer\n    def include!(name)\n      name\n    end\n  end\nend\n")],

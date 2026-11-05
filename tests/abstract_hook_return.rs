@@ -8,11 +8,12 @@
 //! What the hook returns is what the override returns, which the concern
 //! cannot see: gradual, not diverging.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(files: &[(&str, &str)]) -> String {
-    let dir = std::env::temp_dir().join(format!("rh_abstract_hook_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh_abstract_hook");
     for (path, src) in files {
         let full = dir.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();

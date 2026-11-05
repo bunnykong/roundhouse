@@ -1,6 +1,8 @@
 //! Full forwarding has a positional/keyword/block contract, not a naming convention.
 //! Native controls deliberately distinguish all three from plausible miscompiles.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -523,8 +525,7 @@ fn source_archive_copies_unrepresented_formals_without_a_transpile_error() {
     for formal in ["(a,b)", "**nil"] {
         let source = format!("class Probe; def call({formal}); 7; end; end\n");
         let app = analyzed(&source);
-        let fixture = std::env::temp_dir().join(format!("roundhouse-source-archive-{}-{}", std::process::id(), formal.len()));
-        std::fs::create_dir(&fixture).unwrap();
+        let fixture = scratch::dir(&format!("roundhouse-source-archive-{}", formal.len()));
         std::fs::write(fixture.join("probe.rb"), &source).unwrap();
         for target in [BuildTarget::Blog, BuildTarget::Ruby] {
             let (files, diagnostics) = roundhouse::emit::diagnostics::scope(|| {

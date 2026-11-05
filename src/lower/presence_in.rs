@@ -49,6 +49,10 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
                 span,
                 ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
             ));
+            // Not the String table's: its `is_a?(String)` would answer nil for every Symbol.
+            if matches!(&args[0].ty, Some(crate::ty::Ty::Array { elem }) if **elem == crate::ty::Ty::Sym) {
+                *method = Symbol::from("symbol_presence_in");
+            }
             args.insert(0, receiver);
             *parenthesized = true;
         }

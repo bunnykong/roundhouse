@@ -8,6 +8,8 @@
 //! critic_admission keeps refused) no subclass can stand in for it.
 //! Native Ruby on the same source is the oracle.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -48,8 +50,7 @@ const REPORT: &str = "p Patch.report\n";
 
 #[test]
 fn singleton_class_receivers_run_as_in_native_ruby() {
-    let dir = std::env::temp_dir().join(format!("roundhouse-singleton-receivers-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-singleton-receivers");
     let file = dir.join("patch.rb");
     std::fs::write(&file, PATCH).unwrap();
     let native = std::process::Command::new("ruby")
@@ -82,8 +83,7 @@ fn singleton_class_receivers_run_as_in_native_ruby() {
 #[test]
 fn an_immediate_or_unknown_receiver_stays_refused() {
     for (n, body) in ["1.singleton_class.define_method(:x) { 1 }", "ghost.singleton_class.define_method(:x) { 1 }"].iter().enumerate() {
-        let root = std::env::temp_dir().join(format!("roundhouse-singleton-refused-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch::dir(&format!("roundhouse-singleton-refused-{n}"));
         for (path, text) in [
             ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n".to_string()),
             ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n".to_string()),

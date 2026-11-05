@@ -1,3 +1,5 @@
+#[path = "../support/scratch.rs"]
+mod scratch;
 use std::path::Path;
 
 use roundhouse::project::BuildTarget;
@@ -36,8 +38,7 @@ puts "ok"
 
 #[test]
 fn safe_constantize_is_by_name_on_the_interpreters_a_closed_case_on_spinel_and_refused_elsewhere() {
-    let dir = std::env::temp_dir().join(format!("rh-constantize-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-constantize-targets");
     for (path, text) in [
         (
             "db/schema.rb",

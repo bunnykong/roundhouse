@@ -1,5 +1,7 @@
 //! A mounted Rack app sees Rails' shifted environment and owns its response.
 
+#[path = "../support/scratch.rs"]
+mod scratch;
 use super::emit_and_run::{self, Overlay};
 use std::process::Command;
 
@@ -206,8 +208,7 @@ puts JSON.generate(rows)
 #[test]
 fn rack_mount_oracle_missing_gems_and_dependencies_skip_in_ci_and_locally() {
     let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/rails_oracle.rb");
-    let empty = std::env::temp_dir().join(format!("rack-oracle-no-gems-{}", std::process::id()));
-    std::fs::create_dir_all(&empty).unwrap();
+    let empty = scratch::dir("rack-oracle-no-gems");
     let partial = empty.join("partial");
     std::fs::create_dir_all(partial.join("specifications")).unwrap();
     for name in ["railties", "actionpack", "actionview"] {

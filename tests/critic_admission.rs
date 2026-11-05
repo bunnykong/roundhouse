@@ -1,5 +1,7 @@
 //! Regression cases where inference used to certify an unexecutable program.
 //! Both CLI gates must refuse; passing `check` alone is not admission evidence.
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -18,7 +20,7 @@ fn admits(body: &str) {
 }
 
 fn gate(body: &str, expected: &str, extra: &[(&str, &str)], admitted: bool) {
-    let root = std::env::temp_dir().join(format!("rh_admission_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
+    let root = scratch::dir(&format!("rh_admission_{}", NEXT.fetch_add(1, Ordering::SeqCst)));
     for (path, text) in [
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n".to_string()),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n".to_string()),
@@ -103,7 +105,10 @@ fn non_nil_assertions_require_runtime_support() {
     // literal block has no message to inline and stays refused.
     refuses("T.must_because(1, &blk)", "non-nil assertion");
     refuses("T.must_because(1) { |why| why }", "non-nil assertion");
-    refuses("1.not_nil!", "not_nil!");
+    // type_toolkit's `x.not_nil!` runs on the CRuby tree
+    // (tests/not_nil_type_toolkit.rs); other trees refuse it at emit
+    // (tests/not_nil_bang.rs).
+    admits("1.not_nil!");
 }
 
 /// A `for` opens no scope: ingest writes it as a `while`, so the loop

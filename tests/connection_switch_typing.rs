@@ -4,10 +4,12 @@
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(name: &str, postgresql: bool) -> String {
-    let root = std::env::temp_dir().join(format!("rh_connection_switch_typing_{}_{name}", std::process::id()));
+    let root = scratch::dir(&format!("rh_connection_switch_typing_{name}"));
     let (adapter_line, adapter) = if postgresql { ("", "postgresql") } else { ("", "sqlite3") };
     let files = [
         ("roundhouse.yml", format!("test_paths:\n  - test\n{adapter_line}")),

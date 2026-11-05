@@ -1,12 +1,12 @@
 # frozen_string_literal: true
-# CRuby-only spellings of three shared ViewHelpers hot paths.
+# CRuby-only spellings of four shared ViewHelpers hot paths.
 #
 # The shared bodies are written in the one shape every target emitter
 # lowers (see the comments on `boolean_attr?` and `needs_url_escape?`
 # in action_view/view_helpers.rb): `||` chains of `==` / `include?`, and
 # `out = out + ...` concatenation. Under CRuby those are 45 comparisons
 # per attribute, 32 scans per URL value, and a new String per attribute
-# appended; every sidebar room link goes through all three. Same output.
+# appended; every sidebar room link goes through them all. Same output.
 module ActionView
   module ViewHelpers
     # Rails' BOOLEAN_ATTRIBUTES — the shared `boolean_attr?` chain, as a set.
@@ -29,16 +29,32 @@ module ActionView
       s.match?(URL_ESCAPE_PATTERN)
     end
 
+    # The shared `xml_name_escape`'s rule, with anchored regexps the
+    # shared body cannot use (its patterns are the shared constants): a
+    # valid name answers after one `match?` and no new String.
+    XML_NAME_SAFE = /\A[@:A-Z_a-z][@:A-Z_a-z.0-9-]*\z/
+    XML_NAME_BLANK = /\A[\t\n\x0b\f\r ]*\z/
+
+    def self.xml_name_escape(name)
+      return name if name.match?(XML_NAME_SAFE)
+      return "" if name.match?(XML_NAME_BLANK)
+      name[0].gsub(XML_NAME_INVALID_START, "_") + name[1..].gsub(XML_NAME_INVALID_CHAR, "_")
+    end
+
     def self.render_attrs(attrs)
       return "" if attrs.empty?
       out = +""
       attrs.each do |k, v|
         next if v.nil?
-        name = k.to_s
+        name = xml_name_escape(k.to_s)
+        # A blank name is no attribute, as in the shared body.
+        next if name.empty?
         if v.is_a?(Hash)
           v.each do |inner_k, inner_v|
             next if inner_v.nil?
-            out << " " << name << "-" << inner_k.to_s.tr("_", "-") << "=\"" << html_escape(inner_v.to_s) << "\""
+            inner_name = xml_name_escape(k.to_s + "-" + inner_k.to_s.tr("_", "-"))
+            next if inner_name.empty?
+            out << " " << inner_name << "=\"" << html_escape(inner_v.to_s) << "\""
           end
         elsif boolean_attr?(name)
           out << " " << name << "=\"" << name << "\"" unless v.to_s == "false"

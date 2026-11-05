@@ -4,14 +4,15 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
 fn native(files: &[(&str, &str)], script: &str, env: &[(&str, &str)]) -> String {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("rh_conditional_class_{}_{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("rh_conditional_class_{n}"));
     for (path, text) in files {
         let file = root.join("lib").join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -118,8 +119,7 @@ fn a_conditional_declaration_reopened_in_another_file_is_named() {
     assert_eq!(native(REOPENED, &format!("require \"gqlc/q_ext\"\n{script}"), &[]), "[:a, :b]\n");
     assert_eq!(native(REOPENED, &format!("require \"gqlc/q_ext\"\n{script}"), &[("GQLC_LEGACY", "1")]), "[:b]\n");
 
-    let root = std::env::temp_dir().join(format!("rh_conditional_reopened_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("rh_conditional_reopened");
     let gem: Vec<(String, &str)> = REOPENED.iter().map(|(path, text)| (format!("vendor/gems/gqlc-1.0.0/lib/{path}"), *text)).collect();
     for (path, text) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),

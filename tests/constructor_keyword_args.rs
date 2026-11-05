@@ -1,6 +1,8 @@
 //! A keyword passed to `.new` must bind to its source `initialize` slot
 //! after optional keywords are flattened for the emitted Ruby ABI.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
@@ -356,12 +358,7 @@ fn constructor_keywords_bind_to_the_flattened_initialize_slots() {
         "keyword-rest custom `new` must retain its keyword-splat call ABI:\n{source}"
     );
 
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-constructor-keywords-{}-{}",
-        std::process::id(),
-        RUN.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("roundhouse-constructor-keywords-{}", RUN.fetch_add(1, Ordering::Relaxed)));
     for file in &emitted {
         let path = dir.join(&file.path);
         std::fs::create_dir_all(path.parent().expect("emitted file parent")).expect("mkdir");
@@ -968,12 +965,7 @@ end
         emitted.contains("Item.new(\"nested\")"),
         "a lexically resolved nested class call should use the flattened initialize slot: {emitted}"
     );
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-nested-constructor-{}-{}",
-        std::process::id(),
-        RUN.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("roundhouse-nested-constructor-{}", RUN.fetch_add(1, Ordering::Relaxed)));
     for file in &emitted_files {
         let path = dir.join(&file.path);
         std::fs::create_dir_all(path.parent().expect("emitted file parent")).expect("mkdir");

@@ -2,6 +2,10 @@
 # Rails 8.1.4 response charset inheritance, shared by Ruby, JRuby and Spinel.
 module ActionController
   class Base
+    def json_render_escape
+      Rails.application.action_controller_escape_json_responses
+    end
+
     def render(body, status: :ok, content_type: nil, location: nil)
       @_body = body
       @_status = resolve_status(status)

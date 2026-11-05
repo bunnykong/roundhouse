@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use crate::det::HashSet;
 
 use crate::dialect::View;
-use crate::expr::{Expr, ExprNode, InterpPart, LValue};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Pattern};
 use crate::ident::Symbol;
 
 use super::{local_assigns_key, rewrite_ivars_to_locals, IvarLocals};
@@ -29,6 +29,25 @@ pub(super) fn rewritten_extras(
     let rewritten = rewrite_ivars_to_locals(&body, ivar_locals);
     let extras = collect_extra_params(&rewritten, record, &flash, request_context);
     (rewritten, extras)
+}
+
+/// The partial locals `view` reads by name: the extras its body earns
+/// (`local_assigns[:x]`, `defined?(x)`, a reserved-word local, a bare
+/// flash read `flash_locals` left under its name, which a handed local
+/// answers), without the flash pair every view takes. Walked before the
+/// ivar rewrite, so an `@notice` read, which leaves the local `notice`
+/// behind, is not one.
+pub(super) fn local_reads(
+    view: &View,
+    ivar_locals: &IvarLocals,
+    record: &str,
+    keys: Option<&[String]>,
+) -> Vec<String> {
+    let (body, _) = flash_locals(view, ivar_locals, record, keys);
+    let mut out = Vec::new();
+    let bound = [record.to_string(), "_buf".to_string(), "io".to_string()];
+    walk_for_extra(&body, &bound, &mut out);
+    out
 }
 
 /// The names `view`'s flash params go by, and its body with its flash
@@ -288,6 +307,22 @@ fn walk_for_extra(e: &Expr, bound: &[String], out: &mut Vec<String>) {
             walk_for_extra(cond, bound, out);
             walk_for_extra(then_branch, bound, out);
             walk_for_extra(else_branch, bound, out);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            walk_for_extra(scrutinee, bound, out);
+            for arm in arms {
+                if let Pattern::Expr { expr } = &arm.pattern {
+                    walk_for_extra(expr, bound, out);
+                }
+                if let Some(g) = &arm.guard {
+                    walk_for_extra(g, bound, out);
+                }
+                walk_for_extra(&arm.body, bound, out);
+            }
+        }
+        ExprNode::While { cond, body, .. } => {
+            walk_for_extra(cond, bound, out);
+            walk_for_extra(body, bound, out);
         }
         ExprNode::BoolOp { left, right, .. } => {
             walk_for_extra(left, bound, out);

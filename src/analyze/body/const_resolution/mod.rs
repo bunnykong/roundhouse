@@ -58,6 +58,15 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("Float", "MAX", || Ty::Float),
     ("Float", "MIN", || Ty::Float),
     ("IO", "NULL", || Ty::Str),
+    // `io.seek(-n, IO::SEEK_CUR)` (tzinfo's zoneinfo reader); CRuby and spinel answer the same values.
+    ("IO", "SEEK_SET", || Ty::Int),
+    ("IO", "SEEK_CUR", || Ty::Int),
+    ("IO", "SEEK_END", || Ty::Int),
+    // `DateTime.jd(jd, …, Date::ITALY)` (tzinfo's DateTimeWithOffset): the Julian day of the Gregorian reform.
+    ("Date", "ITALY", || Ty::Int),
+    ("Date", "ENGLAND", || Ty::Int),
+    ("Date", "GREGORIAN", || Ty::Float),
+    ("Date", "JULIAN", || Ty::Float),
     // `Regexp.new(selector, Regexp::IGNORECASE)` — lobsters' domain selectors.
     ("Regexp", "IGNORECASE", || Ty::Int),
     ("Regexp", "EXTENDED", || Ty::Int),
@@ -131,7 +140,7 @@ const CORE_TOP_CONSTS: &[&str] = &["STDIN", "STDOUT", "STDERR"];
 
 /// `if RUBY_VERSION >= "2.7.1"` (aasm, hashie): the running Ruby's own
 /// version, which a compile-time answer would freeze to the wrong one.
-const CORE_TOP_STR_CONSTS: &[&str] = &["RUBY_VERSION"];
+const CORE_TOP_STR_CONSTS: &[&str] = &["RUBY_VERSION", "RUBY_PLATFORM"];
 
 fn io_ty() -> Ty {
     Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() }
@@ -145,6 +154,7 @@ const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
     ("Encoding", "Object"),
     ("OpenSSL::SSL", "Object"),
     ("Regexp", "Object"),
+    ("Date", "Object"),
 ];
 
 fn encoding_ty() -> Ty {
@@ -263,6 +273,7 @@ fn core_value_type(name: &str) -> Option<Ty> {
 const CORE_URI: &str = "roundhouse-core:rbs";
 const RUNTIME_URI_PREFIX: &str = "roundhouse-runtime:";
 
+#[cfg_attr(feature = "memory-census", derive(Clone))]
 pub(super) enum ResolvedConstant {
     Namespace { class: Arc<ClassId>, runtime: bool },
     /// `runtime_decl`: declared only by the runtime's sources, so a
@@ -301,6 +312,30 @@ struct FileAnswers {
     singleton_owners: HashSet<Box<str>>,
 }
 
+/// The identity map's hasher is not `Clone`, so its entries are copied.
+#[cfg(feature = "memory-census")]
+impl Clone for FileAnswers {
+    fn clone(&self) -> Self {
+        FileAnswers {
+            references: self.references.clone(),
+            class_references: self.class_references.clone(),
+            namespace_bodies: self.namespace_bodies.clone(),
+            constants: self.constants.clone(),
+            multi_values: self.multi_values.clone(),
+            constant_classes: self.constant_classes.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            namespace_definitions: self.namespace_definitions.clone(),
+            class_definitions: self.class_definitions.clone(),
+            class_bodies: self.class_bodies.clone(),
+            alias_definitions: self.alias_definitions.clone(),
+            runtime_namespace_aliases: self.runtime_namespace_aliases.clone(),
+            sole_namespaces: self.sole_namespaces.clone(),
+            singleton_methods: self.singleton_methods.clone(),
+            singleton_owners: self.singleton_owners.clone(),
+        }
+    }
+}
+
+#[cfg_attr(feature = "memory-census", derive(Clone))]
 pub(crate) struct ConstResolver {
     /// Indexed by `FileId - 1`. `None` marks a source that Rubydex did
     /// not index, such as an ERB template.
@@ -631,7 +666,11 @@ impl ConstResolver {
         let class_ancestry = graph.declarations().values().filter_map(|declaration| {
             let namespace = declaration.as_namespace()?;
             if namespace.kind() != "Class" { return None; }
-            let mut ancestors = vec![ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref()))];
+            let own = ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref()));
+            // Rubydex lists the class itself after its prepended modules, as
+            // Ruby's `ancestors` does; keep that position rather than forcing
+            // the class first.
+            let mut ancestors = Vec::new();
             for ancestor in namespace.ancestors() {
                 // Mutation reachability needs the known edges even when a
                 // gem superclass leaves the rest of the ancestry incomplete.
@@ -642,7 +681,8 @@ impl ConstResolver {
                     if !ancestors.contains(&id) { ancestors.push(id); }
                 }
             }
-            Some((ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())), ancestors))
+            if !ancestors.contains(&own) { ancestors.insert(0, own.clone()); }
+            Some((own, ancestors))
         }).collect();
         let files = crate::timings::phase("rubydex: answers", || collect_answers(&graph, sources));
         drop(graph);
@@ -852,6 +892,13 @@ impl ConstResolver {
 pub struct PreparedConstResolver(Option<Arc<ConstResolver>>);
 
 impl PreparedConstResolver {
+    /// The bytes the prepared answers hold. The handle is an `Arc`, so
+    /// cloning it measures nothing; this copies the answers themselves.
+    #[cfg(feature = "memory-census")]
+    pub(crate) fn census_bytes(&self) -> i64 {
+        crate::memory_census::live_delta(|| self.0.as_deref().cloned())
+    }
+
     /// The answers that ingest prepared, if they cover these sources.
     /// Cloning an app retains the cache, but callers can edit its public
     /// sources. Rebuild when paths, text or file order have changed.
@@ -1497,6 +1544,26 @@ end
             }
             _ => panic!("ActiveRecord::SignedId::SALT must resolve to the runtime value"),
         }
+    }
+
+    #[test]
+    fn class_ancestry_keeps_prepended_modules_ahead_of_the_class() {
+        let sources = vec![SourceFile {
+            path: "app/models/wrapped.rb".into(),
+            text: "\
+module Loud; end
+module Quiet; end
+class Speaker; end
+class Wrapped < Speaker
+  prepend Loud
+  include Quiet
+end
+".into(),
+        }];
+        let resolver = ConstResolver::from_app_sources(&sources);
+        let ancestry = resolver.class_ancestry(&ClassId(Symbol::from("Wrapped"))).unwrap();
+        let names: Vec<&str> = ancestry.iter().map(|class| class.0.as_str()).take(4).collect();
+        assert_eq!(names, ["Loud", "Wrapped", "Quiet", "Speaker"]);
     }
 
     /// A superclass or mixin path is one Rubydex reference spanning the

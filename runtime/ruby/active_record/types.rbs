@@ -2,8 +2,10 @@ module ActiveRecord
   module Type
     class Value
       @type: Symbol?
+      @json_coder: bool
       def type: () -> Symbol?
-      def initialize: (Symbol? type) -> void
+      def initialize: (Symbol? type, ?bool json_coder) -> void
+      def serialize: (untyped value) -> untyped
     end
 
     class String

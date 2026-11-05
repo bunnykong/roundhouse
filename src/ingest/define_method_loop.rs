@@ -61,23 +61,56 @@ enum Entries {
     Hash(Vec<Key>),
 }
 
-/// The literal constants one class or module body assigns, by name.
+/// The literal constants one class or module body assigns, by name, and
+/// the names its `private :name`-style markers set the visibility of.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ConstTable {
     owner: Vec<String>,
     map: HashMap<String, Entries>,
+    named: HashSet<String>,
 }
 
 impl ConstTable {
     pub(super) fn of(owner: &ClassId, statements: &[Node<'_>]) -> Self {
         let mut map = HashMap::default();
+        let mut written: HashMap<String, usize> = HashMap::default();
         for stmt in statements {
             let Some(write) = stmt.as_constant_write_node() else { continue };
+            let name = constant_id_str(&write.name()).to_string();
+            *written.entry(name.clone()).or_default() += 1;
             if let Some(entries) = literal_entries(&write.value()) {
-                map.insert(constant_id_str(&write.name()).to_string(), entries);
+                map.insert(name, entries);
             }
         }
-        ConstTable { owner: owner.0.as_str().split("::").map(str::to_string).collect(), map }
+        // Not one the body writes again or changes in place (`KINDS << "b"`): a loop would run over what it holds then.
+        let mut mutated = Mutations { names: HashSet::default() };
+        for stmt in statements {
+            ruby_prism::Visit::visit(&mut mutated, stmt);
+        }
+        map.retain(|name, _| written.get(name) == Some(&1) && !mutated.names.contains(name));
+        ConstTable { owner: owner.0.as_str().split("::").map(str::to_string).collect(), map, named: named_visibility(statements) }
+    }
+
+    /// Only the visibility markers of a body whose constants another table already holds (an `included do` block).
+    pub(super) fn named_only(statements: &[Node<'_>]) -> Self {
+        ConstTable { named: named_visibility(statements), ..Default::default() }
+    }
+}
+
+/// The constants a call that changes its receiver in place is made on.
+struct Mutations {
+    names: HashSet<String>,
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for Mutations {
+    fn visit_call_node(&mut self, node: &CallNode<'pr>) {
+        const MUTATORS: &[&str] = &["<<", "push", "append", "concat", "unshift", "prepend", "insert", "[]=", "store", "merge!", "update", "delete", "delete_at", "delete_if", "clear", "replace", "map!", "collect!", "select!", "filter!", "reject!", "compact!", "uniq!", "sort!", "sort_by!", "reverse!", "shuffle!", "rotate!", "flatten!", "shift", "pop", "fill", "keep_if", "slice!", "transform_keys!", "transform_values!"];
+        if let Some(read) = node.receiver().and_then(|r| r.as_constant_read_node())
+            && MUTATORS.contains(&constant_id_str(&node.name()))
+        {
+            self.names.insert(constant_id_str(&read.name()).to_string());
+        }
+        ruby_prism::visit_call_node(self, node);
     }
 }
 
@@ -127,6 +160,24 @@ fn literal_key(node: &Node<'_>) -> Option<Key> {
 fn literal_entries(value: &Node<'_>) -> Option<Entries> {
     // `{ … }.freeze` / `%i[…].freeze`
     if let Some(call) = value.as_call_node() {
+        // `%w[ year month ].collect(&:to_sym)` (fugit's TimeCursor): each key converted as the block converts it.
+        if matches!(constant_id_str(&call.name()), "collect" | "map") && call.arguments().is_none() {
+            let to = call
+                .block()
+                .and_then(|b| b.as_block_argument_node())
+                .and_then(|b| b.expression())
+                .and_then(|e| e.as_symbol_node())
+                .map(|s| String::from_utf8_lossy(s.unescaped()).into_owned())?;
+            let Entries::Array(keys) = literal_entries(&call.receiver()?)? else { return None };
+            let text = |k: &Key| match k {
+                Key::Sym(t) | Key::Str(t) => t.clone(),
+            };
+            return match to.as_str() {
+                "to_sym" => Some(Entries::Array(keys.iter().map(|k| Key::Sym(text(k))).collect())),
+                "to_s" => Some(Entries::Array(keys.iter().map(|k| Key::Str(text(k))).collect())),
+                _ => None,
+            };
+        }
         if constant_id_str(&call.name()) != "freeze" || call.arguments().is_some() || call.block().is_some() {
             return None;
         }
@@ -153,9 +204,12 @@ struct Plan<'pr> {
     key_param: String,
     value_param: Option<String>,
     defines: Vec<CallNode<'pr>>,
+    /// Class macros the loop runs beside its `define_method`s
+    /// (`serialize "on_#{type}", coder: JSON`), each once per element.
+    macros: Vec<CallNode<'pr>>,
 }
 
-fn plan<'pr>(stmt: &Node<'pr>, file: &str, named: &HashSet<String>) -> Option<Plan<'pr>> {
+fn plan<'pr>(stmt: &Node<'pr>, file: &str, named: &HashSet<String>, allow_macros: bool) -> Option<Plan<'pr>> {
     let call = stmt.as_call_node()?;
     if constant_id_str(&call.name()) != "each" || call.arguments().is_some() {
         return None;
@@ -179,22 +233,37 @@ fn plan<'pr>(stmt: &Node<'pr>, file: &str, named: &HashSet<String>) -> Option<Pl
         _ => return None,
     };
     let body = block.body()?;
-    let defines: Vec<CallNode<'pr>> = flatten_statements(body)
-        .into_iter()
-        .map(|s| {
-            let c = s.as_call_node()?;
-            (c.receiver().is_none()
-                && constant_id_str(&c.name()) == "define_method"
-                && c.arguments().is_some_and(|a| a.arguments().iter().count() == 1)
+    let mut defines: Vec<CallNode<'pr>> = Vec::new();
+    let mut macros: Vec<CallNode<'pr>> = Vec::new();
+    for s in flatten_statements(body) {
+        let c = s.as_call_node()?;
+        if c.receiver().is_some() {
+            return None;
+        }
+        if constant_id_str(&c.name()) == "define_method" {
+            if !(c.arguments().is_some_and(|a| a.arguments().iter().count() == 1)
                 && c.block().is_some_and(|b| b.as_block_node().is_some()))
-            .then_some(c)
-        })
-        .collect::<Option<Vec<_>>>()?;
+            {
+                return None;
+            }
+            defines.push(c);
+        } else if allow_macros && c.block().is_none() {
+            macros.push(c);
+        } else {
+            return None;
+        }
+    }
     if defines.is_empty() {
         return None;
     }
-    let plan = Plan { constant, entries, key_param, value_param, defines };
-    plan.defines.iter().all(|d| define_ok(d, &plan, named)).then_some(plan)
+    let plan = Plan { constant, entries, key_param, value_param, defines, macros };
+    let loop_params: Vec<&str> = std::iter::once(plan.key_param.as_str()).chain(plan.value_param.as_deref()).collect();
+    let macros_ok = plan.macros.iter().all(|m| {
+        let mut check = MacroCheck { loop_params: &loop_params, ok: true };
+        ruby_prism::Visit::visit(&mut check, &m.as_node());
+        check.ok
+    });
+    (macros_ok && plan.defines.iter().all(|d| define_ok(d, &plan, named))).then_some(plan)
 }
 
 /// Plain required parameter names, or `None` for any other shape.
@@ -293,6 +362,32 @@ fn name_for(arg: &Node<'_>, key_param: &str, key: &str) -> Option<String> {
 /// A `define_method` body the substitution keeps: loop parameters are
 /// only read, no other outer local is reached, and nothing in it means
 /// something else once it is a `def`.
+/// A macro run once per element reads only the loop's parameters, and opens no scope of its own.
+struct MacroCheck<'a> {
+    loop_params: &'a [&'a str],
+    ok: bool,
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for MacroCheck<'_> {
+    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        if node.depth() != 0 || !self.loop_params.contains(&constant_id_str(&node.name())) {
+            self.ok = false;
+        }
+    }
+    fn visit_local_variable_write_node(&mut self, _: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        self.ok = false;
+    }
+    fn visit_local_variable_target_node(&mut self, _: &ruby_prism::LocalVariableTargetNode<'pr>) {
+        self.ok = false;
+    }
+    fn visit_block_node(&mut self, _: &ruby_prism::BlockNode<'pr>) {
+        self.ok = false;
+    }
+    fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {
+        self.ok = false;
+    }
+}
+
 struct BodyCheck<'a> {
     /// Blocks and lambdas entered inside the `define_method` block.
     depth: u32,
@@ -408,7 +503,7 @@ impl<'pr> ruby_prism::Visit<'pr> for BodyCheck<'_> {
 /// Whether `stmt` is a loop this unrolls, with the enclosing bodies' tables
 /// in scope.
 pub(super) fn unrollable(stmt: &Node<'_>, named: &HashSet<String>) -> bool {
-    plan(stmt, "", named).is_some()
+    plan(stmt, "", named, false).is_some()
 }
 
 /// The names `private :a, :b`-style markers in `statements` set the
@@ -430,10 +525,45 @@ pub(super) fn unroll(
     receiver: MethodReceiver,
     named: &HashSet<String>,
 ) -> Option<Vec<MethodDef>> {
-    let plan = plan(stmt, file, named)?;
+    unroll_with(stmt, owner, file, receiver, named, None)
+}
+
+/// [`unroll`], also taking a loop that runs class macros beside its
+/// `define_method`s: each macro once per element, in `macros`, with the
+/// element's key in place of the loop's parameter.
+pub(super) fn unroll_with_macros(
+    stmt: &Node<'_>,
+    owner: &ClassId,
+    file: &str,
+    macros: &mut Vec<Expr>,
+) -> Option<Vec<MethodDef>> {
+    let named: HashSet<String> = SCOPES.with(|s| s.borrow().iter().flat_map(|t| t.named.iter().cloned()).collect());
+    unroll_with(stmt, owner, file, MethodReceiver::Instance, &named, Some(macros))
+}
+
+fn unroll_with(
+    stmt: &Node<'_>,
+    owner: &ClassId,
+    file: &str,
+    receiver: MethodReceiver,
+    named: &HashSet<String>,
+    macros: Option<&mut Vec<Expr>>,
+) -> Option<Vec<MethodDef>> {
+    let plan = plan(stmt, file, named, macros.is_some())?;
     let keys = match &plan.entries {
         Entries::Array(k) | Entries::Hash(k) => k.clone(),
     };
+    if let Some(macros) = macros {
+        let calls: Vec<Expr> = plan.macros.iter().map(|m| ingest_expr(&m.as_node(), file).ok()).collect::<Option<_>>()?;
+        for key in &keys {
+            for call in &calls {
+                let mut call = call.clone();
+                substitute(&mut call, &plan, key);
+                fold_literal_interpolation(&mut call);
+                macros.push(call);
+            }
+        }
+    }
     let mut out = Vec::new();
     for define in &plan.defines {
         let names = plan_names(define, &plan)?;
@@ -473,6 +603,24 @@ pub(super) fn unroll(
         }
     }
     Some(out)
+}
+
+/// `"on_#{"finish"}"` once the key is in place: the String it spells, as a macro reads a literal name.
+fn fold_literal_interpolation(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut fold_literal_interpolation);
+    let ExprNode::StringInterp { parts } = &*expr.node else { return };
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            crate::expr::InterpPart::Text { value } => text.push_str(value),
+            crate::expr::InterpPart::Expr { expr } => match &*expr.node {
+                ExprNode::Lit { value: Literal::Str { value } } => text.push_str(value),
+                ExprNode::Lit { value: Literal::Sym { value } } => text.push_str(value.as_str()),
+                _ => return,
+            },
+        }
+    }
+    *expr.node = ExprNode::Lit { value: Literal::Str { value: text } };
 }
 
 /// Each read of a loop parameter becomes the element's key, or for the

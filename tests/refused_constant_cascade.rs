@@ -3,11 +3,13 @@
 //! same root twice. A receiver that only reaches the constant through a
 //! local keeps its refusal.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 #[test]
 fn an_object_extension_on_a_refused_constant_is_not_refused_again() {
-    let root = std::env::temp_dir().join(format!("roundhouse-refused-constant-cascade-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-refused-constant-cascade");
     for (path, source) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),

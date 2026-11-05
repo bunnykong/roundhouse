@@ -3,10 +3,9 @@
 # here, because the implementation ships PER TREE.
 #
 # Two implementations satisfy this signature. The spinel-subset
-# `runtime/spinel/active_support_time_parsing.rb` avoids everything
-# spinel's Time lacks (no `require "time"`, no `Time.parse`, no `usec`);
-# the CRuby/JRuby overlay's sibling shadows it (dedupe last-wins) with
-# the stdlib-backed exact version. Neither lives under `runtime/ruby/`,
+# `runtime/spinel/active_support_time_parsing.rb` parses the stored
+# text by position; the CRuby/JRuby overlay's sibling shadows it
+# (dedupe last-wins) with the stdlib-backed version. Neither lives under `runtime/ruby/`,
 # so without this file the framework runtime has no signature for them
 # and a call site types as an unresolved variable.
 #
@@ -16,12 +15,6 @@
 # sibling: Rails serializes a temporal attribute through
 # `TimeWithZone#as_json` = `xmlschema(3)`, not as the stored text.
 # `format_db_time` is the write-side inverse.
-#
-# `rfc2822` is the RSS-feed formatter: `Time#rfc2822` is stdlib `time`
-# (NOT core Ruby — `require "time"` installs it), so a `<time>.rfc2822`
-# call site can only ground to a module function, the same posture
-# `lower::duration` takes for `Integer#days`. See
-# `emit::ruby::library::apply_time_format_lowering` for the rewrite.
 #
 # All of them are nil-safe: an absent column reads as nil / "" and the
 # synthesized accessors call them unguarded.
@@ -42,8 +35,6 @@ module ActiveSupport
   def self.format_db_time: (untyped value) -> String?
 
   def self.db_now: () -> String
-
-  def self.rfc2822: (Time? t) -> String?
 
   def self.parse_time: (String str) -> Time
 

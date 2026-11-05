@@ -8,6 +8,7 @@ import (
 
 // Not a package var: net/http serves each request on its own goroutine, and Go has no goroutine-local storage
 var i18nLocaleByGoroutine sync.Map // uint64 → string
+var i18nConfigByGoroutine sync.Map // uint64 → string
 
 var i18nTable struct {
 	once sync.Once
@@ -16,6 +17,7 @@ var i18nTable struct {
 
 func I18nHost_reset_request() {
 	i18nLocaleByGoroutine.Delete(goroutineID())
+	i18nConfigByGoroutine.Delete(goroutineID())
 }
 
 func I18nHost_locale_name() string {
@@ -27,6 +29,18 @@ func I18nHost_locale_name() string {
 
 func I18nHost_set_locale_name(name string) string {
 	i18nLocaleByGoroutine.Store(goroutineID(), name)
+	return name
+}
+
+func I18nHost_config_name() string {
+	if v, ok := i18nConfigByGoroutine.Load(goroutineID()); ok {
+		return v.(string)
+	}
+	return ""
+}
+
+func I18nHost_set_config_name(name string) string {
+	i18nConfigByGoroutine.Store(goroutineID(), name)
 	return name
 }
 

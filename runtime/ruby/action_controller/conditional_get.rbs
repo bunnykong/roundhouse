@@ -11,7 +11,9 @@ module ActionController
     @body: String
     @content_type: String
     def self.body_sha256_hex: (String body) -> String
-    def commit_conditional_get!: (String request_method, String if_none_match) -> nil
+    def commit_conditional_get!: (String request_method, String if_none_match, ?String if_modified_since) -> nil
+    def conditional_get_unmodified?: (String if_modified_since, String? last_modified) -> bool
+    def conditional_get_http_time: (String? text) -> ::Time?
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
     def conditional_get_verb_ok?: () -> bool

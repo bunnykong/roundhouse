@@ -158,6 +158,12 @@ pub(super) fn emit_form_builder_inline(
             binding,
             ctx,
         ),
+        FormBuilderMethod::ColorField => {
+            emit_color_field(positional.first().copied(), opts.as_slice(), binding, ctx)
+        }
+        FormBuilderMethod::DatetimeLocalField => {
+            emit_datetime_local_field(positional.first().copied(), opts.as_slice(), binding, ctx)
+        }
     };
     wrap_field_errors(out, kind, positional.first().copied(), binding, ctx)
 }
@@ -551,27 +557,22 @@ fn emit_select_options(
                 map_loop_options(&container, selected.as_ref(), multiple, field_str, blank, ctx)?;
             Some((setup, loop_var))
         }
+        // `collect`, its alias: the pairs as `map`'s. A block answering one
+        // value per element runs as written under the scalar loop below,
+        // whatever its parameters; pairs the map loop can't inline go to
+        // the general fallback.
+        ExprNode::Send { method, block: Some(block), .. } if method.as_str() == "collect" => {
+            if let Some(found) = map_loop_options(&container, selected.as_ref(), multiple, field_str, blank.clone(), ctx) {
+                return Some(found);
+            }
+            if block_answers_array(block) {
+                return None;
+            }
+            Some(scalar_select_loop(&container, selected.as_ref(), multiple, field_str, blank, ctx))
+        }
         // Any other container expr — flat scalar loop (the corpus:
         // `@moderators`, `Category.pluck(:category)` — plain strings).
-        _ => {
-            let el = Symbol::from("_choice");
-            let el_ref = Expr::new(
-                Span::synthetic(),
-                ExprNode::Var { id: VarId(0), name: el.clone() },
-            );
-            let mut option = Vec::new();
-            push_dynamic_option(
-                &mut option,
-                to_s(el_ref.clone()),
-                to_s(el_ref),
-                &[],
-                selected.as_ref(),
-                multiple,
-            );
-            let (setup, var) =
-                each_loop(&container, el, string_interp(option), field_str, blank, ctx);
-            Some((setup, var))
-        }
+        _ => Some(scalar_select_loop(&container, selected.as_ref(), multiple, field_str, blank, ctx)),
     }
 }
 
@@ -717,7 +718,48 @@ fn collection_options(
     Some((setup, var))
 }
 
-/// `<coll>.map { |x| [text, value] / [text, {attrs}, value] }` — loop
+/// Whether a block's last expression is an array literal (`[text, value]`).
+fn block_answers_array(block: &Expr) -> bool {
+    let ExprNode::Lambda { body, .. } = &*block.node else { return false };
+    let last = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last(),
+        _ => Some(body),
+    };
+    last.is_some_and(|e| matches!(&*e.node, ExprNode::Array { .. }))
+}
+
+/// Whether `e` holds a `next` or `break` for the block it sits in (nested
+/// blocks keep their own).
+fn exits_block(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Next { .. } | ExprNode::Break { .. } => true,
+        ExprNode::Lambda { .. } => false,
+        node => {
+            let mut found = false;
+            node.for_each_child(&mut |child| found |= exits_block(child));
+            found
+        }
+    }
+}
+
+/// One `<option>` per element of `container`, its `to_s` as text and value.
+fn scalar_select_loop(
+    container: &Expr,
+    selected: Option<&Expr>,
+    multiple: bool,
+    field_str: &str,
+    blank: Vec<InterpPart>,
+    ctx: &ViewCtx,
+) -> (Vec<Expr>, Expr) {
+    let el = Symbol::from("_choice");
+    let el_ref = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: el.clone() });
+    let mut option = Vec::new();
+    push_dynamic_option(&mut option, to_s(el_ref.clone()), to_s(el_ref), &[], selected, multiple);
+    each_loop(container, el, string_interp(option), field_str, blank, ctx)
+}
+
+/// `<coll>.map { |x| [text, value] / [text, {attrs}, value] }` (or
+/// `collect`) — loop
 /// over the map SOURCE with the lambda's element exprs inlined (the
 /// loop rebinds the lambda's own param name, so the exprs read it
 /// directly).
@@ -733,11 +775,17 @@ fn map_loop_options(
     else {
         return None;
     };
-    if method.as_str() != "map" {
+    if !matches!(method.as_str(), "map" | "collect") {
         return None;
     }
-    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { return None };
-    if !extra_params.is_empty() {
+    let ExprNode::Lambda { extra_params, params, rest_param, body, .. } = &*block.node else { return None };
+    // One element parameter: the loop binds only that one.
+    if !extra_params.is_empty() || rest_param.is_some() || params.len() != 1 {
+        return None;
+    }
+    // The loop appends one option per element, so a `next` or `break`
+    // answering the block's value would skip it instead.
+    if exits_block(body) {
         return None;
     }
     let el = params.first().cloned()?;
@@ -1354,6 +1402,85 @@ fn emit_typed_input_field(
         expr: view_helpers_call("optional_value_attr", vec![value_read]),
     });
     append_attr_parts(&mut parts, opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<input type="color" …>` — Rails' `Tags::ColorField`, which always
+/// writes a value: an explicit `value:` as given, else the record's
+/// value lowercased when it holds `#` and six hex digits, else
+/// `#000000` (`validate_color_string`). A `value:` that is nil at
+/// render falls back to the record (`options["value"] ||= …`).
+fn emit_color_field(
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let field_str = field_sym.as_str();
+    let mut opts = opts.to_vec();
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!("<input type=\"color\"{}", name_id_attrs_for(binding, field_str, &opts)),
+    });
+    // A String literal `value:` stays an ordinary attribute; any other is
+    // decided at render.
+    let literal = |v: &Expr| matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } });
+    let value_pos = opts.iter().position(|(k, _)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "value")
+    });
+    if !value_pos.is_some_and(|i| literal(&opts[i].1)) {
+        let record = field_value_read(binding, field_sym.clone(), ctx);
+        let attr = match super::attr_parts::take_opt(&mut opts, "value") {
+            Some(v) if !matches!(&*v.node, ExprNode::Lit { value: Literal::Nil }) => {
+                view_helpers_call("color_field_value_attr", vec![v, record])
+            }
+            _ => view_helpers_call("color_value_attr", vec![record]),
+        };
+        parts.push(InterpPart::Expr { expr: attr });
+    }
+    append_attr_parts(&mut parts, &opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<input type="datetime-local" …>` — Rails' `Tags::DatetimeLocalField`.
+/// A String literal `value:` is written as given and `value: nil` writes
+/// none; with no `value:`, a datetime or date column's value is formatted
+/// `%Y-%m-%dT%T` (`datetime_local_value_attr`) and a string column's is
+/// written as given. Analyze refuses the rest (`datetime_local_refusal`).
+fn emit_datetime_local_field(
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let field_str = field_sym.as_str();
+    let mut opts = opts.to_vec();
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!("<input type=\"datetime-local\"{}", name_id_attrs_for(binding, field_str, &opts)),
+    });
+    match super::attr_parts::take_opt(&mut opts, "value") {
+        Some(v) if matches!(&*v.node, ExprNode::Lit { value: Literal::Nil }) => {}
+        Some(v) => opts.insert(0, (lit_sym(Symbol::from("value")), v)),
+        None => {
+            let is_time = ctx
+                .time_columns
+                .get(binding.metadata_class(ctx).unwrap_or(""))
+                .is_some_and(|names| names.contains(field_str));
+            let helper = if is_time { "datetime_local_value_attr" } else { "optional_value_attr" };
+            let read = field_value_read(binding, field_sym.clone(), ctx);
+            parts.push(InterpPart::Expr { expr: view_helpers_call(helper, vec![read]) });
+        }
+    }
+    append_attr_parts(&mut parts, &opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
     vec![accumulator_append_call(string_interp(parts), ctx)]
 }

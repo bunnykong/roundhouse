@@ -127,6 +127,15 @@ class PublicationBoundary(unittest.TestCase):
 
 
 class Routing(unittest.TestCase):
+    def test_shared_controller_base_runs_every_extra_language(self):
+        for suffix in ("rb", "rbs"):
+            with self.subTest(suffix=suffix):
+                plan = ci.select([f"runtime/ruby/action_controller/base.{suffix}"])
+                self.assertIn("compare-extra", plan["jobs"])
+                self.assertEqual(plan["extra_compare"], ci.EXTRA_COMPARE_TARGETS)
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("render_json_encoder_spinel", plan["spinel_tests"])
+
     def test_websocket_lifecycle_sources_and_helpers_run_the_native_suite(self):
         for path in [
             "runtime/spinel/tep/net.rb", "runtime/spinel/tep/server_threaded.rb",
@@ -667,6 +676,26 @@ class Routing(unittest.TestCase):
                     | ({"compare-jruby"} if binary in {"param_binds_values", "param_binds_cleanup"} else set()),
                 )
 
+    def test_object_blank_owns_its_runtime_lowering_and_native_suite(self):
+        for path in [
+            "runtime/ruby/active_support_ext.rb",
+            "src/lower/blank.rs",
+            "src/lower/mod.rs",
+            "src/lower/jbuilder_to_library/mod.rs",
+            "tests/object_blank.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("object_blank", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
+    def test_conditional_value_grouping_keeps_native_coverage(self):
+        for path in ["src/emit/ruby.rs", "src/emit/ruby/expr.rs", "tests/conditional_expression_parens.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("conditional_expression_parens", plan["spinel_tests"])
+
     def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
         for path in [
             "src/lower/arel/visitor.rs",
@@ -904,6 +933,9 @@ class Routing(unittest.TestCase):
             "runtime/spinel/http_stub.rbs": "spinel_net_http_start",
             "runtime/spinel/tcp_socket_stub.rb": "spinel_net_http_start",
             "runtime/spinel/tcp_socket_stub.rbs": "spinel_net_http_start",
+            "tests/spinel_net_http_stream.rb": "spinel_net_http_start",
+            "tests/spinel_net_http_raise.rb": "spinel_net_http_start",
+            "tests/spinel_net_http_transport.rb": "spinel_net_http_start",
         }
         for path, binary in cases.items():
             with self.subTest(path=path):
@@ -1433,6 +1465,55 @@ class Results(unittest.TestCase):
                     ci.spinel_toolchain_shard(tests, 0, timings=ci.load_spinel_timings(raw)),
                     ci.spinel_toolchain_shard(tests, 0),
                 )
+
+    def test_bundled_tests_recorded_with_their_compile_share_spread_across_shards(self):
+        # #1781: a test whose contract runs from a shared bundle finishes in well under a second, and
+        # recording only that put every bundled test on one shard, which then paid all their compiles.
+        heavy = {"heavy0": 600, "heavy1": 500, "heavy2": 400}
+        bundled = [f"bundled{i:02}" for i in range(16)]
+        share = 60
+        true_cost = {**heavy, **{t: 1 + share for t in bundled}}
+        tests = sorted(true_cost)
+
+        def plan(recorded):
+            timings = {"toolchain": {**heavy, **{t: recorded for t in bundled}}}
+            shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(4)]
+            self.assertEqual(sorted(t for s in shards for t in s), tests)
+            loads = [sum(true_cost[t] for t in s) for s in shards]
+            loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
+            return shards, loads
+
+        shards, loads = plan(recorded=1)
+        self.assertEqual(max(sum(t in bundled for t in s) for s in shards), len(bundled))
+        self.assertGreater(max(loads) - min(loads), len(bundled) * share // 2)
+        shards, loads = plan(recorded=1 + share)
+        self.assertLessEqual(max(sum(t in bundled for t in s) for s in shards), len(bundled) // 2)
+        self.assertLess(max(loads) - min(loads), max(heavy.values()))
+
+    def test_run_tests_charges_each_bundled_test_its_share_of_the_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "records.jsonl"
+            bundle = Path(tmp) / "bundle"
+            bundle.mkdir()
+            for raw, expected in [
+                ('{"a": 120.4, "c": 50, "b": "slow", "d": -1}', {"a": 120, "b": 1}),
+                ("not json", {"a": 1, "b": 1}),
+                ("[]", {"a": 1, "b": 1}),
+                (None, {"a": 1, "b": 1}),
+            ]:
+                with self.subTest(raw=raw):
+                    out.unlink(missing_ok=True)
+                    (bundle / "seconds.json").unlink(missing_ok=True)
+                    if raw is not None:
+                        (bundle / "seconds.json").write_text(raw)
+                    env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": str(out), "RH_SPINEL_BUNDLE": str(bundle)}
+                    subprocess.run(
+                        ["python3", spec.origin, "run-tests", "--kind", "toolchain", "--parallel", "2",
+                         "--", "true"],
+                        input="a\nb\n", capture_output=True, text=True, env=env, check=True,
+                    )
+                    records = [json.loads(line) for line in out.read_text().splitlines()]
+                    self.assertEqual({r["name"]: r["seconds"] for r in records}, expected)
 
     def test_merge_averages_passing_records_into_the_last_seconds(self):
         merged = ci.merge_timings(

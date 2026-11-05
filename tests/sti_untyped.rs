@@ -10,14 +10,14 @@
 //!
 //!     ruby tests/sti_untyped/oracle.rb
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-sti-untyped-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir(&format!("roundhouse-sti-untyped-{name}"));
     dir
 }
 

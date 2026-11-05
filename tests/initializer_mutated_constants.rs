@@ -10,6 +10,8 @@
 //! only reads the constant, defines a top-level constant of its own, or
 //! calls the owner, leaves the fold alone.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -189,8 +191,7 @@ fn an_alias_one_initializer_writes_and_another_mutates() {
 #[test]
 fn an_unreadable_boot_directory_is_an_error() {
     use std::os::unix::fs::PermissionsExt;
-    let root = std::env::temp_dir().join(format!("roundhouse-boot-unreadable-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-boot-unreadable");
     let routes = "Rails.application.routes.draw do\nend\n";
     for (path, body) in [
         ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"kind\"\n  end\nend\n"),

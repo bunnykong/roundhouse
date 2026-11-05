@@ -4,6 +4,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -126,7 +128,6 @@ end
 }
 
 fn app(root: &Path, files: &[(&str, &str)]) {
-    let _ = std::fs::remove_dir_all(root);
     for (path, text) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
@@ -147,7 +148,7 @@ fn check(root: &Path) -> String {
 
 #[test]
 fn a_branch_that_changes_visibility_stays_refused_by_name() {
-    let root = std::env::temp_dir().join(format!("roundhouse-conditional-definitions-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-conditional-definitions");
     app(
         &root,
         &[
@@ -315,8 +316,7 @@ end
     const SCRIPT: &str = "p Widget.new.report\n";
     const EXPECTED: &str = "[\"7.1+\", \"8.1+\", \"8.2+\", \"after nested\", false, true, \"s\"]\n";
 
-    let root = std::env::temp_dir().join(format!("roundhouse-nested-conditional-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-nested-conditional");
     std::fs::create_dir_all(root.join("lib")).unwrap();
     std::fs::write(root.join("lib/vc.rb"), GEM).unwrap();
     std::fs::write(root.join("widget.rb"), WIDGET).unwrap();

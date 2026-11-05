@@ -192,6 +192,19 @@ pub const FINDER_DISPATCH_FALLBACK: u64 = 1 << 48;
 pub const IMPLICIT_MODEL_FINDER_RECEIVER: u64 = 1 << 49;
 /// Unknown-hook dynamic dispatch has no established emitted implementation.
 pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 50;
+/// A bare constant read in a `class << self` body: Ruby looks it up from the singleton class, not the class.
+pub const SINGLETON_CREF_CONST_REF: u64 = 1 << 51;
+/// A `raise NameError` standing for such a read Ruby itself cannot resolve.
+pub const SINGLETON_NAME_ERROR: u64 = 1 << 53;
+/// A constant read the code expects may be absent: under a rescue of
+/// StandardError, or after a `return … unless defined?(…)` of its root.
+pub const ABSENCE_GUARDED: u64 = 1 << 54;
+/// A `raise NameError` standing for such a read of a constant nothing defines.
+pub const GUARDED_NAME_ERROR: u64 = 1 << 55;
+/// A nested `def` in a method no call reaches: its load-time calls were expanded in place.
+pub const UNCALLED_DEFINER: u64 = 1 << 56;
+/// An integer literal wider than 64 bits, built from 32-bit limbs: the ruby family's Integer holds it, a fixed-width one does not.
+pub const WIDE_INTEGER_LITERAL: u64 = 1 << 57;
 
 /// On a route-helper call `lower::route_format_suffix` renamed for its
 /// literal `format:` (`widget_url(w, format: :json)` to

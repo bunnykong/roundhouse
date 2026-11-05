@@ -9,6 +9,8 @@
 //! Array. The ingested analysis keeps the element type; a target that
 //! stores the Array retypes it before its analysis.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
@@ -66,8 +68,7 @@ fn warnings(target: &str) -> Vec<String> {
 }
 
 fn warnings_for(target: &str, files: &[(&str, &str)], tag: &str) -> Vec<String> {
-    let root = std::env::temp_dir().join(format!("roundhouse-array-columns-{tag}-{target}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("roundhouse-array-columns-{tag}-{target}"));
     for &(path, body) in files {
         let file = root.join("app_src").join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

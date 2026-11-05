@@ -5,6 +5,8 @@
 //! `recv.attr ||= v`, so the guard was gone and a nil receiver raised
 //! NoMethodError. A `request.details&.profile_id ||= …` hit it on every request
 //! that carries no details.
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -92,8 +94,7 @@ fn app() -> emit_and_run::Overlay {
 }
 
 fn native() -> String {
-    let dir = std::env::temp_dir().join(format!("rh_safe_nav_op_assign_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("rh_safe_nav_op_assign");
     std::fs::write(dir.join("probe.rb"), format!("{SOURCE}\n{SCRIPT}")).unwrap();
     let out = Command::new("ruby").arg("probe.rb").current_dir(&dir).output().expect("ruby is on PATH");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();

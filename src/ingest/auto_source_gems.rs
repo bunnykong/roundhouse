@@ -98,6 +98,13 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
             consider(parent.0.as_str(), from_gem);
         }
     }
+    // Not only bodies and superclasses: a module the class mixes in names its gem too (fugit's `include Raabro`).
+    for lc in &app.library_classes {
+        for (i, module) in lc.includes.iter().enumerate() {
+            let from_gem = lc.include_spans.get(i).is_some_and(|span| in_source_file(span.file));
+            consider(module.0.as_str(), from_gem);
+        }
+    }
     fn visit(e: &Expr, f: &mut dyn FnMut(&Expr, &str)) {
         if let ExprNode::Const { path } = &*e.node {
             let joined = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");

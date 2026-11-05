@@ -6,6 +6,8 @@
 //! and emission, so two apps never see each other's facts, whatever order
 //! or thread they are processed in. An app that lists none is unchanged.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
@@ -150,8 +152,7 @@ fn a_rails_dependent_gem_another_fact_loads_is_refused_across_extensions() {
 #[test]
 fn symbolic_links_to_extension_directories_are_refused() {
     use std::os::unix::fs::symlink;
-    let root = std::env::temp_dir().join(format!("roundhouse_extension_directory_links_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse_extension_directory_links");
     let app = root.join("app");
     let outside = root.join("outside");
     std::fs::create_dir_all(app.join("config")).unwrap();
@@ -168,8 +169,7 @@ fn symbolic_links_to_extension_directories_are_refused() {
 #[test]
 fn symbolic_links_to_extension_files_load_shared_facts() {
     use std::os::unix::fs::symlink;
-    let root = std::env::temp_dir().join(format!("roundhouse_extension_file_links_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse_extension_file_links");
     let app = root.join("app");
     let outside = root.join("outside");
     std::fs::create_dir_all(app.join("config/ext")).unwrap();
@@ -192,8 +192,7 @@ fn symbolic_links_to_extension_files_load_shared_facts() {
 #[test]
 fn dangling_extension_file_links_are_errors_not_absent_files() {
     use std::os::unix::fs::symlink;
-    let root = std::env::temp_dir().join(format!("roundhouse_extension_dangling_links_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse_extension_dangling_links");
     std::fs::create_dir_all(root.join("config/ext")).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
     std::fs::write(root.join("roundhouse.yml"), "extensions: [config/ext]\n").unwrap();
@@ -329,8 +328,7 @@ fn engine_files(rails_dependent: bool) -> Vec<(&'static str, &'static str)> {
 #[test]
 fn the_ruby_target_refuses_a_rails_dependent_constant_with_the_evidence() {
     let transpile = |rails_dependent: bool| {
-        let root = std::env::temp_dir().join(format!("roundhouse_rails_dependent_{rails_dependent}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch::dir(&format!("roundhouse_rails_dependent_{rails_dependent}"));
         for (path, text) in engine_files(rails_dependent) {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

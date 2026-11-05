@@ -2,6 +2,8 @@
 //! contract a CI gate reads, so the cases that must NOT report clean
 //! are pinned here.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(args: &[&str]) -> (i32, String) {
@@ -34,14 +36,10 @@ fn a_directory_without_app_is_not_a_clean_app() {
 
 #[test]
 fn malformed_test_path_configuration_is_not_a_clean_app() {
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse_bad_test_paths_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
+    let root = scratch::dir(&format!("roundhouse_bad_test_paths_{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
-    ));
+            .as_nanos()));
     std::fs::create_dir_all(root.join("app")).expect("create app directory");
     std::fs::write(root.join("roundhouse.yml"), "test_paths: test/unit\n").expect("write config");
     let app = root.to_str().expect("temporary path");
@@ -68,10 +66,7 @@ fn the_store_fixture_checks_clean() {
 
 #[test]
 fn continue_writes_inventory_json_and_prints_hotspots() {
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse-inventory-{}",
-        std::process::id()
-    ));
+    let root = scratch::dir("roundhouse-inventory");
     for (path, source) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),
@@ -103,7 +98,7 @@ fn continue_writes_inventory_json_and_prints_hotspots() {
 /// unsupported, but survey mode must ledger the declaration and its provider.
 #[test]
 fn alba_rejections_are_ledgered_without_reporting_executable_support() {
-    let root = std::env::temp_dir().join(format!("roundhouse-207-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-207");
     for (path, source) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),

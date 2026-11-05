@@ -1,3 +1,5 @@
+#[path = "support/scratch.rs"]
+mod scratch;
 #[cfg(all(target_os = "linux", debug_assertions))]
 #[path = "support/test_subprocess.rs"]
 mod test_subprocess;
@@ -359,8 +361,7 @@ fn strict_emit_ceiling_fails_an_ingest_abort_that_prints_no_error_line() {
         .and_then(|step| step["run"].as_str())
         .expect("strict-emit ceiling")
         .to_owned();
-    let dir = std::env::temp_dir().join(format!("roundhouse-ceiling-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-ceiling");
     let step = |bin_body: &str, ceiling: &str| {
         let bin = dir.join("roundhouse");
         fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
@@ -405,11 +406,7 @@ fn test_backtraces_retain_library_and_integration_source_locations() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse-backtrace-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("roundhouse-backtrace-{unique}"));
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -716,11 +713,7 @@ fn rust_identity_ci_guard_requires_execution_and_propagates_failure() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "rust-identity-ci-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("rust-identity-ci-{unique}"));
     let cargo = root.join("cargo");
     fs::write(
         &cargo,
@@ -857,8 +850,7 @@ fn archive_smoke_reuses_setup_ruby_cache_without_skipping_readme_execution() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("archive-bundle-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("archive-bundle-{unique}"));
     let output = std::process::Command::new("bash")
         .args([
             "-euo",
@@ -927,8 +919,7 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("framework-loop-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("framework-loop-{unique}"));
     // `cargo test --no-run` answers each suite's binary; the binary logs how it ran and fails for `fails`.
     let cargo = root.join("cargo");
     fs::write(
@@ -1268,8 +1259,7 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("full-preflight-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("full-preflight-{unique}"));
     for (name, script) in [(
         "gh",
         "#!/bin/sh\nprintf 'called\\n' >> \"$GH_LOG\"\n[ \"$MOCK_SPINEL\" != unavailable ] || exit 1\nprintf '%s\\n' \"$MOCK_SPINEL\"\n",

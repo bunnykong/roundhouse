@@ -14,6 +14,8 @@
 //! `"12"`; with `allow_nil:`/`allow_blank:` the call was refused. It now
 //! reads the number the validator parses (`ActiveSupport.numericality_number`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -92,8 +94,7 @@ fn an_untyped_attributes_string_is_parsed_as_a_number_on_ruby() {
 /// Warnings `roundhouse --target <target>` prints for the real-blog app with
 /// the form added.
 fn cli_warnings(target: &str, tag: &str) -> Vec<String> {
-    let root = std::env::temp_dir().join(format!("roundhouse-numericality-untyped-{tag}-{target}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("roundhouse-numericality-untyped-{tag}-{target}"));
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     let status = std::process::Command::new("cp")
@@ -166,8 +167,7 @@ fn a_strict_target_refuses_an_untyped_numericality_without_allow() {
 /// way: its settings form is the CLI's, file for file.
 #[test]
 fn the_site_archive_emits_a_strict_target_as_the_cli_does() {
-    let root = std::env::temp_dir().join(format!("roundhouse-numericality-untyped-archive-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-numericality-untyped-archive");
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
@@ -197,8 +197,7 @@ fn the_site_archive_emits_a_strict_target_as_the_cli_does() {
 /// untyped `numericality:` rule it dropped.
 #[test]
 fn archives_and_preview_report_the_refused_rule() {
-    let root = std::env::temp_dir().join(format!("roundhouse-numericality-untyped-report-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-numericality-untyped-report");
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
@@ -227,8 +226,7 @@ fn archives_and_preview_report_the_refused_rule() {
 /// the rule, so the archive build reports no refusal for it.
 #[test]
 fn the_blog_archive_reports_no_refusal() {
-    let root = std::env::temp_dir().join(format!("roundhouse-numericality-untyped-blog-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-numericality-untyped-blog");
     let source = root.join("app");
     std::fs::create_dir_all(&root).unwrap();
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());

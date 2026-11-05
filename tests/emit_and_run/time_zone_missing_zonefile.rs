@@ -1,6 +1,7 @@
+#[path = "../support/scratch.rs"]
+mod scratch;
 use super::emit_and_run;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A `TZDIR` tree that mirrors `/usr/share/zoneinfo` except for one
 /// zone file, deliberately left out. Reproduces, on any host (#1062:
@@ -21,17 +22,7 @@ fn zoneinfo_missing(missing: &str) -> PathBuf {
     );
     let (area, location) = missing.split_once('/').expect("missing is \"Area/Location\"");
 
-    // Tests in this binary run in parallel: a per-process id alone
-    // collides when two tests omit the same zone, as `scratch_dir` in
-    // `support/emit_and_run.rs` notes for its own counter.
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
-        "roundhouse-zoneinfo-missing-{}-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed),
-        missing.replace('/', "-")
-    ));
-    std::fs::create_dir_all(&dir).expect("mkdir scratch zoneinfo");
+    let dir = scratch::dir(&format!("roundhouse-zoneinfo-missing-{}", missing.replace('/', "-")));
 
     for entry in std::fs::read_dir(real).expect("read /usr/share/zoneinfo") {
         let entry = entry.expect("dirent");

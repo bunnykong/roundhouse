@@ -4,6 +4,8 @@
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,7 +18,7 @@ fn check(initializer: &str, run_hooks: &str) -> String {
 }
 
 fn check_with(initializer: &str, run_hooks: &str, account_extra: &str, extra: &[(&str, &str)]) -> String {
-    let root = std::env::temp_dir().join(format!("rh_load_hook_include_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
+    let root = scratch::dir(&format!("rh_load_hook_include_{}", NEXT.fetch_add(1, Ordering::SeqCst)));
     let model = format!("class Account < ApplicationRecord\n  #: -> untyped\n  def use = [hello.succ, things.first, hello.nope]\n{account_extra}\n  {run_hooks}\nend\n");
     let files = [
         ("roundhouse.yml", "test_paths:\n  - test\n".to_string()),

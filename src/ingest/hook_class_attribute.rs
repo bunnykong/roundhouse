@@ -166,8 +166,8 @@ fn expand_model_bodies(app: &mut App) {
             Some((class.clone(), ClassId(Symbol::from(found))))
         })
         .collect();
-    // `self.name` per attribute a class above `class` declares and
-    // `class` neither declares nor defines a reader for.
+    // `self.name` and `self.name=` per attribute a class above `class`
+    // declares and `class` neither declares nor defines a reader for.
     let readers = |class: &ClassId, defined: &dyn Fn(&Symbol) -> bool| -> Vec<MethodDef> {
         let Some(parent) = parents.get(class) else { return Vec::new() };
         let mut inherited: Vec<&Symbol> = Vec::new();
@@ -179,16 +179,21 @@ fn expand_model_bodies(app: &mut App) {
             seen += 1;
         }
         let up = format!("::{}", parent.0.as_str());
+        // Not the reader alone: a write in this class's body (`self.name = …`) then sets an ivar its own setter declares, as Ruby's inherited one does.
         let src: String = inherited
             .iter()
             .filter(|name| !declared.iter().any(|(owner, own)| owner == class && own == **name) && !defined(name))
-            .map(|name| class_reader(name.as_str(), Some(&up)))
+            .map(|name| {
+                let n = name.as_str();
+                format!("{}  def self.{n}=(value)\n    @{w} = true\n    @{n} = value\n  end\n", class_reader(n, Some(&up)), w = self::written(n))
+            })
             .collect();
         if src.is_empty() {
             return Vec::new();
         }
         defs(&src)
             .into_iter()
+            .filter(|method| !defined(&method.name))
             .map(|mut method| {
                 method.enclosing_class = class.0.as_str().rsplit("::").next().map(Symbol::from);
                 method

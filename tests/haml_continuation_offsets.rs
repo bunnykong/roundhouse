@@ -7,6 +7,8 @@
 //! `SourceFile::line_col`. See tests/view_engines.rs for the narrower
 //! in-process regression.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(args: &[&str]) -> (Option<i32>, String, String) {
@@ -24,11 +26,7 @@ fn check(args: &[&str]) -> (Option<i32>, String, String) {
 
 #[test]
 fn continuation_with_a_multibyte_literal_does_not_panic() {
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse-1048-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-1048");
     for (path, source) in [
         (
             "app/models/application_record.rb",

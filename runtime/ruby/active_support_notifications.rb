@@ -104,7 +104,7 @@ module ActiveSupport
       start = monotonic_now
       value = nil
       begin
-        value = block.nil? ? nil : yield
+        value = block.nil? ? nil : yield(payload)
       ensure
         publish(name, start, monotonic_now, payload)
       end

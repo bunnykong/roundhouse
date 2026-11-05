@@ -1,6 +1,8 @@
 //! A targeted smoke consumes the same bytes as full publication, without
 //! requiring website assets, WASM or unselected archives.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,7 +15,7 @@ fn selected_cli_archives_match_full_site_bytes_and_clear_stale_targets() {
             .unwrap()
             .as_nanos();
         let root =
-            std::env::temp_dir().join(format!("selected-archives-{}-{unique}", std::process::id()));
+            scratch::dir(&format!("selected-archives-{unique}"));
         let selected = root.join("selected");
         let full = root.join("full");
         fs::create_dir_all(selected.join("browse")).unwrap();

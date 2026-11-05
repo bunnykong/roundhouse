@@ -17,8 +17,9 @@ module RoundhouseJsonColumn
     JSON.parse(serialized)
   end
 
+  # Not `JSON.generate`: Rails 8.1's JSON coder and json column encode through ActiveSupport's as_json (a Time as ISO 8601), unescaped.
   def self.dump(value)
     return nil if value.nil?
-    JSON.generate(value)
+    ActiveSupport::JSON.encode_without_escape(value)
   end
 end

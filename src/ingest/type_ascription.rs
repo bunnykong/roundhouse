@@ -181,7 +181,7 @@ pub(super) fn is_modifier_body(file: &str, len: usize, end: usize) -> bool {
 pub(super) enum Trailing {
     /// `#: as Type` / `#: Type` — the value has this type.
     Type(Ty),
-    /// `#: as !nil` — RBS inline's `T.must`: the value, with nil ruled out.
+    /// `#: as !nil` — the value, with nil ruled out by the author's word.
     NotNil,
 }
 
@@ -204,19 +204,68 @@ pub(super) fn trailing_ascription(file: &str, end: usize) -> Option<Trailing> {
 }
 
 /// Apply a trailing ascription to `value`: a `Cast` to the declared
-/// type, or `value.not_nil!` for `#: as !nil` — the method core writes
-/// instead of `T.must`, which the analyzer already reads as "the
-/// receiver, nil removed".
-pub(super) fn ascribe_trailing(value: Expr, trailing: Option<Trailing>) -> Expr {
+/// type, or for `#: as !nil` the unchecked non-nil reading
+/// [`not_nil_ascription`] builds. Both are the author's word about the
+/// value, which Ruby never evaluates.
+pub(super) fn ascribe_trailing(
+    value: Expr,
+    trailing: Option<Trailing>,
+    location: &ruby_prism::Location<'_>,
+) -> Expr {
     match trailing {
         Some(Trailing::Type(ty)) => ascribe(value, Some(ty)),
-        Some(Trailing::NotNil) => not_nil(value),
+        Some(Trailing::NotNil) => not_nil_ascription(value, location),
         None => value,
     }
 }
 
-/// A generated non-nil assertion carries a refusal until nil-check semantics
-/// have a shared executable implementation.
+/// `x #: as !nil`: the author says the value is not nil. To Ruby the
+/// annotation is a comment, so native Ruby runs the value on unchecked,
+/// nil included (an `rbs-inline` file has no runtime hook; `T.must` and
+/// type_toolkit's `not_nil!` are the spellings that check). The emitted
+/// value is therefore the value itself on every path, while the typer
+/// still reads the assertion: the value is bound once and tested,
+/// `if (__not_nil_N = x).nil? then __not_nil_N else __not_nil_N end`,
+/// and the nil side is an author cast to `bot`
+/// ([`SOURCE_TYPE_ASCRIPTION`](crate::expr::SOURCE_TYPE_ASCRIPTION),
+/// which the Ruby tree writes as its bare value). The branches' union is
+/// the value's type with nil ruled out, exactly what `#: as Type` does
+/// for a written type, and a nil that does arrive flows on as it does
+/// natively. A local read is tested directly.
+fn not_nil_ascription(value: Expr, location: &ruby_prism::Location<'_>) -> Expr {
+    use crate::ident::{Symbol, VarId};
+    let span = value.span;
+    let (tested, read) = match &*value.node {
+        ExprNode::Var { .. } => (value.clone(), value),
+        _ => {
+            let stem = format!("__not_nil_{}", span.start);
+            let mut name = stem.clone();
+            let mut suffix = 0;
+            while sources::generated_local_is_reserved(location, &name) {
+                suffix += 1;
+                name = format!("{stem}_{suffix}");
+            }
+            let name = Symbol::from(name);
+            let bind = Expr::new(
+                span,
+                ExprNode::Assign { target: crate::expr::LValue::Var { id: VarId(0), name: name.clone() }, value },
+            );
+            (bind, Expr::new(span, ExprNode::Var { id: VarId(0), name }))
+        }
+    };
+    let cond = Expr::new(
+        span,
+        ExprNode::Send { recv: Some(tested), method: Symbol::from("nil?"), args: Vec::new(), block: None, parenthesized: false },
+    );
+    // Built directly: `ascribe` keeps an open type (`bot` is one) off a
+    // value, and here `bot` is the point.
+    let mut ruled_out = Expr::new(span, ExprNode::Cast { value: read.clone(), target_ty: Ty::Bottom });
+    ruled_out.decisions |= crate::expr::SOURCE_TYPE_ASCRIPTION;
+    Expr::new(span, ExprNode::If { cond, then_branch: ruled_out, else_branch: read })
+}
+
+/// `T.must_because`'s non-nil assertion carries a refusal until its
+/// reason block has an executable lowering.
 pub(super) fn not_nil(value: Expr) -> Expr {
     let span = value.span;
     let mut expr = Expr::new(

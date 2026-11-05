@@ -22,12 +22,42 @@ module I18n
   class InvalidLocale < ArgumentError
   end
 
+  # Not the object itself kept per thread: a strict target's host holds Strings, so the thread keeps the config's class name and its locale, and each read builds one.
+  class Config
+    def initialize(locale_name = "")
+      @locale_name = locale_name
+    end
+
+    def locale_name
+      @locale_name
+    end
+
+    def default_locale
+      I18n.app_default_locale
+    end
+
+    def available_locales
+      I18n.app_available_locales
+    end
+  end
+
+  def self.config
+    config_named(I18nHost.config_name, I18nHost.locale_name)
+  end
+
+  # Not the locale left as it is: Rails' config holds the locale, so a fresh one starts at its default and the one put back brings its own.
+  def self.config=(value)
+    I18nHost.set_config_name(config_name_of(value))
+    I18nHost.set_locale_name(value.locale_name)
+    value
+  end
+
   def self.default_locale
-    app_default_locale
+    config_default_locale
   end
 
   def self.available_locales
-    app_available_locales
+    config_available_locales
   end
 
   # The gem's set holds each locale as a String and a Symbol, so "en" and :en answer alike.
@@ -37,7 +67,7 @@ module I18n
 
   # Not `name.to_sym`: Crystal cannot make a Symbol when it runs, and every locale that passes is one of these.
   def self.available_named(name)
-    app_available_locales.find { |l| l.to_s == name }
+    config_available_locales.find { |l| l.to_s == name }
   end
 
   # The locale set for this thread, by name ("" when none is): a Symbol
@@ -50,7 +80,7 @@ module I18n
 
   def self.locale
     found = available_named(thread_locale_name)
-    found.nil? ? app_default_locale : found
+    found.nil? ? config_default_locale : found
   end
 
   # `I18n.locale = x`: an available locale, a Symbol or its String.
@@ -652,6 +682,22 @@ module I18n
 
   def self.app_available_locales
     [:en]
+  end
+
+  def self.config_named(name, locale_name)
+    I18n::Config.new(locale_name)
+  end
+
+  def self.config_name_of(config)
+    ""
+  end
+
+  def self.config_default_locale
+    app_default_locale
+  end
+
+  def self.config_available_locales
+    app_available_locales
   end
   # <<< generated: i18n-locales
 end

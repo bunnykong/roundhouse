@@ -9,6 +9,8 @@
 //! compile itself is `swift_toolchain` / `emit_and_run`'s ignored Swift
 //! tests, which CI runs.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use roundhouse::project::BuildTarget;
 
 #[path = "support/emit_and_run.rs"]
@@ -31,8 +33,7 @@ fn an_owner_temp_from_an_implicitly_unwrapped_ivar_is_not_optional() {
 /// stays optional.
 #[test]
 fn a_local_that_tests_an_ivar_for_nil_stays_optional() {
-    let out = std::env::temp_dir().join(format!("roundhouse-swift-store-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&out);
+    let out = scratch::dir("roundhouse-swift-store");
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse"))
         .args(["--target", "swift", "--allow-unsupported", "-o"])
         .arg(&out)

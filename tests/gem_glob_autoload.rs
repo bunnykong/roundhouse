@@ -5,6 +5,8 @@
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -41,8 +43,7 @@ p Paygate.autoload?(:BogusGateway)
 const EXPECTED: &str = "[]\n:ok\n[1, \"DECLINED\", true]\n[\"Paygate::BogusGateway\", \"Paygate::CardNetGateway\"]\nnil\n";
 
 fn native() -> String {
-    let dir = std::env::temp_dir().join(format!("rh_gem_glob_autoload_native_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh_gem_glob_autoload_native");
     for (path, text) in FILES {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -152,8 +153,7 @@ const SYM_EXPECTED: &str = "[:BitPay, :Mollie, :Paypal]\n\"https://paypal.test\"
 
 #[test]
 fn a_gem_glob_autoload_loop_naming_symbols_registers_each_constant_as_native() {
-    let dir = std::env::temp_dir().join(format!("rh_gem_glob_autoload_sym_native_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh_gem_glob_autoload_sym_native");
     for (path, text) in SYM_FILES {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

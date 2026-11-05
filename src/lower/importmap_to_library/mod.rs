@@ -31,6 +31,44 @@ use crate::ty::{Row, Ty};
 /// (`"application"` by default). Empty when the app has no
 /// importmap.
 pub fn lower_importmap_to_library_functions(app: &App) -> Vec<LibraryFunction> {
+    let mut out = app_importmap_functions(app);
+    out.extend(engine_importmap_functions(app));
+    out
+}
+
+/// `Importmap.pins_for_<module>`, the name an engine's import map is read by.
+pub fn engine_pins_name(module: &str) -> String {
+    format!("pins_for_{}", module.replace("::", "_").to_lowercase())
+}
+
+/// One `pins_for_<module>` per engine import map, the same records as `pins`.
+fn engine_importmap_functions(app: &App) -> Vec<LibraryFunction> {
+    let pin_record_ty = pin_record_ty();
+    let pins_ty = Ty::Array { elem: std::sync::Arc::new(pin_record_ty.clone()) };
+    app.engine_importmaps
+        .iter()
+        .map(|(module, importmap)| LibraryFunction {
+            module_path: vec![Symbol::from("Importmap")],
+            name: Symbol::from(engine_pins_name(module).as_str()),
+            params: Vec::new(),
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            body: build_pins_array(&importmap.pins, &pin_record_ty),
+            signature: Some(fn_sig(vec![], pins_ty.clone())),
+            effects: EffectSet::default(),
+            is_async: false,
+        })
+        .collect()
+}
+
+fn pin_record_ty() -> Ty {
+    let mut fields = indexmap::IndexMap::new();
+    fields.insert(Symbol::from("name"), Ty::Str);
+    fields.insert(Symbol::from("path"), Ty::Str);
+    Ty::Record { row: Row { fields: fields.into(), rest: None } }
+}
+
+fn app_importmap_functions(app: &App) -> Vec<LibraryFunction> {
     let Some(importmap) = app.importmap.as_ref() else {
         return Vec::new();
     };

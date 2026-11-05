@@ -16,6 +16,8 @@
 //! plain Struct for the record) against what Rails 8.1 + jbuilder 2.15
 //! render for the same templates and row.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -651,10 +653,7 @@ fn a_string_as_is_compared_like_a_symbol() {
 #[test]
 fn the_templates_render_what_jbuilder_renders() {
     let files = emitted();
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-jbuilder-partial-record-{}",
-        std::process::id()
-    ));
+    let dir = scratch::dir("roundhouse-jbuilder-partial-record");
     // The emitted tree as it is laid out, partial first. `app/views.rb`
     // is the views index a partial call requires; it holds nothing
     // these templates need.

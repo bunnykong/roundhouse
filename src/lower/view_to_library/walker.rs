@@ -468,6 +468,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // genuinely a statement (the prior TODO-append swallowed the
         // side effect and broke stack-walking templates).
         ExprNode::Send { recv: Some(_), block: None, .. } => vec![stmt.clone()],
+        ExprNode::Raise { .. } => vec![stmt.clone()],
         // A bare literal — most often the synthesized `nil` arm `<% unless
         // %>` lowers to — renders nothing and does nothing: nothing is
         // dropped, so no residue line.
@@ -1099,8 +1100,8 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     // View-helper classifier: `link_to`, `dom_id`, `pluralize`,
     // `truncate`, `turbo_stream_from`, `content_for(:slot)`, …. The
     // classifier matches bare Sends (no recv, no block) only.
-    if let ExprNode::Send { recv: None, method, args: sa, block: None, .. } = &*inner.node {
-        if let Some(kind) = classify_view_helper(method.as_str(), sa) {
+    if let ExprNode::Send { recv: None, method, args: sa, block: None, parenthesized } = &*inner.node {
+        if let Some(kind) = classify_template_helper(method.as_str(), sa, *parenthesized, ctx) {
             if let Some(call) = emit_view_helper_call(&kind, ctx) {
                 return vec![accumulator_append_call(call, ctx)];
             }
@@ -1257,6 +1258,56 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 // that no app in the corpus nested one. campfire does.
                 let cap_owned = next_capture_name(&ctx.accumulator);
                 let cap = cap_owned.as_str();
+                // `content_tag(name[, opts]) do … end`: Rails renders the
+                // block's markup as the tag's content and the second
+                // argument as its options. The runtime's `content_tag` takes
+                // no block, so the capture is a statement and its String the
+                // (already escaped) content of `content_tag_html`.
+                if recv.is_none()
+                    && method.as_str() == "content_tag"
+                    && params.is_empty()
+                    && extra_params.is_empty()
+                    && rest_param.is_none()
+                    && block_param.is_none()
+                    && (1..=2).contains(&sa.len())
+                {
+                    // The capture's statements share the view's scope with
+                    // every other flat capture (a `cache` body's included,
+                    // whose `__cache_io_N` restarts `next_capture_name`), so
+                    // the name is per site, as `emit_cached_fragment`'s are.
+                    let cap_owned = format!("__ctag_io_{}", inner.span.start);
+                    let cap = cap_owned.as_str();
+                    // Rails evaluates the name and options, in order,
+                    // before the block runs: each is read into a local
+                    // first, so the block neither reassigns what they read
+                    // nor runs ahead of a call in them.
+                    let mut stmts = Vec::new();
+                    let mut bound = 0;
+                    let args: Vec<Expr> = sa
+                        .iter()
+                        .map(|a| {
+                            // A literal `class:` Array is space-joined here, as
+                            // form_with's options are: strict targets render
+                            // an Array value with its `to_s`.
+                            let a = match &*a.node {
+                                ExprNode::Hash { entries, kwargs } => Expr::new(a.span, ExprNode::Hash {
+                                    entries: entries.iter().map(|(k, v)| (k.clone(), super::form_with::simplify_opts_value(k, v))).collect(),
+                                    kwargs: *kwargs,
+                                }),
+                                _ => a.clone(),
+                            };
+                            bind_before_block(rewrite_helpers_in_expr(&a, ctx), inner.span.start, &mut bound, &mut stmts)
+                        })
+                        .collect();
+                    let cap_ctx = ViewCtx { accumulator: cap.to_string(), ..ctx.with_locals(std::iter::empty()) };
+                    stmts.push(assign_accumulator_string_new(cap));
+                    stmts.extend(walk_body(body, &cap_ctx));
+                    let mut args = args.into_iter();
+                    let mut call_args = vec![args.next().expect("a content_tag name"), accumulator_result_ref(cap)];
+                    call_args.extend(args);
+                    stmts.push(accumulator_append_call(view_helpers_call("content_tag_html", call_args), ctx));
+                    return stmts;
+                }
                 // Every parameter the block binds is a local in its body, the
                 // optional and keyword ones too: a read of one is not a
                 // helper call.
@@ -1545,6 +1596,23 @@ fn coerce_to_s(expr: Expr) -> Expr {
     )
 }
 
+/// `classify_view_helper` for a bare Send in a template, except that a
+/// zero-arg Send without parens naming one of the view's locals is a
+/// read of it: a partial handed `csrf_meta_tags:` reads the caller's
+/// value, as Ruby takes the bare name for the lvar, not the helper.
+/// `csrf_meta_tags()` is still the call.
+fn classify_template_helper<'a>(
+    method: &str,
+    args: &'a [Expr],
+    parenthesized: bool,
+    ctx: &ViewCtx,
+) -> Option<ViewHelperKind<'a>> {
+    if args.is_empty() && !parenthesized && ctx.binds_local(method) {
+        return None;
+    }
+    classify_view_helper(method, args)
+}
+
 /// Recursively walk `expr` and rewrite any bare view-helper Send
 /// (`Send { recv: None, method, args, block: None }`) into its
 /// `ViewHelpers.*` form via `classify_view_helper` +
@@ -1592,7 +1660,7 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             block: None,
             parenthesized,
         } => {
-            if let Some(kind) = classify_view_helper(method.as_str(), args) {
+            if let Some(kind) = classify_template_helper(method.as_str(), args, *parenthesized, ctx) {
                 if let Some(mut call) = emit_view_helper_call(&kind, ctx) {
                     call.inherit_span(e.span);
                     return call;
@@ -1761,16 +1829,54 @@ fn next_capture_name(outer: &str) -> String {
     }
 }
 
+/// `e`, evaluated ahead of a `content_tag` block into
+/// `__ctag_<site>_<n>` locals pushed on `stmts`. A literal stays inline,
+/// and so does a Hash or Array literal, whose parts are bound in order:
+/// the options keep the shape the runtime's typed parameter reads.
+fn bind_before_block(e: Expr, site: u32, bound: &mut usize, stmts: &mut Vec<Expr>) -> Expr {
+    match &*e.node {
+        ExprNode::Lit { .. } => e,
+        ExprNode::Hash { entries, kwargs } => {
+            let kwargs = *kwargs;
+            let entries = entries
+                .iter()
+                .map(|(k, v)| {
+                    let k = bind_before_block(k.clone(), site, bound, stmts);
+                    (k, bind_before_block(v.clone(), site, bound, stmts))
+                })
+                .collect();
+            Expr::new(e.span, ExprNode::Hash { entries, kwargs })
+        }
+        ExprNode::Array { elements, style } => {
+            let style = *style;
+            let elements = elements.iter().map(|x| bind_before_block(x.clone(), site, bound, stmts)).collect();
+            Expr::new(e.span, ExprNode::Array { elements, style })
+        }
+        _ => {
+            *bound += 1;
+            let at = Symbol::from(format!("__ctag_{site}_{bound}"));
+            stmts.push(Expr::new(Span::synthetic(), ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: at.clone() },
+                value: e,
+            }));
+            var_ref(at)
+        }
+    }
+}
+
+/// Whether a helper's block is template markup: it writes the ERB buffer
+/// (`_buf = …`) somewhere, at its top level or inside the control flow it
+/// starts with (`<% if … %>…<% end %>`, an `each`, a `case`), which
+/// `walk_body` walks as it walks the rest.
 fn block_body_is_template(body: &Expr) -> bool {
-    let stmts: Vec<&Expr> = match &*body.node {
-        ExprNode::Seq { exprs } => exprs.iter().collect(),
-        _ => vec![body],
-    };
-    stmts.iter().any(|s| {
-        matches!(&*s.node,
-            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
-                if name.as_str() == "_buf")
-    })
+    if matches!(&*body.node,
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } if name.as_str() == "_buf")
+    {
+        return true;
+    }
+    let mut found = false;
+    body.node.for_each_child(&mut |c| found = found || block_body_is_template(c));
+    found
 }
 
 fn unwrap_to_s(expr: &Expr) -> &Expr {
@@ -1831,6 +1937,7 @@ mod tests {
     fn test_ctx() -> ViewCtx {
         ViewCtx {
             locals: Vec::new(),
+            ivar_params: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             accumulator: "io".to_string(),
@@ -1844,6 +1951,7 @@ mod tests {
             model_singulars: Default::default(),
             slug_models: Default::default(),
             bool_readers: Default::default(),
+            time_columns: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
             i18n: Default::default(),
@@ -1855,6 +1963,7 @@ mod tests {
             lexxy: false,
             lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
+            ivar_records: Default::default(),
             formats: vec!["html".to_string()],
             view_formats: Default::default(),
             multipart_partials: Default::default(),
@@ -1862,12 +1971,16 @@ mod tests {
             partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            yielding_partials: Default::default(),
+            record_carries_yield: false,
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
+            nilable_ivar_models: Default::default(),
             record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
             own_flash: Default::default(),
+            held_ivars: Vec::new(),
         }
     }
 
@@ -2552,6 +2665,103 @@ mod tests {
 
         assert!(!emitted.contains("to_s"), "string literal must not be coerced:\n{emitted}");
     }
+
+    const ZERO_ARG_HELPERS: [&str; 4] =
+        ["csrf_meta_tags", "csrf_meta_tag", "csp_meta_tag", "javascript_importmap_tags"];
+
+    fn bare(method: &str) -> Expr {
+        bare_call(method, false)
+    }
+
+    fn bare_call(method: &str, parenthesized: bool) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from(method),
+                args: Vec::new(),
+                block: None,
+                parenthesized,
+            },
+        )
+    }
+
+    /// `<name> || "dflt"`.
+    fn or_default(left: Expr) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::BoolOp {
+                op: BoolOpKind::Or,
+                surface: BoolOpSurface::Symbol,
+                left,
+                right: str_lit("dflt"),
+            },
+        )
+    }
+
+    fn emit_output(arg: Expr, ctx: &ViewCtx) -> String {
+        walk_body(&buf_append(send_to_s(arg)), ctx)
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn calls_a_helper(emitted: &str) -> bool {
+        ["csrf_meta_tags", "csp_meta_tag", "javascript_importmap_tags"]
+            .iter()
+            .any(|h| emitted.contains(&format!("ViewHelpers.{h}")))
+    }
+
+    #[test]
+    fn a_local_named_like_a_zero_arg_helper_is_read_not_called() {
+        for name in ZERO_ARG_HELPERS {
+            let ctx = ViewCtx { locals: vec![name.to_string()], ..test_ctx() };
+            for arg in [bare(name), or_default(bare(name))] {
+                let emitted = emit_output(arg, &ctx);
+                assert!(!calls_a_helper(&emitted), "`{name}` is the partial's local:\n{emitted}");
+                assert!(emitted.contains(&format!("{name}.to_s")) || emitted.contains(&format!("{name} ||")), "the local is still read:\n{emitted}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_arg_helper_without_a_local_is_still_the_helper() {
+        for name in ZERO_ARG_HELPERS {
+            for arg in [bare(name), or_default(bare(name))] {
+                let emitted = emit_output(arg, &test_ctx());
+                assert!(calls_a_helper(&emitted), "`{name}` is the helper:\n{emitted}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_parens_call_the_helper_past_a_local() {
+        for name in ZERO_ARG_HELPERS {
+            let ctx = ViewCtx { locals: vec![name.to_string()], ..test_ctx() };
+            for arg in [bare_call(name, true), or_default(bare_call(name, true))] {
+                let emitted = emit_output(arg, &ctx);
+                assert!(calls_a_helper(&emitted), "`{name}()` is the helper:\n{emitted}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_closure_ivar_named_like_a_helper_does_not_shadow_it() {
+        for name in ZERO_ARG_HELPERS {
+            let ctx = ViewCtx {
+                locals: vec![name.to_string()],
+                ivar_params: vec![name.to_string()],
+                ..test_ctx()
+            };
+            for arg in [bare(name), or_default(bare(name))] {
+                let emitted = emit_output(arg, &ctx);
+                assert!(calls_a_helper(&emitted), "`@{name}` leaves `{name}` the helper:\n{emitted}");
+            }
+            let emitted = emit_output(bare(name), &ctx.with_locals([name.to_string()]));
+            assert!(!calls_a_helper(&emitted), "a block param `{name}` is a local again:\n{emitted}");
+        }
+    }
 }
 
 
@@ -2719,7 +2929,9 @@ fn key_element(el: &Expr, ctx: &ViewCtx) -> Option<KeyPart> {
 ///
 /// `ivar_models` covers the other spelling: a view's `@story` is
 /// rewritten to a local by the time it gets here, and that map holds
-/// only names whose type IS a known model.
+/// only names whose type IS a known model. An ivar that may be nil
+/// (`@comment = Comment.first`) is not a record here, under either
+/// spelling: its key would call `cache_key_with_version` on nil.
 ///
 /// The type check stays first for the day these carry one.
 fn is_record(el: &Expr, ctx: &ViewCtx) -> bool {
@@ -2733,6 +2945,9 @@ fn is_record(el: &Expr, ctx: &ViewCtx) -> bool {
         }
         _ => return false,
     };
+    if ctx.nilable_ivar_models.contains(name) {
+        return false;
+    }
     if ctx.ivar_models.contains_key(name) {
         return true;
     }

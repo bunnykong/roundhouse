@@ -259,7 +259,7 @@ fn an_app_without_jobs_keeps_an_empty_registry() {
     let src = registry_source(&[], false);
     assert_eq!(
         src,
-        "  def self.perform(job_class, args)\n    false\n  end\n\n  def self.discards_deserialization_error(job_class)\n    false\n  end\n\n  def self.handler_for(job_class, e)\n    0\n  end\n\n  def self.retry_rule(id)\n    ActiveJob::RetryRule.new(\"\", 0.0, false, 0, \"\", false, 0, 0.0)\n  end\n\n  def self.sidekiq_retry(job_class)\n    \"true\"\n  end\n\n  def self.sidekiq_extra(job_class)\n    \"\"\n  end\n"
+        "  def self.perform(job_class, args)\n    false\n  end\n\n  def self.instantiate(job_class)\n    nil\n  end\n\n  def self.discards_deserialization_error(job_class)\n    false\n  end\n\n  def self.handler_for(job_class, e)\n    0\n  end\n\n  def self.retry_rule(id)\n    ActiveJob::RetryRule.new(\"\", 0.0, false, 0, \"\", false, 0, 0.0)\n  end\n\n  def self.sidekiq_retry(job_class)\n    \"true\"\n  end\n\n  def self.sidekiq_extra(job_class)\n    \"\"\n  end\n"
     );
 }
 

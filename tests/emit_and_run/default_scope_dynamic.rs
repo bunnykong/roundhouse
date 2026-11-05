@@ -1,3 +1,5 @@
+#[path = "../support/scratch.rs"]
+mod scratch;
 use super::emit_and_run;
 
 /// `default_scope { where(col: <expr>) if <cond> }`: a scope whose values
@@ -209,8 +211,7 @@ puts "dynamic default scope guards passed"
 /// keeps the model-DSL warning on every target.
 #[test]
 fn the_cli_reports_a_dynamic_default_scope_only_where_it_is_not_applied() {
-    let root = std::env::temp_dir().join(format!("roundhouse-default-scope-dyn-cli-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-default-scope-dyn-cli");
     for (path, body) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         ("app/models/current.rb", "class Current < ActiveSupport::CurrentAttributes\n  attribute :account_id #: Integer\nend\n"),

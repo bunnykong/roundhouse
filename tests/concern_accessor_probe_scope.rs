@@ -5,12 +5,14 @@
 //! start it. `ROUNDHOUSE_TIMINGS=1` prints one line per phase, which makes
 //! the probe observable as the `concern-accessor-surface` phase.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 const CONCERN: &str = "module Virtual\n  extend ActiveSupport::Concern\n  included { attr_accessor :scratch }\nend\n";
 
 fn check(name: &str, widget_body: &str) -> String {
-    let root = std::env::temp_dir().join(format!("rh_accessor_probe_scope_{}_{name}", std::process::id()));
+    let root = scratch::dir(&format!("rh_accessor_probe_scope_{name}"));
     let widget = format!("class Widget < ApplicationRecord\n  include Virtual\n{widget_body}end\n");
     let files = [
         ("roundhouse.yml", "test_paths:\n  - test\n".to_string()),

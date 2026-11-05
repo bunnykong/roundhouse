@@ -5,16 +5,25 @@ import java.io.File
 object I18nHost {
     // Not one property: Javalin serves requests on several Jetty worker threads at once
     private val locale: ThreadLocal<String> = ThreadLocal.withInitial { "" }
+    private val config: ThreadLocal<String> = ThreadLocal.withInitial { "" }
     @Volatile private var table: String? = null
 
     fun resetRequest() {
         locale.set("")
+        config.set("")
     }
 
     fun localeName(): String = locale.get()
 
     fun setLocaleName(name: String): String {
         locale.set(name)
+        return name
+    }
+
+    fun configName(): String = config.get()
+
+    fun setConfigName(name: String): String {
+        config.set(name)
         return name
     }
 

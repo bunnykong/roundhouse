@@ -1149,6 +1149,8 @@ fn build_helper_function(
     // caller.
     let has_format = route.path.ends_with("(.:format)");
     let path = route.path.strip_suffix("(.:format)").unwrap_or(&route.path);
+    let mount_root = format!("{path}/");
+    let path = if route.mount_root { mount_root.as_str() } else { path };
     let seg_params: Vec<String> = route
         .path_params
         .iter()

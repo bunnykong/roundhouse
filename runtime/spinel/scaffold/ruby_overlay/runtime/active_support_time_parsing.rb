@@ -175,17 +175,6 @@ module ActiveSupport
     )
   end
 
-  # Stdlib is the authority here (this tree already requires "time"),
-  # so the overlay delegates rather than re-derives — the CRuby lane's
-  # feed bytes are exactly what they were before the call site was
-  # grounded to a module function. The spinel twin composes the same
-  # shape from strftime and pins the zone tail; see its comment for why
-  # the two differ.
-  def self.rfc2822(t)
-    return nil if t.nil?
-    t.rfc2822
-  end
-
   # Normalize a temporal-writer value into the canonical storage form
   # above. Time → stamped; nil → nil (a nullable column being cleared:
   # `self.banned_at = nil`); String passes through untouched (already

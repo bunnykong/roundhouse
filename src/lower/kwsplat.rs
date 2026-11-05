@@ -141,6 +141,11 @@ struct Signatures {
     class_self: crate::det::HashSet<crate::span::Span>,
     /// Each class's and module's includes, for a method a mixin supplies.
     includes: HashMap<ClassId, Vec<ClassId>>,
+    /// Each instance method name in `methods`, with its owner when only
+    /// one app class defines it (`None` when several do), so
+    /// [`unique_instance_params`] is a lookup rather than a scan of
+    /// every method per send.
+    instance_owners: HashMap<Symbol, Option<ClassId>>,
 }
 
 pub fn apply_kwsplat_expansion(app: &mut App) -> Vec<Diagnostic> {
@@ -198,11 +203,26 @@ fn apply_to_self_sends(app: &mut App, sigs: &Signatures, diags: &mut Vec<Diagnos
             crate::analyze::controller_includes(controller),
         );
     }
+    // Each owner's own methods, indexed once per table. Scanning every
+    // signature in the app for every class on every class's ancestry was
+    // |classes| * depth * |methods|. An (owner, name) key is unique, so
+    // within one owner the order these are visited in cannot change which
+    // entry wins.
+    type ByOwner<'s> = HashMap<&'s ClassId, Vec<(&'s Symbol, &'s Vec<Param>)>>;
+    fn index_by_owner(table: &HashMap<(ClassId, Symbol), Vec<Param>>) -> ByOwner<'_> {
+        let mut by_owner: ByOwner<'_> = HashMap::default();
+        for ((owner, name), params) in table {
+            by_owner.entry(owner).or_default().push((name, params));
+        }
+        by_owner
+    }
+    let instance_by_owner = index_by_owner(&sigs.methods);
+    let class_by_owner = index_by_owner(&sigs.class_methods);
     let view_of = |id: &ClassId, class_side: bool| -> HashMap<Symbol, Vec<Param>> {
-        let table = if class_side {
-            &sigs.class_methods
+        let by_owner = if class_side {
+            &class_by_owner
         } else {
-            &sigs.methods
+            &instance_by_owner
         };
         let mut out: HashMap<Symbol, Vec<Param>> = HashMap::default();
         let mut queue: Vec<ClassId> = vec![id.clone()];
@@ -211,12 +231,10 @@ fn apply_to_self_sends(app: &mut App, sigs: &Signatures, diags: &mut Vec<Diagnos
             if !seen.insert(cid.clone()) {
                 continue;
             }
-            for ((owner, name), params) in table {
-                if *owner == cid {
-                    // Nearest definition wins: the class itself is
-                    // visited first, then what it reaches.
-                    out.entry(name.clone()).or_insert_with(|| params.clone());
-                }
+            for (name, params) in by_owner.get(&cid).map(Vec::as_slice).unwrap_or_default() {
+                // Nearest definition wins: the class itself is
+                // visited first, then what it reaches.
+                out.entry((*name).clone()).or_insert_with(|| (*params).clone());
             }
             if let Some(parent) = sigs.parents.get(&cid) {
                 queue.push(parent.clone());
@@ -394,6 +412,12 @@ fn collect_signatures(app: &App) -> Signatures {
             }
         }
     }
+    for (owner, name) in sigs.methods.keys() {
+        sigs.instance_owners
+            .entry(name.clone())
+            .and_modify(|unique| *unique = None)
+            .or_insert_with(|| Some(owner.clone()));
+    }
     sigs
 }
 
@@ -488,9 +512,8 @@ fn restore_kwrest_on_typed_send(expr: &mut Expr, sigs: &Signatures) {
     let params = params.clone();
     let ExprNode::Send { args, .. } = &mut *expr.node else { return };
     restore_kwrest_splat(args, &params);
-    // A callee with no keyword parameter takes the Hash positionally, so
-    // the Ruby emitter must not write the source's `**` back over it.
-    if params.iter().all(|p| !p.keyword) {
+    // Flattened keyword parameters still use the established positional ABI.
+    if params.iter().any(|p| p.from_keyword || p.from_kwrest) && params.iter().all(|p| !p.keyword) {
         for arg in args.iter_mut() {
             arg.decisions &= !crate::expr::ERASED_KEYWORD_SPLAT;
         }
@@ -748,9 +771,8 @@ fn is_literal(expr: &Expr) -> bool {
 /// The parameters of the only app class defining instance method
 /// `method`, or `None` when none or several do.
 fn unique_instance_params<'s>(method: &Symbol, sigs: &'s Signatures) -> Option<&'s Vec<Param>> {
-    let mut found = sigs.methods.iter().filter(|((_, name), _)| name == method);
-    let (_, params) = found.next()?;
-    found.next().is_none().then_some(params)
+    let owner = sigs.instance_owners.get(method)?.as_ref()?;
+    sigs.methods.get(&(owner.clone(), method.clone()))
 }
 
 /// The callee's parameter list, walking the inheritance chain the way

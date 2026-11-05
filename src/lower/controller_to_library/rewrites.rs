@@ -54,7 +54,7 @@ pub(super) fn partial_view_call(
     locals: &[(Symbol, Expr)],
     module_name: Option<&str>,
     partials: &super::PartialMap,
-    request: Option<(Option<&str>, &str)>,
+    request: Option<(Option<&str>, &str, bool)>,
     span: Span,
 ) -> Option<Expr> {
     partial_view_call_with_record(partial, locals, None, module_name, partials, request, span)
@@ -75,7 +75,7 @@ pub(super) fn partial_view_call_with_record(
     record_override: Option<&Expr>,
     module_name: Option<&str>,
     partials: &super::PartialMap,
-    request: Option<(Option<&str>, &str)>,
+    request: Option<(Option<&str>, &str, bool)>,
     span: Span,
 ) -> Option<Expr> {
     let (module_dir, base_name) = match partial.rsplit_once('/') {
@@ -107,7 +107,7 @@ pub(super) fn partial_view_call_with_record(
     }
     // An action's render passes its own action, controller and path parameters, as a view's call passes them to a partial.
     let request_value = |name: &str| -> Option<Expr> {
-        let (action, controller) = request?;
+        let (action, controller, overlaid) = request?;
         // Not over a strict partial's own declared default (`action_name: "fallback"`).
         if contract.declared.iter().any(|d| d == name) {
             return None;
@@ -129,7 +129,7 @@ pub(super) fn partial_view_call_with_record(
                     ExprNode::Send { recv: None, method: Symbol::from("controller_path"), args: vec![], block: None, parenthesized: false },
                 ),
             }),
-            "path_parameters" => Some(ivar("path_parameters", span)),
+            "path_parameters" => Some(view_path_parameters(overlaid, span)),
             // The request's flash, as the action's own view gets it
             // (`flash_lookup`): a `render partial: "shared/flash"` in a
             // turbo-stream response reads `notice`. By slot
@@ -169,6 +169,8 @@ pub(super) fn rewrite_render_to_views(
     // where a template this controller lacks may still live. See the
     // `subclass_template_hook` arm below.
     inheritor_modules: &[String],
+    // Whether the controller has `route_param_recall::OVERLAY`, which its views take as the request's path parameters.
+    overlaid: bool,
 ) -> Expr {
     // A controller with no Views module of its own (ApplicationController)
     // still renders: `allow_browser`'s fallback is `render template:
@@ -260,7 +262,7 @@ pub(super) fn rewrite_render_to_views(
                 }
                 if let Some(pname) = partial_name {
                     let view_call =
-                        partial_view_call(&pname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str())), e.span)?;
+                        partial_view_call(&pname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str(), overlaid)), e.span)?;
                     if to_string {
                         return Some(view_call);
                     }
@@ -334,7 +336,7 @@ pub(super) fn rewrite_render_to_views(
                         }
                     }
                     let view_call =
-                        partial_view_call(tname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str())), e.span)?;
+                        partial_view_call(tname, &locals_entries, module_name, partials, Some((is_action.then_some(current_action.as_str()), controller_name.as_str(), overlaid)), e.span)?;
                     let mut new_args = vec![view_call];
                     if !rest.is_empty() {
                         new_args.push(Expr::new(e.span, ExprNode::Hash { entries: rest, kwargs: true }));
@@ -395,6 +397,12 @@ pub(super) fn rewrite_render_to_views(
                 }
                 ExprNode::Hash { entries, kwargs: true } => {
                     let mut name: Option<Symbol> = None;
+                    let callback = entries.iter().find_map(|(key, value)| {
+                        matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } }
+                            if value.as_str() == "callback").then_some(value)
+                    });
+                    let jsonp = callback.is_some_and(|value| matches!(&*value.node,
+                        ExprNode::Lit { value: Literal::Str { value } } if !value.trim().is_empty()));
                     // `template:` / `action:` naming a value only the
                     // running program knows (`render(template: template)`
                     // with `template` a local).
@@ -458,8 +466,15 @@ pub(super) fn rewrite_render_to_views(
                             // "application/json"`, the writer's text.
                             "json" => {
                                 // Not encoded again: Rails' json renderer sends a String as it is (`json.to_json unless json.kind_of?(String)`); `json_render_encode`'s other callers encode one.
-                                let encoded = if matches!(v.ty.as_ref(), Some(Ty::Str)) { v.clone() } else { json_render_body(v) };
-                                body = Some((encoded, Some("application/json")))
+                                let mut encoded = if matches!(v.ty.as_ref(), Some(Ty::Str)) { v.clone() } else { json_render_body(v, jsonp) };
+                                if jsonp {
+                                    encoded = Expr::new(v.span, ExprNode::Send {
+                                        recv: Some(Expr::new(v.span, ExprNode::Const { path: vec![Symbol::from("JsonBuilder")] })),
+                                        method: Symbol::from("jsonp"), args: vec![encoded, callback.unwrap().clone()],
+                                        block: None, parenthesized: true,
+                                    });
+                                }
+                                body = Some((encoded, Some(if jsonp { "text/javascript" } else { "application/json" })))
                             }
                             // The flattener's dispatch marker, read by
                             // `render_kwargs_have_format` above.
@@ -467,7 +482,40 @@ pub(super) fn rewrite_render_to_views(
                             _ => rest.push((k.clone(), v.clone())),
                         }
                     }
-                    if body.as_ref().is_some_and(|(_, ct)| *ct == Some("application/json")) {
+                    if entries.iter().any(|(key, _)| matches!(&*key.node,
+                        ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "json"))
+                    {
+                        if jsonp {
+                            for (key, value) in &mut rest {
+                                if matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "content_type") {
+                                    match &*value.node {
+                                        ExprNode::Lit { value: Literal::Str { value: mime } }
+                                            if mime == "application/json" || mime.strip_prefix("application/json;")
+                                                .is_some_and(|parameters| parameters.trim_start().starts_with("charset=")) => {
+                                            // Rails replaces the exact JSON media type, preserving
+                                            // its existing charset. Non-charset parameters remain
+                                            // part of Rails' media type and pass through unchanged.
+                                            let suffix = &mime["application/json".len()..];
+                                            *value = str_lit(value.span, &format!("text/javascript{suffix}"));
+                                        }
+                                        ExprNode::Lit { value: Literal::Str { .. } } => {}
+                                        _ => {
+                                            let mut d = crate::lower::residue_diagnostic("controller_render", "jsonp_content_type", value.span,
+                                                "jsonp_content_type_not_modelled", "JSONP content_type must be a literal media type".into());
+                                            d.severity = crate::diagnostic::Severity::Error;
+                                            crate::emit::diagnostics::push(d);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Literal blank callbacks do not wrap a response.
+                        // Nonliteral callback options retain previous handling.
+                        if callback.is_none_or(|v| matches!(&*v.node,
+                            ExprNode::Lit { value: Literal::Str { .. } | Literal::Nil | Literal::Bool { value: false } })) {
+                            rest.retain(|(key, _)| !matches!(&*key.node,
+                                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "callback"));
+                        }
                         refuse_serializer_options(&mut rest);
                     }
                     if name.is_none() {
@@ -875,7 +923,7 @@ pub(super) fn rewrite_render_to_views(
                     });
                 }
                 if pass_path_parameters {
-                    view_args.push(ivar("path_parameters", e.span));
+                    view_args.push(view_path_parameters(overlaid, e.span));
                 }
             }
             // Digit-leading stems (`about/404`) carry a `_` prefix on the
@@ -1016,7 +1064,7 @@ fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
 /// append the entry to it; otherwise push a fresh kwarg Hash with
 /// just this entry. The runtime's `render(body, status:, content_type:)`
 /// expects ONE kwargs hash, not multiple.
-/// `ActionController::JsonRender.encode(<value>)` — the runtime JSON
+/// `ActionController::JsonRender.encode_escaped(<value>)` — the runtime JSON
 /// encoder behind inline `render json: <expr>` whose value neither
 /// `as_json_poro` nor the primitive-collection path handles. The ruby family
 /// answers it via runtime/spinel/action_controller_json_render.rb
@@ -1109,13 +1157,40 @@ fn refuse_serializer_options(rest: &mut Vec<(Expr, Expr)>) {
 }
 
 /// `json_render_encode`, with a value that may be a String at run time sent as it is (`JsonRender.body`).
-fn json_render_body(value: &Expr) -> Expr {
+fn json_render_body(value: &Expr, jsonp: bool) -> Expr {
     let mut encoded = json_render_encode(value);
+    if let ExprNode::Send { method, .. } = &mut *encoded.node
+        && method.as_str() == "encode_escaped"
+    {
+        *method = Symbol::from("encode");
+    }
+    if let ExprNode::Send { method, args, .. } = &mut *encoded.node
+        && method.as_str() == "escape_html_entities"
+    {
+        *method = Symbol::from("escape_json_response");
+        if jsonp {
+            args.push(Expr::new(value.span, ExprNode::Lit { value: Literal::Bool { value: true } }));
+        }
+    }
     if may_be_str(value.ty.as_ref())
         && let ExprNode::Send { method, .. } = &mut *encoded.node
         && method.as_str() == "encode"
     {
         *method = Symbol::from("body");
+    }
+    if jsonp && let ExprNode::Send { method, .. } = &mut *encoded.node {
+        match method.as_str() {
+            "encode" => *method = Symbol::from("encode_for_callback"),
+            "body" => *method = Symbol::from("body_for_callback"),
+            _ => {}
+        }
+    }
+    if !jsonp && let ExprNode::Send { method, args, .. } = &mut *encoded.node
+        && matches!(method.as_str(), "encode" | "body" | "escape_json_response")
+    {
+        args.push(Expr::new(value.span, ExprNode::Send {
+            recv: None, method: Symbol::from("json_render_escape"), args: vec![], block: None, parenthesized: true,
+        }));
     }
     encoded
 }
@@ -1151,7 +1226,7 @@ pub(super) fn json_render_encode(value: &Expr) -> Expr {
         value.span,
         ExprNode::Send {
             recv: Some(recv),
-            method: Symbol::from(if primitive_collection { "generate" } else { "encode" }),
+            method: Symbol::from(if primitive_collection { "generate" } else { "encode_escaped" }),
             args: vec![if primitive_collection { crate::lower::to_json::finite_floats(value.clone()) } else { value.clone() }],
             block: None,
             parenthesized: true,
@@ -3619,6 +3694,17 @@ fn params_require_permit(resource: Symbol, fields: Vec<Symbol>, span: Span) -> E
 
 fn nil_expr(span: Span) -> Expr {
     Expr::new(span, ExprNode::Lit { value: Literal::Nil })
+}
+
+/// The path parameters an action hands its views: the request's, with
+/// `default_url_options`' segments laid over them when the controller
+/// has the `route_param_recall::OVERLAY` method.
+fn view_path_parameters(overlaid: bool, span: Span) -> Expr {
+    if !overlaid {
+        return ivar("path_parameters", span);
+    }
+    let method = Symbol::from(crate::lower::route_param_recall::OVERLAY);
+    Expr::new(span, ExprNode::Send { recv: None, method, args: vec![], block: None, parenthesized: false })
 }
 
 fn ivar(name: &str, span: Span) -> Expr {

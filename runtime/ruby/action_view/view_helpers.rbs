@@ -208,6 +208,9 @@ module ActionView
     def self.javascript_path: (String source, ?skip_pipeline: bool) -> String
 
     def self.content_tag: (Symbol name, ?(String | Integer | nil) content, ?Hash[Symbol, untyped] opts) -> String
+    def self.content_tag_html: (Symbol name, String html, ?Hash[Symbol, untyped] opts) -> String
+    def self.content_tag_name: (String name) -> String
+    def self.content_tag_pre: (String name) -> String
   
     # `pins` is the importmap pin array — each entry a record with
     # fixed `:name` and `:path` fields. Record (not `Hash[Symbol,
@@ -243,6 +246,11 @@ module ActionView
     def self.form_with: (?Hash[Symbol, untyped] opts) -> String
     # Schema column union (plus nil). Bodies nil-check and stringify.
     def self.optional_value_attr: (String | Integer | Float | bool | nil value) -> String
+    def self.color_value_attr: (String | Integer | Float | bool | nil value) -> String
+    def self.color_field_value_attr: (String | Integer | Float | bool | nil option, String | Integer | Float | bool | nil value) -> String
+    def self.validated_color: (String s) -> String
+    def self.datetime_local_value_attr: (String | Integer | Float | bool | nil value) -> String
+    def self.hex_digits?: (String s) -> bool
     def self.current_page_match?: (String request_method, String request_path, String request_fullpath, String request_origin, String path) -> bool
     def self.scheme_at_line_start?: (Array[Integer] bytes) -> bool
     def self.word_byte?: (Integer byte) -> bool
@@ -276,6 +284,9 @@ module ActionView
     # Crystal's already-Symbol-keyed callers finally match the param.
     def self.render_attrs: (Hash[Symbol, untyped] attrs) -> String
     def self.attr_value_text: (String name, untyped v) -> String
+    # Rails' ERB::Util.xml_name_escape on an attribute name (ASCII
+    # rule exact; a non-ASCII character becomes "_").
+    def self.xml_name_escape: (String name) -> String
     def self.haml_class: (String static_classes, untyped value) -> String
 
     # Rails' BOOLEAN_ATTRIBUTES membership — presence-is-the-value

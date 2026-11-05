@@ -274,3 +274,48 @@ fn a_helper_spliced_into_several_includers_is_still_one_definition() {
     assert!(out.contains("when \"hour\""), "got:\n{out}");
     assert!(!out.contains(".send("), "dynamic send survived:\n{out}");
 }
+
+/// Shape D counts a constant-receiver call site only when the constant
+/// names exactly one class: by its full name, or by a trailing part of
+/// it (`Pager` for `Paging::Pager`) that no other class's name also ends
+/// with.
+const PARAM_SELECTOR_SOURCE: &str = r##"
+module Paging
+  class Pager
+    def self.load(relation, direction, size)
+      relation.public_send(direction, size)
+    end
+  end
+end
+
+class Report
+  def oldest(relation)
+    Pager.load(relation, :first, 2)
+  end
+
+  def newest(relation)
+    Paging::Pager.load(relation, :last, 1)
+  end
+end
+"##;
+
+#[test]
+fn a_selector_parameter_collects_calls_through_a_unique_trailing_name() {
+    let (out, _) = ground_and_emit(PARAM_SELECTOR_SOURCE);
+    assert!(out.contains("when :first"), "trailing-name call site not counted:\n{out}");
+    assert!(out.contains("when :last"), "full-name call site not counted:\n{out}");
+    assert!(!out.contains("public_send(direction"), "dynamic send survived:\n{out}");
+}
+
+#[test]
+fn a_trailing_name_two_classes_share_counts_no_call_site() {
+    let source = format!(
+        "{PARAM_SELECTOR_SOURCE}\nmodule Archive\n  class Pager\n    def self.load(relation, direction, size)\n      relation\n    end\n  end\nend\n"
+    );
+    let (out, _) = ground_and_emit(&source);
+    assert!(out.contains("when :last"), "full-name call site not counted:\n{out}");
+    assert!(
+        !out.contains("when :first"),
+        "an ambiguous trailing name must not resolve to either class:\n{out}"
+    );
+}

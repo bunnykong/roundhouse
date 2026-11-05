@@ -13,6 +13,8 @@
 //! unescaped, as `h` leaves an html_safe String alone. `h(x)` keeps
 //! escaping everywhere else.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -81,7 +83,7 @@ fn raw_is_the_value_itself() {
 #[test]
 fn the_partial_renders_what_jbuilder_renders() {
     let files = emitted();
-    let dir = std::env::temp_dir().join(format!("roundhouse-jbuilder-raw-{}", std::process::id()));
+    let dir = scratch::dir("roundhouse-jbuilder-raw");
     for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

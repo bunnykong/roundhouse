@@ -5,14 +5,6 @@ module ActiveRecord
   # first/take) — not per-model. `Relation[T]` is the later refinement.
   # `preloaded` and set-operator operands stay `untyped` for Spinel
   # integer-seed arrays.
-  class Bounds
-    type bound = Time | Date | String | Integer | Float | nil
-    def lower: () -> bound
-    def upper: () -> bound
-    def initialize: (bound lower, bound upper, bool exclusive) -> void
-    def exclusive?: () -> bool
-  end
-
   class EagerFilter
     type nested_spec = Symbol | Hash[Symbol, Symbol] | Array[Symbol | Hash[Symbol, Symbol]] | nil
     def initialize: (Array[Hash[Symbol, untyped]] conditions, Array[Hash[Symbol, untyped]] negations, Array[Hash[Symbol, untyped]] orders, nested_spec nested) -> void
@@ -193,6 +185,8 @@ module ActiveRecord
     def select_specs!: (Array[String | Symbol] specs) -> Relation
     def distinct: (?(bool | Symbol | String) value) -> Relation
     def distinct!: (?(bool | Symbol | String) value) -> Relation
+    def optimizer_hints: (*String hints) -> Relation
+    def optimizer_hints!: (*String hints) -> Relation
     def all: () -> Relation
     def includes: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def preload: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
@@ -379,7 +373,7 @@ module ActiveRecord
     def exists_sql: (Integer n) -> String
     def bound_exists_sql: (Integer n) -> String
     def hash_conditions: (Hash[String | Symbol, untyped] hash) -> String
-    def column_predicate: (String col, Relation | Array[untyped] | Base | Bounds | String | Integer | Float | bool | nil val) -> String
+    def column_predicate: (String col, Relation | Array[untyped] | Base | String | Integer | Float | bool | nil val) -> String
     def range_predicate: (String qcol, untyped range) -> String
     def bounds_predicate: (String qcol, Time | Date | String | Integer | Float | nil lower, Time | Date | String | Integer | Float | nil upper, bool exclusive) -> String
     def range_bound_sql: (untyped bound) -> String?

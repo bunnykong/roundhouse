@@ -2,6 +2,8 @@
 //! `markers::push_block_callback` lowers; every other one reports as
 //! unlowered DSL instead of being dropped or spliced half-bound.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::Path;
 
 use roundhouse::ingest::ingest_app;
@@ -25,8 +27,7 @@ fn copy_tree(src: &Path, dst: &Path) {
 /// The diagnostics (any severity) and the lowered `Article` hook names
 /// for real-blog's Article with `callback` added to its class body.
 fn lower_with(tag: &str, callback: &str) -> (Vec<String>, bool) {
-    let dir = std::env::temp_dir().join(format!("roundhouse-block-callback-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("roundhouse-block-callback-{tag}"));
     copy_tree(roundhouse::fixtures::real_blog(), &dir);
     let model = dir.join("app/models/article.rb");
     let source = std::fs::read_to_string(&model).unwrap().replacen(

@@ -7,6 +7,8 @@
 //! emitted literal must be the same bytes, in the same encoding, frozen
 //! where the source froze it: as a constant and as a method's return
 //! value alike.
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -43,8 +45,7 @@ const EXPECTED: &str = "\
 
 #[test]
 fn a_string_literal_that_is_not_utf8_keeps_its_bytes_as_in_ruby() {
-    let dir = std::env::temp_dir().join(format!("rh-binary-literal-native-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("rh-binary-literal-native");
     std::fs::write(dir.join("descriptors.rb"), DESCRIPTORS).unwrap();
     std::fs::write(dir.join("legacy.rb"), LEGACY).unwrap();
     let native = emit_and_run::ruby()

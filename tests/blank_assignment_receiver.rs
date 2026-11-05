@@ -45,7 +45,7 @@ fn assignment_receiver_grounds_and_assigns_exactly_once() {
     );
     // Grounded, not left as a dynamic `present?` send.
     assert!(
-        !body.contains("\"present?\""),
+        body.contains("ActiveSupport"),
         "present? should be grounded:\n{body}"
     );
     // The assignment survives — and appears exactly once, so the session

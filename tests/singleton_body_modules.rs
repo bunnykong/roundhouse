@@ -15,6 +15,8 @@
 //! Native Ruby on the same source is the oracle for what the program
 //! prints through the singleton's own methods.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -50,8 +52,7 @@ const EXPECTED: &str = "alpha:1\nbeta:2\n";
 
 #[test]
 fn native_ruby_reads_singleton_body_modules_through_the_singleton_methods() {
-    let dir = std::env::temp_dir().join(format!("roundhouse-singleton-mods-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-singleton-mods");
     std::fs::write(dir.join("registry.rb"), NAMESPACE).unwrap();
     let output = std::process::Command::new("ruby")
         .arg("-e")

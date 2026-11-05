@@ -358,16 +358,18 @@ fn emit_test_send_go(
             // has no class methods, and our persistence emitter laid
             // down package-level `ArticleFind` / `CommentCount` /
             // etc. to stand in.
+            //
+            // `find`/`count`/`last` go through those shims
+            // (`emit_v2_test_compat`); any other class method is the
+            // model's own `Class_method` function, spelled as the library
+            // emit spells it (`create!` → `Article_create_bang`).
             if is_class_call {
-                if args_s.is_empty() {
-                    return format!("{recv_s}{}()", go_field_name(method));
+                let name = if matches!(method, "find" | "count" | "last") {
+                    format!("{recv_s}{}", go_field_name(method))
                 } else {
-                    return format!(
-                        "{recv_s}{}({})",
-                        go_field_name(method),
-                        args_s.join(", ")
-                    );
-                }
+                    format!("{recv_s}_{}", super::library::sanitize_method_name(method))
+                };
+                return format!("{name}({})", args_s.join(", "));
             }
             let is_attr = args_s.is_empty()
                 && ctx.model_attrs.iter().any(|s| s.as_str() == method);
@@ -383,17 +385,77 @@ fn emit_test_send_go(
                     return format!("DerefString({field})");
                 }
                 field
-            } else if args_s.is_empty() {
-                format!("{recv_s}.{}()", go_field_name(method))
+            } else if args_s.is_empty()
+                && ar_field_predicates().iter().any(|p| p == method)
+                && !model_defines_predicate(r, method, ctx)
+            {
+                // The library emit drops these methods: the struct field
+                // is the reader (`record.persisted?` → `record.Persisted`).
+                format!("{recv_s}.{}", go_field_name(method.trim_end_matches('?')))
             } else {
-                format!(
-                    "{recv_s}.{}({})",
-                    go_field_name(method),
-                    args_s.join(", ")
-                )
+                // `?`/`!` as the library emit names the method
+                // (`new_record?` → `NewRecordPred`, `save!` → `SaveBang`).
+                let name = if method.ends_with(['?', '!']) {
+                    super::expr::go_method_ident(method)
+                } else {
+                    go_field_name(method)
+                };
+                format!("{recv_s}.{name}({})", args_s.join(", "))
             }
         }
     }
+}
+
+/// Does the receiver's model define `method` itself, so the library emit
+/// writes it as a method (`def persisted?; false; end` → `PersistedPred()`)
+/// rather than leaving the field as its reader? The model is the
+/// receiver's type, or else the model its local is named after
+/// (`article`); with neither, any model that defines it counts.
+fn model_defines_predicate(recv: &Expr, method: &str, ctx: GoTestCtx) -> bool {
+    let own = |m: &crate::dialect::Model| {
+        m.methods().any(|d| {
+            matches!(d.receiver, crate::dialect::MethodReceiver::Instance)
+                && d.name.as_str() == method
+                && !super::library::is_trivial_ivar_reader(d)
+        })
+    };
+    let named = match (&recv.ty, &*recv.node) {
+        (Some(crate::ty::Ty::Class { id, .. }), _) => Some(id.0.as_str().to_string()),
+        (_, ExprNode::Var { name, .. }) => Some(crate::naming::camelize(&crate::naming::singularize(name.as_str()))),
+        (_, ExprNode::Send { recv: None, method, args, block: None, .. }) if args.is_empty() => {
+            Some(crate::naming::camelize(&crate::naming::singularize(method.as_str())))
+        }
+        _ => None,
+    };
+    match named.and_then(|n| ctx.app.models.iter().find(|m| m.name.0.as_str() == n)) {
+        Some(model) => own(model),
+        None => ctx.app.models.iter().any(own),
+    }
+}
+
+/// The `ActiveRecord::Base` predicates whose body only reads the ivar of
+/// their name (`persisted?`). The Go library emit leaves them out, as the
+/// struct field already reads it (`library::is_trivial_ivar_reader`).
+fn ar_field_predicates() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        crate::runtime_src::parse_library_with_rbs(
+            include_str!("../../../runtime/ruby/active_record/base.rb").as_bytes(),
+            include_str!("../../../runtime/ruby/active_record/base.rbs"),
+            "runtime/ruby/active_record/base.rb",
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.name.0.as_str() == "ActiveRecord::Base")
+        .flat_map(|c| c.methods)
+        .filter(|m| {
+            matches!(m.receiver, crate::dialect::MethodReceiver::Instance)
+                && m.name.as_str().ends_with('?')
+                && super::library::is_trivial_ivar_reader(m)
+        })
+        .map(|m| m.name.as_str().to_string())
+        .collect()
+    })
 }
 
 /// Parse a Ruby-style `"Class.method"` expression into Go syntax.

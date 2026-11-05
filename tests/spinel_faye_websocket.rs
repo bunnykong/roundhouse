@@ -1,4 +1,6 @@
 //! The bounded Faye facade over real Tep sockets and SQLite callback leases.
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -10,15 +12,7 @@ use std::time::{Duration, Instant};
 struct Scratch(std::path::PathBuf);
 impl Scratch {
     fn new() -> Self {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "roundhouse-faye-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(scratch::dir("roundhouse-faye"))
     }
     fn path(&self) -> &Path {
         &self.0

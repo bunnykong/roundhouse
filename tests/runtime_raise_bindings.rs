@@ -1,5 +1,7 @@
 //! Native raises bind the error kinds used by shared Ruby methods.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[allow(dead_code)]
 #[path = "../runtime/rust/errors_ext.rs"]
 mod rust_errors;
@@ -150,8 +152,7 @@ fn main() {{
         }
     }
     let scratch =
-        Scratch(std::env::temp_dir().join(format!("rh-like-rust-{}", std::process::id())));
-    fs::create_dir(&scratch.0).expect("create native probe directory");
+        Scratch(scratch::dir("rh-like-rust"));
     let input = scratch.0.join("probe.rs");
     let binary = scratch.0.join("probe");
     fs::write(&input, source).expect("write emitted sanitizer");

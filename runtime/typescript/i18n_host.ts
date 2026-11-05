@@ -1,5 +1,6 @@
 interface LocaleScope {
   locale: string;
+  config: string;
 }
 
 interface ScopeStore {
@@ -13,12 +14,14 @@ const hooks = node?.getBuiltinModule?.("node:async_hooks");
 // Not one module variable on Node: node:http interleaves requests across awaits, so each request holds its own locale.
 const store: ScopeStore | null = hooks ? new hooks.AsyncLocalStorage() : null;
 let shared = "";
+let sharedConfig = "";
 let table: string | null = null;
 
 export class I18nHost {
   static per_request<T>(fn: () => T): T {
-    if (store) return store.run({ locale: "" }, fn);
+    if (store) return store.run({ locale: "", config: "" }, fn);
     shared = "";
+    sharedConfig = "";
     return fn();
   }
 
@@ -31,6 +34,18 @@ export class I18nHost {
     const scope = store?.getStore();
     if (scope) scope.locale = name;
     else shared = name;
+    return name;
+  }
+
+  static config_name(): string {
+    const scope = store?.getStore();
+    return scope ? scope.config : sharedConfig;
+  }
+
+  static set_config_name(name: string): string {
+    const scope = store?.getStore();
+    if (scope) scope.config = name;
+    else sharedConfig = name;
     return name;
   }
 

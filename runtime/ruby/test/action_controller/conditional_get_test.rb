@@ -100,6 +100,48 @@ class ConditionalGetTest < Minitest::Test
     assert_equal DEFAULT, c.headers["Cache-Control"]
   end
 
+  # Rack 3.2.7's Rack::ConditionalGet answered the same statuses for this
+  # Last-Modified and these If-Modified-Since values.
+  def last_modified_page
+    c = TestController.new
+    c.headers["Last-Modified"] = "Tue, 13 Oct 2026 10:00:00 GMT"
+    c.render("lm")
+    c
+  end
+
+  def test_if_modified_since_at_or_after_last_modified_is_not_modified
+    ["Tue, 13 Oct 2026 10:00:00 GMT", "Wed, 14 Oct 2026 10:00:00 GMT"].each do |since|
+      c = last_modified_page
+      c.commit_conditional_get!("GET", "", since)
+      assert_equal 304, c.status
+      assert_equal "", c.body
+    end
+  end
+
+  def test_if_modified_since_before_last_modified_is_served
+    c = last_modified_page
+    c.commit_conditional_get!("GET", "", "Mon, 12 Oct 2026 10:00:00 GMT")
+    assert_equal 200, c.status
+  end
+
+  def test_an_unreadable_if_modified_since_is_served
+    c = last_modified_page
+    c.commit_conditional_get!("GET", "", "not a date at all, really")
+    assert_equal 200, c.status
+  end
+
+  def test_if_none_match_takes_precedence_over_if_modified_since
+    c = last_modified_page
+    c.commit_conditional_get!("GET", "W/\"x\"", "Tue, 13 Oct 2026 10:00:00 GMT")
+    assert_equal 200, c.status
+  end
+
+  def test_if_modified_since_on_a_post_is_served
+    c = last_modified_page
+    c.commit_conditional_get!("POST", "", "Wed, 14 Oct 2026 10:00:00 GMT")
+    assert_equal 200, c.status
+  end
+
   def test_fresh_when_gets_the_default_cache_control
     c = TestController.new
     # The tag itself is fresh_when's (conditional_get.rb); this pins the header beside it.

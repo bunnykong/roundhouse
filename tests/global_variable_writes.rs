@@ -4,6 +4,8 @@
 //! it saved before capturing them. The expression ingest refused a global
 //! write, so the tree carried a bare `nil` in its place. A global write
 //! is an `LValue::Var` with its `$` name, as a read is.
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -43,8 +45,7 @@ const SCRIPT: &str = "p StdioRestore.run\np StdioRestore.memo\np StdioRestore.me
 
 #[test]
 fn global_variable_writes_in_a_method_run_as_natively() {
-    let dir = std::env::temp_dir().join(format!("rh_gvar_native_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("rh_gvar_native");
     std::fs::write(dir.join("stdio_restore.rb"), LIB).unwrap();
     let native = emit_and_run::ruby()
         .arg("-I").arg(&dir).arg("-rstdio_restore").arg("-e").arg(SCRIPT)

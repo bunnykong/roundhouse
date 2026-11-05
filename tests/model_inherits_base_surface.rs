@@ -7,11 +7,12 @@
 //! model `ClassInfo` carried no parent link, so `User.transaction_...`
 //! was reported as an unknown method on `User`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check(files: &[(&str, &str)]) -> String {
-    let dir = std::env::temp_dir().join(format!("rh_model_base_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh_model_base");
     for (path, src) in files {
         let full = dir.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();

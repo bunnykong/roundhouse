@@ -3,6 +3,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests. A test the compiler
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -277,11 +279,7 @@ fn native() -> String {
 fn native_of(files: &[(&str, &str)], program: &str) -> String {
     let oracle = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
     static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "rh_active_job_callbacks_native_{}_{}",
-        std::process::id(),
-        RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    ));
+    let dir = scratch::dir(&format!("rh_active_job_callbacks_native_{}", RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
     for (emitted, text) in files {
         let file = dir.join(emitted);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

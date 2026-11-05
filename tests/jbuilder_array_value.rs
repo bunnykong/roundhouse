@@ -8,6 +8,8 @@
 //! as Jbuilder writes `json.tags([{name: "b"}, [1, nil]])`.
 //! The Spinel side is `jbuilder_array_value_spinel.rs`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,7 +56,7 @@ fn emitted() -> Vec<(String, String)> {
 #[test]
 fn an_array_value_is_a_json_array() {
     let files = emitted();
-    let dir = std::env::temp_dir().join(format!("roundhouse-jbuilder-array-{}", std::process::id()));
+    let dir = scratch::dir("roundhouse-jbuilder-array");
     for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

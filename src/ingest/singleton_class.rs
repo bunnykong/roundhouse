@@ -80,7 +80,17 @@ pub(super) fn ingest_singleton_body(
     for stmt in flatten_statements(body) {
         walk_statement(&stmt, owner, file, ingest_def, &mut out)?;
     }
+    for method in &mut out.methods {
+        mark_singleton_constants(&mut method.body);
+    }
     Ok(out)
+}
+
+fn mark_singleton_constants(expr: &mut Expr) {
+    if matches!(&*expr.node, ExprNode::Const { path } if path.len() == 1) {
+        expr.decisions |= crate::expr::SINGLETON_CREF_CONST_REF;
+    }
+    expr.node.for_each_child_mut(&mut mark_singleton_constants);
 }
 
 fn walk_statement(

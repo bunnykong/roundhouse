@@ -375,6 +375,17 @@ fn app_assets<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<BTreeMap<Str
             }
         }
     }
+    // A mounted engine's directories its own initializer adds to the paths, each a root of its own as Propshaft reads one.
+    for root in super::engine_config::asset_dirs() {
+        if vfs.is_dir(&root) {
+            let mut engine = BTreeMap::new();
+            collect(vfs, &root, &root, &mut engine)?;
+            // Not over the app's own: its paths come first, so a logical name it has resolves there.
+            for (logical, bytes) in engine {
+                assets.entry(logical).or_insert(bytes);
+            }
+        }
+    }
     Ok(assets)
 }
 

@@ -5,6 +5,8 @@
 //! disagree: `check` is clean and the emitted program fails. Each is a
 //! complete statement of the fix: make it pass and drop the `#[ignore]`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 #[path = "emit_and_run/controller_content_type_writer.rs"]
@@ -30,14 +32,21 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/time_zone_tzinfo.rs"]
+mod time_zone_tzinfo;
+
 #[path = "emit_and_run/current_page.rs"]
 mod current_page;
+#[path = "emit_and_run/strict_json_render_escape.rs"]
+mod strict_json_render_escape;
 #[path = "emit_and_run/stylesheet_helper.rs"]
 mod stylesheet_helper;
 #[path = "emit_and_run/stylesheet_source.rs"]
 mod stylesheet_source;
 #[path = "emit_and_run/time_tag.rs"]
 mod time_tag;
+#[path = "emit_and_run/attribute_name_escape.rs"]
+mod attribute_name_escape;
 #[path = "emit_and_run/multiparameter_params.rs"]
 mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]
@@ -114,6 +123,10 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "emit_and_run/source_gem_load_order.rs"]
+mod source_gem_load_order;
+#[path = "emit_and_run/unresolved_param_rbs.rs"]
+mod unresolved_param_rbs;
 #[path = "emit_and_run/source_gem_facade.rs"]
 mod source_gem_facade;
 #[path = "support/for_loops.rs"]
@@ -403,6 +416,8 @@ mod conditional_get;
 mod nil_body_length;
 #[path = "emit_and_run/inline_filter_guard.rs"]
 mod inline_filter_guard;
+#[path = "emit_and_run/concern_guarded_filter.rs"]
+mod concern_guarded_filter;
 #[path = "emit_and_run/before_action_return.rs"]
 mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]
@@ -3257,22 +3272,102 @@ fn literal_isolated_engine_mount_runs_over_cruby_http() {
     assert!(run.stdout.contains("literal engine mount CRuby HTTP contract passed"));
 }
 
+/// Rails' boundary: the engine's own code calls its routes bare and the
+/// host's through `main_app`; the host reaches the engine's through its
+/// proxy. The engine's root keeps the slash Rails joins to the mount.
 #[test]
-fn engine_helper_calls_are_explicit_instead_of_using_host_helpers() {
-    let controller = r#"module Catalog
-  class ProductsController < ActionController::Base
+fn engine_route_helpers_resolve_as_rails_does() {
+    let home = r##"module Catalog
+  class HomeController < ActionController::Base
     def index
-      render plain: products_path
+      render plain: "#{root_path} #{products_path} #{main_app.products_path} #{self.items_url}"
     end
+  end
+end
+"##;
+    let host = r##"class HostController < ApplicationController
+  def index
+    render plain: "host root"
+  end
+
+  def engine_proxy
+    render plain: "#{catalog.products_path} #{self.catalog.items_path} #{catalog.root_path} #{root_path}"
+  end
+end
+"##;
+    let run = engine_mount::overlay()
+        .write("vendor/catalog/app/controllers/catalog/home_controller.rb", home)
+        .write("app/controllers/host_controller.rb", host)
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  root \"host#index\"\n  get \"/engine-proxy\", to: \"host#engine_proxy\"\n  get \"/products\", to: \"products#index\", as: :products\n  mount Catalog::Engine, at: \"/catalog\"\nend\n",
+        )
+        .run_ruby(
+            r##"require "rack"
+require "rack/mock"
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+{
+  "/catalog" => "/catalog/ /catalog/products /products http://example.test/catalog/items",
+  "/engine-proxy" => "/catalog/products /catalog/items /catalog/ /",
+}.each do |path, body|
+  response = client.get(path, "HTTP_HOST" => "example.test")
+  raise "GET #{path}: #{response.status} #{response.body.inspect}" unless [response.status, response.body] == [200, body]
+end
+puts "engine route helpers passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("engine route helpers passed"), "{}", run.stdout);
+}
+
+/// Wherever a host helper call resolves, the engine's helper reached the
+/// same way resolves to the engine's route, never to the host's
+/// same-named one.
+#[test]
+fn engine_helpers_in_library_jbuilder_test_and_haml_sources_name_the_engines_routes() {
+    let run = engine_mount::overlay()
+        .write("lib/engine_proxy_reference.rb", "class EngineProxyReference\n  def self.path\n    catalog.products_path\n  end\nend\n")
+        .write("app/views/host/index.json.jbuilder", "json.url catalog.products_path\n")
+        .write(
+            "vendor/catalog/lib/catalog/path_reference.rb",
+            "module Catalog\n  class PathReference\n    def self.engine_home\n      products_path\n    end\n  end\nend\n",
+        )
+        .write("vendor/catalog/app/views/home/index.html.haml", "= root_path\n")
+        .run_ruby(
+            "raise EngineProxyReference.path unless EngineProxyReference.path == \"/catalog/products\"\n\
+             raise Catalog::PathReference.engine_home unless Catalog::PathReference.engine_home == \"/catalog/products\"\n\
+             puts \"engine helper sources passed\"\n",
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("engine helper sources passed"), "{}", run.stdout);
+    for (view, helper) in [("app/views/host/index_json.rb", "RouteHelpers.catalog_products_path"), ("app/views/home/index.rb", "RouteHelpers.catalog_root_path")] {
+        let text = std::fs::read_to_string(run.emitted.join(view)).expect(view);
+        assert!(text.contains(helper), "{view} does not call {helper}:\n{text}");
+    }
+}
+
+/// A host route named like a prefixed engine helper keeps its name; the
+/// engine code that would have reached the other is reported.
+#[test]
+fn an_engine_helper_the_host_also_names_is_reported_where_it_is_called() {
+    let host = r#"class HostController < ApplicationController
+  def index
+    render plain: catalog.items_path
   end
 end
 "#;
     let (_emitted, app, errors) = engine_mount::overlay()
-        .write("vendor/catalog/app/controllers/catalog/products_controller.rb", controller)
+        .write("app/controllers/host_controller.rb", host)
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  root \"host#index\"\n  mount Catalog::Engine, at: \"/catalog\"\n  get \"/host/catalog/products\", to: \"host#index\", as: :catalog_products\nend\n",
+        )
         .emit_with_app(roundhouse::project::BuildTarget::Ruby);
     assert!(
-        engine_mount::has_error_in_source(&app, &errors, "vendor/catalog/app/controllers/catalog/products_controller.rb", "products_path"),
-        "engine helper collision was not explicit:\n{}",
+        engine_mount::has_error_on_source_line(&app, &errors, "app/controllers/host_controller.rb", "catalog.items_path"),
+        "the proxy call past a shared name was not reported:\n{}",
         engine_mount::describe_errors(&app, &errors)
     );
 }
@@ -3363,77 +3458,6 @@ end
 }
 
 #[test]
-fn host_engine_helper_proxy_calls_are_explicit() {
-    let host = r#"class HostController < ApplicationController
-  def index
-    render plain: "host root"
-  end
-
-  def root_helper
-    render plain: root_path
-  end
-
-  def products_helper
-    render plain: products_path
-  end
-
-  def engine_proxy
-    render plain: catalog.products_path
-  end
-
-  def self_engine_proxy
-    render plain: self.catalog.items_path
-  end
-
-  def after
-    render plain: "host after"
-  end
-end
-"#;
-    let (_emitted, app, errors) = engine_mount::overlay()
-        .write("app/controllers/host_controller.rb", host)
-        .write(
-            "config/routes.rb",
-            "Rails.application.routes.draw do\n  root \"host#index\"\n  get \"/root-helper\", to: \"host#root_helper\"\n  get \"/products-helper\", to: \"host#products_helper\"\n  get \"/engine-proxy\", to: \"host#engine_proxy\"\n  get \"/self-engine-proxy\", to: \"host#self_engine_proxy\"\n  get \"/products\", to: \"products#index\", as: :products\n  get \"/catalog/products\", to: \"products#index\", as: :host_catalog_products\n  mount Catalog::Engine, at: \"/catalog\"\n  get \"/catalog/items\", to: \"items#index\", as: :host_catalog_items\n  get \"/after\", to: \"host#after\"\nend\n",
-        )
-        .emit_with_app(roundhouse::project::BuildTarget::Ruby);
-    assert!(
-        engine_mount::has_error_in_source(&app, &errors, "app/controllers/host_controller.rb", "products_path"),
-        "mounted engine proxy calls were not explicit:\n{}",
-        engine_mount::describe_errors(&app, &errors)
-    );
-    assert!(
-        engine_mount::has_error_on_source_line(&app, &errors, "app/controllers/host_controller.rb", "self.catalog.items_path"),
-        "self.catalog.items_path receiver was not rejected:\n{}",
-        engine_mount::describe_errors(&app, &errors)
-    );
-}
-
-#[test]
-fn host_root_helper_is_kept_while_engine_root_helper_is_an_error() {
-    let home = r#"module Catalog
-  class HomeController < ActionController::Base
-    def index
-      render plain: root_path
-    end
-  end
-end
-"#;
-    let (_emitted, app, errors) = engine_mount::overlay()
-        .write("vendor/catalog/app/controllers/catalog/home_controller.rb", home)
-        .emit_with_app(roundhouse::project::BuildTarget::Ruby);
-    assert!(
-        engine_mount::has_error_in_source(&app, &errors, "vendor/catalog/app/controllers/catalog/home_controller.rb", "root_path"),
-        "engine root helper did not retain an explicit error:\n{}",
-        engine_mount::describe_errors(&app, &errors)
-    );
-    assert!(
-        !engine_mount::has_error_in_source(&app, &errors, "app/controllers/host_controller.rb", "root_path"),
-        "the legitimate host root_path call was rejected: {errors:?}"
-    );
-}
-
-#[test]
 fn isolated_engine_paths_do_not_create_or_shadow_host_helpers() {
     let host = r#"class HostController < ApplicationController
   def index
@@ -3474,70 +3498,6 @@ end
 }
 
 #[test]
-fn helper_proxy_uses_in_library_jbuilder_and_configured_test_sources_are_explicit() {
-    let sources = [
-        (
-            "lib/engine_proxy_reference.rb",
-            "class EngineProxyReference\n  def self.path\n    catalog.products_path\n  end\nend\n",
-        ),
-        (
-            "app/views/host/index.json.jbuilder",
-            "json.url catalog.products_path\n",
-        ),
-        (
-            "spec/engine_proxy_reference_spec.rb",
-            "class EngineProxyReferenceSpec\n  def path\n    catalog.products_path\n  end\nend\n",
-        ),
-        (
-            "vendor/catalog/lib/catalog/path_reference.rb",
-            r#"module Catalog
-  class PathReference
-    def path
-      products_path
-    end
-
-    def self.engine_home
-      products_path
-    end
-
-    class Engine
-      def self.reference
-        "plain nested helper class"
-      end
-    end
-  end
-end
-"#,
-        ),
-    ];
-    for (path, source) in sources {
-        let mut overlay = engine_mount::overlay().write(path, source);
-        if path.starts_with("spec/") {
-            overlay = overlay.write("roundhouse.yml", "test_paths:\n  - spec\n");
-        }
-        let (_emitted, app, errors) = overlay.emit_with_app(roundhouse::project::BuildTarget::Ruby);
-        assert!(
-            engine_mount::has_error_in_source(&app, &errors, path, "products_path"),
-            "route helper call in {path} was not an explicit mount gap:\n{}",
-            engine_mount::describe_errors(&app, &errors)
-        );
-    }
-}
-
-#[test]
-fn engine_haml_helper_calls_keep_their_source_boundary() {
-    let path = "vendor/catalog/app/views/home/index.html.haml";
-    let (_emitted, app, errors) = engine_mount::overlay()
-        .write(path, "= root_path\n")
-        .emit_with_app(roundhouse::project::BuildTarget::Ruby);
-    assert!(
-        engine_mount::has_error_in_source(&app, &errors, path, "root_path"),
-        "bare engine helper in HAML was not rejected:\n{}",
-        engine_mount::describe_errors(&app, &errors)
-    );
-}
-
-#[test]
 fn dynamic_engine_route_targets_keep_their_source_boundary() {
     let path = "vendor/catalog/config/routes.rb";
     let (_emitted, app, errors) = engine_mount::overlay()
@@ -3547,7 +3507,7 @@ fn dynamic_engine_route_targets_keep_their_source_boundary() {
         )
         .emit_with_app(roundhouse::project::BuildTarget::Ruby);
     assert!(
-        engine_mount::has_error_in_source(&app, &errors, path, "dynamic targets"),
+        engine_mount::has_error_in_source(&app, &errors, path, "`redirect` targets are not composed"),
         "dynamic engine route target was not rejected:\n{}",
         engine_mount::describe_errors(&app, &errors)
     );
@@ -4064,8 +4024,7 @@ fn oj_overlay(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
 /// would raise.
 #[test]
 fn oj_stand_in_is_ruby_only() {
-    let dir = std::env::temp_dir().join(format!("rh-oj-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-oj-targets");
     for (path, text) in [
         ("config/initializers/oj.rb", "Oj.mimic_JSON\nOj.optimize_rails\n"),
         (
@@ -4341,8 +4300,7 @@ fn faraday_holder_name_does_not_declare_the_gem_on_ruby() {
 /// off the shipping targets — `gem_refusal` used to see only emit bodies.
 #[test]
 fn faraday_superclass_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-super-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-super");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4403,8 +4361,7 @@ fn faraday_superclass_is_refused_off_ruby_and_jruby() {
 /// those parents live on `Controller`, not on a LibraryClass yet.
 #[test]
 fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-ctrl-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-ctrl");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4456,8 +4413,7 @@ fn faraday_controller_superclass_is_refused_off_ruby_and_jruby() {
 /// LibraryClasses.
 #[test]
 fn faraday_test_module_superclass_is_refused_on_spinel() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-tm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-tm");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4540,8 +4496,7 @@ raise r.inspect unless r == [:gave_up, 3]"#,
 /// Off Ruby and JRuby, each Retryable reference is refused.
 #[test]
 fn retryable_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-retryable-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-retryable-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4649,8 +4604,7 @@ raise "malformed" unless Token.read("not-a-token") == :malformed"#,
 /// Off Ruby and JRuby, each JWT reference is refused.
 #[test]
 fn jwt_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-jwt-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-jwt-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4812,8 +4766,7 @@ end
 /// include are refused.
 #[test]
 fn elastic_apm_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-elastic-apm-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-elastic-apm-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -4970,8 +4923,7 @@ raise "block 404" unless Remote.status_of(base, "/missing") == 404
 /// Off Ruby and JRuby, each RestClient reference is refused.
 #[test]
 fn rest_client_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-rest-client-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-rest-client-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -5042,8 +4994,7 @@ fn rest_client_is_refused_off_ruby_and_jruby() {
 /// constant is refused there, and no `Faraday` reference is emitted.
 #[test]
 fn faraday_is_refused_off_ruby_and_jruby() {
-    let dir = std::env::temp_dir().join(format!("rh-faraday-targets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir("rh-faraday-targets");
     for (path, text) in [
         (
             "db/schema.rb",
@@ -20411,6 +20362,8 @@ mod console_only_definitions;
 mod open_classes;
 #[path = "emit_and_run/parameterized_mailer.rs"]
 mod parameterized_mailer;
+#[path = "emit_and_run/change_table_migrations.rs"]
+mod change_table_migrations;
 #[path = "emit_and_run/model_delegate_to_reader.rs"]
 mod model_delegate_to_reader;
 #[path = "emit_and_run/private_calls.rs"]
@@ -20543,6 +20496,64 @@ mod stub_facade_source_gem;
 
 #[path = "emit_and_run/helper_render_partial.rs"]
 mod helper_render_partial;
+#[path = "emit_and_run/interpolated_partial.rs"]
+mod interpolated_partial;
+#[path = "emit_and_run/indifferent_ivar.rs"]
+mod indifferent_ivar;
+#[path = "emit_and_run/library_class_state.rs"]
+mod library_class_state;
+#[path = "emit_and_run/fold_and_destructure_types.rs"]
+mod fold_and_destructure_types;
+#[path = "emit_and_run/container_specialize.rs"]
+mod container_specialize;
+#[path = "emit_and_run/controller_concern_delegate.rs"]
+mod controller_concern_delegate;
+#[path = "emit_and_run/backtrace_cleaner.rs"]
+mod backtrace_cleaner;
+#[path = "emit_and_run/method_lookup_order.rs"]
+mod method_lookup_order;
+#[path = "emit_and_run/inquiry_safe_nav.rs"]
+mod inquiry_safe_nav;
+#[path = "emit_and_run/record_as_json.rs"]
+mod record_as_json;
+#[path = "emit_and_run/active_model_keyword_super.rs"]
+mod active_model_keyword_super;
+#[path = "emit_and_run/arguments_deserialize.rs"]
+mod arguments_deserialize;
+#[path = "emit_and_run/i18n_config.rs"]
+mod i18n_config;
+#[path = "emit_and_run/computed_class_constants.rs"]
+mod computed_class_constants;
+#[path = "emit_and_run/guarded_absent_constant.rs"]
+mod guarded_absent_constant;
+#[path = "emit_and_run/concurrent_map_default.rs"]
+mod concurrent_map_default;
+#[path = "emit_and_run/time_subclass_constructor.rs"]
+mod time_subclass_constructor;
+#[path = "emit_and_run/included_instance_eval_extend.rs"]
+mod included_instance_eval_extend;
+#[path = "emit_and_run/settled_conditional_definition.rs"]
+mod settled_conditional_definition;
+#[path = "emit_and_run/append_features_bridge.rs"]
+mod append_features_bridge;
+#[path = "emit_and_run/io_seek_date_reform_constants.rs"]
+mod io_seek_date_reform_constants;
+#[path = "emit_and_run/class_variable_computed_initializer.rs"]
+mod class_variable_computed_initializer;
+#[path = "emit_and_run/comparable_alias_rational.rs"]
+mod comparable_alias_rational;
+#[path = "emit_and_run/job_class_safe_constantize.rs"]
+mod job_class_safe_constantize;
+#[path = "emit_and_run/load_time_definer.rs"]
+mod load_time_definer;
+#[path = "emit_and_run/gem_source_shapes.rs"]
+mod gem_source_shapes;
+#[path = "emit_and_run/serialized_size_truncate_bytes.rs"]
+mod serialized_size_truncate_bytes;
+#[path = "emit_and_run/inherited_belongs_to_initializer.rs"]
+mod inherited_belongs_to_initializer;
+#[path = "emit_and_run/settled_builtin_probe.rs"]
+mod settled_builtin_probe;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;
@@ -20591,6 +20602,36 @@ mod page_caching;
 mod route_requirement_span;
 #[path = "emit_and_run/boot_program.rs"]
 mod boot_program;
+#[path = "emit_and_run/on_load_extend.rs"]
+mod on_load_extend;
+#[path = "emit_and_run/engine_config.rs"]
+mod engine_config;
+#[path = "emit_and_run/engine_boot_branches.rs"]
+mod engine_boot_branches;
+#[path = "emit_and_run/resource_dynamic_path.rs"]
+mod resource_dynamic_path;
+#[path = "support/enumerable_mixin.rs"]
+mod enumerable_mixin_contract;
+#[path = "emit_and_run/enumerable_mixin.rs"]
+mod enumerable_mixin;
+#[path = "support/file_level_struct.rs"]
+mod file_level_struct_contract;
+#[path = "emit_and_run/file_level_struct.rs"]
+mod file_level_struct;
+#[path = "support/concern_class_side.rs"]
+mod concern_class_side_contract;
+#[path = "emit_and_run/concern_class_side.rs"]
+mod concern_class_side;
+#[path = "support/concern_define_loop.rs"]
+mod concern_define_loop_contract;
+#[path = "emit_and_run/concern_define_loop.rs"]
+mod concern_define_loop;
+#[path = "emit_and_run/mutated_loop_constant.rs"]
+mod mutated_loop_constant;
+#[path = "support/solid_queue_worker.rs"]
+mod solid_queue_worker_contract;
+#[path = "emit_and_run/solid_queue_worker.rs"]
+mod solid_queue_worker;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
 mod route_helper_segment_escape;
 #[path = "emit_and_run/solid_queue_clear.rs"]
@@ -20615,8 +20656,23 @@ mod record_slice;
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
 
+#[path = "emit_and_run/namespaced_model_paths.rs"]
+mod namespaced_model_paths;
+
+#[path = "emit_and_run/link_to_blob.rs"]
+mod link_to_blob;
+#[path = "emit_and_run/validates_rule_gaps.rs"]
+mod validates_rule_gaps;
+
+#[path = "emit_and_run/render_partial_block.rs"]
+mod render_partial_block;
+
 #[path = "emit_and_run/python_route_format.rs"]
 mod python_route_format;
+#[path = "emit_and_run/partial_local_shadows_helper.rs"]
+mod partial_local_shadows_helper;
+#[path = "emit_and_run/partial_reads_caller_ivar.rs"]
+mod partial_reads_caller_ivar;
 
 #[path = "emit_and_run/python_nested_modifier_if.rs"]
 mod python_nested_modifier_if;
@@ -20626,6 +20682,95 @@ mod namespaced_class_consts;
 
 #[path = "emit_and_run/boolop_precedence.rs"]
 mod boolop_precedence;
+#[path = "emit_and_run/concern_with_options.rs"]
+mod concern_with_options;
+
+#[path = "emit_and_run/content_tag_block.rs"]
+mod content_tag_block;
+
+#[path = "support/block_control_flow.rs"]
+mod block_control_flow;
+
+#[test]
+fn a_block_starting_with_control_flow_renders() {
+    block_control_flow::app()
+        .write("test/controllers/probes_controller_test.rb", &block_control_flow::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_block_starting_with_control_flow_renders_on_spinel() {
+    block_control_flow::app()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"rendered\"\n",
+            block_control_flow::body_checks()
+        ))
+        .assert_passes();
+}
+
+#[path = "support/go_conditional_operand.rs"]
+mod go_conditional_operand;
+
+/// #1696's `Note#headline?` on the ruby target: the answers the Go probe
+/// checks are Ruby's.
+#[test]
+fn a_conditional_operand_of_and_answers_as_ruby() {
+    go_conditional_operand::note_app().run_test("test/models/note_headline_test.rb").assert_passes();
+}
+
+/// The Go emit writes the conditional operand as a func literal, not an
+/// `if` statement in expression position.
+#[test]
+fn a_conditional_operand_of_and_is_a_go_value() {
+    let (emitted, errors) = go_conditional_operand::issue_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let model = std::fs::read_to_string(emitted.join("app/v2/article.go")).unwrap();
+    let body = model.split("func (self *Article) HeadlinePred() bool {").nth(1).expect("HeadlinePred").split("\n}\n").next().unwrap();
+    assert!(!body.contains("return if ") && body.contains("func() bool {"), "{body}");
+}
+
+#[path = "support/rust_bare_model.rs"]
+mod rust_bare_model;
+
+/// #1711: the Rust model's `save` and `_insert_row` call `validate` and
+/// `fill_timestamps` only when the model has them.
+#[test]
+fn a_rust_model_calls_only_the_validate_and_fill_timestamps_it_has() {
+    for (validated, timestamped) in rust_bare_model::VARIANTS {
+        let (emitted, errors) = rust_bare_model::app(validated, timestamped).emit(roundhouse::project::BuildTarget::Rust);
+        assert!(errors.is_empty(), "{errors:?}");
+        let model = std::fs::read_to_string(emitted.join("src/models/account.rs")).unwrap();
+        assert_eq!(model.contains("self.validate()"), validated, "validated: {validated}\n{model}");
+        assert_eq!(model.contains("self.fill_timestamps(true)"), timestamped, "timestamped: {timestamped}\n{model}");
+    }
+}
+
+#[path = "support/pluralize_escape.rs"]
+mod pluralize_escape;
+
+#[test]
+fn pluralize_in_a_template_is_escaped() {
+    pluralize_escape::app_with_app_escape()
+        .write("test/controllers/probes_controller_test.rb", &pluralize_escape::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn pluralize_in_a_template_is_escaped_on_spinel() {
+    pluralize_escape::app_with_app_escape()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"pluralize escaped\"\n",
+            pluralize_escape::body_checks()
+        ))
+        .assert_passes();
+}
+
+#[path = "emit_and_run/unknown_class_association.rs"]
+mod unknown_class_association;
 
 #[path = "support/full_forwarding.rs"]
 mod full_forwarding;
@@ -20638,3 +20783,5 @@ fn full_forwarding_keeps_the_native_argument_contract() {
     run.assert_passes();
     assert_eq!(run.stdout, "full forwarding contract passed\n");
 }
+#[path = "emit_and_run/form_with_nilable_record.rs"]
+mod form_with_nilable_record;

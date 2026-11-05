@@ -6,6 +6,8 @@
 //! now starts from the reader the class registered; a plain column keeps
 //! its type.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -14,7 +16,7 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 const SCHEMA: &str = "ActiveRecord::Schema.define do\n  create_table :things do |t|\n    t.string :title\n    t.text :payload\n  end\nend\n";
 
 fn check(model: &str) -> (bool, String) {
-    let root = std::env::temp_dir().join(format!("rh_serialized_column_guard_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
+    let root = scratch::dir(&format!("rh_serialized_column_guard_{}", NEXT.fetch_add(1, Ordering::SeqCst)));
     let files = [
         ("roundhouse.yml", "test_paths:\n  - test\n"),
         ("db/schema.rb", SCHEMA),

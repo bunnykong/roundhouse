@@ -160,16 +160,9 @@ pub enum ReturnKind {
     /// Returns `Bool`. Example: `Model.exists?`, `#save`,
     /// `#valid?`, `#persisted?`.
     Bool,
-    /// Returns `Hash<Sym, Str>`. Example: `#attributes` on an
-    /// ActiveRecord instance — the canonical schema-derived
-    /// attribute dictionary. Specific rather than generic because
-    /// this one shape is what the Rails dialect emits; if/when
-    /// another Hash shape enters the catalog, generalize to a
-    /// `HashOf(PrimKind, PrimKind)` variant.
-    HashSymStr,
-    /// Returns `Hash<Str, untyped>`. Example:
-    /// `#attributes_before_type_cast` — each column's raw stored value,
-    /// String-keyed as Rails keys it.
+    /// Returns `Hash<Str, untyped>`. Example: `#attributes` and
+    /// `#attributes_before_type_cast` — each column's value (cast or
+    /// raw stored), String-keyed as Rails keys it.
     HashStrUntyped,
     /// Returns `Array<Sym>`. Example: `.schema_column_names` on
     /// an ActiveRecord class — the schema column list the lowerer
@@ -995,7 +988,7 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: Some(ReturnKind::Bool),
     },
     // ---- Instance-method accessors (state / metadata) ----
-    // `#attributes` returns Hash<Sym, Str>; `#errors` returns the
+    // `#attributes` returns Hash<Str, untyped>; `#errors` returns the
     // per-instance ActiveModel::Errors collection. Both pure
     // (no DB hit); both structural rather than expression-
     // dispatchable.
@@ -1004,10 +997,25 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         receiver: ReceiverContext::Instance,
         effect: EffectClass::Pure,
         chain: ChainKind::NotApplicable,
-        return_kind: Some(ReturnKind::HashSymStr),
+        return_kind: Some(ReturnKind::HashStrUntyped),
     },
     CatalogedMethod {
         name: "attributes_before_type_cast",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::HashStrUntyped),
+    },
+    // Every attribute by its reader (`synth_serializable_hash`), and the record as JSON reads it (runtime `as_json`).
+    CatalogedMethod {
+        name: "serializable_hash",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::HashStrUntyped),
+    },
+    CatalogedMethod {
+        name: "as_json",
         receiver: ReceiverContext::Instance,
         effect: EffectClass::Pure,
         chain: ChainKind::NotApplicable,

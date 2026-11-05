@@ -6,6 +6,8 @@
 //! on the same source is the oracle for the values, their order and
 //! their identity with ALL's elements.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -46,8 +48,7 @@ const REPORT: &str = "p Level.report, Reader.low\n";
 
 #[test]
 fn a_constant_written_in_another_constant_s_value_is_declared_as_in_native_ruby() {
-    let dir = std::env::temp_dir().join(format!("roundhouse-nested-const-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-nested-const");
     std::fs::write(dir.join("level.rb"), LEVEL).unwrap();
     std::fs::write(dir.join("reader.rb"), READER).unwrap();
     let native = std::process::Command::new("ruby")

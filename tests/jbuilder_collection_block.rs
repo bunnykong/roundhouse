@@ -14,6 +14,8 @@
 //! `JsonBuilder`, with plain Structs for records) against what Rails
 //! 8.1 + jbuilder 2.15 render for the same templates and rows.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -306,10 +308,7 @@ fn the_collection_expression_is_evaluated_once() {
 /// stdout.
 fn render(name: &str, body: &str) -> String {
     let files = emitted();
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-jbuilder-collection-block-{name}-{}",
-        std::process::id()
-    ));
+    let dir = scratch::dir(&format!("roundhouse-jbuilder-collection-block-{name}"));
     // The emitted tree as it is laid out, partial first. `app/views.rb`
     // is the views index a partial call requires; it holds nothing
     // these templates need.

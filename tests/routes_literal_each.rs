@@ -11,6 +11,8 @@
 //! The expected answers are Rails 8.1.4's on the same app, booted
 //! in-process with `Rack::MockRequest`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use roundhouse::det::HashMap;
 
 use roundhouse::ingest::routes::ingest_routes_with_draws;
@@ -221,11 +223,7 @@ end
 /// a partial mount.
 #[test]
 fn a_mount_inside_a_literal_each_loop_is_a_located_gap_on_every_iteration() {
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse-routes-literal-each-mount-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
+    let root = scratch::dir(&format!("roundhouse-routes-literal-each-mount-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     let app_dir = root.join("app");
     for (path, source) in [
         (

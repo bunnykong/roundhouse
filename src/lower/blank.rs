@@ -10,7 +10,8 @@
 //! analyzer already stamped make the dynamic dispatch unnecessary at
 //! almost every site, so this pass rewrites, per receiver type:
 //!
-//!   String        blank? → `(r || "").strip.empty?` (see below)
+//!   String        Ruby family: `ActiveSupport.blank?(r)`; other targets:
+//!                 `(r || "").strip.empty?` (see below)
 //!   Array/Hash    blank? → `r.empty?`
 //!   Class w/ own  left as-is when the app class defines the
 //!   definition    predicate itself; grounded via `empty?` when it
@@ -24,7 +25,7 @@
 //! `present?` is the negation; `presence` is `blank? ? nil : r`
 //! (an `If` node), or just `r` where T is never blank.
 //!
-//! ## Why the String case strips first
+//! ## String whitespace by target
 //!
 //! ActiveSupport's `String#blank?` is a whitespace match — the regex is
 //! `\A[[:space:]]*\z` — and not `empty?`, so `" ".blank?` is TRUE in
@@ -32,18 +33,18 @@
 //! site that priced it: a boost posted with a body of three spaces was
 //! accepted and stored where Rails answers 422.
 //!
-//! `strip` rather than the regex because every target emitter carries
-//! it and a POSIX character class is not a shape every regex backend
-//! shares. The divergence that leaves is NON-ASCII whitespace: Ruby's
-//! `String#strip` takes ASCII space plus NUL, where `[[:space:]]` also
-//! takes U+00A0 and friends. No corpus app has one, and the targets
-//! disagree there among themselves anyway — Python's `.strip()` and
-//! JavaScript's `.trim()` do take them.
+//! Ruby, JRuby and Spinel use the shared runtime predicate, including
+//! Unicode whitespace and the encoded-regexp fallback. A typed String
+//! must agree with the same value passed through an untyped receiver.
+//! In particular, Ruby's `strip` strips NUL and leaves NBSP, reversing
+//! Rails' answer for both. Other targets retain their native trim
+//! lowering; their whitespace sets depend on the target's library.
 //!
 //! The nil guard is this `|| ""`, and it is already in the IR. A column
 //! typed `String` can still be nil once nullable hydration runs, and
 //! `nil.strip` would raise before any later wrap could answer. The
-//! guard sits on the value, so the form is `(r || "").strip.empty?`.
+//! guard sits on the value for the other targets, so their form is
+//! `(r || "").strip.empty?`; the Ruby-family helper handles nil itself.
 //! Emitters print that node. Ruby does not wrap `empty?` again on the
 //! way out.
 //!
@@ -70,6 +71,7 @@
 //! either — see the note in [`apply_blank_lowering`].
 
 use crate::app::App;
+use crate::build_target::BuildTarget;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
@@ -81,7 +83,11 @@ use crate::det::HashSet;
 /// before any emitter. Returns the residue diagnostics — sites left as
 /// dynamic dispatch, with the reason.
 pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
-    let defs = AppDefinitions::collect(app);
+    apply_blank_lowering_for(app, BuildTarget::Ruby)
+}
+
+pub(crate) fn apply_blank_lowering_for(app: &mut App, target: BuildTarget) -> Vec<Diagnostic> {
+    let defs = AppDefinitions::collect(app, matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel));
     let mut diags = Vec::new();
 
     // View bodies are deliberately NOT walked (`for_each_hook_body`
@@ -214,6 +220,7 @@ pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> 
 pub(crate) struct AppDefinitions {
     own_predicate: HashSet<String>,
     own_empty: HashSet<String>,
+    runtime_strings: bool,
 }
 
 impl AppDefinitions {
@@ -243,10 +250,10 @@ impl AppDefinitions {
                 }
             }
         }
-        Self { own_predicate, own_empty }
+        Self { own_predicate, own_empty, runtime_strings: true }
     }
 
-    pub(crate) fn collect(app: &App) -> Self {
+    pub(crate) fn collect(app: &App, runtime_strings: bool) -> Self {
         let mut own_predicate = HashSet::default();
         let mut own_empty = HashSet::default();
         let mut note = |class: &str, method: &str| {
@@ -271,14 +278,14 @@ impl AppDefinitions {
                 note(lc.name.0.as_str(), method.name.as_str());
             }
         }
-        Self { own_predicate, own_empty }
+        Self { own_predicate, own_empty, runtime_strings }
     }
 }
 
 /// How a receiver type grounds the predicate.
 enum Grounding {
     /// `empty?` applies (strings and collections). `whitespace` marks
-    /// the STRING case, whose emptiness test is `strip.empty?` — see
+    /// the non-Ruby STRING case, whose test is `strip.empty?` — see
     /// the module header. A collection's is not: `[nil].blank?` is
     /// false in Rails and `" ".blank?` is true, and one `empty_form`
     /// for both would have to be wrong about one of them.
@@ -292,7 +299,7 @@ enum Grounding {
     AlwaysNil,
     /// The class defines the predicate itself — normal dispatch.
     OwnDispatch,
-    /// No static type to ground on: hand the value to the ruby-family
+    /// No static type, or a Ruby-family String: use the ruby-family
     /// runtime predicate, which branches on the value instead. The
     /// receiver becomes an argument, so it is evaluated exactly once —
     /// that is why this arm needs no effect-free gate.
@@ -332,6 +339,7 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
     // `Object#present?` does for any record.
     let Some(t) = ty else { return Runtime };
     match t {
+        Ty::Str if defs.runtime_strings => Runtime,
         Ty::Str => Container { nilable: false, whitespace: true },
         Ty::Array { .. } | Ty::Hash { .. } | Ty::Tuple { .. } => {
             Container { nilable: false, whitespace: false }

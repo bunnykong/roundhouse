@@ -5,14 +5,15 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
 fn native(files: &[(&str, &str)], script: &str) -> String {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("rh_boot_emit_order_{}_{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("rh_boot_emit_order_{n}"));
     for (path, text) in files {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -118,7 +119,6 @@ const COLLOCATED: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_nested_module_from_another_file_loads_before_the_body_that_extends_it() {
     gem_same_as_native(
         "gqlc",
@@ -207,8 +207,7 @@ fn a_class_declared_in_a_class_body_conditional_is_carried() {
 /// `roundhouse check` on a tree vendoring the gem `gqlc` with `files`
 /// (paths in the gem): its rows.
 fn check_gem_tree(tag: &str, files: &[(&str, &str)]) -> String {
-    let root = std::env::temp_dir().join(format!("rh_boot_emit_order_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("rh_boot_emit_order_{tag}"));
     let gem: Vec<(String, &str)> = files.iter().map(|(path, text)| (format!("vendor/gems/gqlc-1.0.0/{path}"), *text)).collect();
     for (path, text) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
@@ -246,18 +245,17 @@ fn an_alias_no_ancestor_defines_still_refuses_its_file() {
 }
 
 /// A gem file of declarations only, required by config/application.rb.
-/// The boot list held file programs only, so a file with none loaded
-/// nothing, and a plain gem's constants have no autoload: `Gqlc::Plain`
-/// was undefined (NameError). Each class it declares now loads at that
-/// boot require, in the file's order (`Shapes` before `Plain`, whose
-/// body reads it).
+/// In the fork the boot list held file programs only, so a file with none
+/// loaded nothing: `Gqlc::Plain` was undefined (NameError). Here every gem
+/// file has a program, and boot's require of it loads each class it
+/// declares in the file's order (`Shapes` before `Plain`, whose body
+/// reads it).
 const PLAIN_DECLARATIONS: &[(&str, &str)] = &[(
     "gqlc/plain.rb",
     "module Gqlc\n  module Shapes\n    ALL = %i[a b c].freeze\n  end\n\n  class Plain\n    SIZE = Shapes::ALL.size\n\n    def self.x = SIZE\n  end\nend\n",
 )];
 
 #[test]
-#[ignore = "fork spec: load order"]
 fn a_gem_file_of_declarations_only_required_by_boot_is_loaded() {
     let run = gem_same_as_native(
         "gqlc",
@@ -266,10 +264,14 @@ fn a_gem_file_of_declarations_only_required_by_boot_is_loaded() {
         "p Gqlc::Plain.x, Gqlc::Shapes::ALL.last\n",
         "3\n:c\n",
     );
+    // Boot requires the file's program, which loads each class it declares
+    // in the file's order.
     let models = std::fs::read_to_string(run.emitted.join("app/models.rb")).unwrap();
-    let shapes = models.find("  [\"models/gqlc/shapes\", nil], # config/application.rb:1\n");
-    let plain = models.find("  [\"models/gqlc/plain\", nil], # config/application.rb:1\n");
-    assert!(shapes.is_some() && plain.is_some() && shapes < plain, "{models}");
+    assert!(models.contains("RoundhouseAutoload.require_gem_file(\"models/roundhouse_files/vendor/gems/gqlc-1.0.0/lib/gqlc/plain\")"), "{models}");
+    let program = std::fs::read_to_string(run.emitted.join("app/models/roundhouse_files/vendor/gems/gqlc-1.0.0/lib/gqlc/plain.rb")).unwrap();
+    let shapes = program.find("RoundhouseAutoload.path(\"models/gqlc/shapes\")");
+    let plain = program.find("RoundhouseAutoload.path(\"models/gqlc/plain\")");
+    assert!(shapes.is_some() && plain.is_some() && shapes < plain, "{program}");
 }
 
 const SINGLETON_ONLY: &[(&str, &str)] = &[(

@@ -11,6 +11,8 @@
 //!
 //! Native Ruby on the same source is the oracle.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -52,7 +54,7 @@ const REPORT: &str = "Operandlab::Probe.report.each { |r| p r }\n";
 #[test]
 fn statement_operands_keep_their_parentheses() {
     let dir =
-        std::env::temp_dir().join(format!("roundhouse-operand-parens-{}", std::process::id()));
+        scratch::dir("roundhouse-operand-parens");
     std::fs::create_dir_all(&dir).unwrap();
     let probe = dir.join("probe.rb");
     std::fs::write(&probe, PROBE).unwrap();

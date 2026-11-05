@@ -3,6 +3,7 @@ import os
 
 # Not a module global: aiohttp serves each request in its own task, interleaved across awaits
 _locale: contextvars.ContextVar[str] = contextvars.ContextVar("roundhouse_i18n_locale", default="")
+_config: contextvars.ContextVar[str] = contextvars.ContextVar("roundhouse_i18n_config", default="")
 _table: list[str] = []
 
 
@@ -10,6 +11,7 @@ class I18nHost:
     @staticmethod
     def reset_request() -> None:
         _locale.set("")
+        _config.set("")
 
     @staticmethod
     def locale_name() -> str:
@@ -18,6 +20,15 @@ class I18nHost:
     @staticmethod
     def set_locale_name(name: str) -> str:
         _locale.set(name)
+        return name
+
+    @staticmethod
+    def config_name() -> str:
+        return _config.get()
+
+    @staticmethod
+    def set_config_name(name: str) -> str:
+        _config.set(name)
         return name
 
     @staticmethod

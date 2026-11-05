@@ -360,7 +360,12 @@ module Tep
           # browser waits out the difference: campfire's sign-in page
           # hung ~30s on /account/logo until the keep-alive timeout
           # closed the connection under it (ERR_CONTENT_LENGTH_MISMATCH).
-          head << "Content-Length: " + res.body.bytesize.to_s + "\r\n\r\n"
+          # Not for a 204 or a 304: RFC 9110 gives neither a Content-Length of its own body, and Puma writes none.
+          if res.status == 204 || res.status == 304
+            head << "\r\n"
+          else
+            head << "Content-Length: " + res.body.bytesize.to_s + "\r\n\r\n"
+          end
           Sock.sphttp_write_str(client, head)
           # HEAD: the headers GET would send, Content-Length included, and
           # no body (RFC 9110 9.3.2). A body here would be read by the

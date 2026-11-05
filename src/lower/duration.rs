@@ -584,6 +584,11 @@ fn is_numeric_expr(e: &Expr) -> bool {
     matches!(&e.ty, Some(Ty::Int) | Some(Ty::Float))
 }
 
+/// A receiver typed as something no number is: its own `seconds` is a method of its class (fugit's `Cron#seconds`), not a Duration.
+fn known_non_numeric(e: &Expr) -> bool {
+    matches!(&e.ty, Some(Ty::Class { .. } | Ty::Str | Ty::Sym | Ty::Array { .. } | Ty::Hash { .. } | Ty::Bool | Ty::Nil))
+}
+
 /// `<n>.days` → `ActiveSupport::Duration.days(<n>)`, in place,
 /// recursively. The receiver moves into argument position keeping its
 /// stamped type. The synthesized `ActiveSupport::Duration` const is
@@ -602,7 +607,7 @@ pub(crate) fn rewrite_durations(expr: &mut Expr) {
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if args.is_empty() && is_duration_unit(method.as_str()) =>
         {
-            !duration_unit_collides_with_a_reader(method.as_str()) || is_numeric_expr(r)
+            is_numeric_expr(r) || (!duration_unit_collides_with_a_reader(method.as_str()) && !known_non_numeric(r))
         }
         _ => false,
     };

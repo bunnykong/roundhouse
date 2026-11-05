@@ -214,6 +214,6 @@ fn a_declared_as_json_keeps_the_runtime_encoder_at_the_site() {
 end
 "#,
     );
-    assert!(src.contains("ActionController::JsonRender.encode(card)"), "{src}");
+    assert!(src.contains("ActionController::JsonRender.encode(card, json_render_escape)"), "{src}");
     assert!(!src.contains("as_json_str"), "{src}");
 }

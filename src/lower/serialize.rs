@@ -132,6 +132,7 @@ fn is_json_const(expr: &crate::expr::Expr, json_shadowed: bool) -> bool {
 fn sym_lit(expr: &crate::expr::Expr) -> Option<Symbol> {
     match &*expr.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
         _ => None,
     }
 }

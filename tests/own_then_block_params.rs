@@ -6,6 +6,8 @@
 //! to the promise made `include?` read as Module#include? on a promise
 //! instance and refused it. Native Ruby on the same source is the oracle.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -40,8 +42,7 @@ const REPORT: &str = "p Tags.report\n";
 
 #[test]
 fn an_own_then_binds_its_block_parameter_as_native_ruby_does() {
-    let dir = std::env::temp_dir().join(format!("roundhouse-own-then-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-own-then");
     let file = dir.join("tags.rb");
     std::fs::write(&file, TAGS).unwrap();
     let native = std::process::Command::new("ruby")

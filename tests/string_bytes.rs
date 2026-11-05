@@ -1,4 +1,6 @@
 //! A String's bytes are unsigned integers, including multi-byte UTF-8.
+#[path = "support/scratch.rs"]
+mod scratch;
 use roundhouse::analyze::Analyzer;
 use roundhouse::diagnostic::Severity;
 use roundhouse::emit;
@@ -443,8 +445,7 @@ fn shared_bridge_evaluates_receiver_once_and_rejects_arguments() {
 fn generated_byte_expressions_execute_with_unsigned_values_and_one_receiver_call() {
     use emit::shared::string_bytes::{self, Target};
     use std::process::Command;
-    let dir = std::env::temp_dir().join(format!("roundhouse-string-bytes-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-string-bytes");
     let rust = string_bytes::render(Target::Rust, "effectful_receiver()");
     let nil_rust = string_bytes::emit(&analyzed_call("nil_block"), Target::Rust, |_| {
         "effectful_receiver()".into()

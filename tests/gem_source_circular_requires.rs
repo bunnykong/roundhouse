@@ -3,6 +3,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -29,8 +31,7 @@ fn lines(bytes: &[u8]) -> Vec<String> {
 
 #[test]
 fn a_gem_sources_circular_and_self_requires_stay_quiet_no_ops() {
-    let root = std::env::temp_dir().join(format!("roundhouse-gem-source-circular-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-gem-source-circular");
     let source = root.join("circkit/lib");
     std::fs::create_dir_all(source.join("circkit")).unwrap();
     for (path, text) in [("circkit.rb", CIRCKIT), ("circkit/index.rb", INDEX), ("circkit/detector.rb", DETECTOR), ("circkit/checksum.rb", CHECKSUM)] {

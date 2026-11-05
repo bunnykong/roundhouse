@@ -19,12 +19,14 @@ pub(super) struct Delegation {
     /// `allow_nil: true`: the forwarder answers nil for a nil target
     /// (`delegate::synthesized_source`).
     pub(super) allow_nil: bool,
+    /// Called only with a block and no arguments: the forwarder hands the block on, as Rails' `...` does.
+    pub(super) block: bool,
 }
 
 #[derive(Default)]
 pub(super) struct CallShapes {
-    positional_arities: HashSet<usize>,
-    has_block: bool,
+    pub(super) positional_arities: HashSet<usize>,
+    pub(super) has_block: bool,
 }
 
 pub(super) type CallsWithArguments = HashMap<String, CallShapes>;
@@ -34,6 +36,7 @@ struct ParsedDeclaration {
     target: Symbol,
     prefix: DelegatePrefix,
     allow_nil: bool,
+    private: Option<bool>,
     has_unsupported_option: bool,
 }
 
@@ -114,13 +117,13 @@ impl<'a> DelegateEligibility<'a> {
                         })
                         .unwrap_or_default()
                 });
-        let Some(&visibility) = visibility_defaults.get(&(call.span.start as usize)) else {
+        if !visibility_defaults.contains_key(&(call.span.start as usize)) {
             super::super::survey::record(&crate::ingest::IngestError::Unsupported {
                 file,
                 message: "delegate visibility could not be resolved from its source".into(),
             });
             return None;
-        };
+        }
 
         let mut entries = Vec::new();
         for method in &declaration.names {
@@ -134,6 +137,9 @@ impl<'a> DelegateEligibility<'a> {
                     || method.as_str().ends_with('=')
                     || super::operator_forwarder("", method.as_str()).is_some())
             {
+                return None;
+            }
+            if matches!(declaration.prefix, DelegatePrefix::Target) && is_constant_target(declaration.target.as_str()) {
                 return None;
             }
             let name = generated_name(
@@ -158,8 +164,15 @@ impl<'a> DelegateEligibility<'a> {
             {
                 return None;
             }
+            if matches!(method.as_str(), "[]" | "[]=") && !self.hash_backed(declaration.target.as_str()) {
+                return None;
+            }
+            let mut block = false;
             if !method.as_str().ends_with('=') {
                 if let Some(calls) = self.called_with_args.get(&name) {
+                    let block_only = calls.has_block
+                        && calls.positional_arities.iter().all(|arity| *arity == 0)
+                        && super::operator_forwarder("", method.as_str()).is_none();
                     let forwardable_operator = super::operator_forwarder("", method.as_str())
                         .map(|(params, _)| params.split(", ").count())
                         .is_some_and(|arity| {
@@ -169,7 +182,9 @@ impl<'a> DelegateEligibility<'a> {
                                     .iter()
                                     .all(|call_arity| *call_arity == arity)
                         });
-                    if !forwardable_operator {
+                    if block_only {
+                        block = true;
+                    } else if !forwardable_operator {
                         return None;
                     }
                 }
@@ -180,8 +195,10 @@ impl<'a> DelegateEligibility<'a> {
                 name,
                 file: file.clone(),
                 declaration_span: call.span,
-                visibility,
+                // Not the body's `private` in effect: Rails defines the forwarders through `module_eval`, which starts public.
+                visibility: if declaration.private == Some(true) { MethodVisibility::Private } else { MethodVisibility::Public },
                 allow_nil: declaration.allow_nil,
+                block,
             });
         }
         if self.supported_target_methods.is_some_and(|supported| {
@@ -273,6 +290,7 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
     let mut target = None;
     let mut prefix = DelegatePrefix::None;
     let mut allow_nil = false;
+    let mut private = None;
     let mut has_unsupported_option = false;
     for arg in args {
         match &*arg.node {
@@ -289,16 +307,16 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
                         continue;
                     };
                     match key.as_str() {
-                        "to" => {
-                            if let ExprNode::Lit {
-                                value: Literal::Sym { value },
-                            } = &*value.node
-                            {
-                                target = Some(value.clone());
-                            } else {
-                                has_unsupported_option = true;
+                        "to" => match &*value.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => target = Some(value.clone()),
+                            // Rails writes `to.to_s` into the forwarder, so a constant is its own receiver.
+                            ExprNode::Const { path } if !path.is_empty() => {
+                                let rooted = path[0].as_str().is_empty();
+                                let joined = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+                                target = Some(Symbol::from(if rooted { format!("::{joined}") } else { joined }));
                             }
-                        }
+                            _ => has_unsupported_option = true,
+                        },
                         "prefix" => match &*value.node {
                             ExprNode::Lit {
                                 value: Literal::Bool { value: true },
@@ -327,6 +345,12 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
                             } => allow_nil = true,
                             _ => has_unsupported_option = true,
                         },
+                        "private" => match &*value.node {
+                            ExprNode::Lit {
+                                value: Literal::Bool { value },
+                            } => private = Some(*value),
+                            _ => has_unsupported_option = true,
+                        },
                         _ => has_unsupported_option = true,
                     }
                 }
@@ -343,6 +367,7 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
         target,
         prefix,
         allow_nil,
+        private,
         has_unsupported_option,
     })
 }
@@ -391,9 +416,63 @@ fn valid_prefixed_method_name(name: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+impl DelegateEligibility<'_> {
+    /// Whether `target` reads an ivar `initialize` sets to a Hash: its `[]`
+    /// takes one key and its `[]=` a key and a value, the arities the
+    /// forwarders take. Any other receiver's `[]` may take more.
+    fn hash_backed(&self, target: &str) -> bool {
+        let ivar = match target.strip_prefix('@') {
+            Some(name) => name.to_string(),
+            None => {
+                let reads_ivar = self.methods.iter().any(|m| {
+                    m.receiver == MethodReceiver::Instance
+                        && m.name.as_str() == target
+                        && matches!(&*m.body.node, ExprNode::Ivar { name } if name.as_str().trim_start_matches('@') == target)
+                });
+                if !reads_ivar {
+                    return false;
+                }
+                target.to_string()
+            }
+        };
+        fn assigns_hash(e: &Expr, ivar: &str) -> bool {
+            if let ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } = &*e.node
+                && name.as_str().trim_start_matches('@') == ivar
+            {
+                let path_is = |path: &[Symbol]| {
+                    let p: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                    matches!(p.as_slice(), ["Hash"] | ["HashWithIndifferentAccess"] | ["ActiveSupport", "HashWithIndifferentAccess"])
+                };
+                return match &*value.node {
+                    ExprNode::Hash { entries, .. } => entries.is_empty(),
+                    ExprNode::Send { recv: Some(r), method, args, block: None, .. } => {
+                        method.as_str() == "new" && args.is_empty() && matches!(&*r.node, ExprNode::Const { path } if path_is(path))
+                    }
+                    _ => false,
+                };
+            }
+            let mut found = false;
+            e.node.for_each_child(&mut |c| found = found || assigns_hash(c, ivar));
+            found
+        }
+        self.methods.iter().any(|m| {
+            m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize" && assigns_hash(&m.body, &ivar)
+        })
+    }
+}
+
 fn valid_delegate_target(target: &str) -> bool {
+    if is_constant_target(target) {
+        return true;
+    }
     let name = target.strip_prefix('@').unwrap_or(target);
     valid_identifier(name)
+}
+
+pub(super) fn is_constant_target(target: &str) -> bool {
+    let path = target.strip_prefix("::").unwrap_or(target);
+    !path.is_empty()
+        && path.split("::").all(|seg| seg.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && valid_identifier(seg))
 }
 
 fn valid_delegate_method(name: &str) -> bool {

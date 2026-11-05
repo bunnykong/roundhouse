@@ -16,11 +16,13 @@ use super::body::ConstResolver;
 
 /// Register class identities for built-in `Data.define` constants with distinct
 /// literal members, retaining any lifted custom methods. Generated readers stay
-/// untyped; rejected declarations are absent from the returned span-to-type map.
+/// untyped unless a sidecar supplies their types; rejected declarations are
+/// absent from the returned span-to-type map.
 pub(super) fn register(
     app: &App,
     resolver: &ConstResolver,
     classes: &mut HashMap<ClassId, ClassInfo>,
+    rbs_only_classes: &HashSet<ClassId>,
 ) -> HashMap<Span, Ty> {
     let mut factories = HashMap::default();
     // Source overrides can replace `.define`; only the built-in factory is modeled here.
@@ -70,8 +72,11 @@ pub(super) fn register(
         let reopened = app.library_classes.iter().any(|class| {
             class.name == id && !class.is_module && class.parent.is_none()
         });
+        let sidecar_only = rbs_only_classes.contains(&id)
+            && !classes.get(&id).is_some_and(|info| info.app_declared)
+            && !app.gem_boundary.classes.contains_key(&id);
         if id.0.as_str() != format!("{}::{}", owner.0.as_str(), name.as_str())
-            || (classes.contains_key(&id) && !custom && !reopened)
+            || (classes.contains_key(&id) && !custom && !reopened && !sidecar_only)
             || (custom && app.library_classes.iter().filter(|class| class.name == id).count() != 1)
         {
             return;

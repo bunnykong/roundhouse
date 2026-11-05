@@ -12,12 +12,16 @@
 //!
 //!     cargo test --test go_toolchain -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/go_conditional_operand.rs"]
+mod go_conditional_operand;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -53,13 +57,10 @@ fn real_blog_runtime_calls_use_qualified_class_names() {
 }
 
 fn scratch_dir(fixture: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-go-check-{fixture}"))
+    scratch::dir(&format!("roundhouse-go-check-{fixture}"))
 }
 
 fn generate_project(fixture_path: &Path, out: &Path) {
-    if out.exists() {
-        std::fs::remove_dir_all(out).expect("clean scratch");
-    }
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
@@ -272,4 +273,129 @@ func TestFlashEachYieldsPopulatedFields(t *testing.T) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// #1714: a model test calling `Article.create!` and `article.persisted?`.
+fn bang_test_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().write(
+        "test/models/bang_test.rb",
+        "require \"test_helper\"\n\nclass BangTest < ActiveSupport::TestCase\n  test \"create! saves a record\" do\n    article = Article.create!(title: \"Bang\", body: \"A body long enough to pass.\")\n    assert article.persisted?\n    assert_not article.new_record?\n    draft = Article.create(title: \"\", body: \"\")\n    assert_not draft.persisted?\n  end\nend\n",
+    )
+}
+
+/// The Go test calls what the Go emit defines: a class method by its
+/// model function (`Article_create_bang`, `Article_create`), a
+/// predicate with `Pred` (`NewRecordPred()`), and a predicate the
+/// runtime's `ActiveRecord::Base` reads straight off an ivar
+/// (`persisted?`) by the field the library emit reads (`Persisted`).
+#[test]
+fn a_model_test_calls_bang_and_predicate_methods_by_their_go_names() {
+    let (emitted, errors) = bang_test_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = std::fs::read_to_string(emitted.join("app/v2/bang_test.go")).expect("bang_test.go");
+    for want in ["Article_create_bang(map", "Article_create(map", ".Persisted)", ".NewRecordPred()"] {
+        assert!(test.contains(want), "missing {want}:\n{test}");
+    }
+    assert!(!test.contains("!(map") && !test.contains("?()"), "{test}");
+}
+
+#[test]
+#[ignore]
+fn a_model_test_with_bang_and_predicate_calls_runs() {
+    let (emitted, errors) = bang_test_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestCreateSavesARecord", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestCreateSavesARecord"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A model that defines `persisted?` itself: the library emit writes it as
+/// `PersistedPred()`, and the test calls that, not the field.
+fn persisted_override_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  def persisted?\n    false\n  end\n",
+        )
+        .write(
+            "test/models/persisted_override_test.rb",
+            "require \"test_helper\"\n\nclass PersistedOverrideTest < ActiveSupport::TestCase\n  test \"the override answers\" do\n    article = Article.create!(title: \"Bang\", body: \"A body long enough to pass.\")\n    assert_not article.persisted?\n  end\nend\n",
+        )
+}
+
+#[test]
+fn a_model_test_calls_a_models_own_persisted_override() {
+    let (emitted, errors) = persisted_override_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = std::fs::read_to_string(emitted.join("app/v2/persisted_override_test.go")).expect("persisted_override_test.go");
+    assert!(test.contains("article.PersistedPred()") && !test.contains("article.Persisted)"), "{test}");
+}
+
+#[test]
+#[ignore]
+fn a_model_test_with_a_persisted_override_runs() {
+    let (emitted, errors) = persisted_override_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheOverrideAnswers", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheOverrideAnswers"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1696: the issue's reduction parses: its conditional operand of `&&`
+/// is a func literal, not an `if` in expression position.
+#[test]
+#[ignore]
+fn a_conditional_operand_of_and_parses() {
+    let (emitted, errors) = go_conditional_operand::issue_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let output = Command::new("gofmt").args(["-e", "-l", "app/v2/article.go"]).current_dir(&*emitted).output().expect("run gofmt");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A conditional operand of `&&` runs, answering as Ruby does.
+#[test]
+#[ignore]
+fn a_conditional_operand_of_and_runs() {
+    let (emitted, errors) = go_conditional_operand::note_app()
+        .remove("test/models/note_headline_test.rb")
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/note_headline_probe_test.go"), go_conditional_operand::GO_PROBE).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestNoteHeadlineProbe", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestNoteHeadlineProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A conditional of non-nil scalars on the left of `||` is its own value,
+/// as in Ruby, where 0 and "" are truthy.
+#[test]
+#[ignore]
+fn a_conditional_scalar_left_of_or_is_kept() {
+    let (emitted, errors) = go_conditional_operand::or_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/note_or_probe_test.go"), go_conditional_operand::GO_OR_PROBE).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestNoteOrProbe", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestNoteOrProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }

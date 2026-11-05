@@ -110,7 +110,9 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
         .map(|n| super::util::node_span(&n, file))
         .unwrap_or_default();
     let parent = class.superclass().and_then(|n| {
-        constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
+        constant_path_of(&n)
+            .or_else(|| super::engine_config::folded_superclass(&n))
+            .map(|p| ClassId(Symbol::from(p.join("::"))))
     });
 
     let mut comments = collect_comments(&result);
@@ -2071,7 +2073,10 @@ pub fn render_template_name(args: &[Expr]) -> Option<Symbol> {
 /// last segment ends in `Controller` (`ApplicationController`,
 /// `Admin::SectionController`).
 fn descends_from_controller(class: &ruby_prism::ClassNode<'_>) -> bool {
-    let Some(parent) = class.superclass().and_then(|n| constant_path_of(&n)) else {
+    let Some(parent) = class
+        .superclass()
+        .and_then(|n| constant_path_of(&n).or_else(|| super::engine_config::folded_superclass(&n)))
+    else {
         return false;
     };
     parent.first().is_some_and(|s| s == "ActionController")

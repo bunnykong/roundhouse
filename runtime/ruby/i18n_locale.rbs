@@ -13,6 +13,14 @@ module I18n
   class InvalidLocale < ArgumentError
   end
 
+  class Config
+    @locale_name: String
+    def initialize: (?String locale_name) -> void
+    def locale_name: () -> String
+    def default_locale: () -> Symbol
+    def available_locales: () -> Array[Symbol]
+  end
+
   def self.default_locale: () -> Symbol
   def self.available_locales: () -> Array[Symbol]
   def self.locale_available?: (String | Symbol | nil locale) -> bool
@@ -27,6 +35,12 @@ module I18n
   def self.running_in?: (String envs) -> bool
   def self.app_default_locale: () -> Symbol
   def self.app_available_locales: () -> Array[Symbol]
+  def self.config: () -> I18n::Config
+  def self.config=: (I18n::Config value) -> I18n::Config
+  def self.config_named: (String name, String locale_name) -> I18n::Config
+  def self.config_name_of: (I18n::Config config) -> String
+  def self.config_default_locale: () -> Symbol
+  def self.config_available_locales: () -> Array[Symbol]
 
   class MissingTranslationData < ArgumentError
   end

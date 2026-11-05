@@ -156,6 +156,8 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("available_locales", GemTy::Untyped),
             ("locale_available?", GemTy::Bool),
             ("exists?", GemTy::Bool),
+            ("config", GemTy::Instance("I18n::Config")),
+            ("config=", GemTy::Instance("I18n::Config")),
         ],
         instance_methods: &[],
     },

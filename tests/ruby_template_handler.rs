@@ -8,6 +8,8 @@
 //! of one `raw(( … ))` output, its ivars become the view's parameters,
 //! and the `format.rss` branch reaches it.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -110,7 +112,7 @@ fn the_rss_branch_renders_the_ruby_view() {
 fn the_templates_render_what_rails_renders() {
     let app = app();
     let views = views(&app);
-    let dir = std::env::temp_dir().join(format!("roundhouse-ruby-template-handler-{}", std::process::id()));
+    let dir = scratch::dir("roundhouse-ruby-template-handler");
     let mut requires = String::new();
     for suffix in ["app/views/feeds/show_rss.rb", "app/views/feeds/hello.rb"] {
         let file = dir.join(suffix);

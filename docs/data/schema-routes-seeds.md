@@ -382,19 +382,26 @@ shortcut declarations whose paths, `to:` targets, controller/action options,
 and supported `as:`/`match via:` options are literal. Nonliteral targets
 and all `redirect(...)` route targets, `resources`/`resource`,
 `namespace`/`scope`, and other routing wrappers remain explicit errors; they
-are not flattened into public routes. The engine's route helpers and the
-host's named mount proxy helpers are not composed. Calls that could otherwise
-fall through to a same-named host helper receive a located `route mount`
-error. Rack applications and all other engine mount forms remain explicit
+are not flattened into public routes. The engine's route helpers resolve as
+Rails resolves them: inside the engine's own code (its `app/`, `lib/` and
+views) a bare `products_path` is the engine's route under the mount
+(`/catalog/products`), `main_app.products_path` is the host's, and host code
+reaches the engine's through the proxy, `catalog.products_path`. The routes
+are drawn under the proxy's name as a helper prefix (`catalog_products_path`)
+and each such call is rewritten to it as it is ingested
+(`src/ingest/engine_helpers.rs`); the engine's root keeps the trailing slash
+Rails joins to the mount (`/catalog/`). A host route already named like one of
+those prefixed helpers keeps its name, the engine's helpers are left out, and
+each call that reached them is a located `route mount` error. The host's
+named mount helper (`catalog_path`) is not composed. Rack applications and all other engine mount forms remain explicit
 errors, including dynamic or patterned prefixes, `as:` aliases,
 nested or repeated mounts, custom engine initializers and middleware, route
 constraints or conditional branches, route prepends, Devise visibility
 wrappers, and engine `direct` helpers. Strict emission refuses these errors;
 `--allow-unsupported` can write an incomplete project, and survey mode records
-the gap without clearing the diagnostic. Direct and literal reflective
-(`send`, `public_send`, or `__send__`) uses of engine route helpers or the
-mounted proxy are also located errors; engine helper proxies are not resolved
-to the host route table.
+the gap without clearing the diagnostic. Literal reflective (`send`, `public_send`,
+or `__send__`) uses of engine route helpers or the mounted proxy are located
+errors.
 The generic CRuby dispatch contract is exercised by
 `tests/emit_and_run.rs`; `tests/spinel_toolchain.rs` carries the ignored native
 Spinel HTTP witness.
@@ -524,7 +531,34 @@ then flags; a model that declares none is refused, since Rails would key
 it on every column and this compiler does not yet. When there is neither (never migrated locally, or gitignored),
 the walk falls back to folding `db/migrate/*.rb` in filename order —
 `src/ingest/schema.rs::ingest_migration`, called from
-`src/ingest/app.rs`. Migration shapes it can't fold deterministically
+`src/ingest/app.rs`. A `change_table` block folds through the verbs
+its `t.<method>` calls stand for in Rails' `Table`: `t.change`,
+`t.change_default`, `t.change_null`, `t.rename`, `t.remove` (once per
+name), column adds through `t.<type>` (once per name, with `index:`) and
+`t.column`, `t.index`, `t.remove_index`, `t.rename_index`,
+`t.timestamps`, `t.remove_timestamps`, `t.references` / `t.belongs_to`
+and their removals, and `t.foreign_key` / `t.remove_foreign_key`.
+`remove_foreign_key`, top-level or in the block, drops the key Rails
+picks: the first matching every part it gives (target table, `column:`,
+`primary_key:`), and without `column:` one on the default column
+(`author_id` for `:authors`) when there is one; a key named by `name:`
+is a gap, since the fold does not
+record key names. Questions (`column_exists?` and the like) and other
+constraint verbs change nothing the fold models. A non-literal table or
+column name, a block that is not a literal block, an unmapped column
+type, and a `t` used other than as the receiver of a plain statement
+(under an `if` or `case`, or passed to a helper) are gaps. Removing a
+column, top-level or in the block, removes the indexes over it.
+`change_column` (and `t.change`)
+keeps the column's nullability, default and key unless the call gives
+them, as every Rails adapter does, and redefines the column in place.
+`execute` folds when every statement in its literal SQL only sets the
+table's default character set or collation (`ALTER TABLE posts
+COLLATE=utf8mb4_bin`, `… DEFAULT CHARSET=utf8mb4`), which applies only
+to columns added later; any other SQL, `CONVERT TO CHARACTER SET`
+included (it can retype the string columns it re-encodes), is a gap that
+quotes the statement.
+Migration shapes it can't fold deterministically
 (see `UNSUPPORTED_VERBS`) error with a pointer to `rails db:migrate`,
 which materializes the schema.rb this fallback substitutes for. Roda
 apps get the same fallback for Sequel-DSL migrations via

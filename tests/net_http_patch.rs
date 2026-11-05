@@ -1,11 +1,13 @@
 //! Net::HTTP::Patch and Net HTTP exception classes resolve (stdlib surface).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use roundhouse::analyze::{diagnose, Analyzer, Severity};
 use roundhouse::ingest::ingest_app;
 
 #[test]
 fn net_http_patch_and_error_classes_check_clean() {
-    let root = std::env::temp_dir().join(format!("roundhouse-net-http-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-net-http");
     for (path, source) in [
         (
             "db/schema.rb",
@@ -54,14 +56,10 @@ fn cruby_only_http_header_syntax_error_stays_refused() {
     // Spinel-ledgers via `unavailable_class_module_construct`. Header
     // syntax stays an honest constant gap until Spinel grows it
     // (invariant 6) — Jumpstart Pro still names it in NET_HTTP_ERRORS.
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse-net-http-cruby-only-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
+    let root = scratch::dir(&format!("roundhouse-net-http-cruby-only-{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
-    ));
+            .as_nanos()));
     for (path, source) in [
         (
             "db/schema.rb",

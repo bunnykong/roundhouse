@@ -30,7 +30,7 @@ fn lower_and_emit(source: &str) -> (String, Vec<Diagnostic>) {
 }
 
 #[test]
-fn string_present_grounds_to_not_empty() {
+fn string_present_uses_the_shared_runtime_predicate() {
     let (out, diags) = lower_and_emit(
         r#"
 class Util
@@ -42,8 +42,8 @@ class Util
 end
 "#,
     );
-    assert!(!out.contains("present?"), "site should be grounded:\n{out}");
-    assert!(out.contains("empty?"), "expected empty?-based form:\n{out}");
+    assert!(out.contains("ActiveSupport.present?(s)"), "site should be grounded:\n{out}");
+    assert!(!out.contains("strip.empty?"), "{out}");
     assert!(
         diags.is_empty(),
         "typed receiver should not produce residue: {diags:?}"
@@ -79,7 +79,7 @@ end
 }
 
 #[test]
-fn nilable_string_present_gets_nil_guard() {
+fn nilable_string_present_uses_the_same_runtime_predicate() {
     let (out, diags) = lower_and_emit(
         r#"
 class Util
@@ -91,12 +91,7 @@ class Util
 end
 "#,
     );
-    assert!(!out.contains("present?"), "site should be grounded:\n{out}");
-    assert!(
-        out.contains("nil?"),
-        "nilable receiver needs the nil guard:\n{out}"
-    );
-    assert!(out.contains("empty?"), "{out}");
+    assert!(out.contains("ActiveSupport.present?(s)"), "runtime predicate handles nil:\n{out}");
     assert!(diags.is_empty(), "{diags:?}");
 }
 
@@ -149,7 +144,7 @@ end
 }
 
 #[test]
-fn string_presence_becomes_conditional() {
+fn string_presence_uses_the_shared_runtime_predicate() {
     let (out, diags) = lower_and_emit(
         r#"
 class Util
@@ -161,10 +156,10 @@ end
 "#,
     );
     assert!(
-        !out.contains("presence"),
+        out.contains("ActiveSupport.presence(s)"),
         "presence should be grounded:\n{out}"
     );
-    assert!(out.contains("empty?"), "{out}");
+    assert!(!out.contains("strip.empty?"), "{out}");
     assert!(diags.is_empty(), "{diags:?}");
 }
 
@@ -316,7 +311,7 @@ end
 "#,
     );
     assert!(
-        !out.contains("present?"),
+        out.contains("ActiveSupport.present?(h[\"a\"])"),
         "hash-value read should ground:\n{out}"
     );
     assert!(diags.is_empty(), "{diags:?}");
@@ -441,6 +436,13 @@ end
 /// prints that IR and does not run a Ruby pre-emit rewrite, so these
 /// tests fail while `(r || "")` still lives only in an emitter.
 fn is_string_blank_test(expr: &roundhouse::Expr) -> bool {
+    if let roundhouse::ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node {
+        if method.as_str() == "blank?" && args.len() == 1
+            && matches!(&*recv.node, roundhouse::ExprNode::Const { path }
+                if path.len() == 1 && path[0].as_str() == "ActiveSupport") {
+            return true;
+        }
+    }
     let roundhouse::ExprNode::Send { recv: Some(strip_recv), method, args, .. } = &*expr.node
     else {
         return false;
@@ -499,7 +501,7 @@ fn lowered_method(source: &str, method: &str) -> roundhouse::Expr {
 }
 
 #[test]
-fn whitespace_string_blank_is_the_guarded_strip_form_in_ir() {
+fn whitespace_string_blank_uses_the_shared_runtime_predicate_in_ir() {
     let body = lowered_method(
         r#"
 class Util
@@ -515,14 +517,14 @@ end
     assert_eq!(
         count_string_blank_tests(&body),
         1,
-        "whitespace blank? must already be (s || \"\").strip.empty? in the IR:\n{printed}"
+        "typed String blank? must use the shared runtime predicate:\n{printed}"
     );
-    assert!(!printed.contains("blank?"), "{printed}");
-    assert!(printed.contains(".strip.empty?"), "{printed}");
+    assert!(printed.contains("ActiveSupport.blank?(s)"), "{printed}");
+    assert!(!printed.contains(".strip.empty?"), "{printed}");
 }
 
 #[test]
-fn nil_string_blank_carries_the_same_guard_in_ir() {
+fn nil_string_blank_uses_the_same_runtime_predicate_in_ir() {
     let body = lowered_method(
         r#"
 class Util
@@ -538,10 +540,34 @@ end
     assert_eq!(
         count_string_blank_tests(&body),
         1,
-        "a nilable string must carry (s || \"\").strip.empty? before emit:\n{printed}"
+        "a nilable string must use the same runtime predicate:\n{printed}"
     );
-    assert!(printed.contains("nil?"), "typed nil still short-circuits:\n{printed}");
-    assert!(!printed.contains("blank?"), "{printed}");
+    assert!(printed.contains("ActiveSupport.blank?(s)"), "runtime predicate handles nil:\n{printed}");
+}
+
+#[test]
+fn string_blank_runtime_is_limited_to_the_ruby_family() {
+    use roundhouse::project::BuildTarget;
+    for target in BuildTarget::TRANSPILE.iter().copied().filter(|target| {
+        !matches!(target, BuildTarget::Roda | BuildTarget::Futamura)
+    }) {
+        let classes = ingest_library_classes(
+            b"class Util\n  def check\n    s = \"text\"\n    s.blank?\n  end\nend\n",
+            "test.rb",
+        ).unwrap();
+        let mut app = App::new();
+        app.library_classes = classes;
+        roundhouse::session::analyze_and_lower_for(&mut app, target);
+        let body = &app.library_classes.iter().find(|class| class.name.0.as_str() == "Util")
+            .unwrap().methods.iter().find(|method| method.name.as_str() == "check").unwrap().body;
+        let printed = roundhouse::emit::ruby::emit_expr(body);
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+            assert!(printed.contains("ActiveSupport.blank?(s)"), "{target:?}: {printed}");
+        } else {
+            assert!(printed.contains(".strip.empty?"), "{target:?}: {printed}");
+            assert!(!printed.contains("ActiveSupport.blank?"), "{target:?}: {printed}");
+        }
+    }
 }
 
 fn is_nil_guarded_empty(expr: &roundhouse::Expr) -> bool {

@@ -1,6 +1,8 @@
 //! A file assembled from runtime sources keeps only its leading magic
 //! comment: one past the first token is ignored by Ruby with a warning,
 //! and a warnings-are-errors policy turns that warning into a boot failure.
+#[path = "support/scratch.rs"]
+mod scratch;
 use roundhouse::project::drop_late_magic_comments;
 
 #[test]
@@ -21,8 +23,7 @@ fn a_file_without_late_magic_comments_is_untouched() {
 fn the_emitted_files_ruby_parses_warn_free() {
     let src = "require_relative \"active_support_i18n\"\n\n# frozen_string_literal: true\nX = \"x\"\n";
     let out = drop_late_magic_comments(src);
-    let dir = std::env::temp_dir().join(format!("rh-late-magic-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("rh-late-magic");
     let file = dir.join("f.rb");
     std::fs::write(&file, out.as_bytes()).unwrap();
     let res = std::process::Command::new("ruby").args(["-W2", "-c"]).arg(&file).output().expect("ruby");

@@ -825,6 +825,18 @@ pub(crate) fn collect_model_constants(model: &Model) -> Vec<(Symbol, Expr)> {
 /// dynamic targets often run fine without it. The skip-list below must
 /// stay in sync with the claiming passes — each entry names the pass
 /// that consumes the shape.
+fn defines_methods_in_block(expr: &crate::expr::Expr) -> bool {
+    fn walk(expr: &crate::expr::Expr) -> bool {
+        if matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "define_method") {
+            return true;
+        }
+        let mut found = false;
+        expr.node.for_each_child(&mut |child| found |= walk(child));
+        found
+    }
+    matches!(&*expr.node, ExprNode::Send { block: Some(block), .. } if walk(block))
+}
+
 fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
     use crate::diagnostic::{Diagnostic, Severity};
     use crate::expr::LValue;
@@ -853,6 +865,21 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         };
         let name = method.as_str();
         if let Some(recv) = recv {
+            // `KINDS.each { |k| define_method(…) }` that `define_method_loop` could not unroll: its methods are dropped with it.
+            if defines_methods_in_block(expr) {
+                let mut d = Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    "runtime-defined method",
+                    format!(
+                        "a `define_method` loop in the body of `{}` the compile could not unroll; the methods it defines are not emitted",
+                        model.name.0.as_str()
+                    ),
+                );
+                d.severity = Severity::Warning;
+                crate::emit::diagnostics::push(d);
+                continue;
+            }
             // Class-body writes are sends too, and dropping an unclaimed
             // setting must report just like dropping a receiver-less DSL.
             if !matches!(&*recv.node, ExprNode::SelfRef)

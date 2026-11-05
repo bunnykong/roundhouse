@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+require "cgi/escape"
 # CGI protocol I/O. Reads requests from ENV + stdin; writes responses
 # to stdout. The shape spinel can ingest (no sockets) and the shape
 # any CGI-aware web server (Apache mod_cgi, nginx fcgiwrap, lighttpd)
@@ -19,7 +20,6 @@
 #   \r\n
 #   <body bytes>
 #
-# Pure Ruby; no `cgi` stdlib dependency (which spinel doesn't ship).
 # Keeps the spinel-subset envelope clean: basic regex, string ops,
 # Hash mutation. No metaprogramming.
 
@@ -249,37 +249,11 @@ module CgiIo
     current[key] = val
   end
 
-  # Spinel-friendly URL encode: pass-through for unreserved chars
-  # (RFC 3986 §2.3: ALPHA / DIGIT / `-` / `.` / `_` / `~`); percent-
-  # encode everything else as `%XX`. Used for cookie values; cookies
-  # are Latin-1 in the wire format but our values are ASCII for the
-  # demo, so byte-by-byte is sufficient.
   def self.url_encode(s)
-    out = String.new
-    s.to_s.each_byte do |b|
-      if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
-         b == 45 || b == 46 || b == 95 || b == 126
-        out << b.chr
-      else
-        out << format("%%%02X", b)
-      end
-    end
-    out
+    CGI.escapeURIComponent(s.to_s)
   end
 
-  # Spinel-friendly URL decode: % escapes + `+` → space.
-  #
-  # CRuby caveat: Integer#chr returns an ASCII-8BIT-encoded single-byte
-  # String, which propagates through concatenation and lands in the DB
-  # as a BLOB rather than TEXT — breaking subsequent `WHERE col = ?`
-  # comparisons against UTF-8 literals. Force the result back to UTF-8.
-  # Spinel itself "assumes UTF-8/ASCII" per its README, so this
-  # encoding dance is a CRuby-only concern.
   def self.url_decode(s)
-    # Fast path: nothing to decode. In the lobsters frozen sequence 84%
-    # of calls land here (every escape-free path segment, query key/val,
-    # and cookie name) — returning the input as-is is byte-identical to
-    # the scan below for `%`/`+`-free strings, at zero allocation.
     # Not the input as-is: a request body is read as binary, and Rails hands every decoded param over as UTF-8 (commonmarker refuses ASCII-8BIT).
     unless s.include?("%") || s.include?("+")
       return s if s.encoding == Encoding::UTF_8
@@ -287,34 +261,7 @@ module CgiIo
       # Not retagged when the bytes are not UTF-8: a cookie name so tagged would raise at `to_sym`.
       return utf8.valid_encoding? ? utf8 : s
     end
-    # Scan by byte: getbyte returns an Integer, so literal bytes cost no
-    # per-character String allocation (the old `s[i]` allocated one for
-    # every character, the dominant cost when decoding the ~124-char
-    # session-cookie value on every request). Build an ASCII-8BIT buffer
-    # — `out << int` appends the raw byte — so a multibyte escape like
-    # %C3%A9 reassembles the exact UTF-8 bytes; reinterpret at the end.
-    out = String.new
-    i = 0
-    n = s.bytesize
-    while i < n
-      b = s.getbyte(i)
-      if b == 43 # "+"
-        out << 32 # " "
-        i += 1
-      elsif b == 37 && i + 2 < n # "%"
-        hex = s.getbyte(i + 1).chr + s.getbyte(i + 2).chr
-        if hex =~ /\A[0-9A-Fa-f]{2}\z/
-          out << hex.to_i(16)
-          i += 3
-        else
-          out << b
-          i += 1
-        end
-      else
-        out << b
-        i += 1
-      end
-    end
-    out.force_encoding("UTF-8")
+    # Retagged, not taken as CGI.unescape tags it: CRuby's follows CGI.accept_charset, which an app may set to binary.
+    CGI.unescape(s).force_encoding(Encoding::UTF_8)
   end
 end

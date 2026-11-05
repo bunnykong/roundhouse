@@ -355,7 +355,7 @@ fn worker_child() {
             });
             // A subsequent lowering has its own catalog/cache. This also
             // checks the emitted values for two supported, distinct scopes.
-            app.i18n.entries.insert("bad.label".into(), "%{name}".into());
+            std::sync::Arc::make_mut(&mut app.i18n).entries.building().insert("bad.label".into(), "%{name}".into());
             crate::lower::i18n_translate::apply_i18n_translate_lowering(&mut app);
             let values = emitted_labels(&app);
             serde_json::to_vec(&(answers, values)).unwrap()

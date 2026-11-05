@@ -42,10 +42,11 @@
 
 #![allow(dead_code)]
 
+#[path = "scratch.rs"]
+mod scratch;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use roundhouse::analyze::diagnose;
 use roundhouse::diagnostic::{Diagnostic, Severity};
@@ -594,23 +595,7 @@ pub fn ruby() -> Command {
 
 /// A fresh directory per run: tests in one binary run in parallel.
 fn scratch_dir() -> PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    loop {
-        // Resolved, so paths a child Ruby reports (`__dir__` is a realpath)
-        // match on macOS, where $TMPDIR sits under /var -> /private/var.
-        let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "roundhouse-emit-and-run-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        // Combined suites contain independent copies of this module. Reserve
-        // the path atomically instead of deleting another copy's live tree.
-        match std::fs::create_dir(&dir) {
-            Ok(()) => return dir,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => panic!("create scratch directory {}: {error}", dir.display()),
-        }
-    }
+    scratch::dir("roundhouse-emit-and-run")
 }
 
 fn copy_tree(src: &Path, dst: &Path) {
@@ -688,8 +673,10 @@ pub mod bundle {
                 Edit::Remove { path } => serde_json::json!({"remove": path}),
             })
             .collect();
+        // The test's name, so the bundle's compile seconds can be charged to it (#1781).
         let case = serde_json::json!({
             "key": key,
+            "test": std::thread::current().name(),
             "base": base_tag(overlay),
             "flags": flags,
             "script": script,
@@ -727,6 +714,7 @@ pub mod bundle {
 
     struct Case {
         key: String,
+        test: Option<String>,
         base: PathBuf,
         flags: Vec<String>,
         script: String,
@@ -750,6 +738,7 @@ pub mod bundle {
             .collect::<Option<Vec<_>>>()?;
         Some(Case {
             key: v["key"].as_str()?.into(),
+            test: v["test"].as_str().map(String::from),
             base: PathBuf::from(v["base"].as_str()?),
             flags: v["flags"].as_array()?.iter().filter_map(|f| f.as_str().map(String::from)).collect(),
             script: v["script"].as_str()?.into(),
@@ -809,6 +798,21 @@ pub mod bundle {
         Some(emitted)
     }
 
+    // The edits that change a file of the base app rather than add one beside it.
+    fn base_edits(case: &Case) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let in_base = |path: &str| case.base.as_os_str() != EMPTY && case.base.join(path).exists();
+        for edit in &case.edits {
+            match edit {
+                Edit::Write { path, content } if in_base(path) => ("w", path, content).hash(&mut h),
+                Edit::Write { .. } => {}
+                Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
+                Edit::Remove { path } => ("d", path).hash(&mut h),
+            }
+        }
+        h.finish()
+    }
+
     fn clone_edit(e: &Edit) -> Edit {
         match e {
             Edit::Write { path, content } => Edit::Write { path: path.clone(), content: content.clone() },
@@ -817,11 +821,33 @@ pub mod bundle {
         }
     }
 
-    fn build_split(cases: Vec<&Case>, out: &Path, name: &str, manifest: &std::sync::Mutex<BTreeMap<String, (String, usize)>>) {
+    type Seconds = std::sync::Mutex<BTreeMap<String, f64>>;
+
+    // Each case's share of the compiles it took part in, failed ones included: a bundled test runs
+    // in well under a second, so without this its recorded seconds hide what its shard paid (#1781).
+    fn charge(cases: &[&Case], elapsed: f64, seconds: &Seconds) {
+        let mut s = seconds.lock().unwrap();
+        for case in cases {
+            if let Some(test) = &case.test {
+                *s.entry(test.clone()).or_default() += elapsed / cases.len() as f64;
+            }
+        }
+    }
+
+    fn build_split(
+        cases: Vec<&Case>,
+        out: &Path,
+        name: &str,
+        manifest: &std::sync::Mutex<BTreeMap<String, (String, usize)>>,
+        seconds: &Seconds,
+    ) {
         if cases.len() < 2 {
             return;
         }
-        if let Some(tree) = build(&cases) {
+        let start = std::time::Instant::now();
+        let built = build(&cases);
+        charge(&cases, start.elapsed().as_secs_f64(), seconds);
+        if let Some(tree) = built {
             let dest = out.join(name);
             let _ = std::fs::remove_dir_all(&dest);
             copy_tree(&tree, &dest);
@@ -836,8 +862,8 @@ pub mod bundle {
         eprintln!("spinel bundle {name}: {} cases do not combine; halving", cases.len());
         let mid = cases.len() / 2;
         let (a, b) = cases.split_at(mid);
-        build_split(a.to_vec(), out, &format!("{name}a"), manifest);
-        build_split(b.to_vec(), out, &format!("{name}b"), manifest);
+        build_split(a.to_vec(), out, &format!("{name}a"), manifest, seconds);
+        build_split(b.to_vec(), out, &format!("{name}b"), manifest, seconds);
     }
 
     pub fn build_all(collected: &Path, out: &Path) {
@@ -845,12 +871,16 @@ pub mod bundle {
             .map(|d| d.filter_map(|e| read_case(&e.ok()?.path())).collect())
             .unwrap_or_default();
         cases.sort_by(|a, b| a.key.cmp(&b.key));
-        let mut groups: BTreeMap<(PathBuf, Vec<String>), Vec<&Case>> = BTreeMap::new();
+        // Not grouped on the base alone: an edit to a file the base already has (its schema,
+        // routes, a model) changes the app every case in the binary boots, so only cases that
+        // make the same such edits share one.
+        let mut groups: BTreeMap<(PathBuf, Vec<String>, u64), Vec<&Case>> = BTreeMap::new();
         for case in &cases {
-            groups.entry((case.base.clone(), case.flags.clone())).or_default().push(case);
+            groups.entry((case.base.clone(), case.flags.clone(), base_edits(case))).or_default().push(case);
         }
         std::fs::create_dir_all(out).expect("bundle out dir");
         let manifest = std::sync::Mutex::new(BTreeMap::new());
+        let seconds = std::sync::Mutex::new(BTreeMap::new());
         let chunks: Vec<Vec<&Case>> = groups.values().flat_map(|g| g.chunks(GROUP).map(|c| c.to_vec())).collect();
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -859,12 +889,15 @@ pub mod bundle {
                 s.spawn(|| loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let Some(chunk) = chunks.get(i) else { break };
-                    build_split(chunk.clone(), out, &format!("g{i}"), &manifest);
+                    build_split(chunk.clone(), out, &format!("g{i}"), &manifest, &seconds);
                 });
             }
         });
         let manifest = manifest.into_inner().unwrap();
         eprintln!("spinel bundle: {} of {} cases bundled", manifest.len(), cases.len());
         std::fs::write(out.join("manifest.json"), serde_json::to_string(&manifest).unwrap()).expect("write manifest");
+        // Read by ci-plan.py run-tests, which adds each test's share to the seconds it records.
+        let seconds = seconds.into_inner().unwrap();
+        std::fs::write(out.join("seconds.json"), serde_json::to_string(&seconds).unwrap()).expect("write bundle seconds");
     }
 }

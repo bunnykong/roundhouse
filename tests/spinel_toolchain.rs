@@ -24,6 +24,8 @@
 //! (article_broadcasts, views suite) tracked in
 //! `project_lowered_ir_gaps_for_runnability`.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -249,6 +251,22 @@ mod mutable_literals;
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]
 mod auto_source_gem;
+#[path = "support/enumerable_mixin.rs"]
+mod enumerable_mixin_contract;
+#[path = "spinel_toolchain/enumerable_mixin.rs"]
+mod enumerable_mixin;
+#[path = "support/file_level_struct.rs"]
+mod file_level_struct_contract;
+#[path = "spinel_toolchain/file_level_struct.rs"]
+mod file_level_struct;
+#[path = "support/concern_class_side.rs"]
+mod concern_class_side_contract;
+#[path = "spinel_toolchain/concern_class_side.rs"]
+mod concern_class_side;
+#[path = "support/concern_define_loop.rs"]
+mod concern_define_loop_contract;
+#[path = "spinel_toolchain/concern_define_loop.rs"]
+mod concern_define_loop;
 #[path = "support/active_model_serializer.rs"]
 mod active_model_serializer_app;
 #[path = "spinel_toolchain/active_model_serializer.rs"]
@@ -408,7 +426,7 @@ puts "rails health contract passed"
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-spinel-{tag}"))
+    scratch::dir(&format!("roundhouse-spinel-{tag}"))
 }
 
 fn copy_tree(src: &Path, dst: &Path) {
@@ -437,9 +455,6 @@ fn copy_tree(src: &Path, dst: &Path) {
 /// once `test/test_helper.rb` started requiring `main.rb` (whose chain
 /// is complete). Deleted in favour of the set that ships.
 fn generate_project(fixture: &Path, scratch: &Path) {
-    if scratch.exists() {
-        std::fs::remove_dir_all(scratch).expect("clean scratch");
-    }
     std::fs::create_dir_all(scratch).expect("create scratch");
 
     let mut app = ingest_app(fixture).expect("ingest");

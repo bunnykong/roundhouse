@@ -12,6 +12,8 @@
 //! that only fell back to the written name (a view's `Request`) keeps
 //! the refusal.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -34,8 +36,7 @@ const EMITTED_HELPER: &str = "p FetchHelper.fetch_it\n";
 const EXPECTED: &str = "[:top, :get, \"u\", true, nil]\n[:fasp, :p, 1]\n[:fasp, :r, 2]\n[:top, :post, \"c\", false, \"b\"]\n[:fasp, :d, 3]\n[:top, :head, \"h\", true, nil]\n";
 
 fn native() -> String {
-    let dir = std::env::temp_dir().join(format!("roundhouse-ctor-leaf-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-ctor-leaf");
     let mut requires = String::new();
     for (i, source) in [TOP, FASP, CHECKER, CLIENT, REOPENED, COMPACT, DEEP, HELPER].iter().enumerate() {
         let path = dir.join(format!("f{i}.rb"));

@@ -13,6 +13,8 @@
 //! matches nil as `""` (Rails matches `value.to_s`), and `inclusion`
 //! keeps nil "not included", as Rails does.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -69,8 +71,7 @@ fn validations_read_nullable_columns_as_values() {
 #[test]
 #[ignore = "requires the Go toolchain"]
 fn the_emitted_go_vets_clean() {
-    let root = std::env::temp_dir().join(format!("roundhouse-go-validators-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-go-validators");
     for (path, body) in files() {
         let file = root.join("app_src").join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

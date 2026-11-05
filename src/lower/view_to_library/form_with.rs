@@ -475,7 +475,7 @@ fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx, multipart: bool
 /// pass through unchanged. Matches the existing FormBuilder-side
 /// simplification so per-form-tag and per-input-attr behavior stay
 /// in sync.
-fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
+pub(super) fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
     let is_class_key = matches!(
         &*k.node,
         ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "class",
@@ -1567,6 +1567,7 @@ mod tests {
     fn ctx_with(model_singulars: &[&str], ivar_models: &[(&str, &str)]) -> ViewCtx {
         ViewCtx {
             locals: Vec::new(),
+            ivar_params: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             view_name: String::new(),
@@ -1583,6 +1584,7 @@ mod tests {
             ),
             slug_models: Default::default(),
             bool_readers: Default::default(),
+            time_columns: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
             i18n: Default::default(),
@@ -1594,6 +1596,7 @@ mod tests {
             lexxy: false,
             lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
+            ivar_records: Default::default(),
             formats: vec!["html".to_string()],
             view_formats: Default::default(),
             multipart_partials: Default::default(),
@@ -1601,16 +1604,20 @@ mod tests {
             partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            yielding_partials: Default::default(),
+            record_carries_yield: false,
             record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
             own_flash: Default::default(),
+            held_ivars: Vec::new(),
             ivar_models: Rc::new(
                 ivar_models
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect::<HashMap<_, _>>(),
             ),
+            nilable_ivar_models: Default::default(),
         }
     }
 

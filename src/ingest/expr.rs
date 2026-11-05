@@ -37,6 +37,7 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // ingester keeps going. Errors are recorded into the per-thread
     // collector for the post-run punch list. See `survey.rs`.
     match ingest_expr_strict(node, file) {
+        Ok(e) if node.as_call_node().is_some() => Ok(super::engine_helpers::rewrite(proc_new_as_proc(e), file)),
         Ok(e) => Ok(proc_new_as_proc(e)),
         Err(err) if super::survey::is_active() => {
             super::survey::record(&err);
@@ -798,7 +799,8 @@ fn must_because_message(
 /// evaluated once: a local read is tested directly, anything else is
 /// bound to a generated local inside the condition,
 /// `if (__must_N = x).nil? then raise ... else __must_N end`, so the
-/// else side reads it with nil narrowed away.
+/// else side reads it with nil narrowed away. `#: as !nil` lowers to the
+/// same check (`type_ascription::ascribe_trailing`) with its own message.
 ///
 /// `message` is the argument to `TypeError.new`. It is built by the
 /// caller because the two forms differ only there: a fixed string for
@@ -806,7 +808,7 @@ fn must_because_message(
 /// block's body for `T.must_because`. It sits in the `then` branch, so
 /// a `must_because` reason is evaluated only when the value IS nil,
 /// which is where sorbet-runtime's `yield` evaluates it too.
-fn must_check(span: Span, value: Expr, location: &ruby_prism::Location<'_>, message: Expr) -> Expr {
+pub(super) fn must_check(span: Span, value: Expr, location: &ruby_prism::Location<'_>, message: Expr) -> Expr {
     let (tested, read) = match &*value.node {
         ExprNode::Var { .. } => (value.clone(), value),
         _ => {
@@ -966,6 +968,38 @@ fn takes_trailing_ascription(node: &Node<'_>) -> bool {
         || node.as_yield_node().is_some()
 }
 
+/// A write's value with the trailing `#:` that ends the write applied
+/// once. The value ends where the write does (`n = @names.first #: as
+/// !nil`), so the write claims that offset before ingesting it: a value
+/// that reads its own trailing comment (a call, a variable read) then
+/// leaves it to the write, and a nested write ending at the same place
+/// (`a = b = x #: T`) leaves it to the outermost one. `finish` runs on
+/// the value before the ascription, as the write's own step.
+fn ingest_written_value(
+    value: &Node<'_>,
+    loc: &ruby_prism::Location<'_>,
+    file: &str,
+    finish: impl FnOnce(Expr) -> Expr,
+) -> IngestResult<Expr> {
+    let end = loc.end_offset();
+    let outermost = super::type_ascription::push_trailing_ascription_claim(end);
+    struct PopClaim;
+    impl Drop for PopClaim {
+        fn drop(&mut self) {
+            super::type_ascription::pop_trailing_ascription_claim();
+        }
+    }
+    let value = {
+        let _pop = PopClaim;
+        ingest_expr(value, file)
+    }?;
+    let value = finish(value);
+    if !outermost {
+        return Ok(value);
+    }
+    Ok(super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, end), loc))
+}
+
 /// Strict expression ingest: never substitutes survey-mode `nil`.
 /// Call sites that claim a default or other recovered value use this so
 /// a survey recovery cannot be mistaken for a successful parse.
@@ -996,6 +1030,7 @@ pub(super) fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Ex
     Ok(super::type_ascription::ascribe_trailing(
         expr,
         super::type_ascription::trailing_ascription(file, end),
+        &node.location(),
     ))
 }
 
@@ -1174,6 +1209,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                         Some(super::type_ascription::ascribe_trailing(
                             value,
                             super::type_ascription::receiver_rbs_assertion(file, r.location().end_offset()),
+                            &r.location(),
                         ))
                     }
                 }
@@ -1433,13 +1469,11 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // `unwrap_or(0)` that stood here was silent, and it was
             // reached: `0xffffffff` does not fit an `i32`, so campfire's
             // `ipaddr.to_i & 0xffffffff` emitted `& 0`.
-            let Some(v) = super::util::integer_i64(&i.value()) else {
-                return Err(IngestError::Unsupported {
-                    file: file.to_string(),
-                    message: "integer literal does not fit in a 64-bit integer".to_string(),
-                });
-            };
-            ExprNode::Lit { value: Literal::Int { value: v } }
+            match super::util::integer_i64(&i.value()) {
+                Some(v) => ExprNode::Lit { value: Literal::Int { value: v } },
+                // Not refused whole: Ruby's Integer has no width, so the literal is its 32-bit limbs shifted together (tzinfo's `0x10000000000000000`).
+                None => return Ok(wide_integer(&i.value(), span)),
+            }
         }
         n if n.as_float_node().is_some() => {
             let f = n.as_float_node().unwrap();
@@ -1835,8 +1869,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let w = n.as_instance_variable_write_node().unwrap();
             let raw = constant_id_str(&w.name());
             let name = raw.strip_prefix('@').unwrap_or(raw);
-            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
-            let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
+            let value = ingest_written_value(&w.value(), &loc, file, |value| assigned_literal(value, file))?;
             ExprNode::Assign {
                 target: crate::expr::LValue::Ivar { name: Symbol::from(name) },
                 value,
@@ -1845,8 +1878,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_local_variable_write_node().is_some() => {
             let w = n.as_local_variable_write_node().unwrap();
             let name = Symbol::from(constant_id_str(&w.name()));
-            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
-            let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
+            let value = ingest_written_value(&w.value(), &loc, file, |value| assigned_literal(value, file))?;
             ExprNode::Assign {
                 target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
                 value,
@@ -2030,8 +2062,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let w = n.as_instance_variable_or_write_node().unwrap();
             let raw = constant_id_str(&w.name());
             let name = Symbol::from(raw.strip_prefix('@').unwrap_or(raw));
-            let value = assigned_literal(ingest_expr(&w.value(), file)?, file);
-            let value = super::type_ascription::ascribe_trailing(value, super::type_ascription::trailing_ascription(file, loc.end_offset()));
+            let value = ingest_written_value(&w.value(), &loc, file, |value| assigned_literal(value, file))?;
             ExprNode::OpAssign {
                 target: crate::expr::LValue::Ivar { name },
                 op: crate::expr::OpAssignOp::OrOr,
@@ -4836,4 +4867,23 @@ fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option
         }
     }
     Some(body)
+}
+
+fn wide_integer(value: &ruby_prism::Integer<'_>, span: Span) -> Expr {
+    let (negative, digits) = value.to_u32_digits();
+    let lit = |v: i64| Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v } });
+    let send = |recv: Expr, method: &str, arg: Option<Expr>| {
+        let mut e = Expr::new(
+            span,
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args: arg.into_iter().collect(), block: None, parenthesized: true },
+        );
+        e.decisions |= crate::expr::WIDE_INTEGER_LITERAL;
+        e
+    };
+    let mut limbs = digits.iter().rev();
+    let mut acc = lit(i64::from(*limbs.next().unwrap_or(&0)));
+    for limb in limbs {
+        acc = send(send(acc, "<<", Some(lit(32))), "|", Some(lit(i64::from(*limb))));
+    }
+    if negative { send(acc, "-@", None) } else { acc }
 }

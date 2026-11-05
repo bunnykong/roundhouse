@@ -59,7 +59,7 @@ fn attribute_macro_refusals(app: &App) -> Vec<Diagnostic> {
 /// option its Rails `render` rewrites and the lowering would pass
 /// through as a plain attribute.
 fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
-    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+    fn visit(app: &App, expr: &Expr, out: &mut Vec<Diagnostic>) {
         if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
             && !expr.span.is_synthetic()
             && matches!(&r.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionView::Helpers::FormBuilder")
@@ -72,7 +72,7 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
                     None,
                     "form builder method",
                     format!(
-                        "`form.{m}` has no lowering (the form lowering expands label, text_field, text_area, password_field, hidden_field, email_field, url_field, number_field, range_field, search_field, telephone_field/phone_field, check_box, radio_button, select, file_field, rich_text_area, button, submit and fields_for), so the call reaches no method at render"
+                        "`form.{m}` has no lowering (the form lowering expands label, text_field, text_area, password_field, hidden_field, email_field, url_field, number_field, range_field, search_field, telephone_field/phone_field, color_field, datetime_local_field, check_box, radio_button, select, file_field, rich_text_area, button, submit and fields_for), so the call reaches no method at render"
                     ),
                 ));
             } else if let Some(opt) = rewritten_option(m, args) {
@@ -84,17 +84,29 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
                         "`form.{m}` with `{opt}:` is not modeled: Rails' field rewrites that option when it renders, and the lowering would write it as a plain attribute"
                     ),
                 ));
+            } else if m == "datetime_local_field"
+                && let Some(reason) = datetime_local_refusal(app, r.ty.as_ref(), args)
+            {
+                out.push(Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    "form builder field",
+                    format!("`form.datetime_local_field`: {reason}"),
+                ));
             }
         }
-        expr.node.for_each_child(&mut |child| visit(child, out));
+        expr.node.for_each_child(&mut |child| visit(app, child, out));
     }
     /// The option of `method`'s call that Rails' `Tags::*#render`
     /// rewrites: `NumberField` (and `RangeField`) turn `in:`/`within:`
-    /// into `min`/`max`; `SearchField` expands `autosave:`/`onsearch:`.
+    /// into `min`/`max`; `SearchField` expands `autosave:`/`onsearch:`;
+    /// `DatetimeLocalField` reparses `min:`/`max:` and reads
+    /// `include_seconds:`.
     fn rewritten_option(method: &str, args: &[Expr]) -> Option<&'static str> {
         let rewritten: &[&'static str] = match method {
             "number_field" | "range_field" => &["in", "within"],
             "search_field" => &["autosave", "onsearch"],
+            "datetime_local_field" => &["min", "max", "include_seconds"],
             _ => return None,
         };
         let (_, opts) = crate::lower::classify_form_builder_args(args);
@@ -109,7 +121,184 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     }
     let mut out = Vec::new();
     for view in &app.views {
-        visit(&view.body, &mut out);
+        visit(app, &view.body, &mut out);
+    }
+    out
+}
+
+/// Why the lowering can't write Rails' value for a `datetime_local_field`
+/// call, if it can't. Rails (`Tags::DatetimeField#render`, actionview
+/// 8.1.4) writes a String `value:` as given and formats any other value
+/// as `%Y-%m-%dT%T`; with no `value:` it formats the record's. The
+/// lowering formats a datetime or date column's stored text, which is the
+/// zone's wall time only when the app's zone is UTC, and writes a string
+/// column's value as given. `min:`/`max:`/`include_seconds:` are refused
+/// with the other rewritten options.
+fn datetime_local_refusal(app: &App, builder: Option<&Ty>, args: &[Expr]) -> Option<String> {
+    use crate::expr::Literal;
+    use crate::schema::ColumnType;
+    let (field, opts) = crate::lower::classify_form_builder_args(args);
+    let value = opts.unwrap_or_default().iter().find_map(|(k, v)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "value").then_some(v)
+    });
+    if let Some(v) = value {
+        return (!matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Nil }))
+            .then(|| "a `value:` that is not a String literal (or nil) is formatted by Rails at render, which the lowering doesn't model".to_string());
+    }
+    let field = field?;
+    let model = match builder {
+        Some(Ty::Class { args, .. }) => match args.as_slice() {
+            [Ty::Class { id, .. }] => app.models.iter().find(|m| m.name.0 == id.0),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(model) = model else {
+        return Some(format!("the form's record isn't a known model, so the type of `{field}` that decides Rails' value is unknown"));
+    };
+    let column = app.schema.tables.get(&model.table.0).and_then(|t| t.columns.iter().find(|c| c.name.as_str() == field));
+    match column.map(|c| &c.col_type) {
+        Some(ColumnType::DateTime) if crate::emit::ruby::app_presents_time_zoned(app) => Some(format!(
+            "`{field}` is shown in the app's `config.time_zone`, and the lowering writes the stored UTC time"
+        )),
+        Some(ColumnType::DateTime | ColumnType::Date | ColumnType::String { .. } | ColumnType::Text) => None,
+        Some(_) => Some(format!("`{field}` is not a datetime, date or string column, so its value isn't one the lowering formats")),
+        None => Some(format!("`{field}` is not a column of {}, so its value isn't one the lowering formats", model.name.0)),
+    }
+}
+
+/// The `form.datetime_local_field` calls whose value is a datetime or
+/// date column's, read from the record (no `value:`): what
+/// `ViewHelpers.datetime_local_value_attr` formats from the column's
+/// text. `project::report_datetime_local_reads` refuses them on the
+/// targets whose runtime reads the column as anything else.
+pub(crate) fn datetime_local_time_reads(app: &App) -> Vec<crate::span::Span> {
+    fn visit(app: &App, expr: &Expr, out: &mut Vec<crate::span::Span>) {
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+            && !expr.span.is_synthetic()
+            && method.as_str() == "datetime_local_field"
+            && let Some(Ty::Class { id, args: model, .. }) = &r.ty
+            && id.0.as_str() == "ActionView::Helpers::FormBuilder"
+        {
+            let (field, opts) = crate::lower::classify_form_builder_args(args);
+            let has_value = opts.unwrap_or_default().iter().any(|(k, _)| {
+                matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "value")
+            });
+            let column = match (field, model.as_slice()) {
+                (Some(field), [Ty::Class { id, .. }]) => app
+                    .models
+                    .iter()
+                    .find(|m| m.name.0 == id.0)
+                    .and_then(|m| app.schema.tables.get(&m.table.0))
+                    .and_then(|t| t.columns.iter().find(|c| c.name.as_str() == field)),
+                _ => None,
+            };
+            if !has_value
+                && column.is_some_and(|c| matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Date))
+            {
+                out.push(expr.span);
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(app, child, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(app, &view.body, &mut out);
+    }
+    out
+}
+
+/// A `render … do … end` in a view. The view lowering captures the block
+/// into a String and passes it as the partial's yielded body
+/// (`render "x" do`, `render layout: "x" do`), which is Rails' answer only
+/// when the partial yields once, at its top level: Rails runs the block at
+/// each `yield` (a partial yielding twice renders `1|2`). The body rides
+/// the partial's record slot, so a partial with strict locals, or one
+/// reading (or passed) its dir-convention record local, would see the
+/// body there. Those are refused, as is any other block-form render
+/// (`render partial: "x", locals: … do` raises in Rails).
+fn unmodeled_block_renders(app: &App) -> Vec<Diagnostic> {
+    use crate::lower::view::{classify_render_partial, RenderPartial};
+    // Bare `yield`s, and whether any sits inside a loop: a `while`, or the
+    // block of a method that runs it per element. A block run once
+    // (`form_with … do |form|`, `content_tag … do`) yields once.
+    fn yields(e: &Expr, nested: bool, count: &mut usize, in_block: &mut bool) {
+        if let ExprNode::Yield { args } = &*e.node
+            && args.is_empty()
+        {
+            *count += 1;
+            *in_block |= nested;
+        }
+        let iterates = match &*e.node {
+            ExprNode::While { .. } => true,
+            ExprNode::Send { method, block: Some(_), .. } => matches!(
+                method.as_str(),
+                "each" | "each_with_index" | "each_with_object" | "each_slice" | "each_cons" | "each_pair"
+                    | "each_key" | "each_value" | "map" | "collect" | "flat_map" | "filter_map" | "select"
+                    | "filter" | "reject" | "times" | "upto" | "downto" | "step" | "loop" | "sum" | "inject"
+                    | "reduce" | "group_by" | "partition" | "sort_by" | "min_by" | "max_by" | "find_each"
+                    | "find_in_batches" | "in_batches" | "cycle" | "zip"
+            ),
+            _ => false,
+        };
+        let nested = nested || iterates;
+        e.node.for_each_child(&mut |c| yields(c, nested, count, in_block));
+    }
+    let carrying = crate::lower::view_to_library::yield_carrying_partials(app);
+    let reason = |e: &Expr, caller_dir: &str| -> Option<&'static str> {
+        let ExprNode::Send { recv, method, args, block: Some(block), .. } = &*e.node else { return None };
+        if method.as_str() != "render" || recv.is_some() {
+            return None;
+        }
+        let Some(RenderPartial::LayoutBlock { layout, locals, block }) =
+            classify_render_partial(recv.as_ref(), method.as_str(), args, Some(block), &|_| true, &|_| false)
+        else {
+            return Some("only `render \"partial\"[, locals] do … end` and `render layout: \"partial\" do … end` are modeled (Rails raises for `render partial: …, locals: … do`)");
+        };
+        if let ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } = &*block.node
+            && (!params.is_empty() || rest_param.is_some() || !extra_params.is_empty() || block_param.is_some())
+        {
+            return Some("a block with parameters is not modeled; the partial's `yield` passes it none");
+        }
+        let (dir, base) = match layout.rsplit_once('/') {
+            Some((d, b)) => (d.to_string(), b.to_string()),
+            None => (caller_dir.to_string(), layout.to_string()),
+        };
+        let full = format!("{dir}/_{base}");
+        let partial = app.views.iter().find(|v| v.name.as_str() == full)?;
+        if partial.strict_locals.is_some() {
+            return Some("the partial declares strict locals, and the yielded body would take its first local's slot");
+        }
+        let (mut count, mut in_block) = (0, false);
+        yields(&partial.body, false, &mut count, &mut in_block);
+        if count != 1 || in_block {
+            return Some("the partial does not yield exactly once at its top level; Rails runs the block at each `yield`, which a captured string doesn't");
+        }
+        // The lowering's own answer (its effective record local, every
+        // format of the partial): a partial outside it reads that local.
+        let Some(record) = carrying.get(partial.name.as_str()) else {
+            return Some("the partial's yielded body rides its record local, which this partial (or another format of it) also reads");
+        };
+        let passed = locals.is_some_and(|ls| {
+            ls.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == record.as_str()))
+        });
+        if passed {
+            return Some("the partial's yielded body rides its record local, which this render also passes");
+        }
+        None
+    };
+    fn visit(e: &Expr, caller_dir: &str, reason: &dyn Fn(&Expr, &str) -> Option<&'static str>, out: &mut Vec<Diagnostic>) {
+        if !e.span.is_synthetic()
+            && let Some(why) = reason(e, caller_dir)
+        {
+            out.push(Diagnostic::unsupported(e.span, None, "render with a block", why));
+        }
+        e.node.for_each_child(&mut |c| visit(c, caller_dir, reason, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        let dir = view.name.as_str().rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        visit(&view.body, dir, &reason, &mut out);
     }
     out
 }
@@ -466,9 +655,12 @@ fn diagnose_controller_output_collisions(app: &App, out: &mut Vec<Diagnostic>) {
 pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     let mut out = app.routes.diagnostics.clone();
     diagnose_controller_output_collisions(app, &mut out);
+    // A `default_url_options` whose path segments the route helpers do not take.
+    out.extend(crate::lower::route_param_recall::diagnose(app));
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
+    out.extend(unmodeled_block_renders(app));
     out.extend(crate::gems::extension_gem_refusals(app, None));
     // graphql-ruby object types: their bodies, and each `null: false`
     // field's resolved value.
@@ -519,7 +711,11 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
             if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic()
                 && construct.as_str() != crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
             {
-                out.push(Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone()));
+                let mut d = Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone());
+                if expr.decisions & crate::expr::UNCALLED_DEFINER != 0 {
+                    d.severity = crate::diagnostic::Severity::Warning;
+                }
+                out.push(d);
             }
         }
         // Not dropped with the policy's other misses: the typer stamps it only in place of an Object-extension refusal.
@@ -610,6 +806,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         Some(taken) => out.extend(taken.iter().cloned()),
         None => out.extend(diagnose_helper_modules(app)),
     }
+    out.extend(app.unknown_association_targets.iter().cloned());
     for class in &app.library_classes {
         for initializer in &class.class_ivar_initializers {
             diagnose_expr(initializer, &mut out);
@@ -1005,6 +1202,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                 {
                     crate::diagnostic::Severity::Warning
                 }
+                DiagnosticKind::Unsupported { .. } if expr.decisions & crate::expr::UNCALLED_DEFINER != 0 => crate::diagnostic::Severity::Warning,
                 _ => Diagnostic::default_severity(kind),
             };
             out.push(Diagnostic { span: expr.span, kind: kind.clone(), severity, message });
@@ -1041,6 +1239,24 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         });
     }
 
+    if expr.decisions & crate::expr::SINGLETON_NAME_ERROR != 0 {
+        out.push(crate::lower::residue_diagnostic(
+            "singleton_constant",
+            "constant",
+            expr.span,
+            "ruby_name_error",
+            "a bare constant in `class << self` that only the class's ancestors define: Ruby raises NameError there, and so does this".to_string(),
+        ));
+    }
+    if expr.decisions & crate::expr::GUARDED_NAME_ERROR != 0 {
+        out.push(crate::lower::residue_diagnostic(
+            "guarded_constant",
+            "constant",
+            expr.span,
+            "ruby_name_error",
+            "a constant no gem of the app, Ruby or the app defines, read where the code rescues or tests for its absence: Ruby raises NameError there, and so does this".to_string(),
+        ));
+    }
     match &*expr.node {
         ExprNode::Ivar { name } => {
             if is_unknown_ty(expr.ty.as_ref()) {

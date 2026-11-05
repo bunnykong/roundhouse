@@ -3,6 +3,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests. A test the compiler
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 #[path = "support/pg_probe.rs"]
@@ -133,8 +135,7 @@ fn expected() -> String {
 
 fn native() -> String {
     let oracle = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
-    let dir = std::env::temp_dir().join(format!("rh_validates_method_native_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("rh_validates_method_native");
     std::fs::write(dir.join("schema.rb"), SCHEMA).unwrap();
     std::fs::write(dir.join("method_probe.rb"), PROBE).unwrap();
     let mut requires = String::new();

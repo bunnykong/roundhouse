@@ -392,7 +392,7 @@ fn emit_node(n: &ExprNode) -> String {
             }
         }
         ExprNode::Case { scrutinee, arms } => {
-            let mut s = format!("case {}\n", emit_expr(scrutinee));
+            let mut s = format!("case {}\n", emit_arg(scrutinee));
             for arm in arms {
                 s.push_str(&emit_arm(arm));
             }
@@ -404,7 +404,7 @@ fn emit_node(n: &ExprNode) -> String {
         // scrutinee when there's no `else` clause, which is exactly
         // the semantics `else_body: None` means in this IR.
         ExprNode::CaseMatch { scrutinee, arms, else_body } => {
-            let mut s = format!("case {}\n", emit_expr(scrutinee));
+            let mut s = format!("case {}\n", emit_arg(scrutinee));
             for arm in arms {
                 s.push_str(&emit_match_arm(arm));
             }
@@ -1090,15 +1090,18 @@ fn is_simple_ident(s: &str) -> bool {
 /// carrying a `do` block also wraps: CRuby parses
 /// `f(g a: 1 do ... end)` but JRuby (through at least 10.1) rejects it,
 /// and `f((g a: 1 do ... end))` parses identically everywhere.
+/// Case subjects and parameter defaults need the same grouping.
 /// Everything else passes through unchanged.
-fn emit_arg(e: &Expr) -> String {
+pub(super) fn emit_arg(e: &Expr) -> String {
     // A multiple assignment is a statement unless parenthesized: `if a, b
     // = pair` does not parse, and as an argument its comma splits it.
     let multi_assign = matches!(&*e.node, ExprNode::MultiAssign { .. });
     // A `Let` emits as two lines, its binding and its body; as an argument
     // the parens keep them one value.
     let binding = matches!(&*e.node, ExprNode::Let { .. });
-    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign || binding {
+    // A `raise` takes every argument after it as its own: `raise raise E.new(m), "x"` raises E with "x".
+    let raise = matches!(&*e.node, ExprNode::Raise { .. });
+    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign || binding || raise {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)
@@ -1202,6 +1205,8 @@ fn recv_needs_parens(r: &Expr) -> bool {
     match &*r.node {
         ExprNode::Seq { exprs } if exprs.len() > 1 => true,
         ExprNode::BoolOp { .. } | ExprNode::Range { .. } | ExprNode::RescueModifier { .. } => true,
+        // `raise E.new(m).f` raises `E.new(m).f`: the call would bind inside the raise's argument.
+        ExprNode::Raise { .. } | ExprNode::Return { .. } => true,
         // An assignment as receiver (`(rd = session[:k]).present?`,
         // lobsters login) MUST keep its parens: rendered bare, Ruby
         // re-parses `rd = session[:k].present?` — the local becomes the
@@ -1349,6 +1354,19 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_keyword_forward_arg).collect();
     let m = method.as_str();
+    // `...` is a send argument packet, never an index or infix operand.
+    // Preserve explicit call syntax even for operator/setter method names
+    // and `self`, before any surface-syntax prettification below.
+    if args.iter().any(|a| a.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 || matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. })) {
+        return match recv {
+            Some(r) => {
+                let receiver = emit_expr(r);
+                let receiver = if recv_needs_parens(r) { format!("({receiver})") } else { receiver };
+                format!("{receiver}.{method}({})", args_s.join(", "))
+            }
+            None => format!("{method}({})", args_s.join(", ")),
+        };
+    }
     // A receiverless call, or one the typer folded onto `self`, is the
     // backtick literal. An override of `` ` `` still runs through that
     // syntax. An explicit other receiver stays a normal send.
@@ -1381,19 +1399,6 @@ pub(super) fn emit_send_base(
                 return format!("{}.now.utc", emit_expr(r));
             }
         }
-    }
-    // `...` is a send argument packet, never an index or infix operand.
-    // Preserve explicit call syntax even for operator/setter method names
-    // and `self`, before any surface-syntax prettification below.
-    if args.iter().any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. })) {
-        return match recv {
-            Some(r) => {
-                let receiver = emit_expr(r);
-                let receiver = if recv_needs_parens(r) { format!("({receiver})") } else { receiver };
-                format!("{receiver}.{method}({})", args_s.join(", "))
-            }
-            None => format!("{method}({})", args_s.join(", ")),
-        };
     }
     // Indexing a statically string-keyed hash (`Hash[String, _]`, e.g.
     // request `params`) with a Ruby symbol/dynamic key: coerce the key to
@@ -1456,7 +1461,9 @@ pub(super) fn emit_send_base(
         // A method whose name is a Ruby keyword (`self.class`, `self.then`)
         // can't drop to the implicit form — bare `class` parses as the
         // keyword. Keep the explicit `self.class` (falls to the Some(r) arm).
+        // Not only the keyword itself: prism reads a bare `and?(x)` as `and`.
         && !is_ruby_keyword(m)
+        && !is_ruby_keyword(m.trim_end_matches(['?', '!']))
         // A ZERO-ARG bare name is the one form Ruby resolves lexically:
         // after `comments = self.comments.x`, a bare `comments` on the
         // RHS is the just-declared (nil) local, not the method. Args or
@@ -1706,7 +1713,7 @@ fn lambda_params(params: &[Symbol], extra_params: &[crate::dialect::Param], rest
     let mut ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
     for p in extra_params.iter().filter(|p| !p.keyword) {
         match &p.default {
-            Some(d) => ps.push(format!("{} = {}", p.name, emit_expr(d))),
+            Some(d) => ps.push(format!("{} = {}", p.name, emit_arg(d))),
             None => ps.push(p.name.to_string()),
         }
     }
@@ -1715,7 +1722,7 @@ fn lambda_params(params: &[Symbol], extra_params: &[crate::dialect::Param], rest
     }
     for p in extra_params.iter().filter(|p| p.keyword && !p.rest) {
         match &p.default {
-            Some(d) => ps.push(format!("{}: {}", p.name, emit_expr(d))),
+            Some(d) => ps.push(format!("{}: {}", p.name, emit_arg(d))),
             None => ps.push(format!("{}:", p.name)),
         }
     }

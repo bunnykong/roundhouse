@@ -17,12 +17,16 @@
 //!
 //!     cargo test --test rust_toolchain -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/rust_bare_model.rs"]
+mod rust_bare_model;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -34,13 +38,10 @@ use roundhouse::emit::rust;
 use roundhouse::ingest::ingest_app;
 
 fn scratch_dir(fixture: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-rust-check-{fixture}"))
+    scratch::dir(&format!("roundhouse-rust-check-{fixture}"))
 }
 
 fn generate_project(fixture_path: &Path, out: &Path) {
-    if out.exists() {
-        std::fs::remove_dir_all(out).expect("clean scratch");
-    }
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
@@ -367,10 +368,7 @@ async fn articles_index_is_two_queries_not_n_plus_one() {
 #[test]
 #[ignore]
 fn filters_that_read_action_name_compile() {
-    let app_dir = scratch_dir("action-name-app");
-    if app_dir.exists() {
-        std::fs::remove_dir_all(&app_dir).expect("clean app copy");
-    }
+    let app_dir = scratch_dir("action-name-app").join("app");
     let copied = Command::new("cp")
         .arg("-R")
         .arg(roundhouse::fixtures::real_blog())
@@ -563,4 +561,23 @@ async fn a_missing_record_is_rescued_to_404() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// #1711: a model with no validations, no timestamp columns, or neither
+/// builds, and the generated app's `cargo test` passes, its saving test
+/// included.
+#[test]
+#[ignore]
+fn a_model_without_validations_or_timestamps_builds_and_saves() {
+    for (validated, timestamped) in rust_bare_model::VARIANTS {
+        let (emitted, errors) = rust_bare_model::app(validated, timestamped).emit(roundhouse::project::BuildTarget::Rust);
+        assert!(errors.is_empty(), "{errors:?}");
+        let output = Command::new("cargo").arg("test").current_dir(&*emitted).output().expect("run cargo test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("an_account_saves ... ok"),
+            "validated: {validated}, timestamped: {timestamped}\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

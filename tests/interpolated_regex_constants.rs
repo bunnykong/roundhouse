@@ -8,6 +8,8 @@
 //! dropped and each read of it was "constant not supported". `u` only
 //! fixes the encoding (`Regexp::FIXEDENCODING`), so it is carried as that
 //! option bit; `‍` stays regex source for the engine to read.
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -38,8 +40,7 @@ p Handle::FLAGGED.match?("ab X")
 
 #[test]
 fn an_interpolated_regex_constant_with_the_u_flag_works_as_in_ruby() {
-    let dir = std::env::temp_dir().join(format!("rh-interpolated-regex-native-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("rh-interpolated-regex-native");
     std::fs::write(dir.join("handle.rb"), HANDLE).unwrap();
     let native = emit_and_run::ruby()
         .arg("-e")

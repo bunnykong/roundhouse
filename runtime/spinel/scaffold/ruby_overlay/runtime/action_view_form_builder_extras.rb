@@ -33,16 +33,20 @@ module ActionView
 
     # `<input type="submit" name="commit" value="X" data-disable-with="X"
     # <opts>>` — the bare (builder-less) submit. `data: {…}` fans out to
-    # data-* attributes; nil values drop.
+    # data-* attributes; nil values drop. Every name goes through
+    # `xml_name_escape`, as Rails' `tag_option` does, and one that
+    # escapes to "" is dropped (see `render_attrs`).
     def self.submit_tag(value = "Save changes", options = {})
       attrs = +""
       options.each do |k, v|
         if k == :data && v.is_a?(Hash)
           v.each do |dk, dv|
-            attrs << " data-#{dk}=\"#{html_escape(dv.to_s)}\"" unless dv.nil?
+            name = xml_name_escape("data-#{dk}")
+            attrs << " #{name}=\"#{html_escape(dv.to_s)}\"" unless dv.nil? || name.empty?
           end
         elsif !v.nil?
-          attrs << " #{k}=\"#{html_escape(v.to_s)}\""
+          name = xml_name_escape(k.to_s)
+          attrs << " #{name}=\"#{html_escape(v.to_s)}\"" unless name.empty?
         end
       end
       "<input type=\"submit\" name=\"commit\" value=\"#{html_escape(value.to_s)}\"" \
@@ -58,12 +62,15 @@ module ActionView
     # id: nil` could not suppress it the way Rails does.
 
     # `<form action="URL" accept-charset="UTF-8" method="post"<opts>>` +
-    # block content + `</form>` — the bare form_tag. The walker lowers
-    # the block to a capture that returns its accumulated string.
+    # block content + `</form>` — the bare form_tag. Option names go
+    # through `xml_name_escape`, as Rails' `tag_option` does, and one that
+    # escapes to "" is dropped (see `render_attrs`). The walker
+    # lowers the block to a capture that returns its accumulated string.
     def self.form_tag(url, options = {})
       attrs = +""
       options.each do |k, v|
-        attrs << " #{k}=\"#{html_escape(v.to_s)}\"" unless v.nil?
+        name = xml_name_escape(k.to_s)
+        attrs << " #{name}=\"#{html_escape(v.to_s)}\"" unless v.nil? || name.empty?
       end
       body = block_given? ? yield.to_s : ""
       # Rails' form_tag embeds the CSRF hidden input for non-GET forms

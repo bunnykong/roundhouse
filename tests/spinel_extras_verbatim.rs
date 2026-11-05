@@ -5,6 +5,8 @@
 //! `insert` (lobsters' StoryImage) against spinel-ruby-vips 0.3.0, which
 //! the manifest pins. Neither is swapped for a raising façade.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::Path;
 
 use roundhouse::ingest::ingest_app;
@@ -61,8 +63,7 @@ end
 
 fn spinel_files(test: &str) -> Vec<(String, String)> {
     let fixture = roundhouse::fixtures::real_blog().to_path_buf();
-    let dir = std::env::temp_dir().join(format!("roundhouse-extras-verbatim-{}-{test}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("roundhouse-extras-verbatim-{test}"));
     for sub in ["app", "config", "db"] {
         copy_dir(&fixture.join(sub), &dir.join(sub));
     }

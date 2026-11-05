@@ -206,10 +206,14 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             }
             Some(view_helpers_call("dom_id", args))
         }
+        // Rails' `pluralize` returns a String that isn't html-safe (the
+        // word is the caller's), so the template escapes it, as it does
+        // `truncate`'s.
         Pluralize { count, word } => {
-            Some(crate::lower::view::pluralize_helper_call(
+            let pluralized = crate::lower::view::pluralize_helper_call(
                 (*count).clone(), (*word).clone(),
-            ))
+            );
+            Some(view_helpers_call("html_escape", vec![pluralized]))
         }
         Truncate { text, opts } => {
             // Spinel-blog convention: `truncate` returns a plain
@@ -325,6 +329,19 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                     ExprNode::Const { path: vec![Symbol::from("Importmap")] },
                 )),
                 "pins",
+                vec![],
+                None,
+                true,
+            );
+            Some(view_helpers_call("javascript_importmap_tags", vec![pins, (*entry).clone()]))
+        }
+        EngineImportmapTags { entry, module } => {
+            let pins = super::send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Importmap")] },
+                )),
+                &crate::lower::importmap_to_library::engine_pins_name(module),
                 vec![],
                 None,
                 true,
@@ -556,15 +573,52 @@ fn emit_link_to_inline(
 ) -> Option<Expr> {
     let (prefix, suffix) = link_to_wrapper_parts(url, opts, ctx)?;
     let mut parts = prefix;
-    parts.push(InterpPart::Expr {
-        // Same `.to_s` the bare-interpolation path applies: the label
-        // can be a nullable column read (`link_to article.title, …`),
-        // and `html_escape` is deliberately monomorphic `(String) ->
-        // String`. `nil.to_s == ""` is what Rails renders.
-        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
-    });
+    parts.push(InterpPart::Expr { expr: escaped_label(text, ctx) });
     parts.extend(suffix);
     Some(string_interp(parts))
+}
+
+/// A `link_to` / `button_to` label, escaped once. Its helpers are lowered
+/// as the template's own are, so a `pluralize(…)` or `truncate(…)` label
+/// reaches its runtime call on every target; one that lowers to
+/// `ActionView::ViewHelpers.html_escape(…)` already is escape-correct and is
+/// taken as it is. Only that receiver: an app's own `html_escape` may not
+/// escape. Else the same `.to_s` the bare-interpolation path applies: the
+/// label can be a nullable column read (`link_to article.title, …`), and
+/// `html_escape` is deliberately monomorphic `(String) -> String`.
+/// `nil.to_s == ""` is what Rails renders.
+fn escaped_label(text: &Expr, ctx: &ViewCtx) -> Expr {
+    // An escape the template applied (`h(x)`, `ERB::Util.html_escape(x)`)
+    // is html-safe in Rails: escaped here once, before the rewrite folds a
+    // literal one to text that no longer looks escaped.
+    let escaped_arg = match &*text.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "h" && args.len() == 1 && !ctx.is_local("h") =>
+        {
+            Some(&args[0])
+        }
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if matches!(method.as_str(), "html_escape" | "h")
+                && args.len() == 1
+                && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ERB", "Util"])) =>
+        {
+            Some(&args[0])
+        }
+        _ => None,
+    };
+    if let Some(arg) = escaped_arg {
+        return view_helpers_call("html_escape", vec![lit_str_coerce(rewrite_helpers_in_expr(arg, ctx))]);
+    }
+    let lowered = rewrite_helpers_in_expr(text, ctx);
+    let pre_escaped = matches!(&*lowered.node,
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "html_escape" && args.len() == 1
+                && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])));
+    if pre_escaped {
+        lowered
+    } else {
+        view_helpers_call("html_escape", vec![lit_str_coerce(lowered)])
+    }
 }
 
 /// The anchor both spellings share, split where the link's CONTENT
@@ -627,13 +681,7 @@ fn emit_button_to_inline(
 ) -> Option<Expr> {
     let (prefix, suffix) = button_to_wrapper_parts(url, opts, ctx)?;
     let mut parts = prefix;
-    parts.push(InterpPart::Expr {
-        // Same `.to_s` the bare-interpolation path applies: the label
-        // can be a nullable column read (`link_to article.title, …`),
-        // and `html_escape` is deliberately monomorphic `(String) ->
-        // String`. `nil.to_s == ""` is what Rails renders.
-        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
-    });
+    parts.push(InterpPart::Expr { expr: escaped_label(text, ctx) });
     parts.extend(suffix);
     Some(string_interp(parts))
 }
@@ -809,6 +857,29 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     // to the runtime `link_to`, taking its ternary sibling with it.
     if matches!(&*url.node, ExprNode::StringInterp { .. }) {
         return Some(rewrite_helpers_in_expr(url, ctx));
+    }
+    // An Active Storage Blob, Attachment or Attached links where Rails'
+    // `resolve("ActiveStorage::Blob")` / `resolve("ActiveStorage::Attachment")`
+    // route it: `rails_blob_path`, the blob's redirect route. Keyed off
+    // the type, ahead of the name convention below, which read a `blob`
+    // local as `blob_path(blob.id)`. A nilable one (`Attached#blob` is
+    // `Blob?`) too: the runtime answers "" for nil rather than raising.
+    if let Some(crate::ty::Ty::Class { id, .. }) = url.ty.as_ref().map(crate::ty::Ty::peel_nilable)
+        && matches!(id.0.as_str(), "ActiveStorage::Blob" | "ActiveStorage::Attachment" | "ActiveStorage::Attached")
+    {
+        return Some(route_helpers_call("rails_blob_path", vec![rewrite_helpers_in_expr(url, ctx)]));
+    }
+    // The `active_storage/blobs/_blob` override's own record local, which
+    // stays untyped (`record_arg_ty`): a Blob from the app's own render,
+    // or Action Text's Attachment, which answers `blob` as Rails' delegates
+    // to it. Either links to the blob's redirect route.
+    let is_record_local = match &*url.node {
+        ExprNode::Var { name, .. } => name.as_str() == ctx.arg_name,
+        ExprNode::Send { recv: None, method, args, .. } => args.is_empty() && method.as_str() == ctx.arg_name,
+        _ => false,
+    };
+    if ctx.resource_dir == "active_storage/blobs" && !ctx.arg_name.is_empty() && is_record_local {
+        return Some(route_helpers_call("rails_blob_path", vec![rewrite_helpers_in_expr(url, ctx)]));
     }
     // A read `case_class_narrow` pinned to a model (`ma.item` inside
     // `when ModMail`) links through that model's route.

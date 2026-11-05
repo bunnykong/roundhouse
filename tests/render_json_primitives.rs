@@ -5,6 +5,7 @@ mod emit_and_run;
 /// Build generic controllers covering literal and conditional primitive payloads.
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
+        .write("config/application.rb", "module PrimitiveJson\n  class Application < Rails::Application\n    config.load_defaults 8.0\n  end\nend\n")
         .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
         .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
         .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/payload\", to: \"payloads#show\"\n  get \"/list\", to: \"payloads#index\"\n  get \"/choose\", to: \"payloads#choose\"\nend\n")

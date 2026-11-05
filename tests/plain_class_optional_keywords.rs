@@ -19,6 +19,8 @@
 //! literal symbol, a skipped slot whose default reads the callee's
 //! context, a `send`) is refused with a named gap instead.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -76,8 +78,7 @@ fn native(files: &[(&str, &str)], script: &str) -> String {
     // same number of files shared one.
     static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("roundhouse-kwlab-{}-{call}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir(&format!("roundhouse-kwlab-{call}"));
     let mut requires = String::new();
     for (name, source) in files {
         let path = dir.join(name);

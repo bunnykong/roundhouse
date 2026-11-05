@@ -39,13 +39,13 @@ use super::super::util::{constant_id_str, flatten_statements};
 use super::ClassConsts;
 
 /// Whether `call` is a receiverless `with_options`.
-pub(super) fn is_with_options(call: &CallNode<'_>) -> bool {
+pub(in crate::ingest) fn is_with_options(call: &CallNode<'_>) -> bool {
     call.receiver().is_none() && constant_id_str(&call.name()) == "with_options"
 }
 
 /// The body items the block expands to, or the decline that names what
 /// blocked it.
-pub(super) fn expand(
+pub(in crate::ingest) fn expand(
     call: &CallNode<'_>,
     outer: &[MergedOption],
     owner: &ClassId,

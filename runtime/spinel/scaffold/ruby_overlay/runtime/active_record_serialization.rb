@@ -40,7 +40,8 @@ module ActiveRecord
           value = send(n)
           # Date-only JSON is YYYY-MM-DD. DateTime is a distinct
           # timestamp domain despite being a Ruby subclass of Date.
-          h[n] = value.instance_of?(Date) ? value.iso8601 : value
+          # Not the Time itself: Rails' as_json answers each value as JSON reads it, a Time as `xmlschema(3)`.
+          h[n] = value.instance_of?(Date) ? value.iso8601 : (value.is_a?(Time) ? ActiveSupport::JSON.time_json(value) : value)
         end
       end
       h

@@ -2,6 +2,8 @@
 //! connection churn. The Ruby driver runs the real Tep::Scheduler under CRuby
 //! with the poll primitives stubbed out.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::Path;
 use std::process::Command;
 
@@ -43,7 +45,7 @@ fn spawn_fiber_reuses_dead_slots() {
 fn dead_slots_are_reused_on_spinel() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dir =
-        std::env::temp_dir().join(format!("roundhouse-scheduler-slots-{}", std::process::id()));
+        scratch::dir("roundhouse-scheduler-slots");
     std::fs::create_dir_all(&dir).unwrap();
     let binary = dir.join("slots");
     let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());

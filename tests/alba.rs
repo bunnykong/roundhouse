@@ -1,4 +1,6 @@
 //! A bounded Alba 4 source-property contract, distinct from hash-backed input.
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
@@ -100,8 +102,7 @@ fn generated_ruby_runs_the_literal_contract_without_alba_or_class_preloads() {
     let mut app = app(SOURCE);
     let residue = roundhouse::session::analyze_and_lower(&mut app);
     assert!(residue.is_empty(), "{residue:#?}");
-    let dir = std::env::temp_dir().join(format!("roundhouse-alba-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-alba");
     let (files, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
         roundhouse::project::target_files(
             &app,
@@ -478,7 +479,7 @@ fn generated_spinel_compiles_and_runs_the_same_literal_contract() {
     let mut app = app(SOURCE);
     let residue = roundhouse::session::analyze_and_lower(&mut app);
     assert!(residue.is_empty(), "{residue:#?}");
-    let dir = std::env::temp_dir().join(format!("roundhouse-alba-spinel-{}", std::process::id()));
+    let dir = scratch::dir("roundhouse-alba-spinel");
     let (files, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
         roundhouse::project::target_files(
             &app,

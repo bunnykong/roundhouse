@@ -251,7 +251,7 @@ fn a_block_that_builds_a_string_is_served() {
     assert!(emitted.contains("def older"), "unused parameter; got:\n{emitted}");
     assert!(emitted.contains("params[:id]") || emitted.contains("@params"), "one-arg interpolation; got:\n{emitted}");
     assert!(
-        emitted.contains("reports") && emitted.contains("strip.empty?"),
+        emitted.contains("reports") && emitted.contains("ActiveSupport.present?(qs)"),
         "multi-statement present?; got:\n{emitted}"
     );
     assert!(

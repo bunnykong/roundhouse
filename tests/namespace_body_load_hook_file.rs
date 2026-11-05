@@ -4,6 +4,8 @@
 //! does not pass yet is ignored as `fork spec: postgresql`. A probe needs
 //! ROUNDHOUSE_PG_TEST_URL and the pg gem (tests/support/pg_probe.rs).
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -28,9 +30,7 @@ fn lines(bytes: &[u8]) -> Vec<String> {
 #[test]
 #[ignore = "fork spec: postgresql"]
 fn a_namespace_bodys_load_hook_fires_with_the_file_that_wrote_it() {
-    let root = std::env::temp_dir().join(format!("roundhouse-namespace-load-hook-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = scratch::dir("roundhouse-namespace-load-hook");
     std::fs::write(root.join("changeset_registry.rb"), REGISTRY).unwrap();
     std::fs::write(root.join("abstract_changeset.rb"), ABSTRACT).unwrap();
     // CRuby on Rails' own lazy_load_hooks: the sibling's load fires

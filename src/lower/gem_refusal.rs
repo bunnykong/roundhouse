@@ -29,9 +29,41 @@ pub(crate) struct Refusal<'a> {
 
 /// Whether any emit body, superclass, or `include` names the root constant.
 pub(crate) fn mentions(app: &App, root: &str) -> bool {
+    let scoped = scoped_consts(app, root);
     let mut found = false;
-    crate::lower::for_each_emit_body_ref(app, &mut |body| found |= names_root(body, root));
+    crate::lower::for_each_emit_body_ref(app, &mut |body| found |= names_root(body, root, &scoped));
     found || mentions_declarations(app, root)
+}
+
+/// The relative references to `root` in a class body's retained calls that
+/// its own namespace defines (`include Retryable` in an `included do` of
+/// `SolidQueue::Job::Executable`): Ruby's lexical lookup reaches those first.
+fn scoped_consts(app: &App, root: &str) -> crate::det::HashSet<Span> {
+    let known = known_names(app);
+    let mut out = crate::det::HashSet::default();
+    fn walk(expr: &Expr, owner: &str, root: &str, known: &crate::det::HashSet<String>, out: &mut crate::det::HashSet<Span>) {
+        if let ExprNode::Const { path } = &*expr.node
+            && path.first().is_some_and(|seg| seg.as_str() == root)
+            && resolves_in_scope(owner, root, known)
+        {
+            out.insert(expr.span);
+        }
+        expr.node.for_each_child(&mut |child| walk(child, owner, root, known, out));
+    }
+    for lc in &app.library_classes {
+        for call in &lc.unknown_calls {
+            walk(call, lc.name.0.as_str(), root, &known, &mut out);
+        }
+    }
+    out
+}
+
+fn known_names(app: &App) -> crate::det::HashSet<String> {
+    app.library_classes
+        .iter()
+        .map(|lc| lc.name.0.as_str().to_string())
+        .chain(app.models.iter().map(|m| m.name.0.as_str().to_string()))
+        .collect()
 }
 
 fn mentions_declarations(app: &App, root: &str) -> bool {
@@ -62,23 +94,25 @@ fn name_under_root(name: &str, root: &str) -> bool {
     name == root || name.starts_with(&format!("{root}::"))
 }
 
-fn names_root(expr: &Expr, root: &str) -> bool {
-    if const_name(expr, root).is_some() {
+fn names_root(expr: &Expr, root: &str, scoped: &crate::det::HashSet<Span>) -> bool {
+    if const_name(expr, root).is_some() && !scoped.contains(&expr.span) {
         return true;
     }
     let mut found = false;
-    expr.node.for_each_child(&mut |child| found |= names_root(child, root));
+    expr.node.for_each_child(&mut |child| found |= names_root(child, root, scoped));
     found
 }
 
 pub(crate) fn refuse_references(app: &mut App, target: &str, refusal: &Refusal<'_>) {
-    crate::lower::for_each_emit_body(app, &mut |body| rewrite(body, target, refusal));
+    let scoped = scoped_consts(app, refusal.root);
+    crate::lower::for_each_emit_body(app, &mut |body| rewrite(body, target, refusal, &scoped));
     refuse_declarations(app, target, refusal);
 }
 
 fn refuse_declarations(app: &mut App, target: &str, refusal: &Refusal<'_>) {
+    let known = known_names(app);
     for lc in &mut app.library_classes {
-        refuse_library_class(lc, target, refusal);
+        refuse_library_class(lc, target, refusal, &known);
     }
     for model in &mut app.models {
         if class_id_under_root(model.parent.as_ref(), refusal.root) {
@@ -120,7 +154,7 @@ fn refuse_declarations(app: &mut App, target: &str, refusal: &Refusal<'_>) {
                 }
             });
         for lc in &mut tm.inner_classes {
-            refuse_library_class(lc, target, refusal);
+            refuse_library_class(lc, target, refusal, &known);
         }
     }
 }
@@ -129,6 +163,7 @@ fn refuse_library_class(
     lc: &mut crate::dialect::LibraryClass,
     target: &str,
     refusal: &Refusal<'_>,
+    known: &crate::det::HashSet<String>,
 ) {
     if class_id_under_root(lc.parent.as_ref(), refusal.root) {
         let name = lc.parent.as_ref().unwrap().0.as_str().to_string();
@@ -138,7 +173,7 @@ fn refuse_library_class(
     let mut kept = Vec::new();
     let mut kept_spans = Vec::new();
     for (i, id) in lc.includes.iter().enumerate() {
-        if class_id_under_root(Some(id), refusal.root) {
+        if class_id_under_root(Some(id), refusal.root) && !resolves_in_scope(lc.name.0.as_str(), id.0.as_str(), known) {
             let span = lc.include_spans.get(i).copied().unwrap_or(Span::synthetic());
             report_decl(span, target, refusal, id.0.as_str());
         } else {
@@ -154,6 +189,21 @@ fn refuse_library_class(
     }
 }
 
+/// A relative name the includer's own namespace defines: Ruby's lexical lookup reaches it before the gem's top-level one.
+fn resolves_in_scope(owner: &str, name: &str, known: &crate::det::HashSet<String>) -> bool {
+    if name.starts_with("::") {
+        return false;
+    }
+    let mut scope: Vec<&str> = owner.split("::").collect();
+    while !scope.is_empty() {
+        if known.contains(&format!("{}::{name}", scope.join("::"))) {
+            return true;
+        }
+        scope.pop();
+    }
+    false
+}
+
 fn report_decl(span: Span, target: &str, refusal: &Refusal<'_>, name: &str) {
     crate::emit::diagnostics::report_unsupported(
         span,
@@ -163,28 +213,32 @@ fn report_decl(span: Span, target: &str, refusal: &Refusal<'_>, name: &str) {
     );
 }
 
-fn rewrite(expr: &mut Expr, target: &str, refusal: &Refusal<'_>) {
-    if let Some(method) = send_method(expr, refusal.root) {
-        rewrite_send_args(expr, target, refusal);
+fn rewrite(expr: &mut Expr, target: &str, refusal: &Refusal<'_>, scoped: &crate::det::HashSet<Span>) {
+    if let Some(method) = send_method(expr, refusal.root)
+        && !matches!(&*expr.node, ExprNode::Send { recv: Some(r), .. } if scoped.contains(&r.span))
+    {
+        rewrite_send_args(expr, target, refusal, scoped);
         refuse(expr, target, refusal, &format!("`{}.{method}`", refusal.root));
         return;
     }
     expr.node
-        .for_each_child_mut(&mut |child| rewrite(child, target, refusal));
-    if let Some(name) = const_name(expr, refusal.root) {
+        .for_each_child_mut(&mut |child| rewrite(child, target, refusal, scoped));
+    if let Some(name) = const_name(expr, refusal.root)
+        && !scoped.contains(&expr.span)
+    {
         refuse(expr, target, refusal, &format!("`{name}`"));
     }
 }
 
-fn rewrite_send_args(expr: &mut Expr, target: &str, refusal: &Refusal<'_>) {
+fn rewrite_send_args(expr: &mut Expr, target: &str, refusal: &Refusal<'_>, scoped: &crate::det::HashSet<Span>) {
     let ExprNode::Send { args, block, .. } = &mut *expr.node else {
         return;
     };
     for arg in args {
-        rewrite(arg, target, refusal);
+        rewrite(arg, target, refusal, scoped);
     }
     if let Some(block) = block {
-        rewrite(block, target, refusal);
+        rewrite(block, target, refusal, scoped);
     }
 }
 

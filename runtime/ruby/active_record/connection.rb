@@ -243,6 +243,47 @@ module ActiveRecord
       mapped = @rows.map { |row| yield row }
       mapped
     end
+
+    def any?
+      !@rows.empty?
+    end
+
+    def empty?
+      @rows.empty?
+    end
+  end
+
+  # `connection.schema_cache.columns_hash(table)`: each column's declared
+  # type and its length limit, read from the table's own definition.
+  class SchemaCache
+    def columns_hash(table)
+      columns = {}
+      Connection.shared.select_rows("PRAGMA table_info(#{Connection.shared.quote(table.to_s)})").each do |row|
+        name = row[1].to_s
+        columns[name] = Column.new(name, row[2].to_s)
+      end
+      columns
+    end
+  end
+
+  class Column
+    attr_reader :name, :sql_type
+
+    def initialize(name, sql_type)
+      @name = name
+      @sql_type = sql_type
+    end
+
+    # `varchar(255)` declares 255; a bare type (sqlite's `text`) none, as Rails reads it.
+    def limit
+      open = @sql_type.index("(")
+      return nil if open.nil?
+      close = @sql_type.index(")", open)
+      return nil if close.nil?
+      digits = @sql_type[open + 1, close - open - 1].to_s.strip
+      return nil if digits.empty? || !digits.match?(/\A\d+\z/)
+      digits.to_i
+    end
   end
 
   # `connection.raw_connection` — see `Connection#raw_connection`.
@@ -351,6 +392,15 @@ module ActiveRecord
       !select_value("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = #{quote(name.to_s)}").nil?
     end
 
+    # sqlite's `INSERT … ON CONFLICT (cols) DO NOTHING`, as Rails' SQLite3Adapter answers.
+    def supports_insert_conflict_target?
+      true
+    end
+
+    def schema_cache
+      SchemaCache.new
+    end
+
     def column_exists?(table, column)
       select_rows("PRAGMA table_info(#{quote(table.to_s)})").any? { |row| row[1].to_s == column.to_s }
     end
@@ -447,6 +497,14 @@ module ActiveRecord
   end
 
   class Base
+    def self.table_exists?
+      Connection.shared.data_source_exists?(table_name)
+    end
+
+    def self.column_names
+      Connection.shared.select_rows("PRAGMA table_info(#{Connection.shared.quote(table_name)})").map { |row| row[1].to_s }
+    end
+
     # Rails' read-only records: one a `readonly` relation loaded, or one
     # `readonly!` marked, raises ReadOnlyRecord on save, destroy,
     # `update_column(s)` or `touch`.
@@ -530,10 +588,14 @@ module ActiveRecord
       {}
     end
 
-    # Rails' `type_for_attribute(name).type`: the column's type name, nil
-    # for a name that is no column.
+    def self.schema_json_coder_columns
+      []
+    end
+
+    # Rails' `type_for_attribute(name)`: the column's type name, nil for a
+    # name that is no column, and its `serialize …, coder: JSON` coder.
     def self.type_for_attribute(name)
-      ActiveRecord::Type::Value.new(schema_column_types[name.to_sym])
+      ActiveRecord::Type::Value.new(schema_column_types[name.to_sym], schema_json_coder_columns.include?(name.to_sym))
     end
 
     # Rails' `default_scoped`: `all` with the model's `default_scope`,
@@ -1579,6 +1641,10 @@ module ActiveRecord
 
     def self.distinct(value = true)
       all.distinct(value)
+    end
+
+    def self.optimizer_hints(*hints)
+      all.optimizer_hints(*hints)
     end
 
     def self.eager_load(*names)

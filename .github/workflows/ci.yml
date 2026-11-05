@@ -168,7 +168,7 @@ jobs:
       - name: Cache installed fixture gems
         # Weekly keys refresh dependencies only within the same runner
         # image version, Ruby patch/platform and RubyGems/Bundler. Generation
-        # checks for the latest Rails release, even on a gem-cache hit.
+        # installs the pinned Rails, even on a gem-cache hit.
         continue-on-error: true
         uses: actions/cache@v6
         with:
@@ -183,12 +183,16 @@ jobs:
             ${{ env.GEM_HOME }}/specifications
           key: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-${{ steps.gems.outputs.week }}
           restore-keys: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-
+      # The tests assume this exact Rails (tests/boot_wiring.rs, the
+      # activerecord probes); bump it here and in the tests together.
+      # `--rails` also pins the app's lock, so a newer 8.1.4.x in the
+      # gem cache is not locked instead.
       - name: Install Rails
         if: steps.fixture.outputs.generate == 'true'
-        run: gem install rails --no-document
+        run: gem install rails -v 8.1.4 --no-document
       - name: Generate fixtures/real-blog
         if: steps.fixture.outputs.generate == 'true'
-        run: bin/rh fixture
+        run: bin/rh fixture --rails 8.1.4
       # The Rails Guides store rides the same artifact: the /ide/
       # default app and a picker entry, so build-site and
       # browser-smoke-ide bundle it without a second Rails install.
@@ -579,7 +583,10 @@ jobs:
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
           gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt rest-client elastic-apm
-          gem install --no-document activerecord -v '~> 8.1.0'
+          # The Rails the fixture locks (see generate-fixture).
+          gem install --no-document activerecord -v 8.1.4
+          # solid_queue's record models, at the fixture's locked version (tests/support/solid_queue_worker.rs).
+          gem install --no-document --ignore-dependencies solid_queue -v "$(sed -n 's/^    solid_queue (\(.*\))$/\1/p' fixtures/real-blog/Gemfile.lock)"
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8
         with:

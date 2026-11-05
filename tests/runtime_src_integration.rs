@@ -12,6 +12,8 @@
 //! Elixir join as their emit_method gains the single standalone-fn
 //! entry point. Each addition is ~5 lines in this file.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -97,11 +99,7 @@ fn active_support_squish_bang_emits_for_rust() {
         "ActiveSupport.squish! must emit a mutating Rust function:\n{emitted}"
     );
 
-    let scratch = std::env::temp_dir().join(format!(
-        "roundhouse-runtime-rust-squish-bang-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&scratch).expect("create generated Rust scratch directory");
+    let scratch = scratch::dir("roundhouse-runtime-rust-squish-bang");
     let source = format!(
         r#"{emitted}
 #[test]
@@ -1293,7 +1291,18 @@ fn every_runtime_method_body_concretely_typed() {
     // yield result in active_record/connection.rb. Its row is a typed
     // Hash[String, untyped]; the generic block result has no caller in
     // this probe. Existing methods have unchanged per-method counts.
-    const CEILING: usize = 920;
+    // MEASURED 921 on 2026-11-04 (on 920): `I18nHost.config_name` reads
+    // the thread's config name out of `Thread.current`, untyped as
+    // `locale_name`'s read beside it is (+1 in i18n_host.rb).
+    // MEASURED 924 on 2026-11-04 (on 921): `Type::Value#serialize`
+    // takes any value, as Rails' does, and reads it three times
+    // (+3 in active_record/types.rb).
+    // MEASURED 929 on 2026-11-04 (exact main 7868dd14: 924):
+    // ActiveSupport.blank? follows Object's optional empty? protocol and
+    // String's encoding fallback. Its deliberately untyped argument adds
+    // 5 sites; all other files and method bodies are unchanged
+    // (+5 in active_support_ext.rb).
+    const CEILING: usize = 929;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

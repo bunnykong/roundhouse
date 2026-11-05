@@ -1,3 +1,5 @@
+#[path = "../support/scratch.rs"]
+mod scratch;
 use super::emit_and_run;
 
 /// `validates :attr, uniqueness: …` on the ruby-family targets, which ship
@@ -104,8 +106,7 @@ fn strict_targets_keep_uniqueness_a_gap_without_emit_errors() {
 /// ruby-family target, which runs the check, reports nothing for it.
 #[test]
 fn the_cli_reports_uniqueness_only_where_it_is_not_lowered() {
-    let root = std::env::temp_dir().join(format!("roundhouse-uniqueness-cli-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-uniqueness-cli");
     for (path, body) in [
         ("app/models/application_record.rb", APPLICATION_RECORD),
         ("app/models/account.rb", "class Account < ApplicationRecord\nend\n"),

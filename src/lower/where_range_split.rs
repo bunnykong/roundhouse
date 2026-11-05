@@ -5,20 +5,26 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
-pub fn apply_where_range_split(app: &mut App) -> Vec<Diagnostic> {
+pub fn apply_where_range_split(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    use crate::build_target::BuildTarget;
+    let ruby_family = matches!(target, BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby);
     let mut diags = Vec::new();
     super::for_each_hook_body(app, &mut |body| {
         rewrite(body);
-        ledger_stray_time_ranges(body, false, &mut diags);
+        if !ruby_family {
+            ledger_stray_time_ranges(body, false, &mut diags);
+        }
     });
     for view in &mut app.views {
         rewrite(&mut view.body);
-        ledger_stray_time_ranges(&mut view.body, false, &mut diags);
+        if !ruby_family {
+            ledger_stray_time_ranges(&mut view.body, false, &mut diags);
+        }
     }
     diags
 }
 
-// Not left silent: spinel has no Range of Time, so `t.all_month` anywhere but a `where`/`find_by` condition value cannot compile.
+// Not left silent on the strict targets: their runtimes build no Range of Times, so `t.all_month` anywhere but a `where`/`find_by` condition value cannot compile there.
 fn ledger_stray_time_ranges(expr: &mut Expr, as_condition: bool, diags: &mut Vec<Diagnostic>) {
     if !as_condition && is_all_range(expr) {
         diags.push(super::residue_diagnostic(
@@ -27,7 +33,7 @@ fn ledger_stray_time_ranges(expr: &mut Expr, as_condition: bool, diags: &mut Vec
             expr.span,
             "no_time_range_at_runtime",
             "`all_day`/`all_week`/`all_month`/`all_year` grounds only as a `where`/`find_by` condition \
-             value; elsewhere it needs a Range of Time, which spinel does not have"
+             value on this target; elsewhere it needs a Range of Times, which only the ruby family builds"
                 .to_string(),
         ));
     }

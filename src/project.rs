@@ -1095,6 +1095,21 @@ fn report_typescript_error_class(app: &App, target: BuildTarget) {
     }
 }
 
+/// The TypeScript emit writes `include Enumerable` as `extends Enumerable`, a class its runtime has no port of.
+fn report_typescript_enumerable(app: &App, target: BuildTarget) {
+    if !matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
+        return;
+    }
+    for lc in app.library_classes.iter().filter(|lc| lc.origin.is_none() && lc.includes.iter().any(|m| m.0.as_str() == "Enumerable")) {
+        emit::diagnostics::report_unsupported(
+            lc.methods.first().map(|m| m.name_span).unwrap_or(lc.parent_span),
+            target.as_str(),
+            "Enumerable mixin",
+            format!("`{}` includes Enumerable, which the {} runtime does not port", lc.name.0.as_str(), target.as_str()),
+        );
+    }
+}
+
 /// A model's class-body `extend AppModule` and the calls after it to the
 /// module's methods (`ingest::app_extension_calls`) are replayed by the
 /// Ruby family's emit; no other target carries a class body's own code.
@@ -1265,6 +1280,279 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
         }
     }
     true
+}
+
+/// Rust re-exports each model from `src/models/mod.rs` by its struct name
+/// (the last segment of the class name) from a module named by its
+/// flattened stem (`Admin::Note` → `admin_note::Note`). The synthesized
+/// `<Model>Row` and `<Resource>Params` classes are declared there too.
+/// Two of them with one struct name (`Note` and `Admin::Note`, or
+/// `Admin::ArticleRow` and `Article`'s row `ArticleRow`) or one stem
+/// (`AdminNote` and `Admin::Note`) would be declared twice; so would a
+/// model and a synthesized class of the same name (a model `ArticleRow`
+/// and `Article`'s row), whose one file keeps only the last written.
+/// Refused, naming both, rather than renamed. An `Err`, so a caller with
+/// no diagnostic scope (`build_archives`) stops too.
+fn reject_rust_model_name_collisions(app: &App, target: BuildTarget) -> Result<(), String> {
+    if target != BuildTarget::Rust {
+        return Ok(());
+    }
+    // (class name, the span to report it at, what declares it), models first.
+    let mut names: Vec<(String, crate::span::Span, String)> = app
+        .models
+        .iter()
+        .map(|m| (m.name.0.as_str().to_string(), m.parent_span, "the model".to_string()))
+        .collect();
+    for model in app.models.iter().filter(|m| app.schema.tables.contains_key(&m.table.0)) {
+        let row = crate::lower::model_to_library::row::row_class_id(&model.name);
+        names.push((row.0.as_str().to_string(), model.parent_span, format!("`{}`'s row", model.name.0.as_str())));
+    }
+    for spec in crate::lower::controller_to_library::params::collect_specs(&app.controllers).iter() {
+        names.push((spec.class_id.0.as_str().to_string(), spec.span, "the params class".to_string()));
+    }
+    let mut seen: Vec<(String, String, &str, crate::span::Span, &str)> = Vec::new();
+    let mut messages: Vec<String> = Vec::new();
+    for (name, span, origin) in &names {
+        let stem = crate::emit::rust::rust_model_stem(name);
+        let strukt = crate::emit::rust::rust_struct_name(name).to_string();
+        if let Some((_, _, other, other_span, other_origin)) = seen
+            .iter()
+            .find(|(s, n, o, _, oo)| (*o != name.as_str() || *oo != origin.as_str()) && (*s == stem || *n == strukt))
+        {
+            let span = if span.is_synthetic() { *other_span } else { *span };
+            let pair = if *other == name.as_str() {
+                format!("`{name}` ({other_origin}) and `{name}` ({origin})")
+            } else {
+                format!("`{other}` and `{name}`")
+            };
+            let diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "model name",
+                format!("{pair} would both be declared as `src/models/{stem}.rs` or as struct `{strukt}`"),
+            );
+            messages.push(diagnostic.message.clone());
+            emit::diagnostics::push(diagnostic);
+        }
+        seen.push((stem, strukt, name.as_str(), *span, origin.as_str()));
+    }
+    if messages.is_empty() { Ok(()) } else { Err(messages.join("\n")) }
+}
+
+/// Roda converts views from their ERB, and its translator writes plain
+/// HTML for `form.label`, `text_field`, `textarea` and `submit` only
+/// (`emit::roda::views::translate_form_field`). A `color_field` or
+/// `datetime_local_field` stays in the page as `form.…`, which has no
+/// form builder behind it there, so it is refused on Roda.
+fn report_roda_form_fields(app: &App, target: BuildTarget) {
+    if target != BuildTarget::Roda {
+        return;
+    }
+    // Only a form builder's call: the block parameter of a form helper, or
+    // the local a partial is handed the builder under (`render "fields",
+    // form: form`). A model or helper method that shares the name
+    // (`article.color_field`) is an ordinary call.
+    use crate::expr::{Expr, ExprNode, Literal};
+    type Handoffs = crate::det::HashMap<String, Vec<String>>;
+    // A local read naming a builder: a `Var`, or a partial's unbound local
+    // read as a bare call (`form`).
+    fn names_builder(e: &Expr, builders: &[String]) -> bool {
+        match &*e.node {
+            ExprNode::Var { name, .. } => builders.iter().any(|b| b == name.as_str()),
+            ExprNode::Send { recv: None, method, args, block: None, .. } => {
+                args.is_empty() && builders.iter().any(|b| b == method.as_str())
+            }
+            _ => false,
+        }
+    }
+    // A form helper's block (`form_with … do |form|`), or a builder's own
+    // nested one (`form.fields_for :child do |child|`): its parameter is a
+    // builder.
+    fn form_block<'a>(e: &'a Expr, builders: &[String]) -> Option<(&'a str, &'a Expr)> {
+        let ExprNode::Send { recv, method, block: Some(block), .. } = &*e.node else { return None };
+        let helper = match recv {
+            None => matches!(method.as_str(), "form_with" | "form_for" | "fields_for" | "fields"),
+            Some(r) => matches!(method.as_str(), "fields_for" | "fields") && names_builder(r, builders),
+        };
+        if !helper {
+            return None;
+        }
+        let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
+        Some((params.first()?.as_str(), body))
+    }
+    // A partial's view name from a `render` path, as the caller's dir resolves it.
+    fn partial_view(dir: &str, path: &str) -> String {
+        match path.rsplit_once('/') {
+            Some((d, base)) => format!("{d}/_{base}"),
+            None => format!("{dir}/_{path}"),
+        }
+    }
+    fn handoffs(e: &Expr, dir: &str, builders: &mut Vec<String>, out: &mut Handoffs) {
+        if let Some((param, body)) = form_block(e, builders) {
+            builders.push(param.to_string());
+            handoffs(body, dir, builders, out);
+            builders.pop();
+            return;
+        }
+        if let ExprNode::Send { recv: None, method, args, .. } = &*e.node
+            && method.as_str() == "render"
+            && let (Some(first), Some(last)) = (args.first(), args.last())
+            && let ExprNode::Lit { value: Literal::Str { value: path } } = &*first.node
+            && let ExprNode::Hash { entries, .. } = &*last.node
+        {
+            for (k, v) in entries {
+                if let ExprNode::Lit { value: Literal::Sym { value: local } } = &*k.node
+                    && names_builder(v, builders)
+                {
+                    let locals = out.entry(partial_view(dir, path)).or_default();
+                    if !locals.iter().any(|l| l == local.as_str()) {
+                        locals.push(local.as_str().to_string());
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| handoffs(c, dir, builders, out));
+    }
+    fn visit(e: &Expr, builders: &mut Vec<String>) {
+        if let Some((param, body)) = form_block(e, builders) {
+            builders.push(param.to_string());
+            visit(body, builders);
+            builders.pop();
+            return;
+        }
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*e.node
+            && matches!(method.as_str(), "color_field" | "datetime_local_field")
+            && names_builder(recv, builders)
+            && !e.span.is_synthetic()
+        {
+            emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                e.span,
+                Some(crate::ident::Symbol::from(BuildTarget::Roda.as_str())),
+                "form builder field",
+                format!("`form.{}`: Roda's view translator has no plain-HTML form of it, and the page has no form builder", method.as_str()),
+            ));
+        }
+        e.node.for_each_child(&mut |c| visit(c, builders));
+    }
+    // To a fixed point: a partial handed the builder can hand it on
+    // (`_form` → `_outer` → `_inner`), so each view is scanned with the
+    // builder locals it was handed so far.
+    let mut handed = Handoffs::default();
+    loop {
+        let before: usize = handed.values().map(Vec::len).sum();
+        for view in &app.views {
+            let dir = view.name.as_str().rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            let mut builders = handed.get(view.name.as_str()).cloned().unwrap_or_default();
+            handoffs(&view.body, dir, &mut builders, &mut handed);
+        }
+        if handed.values().map(Vec::len).sum::<usize>() == before {
+            break;
+        }
+    }
+    for view in &app.views {
+        let mut builders = handed.get(view.name.as_str()).cloned().unwrap_or_default();
+        visit(&view.body, &mut builders);
+    }
+}
+
+/// `form.datetime_local_field` on a datetime or date column formats the
+/// column's text (`ViewHelpers.datetime_local_value_attr`), which starts
+/// `YYYY-MM-DD HH:MM:SS` on the targets measured against Rails 8.1.4:
+/// the ruby family, Crystal, Go and Python (a datetime column; an app with
+/// a Date-only column is refused off the ruby family before this, by
+/// `reject_unsupported_dates`). TypeScript's record reads the
+/// column as a `Date`, whose text is not that (`Sun Nov 01 2026 …`, in
+/// the host's zone), and the Rust emit of the read does not build; the
+/// rest are unmeasured. Each of those refuses the call rather than
+/// rendering a value Rails wouldn't.
+fn report_datetime_local_reads(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog
+            | BuildTarget::Ruby
+            | BuildTarget::Jruby
+            | BuildTarget::Roda
+            | BuildTarget::Futamura
+            | BuildTarget::Crystal
+            | BuildTarget::Go
+            | BuildTarget::Python
+    ) {
+        return;
+    }
+    for span in crate::analyze::datetime_local_time_reads(app) {
+        emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            span,
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "form builder field",
+            "`form.datetime_local_field` on a datetime or date column: this target's record doesn't read the column as the text the lowering formats into Rails' value",
+        ));
+    }
+}
+
+/// `ActiveSupport::TimeZone` (with `tzinfo`'s `TimeZoneInfo`) is a class
+/// of the ruby family's runtime (`runtime/ruby/active_support_ext.rb`).
+/// Crystal's build of a picker that reads it stops at `undefined constant
+/// ::ActiveSupport::TimeZone` and Go's at `undefined:
+/// ActiveSupportTimeZone_all`, so off the ruby family a `tzinfo` read is
+/// refused rather than emitted. Roda too: it keeps the view's line as
+/// written, and its app loads no ActiveSupport.
+fn report_tzinfo_reads(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    for span in crate::lower::time_calendar::tzinfo_reads(app) {
+        emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            span,
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "tzinfo",
+            "`ActiveSupport::TimeZone` and its `tzinfo` are ruby-family runtime classes; this target's runtime has no time-zone class",
+        ));
+    }
+}
+
+/// `render "x" do … end` and `render layout: "x" do … end`: the view
+/// lowering captures the block into a String and passes it as the
+/// partial's yielded body. Measured through each target's own test
+/// runner, only the ruby family carries that capture: TypeScript
+/// redeclares the capture local (`The symbol "_layout_body" has already
+/// been declared`), Crystal and Go pass the builder where the partial
+/// takes a String, Python passes a list. Refused elsewhere, and on Roda,
+/// which converts views from their ERB with no ActionView; in a template
+/// no request reaches, as a warning.
+fn report_block_render_partials(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    fn visit(e: &crate::expr::Expr, unreachable: bool, target: BuildTarget) {
+        if let crate::expr::ExprNode::Send { recv, method, args, block: Some(block), .. } = &*e.node
+            && !e.span.is_synthetic()
+            && matches!(
+                crate::lower::view::classify_render_partial(recv.as_ref(), method.as_str(), args, Some(block), &|_| true, &|_| false),
+                Some(crate::lower::view::RenderPartial::LayoutBlock { .. })
+            )
+        {
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                e.span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "render with a block",
+                "the block becomes the partial's `yield`, captured into a String, which this target's views don't carry",
+            );
+            if unreachable {
+                d.severity = crate::diagnostic::Severity::Warning;
+            }
+            emit::diagnostics::push(d);
+        }
+        e.node.for_each_child(&mut |c| visit(c, unreachable, target));
+    }
+    for view in &app.views {
+        visit(&view.body, app.unreachable_views.contains(&view.name), target);
+    }
 }
 
 /// `current_page?` reads the request a view renders for. The ruby
@@ -1997,13 +2285,14 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
             {
                 Some("lambda optional, keyword or keyword-rest parameters")
             }
+            // Spinel carries Ruby's class variables, shared down the hierarchy (its test/class_var_* suite).
             ExprNode::Assign { target: LValue::Var { name, .. }, .. }
             | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
-                if name.as_str().starts_with("@@") => Some("class variable write"),
+                if name.as_str().starts_with("@@") && target != BuildTarget::Spinel => Some("class variable write"),
             ExprNode::Assign { target: LValue::Var { name, .. }, .. }
             | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
                 if name.as_str().starts_with('$') => Some("global variable write"),
-            ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some("class variable read"),
+            ExprNode::Var { name, .. } if name.as_str().starts_with("@@") && target != BuildTarget::Spinel => Some("class variable read"),
             _ => None,
         };
         if let Some(construct) = construct {
@@ -2201,7 +2490,37 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
             _ => false,
         }
     }
-    fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str]) {
+    // A job's own fields and hooks are runtime/spinel/active_job_serialization.rb's, which only the ruby family loads.
+    let parents: crate::det::HashMap<&str, &str> = app
+        .library_classes
+        .iter()
+        .filter_map(|lc| lc.parent.as_ref().map(|p| (lc.name.0.as_str(), p.0.as_str().trim_start_matches("::"))))
+        .collect();
+    let jobs: crate::det::HashSet<String> = app
+        .library_classes
+        .iter()
+        .filter(|lc| {
+            let mut at = lc.name.0.as_str();
+            (0..32).any(|_| match parents.get(at) {
+                Some(&"ActiveJob::Base") => true,
+                Some(p) => {
+                    at = p;
+                    false
+                }
+                None => false,
+            })
+        })
+        .map(|lc| lc.name.0.as_str().to_string())
+        .chain(std::iter::once("ActiveJob::Base".to_string()))
+        .collect();
+    fn names_job(ty: &crate::ty::Ty, jobs: &crate::det::HashSet<String>) -> bool {
+        match ty {
+            crate::ty::Ty::Class { id, .. } => jobs.contains(id.0.as_str()),
+            crate::ty::Ty::Union { variants } => variants.iter().any(|v| names_job(v, jobs)),
+            _ => false,
+        }
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str], jobs: &crate::det::HashSet<String>) {
         use crate::expr::ExprNode;
         use crate::ty::Ty;
         if let ExprNode::Send { recv, method, .. } = &*expr.node {
@@ -2242,6 +2561,8 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                     _ => None,
                 },
                 (Some(_), "fetch") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#fetch"),
+                (Some(_), "grapheme_clusters") if matches!(recv_ty, Some(Ty::Str)) => Some("String#grapheme_clusters"),
+                (Some(_), "truncate_bytes") if matches!(recv_ty, Some(Ty::Str)) => Some("String#truncate_bytes"),
                 (Some(_), "each_slice") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_slice"),
                 (Some(_), "each_cons") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_cons"),
                 (Some(_), "lazy") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#lazy"),
@@ -2257,6 +2578,10 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 // whichever arm of the receiver it is (`Rails::AppPath?`, `Rails::AppPath | Pathname`).
                 (Some(_), "expand_path") if recv_ty.is_some_and(names_app_path) => Some("Rails::AppPath#expand_path"),
                 (Some(_), "to_session_value") if recv_ty.is_some_and(names_flash) => Some("ActionDispatch::Flash#to_session_value"),
+                // Ruby's Integer has no width; a fixed-width one wraps the literal's high limbs away.
+                _ if expr.decisions & crate::expr::WIDE_INTEGER_LITERAL != 0 => Some("Integer literal wider than 64 bits"),
+                (Some(_), name) if crate::analyze::ACTIVE_JOB_RUBY_FIELDS.contains(&name)
+                    && recv_ty.is_some_and(|t| names_job(t, jobs)) => Some("ActiveJob::Base job fields"),
                 _ => None,
             };
             if let Some(construct) = construct {
@@ -2266,9 +2591,9 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 );
             }
         }
-        expr.node.for_each_child(&mut |child| visit(child, target, kernel));
+        expr.node.for_each_child(&mut |child| visit(child, target, kernel, jobs));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel, &jobs));
 }
 
 /// An ancestor controller's method reading an ivar only a descendant
@@ -2976,14 +3301,6 @@ fn target_files_inner(
         }
         None => app,
     };
-    let with_where_bounds;
-    let app = match crate::lower::where_bounds::lower_for_target(app, target) {
-        Some(lowered) => {
-            with_where_bounds = lowered;
-            &with_where_bounds
-        }
-        None => app,
-    };
     let with_eager_loads;
     let app = match crate::lower::eager_load::lower_for_target(app, target) {
         Some(lowered) => {
@@ -3041,11 +3358,17 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    reject_rust_model_name_collisions(app, target)?;
+    report_datetime_local_reads(app, target);
+    report_roda_form_fields(app, target);
+    report_tzinfo_reads(app, target);
+    report_block_render_partials(app, target);
     report_current_page_calls(app, target);
     report_time_tag_calls(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
+    report_typescript_enumerable(app, target);
     report_replayed_class_bodies(app, target);
     report_body_statements(app, target);
     report_controller_sibling_classes(app, target);
@@ -3094,7 +3417,7 @@ fn target_files_inner(
             {
                 continue;
             }
-            if !matches!(policy, crate::analyze::forwarding::KeywordPolicy::Legacy | crate::analyze::forwarding::KeywordPolicy::NativeLibrary) {
+            if !matches!(policy, crate::analyze::forwarding::KeywordPolicy::Legacy | crate::analyze::forwarding::KeywordPolicy::LegacyRubySplat | crate::analyze::forwarding::KeywordPolicy::NativeLibrary) {
                 let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
                     ("keyword splat in ordinary super",
                      "super destination's native or lowered argument ABI cannot be verified")
@@ -4994,6 +5317,7 @@ fn ruby_family_runtime_files(
     }
     apply_conditional_declarations(&mut files, app);
     apply_file_programs(&mut files, app);
+    drop_solid_queue_standin(app, &mut files);
     Ok(files)
 }
 
@@ -5085,24 +5409,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         .iter()
         .filter_map(|(p, _)| p.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")).map(str::to_string))
         .collect();
-    // `require "x"` from a gem file: the file of that feature under the
-    // requiring gem's lib/, then any gem's.
-    let resolve = |from: &str, feature: &str, relative: bool| -> Option<String> {
-        let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
-        if relative {
-            let dir = std::path::Path::new(from).parent()?;
-            return Some(normalize_source(&dir.join(&file).display().to_string()));
-        }
-        let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
-        let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
-        if let Some(own) = own.filter(|p| known.contains(p)) {
-            return Some(own);
-        }
-        let suffix = format!("/lib/{file}");
-        let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
-        found.sort();
-        found.first().map(|p| p.to_string())
-    };
+    let resolve = |from: &str, feature: &str, relative: bool| resolve_gem_require(&known, from, feature, relative);
     let site = |span: crate::span::Span| -> String {
         let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) else {
             return "(unknown)".to_string();
@@ -5515,6 +5822,76 @@ fn program_steps<'a>(items: &'a [crate::app::ProgramItem], depth: usize, out: &m
     }
 }
 
+/// `require "x"` from a gem file: the file of that feature under the
+/// requiring gem's lib/, then any gem's.
+fn resolve_gem_require(known: &crate::det::HashSet<String>, from: &str, feature: &str, relative: bool) -> Option<String> {
+    let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
+    if relative {
+        let dir = std::path::Path::new(from).parent()?;
+        return Some(normalize_source(&dir.join(&file).display().to_string()));
+    }
+    let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
+    let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
+    if let Some(own) = own.filter(|p| known.contains(p)) {
+        return Some(own);
+    }
+    let suffix = format!("/lib/{file}");
+    let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
+    found.sort();
+    found.first().map(|p| p.to_string())
+}
+
+/// The model-tree anchors (`models/x`) of the classes the gem programs
+/// declare, in the order Ruby loads them: each boot gem entry as Bundler
+/// requires it, a required file's declarations ahead of the lines after
+/// its `require`. Both branches of a file-level `if` count; an autoload
+/// loads on first read, so it orders nothing.
+fn gem_declaration_order(app: &App) -> Vec<String> {
+    let programs: crate::det::HashMap<String, &crate::app::FileProgram> =
+        app.file_programs.iter().map(|p| (normalize_source(&p.source), p)).collect();
+    if programs.is_empty() {
+        return Vec::new();
+    }
+    let known: crate::det::HashSet<String> = app.sources.iter().map(|f| normalize_source(&f.path)).collect();
+    fn walk(
+        source: &str,
+        programs: &crate::det::HashMap<String, &crate::app::FileProgram>,
+        known: &crate::det::HashSet<String>,
+        app: &App,
+        seen: &mut crate::det::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if !seen.insert(source.to_string()) {
+            return;
+        }
+        let Some(program) = programs.get(source) else { return };
+        for item in all_program_items(&program.items) {
+            match item {
+                crate::app::ProgramItem::Require { feature, relative, .. } => {
+                    if let Some(target) = resolve_gem_require(known, source, feature, *relative) {
+                        walk(&target, programs, known, app, seen, out);
+                    }
+                }
+                crate::app::ProgramItem::Declared(names) => {
+                    for name in names {
+                        let anchor = crate::emit::ruby::library_file_anchor(name.0.as_str(), app);
+                        if !out.contains(&anchor) {
+                            out.push(anchor);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seen = Default::default();
+    let mut out = Vec::new();
+    for entry in &app.boot_gem_entries {
+        walk(&normalize_source(entry), &programs, &known, app, &mut seen, &mut out);
+    }
+    out
+}
+
 /// Every item of a program, those in its branches too.
 fn all_program_items(items: &[crate::app::ProgramItem]) -> Vec<&crate::app::ProgramItem> {
     let mut out = Vec::new();
@@ -5837,6 +6214,58 @@ fn i18n_table_text(app: &App) -> String {
     out
 }
 
+/// The app's `I18n::Config` subclasses, a subclass ahead of its parent
+/// so `case config when …` takes the nearest.
+fn i18n_config_classes(app: &App) -> Vec<String> {
+    let parent_of = |name: &str| {
+        app.library_classes
+            .iter()
+            .find(|lc| lc.name.0.as_str() == name)
+            .and_then(|lc| lc.parent.as_ref())
+            .map(|p| p.0.as_str().trim_start_matches("::").to_string())
+    };
+    let depth = |name: &str| {
+        let mut at = name.to_string();
+        let mut n = 0usize;
+        while let Some(p) = parent_of(&at) {
+            if p == "I18n::Config" {
+                return Some(n);
+            }
+            if n > 32 {
+                return None;
+            }
+            at = p;
+            n += 1;
+        }
+        None
+    };
+    let mut found: Vec<(usize, String)> = app
+        .library_classes
+        .iter()
+        .filter(|lc| !lc.is_module)
+        .filter_map(|lc| depth(lc.name.0.as_str()).map(|d| (d, lc.name.0.as_str().to_string())))
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    found.into_iter().map(|(_, name)| name).collect()
+}
+
+fn i18n_config_source(classes: &[String]) -> String {
+    if classes.is_empty() {
+        return "  def self.config_named(name, locale_name)\n    I18n::Config.new(locale_name)\n  end\n\n  def self.config_name_of(config)\n    \"\"\n  end\n\n  def self.config_default_locale\n    app_default_locale\n  end\n\n  def self.config_available_locales\n    app_available_locales\n  end\n".to_string();
+    }
+    let arms = |each: &dyn Fn(&str) -> String| classes.iter().map(|c| each(c)).collect::<String>();
+    format!(
+        "  def self.config_named(name, locale_name)\n    case name\n{}    else\n      I18n::Config.new(locale_name)\n    end\n  end\n\n\
+         \x20 def self.config_name_of(config)\n    case config\n{}    else\n      \"\"\n    end\n  end\n\n\
+         \x20 def self.config_default_locale\n    case I18nHost.config_name\n{}    else\n      app_default_locale\n    end\n  end\n\n\
+         \x20 def self.config_available_locales\n    case I18nHost.config_name\n{}    else\n      app_available_locales\n    end\n  end\n",
+        arms(&|c| format!("    when \"{c}\"\n      {c}.new(locale_name)\n")),
+        arms(&|c| format!("    when {c}\n      \"{c}\"\n")),
+        arms(&|c| format!("    when \"{c}\"\n      {c}.new.default_locale\n")),
+        arms(&|c| format!("    when \"{c}\"\n      {c}.new.available_locales\n")),
+    )
+}
+
 fn apply_i18n_locales(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "  # >>> generated: i18n-locales\n";
     const TAIL: &str = "  # <<< generated: i18n-locales\n";
@@ -5850,8 +6279,9 @@ fn apply_i18n_locales(files: &mut [(String, String)], app: &App) {
     // object on CRuby 3.4+, and `I18n.locale` searches this list on every
     // call (once per element of a cached collection's keys).
     let generated = format!(
-        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}].freeze\n  end\n{TAIL}",
-        sym(&catalog.locale)
+        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}].freeze\n  end\n\n{}{TAIL}",
+        sym(&catalog.locale),
+        i18n_config_source(&i18n_config_classes(app)),
     );
     for (path, content) in files.iter_mut() {
         if !path.ends_with("runtime/i18n_locale.rb") {
@@ -6735,6 +7165,58 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `JobRegistry.locate(model_name, id)`, the gid half of
+/// `ActiveJob::Arguments.deserialize`: one `when` per model, spelled as a
+/// literal constant (a name from the wire is never turned into a class).
+/// Written only for an app that calls `Arguments.deserialize`; the
+/// scaffold's body, which raises Rails' NameError, stands otherwise.
+fn apply_job_registry_locate(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "  # >>> generated: job-registry-locate\n";
+    const TAIL: &str = "  # <<< generated: job-registry-locate\n";
+    if !calls_arguments_deserialize(app) {
+        return;
+    }
+    let mut generated = format!("{HEAD}  def self.locate(model_name, id)\n    case model_name\n");
+    for model in app.models.iter().filter(|m| !crate::lower::model_to_library::markers::is_abstract_class(m)) {
+        let name = model.name.0.as_str();
+        generated.push_str(&format!(
+            "    when \"{name}\"\n      {name}.find(GlobalID::Locator.cast_id(id))\n"
+        ));
+    }
+    generated.push_str("    else\n      raise NameError, \"uninitialized constant \" + model_name\n    end\n  end\n");
+    generated.push_str(TAIL);
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("job_registry.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
+fn calls_arguments_deserialize(app: &App) -> bool {
+    fn walk(e: &crate::expr::Expr, found: &mut bool) {
+        if let crate::expr::ExprNode::Send { recv: Some(r), method, .. } = &*e.node
+            && method.as_str() == "deserialize"
+            && let crate::expr::ExprNode::Const { path } = &*r.node
+        {
+            let names: Vec<&str> = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect();
+            if names == ["ActiveJob", "Arguments"] {
+                *found = true;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, found));
+    }
+    let mut found = false;
+    crate::lower::for_each_hook_body_ref(app, &mut |e| walk(e, &mut found));
+    for view in &app.views {
+        walk(&view.body, &mut found);
+    }
+    found
+}
+
 fn apply_global_id_locate(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "    # >>> generated: global-id-locate\n";
     const TAIL: &str = "    # <<< generated: global-id-locate\n";
@@ -7444,7 +7926,7 @@ fn apply_route_helpers_demand(files: &mut Vec<(String, String)>) {
     ));
 }
 
-fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
+fn apply_models_aggregator(files: &mut Vec<(String, String)>, app: &App) {
     use std::fmt::Write;
 
     let mut models: Vec<String> = files
@@ -7454,12 +7936,23 @@ fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
         .map(str::to_string)
         .collect();
     models.sort();
+    // Not alphabetical for a gem's files: a class body that runs one of its
+    // methods at load (et-orbi's `ZONES_OLSON = TZInfo::Timezone.all...`)
+    // needs what the gem's own requires loaded first, as Bundler loads it.
+    let gem_first: Vec<String> = gem_declaration_order(app)
+        .into_iter()
+        .map(|anchor| format!("app/{anchor}.rb"))
+        .filter(|path| models.contains(path))
+        .collect();
+    models.retain(|path| !gem_first.contains(path));
+    let models: Vec<String> = gem_first.into_iter().chain(models).collect();
 
     let mut body = String::from(
         "# Loads every model/support class under app/models/. Generated\n\
          # from the emitted tree (see apply_models_aggregator). Each file\n\
          # requires its own LOAD-time deps (superclass, includes, class-body\n\
-         # constants), so the order here is only for legibility; method-body\n\
+         # constants). A gem's files come first, in the order the gem's own\n\
+         # requires load them; the rest are alphabetical. Method-body\n\
          # references between these files rely on this aggregator having\n\
          # run by dispatch time.\n",
     );
@@ -8133,6 +8626,7 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport", "change_time_usec"),
     ("ActiveSupport", "errors_to_hash"),
     ("ActiveSupport", "errors_messages"),
+    ("ActiveSupport", "truncate_bytes"),
     ("ActiveSupport", "errors_attribute_names"),
     ("ActiveSupport", "errors_delete"),
     ("ActiveSupport", "errors_details"),
@@ -8243,6 +8737,53 @@ fn report_unavailable_class_value(
 /// a clean emit. Also ledgers superclass Consts (via `parent_span`) and
 /// lowers-added exception Consts surveyed from a throwaway controller
 /// lower (emit still lowers controllers after this gate today).
+fn unrolled_define(app: &App, name: crate::span::Span) -> bool {
+    app.models.iter().flat_map(|m| m.methods()).chain(app.library_classes.iter().flat_map(|lc| lc.methods.iter())).any(|m| m.name_span == name)
+}
+
+/// A call of `not_nil!` with no arguments, no block and no diagnostic
+/// already on it: its receiver, `None` for a call with none.
+fn not_nil_call(expr: &crate::expr::Expr) -> Option<Option<&crate::expr::Expr>> {
+    match &*expr.node {
+        crate::expr::ExprNode::Send { recv, method, args, block: None, .. }
+            if method.as_str() == "not_nil!"
+                && args.is_empty()
+                && crate::expr::ExprCold::diagnostic(&expr.cold).is_none() =>
+        {
+            Some(recv.as_ref())
+        }
+        _ => None,
+    }
+}
+
+/// type_toolkit's `not_nil!` is a Kernel/NilClass reopen only the CRuby
+/// overlay carries (`ruby_overlay/runtime/type_toolkit.rb`), so `target`
+/// refuses a call of it.
+fn refuse_not_nil(expr: &crate::expr::Expr, target: &str) {
+    emit::diagnostics::report_unsupported(
+        expr.span,
+        target,
+        "not_nil!",
+        format!("`not_nil!` is type_toolkit's Kernel/NilClass extension, which only the CRuby tree carries, not {target}"),
+    );
+}
+
+/// Refuse a typed `x.not_nil!`, unless `x` is an instance of a class that
+/// defines its own, which every tree carries; a class object does not
+/// answer an instance method. A union of such classes stays refused: the
+/// TypeScript emit reads a no-argument call on a union as a property. A
+/// call with no receiver is analysis's to refuse. The assertion ingest
+/// synthesizes for `#: as !nil` already carries its own refusal.
+fn report_not_nil(expr: &crate::expr::Expr, app: &App, target: &str) {
+    if let Some(Some(recv)) = not_nil_call(expr)
+        && !(recv.decisions & crate::expr::CLASS_OBJECT_VALUE == 0
+            && matches!(&recv.ty, Some(crate::ty::Ty::Class { id, .. })
+                if crate::analyze::source_instance_method(app, id, "not_nil!")))
+    {
+        refuse_not_nil(expr, target);
+    }
+}
+
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // Column readers are synthesized inside the emitter, after this walk,
     // so a Send match never sees them. The schema column is the fact.
@@ -8284,6 +8825,42 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             }
         }
     }
+    if target == BuildTarget::Roda {
+        // Roda copies model methods, plain action statements and views
+        // over verbatim but carries no CRuby overlay, so nothing in its
+        // tree defines `not_nil!` either. It runs no analysis, so no
+        // receiver is typed: only a call on `self` (or with no receiver)
+        // in an instance method of a model whose own body defines
+        // `not_nil!` is known to reach that one. Roda emits each model
+        // directly under `Sequel::Model`, without its ancestors, so an
+        // inherited definition is not in its tree.
+        fn not_nil_calls(expr: &crate::expr::Expr, owns: bool) {
+            if let Some(recv) = not_nil_call(expr)
+                && !(owns && recv.is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef)))
+            {
+                refuse_not_nil(expr, "roda");
+            }
+            expr.node.for_each_child(&mut |child| not_nil_calls(child, owns));
+        }
+        for model in &app.models {
+            let owns = model.methods().any(|method| {
+                method.name.as_str() == "not_nil!" && method.receiver == crate::dialect::MethodReceiver::Instance
+            });
+            for method in model.methods() {
+                let owns = owns && method.receiver == crate::dialect::MethodReceiver::Instance;
+                not_nil_calls(&method.body, owns);
+                for default in method.params.iter().filter_map(|param| param.default.as_ref()) {
+                    not_nil_calls(default, owns);
+                }
+            }
+        }
+        for action in app.controllers.iter().flat_map(|controller| controller.actions()) {
+            not_nil_calls(&action.body, false);
+        }
+        for view in &app.views {
+            not_nil_calls(&view.body, false);
+        }
+    }
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;
     }
@@ -8311,6 +8888,9 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        if target != "jruby" {
+            report_not_nil(expr, app, target);
+        }
         // Not the whole constant: spinel answers `Method` as a value, and refuses only a class test against it.
         if target == "spinel" {
             let names_method = |e: &crate::expr::Expr| matches!(&*e.node, crate::expr::ExprNode::Const { path }
@@ -8467,13 +9047,13 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Const { path } = &*expr.node
-            && matches!(path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..], ["RUBY_VERSION"] | ["Object", "RUBY_VERSION"])
+            && matches!(path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..], ["RUBY_VERSION" | "RUBY_PLATFORM"] | ["Object", "RUBY_VERSION" | "RUBY_PLATFORM"])
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
                 target,
                 "bundled_constant",
-                format!("`RUBY_VERSION` is the running Ruby's, which the {target} emit has none of"),
+                format!("`{}` is the running Ruby's, which the {target} emit has none of", path.last().map(|s| s.as_str()).unwrap_or_default()),
             );
         }
         // A strict emit spelled these as methods its class objects do not have.
@@ -8509,6 +9089,8 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             && matches!(method.as_str(), "define_method" | "define_singleton_method")
             && recv.as_ref().is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef))
             && !args.first().is_some_and(|a| matches!(&*a.node, crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { .. } | crate::expr::Literal::Str { .. } }))
+            // Not a loop ingest unrolled: its methods carry the name argument's span, and the call is only the concern's unspliced original.
+            && !args.first().is_some_and(|a| unrolled_define(app, a.span))
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
@@ -8960,6 +9542,24 @@ fn apply_gem_packages(files: &mut Vec<(String, String)>, app: &App) -> Result<()
     let at = boot.find(ANCHOR).ok_or("apply_gem_packages: boot.rb lost its runtime/request_hooks require")? + ANCHOR.len();
     boot.insert_str(at, &boot_lines);
     Ok(())
+}
+
+/// solid_queue's own models replace the queue stand-in: an app that
+/// carries them (`ingest::source_gems::framework_models`) ships
+/// `runtime/solid_queue_runner.rb` in place of `runtime/solid_queue_standin.rb`.
+fn drop_solid_queue_standin(app: &App, files: &mut Vec<(String, String)>) {
+    // Not both: the stand-in's classes would reopen the models, and the runner names the models the stand-in has no part of.
+    let (gone, line) = if app.models.iter().any(|m| m.name.0.as_str() == "SolidQueue::Job") {
+        ("runtime/solid_queue_standin.rb", "require_relative \"runtime/solid_queue_standin\"\n")
+    } else {
+        ("runtime/solid_queue_runner.rb", "require_relative \"runtime/solid_queue_runner\"\n")
+    };
+    files.retain(|(path, _)| path != gone);
+    for (path, text) in files.iter_mut() {
+        if path == "boot.rb" {
+            *text = text.replace(line, "");
+        }
+    }
 }
 
 fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {
@@ -9654,8 +10254,9 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_attachable_locate(&mut files, app);
     // Same reason: both lanes require `runtime/job_registry.rb`.
     apply_job_registry(&mut files, app);
+    apply_job_registry_locate(&mut files, app);
     apply_views_aggregator(&mut files);
-    apply_models_aggregator(&mut files);
+    apply_models_aggregator(&mut files, app);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
     apply_boot_program(&mut files, app);
@@ -9679,6 +10280,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_pagination_demand(&mut files)?;
     apply_pagy_demand(&mut files, app)?;
     apply_pay_demand(&mut files, app)?;
+    drop_solid_queue_standin(app, &mut files);
     Ok((files, test_stems))
 }
 
@@ -10635,8 +11237,18 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     for_each_app_constant(app, &mut |_, path| {
         owned.extend(ownership.owners(path).into_iter().map(str::to_string));
     });
+    // Not only direct gems: a gem compiled from source no longer requires its own dependencies, so the real ones it names come in here (fugit's raabro and et-orbi).
+    let source_deps: Vec<crate::gems::GemEntry> = lock
+        .source
+        .iter()
+        .flat_map(|g| lock.spec_deps.get(g).into_iter().flatten())
+        .filter(|dep| !lock.source.contains(dep) && !census.gems.iter().any(|g| &g.name == *dep))
+        .filter(|dep| matches!(crate::gems::fate_of(dep), crate::gems::GemFate::Unknown))
+        .map(|dep| crate::gems::GemEntry { name: dep.clone(), version: lock.version_of(dep).map(str::to_string), fate: crate::gems::GemFate::Unknown })
+        .collect();
     let needed: Vec<_> = census
         .unknown()
+        .chain(source_deps.iter())
         .filter(|gem| {
             // Fail-closed: a GIT-sourced unknown must not be rewritten as a
             // rubygems.org name/version pin.
@@ -10670,6 +11282,8 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         match lock.gemfile_requires.get(&gem.name) {
             Some(features) => eager_requires.extend(features.iter().cloned()),
             None if crate::gems::loads_by_gem_name(&gem.name) => eager_requires.push(gem.name.clone()),
+            // A source gem's dependency: its own `require "et-orbi"` is the one the compiled gem no longer runs.
+            None if source_deps.iter().any(|d| d.name == gem.name) => eager_requires.push(gem.name.clone()),
             None => {}
         }
         let version = gem.version.as_deref();
@@ -10697,6 +11311,8 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         }
     }
     if let Some((_, boot)) = files.iter_mut().find(|(path, _)| path == "boot.rb") {
+        eager_requires.sort();
+        eager_requires.dedup();
         let requires = eager_requires
             .iter()
             .filter(|feature| !boot.contains(&format!("require {feature:?}")))
@@ -11367,6 +11983,12 @@ fn names_constant(src: &str, konst: &str) -> bool {
                     return true;
                 }
             }
+        }
+        // A mixin's argument: `include Raabro` (fugit's parsers) stands bare at end of line too.
+        if let Some(rest) = ["include ", "extend ", "prepend "].iter().find_map(|kw| line.trim().strip_prefix(kw))
+            && rest.split(',').any(|arg| arg.trim().trim_start_matches("::") == konst)
+        {
+            return true;
         }
         let b = line.as_bytes();
         let mut i = 0;
@@ -12909,14 +13531,24 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
         // single-target driver, with the target's own pre-analysis
         // choices (`session::analyze_and_lower_for`). What it refused or
         // left behind is printed per target, as the CLI prints it.
+        // What `target_files`' own checks report (the `report_*` passes)
+        // is printed the same way: they push into a diagnostics scope,
+        // and without one each finding was dropped.
+        let emit_files = |target_app: &App| {
+            let (files, diags) = emit::diagnostics::scope(|| target_files(target_app, fixture, *target));
+            for d in diags {
+                eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
+            }
+            files
+        };
         let files = match (target, &analyzed) {
-            (BuildTarget::Futamura, Some(analyzed)) => target_files(analyzed, fixture, *target)?,
+            (BuildTarget::Futamura, Some(analyzed)) => emit_files(analyzed)?,
             _ => {
                 let mut target_app = app.clone();
                 for d in crate::session::analyze_and_lower_for(&mut target_app, *target) {
                     eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
                 }
-                target_files(&target_app, fixture, *target)?
+                emit_files(&target_app)?
             }
         };
         let name = target.as_str();
@@ -13385,6 +14017,13 @@ mod tests {
         };
         assert!(!test("WebMock.stub_request(:get, \"/\")\n"));
         assert!(test("assert true\n"));
+    }
+
+    #[test]
+    fn names_constant_reads_a_mixin_argument() {
+        assert!(names_constant("  include Raabro\n", "Raabro"));
+        assert!(names_constant("  extend ::Raabro, Other\n", "Raabro"));
+        assert!(!names_constant("  include RaabroExt\n", "Raabro"));
     }
 
     /// A rooted `::Name` names the top-level constant, and so does a value

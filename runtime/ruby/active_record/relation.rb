@@ -30,21 +30,6 @@ module ActiveRecord
   # stamping) survive to the render. A chain method answers a relation
   # without the receiver's cache (or, for `order`, a sorted copy of it),
   # and the receiver keeps its own.
-  # Not a Range: Spinel keeps a Range's bounds in integer slots, so a `where` value's non-numeric range (`7.days.ago..`) is lowered to these ends
-  class Bounds
-    attr_reader :lower, :upper
-
-    def initialize(lower, upper, exclusive)
-      @lower = lower
-      @upper = upper
-      @exclusive = exclusive
-    end
-
-    def exclusive?
-      @exclusive
-    end
-  end
-
   # What an eager-loaded association keeps: Rails loads `includes(:tags)
   # .where(tags: …).order(tags: …)` in one JOIN, so each record's `tags`
   # holds only the matching rows, in that order. The preload arm reads
@@ -89,6 +74,7 @@ module ActiveRecord
       @havings = []
       @select_sql = nil
       @distinct = false
+      @optimizer_hints = ""
       @limit = nil
       @offset = nil
       @includes = []
@@ -366,7 +352,7 @@ module ActiveRecord
     def merge_seedable_scope(hash)
       own_lists
       hash.each do |key, val|
-        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range) || val.is_a?(Bounds)
+        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range)
         name = key.is_a?(Symbol) ? key.to_s : key.to_s
         next if name.include?(".")
         # Not the record itself: the key was renamed to the foreign key at lower time (`where(story: s)` → `story_id`), so the column wants its id.
@@ -1196,6 +1182,22 @@ module ActiveRecord
     # `distinct(true)`), `false` turns it off.
     def distinct(value = true)
       spawn.distinct!(value)
+    end
+
+    # Rails' `optimizer_hints("INDEX(t i)")`: written into the SELECT as
+    # `/*+ … */`, which MySQL's optimizer reads and SQLite takes for a comment.
+    def optimizer_hints(*hints)
+      spawn.optimizer_hints!(*hints)
+    end
+
+    def optimizer_hints!(*hints)
+      unload_records
+      hints.each do |hint|
+        text = hint.to_s.strip
+        next if text.empty?
+        @optimizer_hints = @optimizer_hints.empty? ? text : "#{@optimizer_hints} #{text}"
+      end
+      self
     end
 
     def distinct!(value = true)
@@ -2956,7 +2958,8 @@ module ActiveRecord
     def select_sql_with(default_cols)
       cols = @select_sql.nil? ? default_cols : @select_sql
       distinct = @distinct ? "DISTINCT " : ""
-      sql = "#{cte_prefix}SELECT #{distinct}#{cols} FROM #{from_source}"
+      hints = @optimizer_hints.empty? ? "" : "/*+ #{@optimizer_hints} */ "
+      sql = "#{cte_prefix}SELECT #{hints}#{distinct}#{cols} FROM #{from_source}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
       sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
@@ -3177,15 +3180,13 @@ module ActiveRecord
         ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
         if ids.empty?
           "1=0"
-        elsif ids.any? { |x| x.nil? || x.is_a?(Range) || x.is_a?(Bounds) }
+        elsif ids.any? { |x| x.nil? || x.is_a?(Range) }
           array_with_ranges_predicate(qcol, ids)
         else
           "#{qcol} IN (#{escape_list(ids)})"
         end
       elsif val.is_a?(Range)
         range_predicate(qcol, val)
-      elsif val.is_a?(Bounds)
-        bounds_predicate(qcol, val.lower, val.upper, val.exclusive?)
       elsif val.nil?
         "#{qcol} IS NULL"
       elsif val.is_a?(Base)
@@ -3262,8 +3263,6 @@ module ActiveRecord
           has_nil = true
         elsif x.is_a?(Range)
           range_arms << range_predicate(qcol, x)
-        elsif x.is_a?(Bounds)
-          range_arms << bounds_predicate(qcol, x.lower, x.upper, x.exclusive?)
         else
           scalars << x
         end

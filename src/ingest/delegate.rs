@@ -78,6 +78,12 @@ fn lower_library_class_delegates(
     app: &mut crate::App,
     model_concerns: &crate::det::HashSet<crate::ident::ClassId>,
 ) {
+    let enumerable: crate::det::HashSet<crate::ident::ClassId> = app
+        .library_classes
+        .iter()
+        .filter(|lc| includes_enumerable(&app.library_classes, &lc.name, &mut crate::det::HashSet::default()))
+        .map(|lc| lc.name.clone())
+        .collect();
     let mut generated: Vec<(usize, Vec<MethodDef>)> = Vec::new();
     for (i, lc) in app.library_classes.iter_mut().enumerate() {
         // Keep module declarations deferred whenever that module contributes
@@ -87,7 +93,8 @@ fn lower_library_class_delegates(
         if lc.is_module && model_concerns.contains(&lc.name) {
             continue;
         }
-        let methods = expand_delegates_in_class(lc);
+        let is_enumerable = enumerable.contains(&lc.name);
+        let methods = expand_delegates_with(lc, is_enumerable);
         if !methods.is_empty() {
             generated.push((i, methods));
         }
@@ -140,6 +147,31 @@ fn record_synthesis_failure(delegates: &[Delegation], diags: &[crate::diagnostic
 /// whole app; a single-class caller can just extend its own `methods`
 /// with the result).
 pub(crate) fn expand_delegates_in_class(lc: &mut LibraryClass) -> Vec<MethodDef> {
+    let enumerable = lc.includes.iter().any(|m| m.0.as_str() == "Enumerable");
+    expand_delegates_with(lc, enumerable)
+}
+
+/// Whether `name`'s ancestry, through its includes and superclasses, may have Enumerable:
+/// a module this app carries no body of (one that only includes others) counts, as Rails forwards the block anyway.
+fn includes_enumerable(
+    classes: &[LibraryClass],
+    name: &crate::ident::ClassId,
+    seen: &mut crate::det::HashSet<crate::ident::ClassId>,
+) -> bool {
+    if !seen.insert(name.clone()) {
+        return false;
+    }
+    let Some(lc) = classes.iter().find(|lc| &lc.name == name) else { return false };
+    let unseen = |m: &crate::ident::ClassId| {
+        !classes.iter().any(|c| c.name == *m || c.name.0.as_str().ends_with(&format!("::{}", m.0.as_str())))
+    };
+    lc.includes.iter().any(|m| m.0.as_str() == "Enumerable" || unseen(m) || includes_enumerable(classes, m, seen))
+        || lc.parent.as_ref().is_some_and(|p| includes_enumerable(classes, p, seen))
+}
+
+fn expand_delegates_with(lc: &mut LibraryClass, enumerable: bool) -> Vec<MethodDef> {
+    // Enumerable calls `each` with a block, a call no source site of the class shows.
+    let implicit_block: &[&str] = if enumerable { &["each"] } else { &[] };
     expand_delegates(
         &lc.name,
         &lc.methods,
@@ -149,6 +181,7 @@ pub(crate) fn expand_delegates_in_class(lc: &mut LibraryClass) -> Vec<MethodDef>
         None,
         &crate::det::HashSet::default(),
         &[],
+        implicit_block,
     )
 }
 
@@ -161,8 +194,14 @@ pub(super) fn expand_delegates(
     supported_target_methods: Option<&crate::det::HashSet<(String, String, usize)>>,
     method_targets: &crate::det::HashSet<String>,
     sources: &[crate::span::SourceFile],
+    implicit_block: &[&str],
 ) -> Vec<MethodDef> {
-    let called_with_args = names_called_with_arguments(methods, additional_method_bodies);
+    let mut called_with_args = names_called_with_arguments(methods, additional_method_bodies);
+    for name in implicit_block {
+        let calls = called_with_args.entry(name.to_string()).or_default();
+        calls.positional_arities.insert(0);
+        calls.has_block = true;
+    }
     let mut eligibility = DelegateEligibility::new(
         methods,
         &called_with_args,
@@ -201,6 +240,14 @@ pub(super) fn expand_delegates(
                         end: delegate.declaration_span.start,
                     };
                 }
+                // Not resolved from the source at its span: the forwarder's text is synthesized, and a `to:` constant names itself.
+                fn generated_consts(e: &mut Expr) {
+                    if matches!(&*e.node, ExprNode::Const { .. }) {
+                        e.decisions |= crate::expr::GENERATED_CONST_REF;
+                    }
+                    e.node.for_each_child_mut(&mut generated_consts);
+                }
+                generated_consts(&mut method.body);
                 method
             })
             .collect(),
@@ -283,10 +330,10 @@ fn receiver(target: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// The forwarder for a fixed-one-argument binary operator, or `None` for
-/// an ordinary name. Indexing operators are declined because Ruby methods
-/// `[]` and `[]=` may take variable positional arities that this expander
-/// cannot forward safely.
+/// The forwarder for a fixed-arity operator, or `None` for an ordinary
+/// name: a binary operator takes one operand, `[]` one key and `[]=` a key
+/// and a value. Every call site must pass that many
+/// (`delegate_declarations`), since `[]` may take other arities.
 fn operator_forwarder(t: &str, m: &str) -> Option<(&'static str, String)> {
     const BINARY: &[&str] = &[
         "==", "!=", "<", ">", "<=", ">=", "<=>", "===", "=~", "!~", "+", "-", "*", "/", "%", "**",
@@ -294,6 +341,8 @@ fn operator_forwarder(t: &str, m: &str) -> Option<(&'static str, String)> {
     ];
     match m {
         op if BINARY.contains(&op) => Some(("other", format!("{t} {op} other"))),
+        "[]" => Some(("key", format!("{t}[key]"))),
+        "[]=" => Some(("key, value", format!("{t}[key] = value"))),
         _ => None,
     }
 }
@@ -331,6 +380,10 @@ fn synthesized_source(
             forwarder
         } else if let Some(attr) = m.strip_suffix('=') {
             ("value", format!("{t}.{attr} = value"))
+        } else if d.block && d.allow_nil {
+            ("&block", format!("__allow_nil_target__ = {t}\n    __allow_nil_target__.nil? ? nil : __allow_nil_target__.{m}(&block)"))
+        } else if d.block {
+            ("&block", format!("{t}.{m}(&block)"))
         } else if d.allow_nil {
             // Rails' `_ = target; _.m if !_.nil?`: a nil target answers nil
             // (the local is named so that no `to:` target can be shadowed by it)

@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 thread_local! {
     // Not one static: axum runs requests on several tokio workers at once, and a request's dispatch stays on one
     static LOCALE: RefCell<String> = const { RefCell::new(String::new()) };
+    static CONFIG: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 static TABLE: OnceLock<String> = OnceLock::new();
@@ -13,6 +14,7 @@ pub struct I18nHost;
 impl I18nHost {
     pub fn reset_request() {
         LOCALE.with(|l| l.borrow_mut().clear());
+        CONFIG.with(|c| c.borrow_mut().clear());
     }
 
     pub fn locale_name() -> String {
@@ -21,6 +23,15 @@ impl I18nHost {
 
     pub fn set_locale_name(name: String) -> String {
         LOCALE.with(|l| *l.borrow_mut() = name.clone());
+        name
+    }
+
+    pub fn config_name() -> String {
+        CONFIG.with(|c| c.borrow().clone())
+    }
+
+    pub fn set_config_name(name: String) -> String {
+        CONFIG.with(|c| *c.borrow_mut() = name.clone());
         name
     }
 

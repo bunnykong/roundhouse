@@ -1,21 +1,18 @@
 //! Pay gem first slice: `rescue Pay::Error` / `Pay::ActionRequired` and
 //! `is_a?(Pay::Charge)` resolve. ActiveRecord APIs on Pay::* stay refused.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::PathBuf;
 
 use roundhouse::analyze::{diagnose, Analyzer, Severity};
 use roundhouse::ingest::ingest_app;
 
 fn fixture(tag: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse-pay-{}-{}-{}",
-        tag,
-        std::process::id(),
-        std::time::SystemTime::now()
+    let root = scratch::dir(&format!("roundhouse-pay-{}-{}", tag, std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
-    ));
+            .as_nanos()));
     for (path, source) in [
         (
             "Gemfile.lock",

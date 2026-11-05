@@ -19,12 +19,8 @@
 # request, after `commit_cache_control!` and before the response is
 # copied to the wire, by both dispatchers that carry this file (the
 # CRuby overlay's `main.rb` and the spinel scaffold's `main.rb`).
-#
-# Not modeled: `Rack::ConditionalGet`'s `If-Modified-Since` branch.
-# It compares HTTP dates (`Time.rfc2822`), which the spinel runtime
-# cannot parse, and the runtime writes `Last-Modified` only when an
-# action sets the header by hand. Such a response still gets the
-# default `Cache-Control` and no body ETag, as in Rails.
+require "time"
+
 module ActionController
   # `Rack::ETag::DEFAULT_CACHE_CONTROL` and actionpack's
   # `ActionDispatch::Http::Cache::Response::DEFAULT_CACHE_CONTROL`: the
@@ -40,9 +36,9 @@ module ActionController
     end
 
     # `request_method` is the request's own verb (Rack::ConditionalGet
-    # reads REQUEST_METHOD); `if_none_match` is the request's
-    # If-None-Match header, "" when it has none.
-    def commit_conditional_get!(request_method, if_none_match)
+    # reads REQUEST_METHOD); `if_none_match` and `if_modified_since` are
+    # the request's headers, "" when it has none.
+    def commit_conditional_get!(request_method, if_none_match, if_modified_since = "")
       etag = @headers["ETag"]
       last_modified = @headers["Last-Modified"]
 
@@ -75,14 +71,37 @@ module ActionController
       # no Content-Type and no Content-Length. Exact string equality,
       # as the middleware compares: a list, or the tag without its W/
       # prefix, does not match (`fresh_when` / `stale?` below do their
-      # own weak, list-aware comparison).
+      # own weak, list-aware comparison). Without an If-None-Match, an
+      # If-Modified-Since at or after the response's Last-Modified does
+      # the same.
       return nil unless request_method == "GET" || request_method == "HEAD"
       return nil unless @status == 200
-      return nil if etag.nil? || if_none_match.empty?
-      return nil unless etag == if_none_match
+      if if_none_match.empty?
+        return nil unless conditional_get_unmodified?(if_modified_since, last_modified)
+      else
+        return nil if etag.nil? || etag != if_none_match
+      end
       @status = 304
       @body = +""
       @content_type = ""
+      nil
+    end
+
+    def conditional_get_unmodified?(if_modified_since, last_modified)
+      since = conditional_get_http_time(if_modified_since)
+      return false if since.nil?
+      modified = conditional_get_http_time(last_modified)
+      unmodified = !modified.nil? && since >= modified
+      unmodified
+    end
+
+    # Not a raise for a malformed date: Rack reads one as no header at all.
+    def conditional_get_http_time(text)
+      # Not Time.rfc2822 on a shorter one: the shortest valid date is 16 characters, as Rack checks first.
+      return nil if text.nil? || text.length < 16
+      parsed = Time.rfc2822(text)
+      parsed
+    rescue StandardError
       nil
     end
 

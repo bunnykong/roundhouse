@@ -686,7 +686,7 @@ module Main
     # before the status, body and headers are copied below, since a 304
     # changes all three.
     controller.commit_cache_control!
-    controller.commit_conditional_get!(req.verb, req.req_headers.fetch("if-none-match", ""))
+    controller.commit_conditional_get!(req.verb, req.req_headers.fetch("if-none-match", ""), req.req_headers.fetch("if-modified-since", ""))
     controller.commit_default_headers!
 
     res.status = controller.status

@@ -610,7 +610,8 @@ pub struct Validation {
     /// `unless_cond` are set, the rules run only when `if:` holds and
     /// `unless:` does not. Anything else (an arity>0 lambda, a String,
     /// a captured local, a body survey mode had to stub with `nil`) is
-    /// not stored; ingest refuses the whole call instead of checking
+    /// not stored; ingest refuses the whole call (the rule, for a
+    /// condition in the rule's own hash) instead of checking
     /// unconditionally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_cond: Option<Expr>,
@@ -2168,6 +2169,11 @@ pub enum RouteSpec {
         /// to the engine's mounted proxy, which this runtime does not model.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         suppress_helpers: bool,
+        /// An isolated engine's routes under the path it is mounted at: Rails
+        /// joins the mount's script name and the engine's own `/`, so its
+        /// root's helper keeps the trailing slash a scope's root drops.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mount: bool,
         /// Set when the scope is written inside a `member do … end` /
         /// `collection do … end` block: Rails keeps that scope level, so
         /// the scope's `path` lands AFTER the resource's own segment

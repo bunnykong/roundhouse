@@ -5,6 +5,8 @@
 //! was refused by ingest, and the walk dropped the whole file. Native Ruby
 //! on the same source is the oracle.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -83,8 +85,7 @@ p Retry.inner_block_next
 
 #[test]
 fn emitted_do_while_matches_native_ruby() {
-    let dir = std::env::temp_dir().join(format!("roundhouse-do-while-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-do-while");
     let file = dir.join("retry.rb");
     std::fs::write(&file, RETRY).unwrap();
     let native = std::process::Command::new("ruby")
@@ -118,8 +119,7 @@ fn emitted_do_while_matches_native_ruby() {
 
 #[test]
 fn a_next_aimed_at_the_loop_is_surveyed_as_unsupported() {
-    let root = std::env::temp_dir().join(format!("roundhouse-do-while-next-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-do-while-next");
     for (path, text) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),

@@ -39,6 +39,10 @@ module JobRegistry
     false
   end
 
+  def self.instantiate(job_class)
+    nil
+  end
+
   def self.discards_deserialization_error(job_class)
     false
   end
@@ -115,6 +119,15 @@ module JobRegistry
     ""
   end
   # <<< generated: job-registry
+
+  # `GlobalID::Locator.locate` for `ActiveJob::Arguments.deserialize`, by
+  # literal model name; `project::apply_job_registry_locate` writes a
+  # `when` per model for an app that calls it.
+  # >>> generated: job-registry-locate
+  def self.locate(model_name, id)
+    raise NameError, "uninitialized constant " + model_name
+  end
+  # <<< generated: job-registry-locate
 end
 
 module ActiveJob

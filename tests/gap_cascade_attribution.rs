@@ -2,6 +2,8 @@
 //! unresolved. Those shadows read as coverage notes naming the gap, the way
 //! an unknown gem's do, while an unrelated error stays an error.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 fn check_continue(root: &std::path::Path) -> String {
@@ -15,7 +17,7 @@ fn check_continue(root: &std::path::Path) -> String {
 
 #[test]
 fn references_to_a_class_dropped_by_an_ingest_gap_are_coverage_notes() {
-    let root = std::env::temp_dir().join(format!("roundhouse-gap-cascade-{}", std::process::id()));
+    let root = scratch::dir("roundhouse-gap-cascade");
     for (path, source) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         // A marker before its `def` is Ruby's NameError at load: the whole model is refused.

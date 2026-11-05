@@ -4,6 +4,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -79,8 +81,7 @@ fn native(lib: &Path) -> Vec<String> {
 
 #[test]
 fn a_load_time_reference_into_a_program_autoloaded_namespace_loads_the_program_first() {
-    let root = std::env::temp_dir().join(format!("roundhouse-gem-namespace-program-first-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir("roundhouse-gem-namespace-program-first");
     let lib = root.join("trackopts/lib");
     for (path, text) in FILES {
         let file = lib.join(path);

@@ -3,11 +3,13 @@ import Foundation
 enum I18nHost {
     // Not one static var: a request's dispatch runs on one NIOThreadPool thread, several at once
     private static let locale = RhThreadLocal<String>({ "" })
+    private static let config = RhThreadLocal<String>({ "" })
     private static let tableLock = NSLock()
     private static var table: String? = nil
 
     static func resetRequest() {
         locale.value = ""
+        config.value = ""
     }
 
     static func localeName() -> String {
@@ -17,6 +19,16 @@ enum I18nHost {
     @discardableResult
     static func setLocaleName(_ name: String) -> String {
         locale.value = name
+        return name
+    }
+
+    static func configName() -> String {
+        config.value
+    }
+
+    @discardableResult
+    static func setConfigName(_ name: String) -> String {
+        config.value = name
         return name
     }
 

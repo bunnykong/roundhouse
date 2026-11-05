@@ -1630,7 +1630,7 @@ end
 }
 
 /// Survey mode substitutes `nil` for an expression it cannot ingest
-/// (an integer wider than i64) and still returns that expression.
+/// (a Rational wider than i64) and still returns that expression.
 /// Accepting it would guard the check with `nil`, so a validation
 /// Rails runs would never run. The call stays a gap.
 #[test]
@@ -1638,7 +1638,7 @@ fn survey_recovered_lambda_condition_on_validates_stays_a_gap() {
     let (model, warnings, gaps) = ingest_widget(
         r#"
 class Widget < ApplicationRecord
-  validates :name, presence: true, if: -> { 9223372036854775808 }
+  validates :name, presence: true, if: -> { 9223372036854775808r }
 end
 "#,
     );
@@ -1666,8 +1666,11 @@ end
     );
 }
 
+// A gap in a rule's own options drops that rule, and the call keeps the
+// others (`presence:` on `:name`). A condition reaches every rule, so its
+// gap drops the call.
 #[test]
-fn unmodeled_validates_options_warn_and_drop_the_whole_call() {
+fn unmodeled_validates_options_warn_and_drop_their_rule_or_call() {
     let (model, warnings, gaps) = ingest_widget(
         r#"
 class Widget < ApplicationRecord
@@ -1685,11 +1688,9 @@ class Widget < ApplicationRecord
 end
 "#,
     );
-    assert!(
-        validation_rules(&model).is_empty(),
-        "a dropped option must not leave the sibling rules running: {:?}",
-        validation_rules(&model).iter().map(|v| v.attribute.as_str()).collect::<Vec<_>>()
-    );
+    let kept: Vec<(String, Vec<roundhouse::dialect::ValidationRule>)> =
+        validation_rules(&model).into_iter().map(|v| (v.attribute.as_str().to_string(), v.rules.clone())).collect();
+    assert_eq!(kept, vec![("name".to_string(), vec![roundhouse::dialect::ValidationRule::Presence])]);
     for needle in [
         "uniqueness",
         "comparison",
@@ -2199,8 +2200,10 @@ fn a_literal_classvar_initializer_is_kept_and_an_expression_refused() {
     use roundhouse::ingest::ingest_library_classes;
 
     // ancestry's `@@default_update_strategy = :ruby`: a literal reads no
-    // other state, so it is kept as the class's initializer. A computed
-    // value is refused: it would observe the emitted body's order.
+    // other state, so it is kept as the class's initializer. A value that
+    // reads the body's own methods is refused: it would observe the emitted
+    // body's order (one that reads only constants is kept; see
+    // `emit_and_run::class_variable_computed_initializer`).
     let classes = ingest_library_classes(b"class Twitter\n  @@TIMEOUT = 30\nend\n", "extras/twitter.rb")
         .expect("a literal class-variable initializer ingests");
     assert!(
@@ -2209,7 +2212,7 @@ fn a_literal_classvar_initializer_is_kept_and_an_expression_refused() {
         classes[0].class_ivar_initializers
     );
     assert!(
-        ingest_library_classes(b"class Twitter\n  @@TIMEOUT = ENV.fetch(\"T\")\nend\n", "extras/twitter.rb").is_err(),
+        ingest_library_classes(b"class Twitter\n  @@TIMEOUT = default_timeout\nend\n", "extras/twitter.rb").is_err(),
         "a computed class-variable initializer must be refused"
     );
 }

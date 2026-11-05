@@ -25,6 +25,8 @@
 //! Like the other toolchain tests this is `#[ignore]`d: it shells out to
 //! bundler/MRI, which is a CI (or explicit `--ignored`) concern.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -32,9 +34,6 @@ use std::process::Command;
 /// mirrors the CLI's `--target ruby` flow (ingest → analyze+lower →
 /// `project::target_files`).
 fn generate_ruby_project(fixture: &Path, scratch: &Path) {
-    if scratch.exists() {
-        std::fs::remove_dir_all(scratch).expect("clean scratch");
-    }
     std::fs::create_dir_all(scratch).expect("create scratch");
     let mut app = roundhouse::ingest::ingest_app(fixture).expect("ingest roda-blog");
     roundhouse::session::analyze_and_lower(&mut app);
@@ -51,7 +50,7 @@ fn generate_ruby_project(fixture: &Path, scratch: &Path) {
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-ruby-{tag}"))
+    scratch::dir(&format!("roundhouse-ruby-{tag}"))
 }
 
 #[test]

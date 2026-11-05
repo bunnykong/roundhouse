@@ -12,6 +12,8 @@
 //! (`ActiveSupport.presence(x)` for a receiver with no static type).
 //! An `if` condition is left to the view-condition rewrite.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -162,15 +164,14 @@ fn a_predicate_in_a_ternary_value_is_grounded() {
 
 /// Template-level `if` / `unless` conditions ground `present?` /
 /// `blank?` too: jbuilder does not run the ERB view-condition rewrite,
-/// and Spinel has no `String#present?`. A typed String becomes the
-/// nil-guarded whitespace emptiness test (`(s || "").strip.empty?`);
-/// an open value would be `ActiveSupport.present?(…)`.
+/// and Spinel has no `String#present?`. Typed Strings and open values
+/// both use the runtime predicate's Rails whitespace semantics.
 #[test]
 fn a_template_condition_predicate_is_grounded() {
     let files = emitted();
     let src = view(&files, "widgets/flag_json.rb");
     assert!(
-        src.contains("!((widget.name || \"\").strip.empty?)"),
+        src.contains("ActiveSupport.present?(widget.name)"),
         "{src}"
     );
     assert!(!src.contains("name.present?"), "{src}");
@@ -192,7 +193,7 @@ fn presence_in_a_template_condition_is_grounded() {
 #[test]
 fn the_partial_renders_what_jbuilder_renders() {
     let files = emitted();
-    let dir = std::env::temp_dir().join(format!("roundhouse-jbuilder-presence-{}", std::process::id()));
+    let dir = scratch::dir("roundhouse-jbuilder-presence");
     for (path, source) in files.iter().filter(|(p, _)| p.ends_with(".rb")) {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
