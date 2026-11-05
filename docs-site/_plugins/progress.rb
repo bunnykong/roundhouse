@@ -41,6 +41,10 @@ module RoundhouseProgress
   def short(sha) = sha.to_s[0, 7]
   def num(n) = n.is_a?(Integer) ? n.to_s.gsub(/\B(?=(\d{3})+\z)/, ",") : n.to_s
   def plural(n, one, many = "#{one}s") = "#{num(n)} #{n == 1 ? one : many}"
+  # Text from a report, made safe for an id: "Symbol into Integer" -> "symbol-into-integer".
+  def id_part(text) = text.to_s.downcase.gsub(/[^a-z0-9]+/, "-").gsub(/\A-|-\z/, "")
+  # A commit link, only for a commit hash.
+  def commit_url(base, sha) = sha.to_s.match?(/\A\h{7,64}\z/) ? "#{base}/commit/#{sha}" : nil
 
   def state(key, feed, now)
     return { "available" => false, "note" => feed&.dig("fetch") == "offline" ? "Not collected in this build." : "Couldn't load this source." } unless feed&.dig("data")
@@ -198,12 +202,12 @@ module RoundhouseProgress
     d = feed["data"]
     failing = d.dig("examples", "failed").to_i
     group = lambda do |c|
-      { "slug" => c["slug"], "share" => failing.positive? ? (c["failures"] * 100.0 / failing).round(1) : 0, "anchor" => "cause-#{c["slug"]}", "title" => c["title"], "failures" => c["failures"],
+      { "slug" => c["slug"], "share" => failing.positive? ? (c["failures"] * 100.0 / failing).round(1) : 0, "anchor" => "cause-#{id_part(c["slug"])}", "title" => c["title"], "failures" => c["failures"],
         "area" => c["slug"] == "unclassified" ? "Needs triage" : AREAS.fetch(c["owner"].to_s, "Needs triage"),
         "step" => c["stale_rule"] ? "Recheck its original reproducer before retiring the rule." : STEPS.fetch(c["slug"], "Reproduce a named example."),
         "action" => c["stale_rule"] ? "Recheck the reproducer" : ACTIONS.fetch(c["slug"], "Reproduce a named example"),
         "note" => c["note"], "examples" => c["examples"], "more" => [c["example_count"].to_i - c["examples"].size, 0].max,
-        "related_url" => "https://github.com/#{repo}/issues?q=#{CGI.escape(c["slug"])}" }
+        "related_url" => "https://github.com/#{repo}/issues?q=#{CGI.escape(c["slug"].to_s)}" }
     end
     active = d["causes"].reject { |c| c["stale_rule"] || c["failures"].zero? }
                         .sort_by { |c| [c["slug"] == "unclassified" ? 0 : 1, -c["failures"], c["slug"]] }
@@ -212,22 +216,22 @@ module RoundhouseProgress
       "failed" => num(ex["failed"]), "passed" => num(ex["passed"]), "total" => num(ex["total"]), "pending" => ex["pending"],
       "outside" => ex["errors_outside_examples"], "headline" => d["canary_ok"] && d["consistent"],
       "pass_pct" => ex["total"].to_i.positive? ? (ex["passed"] * 100.0 / ex["total"]).round(1) : 0,
-      "ruby" => d["ruby_pinned"], "lobsters_sha" => short(d["lobsters_sha"]), "lobsters_url" => "https://github.com/lobsters/lobsters/commit/#{d["lobsters_sha"]}",
-      "roundhouse_sha" => short(d["roundhouse_sha"]), "roundhouse_url" => "https://github.com/#{repo}/commit/#{d["roundhouse_sha"]}",
+      "ruby" => d["ruby_pinned"], "lobsters_sha" => short(d["lobsters_sha"]), "lobsters_url" => commit_url("https://github.com/lobsters/lobsters", d["lobsters_sha"]),
+      "roundhouse_sha" => short(d["roundhouse_sha"]), "roundhouse_url" => commit_url("https://github.com/#{repo}", d["roundhouse_sha"]),
       "report_url" => feed["sources"].last, "groups" => active.map(&group), "group_count" => active.count { |c| c["slug"] != "unclassified" },
-      "smaller_count" => [active.size - 3, 0].max, "smaller_examples" => num(active.drop(3).sum { |c| c["failures"] }),
+      "smaller_count" => [active.size - 3, 0].max, "smaller_examples" => plural(active.drop(3).sum { |c| c["failures"] }, "example"),
       # Two parts only: with pending examples, passed + failed isn't the whole run.
       "figure" => d["canary_ok"] && d["consistent"] && ex["pending"].to_i.zero? ? gap_meter(ex["passed"].to_i, ex["total"].to_i) : nil,
       "unclassified" => d["causes"].find { |c| c["slug"] == "unclassified" }&.dig("failures").to_i,
       "stale_rules" => d["causes"].select { |c| c["stale_rule"] }.sort_by { |c| c["slug"] }.map(&group),
       "warning_kinds" => d.dig("warnings", "by_kind").sort_by { |_, n| -n }.map { |k, n| { "kind" => k.tr("_", " "), "count" => num(n) } },
-      "warning_total" => num(d.dig("warnings", "total").to_i)
+      "warning_total" => plural(d.dig("warnings", "total").to_i, "warning")
     )
   end
 
   def over_time(history)
     seen = {}
-    points = history["points"].filter_map { |p| p["specs"]&.dup }.reject { |s| s["cached"] || s["observed_at"].nil? }
+    points = history["points"].filter_map { |p| p["specs"]&.dup }.select { |s| s["verified"] == true && !s["cached"] && s["observed_at"] }
                               .select { |s| seen[s["observed_at"]] ? false : (seen[s["observed_at"]] = true) }.sort_by { |s| s["observed_at"] }
     points.each_cons(2) do |a, b|
       b["new_segment"] = a["scope_key"] != b["scope_key"]
@@ -265,7 +269,7 @@ module RoundhouseProgress
     end
     failed = lanes.reject { |l| l["ok"] || l["comparison"] == "Reference" }
     entries = routes_feed&.dig("data", "entries").to_a.sort_by { |e| e["route"] }.map do |e|
-      slug = e["route"].delete_prefix("/").gsub(/[^a-z0-9]+/i, "-").gsub(/^-|-$/, "").downcase
+      slug = id_part(e["route"])
       e.merge("anchor" => "route-#{slug.empty? ? "root" : slug}", "area" => AREAS.fetch(e["owner"].to_s, e["owner"]))
     end
     compiled = lanes.reject { |l| l["comparison"] == "Reference" }
@@ -311,6 +315,7 @@ module RoundhouseProgress
       "failed_text" => failed.empty? ? nil : "#{failed.size > 1 ? "#{failed[0..-2].join(", ")} and #{failed[-1]}" : failed[0]} failed",
       "figure" => marks.empty? ? nil : unit_marks(marks, "#{passed} of #{selected} selected checks passed#{"; #{failed.join(", ")} failed" unless failed.empty?}"),
       "others" => checked.select { |r| r["result"] == "Not selected" }.sort_by { |r| [r["app"], r["name"].downcase] },
+      "others_text" => plural(not_selected, "more check") + (not_selected == 1 ? " wasn’t" : " weren’t") + " selected for this run",
       "unchecked" => rows.reject { |r| r["check"] }.map { |r| "#{r["app"]}: #{r["name"]}" },
       "run_url" => d.dig("run", "url") || "https://github.com/roundhouse-rb/roundhouse/actions/runs/#{d["run_id"]}",
       "run_conclusion" => d.dig("run", "conclusion"), "source_sha" => short(d["source_sha"]), "source_sha_full" => d["source_sha"]
@@ -334,7 +339,7 @@ module RoundhouseProgress
         "rss" => r["rss_mb"]&.round, "per_gib" => r["rps_per_gb"] && num(r["rps_per_gb"].round), "runs" => r["runs"], "errors" => r["non_2xx"] }
     end
     env = d["environment"]
-    { "headline" => headline && "#{headline}×", "figure" => headline && ratio_bars(headline.to_f), "runs" => ruby&.dig("runs"), "endpoints" => endpoints, "pairs" => pairs, "by_endpoint" => by_endpoint, "table" => table,
+    { "headline" => headline && "#{headline}×", "figure" => headline && ratio_bars(headline.to_f), "runs" => ruby&.dig("runs"), "runs_text" => ruby&.dig("runs") == 1 ? "one run" : "median of #{ruby&.dig("runs")} runs", "endpoints" => endpoints, "pairs" => pairs, "by_endpoint" => by_endpoint, "table" => table,
       "env_date" => env && date(env["captured_at"]), "env_sha" => env && short(env.dig("git", "sha")), "toolchains" => env&.dig("toolchains").to_h.map { |k, v| "#{k} #{v}" } }
   end
 
@@ -343,7 +348,10 @@ module RoundhouseProgress
     weekly = d["weekly_merged"]
     d.slice("people_30d", "recent").merge(
       "merged_7d" => num(d["merged_7d"]), "people_7d" => d["people_7d"], "merged_all" => num(d["merged_all"].to_i),
-      "contributors_30d" => d["people_30d"].size, "bars" => weekly_bars(weekly), "spark" => weekly.empty? ? nil : weeks_spark(weekly),
+      "merged_7d_text" => plural(d["merged_7d"], "pull request"), "people_7d_text" => plural(d["people_7d"], "person", "people") + (d["bots_7d"].to_i.positive? ? " and #{plural(d["bots_7d"], "bot")}" : ""),
+      "firsts_text" => plural(d["first_contributions_30d"].size, "first-timer"),
+      "firsts_people_text" => plural(d["first_contributions_30d"].size, "person", "people"),
+      "contributors_30d" => d["people_30d"].size, "bars" => weekly_bars(weekly), "spark" => weekly.empty? ? nil : weeks_spark(weekly), "weeks_text" => plural(weekly.size, "week"),
       "weeks" => weekly.reverse.map { |w| { "week" => date(w["week"]), "merged" => num(w["merged"]), "partial" => w["partial"] } },
       "firsts" => d["first_contributions_30d"].map { |p| p.merge("date" => date(p.dig("first_pr", "merged_at"))) },
       "firsts_alpha" => d["first_contributions_30d"].sort_by { |p| p["login"].downcase },
@@ -355,11 +363,31 @@ module RoundhouseProgress
                    "archives" => "Archive smoke checks", "bench" => "Reference blog benchmarks", "activity" => "Merged pull requests",
                    "help" => "Labelled issues" }.freeze
 
+  UNREADABLE = { "available" => false, "note" => "This result couldn’t be read." }.freeze
+
+  # A section whose data has an unexpected shape is left out, and its rows say so:
+  # one odd report never stops the docs and the rest of Progress from publishing.
+  def guarded(states, *keys)
+    yield
+  rescue StandardError => e
+    Jekyll.logger.warn "Progress:", "#{keys.join(", ")} left out: #{e.class}: #{e.message[0, 160]}"
+    keys.each { |k| states[k] = UNREADABLE.dup if states.key?(k) }
+    nil
+  end
+
   def build(site)
     status = site.data["status"] or return nil
     now = Time.parse(status["generated_at"])
     repo = site.config.dig("status", "repo")
-    states = SOURCE_NAMES.keys.to_h { |k| [k, state(k, status[k], now)] }
+    states = SOURCE_NAMES.keys.to_h { |k| [k, guarded({}, k) { state(k, status[k], now) } || UNREADABLE.dup] }
+    view = { "built" => datetime(status["generated_at"]), "site_sha" => short(status["site_sha"]), "states" => states, "repo" => repo }
+    view["gap"] = guarded(states, "specs") { gap(status["specs"], repo) } if states.dig("specs", "available")
+    view["over_time"] = guarded(states, "history") { over_time(site.data["status_history"]) } || { "count" => 0 }
+    view["replay"] = guarded(states, "replay", "routes") { replay(status["replay"], status["routes"]) }
+    view["targets"] = guarded(states, "archives") { targets(status["archives"]) } if states.dig("archives", "available")
+    view["bench"] = guarded(states, "bench") { bench(status["bench"]) } if states.dig("bench", "available")
+    view["activity"] = guarded(states, "activity") { activity(status["activity"]) } if states.dig("activity", "available")
+    view["help"] = status.dig("help", "data")
     # The results table shows one date when its rows share it; a row that differs,
     # or isn't current, carries its own.
     rows = %w[specs replay archives bench].select { |k| states.dig(k, "available") }
@@ -377,21 +405,16 @@ module RoundhouseProgress
       own = act["observed_short"] || "Date not published"
       act["when"] = if act["cached"] then "Saved result, #{own}" elsif act["stale"] then "#{own}, not current" end
     end
-    view = { "built" => datetime(status["generated_at"]), "site_sha" => short(status["site_sha"]), "states" => states, "repo" => repo, "results_date" => common }
-    view["gap"] = gap(status["specs"], repo) if states.dig("specs", "available")
-    view["over_time"] = over_time(site.data["status_history"])
-    view["replay"] = replay(status["replay"], status["routes"])
-    view["targets"] = targets(status["archives"]) if states.dig("archives", "available")
-    view["bench"] = bench(status["bench"]) if states.dig("bench", "available")
-    view["activity"] = activity(status["activity"]) if states.dig("activity", "available")
-    view["help"] = status.dig("help", "data")
-    view["sources"] = SOURCE_NAMES.map do |key, name|
-      feed = status[key].to_h
-      { "name" => name, "url" => feed["sources"]&.first, "observed" => datetime(feed["observed_at"]) || "Not published",
-        "fetch" => { "ok" => feed["cached"] ? "Saved result" : "Collected", "reused" => "Collected #{datetime(feed["checked_at"])}; refreshed daily",
-                     "missing" => "Not found", "error" => "Couldn't load", "offline" => "Not collected" }[feed["fetch"]] || "Not collected",
-        "stale" => states.dig(key, "stale") }
-    end
+    view["results_date"] = common
+    view["sources"] = guarded(states, "sources") do
+      SOURCE_NAMES.map do |key, name|
+        feed = status[key].to_h
+        { "name" => name, "url" => feed["sources"]&.first, "observed" => datetime(feed["observed_at"]) || "Not published",
+          "fetch" => { "ok" => feed["cached"] ? "Saved result" : "Collected", "reused" => "Collected #{datetime(feed["checked_at"])}; refreshed daily",
+                       "missing" => "Not found", "error" => "Couldn't load", "offline" => "Not collected" }[feed["fetch"]] || "Not collected",
+          "stale" => states.dig(key, "stale") }
+      end
+    end || []
     view
   end
 
@@ -399,8 +422,34 @@ module RoundhouseProgress
     safe true
     priority :normal # after RoundhouseStatus::Generator
 
+    # Values in progress/index.html are escaped, except the figures progress.rb
+    # draws; a new one without `escape` or `web_url` fails the build.
+    RAW = /\A\w+\.(figure|spark|chart)\z|\Asite\.repo_docs\.github\z/
+
     def generate(site)
+      check_escaping(site.pages.find { |page| page.url == "/progress/" })
       site.data["progress"] = RoundhouseProgress.build(site)
+    end
+
+    def check_escaping(page)
+      return unless page
+      raw = page.content.scan(/\{\{-?(.*?)-?\}\}/m).flatten.map(&:strip)
+                .reject { |expr| expr.match?(/\|\s*(escape|web_url|relative_url|url_encode)\b/) || expr.match?(RAW) }
+      return if raw.empty?
+      message = "progress/index.html: escape these values, or add them to RAW if progress.rb builds them: #{raw.uniq.join(", ")}"
+      raise Jekyll::Errors::FatalException, message unless ENV["ROUNDHOUSE_DOCS_LENIENT"] == "1"
+      Jekyll.logger.warn "Progress:", message
+    end
+  end
+
+  # Liquid: a link taken from data, escaped for an attribute. Only web and
+  # site-relative URLs pass; anything else (javascript:, data:) becomes "#".
+  module Filters
+    def web_url(input)
+      url = input.to_s.strip
+      url.match?(%r{\A(?:https?://[^\s]+|/(?![/\\])\S*)\z}i) ? CGI.escapeHTML(url) : "#"
     end
   end
 end
+
+Liquid::Template.register_filter(RoundhouseProgress::Filters)

@@ -25,22 +25,31 @@
       mark.addEventListener("focus", function () { show(mark); });
       mark.addEventListener("blur", hide);
     });
-    // Arrow keys move between a chart's marks.
+    // One tab stop per chart, on its latest mark; arrow keys move between the
+    // marks of the chart on screen (a frame can hold a wide and a narrow copy).
+    frame.querySelectorAll("svg").forEach(function (chart) {
+      var marks = chart.querySelectorAll(".mark[data-tip]");
+      Array.prototype.forEach.call(marks, function (m, i) { m.tabIndex = i === marks.length - 1 ? 0 : -1; });
+    });
     frame.addEventListener("keydown", function (e) {
-      var marks = Array.prototype.slice.call(frame.querySelectorAll(".mark[data-tip]"));
-      var i = marks.indexOf(document.activeElement);
       if (e.key === "Escape") return hide();
+      var marks = Array.prototype.filter.call(frame.querySelectorAll(".mark[data-tip]"), function (m) { return m.getClientRects().length > 0; });
+      var i = marks.indexOf(document.activeElement);
       if (i < 0) return;
       var next = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: marks.length - 1 }[e.key];
       if (next === undefined) return;
       e.preventDefault();
-      marks[Math.max(0, Math.min(next, marks.length - 1))].focus();
+      var to = marks[Math.max(0, Math.min(next, marks.length - 1))];
+      marks[i].tabIndex = -1;
+      to.tabIndex = 0;
+      to.focus();
     });
   });
 
   // A link to #cause-… or #route-… opens that row.
   function openTarget() {
-    var id = decodeURIComponent(location.hash.slice(1));
+    var id;
+    try { id = decodeURIComponent(location.hash.slice(1)); } catch (e) { return; } // a malformed hash
     var el = id && document.getElementById(id);
     if (!el) return;
     var details = el.tagName === "DETAILS" ? el : el.closest("details");

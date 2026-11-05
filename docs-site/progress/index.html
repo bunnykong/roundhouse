@@ -4,6 +4,11 @@ title: Progress
 description: Real Rails apps, measured against Rails. What runs, what still differs, and where you can help, each result with its date and scope.
 permalink: /progress/
 ---
+{%- comment -%}
+  Every value is escaped: text with `escape`, links with `web_url` (which also
+  drops any scheme but http and https). The figures (*.figure, ac.spark,
+  t.chart) are SVG that _plugins/progress.rb builds with its own escaping.
+{%- endcomment -%}
 {%- assign p = site.data.progress -%}
 {%- assign st = p.states -%}
 {%- assign g = p.gap -%}
@@ -17,7 +22,7 @@ permalink: /progress/
     <h1>Progress</h1>
     <p class="lede">Real Rails apps, measured against Rails. Early, and not ready for production.</p>
   </div>
-  <p class="jump">{% if p.results_date %}<span class="date">Results of {{ p.results_date }}</span>{% endif %}<a class="phone-only start-link" href="#help">Start contributing <span aria-hidden="true">↓</span></a><a href="#sources">About these numbers <span aria-hidden="true">↓</span></a></p>
+  <p class="jump">{% if p.results_date %}<span class="date">Results of {{ p.results_date | escape }}</span>{% endif %}<a class="phone-only start-link" href="#help">Start contributing <span aria-hidden="true">↓</span></a><a href="#sources">About these numbers <span aria-hidden="true">↓</span></a></p>
 </header>
 
 {%- comment -%} Where it stands: one row per measure, each with what it does and doesn't show. They are never added up. {%- endcomment %}
@@ -31,44 +36,44 @@ permalink: /progress/
       <tr>
         <th scope="row"><a href="#groups">Lobsters · model specs</a></th>
         {%- if g and g.headline %}
-        <td class="result"><b>{{ g.passed }} / {{ g.total }}</b> <span>passed</span></td>
+        <td class="result"><b>{{ g.passed | escape }} / {{ g.total | escape }}</b> <span>passed</span></td>
         <td class="fig">{{ g.figure }}</td>
-        <td class="scope">Emitted Ruby. <b>{{ g.scope.spec_files_run }} of {{ g.scope.spec_files_in_suite }} spec files ran</b>; {% if g.figure %}the dashed gap is the {{ g.failed }} that fail{% else %}{{ g.failed }} fail{% endif %}.{% if g.outside > 0 %} {{ g.outside }} more {% if g.outside == 1 %}error{% else %}errors{% endif %} came from outside the examples.{% endif %}{% if g.pending > 0 %} {{ g.pending }} pending.{% endif %}{% if st.specs.when %} <span class="when">{{ st.specs.when }}</span>{% endif %}</td>
+        <td class="scope">Emitted Ruby. <b>{{ g.scope.spec_files_run | escape }} of {{ g.scope.spec_files_in_suite | escape }} spec files ran</b>; {% if g.figure %}the dashed gap is the {{ g.failed | escape }} that fail{% else %}{{ g.failed | escape }} fail{% endif %}.{% if g.outside > 0 %} {{ g.outside | escape }} more {% if g.outside == 1 %}error{% else %}errors{% endif %} came from outside the examples.{% endif %}{% if g.pending > 0 %} {{ g.pending | escape }} pending.{% endif %}{% if st.specs.when %} <span class="when">{{ st.specs.when | escape }}</span>{% endif %}</td>
         {%- elsif g %}
         <td class="result na"><b>Withheld</b></td><td class="fig"></td>
-        <td class="scope">{% if g.canary_ok == false %}The harness didn’t establish that these results came from the emitted Ruby.{% else %}The published totals don’t agree.{% endif %} <a href="{{ g.report_url }}">Read the report</a>.</td>
+        <td class="scope">{% if g.canary_ok == false %}The harness didn’t establish that these results came from the emitted Ruby.{% else %}The published totals don’t agree.{% endif %} <a href="{{ g.report_url | web_url }}">Read the report</a>.</td>
         {%- else %}
-        <td class="result na"><b>Not available</b></td><td class="fig"></td><td class="scope">{{ st.specs.note }}</td>
+        <td class="result na"><b>Not available</b></td><td class="fig"></td><td class="scope">{{ st.specs.note | escape }}</td>
         {%- endif %}
       </tr>
       <tr>
         <th scope="row"><a href="#routes">Lobsters · frozen replay</a></th>
         {%- if st.replay.available and r.compiled > 0 %}
-        <td class="result"><b>{{ r.completed }} / {{ r.compiled }}</b> <span>completed</span></td>
+        <td class="result"><b>{{ r.completed | escape }} / {{ r.compiled | escape }}</b> <span>completed</span></td>
         <td class="fig">{{ r.figure }}</td>
-        <td class="scope">Compiled configurations{% if r.completed == 0 %}. <b>Route agreement is unknown.</b>{% elsif r.completed == r.compiled %}, each replayed to the end. Route agreement is below.{% else %}. {{ r.lead }}{% endif %}{% if st.replay.when %} <span class="when">{{ st.replay.when }}</span>{% endif %}</td>
+        <td class="scope">Compiled configurations{% if r.completed == 0 %}. <b>Route agreement is unknown.</b>{% elsif r.completed == r.compiled %}, each replayed to the end. Route agreement is below.{% else %}. {{ r.lead | escape }}{% endif %}{% if st.replay.when %} <span class="when">{{ st.replay.when | escape }}</span>{% endif %}</td>
         {%- else %}
-        <td class="result na"><b>Not available</b></td><td class="fig"></td><td class="scope">{{ st.replay.note | default: "No compiled configurations in this run." }}</td>
+        <td class="result na"><b>Not available</b></td><td class="fig"></td><td class="scope">{{ st.replay.note | default: "No compiled configurations in this run." | escape }}</td>
         {%- endif %}
       </tr>
       <tr>
-        <th scope="row"><a href="#targets">{% if a %}{{ a.apps_label }} · archive smoke{% else %}Archive smoke checks{% endif %}</a></th>
+        <th scope="row"><a href="#targets">{% if a %}{{ a.apps_label | escape }} · archive smoke{% else %}Archive smoke checks{% endif %}</a></th>
         {%- if a and a.selected > 0 %}
-        <td class="result"><b>{{ a.passed }} / {{ a.selected }}</b> <span>passed</span></td>
+        <td class="result"><b>{{ a.passed | escape }} / {{ a.selected | escape }}</b> <span>passed</span></td>
         <td class="fig">{{ a.figure }}</td>
-        <td class="scope">Does each published archive start and serve? Selected checks only{% if a.failed_text %}; {{ a.failed_text }}{% endif %}.{% if st.archives.when %} <span class="when">{{ st.archives.when }}</span>{% endif %}</td>
+        <td class="scope">Does each published archive start and serve? Selected checks only{% if a.failed_text %}; {{ a.failed_text | escape }}{% endif %}.{% if st.archives.when %} <span class="when">{{ st.archives.when | escape }}</span>{% endif %}</td>
         {%- else %}
-        <td class="result na"><b>Not available</b></td><td class="fig"></td><td class="scope">{{ st.archives.note | default: "No selected checks in this run." }}</td>
+        <td class="result na"><b>Not available</b></td><td class="fig"></td><td class="scope">{{ st.archives.note | default: "No selected checks in this run." | escape }}</td>
         {%- endif %}
       </tr>
       <tr>
         <th scope="row"><a href="#benchmarks">Blog · <code>/articles</code> speed</a></th>
         {%- if b and b.headline %}
-        <td class="result"><b>{{ b.headline }}</b> <span>Rails’ throughput</span></td>
+        <td class="result"><b>{{ b.headline | escape }}</b> <span>Rails’ throughput</span></td>
         <td class="fig">{{ b.figure }}</td>
-        <td class="scope">CRuby + YJIT, one worker, median of {{ b.runs }} runs. <b>Speed doesn’t show parity.</b>{% if st.bench.when %} <span class="when">{{ st.bench.when }}</span>{% endif %}</td>
+        <td class="scope">CRuby + YJIT, one worker, {{ b.runs_text | escape }}. <b>Speed doesn’t show parity.</b>{% if st.bench.when %} <span class="when">{{ st.bench.when | escape }}</span>{% endif %}</td>
         {%- else %}
-        <td class="result na"><b>Not available</b></td><td class="fig"></td><td class="scope">{{ st.bench.note | default: "No comparable result for this selection." }}</td>
+        <td class="result na"><b>Not available</b></td><td class="fig"></td><td class="scope">{{ st.bench.note | default: "No comparable result for this selection." | escape }}</td>
         {%- endif %}
       </tr>
     </tbody>
@@ -77,14 +82,14 @@ permalink: /progress/
   {%- comment -%} Whether it's moving: the measured trend, and the people doing the work. {%- endcomment %}
   <dl class="movement">
     <dt>Movement</dt>
-    <dd><span class="what">App results</span><span>{% if t.count == 0 %}History starts with this page; each nightly run adds a point.{% elsif t.count == 1 %}One nightly run recorded. The trend starts with the next comparable run.{% elsif t.change %}{{ t.change }} <a href="#over-time">The trend</a>{% else %}History starts on {{ t.since }}; each nightly run adds a point. <a href="#over-time">The trend</a>{% endif %}</span></dd>
+    <dd><span class="what">App results</span><span>{% if t.count == 0 %}No verified nightly run is recorded yet; each one adds a point.{% elsif t.count == 1 %}One nightly run recorded. The trend starts with the next comparable run.{% elsif t.change %}{{ t.change | escape }} <a href="#over-time">The trend</a>{% else %}History starts on {{ t.since | escape }}; each nightly run adds a point. <a href="#over-time">The trend</a>{% endif %}</span></dd>
     {%- if ac %}
-    <dd><span class="what">Work merged</span><a href="#activity"><b>{{ ac.merged_7d }} pull requests</b> in 7 days by <b>{{ ac.people_7d }} people</b></a>{% if st.activity.when %}<span class="when">{{ st.activity.when }}</span>{% endif %}{% if ac.spark %}{{ ac.spark }}<span class="axis">{{ ac.bars.size }} weeks{% if ac.bars.last.partial %}, the last so far{% endif %}</span>{% endif %}</dd>
+    <dd><span class="what">Work merged</span><a href="#activity"><b>{{ ac.merged_7d_text | escape }}</b> in 7 days by <b>{{ ac.people_7d_text | escape }}</b></a>{% if st.activity.when %}<span class="when">{{ st.activity.when | escape }}</span>{% endif %}{% if ac.spark %}{{ ac.spark }}<span class="axis">{{ ac.weeks_text | escape }}{% if ac.bars.last.partial %}, the last so far{% endif %}</span>{% endif %}</dd>
     {%- if ac.firsts.size > 0 %}
-    <dd><span class="what">First-timers</span><a href="#welcome"><b>{{ ac.firsts.size }} first-timers</b> in 30 days</a>{% if st.activity.when %}<span class="when">{{ st.activity.when }}</span>{% endif %}<span class="faces" aria-hidden="true">{% for f in ac.firsts_alpha limit: 16 %}<img src="{{ f.avatar }}&amp;s=48" alt="" width="24" height="24" loading="lazy">{% endfor %}{% if ac.firsts.size > 16 %}<span class="more">+{{ ac.firsts.size | minus: 16 }}</span>{% endif %}</span></dd>
+    <dd><span class="what">First-timers</span><a href="#welcome"><b>{{ ac.firsts_text | escape }}</b> in 30 days</a>{% if st.activity.when %}<span class="when">{{ st.activity.when | escape }}</span>{% endif %}<span class="faces" aria-hidden="true">{% for f in ac.firsts_alpha limit: 16 %}<img src="{{ f.avatar | web_url }}&amp;s=48" alt="" width="24" height="24" loading="lazy">{% endfor %}{% if ac.firsts.size > 16 %}<span class="more">+{{ ac.firsts.size | minus: 16 | escape }}</span>{% endif %}</span></dd>
     {%- endif %}
     {%- else %}
-    <dd><span class="what">Work merged</span><span>{{ st.activity.note }}</span></dd>
+    <dd><span class="what">Work merged</span><span>{{ st.activity.note | escape }}</span></dd>
     {%- endif %}
   </dl>
 </section>
@@ -94,7 +99,7 @@ permalink: /progress/
 <section class="help-list" id="gaps" aria-labelledby="gaps-title">
   <div class="sec-head">
     <h2 id="gaps-title"><span class="roundel" aria-hidden="true"></span>Where to help</h2>
-    {%- if g %}<p class="date">{% if g.headline %}{{ g.failed }} failing examples · {% endif %}<a href="{{ g.report_url }}">Report</a></p>{% endif %}
+    {%- if g %}<p class="date">{% if g.headline %}{{ g.failed | escape }} failing examples · {% endif %}<a href="{{ g.report_url | web_url }}">Report</a></p>{% endif %}
   </div>
   {%- if g and g.headline and g.groups.size > 0 %}
   <table class="failures">
@@ -103,30 +108,30 @@ permalink: /progress/
     <thead><tr><th scope="col">Examples</th><th scope="col">Failure group</th><th scope="col">First step</th></tr></thead>
     <tbody>
       {%- for c in g.groups limit: 3 %}
-      <tr{% if c.slug == "unclassified" %} class="entry"{% endif %}><td class="count">{{ c.failures }}</td><th scope="row"><span class="share"{% if g.headline %} style="--share: {{ c.share }}%"{% endif %}>{{ c.title | escape }}</span></th><td class="step"><a href="#{{ c.anchor }}">{{ c.action }}<span aria-hidden="true"> →</span></a></td></tr>
+      <tr{% if c.slug == "unclassified" %} class="entry"{% endif %}><td class="count">{{ c.failures | escape }}</td><th scope="row"><span class="share"{% if g.headline %} style="--share: {{ c.share | escape }}%"{% endif %}>{{ c.title | escape }}</span></th><td class="step"><a href="#{{ c.anchor | escape }}">{{ c.action | escape }}<span aria-hidden="true"> →</span></a></td></tr>
       {%- endfor %}
     </tbody>
   </table>
   {%- if g.smaller_count > 0 %}
   <details class="smaller">
-    <summary>{{ g.smaller_count }} smaller {% if g.smaller_count == 1 %}group{% else %}groups{% endif %} · {{ g.smaller_examples }} examples</summary>
+    <summary>{{ g.smaller_count | escape }} smaller {% if g.smaller_count == 1 %}group{% else %}groups{% endif %} · {{ g.smaller_examples | escape }}</summary>
     <table class="failures">
       <caption class="sr">The smaller failure groups</caption>
       <colgroup><col class="c-count"><col class="c-group"><col class="c-step"></colgroup>
       <tbody>
         {%- for c in g.groups offset: 3 %}
-        <tr><td class="count">{{ c.failures }}</td><th scope="row"><span class="share"{% if g.headline %} style="--share: {{ c.share }}%"{% endif %}>{{ c.title | escape }}</span></th><td class="step"><a href="#{{ c.anchor }}">{{ c.action }}<span aria-hidden="true"> →</span></a></td></tr>
+        <tr><td class="count">{{ c.failures | escape }}</td><th scope="row"><span class="share"{% if g.headline %} style="--share: {{ c.share | escape }}%"{% endif %}>{{ c.title | escape }}</span></th><td class="step"><a href="#{{ c.anchor | escape }}">{{ c.action | escape }}<span aria-hidden="true"> →</span></a></td></tr>
         {%- endfor %}
       </tbody>
     </table>
   </details>
   {%- endif %}
   {%- elsif g and g.headline %}
-  <p class="notice">No failure groups in this run. <a href="{{ g.report_url }}">Read the report</a>.</p>
+  <p class="notice">No failure groups in this run. <a href="{{ g.report_url | web_url }}">Read the report</a>.</p>
   {%- elsif g %}
-  <p class="notice">Failure groups are withheld because this run couldn’t be verified. <a href="{{ g.report_url }}">Read the report</a>.</p>
+  <p class="notice">Failure groups are withheld because this run couldn’t be verified. <a href="{{ g.report_url | web_url }}">Read the report</a>.</p>
   {%- else %}
-  <p class="notice">{{ st.specs.note }} <a href="https://roundhouse-rb.dev/bench/lobsters-specs/">The report</a> has the latest result.</p>
+  <p class="notice">{{ st.specs.note | escape }} <a href="https://roundhouse-rb.dev/bench/lobsters-specs/">The report</a> has the latest result.</p>
   {%- endif %}
 </section>
 <aside class="start" id="help" aria-labelledby="start-title">
@@ -154,32 +159,32 @@ permalink: /progress/
 <section class="sect" id="groups" aria-labelledby="groups-title">
   <div class="sect-label">
     <h2 id="groups-title">The failure groups</h2>
-    {%- if g %}<p class="date">{{ st.specs.observed_date }}</p><p class="meta"><a href="{{ g.report_url }}">Report</a> · <a href="#sources">Scope</a></p>{% endif %}
+    {%- if g %}<p class="date">{{ st.specs.observed_date | escape }}</p><p class="meta"><a href="{{ g.report_url | web_url }}">Report</a> · <a href="#sources">Scope</a></p>{% endif %}
   </div>
   <div class="sect-body">
     {%- if g %}
-    {%- if st.specs.note %}<p class="notice">{{ st.specs.note }}</p>{% endif %}
+    {%- if st.specs.note %}<p class="notice">{{ st.specs.note | escape }}</p>{% endif %}
     {%- if g.headline %}
-    <p><b>{{ g.failed }}</b> of {{ g.total }} Lobsters model examples fail against the emitted Ruby{% if g.outside > 0 %}, plus {{ g.outside }} {% if g.outside == 1 %}error{% else %}errors{% endif %} outside the examples{% endif %}. Only model specs run: {{ g.scope.spec_files_run }} of {{ g.scope.spec_files_in_suite }} spec files. Open a group for its examples and a first step.</p>
+    <p><b>{{ g.failed | escape }}</b> of {{ g.total | escape }} Lobsters model examples fail against the emitted Ruby{% if g.outside > 0 %}, plus {{ g.outside | escape }} {% if g.outside == 1 %}error{% else %}errors{% endif %} outside the examples{% endif %}. Only model specs run: {{ g.scope.spec_files_run | escape }} of {{ g.scope.spec_files_in_suite | escape }} spec files. Open a group for its examples and a first step.</p>
     {%- elsif g.canary_ok == false %}
-    <p class="notice">The harness didn’t establish that these results came from the emitted code, so the counts are withheld. <a href="{{ g.report_url }}">Read the report</a>.</p>
+    <p class="notice">The harness didn’t establish that these results came from the emitted code, so the counts are withheld. <a href="{{ g.report_url | web_url }}">Read the report</a>.</p>
     {%- else %}
-    <p class="notice">The published totals don’t agree ({{ g.problems | join: "; " }}), so the counts are withheld until the source is fixed. <a href="{{ g.report_url }}">Read the report</a>.</p>
+    <p class="notice">The published totals don’t agree ({{ g.problems | join: "; " | escape }}), so the counts are withheld until the source is fixed. <a href="{{ g.report_url | web_url }}">Read the report</a>.</p>
     {%- endif %}
     {%- if g.headline %}
     <ul class="groups">
       {%- for c in g.groups %}
-      <li><details class="group{% if c.slug == 'unclassified' %} entry{% endif %}" id="{{ c.anchor }}">
-        <summary><span class="count">{{ c.failures }}</span><b>{{ c.title | escape }}</b><span class="area">{{ c.area }}</span></summary>
+      <li><details class="group{% if c.slug == 'unclassified' %} entry{% endif %}" id="{{ c.anchor | escape }}">
+        <summary><span class="count">{{ c.failures | escape }}</span><b>{{ c.title | escape }}</b><span class="area">{{ c.area | escape }}</span></summary>
         <div class="group-body">
-          <p><b>First step:</b> {{ c.step }}</p>
+          <p><b>First step:</b> {{ c.step | escape }}</p>
           {%- if c.note %}<p>{{ c.note | escape }}</p>{% endif %}
           {%- if c.examples.size > 0 %}
           <p class="label">Examples from this run</p>
           <ul class="examples">
             {%- for e in c.examples %}<li>{{ e.name | escape }}{% if e.error %}<code>{{ e.error | escape }}</code>{% endif %}</li>{% endfor %}
           </ul>
-          {%- if c.more > 0 %}<p class="aside">And {{ c.more }} more in the report.</p>{% endif %}
+          {%- if c.more > 0 %}<p class="aside">And {{ c.more | escape }} more in the report.</p>{% endif %}
           {%- endif %}
           {%- if c.slug == "unclassified" %}
           <p class="label">A first contribution</p>
@@ -188,26 +193,26 @@ permalink: /progress/
           <p class="label">Closes when</p>
           <p>An acceptance check is still to be written for this group. A good start: reduce a named failure, add a regression test, and check the answer against Rails.</p>
           {%- endif %}
-          <p class="links"><a href="{{ g.report_url }}">Evidence</a><a href="{{ c.related_url }}">Search for related work</a><a href="{{ '/docs/development/debugging.html' | relative_url }}">Debugging guide</a></p>
+          <p class="links"><a href="{{ g.report_url | web_url }}">Evidence</a><a href="{{ c.related_url | web_url }}">Search for related work</a><a href="{{ '/docs/development/debugging.html' | relative_url }}">Debugging guide</a></p>
         </div>
       </details></li>
       {%- endfor %}
       {%- if g.stale_rules.size > 0 %}
       <li><details class="group quiet" id="cause-rules">
-        <summary><span class="count">{{ g.stale_rules.size }}</span><b>Rules with no matches in this run</b><span class="area">Help verify</span></summary>
+        <summary><span class="count">{{ g.stale_rules.size | escape }}</span><b>Rules with no matches in this run</b><span class="area">Help verify</span></summary>
         <div class="group-body">
           <p>Each rule names a failure that used to appear. Nothing matched it this time. That isn’t proof of a fix: recheck the original reproducer before the rule is retired.</p>
           <ul class="rules">
-            {%- for c in g.stale_rules %}<li id="{{ c.anchor }}"><b>{{ c.title | escape }}</b> <code>{{ c.slug }}</code> <span class="area">{{ c.area }}</span> <a href="{{ c.related_url }}">Search for related work</a></li>{% endfor %}
+            {%- for c in g.stale_rules %}<li id="{{ c.anchor | escape }}"><b>{{ c.title | escape }}</b> <code>{{ c.slug | escape }}</code> <span class="area">{{ c.area | escape }}</span> <a href="{{ c.related_url | web_url }}">Search for related work</a></li>{% endfor %}
           </ul>
         </div>
       </details></li>
       {%- endif %}
     </ul>
     {%- endif %}
-    <p class="foot">Ruby {{ g.ruby | escape }} · Lobsters <a href="{{ g.lobsters_url }}"><code>{{ g.lobsters_sha }}</code></a> · Roundhouse <a href="{{ g.roundhouse_url }}"><code>{{ g.roundhouse_sha }}</code></a></p>
+    <p class="foot">Ruby {{ g.ruby | escape }} · Lobsters <a href="{{ g.lobsters_url | web_url }}"><code>{{ g.lobsters_sha | escape }}</code></a> · Roundhouse <a href="{{ g.roundhouse_url | web_url }}"><code>{{ g.roundhouse_sha | escape }}</code></a></p>
     {%- else %}
-    <p class="notice">{{ st.specs.note }} The model specs run Lobsters’ own tests against the emitted Ruby; <a href="https://roundhouse-rb.dev/bench/lobsters-specs/">the report</a> has the latest result.</p>
+    <p class="notice">{{ st.specs.note | escape }} The model specs run Lobsters’ own tests against the emitted Ruby; <a href="https://roundhouse-rb.dev/bench/lobsters-specs/">the report</a> has the latest result.</p>
     {%- endif %}
   </div>
 </section>
@@ -216,12 +221,12 @@ permalink: /progress/
   <div class="sect-label"><h2 id="over-time-title">Is the gap closing?</h2></div>
   <div class="sect-body">
     {%- if t.count == 0 %}
-    <p>History starts with this page. Each nightly run will add a point.</p>
+    <p>No verified nightly run is recorded yet. Each one adds a point.</p>
     {%- elsif t.count == 1 %}
     {%- assign only = t.rows.first %}
-    <p>One run recorded so far: <b>{{ only.failed }}</b> failing examples, {{ only.date }}. The trend starts with the next comparable run.{% if t.interrupted %} History is incomplete before {{ t.since }}.{% endif %}</p>
+    <p>One run recorded so far: <b>{{ only.failed | escape }}</b> failing examples, {{ only.date | escape }}. The trend starts with the next comparable run.{% if t.interrupted %} History is incomplete before {{ t.since | escape }}.{% endif %}</p>
     {%- else %}
-    <p>{% if t.change %}{{ t.change }} A change in the count isn’t a diagnosis of its cause.{% else %}History starts on {{ t.since }}; each nightly run adds a point.{% endif %}{% if t.interrupted %} History is incomplete before {{ t.since }}.{% endif %}</p>
+    <p>{% if t.change %}{{ t.change | escape }} A change in the count isn’t a diagnosis of its cause.{% else %}History starts on {{ t.since | escape }}; each nightly run adds a point.{% endif %}{% if t.interrupted %} History is incomplete before {{ t.since | escape }}.{% endif %}</p>
     <figure class="chart-frame">
       {{ t.chart }}
       <figcaption>Failing model examples per run. A line breaks where the app revision or scope changed, or a run is missing.</figcaption>
@@ -231,7 +236,7 @@ permalink: /progress/
       <div class="table-wrap" tabindex="0" role="region" aria-label="Failing examples by run">
         <table>
           <thead><tr><th scope="col">Run</th><th scope="col" class="num">Failing</th><th scope="col" class="num">Run</th><th scope="col" class="num">Spec files</th><th scope="col" class="num">Outside errors</th><th scope="col">Lobsters</th><th scope="col">Roundhouse</th><th scope="col">Note</th></tr></thead>
-          <tbody>{% for row in t.rows %}<tr><td>{{ row.date }}</td><td class="num">{{ row.failed }}</td><td class="num">{{ row.total }}</td><td class="num">{{ row.files }}</td><td class="num">{{ row.outside }}</td><td><code>{{ row.lobsters_sha }}</code></td><td><code>{{ row.roundhouse_sha }}</code></td><td>{{ row.note }}</td></tr>{% endfor %}</tbody>
+          <tbody>{% for row in t.rows %}<tr><td>{{ row.date | escape }}</td><td class="num">{{ row.failed | escape }}</td><td class="num">{{ row.total | escape }}</td><td class="num">{{ row.files | escape }}</td><td class="num">{{ row.outside | escape }}</td><td><code>{{ row.lobsters_sha | escape }}</code></td><td><code>{{ row.roundhouse_sha | escape }}</code></td><td>{{ row.note | escape }}</td></tr>{% endfor %}</tbody>
         </table>
       </div>
     </details>
@@ -242,12 +247,12 @@ permalink: /progress/
 <section class="sect" id="routes" aria-labelledby="routes-title">
   <div class="sect-label">
     <h2 id="routes-title">Frozen Lobsters replay</h2>
-    {%- if st.replay.available %}<p class="date">{{ st.replay.observed_date }}</p><p class="meta"><a href="{{ r.source }}">Raw results</a></p>{% endif %}
+    {%- if st.replay.available %}<p class="date">{{ st.replay.observed_date | escape }}</p><p class="meta"><a href="{{ r.source | web_url }}">Raw results</a></p>{% endif %}
   </div>
   <div class="sect-body">
     {%- if st.replay.available %}
-    {%- if st.replay.note %}<p class="notice">{{ st.replay.note }}</p>{% endif %}
-    <p>A fixed Lobsters snapshot, replayed on Rails and on the compiled app. Rails is the reference.{% if r.lead %} {{ r.lead }}{% endif %}</p>
+    {%- if st.replay.note %}<p class="notice">{{ st.replay.note | escape }}</p>{% endif %}
+    <p>A fixed Lobsters snapshot, replayed on Rails and on the compiled app. Rails is the reference.{% if r.lead %} {{ r.lead | escape }}{% endif %}</p>
     <ul class="rows">
       {%- for l in r.lanes %}
       <li>
@@ -263,19 +268,19 @@ permalink: /progress/
     {%- else %}
     <p class="notice">Latest replay unavailable. The route ledger below is still readable.</p>
     {%- endif %}
-    <h3 class="sub">Recorded route gaps{% if st.routes.available %} <span>{{ r.entries.size }}</span>{% endif %}</h3>
+    <h3 class="sub">Recorded route gaps{% if st.routes.available %} <span>{{ r.entries.size | escape }}</span>{% endif %}</h3>
     {%- if st.routes.available %}
     {%- if r.entries.size == 0 %}
     <p>None declared in <a href="{{ site.repo_docs.github }}/blob/main/bench/lobsters/declared-gaps.json">the ledger</a>; the replay is the measure.</p>
     {%- else %}
     <ul class="rows">
       {%- for e in r.entries %}
-      <li><details class="row gap" id="{{ e.anchor }}">
+      <li><details class="row gap" id="{{ e.anchor | escape }}">
         <summary><code class="route">{{ e.route | escape }}</code><span class="row-text">{{ e.reason | escape }}</span><span class="area">Ledger: {{ e.status | escape }}</span></summary>
         <div class="row-body">
           {%- if e.detail %}<p>{{ e.detail | escape }}</p>{% endif %}
           <p><b>What closes it:</b> {% if e.closes_with %}{{ e.closes_with | escape }}{% else %}an acceptance check still needs describing.{% endif %} In <a href="{{ site.repo_docs.github }}/blob/main/bench/lobsters/declared-gaps.json">the ledger</a> since {{ e.since | escape }}.</p>
-          <p class="links">{% if e.issue_url %}<a href="{{ e.issue_url }}">The issue</a>{% endif %}<a href="{{ site.repo_docs.github }}/issues?q={{ e.route | url_encode }}">Search for related work</a><a href="{{ '/docs/development/compiler-changes.html' | relative_url }}">Changing the compiler</a></p>
+          <p class="links">{% if e.issue_url %}<a href="{{ e.issue_url | web_url }}">The issue</a>{% endif %}<a href="{{ site.repo_docs.github }}/issues?q={{ e.route | url_encode }}">Search for related work</a><a href="{{ '/docs/development/compiler-changes.html' | relative_url }}">Changing the compiler</a></p>
         </div>
       </details></li>
       {%- endfor %}
@@ -291,29 +296,29 @@ permalink: /progress/
 <section class="sect" id="targets" aria-labelledby="targets-title">
   <div class="sect-label">
     <h2 id="targets-title">Archive smoke checks</h2>
-    {%- if a %}<p class="date">{{ st.archives.observed_date | default: "Date not published" }}</p><p class="meta"><a href="{{ a.run_url }}">The run</a></p>{% endif %}
+    {%- if a %}<p class="date">{{ st.archives.observed_date | default: "Date not published" | escape }}</p><p class="meta"><a href="{{ a.run_url | web_url }}">The run</a></p>{% endif %}
   </div>
   <div class="sect-body">
     {%- if a %}
-    {%- if st.archives.note %}<p class="notice">{{ st.archives.note }}</p>{% endif %}
-    <p>Does each published archive start and serve? <b>{{ a.headline }}.</b> These are smoke checks: they don’t measure all of Rails, or everything an app does.</p>
+    {%- if st.archives.note %}<p class="notice">{{ st.archives.note | escape }}</p>{% endif %}
+    <p>Does each published archive start and serve? <b>{{ a.headline | escape }}.</b> These are smoke checks: they don’t measure all of Rails, or everything an app does.</p>
     <dl class="checks">
       {%- for app in a.apps %}
-      <dt>{{ app.app }}</dt>
-      <dd><ul>{% for row in app.rows %}<li class="check {{ row.class }}" title="{{ row.result }}{% if row.detail %}. {{ row.detail | escape }}{% endif %}"><span aria-hidden="true">{% case row.class %}{% when "ok" %}✓{% when "fail" %}✕{% else %}–{% endcase %}</span> {{ row.name }}<span class="sr">: {{ row.result }}</span></li>{% endfor %}</ul></dd>
+      <dt>{{ app.app | escape }}</dt>
+      <dd><ul>{% for row in app.rows %}<li class="check {{ row.class | escape }}" title="{{ row.result | escape }}{% if row.detail %}. {{ row.detail | escape }}{% endif %}"><span aria-hidden="true">{% case row.class %}{% when "ok" %}✓{% when "fail" %}✕{% else %}–{% endcase %}</span> {{ row.name | escape }}<span class="sr">: {{ row.result | escape }}</span></li>{% endfor %}</ul></dd>
       {%- endfor %}
     </dl>
     {%- if a.others.size > 0 %}
     <details class="table-view">
-      <summary>{{ a.others.size }} more ran outside this run’s plan</summary>
+      <summary>{{ a.others_text | escape }}</summary>
       <ul class="others">
-        {%- for row in a.others %}<li title="{{ row.detail | escape }}">{{ row.app }}: {{ row.name }}{% if row.detail %}<span class="sr">. {{ row.detail | escape }}</span>{% endif %}</li>{% endfor %}
+        {%- for row in a.others %}<li title="{{ row.detail | escape }}">{{ row.app | escape }}: {{ row.name | escape }}{% if row.detail %}<span class="sr">. {{ row.detail | escape }}</span>{% endif %}</li>{% endfor %}
       </ul>
     </details>
     {%- endif %}
-    <p class="foot">{% if a.run_conclusion %}The whole run concluded “{{ a.run_conclusion }}” · {% endif %}<a href="{{ site.repo_docs.github }}/commit/{{ a.source_sha_full }}"><code>{{ a.source_sha }}</code></a></p>
+    <p class="foot">{% if a.run_conclusion %}The whole run concluded “{{ a.run_conclusion | escape }}” · {% endif %}<a href="{{ site.repo_docs.github }}/commit/{{ a.source_sha_full | escape }}"><code>{{ a.source_sha | escape }}</code></a></p>
     {%- else %}
-    <p class="notice">Archive check results unavailable. {{ st.archives.note }}</p>
+    <p class="notice">Archive check results unavailable. {{ st.archives.note | escape }}</p>
     {%- endif %}
   </div>
 </section>
@@ -321,21 +326,21 @@ permalink: /progress/
 <section class="sect" id="benchmarks" aria-labelledby="bench-title">
   <div class="sect-label">
     <h2 id="bench-title">Reference blog speed</h2>
-    {%- if b %}<p class="date">{{ st.bench.observed_date }}</p>{% endif %}<p class="meta"><a href="{{ '/bench/' | relative_url }}">Methodology</a></p>
+    {%- if b %}<p class="date">{{ st.bench.observed_date | escape }}</p>{% endif %}<p class="meta"><a href="{{ '/bench/' | relative_url }}">Methodology</a></p>
   </div>
   <div class="sect-body">
     {%- if b %}
-    {%- if st.bench.note %}<p class="notice">{{ st.bench.note }}</p>{% endif %}
+    {%- if st.bench.note %}<p class="notice">{{ st.bench.note | escape }}</p>{% endif %}
     {%- if b.headline %}
-    <p>Generated Ruby serves the reference blog’s <code>/articles</code> at <b>{{ b.headline }}</b> the requests per second of Rails: CRuby + YJIT, one worker, median of {{ b.runs }} runs. Speed says nothing about parity.</p>
+    <p>Generated Ruby serves the reference blog’s <code>/articles</code> at <b>{{ b.headline | escape }}</b> the requests per second of Rails: CRuby + YJIT, one worker, {{ b.runs_text | escape }}. Speed says nothing about parity.</p>
     {%- else %}
     <p class="notice">Comparable results are unavailable for this selection.</p>
     {%- endif %}
     <div class="table-wrap" tabindex="0" role="region" aria-label="Speed-up by endpoint and runtime">
       <table>
         <caption class="sr">Generated Ruby against Rails on the same runtime</caption>
-        <thead><tr><th scope="col">Endpoint</th>{% for pair in b.pairs %}<th scope="col" class="num">{{ pair.label }}</th>{% endfor %}</tr></thead>
-        <tbody>{% for row in b.by_endpoint %}<tr><td><code>{{ row.endpoint }}</code></td>{% for v in row.ratios %}<td class="num">{{ v }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+        <thead><tr><th scope="col">Endpoint</th>{% for pair in b.pairs %}<th scope="col" class="num">{{ pair.label | escape }}</th>{% endfor %}</tr></thead>
+        <tbody>{% for row in b.by_endpoint %}<tr><td><code>{{ row.endpoint | escape }}</code></td>{% for v in row.ratios %}<td class="num">{{ v | escape }}</td>{% endfor %}</tr>{% endfor %}</tbody>
       </table>
     </div>
     <details class="table-view">
@@ -343,11 +348,11 @@ permalink: /progress/
       <div class="table-wrap" tabindex="0" role="region" aria-label="All configurations">
         <table>
           <thead><tr><th scope="col">Configuration</th><th scope="col" class="num">req/s</th><th scope="col" class="num">p50 ms</th><th scope="col" class="num">p99 ms</th><th scope="col" class="num">RSS MiB</th><th scope="col" class="num">req/s per GiB</th><th scope="col" class="num">Runs</th><th scope="col" class="num">Error responses</th></tr></thead>
-          <tbody>{% for row in b.table %}<tr><td><code>{{ row.target }}</code></td><td class="num">{{ row.req_sec }}</td><td class="num">{{ row.p50 }}</td><td class="num">{{ row.p99 }}</td><td class="num">{{ row.rss }}</td><td class="num">{{ row.per_gib }}</td><td class="num">{{ row.runs }}</td><td class="num">{{ row.errors }}</td></tr>{% endfor %}</tbody>
+          <tbody>{% for row in b.table %}<tr><td><code>{{ row.target | escape }}</code></td><td class="num">{{ row.req_sec | escape }}</td><td class="num">{{ row.p50 | escape }}</td><td class="num">{{ row.p99 | escape }}</td><td class="num">{{ row.rss | escape }}</td><td class="num">{{ row.per_gib | escape }}</td><td class="num">{{ row.runs | escape }}</td><td class="num">{{ row.errors | escape }}</td></tr>{% endfor %}</tbody>
         </table>
       </div>
     </details>
-    <p class="foot">Generated Ruby against Rails on the same runtime. Environment captured {{ b.env_date | default: "on an unpublished date" }}{% if b.env_sha %} at <code>{{ b.env_sha }}</code>{% endif %}.</p>
+    <p class="foot">Generated Ruby against Rails on the same runtime. Environment captured {{ b.env_date | default: "on an unpublished date" | escape }}{% if b.env_sha %} at <code>{{ b.env_sha | escape }}</code>{% endif %}.</p>
     {%- else %}
     <p class="notice">Benchmark results unavailable.</p>
     {%- endif %}
@@ -357,18 +362,18 @@ permalink: /progress/
 <section class="sect" id="activity" aria-labelledby="activity-title">
   <div class="sect-label">
     <h2 id="activity-title">The people building it</h2>
-    {%- if ac %}<p class="date">{{ st.activity.observed_date }}</p><p class="meta">GitHub</p>{% endif %}
+    {%- if ac %}<p class="date">{{ st.activity.observed_date | escape }}</p><p class="meta">GitHub</p>{% endif %}
   </div>
   <div class="sect-body">
     {%- if ac %}
-    <p><b>{{ ac.merged_7d }}</b> pull requests merged in 7 days, by {{ ac.people_7d }} people; {{ ac.merged_all }} in all. Merges measure activity; the app results above measure progress.</p>
+    <p><b>{{ ac.merged_7d_text | escape }}</b> merged in 7 days, by {{ ac.people_7d_text | escape }}; {{ ac.merged_all | escape }} in all. Merges measure activity; the app results above measure progress.</p>
     {%- if ac.bars.size > 0 %}
     <figure class="chart-frame">
       <div class="bars" role="group" aria-label="Pull requests merged per week, Monday to Sunday">
         {%- for w in ac.bars %}
         <div class="mark{% if w.partial %} partial{% endif %}" role="img" tabindex="0" data-tip="{{ w.tip | escape }}" aria-label="{{ w.tip | escape }}">
-          <span class="bar-slot"><i class="wk" style="height: {{ w.pct }}%">{% if w.peak %}<span class="bar-value">{{ w.merged }}</span>{% endif %}</i></span>
-          <span class="bar-tick">{% if w.show_label %}{{ w.label }}{% if w.partial %}*{% endif %}{% endif %}</span>
+          <span class="bar-slot"><i class="wk" style="height: {{ w.pct | escape }}%">{% if w.peak %}<span class="bar-value">{{ w.merged | escape }}</span>{% endif %}</i></span>
+          <span class="bar-tick">{% if w.show_label %}{{ w.label | escape }}{% if w.partial %}*{% endif %}{% endif %}</span>
         </div>
         {%- endfor %}
       </div>
@@ -378,34 +383,34 @@ permalink: /progress/
       <summary>Weekly counts</summary>
       <div class="table-wrap" tabindex="0" role="region" aria-label="Merged pull requests by week">
         <table><thead><tr><th scope="col">Week of</th><th scope="col" class="num">Merged</th></tr></thead>
-          <tbody>{% for w in ac.weeks %}<tr><td>{{ w.week }}{% if w.partial %} (so far){% endif %}</td><td class="num">{{ w.merged }}</td></tr>{% endfor %}</tbody></table>
+          <tbody>{% for w in ac.weeks %}<tr><td>{{ w.week | escape }}{% if w.partial %} (so far){% endif %}</td><td class="num">{{ w.merged | escape }}</td></tr>{% endfor %}</tbody></table>
       </div>
     </details>
     {%- endif %}
-    <h3 class="sub" id="welcome">Welcome{% if ac.firsts.size > 0 %} <span>{{ ac.firsts.size }}</span>{% endif %}</h3>
+    <h3 class="sub" id="welcome">Welcome{% if ac.firsts.size > 0 %} <span>{{ ac.firsts.size | escape }}</span>{% endif %}</h3>
     {%- if ac.firsts.size > 0 %}
-    <p>{{ ac.firsts.size }} people had their first pull request merged in the last 30 days.</p>
+    <p>{{ ac.firsts_people_text | escape }} had {% if ac.firsts.size == 1 %}a first{% else %}their first{% endif %} pull request merged in the last 30 days.</p>
     <ul class="firsts">
       {%- for f in ac.firsts %}
-      <li><img src="{{ f.avatar }}&amp;s=64" alt="" width="28" height="28" loading="lazy"><span><a href="{{ f.url }}">{{ f.login | escape }}</a> <a class="pr" href="{{ f.first_pr.url }}">{{ f.first_pr.title | escape }}</a></span><span class="date">{{ f.date }}</span></li>
+      <li><img src="{{ f.avatar | web_url }}&amp;s=64" alt="" width="28" height="28" loading="lazy"><span><a href="{{ f.url | web_url }}">{{ f.login | escape }}</a> <a class="pr" href="{{ f.first_pr.url | web_url }}">{{ f.first_pr.title | escape }}</a></span><span class="date">{{ f.date | escape }}</span></li>
       {%- endfor %}
     </ul>
     {%- else %}
     <p>No first-time contributors in the last 30 days. You could be the next.</p>
     {%- endif %}
-    <h3 class="sub" id="contributors">Merged work in 30 days <span>{{ ac.contributors_30d }}</span></h3>
+    <h3 class="sub" id="contributors">Merged work in 30 days <span>{{ ac.contributors_30d | escape }}</span></h3>
     <ul class="faces">
-      {%- for person in ac.people_30d %}<li><a href="{{ person.url }}" title="{{ person.login | escape }}"><img src="{{ person.avatar }}&amp;s=64" alt="{{ person.login | escape }}" width="32" height="32" loading="lazy"></a></li>{% endfor %}
+      {%- for person in ac.people_30d %}<li><a href="{{ person.url | web_url }}" title="{{ person.login | escape }}"><img src="{{ person.avatar | web_url }}&amp;s=64" alt="{{ person.login | escape }}" width="32" height="32" loading="lazy"></a></li>{% endfor %}
     </ul>
     <p class="foot">Alphabetical, never ranked.</p>
     <details class="table-view">
       <summary>Latest merges</summary>
       <ul class="recent">
-        {%- for m in ac.recent %}<li><a href="{{ m.url }}">#{{ m.number }} {{ m.title | escape }}</a> <span class="date">{{ m.author | escape }} · {{ m.date }}</span></li>{% endfor %}
+        {%- for m in ac.recent %}<li><a href="{{ m.url | web_url }}">#{{ m.number | escape }} {{ m.title | escape }}</a> <span class="date">{{ m.author | escape }} · {{ m.date | escape }}</span></li>{% endfor %}
       </ul>
     </details>
     {%- else %}
-    <p class="notice">Activity unavailable. {{ st.activity.note }} <a href="{{ site.repo_docs.github }}/pulls?q=is%3Apr+is%3Amerged">Merged pull requests on GitHub</a>.</p>
+    <p class="notice">Activity unavailable. {{ st.activity.note | escape }} <a href="{{ site.repo_docs.github }}/pulls?q=is%3Apr+is%3Amerged">Merged pull requests on GitHub</a>.</p>
     {%- endif %}
   </div>
 </section>
@@ -435,8 +440,8 @@ permalink: /progress/
     {%- if gfi.size > 0 or hw.size > 0 %}
     <h3 class="sub">Issues asking for help</h3>
     <ul class="recent">
-      {%- for i in gfi %}<li><a href="{{ i.url }}">#{{ i.number }} {{ i.title | escape }}</a> <span class="date">good first issue{% if i.assignees.size > 0 %} · assigned{% endif %}</span></li>{% endfor %}
-      {%- for i in hw %}<li><a href="{{ i.url }}">#{{ i.number }} {{ i.title | escape }}</a> <span class="date">help wanted{% if i.assignees.size > 0 %} · assigned{% endif %}</span></li>{% endfor %}
+      {%- for i in gfi %}<li><a href="{{ i.url | web_url }}">#{{ i.number | escape }} {{ i.title | escape }}</a> <span class="date">good first issue{% if i.assignees.size > 0 %} · assigned{% endif %}</span></li>{% endfor %}
+      {%- for i in hw %}<li><a href="{{ i.url | web_url }}">#{{ i.number | escape }} {{ i.title | escape }}</a> <span class="date">help wanted{% if i.assignees.size > 0 %} · assigned{% endif %}</span></li>{% endfor %}
     </ul>
     {%- endif %}
     {%- endif %}
@@ -451,21 +456,21 @@ permalink: /progress/
   </div>
   <div class="sect-body">
     <p>Model examples are Lobsters’ own tests; the frozen replay is a recorded request workload; smoke checks start each published archive; benchmarks time one reference app. They test different things, so they aren’t added into one score, and none of them counts Rails features.</p>
-    {%- if g %}<p><b>Model specs:</b> {{ g.scope.spec_files_run }} of {{ g.scope.spec_files_in_suite }} spec files ran. {{ g.scope.excluded | escape }}</p>{% endif %}
-    {%- if a %}<p><b>Smoke checks</b> don’t measure all of Rails, or everything an app does; <a href="{{ '/docs/guide/rails-coverage.html' | relative_url }}">Rails coverage</a> is the hand-kept feature map.{% if a.unchecked.size > 0 %} Published without a named check: {{ a.unchecked | join: ", " }}.{% endif %}</p>{% endif %}
+    {%- if g %}<p><b>Model specs:</b> {{ g.scope.spec_files_run | escape }} of {{ g.scope.spec_files_in_suite | escape }} spec files ran. {{ g.scope.excluded | escape }}</p>{% endif %}
+    {%- if a %}<p><b>Smoke checks</b> don’t measure all of Rails, or everything an app does; <a href="{{ '/docs/guide/rails-coverage.html' | relative_url }}">Rails coverage</a> is the hand-kept feature map.{% if a.unchecked.size > 0 %} Published without a named check: {{ a.unchecked | join: ", " | escape }}.{% endif %}</p>{% endif %}
     <div class="table-wrap" tabindex="0" role="region" aria-label="Sources">
       <table>
         <thead><tr><th scope="col">Source</th><th scope="col">Observed</th><th scope="col">This build</th></tr></thead>
-        <tbody>{% for s in p.sources %}<tr><td>{% if s.url %}<a href="{{ s.url }}">{{ s.name }}</a>{% else %}{{ s.name }}{% endif %}</td><td>{{ s.observed }}{% if s.stale %} <span class="when">not current</span>{% endif %}</td><td>{{ s.fetch }}</td></tr>{% endfor %}</tbody>
+        <tbody>{% for s in p.sources %}<tr><td>{% if s.url %}<a href="{{ s.url | web_url }}">{{ s.name | escape }}</a>{% else %}{{ s.name | escape }}{% endif %}</td><td>{{ s.observed | escape }}{% if s.stale %} <span class="when">not current</span>{% endif %}</td><td>{{ s.fetch | escape }}</td></tr>{% endfor %}</tbody>
       </table>
     </div>
     {%- if g %}
     <details class="table-view">
       <summary>Compiler warnings are a different measure</summary>
-      <p>The emit of Lobsters raised {{ g.warning_total }} warnings. Warnings are the modeling-debt ledger: expected, and not the same as broken features. They aren’t added to the failures.</p>
+      <p>The emit of Lobsters raised {{ g.warning_total | escape }}. Warnings are the modeling-debt ledger: expected, and not the same as broken features. They aren’t added to the failures.</p>
       <div class="table-wrap" tabindex="0" role="region" aria-label="Warnings by kind">
         <table><thead><tr><th scope="col">Kind</th><th scope="col" class="num">Warnings</th></tr></thead>
-          <tbody>{% for w in g.warning_kinds %}<tr><td>{{ w.kind }}</td><td class="num">{{ w.count }}</td></tr>{% endfor %}</tbody></table>
+          <tbody>{% for w in g.warning_kinds %}<tr><td>{{ w.kind | escape }}</td><td class="num">{{ w.count | escape }}</td></tr>{% endfor %}</tbody></table>
       </div>
     </details>
     {%- endif %}

@@ -18,11 +18,15 @@
 #
 # ROUNDHOUSE_STATUS=off skips the network (offline builds, pull requests);
 # ROUNDHOUSE_STATUS_FROM renders a saved snapshot instead (see the generator).
+# ROUNDHOUSE_STATUS_STAGED names the site a publishing build is about to deploy:
+# the reports it already holds are read from there, so Progress agrees with the
+# evidence it links to.
 
 require "digest"
 require "json"
 require "net/http"
 require "time"
+require "timeout"
 require "uri"
 
 module RoundhouseStatus
@@ -33,19 +37,35 @@ module RoundhouseStatus
 
   def offline? = ENV["ROUNDHOUSE_STATUS"] == "off"
 
+  # Each request ends within this, however slowly a server answers.
+  REQUEST_SECONDS = 45
+
   def fetch(url, headers = {})
     uri = URI(url)
-    Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https", open_timeout: 10, read_timeout: 30) do |http|
-      req = Net::HTTP::Get.new(uri)
-      headers.each { |k, v| req[k] = v }
-      res = http.request(req)
-      raise NotFound, url if res.is_a?(Net::HTTPNotFound)
-      raise "#{url}: HTTP #{res.code}" unless res.is_a?(Net::HTTPSuccess)
-      res.body
+    Timeout.timeout(REQUEST_SECONDS, Timeout::Error, "#{url}: no answer within #{REQUEST_SECONDS} s") do
+      Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https", open_timeout: 10, read_timeout: 30) do |http|
+        req = Net::HTTP::Get.new(uri)
+        headers.each { |k, v| req[k] = v }
+        res = http.request(req)
+        raise NotFound, url if res.is_a?(Net::HTTPNotFound)
+        raise "#{url}: HTTP #{res.code}" unless res.is_a?(Net::HTTPSuccess)
+        res.body
+      end
     end
   end
 
   def json(url, headers = {}) = JSON.parse(fetch(url, headers))
+
+  # A report the site publishes: this publication's copy when one is staged,
+  # otherwise the deployed one. A report missing from the staged site won't be
+  # deployed either, so it counts as missing.
+  def report(site, path)
+    staged = ENV["ROUNDHOUSE_STATUS_STAGED"].to_s
+    return json("#{site}/#{path}") if staged.empty?
+    file = File.join(staged, path)
+    raise NotFound, "#{path} isn't in this publication" unless File.file?(file)
+    JSON.parse(File.read(file))
+  end
 
   def token = ENV["GITHUB_TOKEN"] || ENV["GH_TOKEN"]
 
@@ -58,12 +78,14 @@ module RoundhouseStatus
   def graphql(query, variables = {})
     raise "no GITHUB_TOKEN" if token.to_s.empty?
     uri = URI("https://api.github.com/graphql")
-    body = Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 10, read_timeout: 30) do |http|
-      req = Net::HTTP::Post.new(uri, github_headers.merge("Content-Type" => "application/json"))
-      req.body = JSON.generate(query: query, variables: variables)
-      res = http.request(req)
-      raise "GraphQL: HTTP #{res.code}" unless res.is_a?(Net::HTTPSuccess)
-      res.body
+    body = Timeout.timeout(REQUEST_SECONDS, Timeout::Error, "GraphQL: no answer within #{REQUEST_SECONDS} s") do
+      Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 10, read_timeout: 30) do |http|
+        req = Net::HTTP::Post.new(uri, github_headers.merge("Content-Type" => "application/json"))
+        req.body = JSON.generate(query: query, variables: variables)
+        res = http.request(req)
+        raise "GraphQL: HTTP #{res.code}" unless res.is_a?(Net::HTTPSuccess)
+        res.body
+      end
     end
     data = JSON.parse(body)
     raise "GraphQL: #{data["errors"].map { |e| e["message"] }.join("; ")[0, 160]}" if data["errors"]
@@ -85,7 +107,7 @@ module RoundhouseStatus
 
   def specs(site)
     url = "#{site}/bench/lobsters-specs/summary.json"
-    s = json(url)
+    s = report(site, "bench/lobsters-specs/summary.json")
     ex = s.fetch("examples")
     causes = s.fetch("causes").map do |c|
       examples = c["examples"].to_a.map do |e|
@@ -98,6 +120,9 @@ module RoundhouseStatus
     by_file = s["by_file"].to_a.map { |f| f.slice("file", "examples", "passed", "failed") }
     compensations = s["harness_compensations"].to_a.map { |h| h.slice("what", "kind", "why") }
     problems = []
+    counts = ex.values_at("total", "passed", "failed", "pending")
+    problems << "the example counts are missing" unless counts.all? { |n| n.is_a?(Integer) && n >= 0 } && ex["total"].positive?
+    problems << "a failure group has no count" unless s.fetch("causes").all? { |c| c["failures"].is_a?(Integer) && c["failures"] >= 0 }
     problems << "the example counts don't add up" unless ex.values_at("passed", "failed", "pending").sum(&:to_i) == ex["total"].to_i
     problems << "the failure groups don't add up to the failures" unless causes.sum { |c| c["failures"] } == ex["failed"].to_i
     problems << "a rule with no matches has failures" if causes.any? { |c| c["stale_rule"] && c["failures"].positive? }
@@ -147,7 +172,7 @@ module RoundhouseStatus
 
   def archives(site, repo)
     url = "#{site}/ci/archive-results.json"
-    a = json(url)
+    a = report(site, "ci/archive-results.json")
     rows = a.fetch("archives").select { |r| r["path"].to_s.end_with?(".tgz") }
             .map { |r| r.slice("path", "check", "status", "reason", "harness_outcome", "selected", "published", "validation_attempt") }
     run = begin
@@ -167,12 +192,12 @@ module RoundhouseStatus
   ENV_HARNESS = %w[workers concurrency runs duration_sec warmup_sec threads wrk_threads endpoints targets].freeze
 
   def bench(site)
-    rows = json("#{site}/bench/summary.json").map do |r|
+    rows = report(site, "bench/summary.json").map do |r|
       r.slice("target", "endpoint", "workers", "runs", "non_2xx")
        .merge(r.slice("req_sec", "p50_ms", "p99_ms", "rss_mb", "rps_per_gb").transform_values { |v| v.is_a?(Numeric) && v.finite? ? v : nil })
     end
     env = begin
-      e = json("#{site}/bench/env.json")
+      e = report(site, "bench/env.json")
       { "captured_at" => time_or_nil(e["captured_at"]), "git" => e["git"].to_h.slice("sha", "branch", "dirty"),
         "host" => e["host"].to_h.slice("arch", "platform"), "toolchains" => e["toolchains"], "harness" => e["harness"].to_h.slice(*ENV_HARNESS) }
     rescue NotFound
@@ -219,7 +244,7 @@ module RoundhouseStatus
     # Most recently updated first; mergedAt <= updatedAt, so once updatedAt
     # passes the window nothing older can have merged inside it.
     since = now - 30 * 86_400
-    merged, cursor = [], nil
+    merged, cursor, complete = [], nil, false
     20.times do
       page = graphql(<<~Q, { "owner" => owner, "name" => name, "after" => cursor }).dig("repository", "pullRequests")
         query($owner: String!, $name: String!, $after: String) {
@@ -232,71 +257,78 @@ module RoundhouseStatus
         }
       Q
       merged.concat(page["nodes"].select { |pr| Time.parse(pr["mergedAt"]) >= since })
-      break if !page.dig("pageInfo", "hasNextPage") || Time.parse(page["nodes"].last["updatedAt"]) < since
+      complete = !page.dig("pageInfo", "hasNextPage") || Time.parse(page["nodes"].last["updatedAt"]) < since
+      break if complete
       cursor = page.dig("pageInfo", "endCursor")
     end
-    merged = merged.reject { |pr| pr["author"].nil? || pr.dig("author", "__typename") == "Bot" }.sort_by { |pr| pr["mergedAt"] }.reverse
-    people = merged.group_by { |pr| pr.dig("author", "login") }.map do |login, prs|
+    raise "more than 2,000 pull requests changed in 30 days; the count would be incomplete" unless complete
+    merged = merged.sort_by { |pr| pr["mergedAt"] }.reverse
+    humans = merged.reject { |pr| pr["author"].nil? || pr.dig("author", "__typename") == "Bot" }
+    people = humans.group_by { |pr| pr.dig("author", "login") }.map do |login, prs|
       { "login" => login, "url" => prs.first.dig("author", "url"), "avatar" => prs.first.dig("author", "avatarUrl"), "last_merged_at" => prs.first["mergedAt"] }
     end
 
-    # Each person's first merged pull request: the earliest merge among their 30
-    # earliest-opened merged ones (search can't sort by merge time). A first merge
-    # inside the window is a first contribution.
-    firsts = people.each_with_index.map do |p, i|
-      %(u#{i}: search(type: ISSUE, first: 30, query: "repo:#{repo} is:pr is:merged author:#{p["login"]} sort:created-asc") { nodes { ... on PullRequest { number title url mergedAt } } })
+    # A first contribution: nothing of theirs merged before the window, so their
+    # earliest merge inside it (all collected above) is their first.
+    earlier = people.each_with_index.map do |p, i|
+      %(u#{i}: search(type: ISSUE, first: 0, query: "repo:#{repo} is:pr is:merged author:#{p["login"]} merged:<#{since.utc.iso8601}") { issueCount })
     end
-    first_prs = firsts.empty? ? {} : graphql("{ #{firsts.join("\n")} }")
+    before = earlier.empty? ? {} : graphql("{ #{earlier.join("\n")} }")
     people.each_with_index do |p, i|
-      first = first_prs.dig("u#{i}", "nodes").to_a.min_by { |pr| pr["mergedAt"] }
-      p["first_pr"] = first && first.slice("number", "title", "url").merge("merged_at" => first["mergedAt"])
+      count = before.dig("u#{i}", "issueCount")
+      raise "couldn't tell whether #{p["login"]} contributed before" unless count.is_a?(Integer)
+      next unless count.zero?
+      first = humans.select { |pr| pr.dig("author", "login") == p["login"] }.min_by { |pr| pr["mergedAt"] }
+      p["first_pr"] = first.slice("number", "title", "url").merge("merged_at" => first["mergedAt"])
     end
     c = counts_query.value
     weekly = windows.each_with_index.map { |from, i| { "week" => from.strftime("%F"), "merged" => c["w#{i}"]["issueCount"], "partial" => i == weeks - 1 } }
     weekly.shift while weekly.size > 1 && weekly.first["merged"].zero?
     week_ago = now - 7 * 86_400
     this_week = merged.select { |pr| Time.parse(pr["mergedAt"]) >= week_ago }
+    humans_this_week = humans.select { |pr| Time.parse(pr["mergedAt"]) >= week_ago }
     {
       "observed_at" => now.iso8601, "sources" => ["https://github.com/#{repo}/pulls?q=is%3Apr+is%3Amerged"],
       "data" => {
         "weekly_merged" => weekly,
-        "merged_7d" => this_week.size, "people_7d" => this_week.map { |pr| pr.dig("author", "login") }.uniq.size,
+        "merged_7d" => this_week.size, "people_7d" => humans_this_week.map { |pr| pr.dig("author", "login") }.uniq.size,
+        "bots_7d" => this_week.count { |pr| pr.dig("author", "__typename") == "Bot" },
         "merged_30d" => merged.size, "merged_all" => c.dig("merged_all", "issueCount"),
         "people_30d" => people.sort_by { |p| p["login"].downcase },
         "first_contributions_30d" => people.select { |p| p["first_pr"] && Time.parse(p["first_pr"]["merged_at"]) >= since }
                                            .sort_by { |p| p["first_pr"]["merged_at"] }.reverse,
-        "recent" => merged.first(8).map { |pr| { "number" => pr["number"], "title" => pr["title"], "url" => pr["url"], "author" => pr.dig("author", "login"), "merged_at" => pr["mergedAt"] } }
+        "recent" => humans.first(8).map { |pr| { "number" => pr["number"], "title" => pr["title"], "url" => pr["url"], "author" => pr.dig("author", "login"), "merged_at" => pr["mergedAt"] } }
       }
     }
   end
 
-# Generated Ruby against Rails on the same runtime, one worker; nil unless both
-# rows are clean (no error responses).
-def ratio(rows, generated, rails, endpoint)
-  a, b = [generated, rails].map { |t| rows.find { |r| r["target"] == t && r["endpoint"] == endpoint && r["workers"] == 1 } }
-  ok = ->(r) { r && r["req_sec"].to_f.positive? && r["non_2xx"].to_i.zero? }
-  (a["req_sec"] / b["req_sec"]).round(1) if ok.(a) && ok.(b)
-end
+  # Generated Ruby against Rails on the same runtime, one worker; nil unless both
+  # rows are clean (no error responses).
+  def ratio(rows, generated, rails, endpoint)
+    a, b = [generated, rails].map { |t| rows.find { |r| r["target"] == t && r["endpoint"] == endpoint && r["workers"] == 1 } }
+    ok = ->(r) { r && r["req_sec"].is_a?(Numeric) && r["req_sec"].positive? && r["non_2xx"].is_a?(Numeric) && r["non_2xx"].zero? }
+    a["req_sec"].fdiv(b["req_sec"]).round(1) if ok.(a) && ok.(b)
+  end
 
-# The few numbers the home page shows, each with its own observation time.
-def highlights(status)
-  out = {}
-  if (d = status.dig("specs", "data")) && d["canary_ok"] && d["consistent"]
-    out["specs"] = { "observed_at" => status.dig("specs", "observed_at"), "passed" => d.dig("examples", "passed"), "total" => d.dig("examples", "total"),
-                     "unclassified" => d["causes"].find { |c| c["slug"] == "unclassified" }&.dig("failures") }
+  # The few numbers the home page shows, each with its own observation time.
+  def highlights(status)
+    out = {}
+    if (d = status.dig("specs", "data")) && d["canary_ok"] && d["consistent"]
+      out["specs"] = { "observed_at" => status.dig("specs", "observed_at"), "passed" => d.dig("examples", "passed"), "total" => d.dig("examples", "total"),
+                       "unclassified" => d["causes"].find { |c| c["slug"] == "unclassified" }&.dig("failures") }
+    end
+    if (d = status.dig("activity", "data"))
+      out["activity"] = { "observed_at" => status.dig("activity", "observed_at"), "merged_7d" => d["merged_7d"], "people_7d" => d["people_7d"], "bots_7d" => d["bots_7d"].to_i,
+                          "first_contributions_30d" => d["first_contributions_30d"].size }
+    end
+    if (d = status.dig("bench", "data")) && d["environment"]
+      endpoints = d["rows"].map { |r| r["endpoint"] }.uniq
+      cruby = endpoints.filter_map { |e| ratio(d["rows"], "ruby", "rails", e) }
+      out["bench"] = { "observed_at" => d.dig("environment", "captured_at"), "articles" => ratio(d["rows"], "ruby", "rails", "/articles"),
+                       "min" => cruby.min, "max" => cruby.max, "jvm_articles" => ratio(d["rows"], "jruby", "rails-jruby", "/articles") }
+    end
+    out
   end
-  if (d = status.dig("activity", "data"))
-    out["activity"] = { "observed_at" => status.dig("activity", "observed_at"), "merged_7d" => d["merged_7d"], "people_7d" => d["people_7d"],
-                        "first_contributions_30d" => d["first_contributions_30d"].size }
-  end
-  if (d = status.dig("bench", "data")) && d["environment"]
-    endpoints = d["rows"].map { |r| r["endpoint"] }.uniq
-    cruby = endpoints.filter_map { |e| ratio(d["rows"], "ruby", "rails", e) }
-    out["bench"] = { "observed_at" => d.dig("environment", "captured_at"), "articles" => ratio(d["rows"], "ruby", "rails", "/articles"),
-                     "min" => cruby.min, "max" => cruby.max, "jvm_articles" => ratio(d["rows"], "jruby", "rails-jruby", "/articles") }
-  end
-  out
-end
 
   def release(root)
     heading = File.read(File.join(root, "RELEASES.md"))[/^## (\S+)/, 1]
@@ -334,10 +366,19 @@ end
     return old.merge("fetch" => "reused") if networked && reusable?(key, old, now)
     feed.merge("fetch" => "ok").merge(source.call)
   rescue StandardError => e
-    feed.merge!("fetch" => e.is_a?(NotFound) ? "missing" : "error", "error" => e.message[0, 200], "observed_at" => nil, "data" => nil)
+    failed(old, now, e)
+  end
+
+  def failed(old, now, error)
+    feed = { "checked_at" => now.iso8601, "cached" => false, "fetch" => error.is_a?(NotFound) ? "missing" : "error",
+             "error" => error.message[0, 200], "observed_at" => nil, "data" => nil }
     feed.merge!("data" => old["data"], "observed_at" => old["observed_at"], "sources" => old["sources"], "cached" => true) if old.is_a?(Hash) && old["data"]
     feed
   end
+
+  # A publication waits this long for its sources, at most. One still running
+  # then keeps its saved result, so a slow API never holds up a deploy.
+  COLLECT_SECONDS = 120
 
   def collect(config, root)
     cfg = config.fetch("status")
@@ -356,8 +397,20 @@ end
     }
     # The sources are independent, so they're collected at once: the build waits for the slowest.
     threads = local.merge(network).to_h { |key, source| [key, Thread.new { feed_for(key, source, network.key?(key), previous&.dig(key), now) }] }
-    threads.each { |key, thread| status[key] = thread.value }
-    status["highlights"] = highlights(status)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + COLLECT_SECONDS
+    threads.each do |key, thread|
+      left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      status[key] = thread.join([left, 0].max)&.value || begin
+        thread.kill
+        failed(previous&.dig(key), now, RuntimeError.new("still running after #{COLLECT_SECONDS} s"))
+      end
+    end
+    status["highlights"] = begin
+      highlights(status)
+    rescue StandardError => e # the home page then keeps its written text
+      status["highlights_error"] = e.message[0, 160]
+      {}
+    end
     status
   end
 
@@ -399,6 +452,8 @@ end
       "build_id" => status["build_id"], "at" => status["generated_at"], "site_sha" => status["site_sha"],
       "specs" => specs && {
         "observed_at" => status.dig("specs", "observed_at"), "cached" => status.dig("specs", "cached"),
+        # The harness showed it tested the emitted Ruby, and the totals agree.
+        "verified" => specs["canary_ok"] == true && specs["consistent"] == true,
         "scope_key" => specs["scope_key"], "lobsters_sha" => specs["lobsters_sha"], "roundhouse_sha" => specs["roundhouse_sha"],
         "spec_files_run" => specs.dig("scope", "spec_files_run")
       }.merge(specs["examples"]).merge("causes" => specs["causes"].map { |c| c.slice("slug", "failures") }),
@@ -444,6 +499,7 @@ module RoundhouseStatus
         Jekyll.logger.warn "Status:", "#{key}: #{feed["fetch"]}#{" (showing the saved result)" if feed["cached"]}: #{feed["error"]}"
       end
       Jekyll.logger.warn "Status:", "history #{@status["history_error"]}" if @status["history_error"]
+      Jekyll.logger.warn "Status:", "home page numbers withheld: #{@status["highlights_error"]}" if @status["highlights_error"]
       Jekyll.logger.info "Status:", "#{@status.count { |_, f| f.is_a?(Hash) && f["fetch"] == "ok" }} feeds collected; history has #{@history["points"].size} point(s)"
     end
   end

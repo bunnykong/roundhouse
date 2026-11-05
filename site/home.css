@@ -118,6 +118,13 @@ code { font: 0.88em var(--mono); color: var(--rh-text); background: var(--rh-sur
 .workshop span { font-size: 13.5px; line-height: 1.45; color: var(--rh-text-2); }
 .workshop small { font: 11px var(--mono); color: var(--rh-text-dim); }
 .workshop li a:hover span { color: var(--rh-accent); }
+/* While the live numbers load, their rows keep their place, so nothing moves when
+   they arrive. Without scripts, or in a cell with no current number, the written text stands alone. */
+@media (scripting: enabled) {
+  .workshop a:not(.is-written) b[hidden], .workshop a:not(.is-written) small[hidden] { display: block; visibility: hidden; }
+  .workshop a:not(.is-written) b:empty::before, .workshop a:not(.is-written) small:empty::before { content: "\00a0"; }
+  .workshop a:not(.is-written) span { min-height: calc(2em * 1.45); }
+}
 .closing .welcome { color: var(--rh-text-muted); }
 .apps { grid-column: 1 / -1; }
 .apps .label { margin: 0 0 14px; font: 600 10.5px var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--rh-text-dim); }

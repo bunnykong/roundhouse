@@ -40,12 +40,19 @@
 
   // Live numbers from /status.json (built with the site; see /progress/). Without
   // it, or when a result is too old to show as current, the text links stay as written.
-  if (!window.fetch) return;
+  // A cell without a current number goes back to its written text.
+  function written() {
+    document.querySelectorAll(".workshop [data-morsel]").forEach(function (link) {
+      if (!link.classList.contains("is-live")) link.classList.add("is-written");
+    });
+  }
+  if (!window.fetch) return written();
   var HOURS = 3600 * 1000;
   function fresh(part, maxHours) {
     return part && part.observed_at && Date.now() - Date.parse(part.observed_at) < maxHours * HOURS;
   }
   function n(value) { return Number(value).toLocaleString("en-US"); }
+  function people(count) { return count === 1 ? "person" : "people"; }
   function day(iso) { return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" }); }
   function fill(name, figure, text, note) {
     var link = document.querySelector('[data-morsel="' + name + '"]');
@@ -55,6 +62,7 @@
     b.hidden = false;
     link.querySelector("span").textContent = text;
     if (note) { small.textContent = note; small.hidden = false; }
+    link.classList.add("is-live");
   }
   fetch("status.json", { cache: "no-cache" }).then(function (response) {
     return response.ok ? response.json() : null;
@@ -68,15 +76,17 @@
         fill("triage", n(specs.unclassified), "failing specs waiting for a first look. Start here.", "Nightly · " + day(specs.observed_at));
         var triage = document.querySelector('[data-morsel="triage"]');
         if (triage) triage.setAttribute("href", "progress/#cause-unclassified");
+      } else if (specs.unclassified === 0) {
+        fill("triage", "0", "failing specs waiting for a first look", "Nightly · " + day(specs.observed_at));
       }
     }
     if (fresh(act, 24)) {
-      fill("merged", n(act.merged_7d), "pull requests merged in the last 7 days, by " + n(act.people_7d) + " people", "GitHub · " + day(act.observed_at));
+      fill("merged", n(act.merged_7d), (act.merged_7d === 1 ? "pull request" : "pull requests") + " merged in the last 7 days, by " + n(act.people_7d) + " " + people(act.people_7d) + (act.bots_7d > 0 ? " and " + n(act.bots_7d) + (act.bots_7d === 1 ? " bot" : " bots") : ""), "GitHub · " + day(act.observed_at));
       if (act.first_contributions_30d > 0) {
-        fill("firsts", n(act.first_contributions_30d), "people made their first contribution in the last 30 days", "GitHub · " + day(act.observed_at));
+        fill("firsts", n(act.first_contributions_30d), people(act.first_contributions_30d) + " made their first contribution in the last 30 days", "GitHub · " + day(act.observed_at));
         var welcome = document.querySelector('[data-morsel="welcome"]');
         if (welcome) {
-          welcome.textContent = n(act.first_contributions_30d) + " people had their first pull request merged in the last 30 days. You could be next.";
+          welcome.textContent = n(act.first_contributions_30d) + " " + people(act.first_contributions_30d) + (act.first_contributions_30d === 1 ? " had a first" : " had their first") + " pull request merged in the last 30 days. You could be next.";
           welcome.hidden = false;
         }
       }
@@ -89,5 +99,5 @@
       if (bench.jvm_articles) set("jvm_articles", bench.jvm_articles.toFixed(1) + "×");
       set("date", bench.observed_at.slice(0, 10));
     }
-  }).catch(function () { /* keep the written text */ });
+  }).catch(function () { /* keep the written text */ }).then(written);
 })();
