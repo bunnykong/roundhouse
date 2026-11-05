@@ -221,8 +221,18 @@ end
 
 Jekyll::Hooks.register :pages, :post_convert do |page|
   next unless page.data["repo_doc"]
-  RepoDocs.check_converted!(page.content, page.data["source_path"])
   rt = RepoDocs.runtime.fetch(page.site.object_id)
+  begin
+    RepoDocs.check_converted!(page.content, page.data["source_path"])
+  rescue Jekyll::Errors::FatalException => e
+    # Publication (ROUNDHOUSE_DOCS_LENIENT=1) never stops on one page's content: the page
+    # points to its source instead of showing a misread, and the run carries a warning.
+    raise unless ENV["ROUNDHOUSE_DOCS_LENIENT"] == "1"
+    src = page.data["source_path"]
+    puts "::warning file=#{src}::#{e.message.tr("\n", " ")}"
+    page.content = %(<p>This page didn’t render cleanly in this build. <a href="#{RepoDocs.escape("#{rt[:github]}/blob/#{rt[:branch]}/#{src}")}">Read it on GitHub</a>.</p>)
+    next
+  end
   page.content = RepoDocs.transform(page.content, page.data["source_path"], rt)
 end
 

@@ -165,26 +165,31 @@ module RoundhouseProgress
 
   # Throughput against Rails on one scale: Rails is 1.
   def ratio_bars(ratio)
-    w = 178.0
+    w = 124.0
     rails, gen = ratio >= 1 ? [(w / ratio).round(1), w] : [w, (w * ratio).round(1)]
     fig("Requests per second on /articles: Rails 1, generated Ruby #{ratio}",
         mark("Rails: 1×", %(<rect class="f-ref" x="0" y="3" width="#{rails}" height="7" rx="2"/>)) +
         %(<text class="f-label" x="#{(rails + 6).round(1)}" y="10">Rails</text>) +
-        mark("Generated Ruby: #{ratio}×", %(<rect class="f-pass" x="0" y="14" width="#{gen}" height="7" rx="2"/>)))
+        mark("Generated Ruby: #{ratio}×", %(<rect class="f-pass" x="0" y="14" width="#{gen}" height="7" rx="2"/>)) +
+        %(<text class="f-label" x="#{(gen + 6).round(1)}" y="21">Roundhouse</text>), w: 200)
   end
 
-  # Merged per week, small: the current week is dashed because it isn't over.
+  # Merged per week, small, on a baseline: a week with none draws nothing, and the
+  # current week is an outline because it isn't over.
   def weeks_spark(weekly)
     max = weekly.map { |p| p["merged"] }.max.to_i
-    body = weekly.each_with_index.map do |p, i|
-      hgt = max.zero? ? 1.5 : [26.0 * p["merged"] / max, 1.5].max.round(1)
+    w = [weekly.size * 18 - 6, 12].max
+    body = %(<rect class="f-base" x="0" y="27" width="#{w}" height="1"/>) + weekly.each_with_index.map do |p, i|
+      hgt = max.zero? ? 0 : (26.0 * p["merged"] / max).round(2)
+      next "" if hgt.zero?
       x = i * 18
       tip = "Week of #{date(p["week"])}: #{num(p["merged"])} merged#{" so far" if p["partial"]}"
-      mark(tip, p["partial"] ? %(<rect class="f-week partial" x="#{x + 0.5}" y="#{(28.5 - hgt).round(1)}" width="11" height="#{[hgt - 1, 0.5].max.round(1)}" rx="2"/>)
-                             : %(<rect class="f-week" x="#{x}" y="#{(28 - hgt).round(1)}" width="12" height="#{hgt}" rx="2"/>))
+      s = [1.0, hgt / 2].min
+      mark(tip, p["partial"] ? %(<rect class="f-week partial" x="#{x + s / 2}" y="#{(27 - hgt + s / 2).round(2)}" width="#{12 - s}" height="#{(hgt - s).round(2)}" rx="2" stroke-width="#{s}"/>)
+                             : %(<rect class="f-week" x="#{x}" y="#{(27 - hgt).round(2)}" width="12" height="#{hgt}" rx="2"/>))
     end.join
     label = "Merged per week, #{date(weekly.first["week"])} to #{date(weekly.last["week"])}: " + weekly.map { |p| "#{num(p["merged"])}#{" so far" if p["partial"]}" }.join(", ")
-    fig(label, body, w: [weekly.size * 18 - 6, 12].max, hgt: 28)
+    fig(label, body, w: w, hgt: 28)
   end
 
   # --- Modules ----------------------------------------------------------------
@@ -211,7 +216,8 @@ module RoundhouseProgress
       "roundhouse_sha" => short(d["roundhouse_sha"]), "roundhouse_url" => "https://github.com/#{repo}/commit/#{d["roundhouse_sha"]}",
       "report_url" => feed["sources"].last, "groups" => active.map(&group), "group_count" => active.count { |c| c["slug"] != "unclassified" },
       "smaller_count" => [active.size - 3, 0].max, "smaller_examples" => num(active.drop(3).sum { |c| c["failures"] }),
-      "figure" => d["canary_ok"] && d["consistent"] ? gap_meter(ex["passed"].to_i, ex["total"].to_i) : nil,
+      # Two parts only: with pending examples, passed + failed isn't the whole run.
+      "figure" => d["canary_ok"] && d["consistent"] && ex["pending"].to_i.zero? ? gap_meter(ex["passed"].to_i, ex["total"].to_i) : nil,
       "unclassified" => d["causes"].find { |c| c["slug"] == "unclassified" }&.dig("failures").to_i,
       "stale_rules" => d["causes"].select { |c| c["stale_rule"] }.sort_by { |c| c["slug"] }.map(&group),
       "warning_kinds" => d.dig("warnings", "by_kind").sort_by { |_, n| -n }.map { |k, n| { "kind" => k.tr("_", " "), "count" => num(n) } },
@@ -367,6 +373,10 @@ module RoundhouseProgress
                    elsif common.nil? then own
                    end
     end
+    if (act = states["activity"])["available"]
+      own = act["observed_short"] || "Date not published"
+      act["when"] = if act["cached"] then "Saved result, #{own}" elsif act["stale"] then "#{own}, not current" end
+    end
     view = { "built" => datetime(status["generated_at"]), "site_sha" => short(status["site_sha"]), "states" => states, "repo" => repo, "results_date" => common }
     view["gap"] = gap(status["specs"], repo) if states.dig("specs", "available")
     view["over_time"] = over_time(site.data["status_history"])
@@ -378,7 +388,8 @@ module RoundhouseProgress
     view["sources"] = SOURCE_NAMES.map do |key, name|
       feed = status[key].to_h
       { "name" => name, "url" => feed["sources"]&.first, "observed" => datetime(feed["observed_at"]) || "Not published",
-        "fetch" => { "ok" => feed["cached"] ? "Saved result" : "Collected", "missing" => "Not found", "error" => "Couldn't load", "offline" => "Not collected" }[feed["fetch"]] || "Not collected",
+        "fetch" => { "ok" => feed["cached"] ? "Saved result" : "Collected", "reused" => "Collected #{datetime(feed["checked_at"])}; refreshed daily",
+                     "missing" => "Not found", "error" => "Couldn't load", "offline" => "Not collected" }[feed["fetch"]] || "Not collected",
         "stale" => states.dig(key, "stale") }
     end
     view

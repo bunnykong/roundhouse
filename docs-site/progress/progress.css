@@ -23,6 +23,7 @@
 .lede { margin-top: 8px !important; }
 .jump { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 12px; line-height: 18px; color: var(--muted); }
 .phone-only { display: none; }
+.progress .start-link { font-weight: 600; color: var(--rh-heading); }
 
 .sec-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
 .sec-head h2, .start h2, .sect-label h2 { font-size: 18px; line-height: 25px; font-weight: 600; letter-spacing: -.015em; }
@@ -56,7 +57,8 @@ svg.fig { display: block; overflow: visible; }
 .f-ref { fill: var(--rh-text-faint); }
 .f-label { fill: var(--muted); font: 11px var(--mono); }
 .f-week { fill: var(--rh-prism-cyan); }
-.f-week.partial { fill: none; stroke: var(--rh-prism-cyan); stroke-width: 1; stroke-dasharray: 2 1.5; }
+.f-week.partial { fill: none; stroke: var(--rh-prism-cyan); stroke-dasharray: 2 1.5; }
+.f-base { fill: var(--rh-line-strong); }
 
 /* Movement: the measured trend, then the people. */
 .movement { display: grid; grid-template-columns: 22% minmax(0, 1fr); margin: 0; padding: 6px 0 10px; border-top: 1px solid var(--line); }
@@ -171,7 +173,7 @@ svg.fig { display: block; overflow: visible; }
 .recent .date { margin-left: 6px; }
 
 /* Ways in: four links on one hairline row, as on the home page. */
-.paths { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 14px 0 0; padding: 0; list-style: none; border-block: 1px solid var(--line); }
+.paths { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); margin: 14px 0 0; padding: 0; list-style: none; border-block: 1px solid var(--line); }
 .paths li + li { border-left: 1px solid var(--line); }
 .progress .paths a { display: flex; flex-direction: column; gap: 2px; height: 100%; padding: 12px 16px; text-decoration: none; }
 .paths li:first-child a { padding-left: 0; }
@@ -185,7 +187,7 @@ svg.fig { display: block; overflow: visible; }
 .bars { display: flex; gap: 6px; height: 122px; padding-top: 18px; box-sizing: border-box; }
 .bars .mark { flex: 1; display: flex; flex-direction: column; min-width: 0; outline: none; }
 .bar-slot { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; border-bottom: 1px solid var(--rh-line-strong); }
-.bars .wk { position: relative; display: block; width: 100%; max-width: 28px; min-height: 1px; border-radius: 4px 4px 0 0; background: var(--rh-prism-cyan); }
+.bars .wk { position: relative; display: block; width: 100%; max-width: 24px; min-height: 0; border-radius: 4px 4px 0 0; background: var(--rh-prism-cyan); }
 /* The label sits outside the bar, so it never takes height from it. */
 .bar-value { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 3px; font-size: 12px; font-style: normal; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; }
 .bar-tick { display: flex; justify-content: center; height: 18px; padding-top: 3px; font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
@@ -274,6 +276,11 @@ svg.fig { display: block; overflow: visible; }
   .group-body { padding-left: 0; }
   .checks { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .row.gap > summary { grid-template-columns: minmax(0, 1fr); }
+  .group > summary { grid-template-columns: 36px minmax(0, 1fr); gap: 2px 12px; }
+  .group .count { grid-row: 1 / span 2; }
+  .group .area { grid-column: 2; }
+  .firsts li { grid-template-columns: 28px minmax(0, 1fr); }
+  .firsts .date { grid-column: 2; }
 }
 @media (max-width: 420px) {
   .progress-page .site-nav a[href$="/ide/"], .progress-page .site-nav a[href$="/studio/"] { display: none; }
@@ -284,7 +291,7 @@ svg.fig { display: block; overflow: visible; }
 }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .group > summary::after, .row > summary::after { transition: none; } }
 @media (forced-colors: active) {
-  .f-pass, .f-ok, .f-bad, .f-ref, .f-week, .chart .dot { fill: CanvasText; forced-color-adjust: none; }
+  .f-pass, .f-ok, .f-bad, .f-ref, .f-week, .f-base, .chart .dot { fill: CanvasText; forced-color-adjust: none; }
   .f-gap, .f-open, .f-week.partial { stroke: CanvasText; forced-color-adjust: none; }
   .f-tick { fill: Canvas; forced-color-adjust: none; }
   .bars .wk { background: CanvasText; forced-color-adjust: none; }

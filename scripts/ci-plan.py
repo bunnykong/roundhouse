@@ -829,10 +829,14 @@ def select(
         if path.startswith("wasm/"):
             wasm = True
             reasons.append(f"{path}: WASM/browser compiler")
-        # The user guide and the docs renderer rebuild the site at once; the
-        # other published docs refresh with the next site build.
-        if path.startswith(("site/", "docs/guide/", "docs-site/")):
+        if path.startswith(("site/", "docs/guide/")):
             site = wasm = True
+        # The docs renderer and Progress build alone and offline, with no
+        # compiler, fixture or WASM; publication renders them in
+        # assemble-site. Other docs refresh with the next publication.
+        if path.startswith("docs-site/"):
+            jobs_selected.add("docs-site")
+            reasons.append(f"{path}: docs site")
         if (
             path.startswith("e2e/") and not path.startswith("e2e/campfire/")
         ) or path in {
@@ -863,6 +867,7 @@ def select(
         smoke.update(TARGETS)
         wasm = site = spinel = True
         reasons.append("full validation requested")
+        jobs_selected.add("docs-site")
         jobs_selected.update(SPINEL)
         jobs_selected.update(SPINEL_FULL_OR_PATH)
         spinel_tests.update(SPINEL_TESTS)
@@ -899,7 +904,7 @@ def select(
         jobs_selected.add("archive-results")
     jobs.extend(
         j
-        for j in [*SPINEL, *SPINEL_FULL_OR_PATH, "archive-results"]
+        for j in [*SPINEL, *SPINEL_FULL_OR_PATH, "archive-results", "docs-site"]
         if j in jobs_selected
     )
     if publish:

@@ -197,17 +197,24 @@ class Routing(unittest.TestCase):
         self.assertIn("browser-smoke-typescript", wasm["jobs"])
         self.assertNotIn("compare", wasm["jobs"])
 
-    def test_guide_and_docs_renderer_select_the_site_build(self):
-        for path in ["docs-site/_config.yml", "docs-site/_plugins/repo_docs.rb", "docs/guide/install.md"]:
+    def test_docs_renderer_builds_alone_and_other_docs_wait_for_publication(self):
+        # The renderer and Progress check offline, without the site, WASM or browsers.
+        for path in ["docs-site/_config.yml", "docs-site/_plugins/repo_docs.rb", "docs-site/progress/index.html"]:
             with self.subTest(path=path):
                 plan = ci.select([path])
-                self.assertTrue(plan["site"])
-                self.assertIn("build-site", plan["jobs"])
-        # Other published docs refresh with the next site build rather than
-        # pulling in the WASM build and browser smoke on their own.
-        for path in ["docs/pipeline/runtime.md", "RELEASES.md", "docs/roda-sequel-plan.md"]:
+                self.assertIn("docs-site", plan["jobs"])
+                self.assertFalse(plan["site"])
+                self.assertFalse(plan["wasm"])
+                self.assertNotIn("build-site", plan["jobs"])
+        # The guide still rebuilds the site, as before; the docs build isn't added to it.
+        guide = ci.select(["docs/guide/install.md"])
+        self.assertTrue(guide["site"])
+        self.assertNotIn("docs-site", guide["jobs"])
+        # Other published docs, and ordinary changes, select neither.
+        for path in ["docs/pipeline/runtime.md", "RELEASES.md", "docs/roda-sequel-plan.md", "src/emit/ruby.rs", "site/index.html"]:
             with self.subTest(path=path):
-                self.assertFalse(ci.select([path])["site"])
+                self.assertNotIn("docs-site", ci.select([path])["jobs"])
+        self.assertIn("docs-site", ci.select([], full=True)["jobs"])
 
     def test_shared_emitters_select_cross_target_full_coverage(self):
         for path in [

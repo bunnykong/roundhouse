@@ -64,7 +64,11 @@
     var specs = h.specs, act = h.activity, bench = h.bench;
     if (fresh(specs, 36)) {
       fill("specs", n(specs.passed) + " of " + n(specs.total), "Lobsters’ own model specs pass on the compiled app", "Nightly · " + day(specs.observed_at));
-      if (specs.unclassified > 0) fill("triage", n(specs.unclassified), "failing specs waiting for a first look. Start here.", "Nightly · " + day(specs.observed_at));
+      if (specs.unclassified > 0) {
+        fill("triage", n(specs.unclassified), "failing specs waiting for a first look. Start here.", "Nightly · " + day(specs.observed_at));
+        var triage = document.querySelector('[data-morsel="triage"]');
+        if (triage) triage.setAttribute("href", "progress/#cause-unclassified");
+      }
     }
     if (fresh(act, 24)) {
       fill("merged", n(act.merged_7d), "pull requests merged in the last 7 days, by " + n(act.people_7d) + " people", "GitHub · " + day(act.observed_at));

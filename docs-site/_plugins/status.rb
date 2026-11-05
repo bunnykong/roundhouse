@@ -313,6 +313,32 @@ end
     nil
   end
 
+  # How long a publishing build may reuse a source the last one collected. Merged pull
+  # requests and labelled issues take most of collection's time and change slowly, so
+  # they're collected about once a day; the nightly results are collected every time.
+  REFRESH_HOURS = { "activity" => 20, "help" => 20 }.freeze
+
+  def reusable?(key, old, now)
+    hours = REFRESH_HOURS[key]
+    return false unless hours && old.is_a?(Hash) && old["data"] && !old["cached"] && %w[ok reused].include?(old["fetch"])
+    (now - Time.parse(old["checked_at"].to_s)) < hours * 3600
+  rescue ArgumentError
+    false
+  end
+
+  # One source: collected, reused from the deployed snapshot, or, when collection
+  # fails, the deployed copy marked as saved. Never raises.
+  def feed_for(key, source, networked, old, now)
+    feed = { "checked_at" => now.iso8601, "cached" => false }
+    return feed.merge("fetch" => "offline", "observed_at" => nil, "data" => nil, "error" => "not collected in this build") if offline? && networked
+    return old.merge("fetch" => "reused") if networked && reusable?(key, old, now)
+    feed.merge("fetch" => "ok").merge(source.call)
+  rescue StandardError => e
+    feed.merge!("fetch" => e.is_a?(NotFound) ? "missing" : "error", "error" => e.message[0, 200], "observed_at" => nil, "data" => nil)
+    feed.merge!("data" => old["data"], "observed_at" => old["observed_at"], "sources" => old["sources"], "cached" => true) if old.is_a?(Hash) && old["data"]
+    feed
+  end
+
   def collect(config, root)
     cfg = config.fetch("status")
     site, repo = cfg.fetch("site"), cfg.fetch("repo")
@@ -328,22 +354,9 @@ end
       "archives" => -> { archives(site, repo) }, "bench" => -> { bench(site) },
       "help" => -> { help(repo) }, "activity" => -> { activity(repo, now, weeks: cfg.fetch("weeks", 12)) }
     }
-    local.merge(network).each do |key, source|
-      feed = { "checked_at" => now.iso8601, "cached" => false }
-      if offline? && network.key?(key)
-        feed.merge!("fetch" => "offline", "observed_at" => nil, "data" => nil, "error" => "not collected in this build")
-      else
-        begin
-          feed.merge!("fetch" => "ok").merge!(source.call)
-        rescue StandardError => e
-          feed.merge!("fetch" => e.is_a?(NotFound) ? "missing" : "error", "error" => e.message[0, 200], "observed_at" => nil, "data" => nil)
-          if (old = previous&.dig(key)) && old["data"]
-            feed.merge!("data" => old["data"], "observed_at" => old["observed_at"], "sources" => old["sources"], "cached" => true)
-          end
-        end
-      end
-      status[key] = feed
-    end
+    # The sources are independent, so they're collected at once: the build waits for the slowest.
+    threads = local.merge(network).to_h { |key, source| [key, Thread.new { feed_for(key, source, network.key?(key), previous&.dig(key), now) }] }
+    threads.each { |key, thread| status[key] = thread.value }
     status["highlights"] = highlights(status)
     status
   end
@@ -364,9 +377,7 @@ end
         break
       rescue StandardError => e
         next sleep(2**attempt) if attempt < 3
-        # A publishing build that can't read the deployed history would replace it with one
-        # point. Fail instead: the deployed history stays, and the next build tries again.
-        raise "status-history.json could not be carried forward: #{e.message[0, 160]}" if ENV["ROUNDHOUSE_STATUS"] == "on"
+        # Publication goes ahead: the new history starts here, and the page says it's incomplete.
         continuity = "interrupted"
         status["history_error"] = "not carried forward: #{e.message[0, 160]}"
       end

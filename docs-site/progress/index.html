@@ -17,7 +17,7 @@ permalink: /progress/
     <h1>Progress</h1>
     <p class="lede">Real Rails apps, measured against Rails. Early, and not ready for production.</p>
   </div>
-  <p class="jump">{% if p.results_date %}<span class="date">Results of {{ p.results_date }}</span>{% endif %}<a class="phone-only" href="#gaps">Where to help <span aria-hidden="true">↓</span></a><a href="#sources">About these numbers <span aria-hidden="true">↓</span></a></p>
+  <p class="jump">{% if p.results_date %}<span class="date">Results of {{ p.results_date }}</span>{% endif %}<a class="phone-only start-link" href="#help">Start contributing <span aria-hidden="true">↓</span></a><a href="#sources">About these numbers <span aria-hidden="true">↓</span></a></p>
 </header>
 
 {%- comment -%} Where it stands: one row per measure, each with what it does and doesn't show. They are never added up. {%- endcomment %}
@@ -33,7 +33,7 @@ permalink: /progress/
         {%- if g and g.headline %}
         <td class="result"><b>{{ g.passed }} / {{ g.total }}</b> <span>passed</span></td>
         <td class="fig">{{ g.figure }}</td>
-        <td class="scope">Emitted Ruby. <b>{{ g.scope.spec_files_run }} of {{ g.scope.spec_files_in_suite }} spec files ran</b>; the dashed gap is {{ g.failed }} failing examples{% if g.outside > 0 %}, plus {{ g.outside }} {% if g.outside == 1 %}error{% else %}errors{% endif %} outside them{% endif %}{% if g.pending > 0 %}; {{ g.pending }} pending{% endif %}.{% if st.specs.when %} <span class="when">{{ st.specs.when }}</span>{% endif %}</td>
+        <td class="scope">Emitted Ruby. <b>{{ g.scope.spec_files_run }} of {{ g.scope.spec_files_in_suite }} spec files ran</b>; {% if g.figure %}the dashed gap is the {{ g.failed }} that fail{% else %}{{ g.failed }} fail{% endif %}.{% if g.outside > 0 %} {{ g.outside }} more {% if g.outside == 1 %}error{% else %}errors{% endif %} came from outside the examples.{% endif %}{% if g.pending > 0 %} {{ g.pending }} pending.{% endif %}{% if st.specs.when %} <span class="when">{{ st.specs.when }}</span>{% endif %}</td>
         {%- elsif g %}
         <td class="result na"><b>Withheld</b></td><td class="fig"></td>
         <td class="scope">{% if g.canary_ok == false %}The harness didn’t establish that these results came from the emitted Ruby.{% else %}The published totals don’t agree.{% endif %} <a href="{{ g.report_url }}">Read the report</a>.</td>
@@ -79,9 +79,9 @@ permalink: /progress/
     <dt>Movement</dt>
     <dd><span class="what">App results</span><span>{% if t.count == 0 %}History starts with this page; each nightly run adds a point.{% elsif t.count == 1 %}One nightly run recorded. The trend starts with the next comparable run.{% elsif t.change %}{{ t.change }} <a href="#over-time">The trend</a>{% else %}History starts on {{ t.since }}; each nightly run adds a point. <a href="#over-time">The trend</a>{% endif %}</span></dd>
     {%- if ac %}
-    <dd><span class="what">Work merged</span><a href="#activity"><b>{{ ac.merged_7d }} pull requests</b> in 7 days by <b>{{ ac.people_7d }} people</b></a>{% if ac.spark %}{{ ac.spark }}<span class="axis">{{ ac.bars.size }} weeks</span>{% endif %}</dd>
+    <dd><span class="what">Work merged</span><a href="#activity"><b>{{ ac.merged_7d }} pull requests</b> in 7 days by <b>{{ ac.people_7d }} people</b></a>{% if st.activity.when %}<span class="when">{{ st.activity.when }}</span>{% endif %}{% if ac.spark %}{{ ac.spark }}<span class="axis">{{ ac.bars.size }} weeks{% if ac.bars.last.partial %}, the last so far{% endif %}</span>{% endif %}</dd>
     {%- if ac.firsts.size > 0 %}
-    <dd><span class="what">First-timers</span><a href="#welcome"><b>{{ ac.firsts.size }} first-timers</b> in 30 days</a><span class="faces" aria-hidden="true">{% for f in ac.firsts_alpha limit: 16 %}<img src="{{ f.avatar }}&amp;s=48" alt="" width="24" height="24" loading="lazy">{% endfor %}{% if ac.firsts.size > 16 %}<span class="more">+{{ ac.firsts.size | minus: 16 }}</span>{% endif %}</span></dd>
+    <dd><span class="what">First-timers</span><a href="#welcome"><b>{{ ac.firsts.size }} first-timers</b> in 30 days</a>{% if st.activity.when %}<span class="when">{{ st.activity.when }}</span>{% endif %}<span class="faces" aria-hidden="true">{% for f in ac.firsts_alpha limit: 16 %}<img src="{{ f.avatar }}&amp;s=48" alt="" width="24" height="24" loading="lazy">{% endfor %}{% if ac.firsts.size > 16 %}<span class="more">+{{ ac.firsts.size | minus: 16 }}</span>{% endif %}</span></dd>
     {%- endif %}
     {%- else %}
     <dd><span class="what">Work merged</span><span>{{ st.activity.note }}</span></dd>
@@ -96,7 +96,7 @@ permalink: /progress/
     <h2 id="gaps-title"><span class="roundel" aria-hidden="true"></span>Where to help</h2>
     {%- if g %}<p class="date">{% if g.headline %}{{ g.failed }} failing examples · {% endif %}<a href="{{ g.report_url }}">Report</a></p>{% endif %}
   </div>
-  {%- if g and g.groups.size > 0 %}
+  {%- if g and g.headline and g.groups.size > 0 %}
   <table class="failures">
     <caption class="sr">Lobsters failure groups, each with a first step. Counts are examples, not distinct causes.</caption>
     <colgroup><col class="c-count"><col class="c-group"><col class="c-step"></colgroup>
@@ -121,22 +121,30 @@ permalink: /progress/
     </table>
   </details>
   {%- endif %}
-  {%- elsif g %}
+  {%- elsif g and g.headline %}
   <p class="notice">No failure groups in this run. <a href="{{ g.report_url }}">Read the report</a>.</p>
+  {%- elsif g %}
+  <p class="notice">Failure groups are withheld because this run couldn’t be verified. <a href="{{ g.report_url }}">Read the report</a>.</p>
   {%- else %}
   <p class="notice">{{ st.specs.note }} <a href="https://roundhouse-rb.dev/bench/lobsters-specs/">The report</a> has the latest result.</p>
   {%- endif %}
 </section>
 <aside class="start" id="help" aria-labelledby="start-title">
+  {%- if g and g.headline and g.unclassified > 0 %}
   <h2 id="start-title">Start with one failure</h2>
-  {%- if g and g.unclassified > 0 %}
   <p>A useful first contribution is a diagnosis. Reproduce one example against Rails, then name the difference.</p>
   <a class="button primary" href="#cause-unclassified">Triage one example <span aria-hidden="true">→</span></a>
-  {%- else %}
+  <a class="setup" href="{{ '/docs/development/' | relative_url }}">New here? Set up a checkout <span aria-hidden="true">→</span></a>
+  {%- elsif g and g.headline and g.groups.size > 0 %}
+  <h2 id="start-title">Start with one failure</h2>
   <p>A useful first contribution is a reduction. Take one failing example down to a few lines, then check it against Rails.</p>
   <a class="button primary" href="#groups">Pick a failure group <span aria-hidden="true">→</span></a>
-  {%- endif %}
   <a class="setup" href="{{ '/docs/development/' | relative_url }}">New here? Set up a checkout <span aria-hidden="true">→</span></a>
+  {%- else %}
+  <h2 id="start-title">Help improve Roundhouse</h2>
+  <p>Start by building Roundhouse and running the tests.</p>
+  <a class="button primary" href="{{ '/docs/development/' | relative_url }}">Set up a checkout <span aria-hidden="true">→</span></a>
+  {%- endif %}
 </aside>
 </div>
 
@@ -158,6 +166,7 @@ permalink: /progress/
     {%- else %}
     <p class="notice">The published totals don’t agree ({{ g.problems | join: "; " }}), so the counts are withheld until the source is fixed. <a href="{{ g.report_url }}">Read the report</a>.</p>
     {%- endif %}
+    {%- if g.headline %}
     <ul class="groups">
       {%- for c in g.groups %}
       <li><details class="group{% if c.slug == 'unclassified' %} entry{% endif %}" id="{{ c.anchor }}">
@@ -195,6 +204,7 @@ permalink: /progress/
       </details></li>
       {%- endif %}
     </ul>
+    {%- endif %}
     <p class="foot">Ruby {{ g.ruby | escape }} · Lobsters <a href="{{ g.lobsters_url }}"><code>{{ g.lobsters_sha }}</code></a> · Roundhouse <a href="{{ g.roundhouse_url }}"><code>{{ g.roundhouse_sha }}</code></a></p>
     {%- else %}
     <p class="notice">{{ st.specs.note }} The model specs run Lobsters’ own tests against the emitted Ruby; <a href="https://roundhouse-rb.dev/bench/lobsters-specs/">the report</a> has the latest result.</p>
@@ -295,7 +305,7 @@ permalink: /progress/
     </dl>
     {%- if a.others.size > 0 %}
     <details class="table-view">
-      <summary>{{ a.others.size }} more ran, not selected for publication</summary>
+      <summary>{{ a.others.size }} more ran outside this run’s plan</summary>
       <ul class="others">
         {%- for row in a.others %}<li title="{{ row.detail | escape }}">{{ row.app }}: {{ row.name }}{% if row.detail %}<span class="sr">. {{ row.detail | escape }}</span>{% endif %}</li>{% endfor %}
       </ul>
@@ -409,8 +419,14 @@ permalink: /progress/
     <p>Your first contribution doesn’t have to be a compiler patch.</p>
     <ul class="paths">
       <li><a href="{{ '/docs/development/' | relative_url }}"><b>Set up a checkout</b><span>Build Roundhouse and run the tests.</span></a></li>
+      {%- if g and g.headline and g.unclassified > 0 %}
       <li><a href="#cause-unclassified"><b>Reproduce a failure</b><span>Give an untriaged example a name.</span></a></li>
+      {%- elsif g and g.headline and g.groups.size > 0 %}
+      <li><a href="#groups"><b>Reduce a failure</b><span>Take one failing example down to a few lines.</span></a></li>
+      {%- endif %}
+      {%- if g and g.headline and g.stale_rules.size > 0 %}
       <li><a href="#cause-rules"><b>Verify a previous failure</b><span>Recheck a rule nothing matched.</span></a></li>
+      {%- endif %}
       <li><a href="{{ '/docs/development/compiler-changes.html' | relative_url }}"><b>Change the compiler</b><span>Where each stage lives, and its tests.</span></a></li>
     </ul>
     {%- assign hp = p.help %}

@@ -3259,34 +3259,6 @@ jobs:
             mkdir -p _site
           fi
 
-      # The docs pages → _site/docs/. Jekyll renders docs/*.md and
-      # RELEASES.md in place (docs-site/_plugins/repo_docs.rb) and
-      # replaces the guide pages `--site` wrote, adding the contributor
-      # and pipeline docs. The build fails if a page doesn't convert.
-      - name: Install the docs site's gems
-        if: needs.plan.outputs.site == 'true'
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: ${{ env.MRI_RUBY }}
-          bundler-cache: true
-          working-directory: ./docs-site
-      - name: Render the docs pages (→ _site/docs)
-        if: needs.plan.outputs.site == 'true'
-        env:
-          # Public pull requests, issues and runs need no extra token permissions;
-          # the token only lifts the API rate limit.
-          GITHUB_TOKEN: ${{ github.token }}
-          # Project status is collected only for builds that publish; others stay offline.
-          ROUNDHOUSE_STATUS: ${{ needs.plan.outputs.publish == 'true' && 'on' || 'off' }}
-        run: |
-          (cd docs-site && bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site")
-          rm -rf _site/docs
-          cp -R "$RUNNER_TEMP/docs-site/docs" _site/docs
-          rm -rf _site/progress
-          cp -R "$RUNNER_TEMP/docs-site/progress" _site/progress
-          cp "$RUNNER_TEMP/docs-site/status.json" "$RUNNER_TEMP/docs-site/status-history.json" _site/
-          echo "docs pages:"; find _site/docs -name '*.html' | sort
-
       # Live SharedWorker blog demo → _site/blog/. Emits real-blog under
       # the worker profile, vite-builds it with ROUNDHOUSE_BASE set to the
       # Pages mount path, and drops dist/ alongside the static site. The
@@ -3733,6 +3705,27 @@ jobs:
 
   # Publication only: PR smoke jobs consume browse-archives, not Pages.
   # Finish Pages assembly without keeping blog smoke jobs behind Campfire.
+  docs-site:
+    # The docs pages and Progress, built offline from this checkout: the check
+    # for a change to docs-site/. It needs no compiler, fixture or WASM, and
+    # only the summary waits on it. Publication renders the same pages, with
+    # live status, in assemble-site.
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'docs-site') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
+          bundler-cache: true
+          working-directory: ./docs-site
+      - name: Render the docs pages and Progress (offline)
+        env:
+          ROUNDHOUSE_STATUS: 'off'
+        run: cd docs-site && bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site"
+
   assemble-site:
     # campfire-conformance is here for ORDERING ONLY — its summary.json is
     # this job's input. Assembly can render a failed conformance report
@@ -3821,6 +3814,40 @@ jobs:
             rmdir _site/bench 2>/dev/null || true
           fi
 
+      # The docs pages and Progress → _site/docs, _site/progress and the
+      # status files. Jekyll renders docs/*.md and RELEASES.md in place
+      # (docs-site/_plugins/repo_docs.rb), replacing the guide pages --site
+      # wrote. Only publication renders them, so other runs never install
+      # these gems or call the network. Collection takes about 3 s; merged
+      # pull requests refresh about once a day (about 25 s). A page that
+      # doesn't convert links to its source with a warning, and if the
+      # build fails the guide pages stay: this never blocks deployment.
+      - name: Install the docs site's gems
+        id: docs-gems
+        continue-on-error: true
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
+          bundler-cache: true
+          working-directory: ./docs-site
+      - name: Render the docs pages and Progress
+        env:
+          GEMS: ${{ steps.docs-gems.outcome }}
+          # Public pull requests, issues and runs need no extra token permissions;
+          # the token only lifts the API rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
+          ROUNDHOUSE_STATUS: 'on'
+          ROUNDHOUSE_DOCS_LENIENT: '1'
+        run: |
+          if [ "$GEMS" = success ] && (cd docs-site && bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site"); then
+            rm -rf _site/docs _site/progress
+            cp -R "$RUNNER_TEMP/docs-site/docs" _site/docs
+            cp -R "$RUNNER_TEMP/docs-site/progress" _site/progress
+            cp "$RUNNER_TEMP/docs-site/status.json" "$RUNNER_TEMP/docs-site/status-history.json" _site/
+          else
+            echo "::warning::The docs site didn't build; publishing the guide pages from --site, without Progress."
+          fi
+
       - name: Verify published archive bytes
         # Verify the copied download bytes against their producer/test report.
         # Failed validations may publish as repros; mismatched bytes may not.
@@ -3864,7 +3891,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, docs-site, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
