@@ -3817,36 +3817,65 @@ jobs:
       # The docs pages and Progress → _site/docs, _site/progress and the
       # status files. Jekyll renders docs/*.md and RELEASES.md in place
       # (docs-site/_plugins/repo_docs.rb), replacing the guide pages --site
-      # wrote. Only publication renders them, so other runs never install
-      # these gems or call the network. Collection takes about 3 s; merged
-      # pull requests refresh about once a day (about 25 s). A page that
-      # doesn't convert links to its source with a warning, and if the
-      # build fails the guide pages stay: this never blocks deployment.
+      # wrote, and reads the reports this run staged in _site. Only
+      # publication renders them, so other runs never install these gems or
+      # call the network. Collection takes about 3 s, at most 2 minutes;
+      # merged pull requests refresh about once a day (about 25 s). A page
+      # that doesn't convert links to its source with a warning. If the gems,
+      # the render or its time limit fail, the deployed docs pages, Progress
+      # and status files are published again: this never blocks deployment.
       - name: Install the docs site's gems
         id: docs-gems
         continue-on-error: true
+        timeout-minutes: 5
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./docs-site
       - name: Render the docs pages and Progress
+        id: docs-render
+        if: ${{ steps.docs-gems.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 6
+        working-directory: docs-site
         env:
-          GEMS: ${{ steps.docs-gems.outcome }}
           # Public pull requests, issues and runs need no extra token permissions;
           # the token only lifts the API rate limit.
           GITHUB_TOKEN: ${{ github.token }}
           ROUNDHOUSE_STATUS: 'on'
+          ROUNDHOUSE_STATUS_STAGED: ${{ github.workspace }}/_site
           ROUNDHOUSE_DOCS_LENIENT: '1'
+        run: bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site"
+      - name: Publish the docs pages and Progress
+        env:
+          RENDERED: ${{ steps.docs-render.outcome }}
+          SITE: https://roundhouse-rb.dev
         run: |
-          if [ "$GEMS" = success ] && (cd docs-site && bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site"); then
+          built="$RUNNER_TEMP/docs-site" kept="$RUNNER_TEMP/docs-site-deployed"
+          if [ "$RENDERED" = success ]; then
             rm -rf _site/docs _site/progress
-            cp -R "$RUNNER_TEMP/docs-site/docs" _site/docs
-            cp -R "$RUNNER_TEMP/docs-site/progress" _site/progress
-            cp "$RUNNER_TEMP/docs-site/status.json" "$RUNNER_TEMP/docs-site/status-history.json" _site/
-          else
-            echo "::warning::The docs site didn't build; publishing the guide pages from --site, without Progress."
+            cp -R "$built/docs" "$built/progress" "$built/status.json" "$built/status-history.json" _site/
+            # The list a later failed render republishes from.
+            (cd _site && find docs progress -type f | LC_ALL=C sort) > _site/ci/docs-site-files.txt
+            exit 0
           fi
+          echo "::warning::The docs site didn't build; publishing the deployed docs pages, Progress and status files again."
+          mkdir -p "$kept"
+          # The list comes from the deployed site, so only plain paths under docs/ and progress/ are fetched.
+          if curl -fsS --max-time 20 "$SITE/ci/docs-site-files.txt" -o "$kept/files.txt" && [ -s "$kept/files.txt" ] \
+            && ! grep -Evxq '(docs|progress)(/[A-Za-z0-9_][A-Za-z0-9_.-]*)+' "$kept/files.txt" \
+            && xargs -P 8 -I{} curl -fsS --max-time 20 --create-dirs -o "$kept/{}" "$SITE/{}" < "$kept/files.txt"; then
+            for dir in docs progress; do
+              if [ -d "$kept/$dir" ]; then rm -rf "_site/$dir" && cp -R "$kept/$dir" _site/; fi
+            done
+            cp "$kept/files.txt" _site/ci/docs-site-files.txt
+          else
+            echo "::warning::The deployed docs pages couldn't be fetched; publishing the guide pages from --site, without Progress."
+          fi
+          for file in status.json status-history.json; do
+            curl -fsS --max-time 20 "$SITE/$file" -o "_site/$file" || echo "::warning::$file couldn't be published again."
+          done
 
       - name: Verify published archive bytes
         # Verify the copied download bytes against their producer/test report.
