@@ -5,10 +5,10 @@
 {%- endcomment -%}
 {%- assign m = include.m -%}
 <article class="mult{% if include.wide %} wide{% endif %}" id="trend-{{ m.id | escape }}" aria-labelledby="trend-{{ m.id | escape }}-title">
-  <header><h4 id="trend-{{ m.id | escape }}-title">{{ m.label | escape }}</h4><p class="cue">{% if m.better == "lower" %}↓ {{ m.cue | escape }}{% elsif m.better == "higher" %}↑ {{ m.cue | escape }}{% else %}Context only{% endif %}</p></header>
+  <header><h4 id="trend-{{ m.id | escape }}-title">{{ m.label | escape }}</h4>{% if m.better %}<p class="cue">{% if m.better == "lower" %}↓{% else %}↑{% endif %} {{ m.cue | escape }}</p>{% endif %}</header>
   <p class="def">{{ m.definition | escape }}</p>
   {%- if m.value %}
-  <p class="now"><b>{{ m.value_num | escape }}{% if m.value_unit %}<span class="unit">{{ m.value_unit | escape }}</span>{% endif %}</b>{% if m.delta %}<span class="t-delta">{{ m.delta.text | escape }}{% if m.delta.mark %} <span class="verdict {{ m.delta.verdict | escape }}">{{ m.delta.mark | escape }}</span>{% endif %}</span>{% endif %}</p>
+  <p class="now"><b>{{ m.value_num | escape }}{% if m.value_unit %}<span class="unit">{{ m.value_unit | escape }}</span>{% endif %}</b>{% if m.delta %}<span class="t-delta">{{ m.delta.text | escape }}</span>{% endif %}</p>
   {%- if m.sub %}<p class="sub">{{ m.sub | escape }}</p>{% endif %}
   {%- endif %}
   {%- if m.chart %}
@@ -23,6 +23,10 @@
   </div>
   {%- endif %}
   <p class="single-note">First measurement · {{ m.first | escape }}. Change over time needs another comparable run.</p>
+  {%- elsif m.ranked %}
+  <ol class="ranked">
+    {%- for r in m.ranked %}<li><span class="pair-name">{{ r.name | escape }}</span><span class="pair-val">{{ r.text | escape }} <span class="muted">{{ r.runs | escape }}</span></span><span class="pair-bar" style="--w: {{ r.pct | escape }}%"></span></li>{% endfor %}
+  </ol>
   {%- elsif include.empty %}
   <p class="notice">{{ include.empty | escape }}</p>
   {%- endif %}

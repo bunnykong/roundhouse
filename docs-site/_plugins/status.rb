@@ -247,24 +247,71 @@ module RoundhouseStatus
 
   # --- CI on main: how long a merge waits for its verdict, week by week ---------
 
+  JOB_SAMPLE = 6 # green runs a week whose jobs are read
+  JOB_BACKFILL = 2 # older weeks given a job sample per collection
+  CI_REQUESTS = 8 # requests in flight at once
+
   # A run on main is cancelled when a newer merge lands, so "superseded" is its
   # own count, apart from failures. Times are for green runs: start to finish.
-  def ci(repo, now, weeks:)
+  def ci(repo, now, weeks:, old: nil)
     monday = now - ((now.wday - 1) % 7) * 86_400
     start = Time.utc(monday.year, monday.month, monday.day)
     base = "https://api.github.com/repos/#{repo}/actions/workflows/ci.yml/runs?event=push&branch=main"
-    rows = (0...weeks).map { |i| start - (weeks - 1 - i) * 7 * 86_400 }.map do |from|
-      Thread.new do
+    # A week that had finished by the last collection doesn't change: reuse it.
+    kept = old.to_h.fetch("weeks", []).to_h { |x| [x["week"], x] }
+    # At most CI_REQUESTS at once: GitHub refuses a burst of connections.
+    gate = SizedQueue.new(CI_REQUESTS)
+    CI_REQUESTS.times { gate << true }
+    get = lambda do |url|
+      gate.pop
+      begin
+        json(url, github_headers)
+      ensure
+        gate << true
+      end
+    end
+    spawn = ->(&work) { Thread.new { Thread.current.report_on_exception = false; work.call } }
+    # Job samples are the slow part: the current and last week always get one, and up
+    # to JOB_BACKFILL older weeks without one per collection, newest first.
+    starts = (0...weeks).map { |i| start - (weeks - 1 - i) * 7 * 86_400 }
+    finished = ->(from) { (prior = kept[from.strftime("%F")]) && !prior["partial"] && from + 14 * 86_400 <= now }
+    backfill = starts.reverse.reject { |from| from + 14 * 86_400 > now || (finished.(from) && kept[from.strftime("%F")]["jobs_ran"]) }.first(JOB_BACKFILL)
+    rows = starts.map do |from|
+      prior = kept[from.strftime("%F")]
+      next spawn.() { prior } if finished.(from) && (prior["jobs_ran"] || !backfill.include?(from))
+      sample_jobs = from + 14 * 86_400 > now || backfill.include?(from)
+      spawn.() do # a failure surfaces once, through the feed, with its saved result
         range = "created=#{from.strftime('%F')}..#{(from + 6 * 86_400).strftime('%F')}"
-        count = ->(status) { json("#{base}&status=#{status}&per_page=1&#{range}", github_headers).fetch("total_count") }
-        completed, green, failed, cancelled = %w[completed success failure cancelled].map(&count)
+        count = ->(status) { get.("#{base}&status=#{status}&per_page=1&#{range}").fetch("total_count") }
+        completed, green, failed, cancelled = %w[completed success failure cancelled].map { |st| spawn.() { count.(st) } }.map(&:value)
         minutes = (1..[(green / 100.0).ceil, 3].min).flat_map do |page|
-          json("#{base}&status=success&per_page=100&page=#{page}&#{range}", github_headers).fetch("workflow_runs")
+          get.("#{base}&status=success&per_page=100&page=#{page}&#{range}").fetch("workflow_runs")
         end.map { |r| (Time.parse(r["updated_at"]) - Time.parse(r["run_started_at"])) / 60.0 }.sort
         q = ->(p) { minutes.empty? ? nil : minutes[(p * (minutes.size - 1)).round].round(1) }
+        # The work behind a green run: how many jobs ran and their summed minutes,
+        # from the week's latest few green runs, and each job's time (shards as one).
+        sample = (sample_jobs ? get.("#{base}&status=success&per_page=#{JOB_SAMPLE}&#{range}").fetch("workflow_runs") : []).map do |r|
+          spawn.() do
+            get.("https://api.github.com/repos/#{repo}/actions/runs/#{r["id"]}/jobs?per_page=100&filter=latest").fetch("jobs")
+          rescue StandardError # one run's jobs that won't load leave the sample smaller, not the week empty
+            nil
+          end
+        end.filter_map(&:value).map do |jobs|
+          ran = jobs.select { |j| j["conclusion"] == "success" && j["started_at"] && j["completed_at"] }
+          span = ran.to_h { |j| [j["name"], (Time.parse(j["completed_at"]) - Time.parse(j["started_at"])) / 60.0] }
+          by_job = span.group_by { |name, _| name.sub(/ \(\d+\)\z/, "").sub(/ \(suite, .*\)\z/, "") }.transform_values { |xs| xs.map(&:last).max }
+          { "jobs" => ran.size, "runner_min" => span.values.sum, "by_job" => by_job }
+        end
+        mid = ->(xs) { xs.empty? ? nil : xs.sort[xs.size / 2] }
+        slowest = sample.flat_map { |x| x["by_job"].to_a }.group_by(&:first)
+                        .map { |name, xs| { "name" => name, "median_min" => mid.(xs.map(&:last)).round(1), "runs" => xs.size } }
+                        .sort_by { |j| -j["median_min"] }.first(6)
         { "week" => from.strftime("%F"), "completed" => completed, "green" => green, "failed" => failed, "superseded" => cancelled,
           "other" => completed - green - failed - cancelled, "median_min" => q.(0.5), "p90_min" => q.(0.9), "timed" => minutes.size,
-          "partial" => from + 7 * 86_400 > now }
+          "jobs_ran" => mid.(sample.map { |x| x["jobs"] }), "runner_min" => mid.(sample.map { |x| x["runner_min"] })&.round,
+          "sampled" => sample.size, "slowest" => slowest, "partial" => from + 7 * 86_400 > now,
+          # Last, so it wins: a week that had a sample keeps it when only its counts were refreshed.
+          **(sample.empty? && prior&.dig("jobs_ran") ? prior.slice("jobs_ran", "runner_min", "sampled", "slowest") : {}) }
       end
     end.map(&:value)
     { "observed_at" => now.iso8601, "sources" => ["https://github.com/#{repo}/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush"],
@@ -439,7 +486,7 @@ module RoundhouseStatus
       "specs" => -> { specs(site) }, "replay" => -> { replay(cfg.fetch("lobsters_bench")) },
       "archives" => -> { archives(site, repo) }, "bench" => -> { bench(site) },
       "help" => -> { help(repo) }, "activity" => -> { activity(repo, now, weeks: cfg.fetch("weeks", 12)) },
-      "ci" => -> { ci(repo, now, weeks: cfg.fetch("weeks", 12)) }
+      "ci" => -> { ci(repo, now, weeks: cfg.fetch("weeks", 12), old: previous&.dig("ci", "data")) }
     }
     # The sources are independent, so they're collected at once: the build waits for the slowest.
     threads = local.merge(network).to_h { |key, source| [key, Thread.new { feed_for(key, source, network.key?(key), previous&.dig(key), now) }] }

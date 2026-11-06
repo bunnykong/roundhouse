@@ -341,45 +341,14 @@ module RoundhouseProgress
   def delta(now, was, better:, since:, fmt:, noise: 0)
     return nil unless now && was
     change = now - was
-    return { "text" => "No change since #{since}", "verdict" => "same" } if change.abs <= noise
-    good = better && (better == "higher" ? change.positive? : change.negative?)
-    { "text" => "#{change.positive? ? "▲" : "▼"} #{fmt.(change.abs)} since #{since}", "verdict" => better ? (good ? "better" : "worse") : "neutral",
-      "mark" => better ? (good ? "✓ better" : "✕ worse") : nil }
+    return { "text" => "No change since #{since}" } if change.abs <= noise
+    { "text" => "#{change.positive? ? "▲" : "▼"} #{fmt.(change.abs)} since #{since}" }
   end
 
   def short_date(iso) = iso && day(iso).strftime("%-d %b")
   def ratio(v) = v >= 1 ? "#{v.round(1)}×" : "#{v.round(2)}×"
 
   CUES = { "lower" => "Lower is better", "higher" => "Higher is better" }.freeze
-
-  # One sentence per family, from the numbers it heads; never a guess.
-  def findings(trends, status)
-    out = {}
-    if (weeks = status.dig("ci", "data", "weeks"))
-      done = weeks.reject { |x| x["partial"] }.select { |x| x["median_min"] }
-      if done.size >= 8
-        recent, before = done.last(4).sum { |x| x["median_min"] } / 4.0, done[-8..-5].sum { |x| x["median_min"] } / 4.0
-        change = (recent - before) / before
-        out["build"] = if change > 0.15 then "Green runs on main are taking longer."
-                       elsif change < -0.15 then "Green runs on main are getting faster."
-                       else "Time to a green run on main is steady."
-                       end
-      end
-    end
-    rt = trends["runtime"].to_a
-    if rt.any?
-      t = rt.find { |m| m["id"] == "throughput" }
-      out["runtime"] = if rt.all? { |m| m["count"] == 1 } then "A baseline to build on."
-                       elsif t && t["delta"] && t["delta"]["verdict"] == "better" then "Throughput is up on the last comparable run."
-                       elsif t && t["delta"] && t["delta"]["verdict"] == "worse" then "Throughput is down on the last comparable run."
-                       elsif t && t["delta"] then "No measurable change since the last comparable run."
-                       else "The latest run isn't comparable with the one before."
-                       end
-    end
-    sp = trends["specs"]
-    out["apps"] = sp && sp["value"] ? "#{sp["value"]} model specs pass." : "Model-spec results are missing upstream."
-    out
-  end
 
   def measure(id, label:, definition:, better:, series:, value:, sub: nil, delta: nil, fmt:, ref: nil, ref_label: nil, rows: [], columns: [], note: nil, first: nil, legend: nil, facts: nil, conditions: nil, w: 480, pair: nil, headline_value: nil, href: nil)
     pts = series.flat_map { |x| x["points"] }
@@ -415,7 +384,8 @@ module RoundhouseProgress
     measure("ci", label: "Time to a green run on main", better: "lower", fmt: min, w: 720,
             definition: "Minutes from a green run's start to its last update, for runs after a merge to main. Queueing before the start isn't included.",
             series: [{ "name" => "Median", "short" => "median", "cls" => "s-n", "primary" => true, "points" => pts }],
-            value: now && min.(now["median_min"]), sub: now && "Week of #{short_date(now["week"])} · p90 #{min.(now["p90_min"])}",
+            value: now && min.(now["median_min"]),
+            sub: now && ["Week of #{short_date(now["week"])}", "p90 #{min.(now["p90_min"])}", (done[-2] && "#{min.(done[-2]["median_min"])} the week before")].compact.join(" · "),
             delta: now && now != was && delta(now["median_min"], was["median_min"], better: "lower", since: short_date(was["week"]), fmt: min, noise: 1),
             legend: "Line: weekly median. Band: up to the 90th percentile. Hollow: an unfinished week, or under 10 green runs.",
             conditions: "ci.yml on pushes to main · green runs only · start to finish",
@@ -423,6 +393,40 @@ module RoundhouseProgress
             facts: (cur = weeks.last)["partial"] && cur["median_min"] ? [["This week, so far", "#{min.(cur["median_min"])} · #{plural(cur["timed"], "green run")}"]] : nil,
             columns: ["Week of", "Runs", "Green", "Failed", "Cancelled", "Median, min", "90th percentile, min"],
             rows: weeks.reverse.map { |x| [date(x["week"]) + (x["partial"] ? ", so far" : ""), x["completed"], x["green"], x["failed"], x["superseded"], x["median_min"]&.round, x["p90_min"]&.round] })
+  end
+
+  # The work behind a green run on main: runner-minutes and jobs that ran, from a
+  # sample of each week's green runs.
+  def work_measure(feed)
+    weeks = feed.dig("data", "weeks").to_a.select { |x| x["runner_min"] }
+    return nil if weeks.empty?
+    pts = weeks.map do |x|
+      { "at" => "#{x["week"]}T00:00:00Z", "y" => x["runner_min"], "partial" => x["partial"], "when" => "Week of #{date(x["week"])}#{", so far" if x["partial"]}",
+        "tip" => "#{num(x["runner_min"])}; #{plural(x["jobs_ran"], "job")} ran (median of #{plural(x["sampled"], "green run")})" }
+    end
+    done = weeks.reject { |x| x["partial"] }
+    now, was = done.last, weeks.first
+    measure("work", label: "Work per green run", better: nil, fmt: ->(v) { "#{num(v.round)} min" }, w: 720,
+            definition: "Runner-minutes summed over a green run's jobs, and how many jobs ran: the median of a sample of each week's green runs on main. The planner picks a merge's jobs from what it changed.",
+            series: [{ "name" => "Runner-minutes", "short" => "", "cls" => "s-n", "primary" => true, "points" => pts }],
+            value: now && "#{num(now["runner_min"])} runner-minutes", sub: now && "Week of #{short_date(now["week"])} · #{plural(now["jobs_ran"], "job")} ran",
+            facts: now && was && now != was ? [["Week of #{short_date(was["week"])}", "#{num(was["runner_min"])} runner-minutes · #{plural(was["jobs_ran"], "job")}"]] : nil,
+            legend: "Hollow: an unfinished week.",
+            columns: ["Week of", "Jobs that ran", "Runner-minutes", "Green runs sampled"],
+            rows: weeks.reverse.map { |x| [date(x["week"]) + (x["partial"] ? ", so far" : ""), x["jobs_ran"], x["runner_min"], x["sampled"]] })
+  end
+
+  def slowest_measure(feed)
+    week = feed.dig("data", "weeks").to_a.reject { |x| x["partial"] }.select { |x| x["slowest"].to_a.any? }.last
+    return nil unless week
+    jobs = week["slowest"]
+    top = jobs.map { |j| j["median_min"] }.max.to_f
+    {
+      "id" => "slowest", "label" => "Slowest jobs", "cue" => nil, "better" => nil,
+      "definition" => "Median minutes per job in the week of #{short_date(week["week"])}, from #{plural(week["sampled"], "green run")}; a sharded job counts as its slowest shard.",
+      "ranked" => jobs.map { |j| { "name" => j["name"], "text" => "#{j["median_min"]} min", "pct" => top.positive? ? (100 * j["median_min"] / top).round(1) : 0, "runs" => "in #{j["runs"]} of #{week["sampled"]}" } },
+      "rows" => [], "columns" => []
+    }
   end
 
   # Merged pull requests per week: activity, with no better direction.
@@ -464,7 +468,7 @@ module RoundhouseProgress
     blocks = history["points"].filter_map { |p| p["bench"] }.uniq { |b| b["observed_at"] }.sort_by { |b| b["observed_at"] }
     return [] if blocks.empty?
     conditions = bench_conditions(feed)
-    RUNTIME.map do |id, i, better, label, definition, long, short_fmt, unit|
+    RUNTIME.filter_map do |id, i, better, label, definition, long, short_fmt, unit|
       pick = lambda do |target|
         prev = nil
         blocks.filter_map do |b|
@@ -479,6 +483,7 @@ module RoundhouseProgress
         end
       end
       mine, rails, native = pick.("ruby"), pick.("rails"), pick.("spinel")
+      next if mine.empty? # no generated-Ruby value for this measure: leave it out, not the rest
       now, base = mine.last, rails.last
       prev = mine[-2]
       comparable = prev && prev["key"] == now["key"]
@@ -533,7 +538,7 @@ module RoundhouseProgress
     done = weeks.reject { |x| x["partial"] }.last || weeks.last
     share = ->(n) { done["completed"].positive? ? "#{(100.0 * n / done["completed"]).round}%" : "–" }
     {
-      "id" => "outcomes", "label" => "Runs on main, by outcome", "cue" => "Context only", "chart" => chart,
+      "id" => "outcomes", "label" => "Runs on main, by outcome", "chart" => chart,
       "definition" => "Each merge starts a run; a newer merge cancels one still running. Counts, not a score.",
       "facts" => [["Week of #{short_date(done["week"])}", "#{num(done["completed"])} runs"], ["✓ Green", "#{done["green"]} · #{share.(done["green"])}"],
                   ["✕ Failed", "#{done["failed"]} · #{share.(done["failed"])}"], ["Cancelled", "#{done["superseded"]} · #{share.(done["superseded"])}"]],
@@ -735,16 +740,15 @@ module RoundhouseProgress
     view["activity"] = guarded(states, "activity") { activity(status["activity"]) } if states.dig("activity", "available")
     view["help"] = status.dig("help", "data")
     history = site.data["status_history"] || { "points" => [] }
-    trends = guarded(states, "trends") do
-      runtime = runtime_measures(history, status["bench"])
-      ci = (ci_measure(status["ci"]) if states.dig("ci", "available"))
-      {
-        "ci" => ci, "outcomes" => (outcomes_measure(status["ci"]) if states.dig("ci", "available")), "runtime" => runtime,
-        "specs" => specs_measure(view["over_time"], view["gap"]), "archive" => size_measure(history), "merges" => merges_measure(status["activity"]),
-        "conditions" => bench_conditions(status["bench"])
-      }
-    end || {}
-    trends["findings"] = guarded(states, "trends") { findings(trends, status) } || {}
+    ci_ok = states.dig("ci", "available")
+    one = ->(name, &build) { guarded(states, "trends: #{name}", &build) }
+    trends = {
+      "ci" => (one.("ci") { ci_measure(status["ci"]) } if ci_ok), "outcomes" => (one.("outcomes") { outcomes_measure(status["ci"]) } if ci_ok),
+      "work" => (one.("work") { work_measure(status["ci"]) } if ci_ok), "slowest" => (one.("slowest") { slowest_measure(status["ci"]) } if ci_ok),
+      "runtime" => one.("runtime") { runtime_measures(history, status["bench"]) } || [],
+      "specs" => one.("specs") { specs_measure(view["over_time"], view["gap"]) }, "archive" => one.("archive") { size_measure(history) },
+      "merges" => one.("merges") { merges_measure(status["activity"]) }, "conditions" => one.("conditions") { bench_conditions(status["bench"]) }
+    }
     view["trends"] = trends
     # The summary strip: build time first, then the runtime trio, then the work merged.
     view["tiles"] = ([trends["ci"]] + trends["runtime"].to_a + [trends["merges"]]).compact

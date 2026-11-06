@@ -87,9 +87,9 @@ permalink: /progress/
       {%- for m in p.tiles %}
       <li><a class="tile" href="{{ m.href | escape }}">
         <span class="t-label">{{ m.label | escape }}</span>
-        <span class="t-cue">{% if m.better == "lower" %}↓ {{ m.cue | escape }}{% elsif m.better == "higher" %}↑ {{ m.cue | escape }}{% else %}Context only{% endif %}</span>
+        <span class="t-cue">{% if m.better == "lower" %}↓ {{ m.cue | escape }}{% elsif m.better == "higher" %}↑ {{ m.cue | escape }}{% endif %}</span>
         <span class="t-value">{% if m.value %}{{ m.value_num | escape }}{% if m.value_unit %}<span class="unit">{{ m.value_unit | escape }}</span>{% endif %}{% else %}<span class="na">Not available</span>{% endif %}</span>
-        <span class="t-delta">{% if m.delta %}{{ m.delta.text | escape }}{% if m.delta.mark %} <span class="verdict {{ m.delta.verdict | escape }}">{{ m.delta.mark | escape }}</span>{% endif %}{% elsif m.count == 1 %}First measurement · {{ m.first | escape }}{% endif %}</span>
+        <span class="t-delta">{% if m.delta %}{{ m.delta.text | escape }}{% elsif m.count == 1 %}First measurement · {{ m.first | escape }}{% endif %}</span>
         {%- if m.spark %}<span class="t-spark">{{ m.spark }}</span>{% endif %}
         {%- if m.sub %}<span class="t-sub">{{ m.sub | escape }}</span>{% endif %}
       </a></li>
@@ -233,15 +233,17 @@ permalink: /progress/
   </div>
   <div class="sect-body">
     <section class="family" aria-labelledby="fam-build">
-      <h3 class="family-title" id="fam-build">Build health</h3>{% if tr.findings.build %}<p class="finding">{{ tr.findings.build | escape }}</p>{% endif %}
+      <h3 class="family-title" id="fam-build">CI on main</h3>
       <div class="family-grid build">
         {%- if tr.ci %}{% include trend-cell.html m=tr.ci wide=true %}{% else %}<p class="notice">{{ st.ci.note | default: "CI runs couldn’t be loaded." | escape }}</p>{% endif %}
         {%- if tr.outcomes %}{% include trend-cell.html m=tr.outcomes %}{% endif %}
+        {%- if tr.work %}{% include trend-cell.html m=tr.work wide=true %}{% endif %}
+        {%- if tr.slowest %}{% include trend-cell.html m=tr.slowest %}{% endif %}
       </div>
     </section>
     {%- if tr.runtime.size > 0 %}
     <section class="family" aria-labelledby="fam-runtime">
-      <h3 class="family-title" id="fam-runtime">Runtime cost</h3>{% if tr.findings.runtime %}<p class="finding">{{ tr.findings.runtime | escape }}</p>{% endif %}
+      <h3 class="family-title" id="fam-runtime">Runtime</h3>
       <p class="family-conditions">{{ tr.conditions | escape }}. Performance doesn’t establish behavioural parity.</p>
       <div class="family-grid runtime">
         {%- for m in tr.runtime %}{% include trend-cell.html m=m %}{% endfor %}
@@ -249,7 +251,7 @@ permalink: /progress/
     </section>
     {%- endif %}
     <section class="family" aria-labelledby="fam-apps">
-      <h3 class="family-title" id="fam-apps">App results and footprint</h3>{% if tr.findings.apps %}<p class="finding">{{ tr.findings.apps | escape }}</p>{% endif %}
+      <h3 class="family-title" id="fam-apps">Apps and footprint</h3>
       <div class="family-grid apps">
         {%- if tr.specs %}{% include trend-cell.html m=tr.specs empty="No verified model-spec result in this snapshot." %}{% endif %}
         {%- if tr.archive %}{% include trend-cell.html m=tr.archive %}{% else %}<p class="notice">No archive size recorded yet.</p>{% endif %}

@@ -238,11 +238,11 @@ svg.fig { display: block; overflow: visible; }
 .tiles li:first-child .tile { padding-left: 0; }
 .tile:hover .t-label, .tile:focus-visible .t-label { color: var(--accent); }
 .t-label { font-size: 13px; line-height: 18px; color: var(--rh-text); }
-.t-cue { font: 11px/16px var(--mono); color: var(--muted); }
+.t-cue { min-height: 16px; font: 11px/16px var(--mono); color: var(--muted); }
 .t-value { margin-top: 4px; font-size: 24px; line-height: 30px; font-weight: 600; letter-spacing: -0.02em; color: var(--rh-heading); }
 .t-value .na { font-size: 15px; font-weight: 500; color: var(--muted); }
 .t-delta { min-height: 16px; font-size: 12px; line-height: 16px; color: var(--muted); }
-.verdict { white-space: nowrap; font-weight: 600; } .verdict.better { color: var(--rh-prism-green); } .verdict.worse { color: var(--rh-prism-red); }
+
 .t-spark, .t-first { display: flex; align-items: center; height: 34px; }
 .t-first { font-size: 12px; line-height: 16px; color: var(--muted); }
 .t-sub { font-size: 12px; line-height: 17px; color: var(--muted); }
@@ -264,6 +264,9 @@ svg.fig { display: block; overflow: visible; }
 .pair-name { color: var(--muted); } .pair-val { color: var(--rh-text); font-variant-numeric: tabular-nums; }
 .pair-bar { grid-column: 1 / -1; height: 8px; width: var(--w); border-radius: 0 4px 4px 0; background: var(--rh-text-faint); }
 .pair-bar.s-a { background: var(--rh-accent); }
+.ranked { display: grid; gap: 10px; margin: 14px 0 0; padding: 0; list-style: none; }
+.ranked li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; font-size: 13px; line-height: 18px; }
+.ranked .muted { color: var(--muted); }
 .chart .so-far { fill: var(--rh-text-muted); fill-opacity: 0.06; }
 .chart .so-far-label { fill: var(--muted); font-size: 10px; }
 .family-title { margin: 0 0 4px; font: 600 11px/16px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
