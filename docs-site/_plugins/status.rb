@@ -94,6 +94,13 @@ module RoundhouseStatus
 
   # A short, safe excerpt of a failure message: no ANSI colour, control
   # characters or machine-local path prefixes.
+  # A git command's output, run without a shell; "" when git fails or is missing.
+  def git(root, *args)
+    IO.popen(["git", "-C", root.to_s, *args], err: File::NULL, &:read).to_s.strip
+  rescue SystemCallError
+    ""
+  end
+
   def excerpt(text, max = 200)
     line = text.to_s.gsub(/\e\[[\d;]*[A-Za-z]/, "").gsub(%r{/(?:home|Users)/[^/\s]+/}, "")
                .lines.map(&:strip).find { |l| !l.empty? }.to_s.gsub(/[[:cntrl:]]/, "")
@@ -163,7 +170,7 @@ module RoundhouseStatus
     path = "bench/lobsters/declared-gaps.json"
     ledger = JSON.parse(File.read(File.join(root, path)))
     entries = ledger.fetch("declared_gaps").map { |g| g.slice("route", "since", "owner", "reason", "detail", "closes_with", "status", "issue_url") }
-    committed = `git -C #{root} log -1 --format=%cI -- #{path} 2>/dev/null`.strip
+    committed = git(root, "log", "-1", "--format=%cI", "--", path)
     { "observed_at" => (time_or_nil(committed) unless committed.empty?), "sources" => ["https://github.com/#{repo}/blob/main/#{path}"],
       "data" => { "entries" => entries } }
   end
@@ -384,7 +391,7 @@ module RoundhouseStatus
     cfg = config.fetch("status")
     site, repo = cfg.fetch("site"), cfg.fetch("repo")
     now = Time.now.utc
-    sha = ENV["GITHUB_SHA"] || `git -C #{root} rev-parse HEAD 2>/dev/null`.strip
+    sha = ENV["GITHUB_SHA"] || git(root, "rev-parse", "HEAD")
     run = ENV["GITHUB_RUN_ID"]
     status = { "schema" => SCHEMA, "generated_at" => now.iso8601, "site_sha" => sha,
                "build_id" => run ? "#{run}.#{ENV.fetch("GITHUB_RUN_ATTEMPT", "1")}" : "local:#{sha[0, 12]}" }
