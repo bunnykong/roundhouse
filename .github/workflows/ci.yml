@@ -3968,8 +3968,13 @@ jobs:
           else
             echo "::warning::The deployed docs pages couldn't be fetched; publishing the guide pages from --site, without Progress."
           fi
+          # Into place only whole and readable: a cut-off history would restart the trend.
           for file in status.json status-history.json; do
-            curl -fsS --max-time 20 "$SITE/$file" -o "_site/$file" || echo "::warning::$file couldn't be published again."
+            if curl -fsS --max-time 20 "$SITE/$file" -o "$kept/$file" && python3 -m json.tool "$kept/$file" > /dev/null 2>&1; then
+              mv "$kept/$file" "_site/$file"
+            else
+              echo "::warning::$file couldn't be published again."
+            fi
           done
 
       - name: Verify published archive bytes
