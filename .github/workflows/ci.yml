@@ -3829,6 +3829,11 @@ jobs:
     # assembly does not override the separate publication guards.
     needs: [build-site, campfire-conformance, campfire-archive-build, archive-results, plan]
     if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.archive-results.result == 'success' }}
+    # actions: read lets Progress list this workflow's runs on main (its CI trend);
+    # the scheduled caller already grants it.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       ready: ${{ steps.ready.outputs.ready }}
     runs-on: ubuntu-latest
