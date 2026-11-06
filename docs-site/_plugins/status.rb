@@ -59,12 +59,14 @@ module RoundhouseStatus
   # A report the site publishes: this publication's copy when one is staged,
   # otherwise the deployed one. A report missing from the staged site won't be
   # deployed either, so it counts as missing.
-  def report(site, path)
+  def report(site, path) = JSON.parse(report_text(site, path))
+
+  def report_text(site, path)
     staged = ENV["ROUNDHOUSE_STATUS_STAGED"].to_s
-    return json("#{site}/#{path}") if staged.empty?
+    return fetch("#{site}/#{path}") if staged.empty?
     file = File.join(staged, path)
     raise NotFound, "#{path} isn't in this publication" unless File.file?(file)
-    JSON.parse(File.read(file))
+    File.read(file)
   end
 
   def token = ENV["GITHUB_TOKEN"] || ENV["GH_TOKEN"]
@@ -156,7 +158,7 @@ module RoundhouseStatus
     url = "#{bench}/matrix.json"
     m = json(url)
     lanes = m.fetch("rows").map do |r|
-      lane = r.slice("id", "label", "kind", "runtime", "jit", "state", "stage", "vs_rails", "failed_visits", "partial")
+      lane = r.slice("id", "label", "kind", "runtime", "jit", "state", "stage", "vs_rails", "failed_visits", "partial", "ms_median", "rss_boot_kb", "rss_peak_kb")
       lane["detail"] = excerpt(r["detail"]) unless r["state"] == "ok" || r["detail"].to_s.empty?
       %w[content_total content_equivalent content_differs content_scope content_deferred].each { |k| lane[k] = r[k] unless r[k].nil? }
       %w[content_gaps content_undeclared].each { |k| lane[k] = r[k].map { |g| g.is_a?(Hash) ? g["route"] : g } if r[k].is_a?(Array) }
@@ -181,7 +183,7 @@ module RoundhouseStatus
     url = "#{site}/ci/archive-results.json"
     a = report(site, "ci/archive-results.json")
     rows = a.fetch("archives").select { |r| r["path"].to_s.end_with?(".tgz") }
-            .map { |r| r.slice("path", "check", "status", "reason", "harness_outcome", "selected", "published", "validation_attempt") }
+            .map { |r| r.slice("path", "check", "status", "reason", "harness_outcome", "selected", "published", "validation_attempt", "size") }
     run = begin
       j = json("https://api.github.com/repos/#{repo}/actions/runs/#{a["run_id"]}", github_headers)
       { "url" => j["html_url"], "created_at" => j["created_at"], "attempt" => j["run_attempt"], "conclusion" => j["conclusion"] }
@@ -199,9 +201,19 @@ module RoundhouseStatus
   ENV_HARNESS = %w[workers concurrency runs duration_sec warmup_sec threads wrk_threads endpoints targets].freeze
 
   def bench(site)
+    # Each configuration's repeats (one JSON object per line), for their spread.
+    spread = begin
+      report_text(site, "bench/per-run.json").lines.filter_map { |l| JSON.parse(l) rescue nil }
+        .group_by { |r| r.values_at("target", "endpoint", "workers") }
+        .transform_values { |rs| rs.map { |r| r["req_sec"] }.select { |v| v.is_a?(Numeric) && v.finite? }.minmax }
+    rescue NotFound
+      {}
+    end
     rows = report(site, "bench/summary.json").map do |r|
+      lo, hi = spread[r.values_at("target", "endpoint", "workers")]
       r.slice("target", "endpoint", "workers", "runs", "non_2xx")
        .merge(r.slice("req_sec", "p50_ms", "p99_ms", "rss_mb", "rps_per_gb").transform_values { |v| v.is_a?(Numeric) && v.finite? ? v : nil })
+       .merge("req_lo" => lo, "req_hi" => hi)
     end
     env = begin
       e = report(site, "bench/env.json")
@@ -231,6 +243,32 @@ module RoundhouseStatus
       [key, { "count" => d.dig(key, "issueCount"), "issues" => issues }]
     end
     { "observed_at" => Time.now.utc.iso8601, "sources" => ["https://github.com/#{repo}/issues"], "data" => data }
+  end
+
+  # --- CI on main: how long a merge waits for its verdict, week by week ---------
+
+  # A run on main is cancelled when a newer merge lands, so "superseded" is its
+  # own count, apart from failures. Times are for green runs: start to finish.
+  def ci(repo, now, weeks:)
+    monday = now - ((now.wday - 1) % 7) * 86_400
+    start = Time.utc(monday.year, monday.month, monday.day)
+    base = "https://api.github.com/repos/#{repo}/actions/workflows/ci.yml/runs?event=push&branch=main"
+    rows = (0...weeks).map { |i| start - (weeks - 1 - i) * 7 * 86_400 }.map do |from|
+      Thread.new do
+        range = "created=#{from.strftime('%F')}..#{(from + 6 * 86_400).strftime('%F')}"
+        count = ->(status) { json("#{base}&status=#{status}&per_page=1&#{range}", github_headers).fetch("total_count") }
+        completed, green, failed, cancelled = %w[completed success failure cancelled].map(&count)
+        minutes = (1..[(green / 100.0).ceil, 3].min).flat_map do |page|
+          json("#{base}&status=success&per_page=100&page=#{page}&#{range}", github_headers).fetch("workflow_runs")
+        end.map { |r| (Time.parse(r["updated_at"]) - Time.parse(r["run_started_at"])) / 60.0 }.sort
+        q = ->(p) { minutes.empty? ? nil : minutes[(p * (minutes.size - 1)).round].round(1) }
+        { "week" => from.strftime("%F"), "completed" => completed, "green" => green, "failed" => failed, "superseded" => cancelled,
+          "other" => completed - green - failed - cancelled, "median_min" => q.(0.5), "p90_min" => q.(0.9), "timed" => minutes.size,
+          "partial" => from + 7 * 86_400 > now }
+      end
+    end.map(&:value)
+    { "observed_at" => now.iso8601, "sources" => ["https://github.com/#{repo}/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush"],
+      "data" => { "workflow" => "ci.yml", "weeks" => rows } }
   end
 
   # --- Who is building: merged pull requests, never ranked -------------------
@@ -355,7 +393,7 @@ module RoundhouseStatus
   # How long a publishing build may reuse a source the last one collected. Merged pull
   # requests and labelled issues take most of collection's time and change slowly, so
   # they're collected about once a day; the nightly results are collected every time.
-  REFRESH_HOURS = { "activity" => 20, "help" => 20 }.freeze
+  REFRESH_HOURS = { "activity" => 20, "help" => 20, "ci" => 20 }.freeze
 
   def reusable?(key, old, now)
     hours = REFRESH_HOURS[key]
@@ -400,7 +438,8 @@ module RoundhouseStatus
     network = {
       "specs" => -> { specs(site) }, "replay" => -> { replay(cfg.fetch("lobsters_bench")) },
       "archives" => -> { archives(site, repo) }, "bench" => -> { bench(site) },
-      "help" => -> { help(repo) }, "activity" => -> { activity(repo, now, weeks: cfg.fetch("weeks", 12)) }
+      "help" => -> { help(repo) }, "activity" => -> { activity(repo, now, weeks: cfg.fetch("weeks", 12)) },
+      "ci" => -> { ci(repo, now, weeks: cfg.fetch("weeks", 12)) }
     }
     # The sources are independent, so they're collected at once: the build waits for the slowest.
     threads = local.merge(network).to_h { |key, source| [key, Thread.new { feed_for(key, source, network.key?(key), previous&.dig(key), now) }] }
@@ -422,6 +461,29 @@ module RoundhouseStatus
   end
 
   # --- History: one point per publishing build, for the gap over time --------
+
+  # The measured families a trend can draw, each with its own observation time
+  # and a key that changes when its runs stop being comparable (host,
+  # toolchains, harness). Saved feeds aren't new observations.
+  def observations(status)
+    out = {}
+    if (b = status["bench"]) && !b["cached"] && (d = b["data"]) && (env = d["environment"])
+      rows = d["rows"].select { |r| r["workers"] == 1 && r["req_sec"] }.to_h do |r|
+        ["#{r["target"]} #{r["endpoint"]}", [r["req_sec"], r["rss_mb"]&.round(1), r["p99_ms"], r["req_lo"], r["req_hi"]]]
+      end
+      out["bench"] = { "observed_at" => env["captured_at"], "key" => digest(env["host"], env["toolchains"], env["harness"]),
+                       "sha" => env.dig("git", "sha"), "fields" => %w[req_sec rss_mb p99_ms req_lo req_hi], "rows" => rows }
+    end
+    if (r = status["replay"]) && !r["cached"] && (d = r["data"])
+      lanes = d["lanes"].to_h { |l| [l["id"], [l["state"], l["ms_median"], l["rss_peak_kb"]]] }
+      out["replay"] = { "observed_at" => r["observed_at"], "key" => digest(d["workload"]), "fields" => %w[state ms_median rss_peak_kb], "lanes" => lanes }
+    end
+    if (a = status["archives"]) && !a["cached"] && (d = a["data"])
+      sizes = d["rows"].select { |x| x["size"] }.to_h { |x| [x["path"], x["size"]] }
+      out["sizes"] = { "observed_at" => a["observed_at"], "sha" => d["source_sha"], "run_id" => d["run_id"], "bytes" => sizes } unless sizes.empty?
+    end
+    out
+  end
 
   HISTORY_DAYS = 90
 
@@ -466,6 +528,12 @@ module RoundhouseStatus
       }.merge(specs["examples"]).merge("causes" => specs["causes"].map { |c| c.slice("slug", "failures") }),
       "activity" => act&.slice("merged_7d", "people_7d")
     }
+    observations(status).each do |family, block|
+      last = previous.reverse.find { |p| p[family] }&.dig(family)
+      next unless block["observed_at"] && block["observed_at"] != last&.dig("observed_at")
+      next if family == "sizes" && block["bytes"] == last&.dig("bytes") # sizes are seen every run; keep changes
+      point[family] = block
+    end
     cutoff = (Time.parse(status["generated_at"]) - HISTORY_DAYS * 86_400).iso8601
     points = previous.reject { |p| p["build_id"] == point["build_id"] || p["at"].to_s < cutoff } + [point]
     { "schema" => SCHEMA, "generated_at" => status["generated_at"], "continuity" => continuity, "points" => points.sort_by { |p| p["at"] } }
