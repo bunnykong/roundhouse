@@ -157,6 +157,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
     // The jobs given a synthesized `perform_later`: the ones
     // `lower::job_payload` can plan a payload for.
     let mut payload_jobs: BTreeSet<String> = BTreeSet::new();
+    let native_keywords = app.native_library_keywords;
     for lc in app.library_classes.iter_mut() {
         let is_worker = workers.contains(lc.name.0.as_str());
         if !is_worker && !jobs.contains(lc.name.0.as_str()) {
@@ -231,7 +232,8 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                 "the generated job wrapper cannot preserve a full forwarding packet"));
             continue;
         }
-        if perform.params.iter().any(|p| p.keyword) {
+        // Not on a target whose keywords are trailing positionals: there a required keyword has no slot a caller can name.
+        if perform.params.iter().any(|p| p.keyword && (!native_keywords || p.rest || is_worker)) {
             diags.push(residue(&perform, "keyword parameters do not forward positionally"));
             continue;
         }
@@ -254,12 +256,13 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             if class_side.contains(entry) {
                 continue;
             }
-            let args: Vec<Expr> = perform
+            let mut keywords: Vec<(Expr, Expr)> = Vec::new();
+            let mut args: Vec<Expr> = perform
                 .params
                 .iter()
                 .zip(param_tys.iter())
                 .enumerate()
-                .map(|(i, (p, ty))| {
+                .filter_map(|(i, (p, ty))| {
                     let mut v = Expr::new(
                         span,
                         ExprNode::Var {
@@ -268,13 +271,22 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                         },
                     );
                     v.ty = ty.clone();
+                    if p.keyword {
+                        let mut key = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Sym { value: p.name.clone() } });
+                        key.ty = Some(Ty::Sym);
+                        keywords.push((key, v));
+                        return None;
+                    }
                     if p.rest {
                         v.ty = Some(Ty::Array { elem: std::sync::Arc::new(ty.clone().unwrap_or(Ty::Untyped)) });
-                        return Expr::new(span, ExprNode::Splat { value: v });
+                        return Some(Expr::new(span, ExprNode::Splat { value: v }));
                     }
-                    v
+                    Some(v)
                 })
                 .collect();
+            if !keywords.is_empty() {
+                args.push(Expr::new(span, ExprNode::Hash { entries: keywords, kwargs: true }));
+            }
             let mut new_call = Expr::new(
                 span,
                 ExprNode::Send {

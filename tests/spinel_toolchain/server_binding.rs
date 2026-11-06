@@ -5,7 +5,7 @@
 //! loopback behind Tailscale (`rails server -b 127.0.0.1`), and an
 //! every-interface listener put it on the container network too.
 
-use super::{emit_and_run, native_http};
+use super::emit_and_run;
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
@@ -49,9 +49,7 @@ fn listening_address(tree: &Path, envs: &[(&str, &str)], args: &[&str]) -> Strin
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn the_server_binds_where_rails_server_would() {
-    let (tree, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+    let tree = emit_and_run::real_blog().native_http_tree();
     assert_eq!(listening_address(&tree, &[], &[]), "localhost", "development default");
     assert_eq!(listening_address(&tree, &[("RAILS_ENV", "production")], &[]), "0.0.0.0", "production default");
     assert_eq!(listening_address(&tree, &[("RAILS_ENV", "production"), ("BINDING", "127.0.0.1")], &[]), "127.0.0.1");

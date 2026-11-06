@@ -2394,7 +2394,7 @@ fn default_forgery_protection() -> Filter {
 /// Always includes `controller_path`: ActionController::Base answers it
 /// (and the lowerer synthesizes a literal override) even when no source
 /// `def` appears in the ancestry.
-fn route_helper_shadows(
+pub(crate) fn route_helper_shadows(
     controller: &Controller,
     all: &[Controller],
 ) -> crate::det::HashSet<Symbol> {
@@ -3644,7 +3644,7 @@ fn lower_action_body(
     let with_typed_params = self::params::rewrite_params_writes(
         &with_typed_params, params_privs, params_specs, &controller.name,
     );
-    let with_redirects = rewrite_redirect_to(&with_typed_params, route_id_segments);
+    let with_redirects = rewrite_redirect_to(&with_typed_params, shadows, route_id_segments);
     // Rewrite `<Model>.new(<resource>_params)` → `<Model>.from_params(<resource>_params)`
     // BEFORE the assoc-through-parent rewrite, so the build path picks
     // up the typed factory shape rather than the legacy attrs-Hash.

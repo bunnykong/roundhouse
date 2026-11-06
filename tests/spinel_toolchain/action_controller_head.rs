@@ -1,7 +1,6 @@
 //! The ActionController::Head contract over the emitted Spinel HTTP server.
 
 use super::{emit_and_run, native_http};
-use roundhouse::project::BuildTarget;
 
 #[test]
 #[ignore = "requires Spinel; run in its CI lane"]
@@ -68,14 +67,7 @@ fn head_options_are_observable_in_the_native_http_response() {
 end
 "#,
         );
-    let (tree, errors) = overlay.emit(BuildTarget::Spinel);
-    assert!(
-        errors.is_empty(),
-        "analysis/emission errors:\n{}",
-        errors.join("\n")
-    );
-
-    native_http::build(&tree);
+    let tree = overlay.native_http_tree();
     let server = native_http::Server::start(&tree);
 
     let created = server.get("/head-probe");

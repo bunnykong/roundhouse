@@ -16,6 +16,45 @@ fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
     files.iter().map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec())).collect()
 }
 
+#[test]
+fn column_primary_keys_are_retained_without_reading_default_text_as_constraints() {
+    let schema = ingest_structure_sql(
+        b"CREATE TABLE jobs (id bigserial PRIMARY KEY, label text DEFAULT 'PRIMARY KEY');",
+        "db/structure.sql",
+    ).unwrap();
+    let table = schema.tables.get(&Symbol::from("jobs")).unwrap();
+    assert!(col(table, "id").primary_key);
+    assert!(!col(table, "label").primary_key);
+}
+
+#[test]
+fn escape_string_defaults_keep_their_quoted_words_out_of_constraints() {
+    let schema = ingest_structure_sql(
+        b"CREATE TABLE notes (\n  id bigserial PRIMARY KEY,\n  body text DEFAULT E'prefix \\' PRIMARY KEY' || E'suffix \\'x',\n  title text DEFAULT 'plain'\n);",
+        "db/structure.sql",
+    ).unwrap();
+    let table = schema.tables.get(&Symbol::from("notes")).unwrap();
+    assert!(col(table, "id").primary_key);
+    assert!(!col(table, "body").primary_key);
+    assert!(!col(table, "title").primary_key);
+}
+
+#[test]
+fn an_identifier_ending_in_e_before_a_quote_is_not_an_escape_string() {
+    let schema = ingest_structure_sql(
+        br"CREATE TABLE notes (
+  id bigserial PRIMARY KEY,
+  code text DEFAULT tag$e'x\' || 'y',
+  title text DEFAULT 'plain'
+);",
+        "db/structure.sql",
+    ).unwrap();
+    let table = schema.tables.get(&Symbol::from("notes")).unwrap();
+    assert!(col(table, "id").primary_key);
+    assert!(table.columns.iter().any(|c| c.name.as_str() == "title"));
+    assert!(!col(table, "title").primary_key);
+}
+
 /// A small hand-rolled `pg_dump`-shaped dump covering the constructs
 /// `ingest_structure_sql` is expected to model plus the ones it must
 /// ledger rather than silently drop.

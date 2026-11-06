@@ -107,6 +107,8 @@ use crate::ty::{ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
+    /// Module lookup owner and escaped `self` values; dispatch keeps its original context.
+    module_self_types: HashMap<ClassId, (ClassId, Ty)>,
     upload_array_fields: Option<BTreeMap<ClassId, BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), BTreeSet<Symbol>>>>,
     materialized_associations: crate::det::HashSet<Symbol>,
     /// Inferred parameter types per (class, method). Empty after
@@ -1336,6 +1338,7 @@ impl Analyzer {
 
         Self {
             materialized_associations: crate::lower::assoc_pluck::materialized_assoc_names(app),
+            module_self_types: Self::module_self_types(&classes, app, &const_resolver),
             classes,
             upload_array_fields: None,
             inferred_params: HashMap::default(),
@@ -1374,6 +1377,7 @@ impl Analyzer {
     /// Cheap — just a struct with a reference.
     fn body_typer(&self) -> BodyTyper<'_> {
         let typer = BodyTyper::new(&self.classes)
+            .with_module_self_types(&self.module_self_types)
             .with_materialized_associations(&self.materialized_associations)
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n, &self.helper_modules)
@@ -2118,6 +2122,23 @@ impl Analyzer {
     ///   fallback renders, so skipping keeps the output byte-identical
     ///   rather than routing it through a second code path.
     fn stamp_inferred_method_signatures(&self, app: &mut App) {
+        let declared_sigs = app.rbs_signatures.clone();
+        let declared = |owner: &ClassId, method: &crate::dialect::MethodDef| -> Option<Ty> {
+            let sig @ Ty::Fn { params, .. } = declared_sigs.get(owner)?.get(&method.name)? else { return None };
+            (params.len() == method.params.len() && params.iter().zip(&method.params).all(|(d, p)| d.kind == p.ty_kind()))
+                .then(|| sig.clone())
+        };
+        // Not left to the model lowering, which types only a method's return: an author's `sig/` declaration of a model method names its parameters too.
+        for model in &mut app.models {
+            for item in &mut model.body {
+                if let crate::dialect::ModelBodyItem::Method { method, .. } = item
+                    && method.signature.is_none()
+                    && let Some(sig) = declared(&model.name, method)
+                {
+                    method.signature = Some(sig);
+                }
+            }
+        }
         for (owner, methods) in app.library_classes.iter_mut().map(|lc| (&lc.name, &mut lc.methods))
             .chain(app.test_modules.iter_mut().map(|module| (&module.name, &mut module.helpers))) {
             let registered = self.classes.get(owner);
@@ -2126,6 +2147,15 @@ impl Analyzer {
                     continue;
                 }
                 if method.name.as_str() == "initialize" {
+                    continue;
+                }
+                let table = registered.map(|ci| match method.receiver {
+                    crate::dialect::MethodReceiver::Instance => &ci.instance_methods,
+                    crate::dialect::MethodReceiver::Class => &ci.class_methods,
+                });
+                // Not the call sites' types over an author's `sig/` declaration: a method no site reaches would read `untyped` where the author wrote the type.
+                if let Some(sig) = declared(owner, method) {
+                    method.signature = Some(sig);
                     continue;
                 }
                 let key = (owner.clone(), method.name.clone(), method.receiver);
@@ -2139,10 +2169,6 @@ impl Analyzer {
                 // the fallback for a method the harvest skipped (a
                 // scope-shaped class method takes an early `continue`
                 // there).
-                let table = registered.map(|ci| match method.receiver {
-                    crate::dialect::MethodReceiver::Instance => &ci.instance_methods,
-                    crate::dialect::MethodReceiver::Class => &ci.class_methods,
-                });
                 let ret = table
                     .and_then(|t| t.get(&method.name))
                     .filter(|t| !matches!(t, Ty::Fn { .. }))
@@ -2274,8 +2300,10 @@ impl Analyzer {
         // Int to one, and the two `each`es iterated one. Five of the
         // emit's type errors, one missing loop.
         for lc in &app.library_classes {
+            // A file of constants alone writes them at the top level.
+            let owner = if lc.is_file_constants() { ClassId(Symbol::from("Object")) } else { lc.name.clone() };
             for (name, value) in &lc.constants {
-                let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
+                let self_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
                 entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), true));
             }
         }
@@ -4892,6 +4920,48 @@ impl Analyzer {
         }
     }
 
+    fn module_self_types(classes: &HashMap<ClassId, ClassInfo>, app: &App, resolver: &ConstResolver) -> HashMap<ClassId, (ClassId, Ty)> {
+        let mut includes: HashMap<_, _> = classes.iter().map(|(id, c)| (id, c.includes.clone())).collect();
+        // Library prepends are retained calls; membership shares the instance lookup side.
+        let bodies = app.library_classes.iter().map(|c| (&c.name, c.unknown_calls.iter().collect::<Vec<_>>()))
+            .chain(app.models.iter().map(|m| (&m.name, m.body.iter().filter_map(|item| match item { ModelBodyItem::Unknown { expr, .. } => Some(expr), _ => None }).collect())));
+        for (owner, calls) in bodies {
+            for call in calls {
+                if let ExprNode::Send { recv, method, args, .. } = &*call.node {
+                    if method.as_str() != "prepend" || !recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) { continue; }
+                    for arg in args {
+                        if let ExprNode::Const { path } = &*arg.node {
+                            if let Some(id) = resolver.namespace(arg.span, path) { includes.entry(owner).or_default().push(id.clone()); }
+                        }
+                    }
+                }
+            }
+        }
+        let mut hosts: HashMap<ClassId, Vec<Ty>> = HashMap::default();
+        for (host, info) in classes {
+            for class_side in [false, true] {
+                if !class_side && info.is_module { continue; }
+                let value = Ty::Class { id: host.clone(), args: vec![].into() };
+                let value = if class_side { Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![value].into() } } else { value };
+                let mut pending = vec![(host, class_side)];
+                let mut seen = BTreeSet::new();
+                while let Some((id, side)) = pending.pop() {
+                    if !seen.insert((id, side)) { continue; }
+                    let Some(class) = classes.get(id) else { continue };
+                    if !side && class.is_module && id != host { hosts.entry(id.clone()).or_default().push(value.clone()); }
+                    pending.extend(class.parent.iter().map(|p| (p, side)));
+                    let mixins = if side { &class.class_method_extensions } else { &includes[id] };
+                    pending.extend(mixins.iter().map(|m| (m, false)));
+                }
+            }
+        }
+        let lookup = app.sole_includer_of_modules();
+        hosts.into_iter().map(|(id, values)| {
+            let owner = lookup.get(&id).cloned().unwrap_or_else(|| id.clone());
+            (id, (owner, body::union_many(values)))
+        }).collect()
+    }
+
     fn seed_method_params(
         &self,
         base: &Ctx,
@@ -5825,84 +5895,45 @@ impl Analyzer {
         if let Some(Ty::Fn { ret, .. }) = &method.signature {
             return Some((**ret).clone());
         }
-        self.class_object_return_ty(&method.body)
-            .or_else(|| tuple_return_ty(&method.body))
-            .or_else(|| effective_return_ty(&method.body))
+        tuple_return_ty(&method.body)
+            .or_else(|| effective_return_ty_with(&method.body, Self::class_object_return_ty))
     }
 
-    /// A method whose every return value is a class constant returns
-    /// the CLASS, not an instance of it: lobsters'
-    /// `Search#searched_model` is `what == :stories ? Story : Comment`.
-    /// The body typer gives a class constant the same `Ty::Class { C }`
-    /// an instance has (deliberately, so `Story.where` dispatches), and
-    /// harvesting that as the return declared `-> (Comment | Story)` in
-    /// the emitted RBS — a lie spinel trusted, which hid a
-    /// `searched_model.none` NoMethodError (#132). The boundary is where
-    /// the distinction is recoverable, so it is drawn here, the way
-    /// `Relation` is: `Class[C]`, which RBS spells `singleton(C)` and
-    /// `dispatch` reads back as `C` for callers.
+    /// A return value that is a class constant is the CLASS, not an
+    /// instance of it: lobsters' `Search#searched_model` is
+    /// `what == :stories ? Story : Comment`. The body typer gives a class
+    /// constant the same `Ty::Class { C }` an instance has (deliberately,
+    /// so `Story.where` dispatches), and harvesting that as the return
+    /// declared `-> (Comment | Story)` in the emitted RBS, a lie spinel
+    /// trusted, which hid a `searched_model.none` NoMethodError (#132).
+    /// The boundary is drawn here, the way `Relation` is: `Class[C]`, which
+    /// RBS spells `singleton(C)` and `dispatch` reads back as `C`.
     ///
-    /// All or nothing: a tail mixing a class with any other value, or a
-    /// `return` off the tail, keeps the ordinary harvest.
-    fn class_object_return_ty(&self, body: &Expr) -> Option<Ty> {
-        fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>, returns: &mut usize) {
-            match &*e.node {
-                ExprNode::If { then_branch, else_branch, .. } => {
-                    tails(then_branch, out, returns);
-                    tails(else_branch, out, returns);
-                }
-                ExprNode::Case { arms, .. } => {
-                    arms.iter().for_each(|a| tails(&a.body, out, returns))
-                }
-                ExprNode::Seq { exprs } if !exprs.is_empty() => {
-                    tails(exprs.last().unwrap(), out, returns)
-                }
-                ExprNode::Return { value } => {
-                    *returns += 1;
-                    tails(value, out, returns);
-                }
-                // A raising arm returns nothing.
-                ExprNode::Raise { .. } => {}
-                _ => out.push(e),
-            }
+    /// Each return alternative is promoted on its own, so a method that
+    /// returns `C` on one path and `C.new` on another declares
+    /// `singleton(C) | C`. Nominal types alone don't tell `C` from
+    /// `C.new`; the body typer's identity evidence does, including a local
+    /// copy of `C`. An unresolved alternative keeps the whole return unknown.
+    fn class_object_return_ty(body: &Expr) -> Option<Ty> {
+        let mut promoted = false;
+        let mut tys = Vec::new();
+        for leaf in return_leaves(body) {
+            let ty = leaf.ty.clone().unwrap_or_else(crate::analyze::body::unknown);
+            // A runtime-created class has kind Class/Module but no named identity.
+            let value = if matches!(&ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "Class" | "Module"))
+                && !matches!(&*leaf.node, ExprNode::Const { .. })
+            { ty.clone() } else { class_object_arg_ty(leaf, ty.clone()) };
+            promoted |= value != ty;
+            tys.push(value);
         }
-        fn count_returns(e: &Expr) -> usize {
-            let mut n = usize::from(matches!(&*e.node, ExprNode::Return { .. }));
-            e.node.for_each_child(&mut |c| n += count_returns(c));
-            n
+        if !promoted {
+            return body.ty.clone();
         }
-        let mut out = Vec::new();
-        let mut tail_returns = 0;
-        tails(body, &mut out, &mut tail_returns);
-        // A `return` off the tail is a value this walk did not see.
-        if out.is_empty() || count_returns(body) != tail_returns {
-            return None;
+        // An unresolved alternative must not disappear behind a proven one.
+        if tys.iter().any(Ty::has_unknown_arm) {
+            return Some(crate::analyze::body::unknown());
         }
-        let mut classes: Vec<Ty> = Vec::new();
-        for t in out {
-            let ExprNode::Const { path } = &*t.node else { return None };
-            let Some(Ty::Class { id, args }) = &t.ty else { return None };
-            // The constant must NAME the class it is typed as. A value
-            // constant (`DEFAULT = Foo.new`) is typed by its value,
-            // whose class is not its own name.
-            let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            let named = id.0.as_str() == written
-                || id.0.as_str().ends_with(&format!("::{written}"));
-            if !args.is_empty() || !named || !self.classes.contains_key(id) {
-                return None;
-            }
-            let singleton = Ty::Class {
-                id: ClassId(Symbol::from("Class")),
-                args: vec![Ty::Class { id: id.clone(), args: vec![].into() }].into(),
-            };
-            if !classes.contains(&singleton) {
-                classes.push(singleton);
-            }
-        }
-        Some(match classes.len() {
-            1 => classes.pop().unwrap(),
-            _ => Ty::Union { variants: classes.into() },
-        })
+        Some(crate::analyze::body::union_many(tys))
     }
 
     /// True when every value `body` can return is the value of the
@@ -7793,7 +7824,7 @@ fn collect_transitive_filter_ivars(
             let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
             for (i, target) in targets.iter().enumerate() {
                 if let (LValue::Ivar { name }, false) = (target, own) {
-                    if let Some(ty) = body::multiassign_target_ty(&value.ty, i) {
+                    if let Some(ty) = body::multiassign_target_ty(value, i) {
                         union_ivar_maps(&mut out, HashMap::from_iter([(name.clone(), ty)]));
                     }
                 }
@@ -9586,9 +9617,13 @@ fn helper_instance_index(app: &App) -> HashMap<Symbol, ClassId> {
 }
 
 fn effective_return_ty(body: &Expr) -> Option<Ty> {
+    effective_return_ty_with(body, |value| value.ty.clone())
+}
+
+fn effective_return_ty_with(body: &Expr, value_ty: fn(&Expr) -> Option<Ty>) -> Option<Ty> {
     let mut tys: Vec<Ty> = Vec::new();
     let mut saw_return = false;
-    collect_return_types(body, &mut tys, &mut saw_return);
+    collect_return_types(body, &mut tys, &mut saw_return, value_ty);
     // Not the known arms alone: parslet's `Atoms::Base#apply` returns an
     // unknown `result` beside `context.err_at(...)`, and harvesting only
     // the latter typed every parse result as a `Parslet::Cause`.
@@ -9597,7 +9632,7 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
     }
     // Tail (implicit return). Drop `Bottom` so an all-diverging tail
     // doesn't poison the union; keep everything else.
-    if let Some(t) = &body.ty {
+    if let Some(t) = value_ty(body) {
         if !matches!(t, Ty::Bottom) {
             tys.push(t.clone());
         }
@@ -9630,7 +9665,7 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
 
 fn returns_an_unknown(expr: &Expr) -> bool {
     match &*expr.node {
-        ExprNode::Return { value } => matches!(value.ty, Some(Ty::Var { .. })) || returns_an_unknown(value),
+        ExprNode::Return { value } => value.ty.as_ref().is_some_and(Ty::has_unknown_arm) || returns_an_unknown(value),
         ExprNode::Lambda { .. } => false,
         ExprNode::Send { recv, args, block, method, .. } => {
             recv.as_ref().is_some_and(returns_an_unknown)
@@ -9672,16 +9707,16 @@ fn returns_an_unknown(expr: &Expr) -> bool {
 /// receivers make a `{ }` block a closure anyway and are named:
 /// `lambda` (a lambda's `return` is lambda-local) and `define_method`
 /// (the `return` belongs to the method being defined).
-fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
+fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>, saw: &mut bool, value_ty: fn(&Expr) -> Option<Ty>) {
     match &*expr.node {
         ExprNode::Return { value } => {
             *saw = true;
-            if let Some(t) = &value.ty {
+            if let Some(t) = value_ty(value) {
                 if !t.is_open() {
                     out.push(t.clone());
                 }
             }
-            collect_return_types(value, out, saw);
+            collect_return_types(value, out, saw, value_ty);
         }
         // A `Lambda` reached here is in value position — a closure
         // boundary. The `Send`/`Apply` arms below step past the node
@@ -9690,40 +9725,40 @@ fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
 
         ExprNode::Send { recv, args, block, method, .. } => {
             if let Some(r) = recv {
-                collect_return_types(r, out, saw);
+                collect_return_types(r, out, saw, value_ty);
             }
             for a in args {
-                collect_return_types(a, out, saw);
+                collect_return_types(a, out, saw, value_ty);
             }
             // `lambda { return }` is lambda-local, and
             // `define_method(:x) { return }` belongs to the method
             // being defined. Every other block's `return` is ours.
             if !matches!(method.as_str(), "lambda" | "define_method") {
                 if let Some(b) = block {
-                    collect_block_return_types(b, out, saw);
+                    collect_block_return_types(b, out, saw, value_ty);
                 }
             }
         }
         ExprNode::Apply { fun, args, block } => {
-            collect_return_types(fun, out, saw);
+            collect_return_types(fun, out, saw, value_ty);
             for a in args {
-                collect_return_types(a, out, saw);
+                collect_return_types(a, out, saw, value_ty);
             }
             if let Some(b) = block {
-                collect_block_return_types(b, out, saw);
+                collect_block_return_types(b, out, saw, value_ty);
             }
         }
 
-        _ => expr.node.for_each_child(&mut |c| collect_return_types(c, out, saw)),
+        _ => expr.node.for_each_child(&mut |c| collect_return_types(c, out, saw, value_ty)),
     }
 }
 
 /// Walk a call's block body for `return`s that belong to the enclosing
 /// method. Steps past the `Lambda` node deliberately: reaching the body
 /// through `collect_return_types` would hit the closure-boundary arm.
-fn collect_block_return_types(block: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
+fn collect_block_return_types(block: &Expr, out: &mut Vec<Ty>, saw: &mut bool, value_ty: fn(&Expr) -> Option<Ty>) {
     match &*block.node {
-        ExprNode::Lambda { body, .. } => collect_return_types(body, out, saw),
+        ExprNode::Lambda { body, .. } => collect_return_types(body, out, saw, value_ty),
         // A block passed as `&blk` (or any non-literal block operand)
         // has no body here.
         _ => {}
@@ -9964,7 +9999,7 @@ fn walk_ivar_assignments(
             for (i, target) in targets.iter().enumerate() {
                 if let LValue::Ivar { name } = target {
                     if let Some(ty) =
-                        crate::analyze::body::multiassign_target_ty(&value.ty, i)
+                        crate::analyze::body::multiassign_target_ty(value, i)
                     {
                         let merged = match out.remove(name) {
                             Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),
@@ -10476,16 +10511,9 @@ fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol,
 /// `typed_store`, reusing its type map. A bare `attribute :name` with no
 /// type, or an unrecognized type, falls back to `Untyped` (gradual).
 fn register_ar_attributes(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
-    for item in body {
-        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
-        let ExprNode::Send { recv, method, args, .. } = &*expr.node else { continue };
-        if recv.is_some() || method.as_str() != "attribute" {
-            continue;
-        }
-        let Some(name) = args.first().and_then(symbol_arg) else { continue };
-        let ty = args
-            .get(1)
-            .and_then(symbol_arg)
+    for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(body) {
+        let ty = ty
+            .as_ref()
             .and_then(|t| typed_store_ty(t.as_str()))
             .unwrap_or(Ty::Untyped);
         methods.entry(name.clone()).or_insert(ty.clone());
@@ -11438,9 +11466,10 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
+            ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
             ("upload_array_fields", crate::memory_census::freed_by(|| drop(upload_array_fields))),
             ("materialized_associations", crate::memory_census::freed_by(|| drop(materialized_associations))),
             ("inferred_params", crate::memory_census::freed_by(|| drop(inferred_params))),

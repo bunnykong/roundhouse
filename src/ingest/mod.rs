@@ -50,6 +50,7 @@ mod dry_validation;
 mod representable;
 mod active_model_serializer;
 mod action_cable_config;
+mod recurring_commands;
 mod session_config;
 pub(crate) mod database_ownership;
 pub(crate) mod database_yml;

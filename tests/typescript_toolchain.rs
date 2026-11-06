@@ -32,6 +32,9 @@ mod ts_controller_ivars;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/content_tag_options.rs"]
+#[allow(dead_code)]
+mod content_tag_options;
 #[path = "support/nested_classes.rs"]
 mod nested_classes;
 #[path = "support/array_methods.rs"]
@@ -684,4 +687,22 @@ console.log("slice passed");
     assert_eq!(out, "slice passed");
     std::fs::remove_file(emitted.join("check.ts")).unwrap();
     assert_tsc_passes("real-blog with record slices", &emitted);
+}
+
+/// A non-block `content_tag` with options renders as Rails 8.1.4 does
+/// (#1780): the app's integration test, run by the emitted node test.
+#[test]
+#[ignore]
+fn content_tag_with_options_renders() {
+    let (emitted, errors) = content_tag_options::app(content_tag_options::VIEW).emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    let output = Command::new("./node_modules/.bin/tsx")
+        .args(["--test", "test/probes_controller.test.ts"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run tsx --test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("pass 1"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }

@@ -170,6 +170,8 @@ pub mod assoc_primary_key;
 pub mod has_one_builder;
 pub mod inquiry;
 pub mod byte_size;
+pub mod ruby2_keywords_hash;
+pub mod redirect_back;
 pub mod numeric_unary;
 pub mod tag_builder;
 pub mod kwsplat;

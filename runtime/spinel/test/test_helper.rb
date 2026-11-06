@@ -318,7 +318,7 @@ module Dom
     chunk = target_chunk(selector)
     negated = negated_attrs(chunk)
     chunk = without_negations(chunk)
-    base = chunk.split("[")[0].to_s
+    base = selector_base(chunk)
     want_tag = selector_tag(base)
     want_id = selector_id(base)
     want_classes = selector_classes(base)
@@ -459,7 +459,7 @@ module Dom
   # attribute or in text — which costs candidates, not correctness:
   # a false candidate fails the class check that follows.
   def self.fragment_for(selector)
-    base = target_chunk(selector).split("[")[0].to_s
+    base = selector_base(without_negations(target_chunk(selector)))
     tag = selector_tag(base)
     id = selector_id(base)
     classes = selector_classes(base)
@@ -537,7 +537,7 @@ module Dom
              else value.end_with?(want) || value.end_with?(escaped)
              end
     end
-    tag.include?(pred) || tag.include?(pred.gsub(">", "&gt;").gsub("<", "&lt;"))
+    tag.include?(pred) || tag.include?(pred.gsub(">", "&gt;").gsub("<", "&lt;").gsub("'", "&#39;"))
   end
 
   # Whether a start tag carries the attribute a predicate names: a
@@ -550,16 +550,13 @@ module Dom
 
   def self.selector_attrs(chunk)
     out = []
-    parts = chunk.split("[")
-    i = 1
-    while i < parts.length
-      pred = parts[i].to_s.split("]")[0].to_s
+    selector_preds(chunk).each do |pred|
       eq = pred.index("=")
       if eq.nil?
         out << pred
       else
         name = pred[0, eq].to_s
-        value = pred[eq + 1, pred.length].to_s.gsub("'", "").gsub("\"", "")
+        value = selector_value(pred[eq + 1, pred.length].to_s)
         # `*=` / `^=` / `$=` — substring, prefix and suffix matches
         # (campfire's `img[src*='install-edge']`). Kept as the operator
         # spelled out, which `attr_matches?` reads; `=` stays the literal
@@ -571,9 +568,76 @@ module Dom
           out << %(#{name}="#{value}")
         end
       end
+    end
+    out
+  end
+
+  # Not `split("[")`: a quoted value can hold brackets (`[name='filter[q]']`) and an id can follow a predicate; a pseudo-class (`:checked`) is not checked, as before.
+  def self.selector_value(raw)
+    q = raw[0, 1].to_s
+    raw = raw[1, raw.length - 2].to_s if raw.length >= 2 && (q == "'" || q == "\"") && raw[-1, 1].to_s == q
+    out = ""
+    i = 0
+    while i < raw.length
+      c = raw[i, 1].to_s
+      if c == "\\" && i + 1 < raw.length
+        i += 1
+        c = raw[i, 1].to_s
+      end
+      out = out + c
       i += 1
     end
     out
+  end
+
+  def self.selector_base(chunk)
+    selector_split(chunk)[0].to_s
+  end
+
+  def self.selector_preds(chunk)
+    parts = selector_split(chunk)
+    parts[1, parts.length].to_a
+  end
+
+  def self.selector_split(chunk)
+    base = ""
+    preds = []
+    pred = ""
+    inside = false
+    pseudo = false
+    quote = ""
+    i = 0
+    while i < chunk.length
+      c = chunk[i, 1].to_s
+      if !inside
+        if c == "["
+          inside = true
+          pseudo = false
+          pred = ""
+        elsif c == ":"
+          pseudo = true
+        elsif !pseudo || c == "#" || c == "."
+          pseudo = false
+          base = base + c
+        end
+      elsif quote != "" && c == "\\"
+        pred = pred + chunk[i, 2].to_s
+        i += 1
+      elsif quote != ""
+        quote = "" if c == quote
+        pred = pred + c
+      elsif c == "'" || c == "\""
+        quote = c
+        pred = pred + c
+      elsif c == "]"
+        preds << pred
+        inside = false
+      else
+        pred = pred + c
+      end
+      i += 1
+    end
+    [base] + preds
   end
 
   # The three parts of one compound selector chunk. Split by hand rather

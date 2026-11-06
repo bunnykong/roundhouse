@@ -11,9 +11,7 @@ use super::{emit_and_run, native_http};
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn a_json_body_is_wrapped_natively() {
     const JSON: &str = "application/json";
-    let (tree, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+    let tree = emit_and_run::real_blog().native_http_tree();
     let mut server = native_http::Server::start(&tree);
     server.take_session("/articles/new");
     let cases = [
@@ -40,15 +38,13 @@ fn a_json_body_is_wrapped_natively() {
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn a_wrapped_empty_body_is_refused_natively() {
     const JSON: &str = "application/json";
-    let (tree, errors) = emit_and_run::real_blog()
+    let tree = emit_and_run::real_blog()
         .edit(
             "app/controllers/articles_controller.rb",
             "    @article = Article.new(article_params)\n",
             "    params.require(:article)\n    @article = Article.new(title: \"Guarded only by require\", body: \"A body long enough\")\n",
         )
-        .emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+        .native_http_tree();
     let mut server = native_http::Server::start(&tree);
     server.take_session("/articles/new");
     for (name, body) in [("empty body", ""), ("{}", "{}"), ("article: {}", r#"{"article":{}}"#)] {

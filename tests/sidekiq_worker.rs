@@ -85,6 +85,17 @@ fn scratch(name: &str) -> PathBuf {
         .map(|v| v.as_str().unwrap())
         .collect();
     std::fs::write(dir.join("popped.txt"), popped.join("\n") + "\n").expect("write popped.txt");
+    write_failures(&dir);
+    let moves: Vec<String> = retry_moves(&retry_oracle())
+        .iter()
+        .map(|m| format!("{}\t{}", m["set"].as_str().unwrap(), m["popped"].as_str().unwrap()))
+        .collect();
+    std::fs::write(dir.join("moves.txt"), moves.join("\n") + "\n").expect("write moves.txt");
+    dir
+}
+
+/// The retry oracle's failures, their times made a few seconds before now.
+fn write_failures(dir: &Path) {
     let lines: Vec<String> = retry_failures(&retry_oracle())
         .iter()
         .map(|f| {
@@ -98,12 +109,6 @@ fn scratch(name: &str) -> PathBuf {
         })
         .collect();
     std::fs::write(dir.join("failures.txt"), lines.join("\n") + "\n").expect("write failures.txt");
-    let moves: Vec<String> = retry_moves(&retry_oracle())
-        .iter()
-        .map(|m| format!("{}\t{}", m["set"].as_str().unwrap(), m["popped"].as_str().unwrap()))
-        .collect();
-    std::fs::write(dir.join("moves.txt"), moves.join("\n") + "\n").expect("write moves.txt");
-    dir
 }
 
 /// The retry oracle's moves (each job Sidekiq's poller popped and pushed
@@ -338,6 +343,8 @@ fn spinel_twin(name: &str, driver: &str) {
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr)
     );
+    // Not the times `scratch` wrote: the build can outlast the driver's 60-second window around now.
+    write_failures(&dir);
     let out = Command::new(dir.join("driver")).current_dir(&dir).output().unwrap();
     let binary = String::from_utf8_lossy(&out.stdout).to_string();
     assert_eq!(binary, cruby, "the binary and CRuby disagree\n=== spinel ===\n{binary}\n=== CRuby ===\n{cruby}");

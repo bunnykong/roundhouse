@@ -3,14 +3,11 @@
 
 use super::conditional_get_contract as contract;
 use super::native_http;
-use roundhouse::project::BuildTarget;
 
 #[test]
 #[ignore = "requires Spinel; run in its CI lane"]
 fn responses_carry_etag_cache_control_and_answer_304_natively() {
-    let (tree, errors) = contract::overlay().emit(BuildTarget::Spinel);
-    assert!(errors.is_empty(), "analysis/emission errors:\n{}", errors.join("\n"));
-    native_http::build(&tree);
+    let tree = contract::overlay().native_http_tree();
     let server = native_http::Server::start(&tree);
     let header = |r: &native_http::Response, name: &str| r.headers.get(name).cloned();
 

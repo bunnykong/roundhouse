@@ -1048,9 +1048,9 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         {
             continue;
         }
-        // 2-arg `attribute :name, :type` — claimed by
-        // markers::push_attribute_api_methods (typed virtual
-        // attributes), as is a 3-arg one whose `default:` it reads. A
+        // `attribute :name` — claimed by
+        // markers::push_attribute_api_methods (virtual attributes),
+        // with an optional type and a supported `default:`. A
         // default over an existing column (Rails makes it the column's
         // default; the column's reader is kept here, so it would be
         // dropped) or beside the model's own writer
@@ -1058,25 +1058,16 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         // warns, as other arities do.
         if name == "attribute" {
             if let ExprNode::Send { args, .. } = &*expr.node {
-                let default_over_column = args.len() == 3
-                    && matches!(
-                        &*args[0].node,
-                        ExprNode::Lit { value: Literal::Sym { value: attr } }
-                            if schema.tables.get(&model.table.0).is_some_and(|t| t.columns.iter().any(|c| c.name == *attr))
-                    );
-                if args.len() == 2
-                    || (args.len() == 3
-                        && self::markers::attribute_api_default(&args[2]).is_some()
-                        && !default_over_column
-                        && !self::markers::default_beside_source_writer(&model.body, args))
+                if let Some(decl) = self::markers::attribute_api_decl(args)
+                    && !(decl.options.is_some()
+                        && schema.tables.get(&model.table.0).is_some_and(|t| t.columns.iter().any(|c| c.name == *decl.name)))
+                    && !self::markers::default_beside_source_writer(&model.body, args)
                 {
                     // Over a column of another type, the column's cast,
                     // reader and storage are kept
                     // (`markers::attribute_matches_column`): reported.
-                    if let (
-                        ExprNode::Lit { value: Literal::Sym { value: attr } },
-                        ExprNode::Lit { value: Literal::Sym { value: ty } },
-                    ) = (&*args[0].node, &*args[1].node)
+                    let attr = decl.name;
+                    if let Some(ty) = decl.ty
                         && !model.enums.contains_key(attr)
                         && let Some(col) = schema
                             .tables

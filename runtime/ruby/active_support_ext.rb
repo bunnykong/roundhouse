@@ -78,6 +78,16 @@ module ActiveSupport
       ::JSON.parse(text)
     end
 
+    # Rails' aliases (`alias_method :load, :decode`, `:dump, :encode`);
+    # solid_queue's recurring task arguments go through them.
+    def self.load(text)
+      ActiveSupport::JSON.decode(text)
+    end
+
+    def self.dump(value)
+      ActiveSupport::JSON.encode(value)
+    end
+
     # One `case` rather than a chain of tests: each read of the untyped
     # value is a site the runtime typing gate counts.
     def self.jsonable(value)

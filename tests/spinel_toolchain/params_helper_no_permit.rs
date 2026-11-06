@@ -13,7 +13,6 @@
 //! hand against the issue's exact repro before writing this test.
 
 use super::{emit_and_run, native_http};
-use roundhouse::project::BuildTarget;
 
 fn widgets() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
@@ -70,10 +69,7 @@ end
 #[ignore = "requires Spinel; run in its CI lane"]
 fn a_no_permit_guard_filter_builds_and_runs_on_spinel() {
     // Not a build of its own: the bare-permit controller (`emit_and_run/bare_permit.rs`) rides this one.
-    let (tree, errors) = super::bare_permit_contract::apply(widgets()).emit(BuildTarget::Spinel);
-    assert!(errors.is_empty(), "analysis/emission errors:\n{}", errors.join("\n"));
-
-    native_http::build(&tree);
+    let tree = super::bare_permit_contract::apply(widgets()).native_http_tree();
     let server = native_http::Server::start(&tree);
 
     let allowed = server.get("/widgets/1?kind=small");

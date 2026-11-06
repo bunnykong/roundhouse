@@ -2507,6 +2507,12 @@ pub(super) fn emit_send(
                 if result_ty.is_some_and(Ty::contains_time) {
                     return format!("{recv_s}.{go_m}()");
                 }
+                // A method the receiver's model defines itself
+                // (`def featured?`) is a call: the model emit writes it as
+                // a method (`FeaturedPred()`), not a field.
+                if recv_model_defines(r, method) {
+                    return format!("{recv_s}.{go_m}()");
+                }
                 // Bare field read (no parens) → suffix-stripped field
                 // name so `record.persisted?` → `record.Persisted`.
                 return format!("{recv_s}.{}", go_field_ident(method));
@@ -4376,6 +4382,26 @@ fn raised_error_class(ctx: &EmitCtx, path: &[crate::ident::Symbol]) -> Option<St
 
 pub(super) fn set_all_nullable_columns(columns: Vec<(String, String, String)>) {
     ALL_NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = columns);
+}
+
+thread_local! {
+    /// Every model's Go methods, app-wide: `(Model path, method)`. A view
+    /// reads another record's method (`article.featured?`), and a bare
+    /// 0-arg read of one is a field read unless the model's type has it.
+    static ALL_MODEL_METHODS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(super) fn set_all_model_methods(methods: Vec<(String, String)>) {
+    ALL_MODEL_METHODS.with(|c| *c.borrow_mut() = methods);
+}
+
+/// Does the model this receiver resolves to have `method` as a Go
+/// method? A nilable receiver (`Article | nil`) is its model's; the
+/// model is matched by its full class path.
+fn recv_model_defines(recv: &Expr, method: &str) -> bool {
+    let Some(Ty::Class { id, .. }) = recv.ty.as_ref().and_then(union_non_nil_core) else { return false };
+    let model = id.0.as_str();
+    ALL_MODEL_METHODS.with(|c| c.borrow().iter().any(|(m, name)| m == model && name == method))
 }
 
 /// Is `column` nullable on the model this expression's receiver

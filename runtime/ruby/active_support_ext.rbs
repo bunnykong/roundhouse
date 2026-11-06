@@ -3,6 +3,8 @@ module ActiveSupport
     def self.encode: (untyped value) -> String
     def self.encode_without_escape: (untyped value) -> String
     def self.decode: (String text) -> untyped
+    def self.load: (String text) -> untyped
+    def self.dump: (untyped value) -> String
     def self.jsonable: (untyped value) -> untyped
     def self.time_json: (::Time t) -> String
     def self.time_fragment: (::Time? t) -> String

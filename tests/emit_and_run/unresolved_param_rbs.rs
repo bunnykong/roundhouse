@@ -9,7 +9,9 @@
 //! caller forwards its own parameter to: campfire's `Room#receive` is
 //! called from a test alone, and its `push_later(message)` kept the
 //! Message the job payload is lowered from. A concern's method follows
-//! its includer's untyped caller into the module's own row.
+//! its includer's untyped caller into the module's own row. A parameter
+//! fed through a relay ships `untyped` too when a test helper is passed
+//! its own returned value, which once kept the rounds from settling.
 
 use super::emit_and_run;
 use roundhouse::project::BuildTarget;
@@ -68,6 +70,52 @@ end
     )
 }
 
+fn relay_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/label_probe.rb",
+            r#"require "json"
+
+class LabelProbe
+  def self.label(time)
+    time.to_s
+  end
+
+  def self.label_of_time
+    label(Time.at(0).utc)
+  end
+
+  def self.relay_label(time)
+    label(time)
+  end
+
+  def self.label_of_json
+    relay_label(JSON.parse('{"x":1}'))
+  end
+end
+"#,
+        )
+        .write(
+            "test/models/probe_test.rb",
+            r#"require "test_helper"
+
+class ProbeTest < ActiveSupport::TestCase
+  test "the second probe reuses the first connection" do
+    connection, channel = open_probe
+    open_probe(connection:)
+  end
+
+  private
+
+  def open_probe(connection: nil)
+    connection ||= Connection.new
+    [connection, Channel.new]
+  end
+end
+"#,
+        )
+}
+
 const SCRIPT: &str = r#"
 got = ZoneProbe.from_block({ x: "noon" }).first
 raise "local: #{got.inspect}" unless got == "noon"
@@ -89,6 +137,15 @@ fn a_parameter_an_untyped_caller_reaches_ships_untyped() {
     // A concern's method keys its calls to the includer; the module's row is what the sidecar declares.
     let text = std::fs::read_to_string(tree.join("app/models/stamping.rbs")).expect("stamping sidecar");
     assert!(text.contains("def stamp_year: (untyped t)"), "{text}");
+}
+
+#[test]
+fn a_relayed_parameter_ships_untyped_beside_a_helper_passed_its_own_return() {
+    let (tree, _errors) = relay_app().emit(BuildTarget::Spinel);
+    let text = std::fs::read_to_string(tree.join("app/models/label_probe.rbs")).expect("label_probe sidecar");
+    for line in ["def self.label: (untyped time)", "def self.relay_label: (untyped time)"] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
 }
 
 #[test]

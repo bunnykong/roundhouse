@@ -77,6 +77,7 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "spinel_stream_error",
     "did_you_mean",
     "spinel_faye_websocket",
     "spinel_websocket_lifecycle",
@@ -114,6 +115,8 @@ SPINEL_TESTS = [
     "partial_flash_from_caller_spinel",
     "plain_class_optional_keywords_spinel",
     "conditional_expression_parens",
+    "class_object_return_rbs",
+    "module_self_argument_rbs",
     "jbuilder_array_value_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
@@ -505,6 +508,10 @@ def native_coverage(path):
         or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
+    if path == "src/analyze/mod.rs":
+        suites.add("class_object_return_rbs")
+    if path in {"src/analyze/mod.rs", "src/analyze/body/mod.rs"}:
+        suites.add("module_self_argument_rbs")
     if path in {"src/emit/ruby.rs", "src/emit/ruby/expr.rs"}:
         suites.add("conditional_expression_parens")
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
@@ -534,6 +541,12 @@ def native_coverage(path):
         suites.add("did_you_mean")
     if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
         suites.add("spinel_net_http_start")
+    if path.startswith("tests/spinel_stream_error") or path in {
+        "tests/support/server_check_io.rb",
+        "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
+        "runtime/spinel/tep/server_scheduled.rb", "runtime/spinel/tep/streamer.rb",
+    }:
+        suites.add("spinel_stream_error")
     if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":
         suites.add("spinel_faye_websocket")
     if path.startswith(("tests/spinel_websocket_lifecycle", "runtime/spinel/tep/websocket")) or path in {
@@ -991,17 +1004,35 @@ def spinel_framework_shards(tests, count=SPINEL_FRAMEWORK_SHARDS, timings=None):
     return [{"shard": i, "tests": [t for t in tests if t in shard]} for i, shard in enumerate(shards)]
 
 
-def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=None):
-    """This shard's tests: longest first onto the lightest shard, by name order within it."""
+def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=None, units=None):
+    """This shard's tests: longest first onto the lightest shard, by name order within it.
+
+    A unit (tests one shared Spinel build would take, from spinel_bundle_plan) goes to one
+    shard whole: split across shards, each part pays the build again."""
     loads = [0] * count
     tail = (timings or {}).get("toolchain", {}).get(SPINEL_TOOLCHAIN_TAIL, SPINEL_TOOLCHAIN_TAIL_SECONDS)
     loads[-1] = tail * SPINEL_TOOLCHAIN_THREADS
+    present = set(tests)
+    items = []
+    taken = set()
+    for unit in units or []:
+        unit = sorted(t for t in unit if t in present and t not in taken)
+        if unit:
+            taken.update(unit)
+            items.append(unit)
+    items.extend([t] for t in tests if t not in taken)
+    # A unit is one build. Its tests' recorded seconds are either their shares of it (#1781),
+    # which sum to it, or what each paid compiling alone, which sum to many builds; one build
+    # of n cases costs about its heaviest case's, a bit more per case. The lesser of the two.
+    def cost(item):
+        seconds = [spinel_toolchain_seconds(t, timings) for t in item]
+        return min(sum(seconds), max(seconds) * (1 + (len(item) - 1) / 8))
     mine = []
-    for test in sorted(tests, key=lambda t: (-spinel_toolchain_seconds(t, timings), t)):
+    for item in sorted(items, key=lambda item: (-cost(item), item[0])):
         i = loads.index(min(loads))
-        loads[i] += spinel_toolchain_seconds(test, timings)
+        loads[i] += cost(item)
         if i == shard:
-            mine.append(test)
+            mine.extend(item)
     return sorted(mine)
 
 
@@ -1331,6 +1362,7 @@ def main():
         choices=["plan", "gate", "compact-gate", "toolchain-shard", "timed", "run-tests", "merge-timings"],
     )
     parser.add_argument("--shard", type=int)
+    parser.add_argument("--units")
     parser.add_argument("--kind", choices=SPINEL_TIMING_KINDS)
     parser.add_argument("--name")
     parser.add_argument("--parallel", type=int, default=os.cpu_count() or 1)
@@ -1343,7 +1375,8 @@ def main():
     command = argv[split + 1 :]
     if args.command == "toolchain-shard":
         tests = [line.strip() for line in sys.stdin if line.strip()]
-        for test in spinel_toolchain_shard(tests, args.shard, timings=spinel_timings_from_env()):
+        units = json.loads(Path(args.units).read_text()) if args.units and Path(args.units).is_file() else None
+        for test in spinel_toolchain_shard(tests, args.shard, timings=spinel_timings_from_env(), units=units):
             print(test)
         return False
     if args.command == "timed":

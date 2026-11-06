@@ -553,6 +553,38 @@ fn controller_state_ivars(files: &mut [(String, String)]) -> Result<(), String> 
 /// (roundhouse#90). Integer-only apps ship the sidecar byte-for-byte.
 /// The three lines are matched exactly so a drift in the sidecar is a
 /// build error here, not a silent narrowing.
+/// `ActiveModel::UnknownAttributeError.new(self, key)` from a tableless
+/// model's attribute assignment (a gem's `include ActiveModel::Model`
+/// class, MissionControl::Jobs::RecurringTask): Rails takes any record,
+/// and the shared sidecar's `ActiveRecord::Base` refused it on Spinel.
+/// Widened in the Spinel tree alone; the strict targets keep the record
+/// type their own fields need.
+fn widen_unknown_attribute_record(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
+    if !app.models.iter().any(|m| m.parent.is_none()) {
+        return Ok(());
+    }
+    let Some((_, text)) = files.iter_mut().find(|(p, _)| p == "sig/runtime/active_record/errors.rbs") else {
+        return Ok(());
+    };
+    for (narrow, wide) in [
+        ("    def record: () -> ActiveRecord::Base
+", "    def record: () -> untyped
+"),
+        (
+            "    def initialize: (ActiveRecord::Base record, String attribute, ?String message) -> void
+",
+            "    def initialize: (untyped record, String attribute, ?String message) -> void
+",
+        ),
+    ] {
+        if !text.contains(narrow) {
+            return Err(format!("widen_unknown_attribute_record: errors.rbs no longer declares {narrow:?}"));
+        }
+        *text = text.replace(narrow, wide);
+    }
+    Ok(())
+}
+
 fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
     let string_key = |col: &crate::schema::Column| {
         !matches!(
@@ -748,17 +780,16 @@ pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<()
     resolve_runtime_sig_conflicts(files)
 }
 
-/// Two runtime RBS files can declare one method with different
-/// signatures: the shared runtime declares a class's methods for every
+/// Two runtime RBS files can declare one method or ivar with different
+/// types: the shared runtime declares a class's members for every
 /// target, and a ruby-family reopen or a Spinel-specific file re-declares
 /// the ones it overrides (`ActiveRecord::Base.where` as a `Relation` in
 /// connection.rbs, not an `Array[Base]`; `ActiveStorage::Service#upload`
-/// returning `nil` in Spinel's active_storage_disk.rbs). Spinel used to let
-/// whichever seed `readdir` visited later replace the other, which is
-/// filesystem order; since spinel e6b845d1f ("Two declarations of one
-/// method that disagree are an error") it refuses the build.
+/// returning `nil` in Spinel's active_storage_disk.rbs). Spinel refuses
+/// conflicting method declarations since e6b845d1f; ivar seeds still take
+/// whichever declaration `readdir` visits later.
 ///
-/// So the Spinel tree keeps one declaration per method, chosen the way the
+/// So the Spinel tree keeps one declaration per member, chosen the way the
 /// Ruby definitions override each other: a file from runtime/spinel beats
 /// one from runtime/ruby, and within one runtime a reopen beats the
 /// class's primary file (active_record/base.rbs for ActiveRecord::Base).
@@ -771,19 +802,19 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         span: std::ops::Range<usize>,
         sig: String,
     }
-    // (qualified class, receiver, method) -> declarations from every runtime .rbs.
-    let mut decls: HashMap<(String, &'static str, String), Vec<Decl>> = HashMap::default();
+    // (qualified class, ivar, receiver, name) -> declarations from every runtime .rbs.
+    let mut decls: HashMap<(String, bool, &'static str, String), Vec<Decl>> = HashMap::default();
     for (fi, (path, text)) in files.iter().enumerate() {
         if !path.ends_with(".rbs")
             || !(path.starts_with("runtime/") || path.starts_with("sig/runtime/"))
         {
             continue;
         }
-        let found = rbs_method_declarations(text)
+        let found = rbs_member_declarations(text)
             .map_err(|e| format!("resolve_runtime_sig_conflicts: {path}: {e}"))?;
         for d in found {
             decls
-                .entry((d.owner, d.receiver, d.name))
+                .entry((d.owner, d.ivar, d.receiver, d.name))
                 .or_default()
                 .push(Decl { file: fi, span: d.span, sig: d.sig });
         }
@@ -803,7 +834,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
     };
     let mut drop: HashMap<usize, Vec<std::ops::Range<usize>>> = HashMap::default();
     let mut undecided = Vec::new();
-    for ((class, receiver, method), ds) in &decls {
+    for ((class, ivar, receiver, member), ds) in &decls {
         let first = &ds[0].sig;
         if ds.iter().all(|d| &d.sig == first) {
             continue;
@@ -811,8 +842,9 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
         let best = ds.iter().map(|d| rank(d.file, class)).max().unwrap_or(0);
         let winners: Vec<&Decl> = ds.iter().filter(|d| rank(d.file, class) == best).collect();
         if winners.iter().any(|d| d.sig != winners[0].sig) {
+            let separator = if *ivar { " " } else { "#" };
             undecided.push(format!(
-                "{class}#{receiver}{method}: {}",
+                "{class}{separator}{receiver}{member}: {}",
                 ds.iter()
                     .map(|d| format!("{} `{}`", files[d.file].0, d.sig))
                     .collect::<Vec<_>>()
@@ -827,7 +859,7 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
     if !undecided.is_empty() {
         undecided.sort();
         return Err(format!(
-            "resolve_runtime_sig_conflicts: runtime RBS declares a method twice and no file overrides the other:\n  {}",
+            "resolve_runtime_sig_conflicts: runtime RBS declares a member twice and no file overrides the other:\n  {}",
             undecided.join("\n  ")
         ));
     }
@@ -837,14 +869,13 @@ fn resolve_runtime_sig_conflicts(files: &mut [(String, String)]) -> Result<(), S
     Ok(())
 }
 
-/// One method declaration in an RBS file, as the passes that drop one
-/// see it: `resolve_runtime_sig_conflicts`, and `emit::ruby::reopen` for
-/// a method an app's reopen redefines.
-pub(crate) struct RbsMethodDecl {
+/// One method or ivar declaration in an RBS file.
+pub(crate) struct RbsMemberDecl {
     /// The qualified class, module or interface that declares it.
     pub(crate) owner: String,
     /// `""`, `"self."` or `"self?."`.
     pub(crate) receiver: &'static str,
+    ivar: bool,
     pub(crate) name: String,
     /// What removing it takes: every overload and annotation, plus the
     /// indentation and line end when no neighbor shares that line.
@@ -854,10 +885,14 @@ pub(crate) struct RbsMethodDecl {
 }
 
 /// Every method declaration in `text`, nested owners included.
-pub(crate) fn rbs_method_declarations(text: &str) -> Result<Vec<RbsMethodDecl>, String> {
+pub(crate) fn rbs_method_declarations(text: &str) -> Result<Vec<RbsMemberDecl>, String> {
+    Ok(rbs_member_declarations(text)?.into_iter().filter(|decl| !decl.ivar).collect())
+}
+
+fn rbs_member_declarations(text: &str) -> Result<Vec<RbsMemberDecl>, String> {
     let signature = ruby_rbs::node::parse(text).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    collect_rbs_methods(signature.declarations().iter(), "", text, &mut out)?;
+    collect_rbs_members(signature.declarations().iter(), "", text, &mut out)?;
     Ok(out)
 }
 
@@ -903,11 +938,11 @@ fn signature_key(source: &str) -> String {
     tokens.join(" ")
 }
 
-fn collect_rbs_methods<'a>(
+fn collect_rbs_members<'a>(
     nodes: impl Iterator<Item = ruby_rbs::node::Node<'a>>,
     parent: &str,
     text: &str,
-    out: &mut Vec<RbsMethodDecl>,
+    out: &mut Vec<RbsMemberDecl>,
 ) -> Result<(), String> {
     use ruby_rbs::node::{MethodDefinitionKind, Node};
     for node in nodes {
@@ -923,7 +958,7 @@ fn collect_rbs_methods<'a>(
                 };
                 let loc = method.location();
                 let mut start = loc.start() as usize;
-                let mut end = loc.end() as usize;
+                let end = loc.end() as usize;
                 // ruby-rbs 0.3 leaves name_location unset for a backtick
                 // identifier. The name symbol's own location is populated
                 // for every spelling, including quoted names and operators.
@@ -942,26 +977,36 @@ fn collect_rbs_methods<'a>(
                 for annotation in method.annotations().iter() {
                     start = start.min(annotation.location().start() as usize);
                 }
-                // Remove indentation/newline only when the declaration owns
-                // that part of the line; same-line neighbors must survive.
-                let before = text.get(..start).ok_or_else(invalid_location)?;
-                let line_start = before.rfind('\n').map_or(0, |n| n + 1);
-                if text[line_start..start].trim().is_empty() {
-                    start = line_start;
-                }
-                let line_end = text[end..].find('\n').map_or(text.len(), |n| end + n + 1);
-                let suffix = text[end..line_end].trim();
-                if suffix.is_empty() || suffix.starts_with('#') {
-                    end = line_end;
-                }
                 // A quoted instance name can itself start with `self.`.
                 // Keep the receiver separate from the decoded name.
-                out.push(RbsMethodDecl {
+                out.push(RbsMemberDecl {
                     owner: parent.to_string(),
                     receiver: prefix,
+                    ivar: false,
                     name: method.name().as_str().to_string(),
-                    span: start..end,
+                    span: rbs_member_span(text, start..end)?,
                     sig,
+                });
+                continue;
+            }
+            Node::InstanceVariable(_) | Node::ClassInstanceVariable(_) => {
+                let (name, loc, prefix) = match node {
+                    Node::InstanceVariable(ivar) => (ivar.name(), ivar.location(), ""),
+                    Node::ClassInstanceVariable(ivar) => (ivar.name(), ivar.location(), "self."),
+                    _ => unreachable!(),
+                };
+                let start = loc.start() as usize;
+                let end = loc.end() as usize;
+                let sig_start = name.location().end() as usize;
+                let source = text.get(sig_start..end)
+                    .ok_or_else(|| format!("invalid source location for {parent} {prefix}{name}"))?;
+                out.push(RbsMemberDecl {
+                    owner: parent.to_string(),
+                    receiver: prefix,
+                    ivar: true,
+                    name: name.as_str().to_string(),
+                    span: rbs_member_span(text, start..end)?,
+                    sig: signature_key(source),
                 });
                 continue;
             }
@@ -977,9 +1022,28 @@ fn collect_rbs_methods<'a>(
             _ => None,
         }));
         parts.push(name.name().as_str().to_string());
-        collect_rbs_methods(members.iter(), &parts.join("::"), text, out)?;
+        collect_rbs_members(members.iter(), &parts.join("::"), text, out)?;
     }
     Ok(())
+}
+
+// Remove indentation/newline only when the declaration owns that part of
+// the line; same-line neighbors must survive.
+fn rbs_member_span(text: &str, span: std::ops::Range<usize>) -> Result<std::ops::Range<usize>, String> {
+    let mut start = span.start;
+    let mut end = span.end;
+    let before = text.get(..start).ok_or("invalid RBS member start")?;
+    let after = text.get(end..).ok_or("invalid RBS member end")?;
+    let line_start = before.rfind('\n').map_or(0, |n| n + 1);
+    if text[line_start..start].trim().is_empty() {
+        start = line_start;
+    }
+    let line_end = after.find('\n').map_or(text.len(), |n| end + n + 1);
+    let suffix = text[end..line_end].trim();
+    if suffix.is_empty() || suffix.starts_with('#') {
+        end = line_end;
+    }
+    Ok(start..end)
 }
 
 /// `text` without `spans`, overlapping ones included.
@@ -1876,6 +1940,26 @@ fn reject_file_blob_fixtures(app: &App, target: BuildTarget) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+/// A file of top-level constants with no class or module
+/// (`LibraryClassOrigin::FileConstants`) is written as those constants,
+/// which only the CRuby and JRuby trees do; another target would have
+/// to invent a class for it.
+fn refuse_file_constants(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Futamura) {
+        return Ok(());
+    }
+    let Some(holder) = app.library_classes.iter().find(|lc| lc.is_file_constants()) else {
+        return Ok(());
+    };
+    let span = holder.constants.first().map(|(_, value)| value.span).unwrap_or_default();
+    let message = format!(
+        "{} is a file of top-level constants with no class or module, which this target has no representation for; use Ruby or JRuby",
+        holder.name.0.as_str()
+    );
+    emit::diagnostics::report_unsupported(span, target.as_str(), "file constants", &message);
+    Err(format!("{}: {message}", target.as_str()))
 }
 
 /// Keep admitted Data factories outside unverified target emitters.
@@ -3357,6 +3441,7 @@ fn target_files_inner(
     reject_unsupported_pattern_matches(app, target)?;
     reject_file_blob_fixtures(app, target)?;
     reject_unsupported_data_factories(app, target)?;
+    refuse_file_constants(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
@@ -7179,7 +7264,13 @@ fn apply_job_registry_locate(files: &mut [(String, String)], app: &App) {
         return;
     }
     let mut generated = format!("{HEAD}  def self.locate(model_name, id)\n    case model_name\n");
-    for model in app.models.iter().filter(|m| !crate::lower::model_to_library::markers::is_abstract_class(m)) {
+    // Not a model with neither a table nor its own `self.find` (MissionControl::Jobs::RecurringTask): Rails' locator raises for it too.
+    let finds = |m: &crate::dialect::Model| {
+        !m.attributes.fields.is_empty()
+            || m.body.iter().any(|item| matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+                if method.name.as_str() == "find" && method.receiver == crate::dialect::MethodReceiver::Class))
+    };
+    for model in app.models.iter().filter(|m| finds(m) && !crate::lower::model_to_library::markers::is_abstract_class(m)) {
         let name = model.name.0.as_str();
         generated.push_str(&format!(
             "    when \"{name}\"\n      {name}.find(GlobalID::Locator.cast_id(id))\n"
@@ -8637,6 +8728,8 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport", "error_template"),
     ("ActiveSupport", "errors_import"),
     ("ActiveSupport", "errors_merge"),
+    ("ActiveJob::Arguments", "serialize"),
+    ("ActiveJob::Arguments", "ruby2_keywords_hash"),
 ];
 
 /// Instance methods only the ruby family and spinel can answer: a model's
@@ -9944,6 +10037,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         }
     }
     widen_key_contract(app, &mut files)?;
+    widen_unknown_attribute_record(app, &mut files)?;
     controller_state_ivars(&mut files)?;
     // Relation Base→untyped rewrite is Spinel-only (see
     // `spinel_relation_model_handle` call sites). `ruby_family_runtime_files`
@@ -14755,6 +14849,38 @@ mod tests {
             assert!(files[0].1.contains("def untouched: () -> Integer"));
             ruby_rbs::node::parse(&files[0].1).expect("same-line neighbors survive");
         }
+    }
+
+    #[test]
+    fn spinel_runtime_sig_conflicts_prefer_overlay_ivars() {
+        for reverse in [false, true] {
+            let mut files = vec![
+                ("runtime/action_dispatch/flash.rbs".into(),
+                 "module ActionDispatch\n  class Flash\n    @notice: String?\n    @untouched: Integer\n    self.@notice: String\n    def notice: () -> String?\n  end\nend\n".into()),
+                ("runtime/flash_any_key.rbs".into(),
+                 "class ::ActionDispatch::Flash\n  @notice: untyped\nend\n".into()),
+            ];
+            if reverse {
+                files.reverse();
+            }
+            resolve_runtime_sig_conflicts(&mut files).unwrap();
+            let primary = &files.iter().find(|(p, _)| p == "runtime/action_dispatch/flash.rbs").unwrap().1;
+            assert!(!primary.contains("@notice: String?"), "{primary}");
+            assert!(primary.contains("@untouched: Integer"));
+            assert!(primary.contains("self.@notice: String"));
+            assert!(primary.contains("def notice: () -> String?"));
+            for (_, text) in &files {
+                ruby_rbs::node::parse(text).expect("resolved ivars parse");
+            }
+        }
+        let mut ambiguous = vec![
+            ("runtime/action_dispatch/flash.rbs".into(),
+             "class ActionDispatch::Flash\n  @notice: String?\nend\n".into()),
+            ("sig/runtime/action_dispatch/flash.rbs".into(),
+             "class ActionDispatch::Flash\n  @notice: untyped\nend\n".into()),
+        ];
+        let error = resolve_runtime_sig_conflicts(&mut ambiguous).unwrap_err();
+        assert!(error.contains("ActionDispatch::Flash @notice"), "{error}");
     }
 
     #[test]

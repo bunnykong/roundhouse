@@ -25,6 +25,9 @@ use std::process::Command;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/content_tag_options.rs"]
+#[allow(dead_code)]
+mod content_tag_options;
 #[path = "support/rust_bare_model.rs"]
 mod rust_bare_model;
 #[path = "support/i18n_locales_app.rs"]
@@ -561,6 +564,27 @@ async fn a_missing_record_is_rescued_to_404() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// A non-block `content_tag` with options renders as Rails 8.1.4 does
+/// (#1780): the app's integration test, run by `cargo test`. Rust's
+/// test emit has no `assert_includes`; the probe defines it.
+#[test]
+#[ignore]
+fn content_tag_with_options_renders() {
+    let (emitted, errors) = content_tag_options::app(content_tag_options::VIEW).emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("src/tests/probes_controller_test.rs");
+    let mut source = std::fs::read_to_string(&test).expect("probes_controller_test.rs");
+    source.push_str("\nfn assert_includes(body: String, want: &str) {\n    assert!(body.contains(want), \"missing {want} in {body}\");\n}\n");
+    std::fs::write(&test, source).expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "content_tag_renders"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// #1711: a model with no validations, no timestamp columns, or neither

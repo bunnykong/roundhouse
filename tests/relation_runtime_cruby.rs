@@ -19,7 +19,7 @@ fn tree() -> PathBuf {
     for (path, body) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n    t.integer \"parent_id\"\n    t.datetime \"read_at\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
-        ("app/models/note.rb", "class Note < ApplicationRecord\nend\n"),
+        ("app/models/note.rb", "class Note < ApplicationRecord\n  validates :body, presence: true\nend\n"),
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
         ("app/controllers/notes_controller.rb", "class NotesController < ApplicationController\n  def index\n    @notes = Note.all\n  end\nend\n"),
         ("app/views/notes/index.html.erb", "<%= @notes.length %>\n"),
@@ -85,5 +85,83 @@ p (only_a & [Note.find(a.id)]).length
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
         "1\n1\n1\nfalse\n[\"a\", \"b\"]\n2\n2\n[\"a\"]\n[\"b\", \"c\"]\n[\"a\", \"b\", \"c\"]\n1\n"
+    );
+}
+
+#[test]
+fn relation_enumeration_chains_answer_loaded_rows() {
+    if !Command::new("ruby").args(["-rsqlite3", "-e", "1"]).status().is_ok_and(|s| s.success()) {
+        eprintln!("skipping: ruby with the sqlite3 gem not available");
+        return;
+    }
+    let out = tree();
+    let script = r#"
+require File.expand_path("main", Dir.pwd)
+Main.configure_default_adapter!
+%w[B A C].each { |body| record = Note.new; record.body = body; record.save! }
+relation = ActiveRecord::Relation.new(Note).order(:id)
+p relation.filter_map { |record| record.body if record.body != "A" }
+p relation.flat_map { |record| [record.body, record.body] }
+p relation.each_with_index.map { |record, index| [record.body, index] }
+p relation.find_each.reduce(true) { |memo, record| memo && record.body != "D" }
+p relation.find_each.filter_map { |record| record.body if record.body != "A" }
+p relation.find_each.map { |record| record.body }
+p relation.sort_by.with_index { |record, index| -index }.map { |record| record.body }
+p relation.sort_by.with_index { |record, index| 0 }.map { |record| record.body }
+"#;
+    let result = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(&out)
+        .env("BLOG_DB", ":memory:")
+        .output()
+        .expect("ruby");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[\"B\", \"C\"]\n[\"B\", \"B\", \"A\", \"A\", \"C\", \"C\"]\n\
+         [[\"B\", 0], [\"A\", 1], [\"C\", 2]]\ntrue\n[\"B\", \"C\"]\n\
+         [\"B\", \"A\", \"C\"]\n[\"C\", \"A\", \"B\"]\n[\"B\", \"A\", \"C\"]\n"
+    );
+}
+
+#[test]
+fn relation_create_returns_records_and_create_bang_raises_on_invalid_records() {
+    if !Command::new("ruby").args(["-rsqlite3", "-e", "1"]).status().is_ok_and(|s| s.success()) {
+        eprintln!("skipping: ruby with the sqlite3 gem not available");
+        return;
+    }
+    let out = tree();
+    let script = r#"
+require File.expand_path("main", Dir.pwd)
+Main.configure_default_adapter!
+scope = Note.where(parent_id: 7, read_at: nil)
+first = scope.create(body: "first")
+second = scope.create!(body: "second", parent_id: 9)
+first.reload
+second.reload
+p [first.body, first.parent_id, first.read_at.nil?, first.persisted?]
+p [second.body, second.parent_id, second.read_at.nil?, second.persisted?]
+invalid = scope.create(body: "")
+p [invalid.parent_id, invalid.persisted?]
+begin
+  scope.create!(body: "")
+  raise "create! accepted an invalid record"
+rescue ActiveRecord::RecordInvalid
+  puts "ActiveRecord::RecordInvalid"
+end
+p Note.count
+"#;
+    let result = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(&out)
+        .env("BLOG_DB", ":memory:")
+        .output()
+        .expect("ruby");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[\"first\", 7, true, true]\n[\"second\", 9, true, true]\n[7, false]\nActiveRecord::RecordInvalid\n2\n"
     );
 }

@@ -216,6 +216,7 @@ fn tiny_blog_round_trips() {
         view_ivar_types: roundhouse::det::HashMap::default(),
         html_safe_methods: std::collections::BTreeSet::new(),
         html_safe_method_owners: Default::default(),
+        html_safe_method_defs: Default::default(),
         time_formats: std::collections::BTreeMap::new(),
         generated_helper_methods: std::collections::BTreeMap::new(),
         module_mixins: Vec::new(),

@@ -76,6 +76,22 @@ module ActionController
       result
     end
 
+    # Rails' `http_basic_authenticate_or_request_with` (actionpack
+    # http_authentication.rb), which mission_control-jobs' basic
+    # authentication calls: both names compared, then both answers.
+    def http_basic_authenticate_or_request_with(name:, password:, realm: nil, message: nil)
+      authenticate_or_request_with_http_basic(realm.nil? ? "Application" : realm, message) do |given_name, given_password|
+        # Not `nil.to_s`: an unset credential would admit an empty one, where Rails' compare raises.
+        if name.nil? || password.nil?
+          false
+        else
+          name_ok = MessageDigest.secure_compare(given_name.to_s, name.to_s)
+          password_ok = MessageDigest.secure_compare(given_password.to_s, password.to_s)
+          name_ok && password_ok
+        end
+      end
+    end
+
     def request_http_basic_authentication(realm = "Application", message = nil)
       headers["WWW-Authenticate"] = "Basic realm=\"#{realm.delete("\"")}\""
       render(message.nil? ? "HTTP Basic: Access denied.\n" : message,

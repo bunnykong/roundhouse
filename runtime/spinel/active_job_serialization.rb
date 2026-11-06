@@ -27,6 +27,16 @@ require "time"
 # run a payload on, so this is where it belongs anyway — the same split
 # as GlobalID's mint (ruby/) and locator (spinel/).
 module ActiveJob
+  # Rails' `ActiveJob.adapter_name` (activejob queue_adapter.rb):
+  # mission_control-jobs names the adapter through it.
+  def self.adapter_name(adapter)
+    return adapter.queue_adapter_name if adapter.respond_to?(:queue_adapter_name)
+
+    return adapter.name.to_s.split("::").last.to_s.delete_suffix("Adapter") if adapter.is_a?(Module)
+    # Not Rails' `adapter.is_a?(Module) ? adapter : adapter.class`: that untyped-or-Class value makes Spinel send every untyped `.new` (Relation's `@model.new`) to every class, Flash's included.
+    adapter.class.name.to_s.split("::").last.to_s.delete_suffix("Adapter")
+  end
+
   module Arguments
     GLOBALID_KEY = "_aj_globalid"
     SERIALIZER_KEY = "_aj_serialized"
@@ -114,6 +124,24 @@ module ActiveJob
     # each helper above wrote, joined.
     def self.list(parts)
       "[" + parts.join(",") + "]"
+    end
+
+    def self.keywords(names, parts)
+      body = []
+      names.each_with_index { |name, i| body << str(name) + ":" + parts[i] }
+      body << "\"" + RUBY2_KEYWORDS_KEY + "\":" + list(names.map { |name| str(name) })
+      "{" + body.join(",") + "}"
+    end
+
+    def self.keyword_given?(args, name)
+      names = key_of(args[args.length - 1], RUBY2_KEYWORDS_KEY)
+      !names.nil? && names.include?(name)
+    end
+
+    # Not nil for a keyword the Hash lacks: a defaulted one is read only behind `keyword_given?`, and a required one is an error in Rails too.
+    def self.keyword_args(args, name)
+      raise ActiveJob::DeserializationError, deserialize_message("missing keyword " + name) unless keyword_given?(args, name)
+      [args[args.length - 1][name]]
     end
 
     # The keyword hash `Turbo::Streams::ActionBroadcastJob` takes, as
@@ -279,6 +307,69 @@ module ActiveJob
     RUBY2_KEYWORDS_KEY = "_aj_ruby2_keywords"
     WITH_INDIFFERENT_ACCESS_KEY = "_aj_hash_with_indifferent_access"
 
+    # Rails' `ActiveJob::Arguments.serialize`, the JSON-ready objects
+    # (solid_queue's recurring task arguments go through it). The same
+    # serializers `deserialize` reads; any other value raises Rails'
+    # SerializationError.
+    def self.serialize(arguments)
+      arguments.map { |argument| serialize_argument(argument) }
+    end
+
+    # Not a flag on the Hash, as Ruby keeps one: no target carries it, so the latest copies are held and known by identity (not `object_id`, which Spinel reuses once one is freed).
+    FLAGGED = []
+
+    def self.ruby2_keywords_hash(hash)
+      copy = hash.dup
+      FLAGGED << copy
+      FLAGGED.shift if FLAGGED.length > 64
+      copy
+    end
+
+    def self.ruby2_keywords_hash?(hash)
+      FLAGGED.any? { |held| held.equal?(hash) }
+    end
+
+    def self.serialize_hash_key(key)
+      unless key.is_a?(String) || key.is_a?(Symbol)
+        raise ActiveJob::SerializationError, "Only string and symbol hash keys may be serialized as job arguments, but " + key.inspect + " is a " + key.class.name.to_s
+      end
+      name = key.to_s
+      if [GLOBALID_KEY, SERIALIZER_KEY, SYMBOL_KEYS_KEY, RUBY2_KEYWORDS_KEY, WITH_INDIFFERENT_ACCESS_KEY].include?(name)
+        raise ActiveJob::SerializationError, "Can't serialize a Hash with reserved key " + key.inspect
+      end
+      name
+    end
+
+    def self.serialize_argument(argument)
+      case argument
+      when nil, true, false, Integer, Float, String
+        argument
+      when Symbol
+        { SERIALIZER_KEY => SYMBOL_SERIALIZER, "value" => argument.to_s }
+      when Time
+        { SERIALIZER_KEY => TIME_SERIALIZER, "value" => argument.iso8601(9) }
+      when Array
+        argument.map { |part| serialize_argument(part) }
+      when Hash
+        symbol_keys = []
+        result = {}
+        argument.each do |key, value|
+          name = serialize_hash_key(key)
+          symbol_keys << name if key.is_a?(Symbol)
+          result[name] = serialize_argument(value)
+        end
+        result[ruby2_keywords_hash?(argument) ? RUBY2_KEYWORDS_KEY : SYMBOL_KEYS_KEY] = symbol_keys
+        result
+      else
+        # Not Date, Duration or an app's own serializer, which Rails writes: `deserialize` reads none of them either.
+        if argument.respond_to?(:to_gid_uri)
+          { GLOBALID_KEY => argument.to_gid_uri }
+        else
+          raise ActiveJob::SerializationError, "Unsupported argument type: " + argument.class.name.to_s
+        end
+      end
+    end
+
     # Not every Rails serializer: Date, DateTime, Duration, BigDecimal, Range, Module and an app's own raise DeserializationError.
     def self.deserialize(arguments)
       arguments.map { |argument| deserialize_argument(argument) }
@@ -328,7 +419,7 @@ module ActiveJob
         next if key == SYMBOL_KEYS_KEY || key == RUBY2_KEYWORDS_KEY || key == WITH_INDIFFERENT_ACCESS_KEY
         result[symbol_keys && symbol_keys.include?(key) ? key.to_sym : key] = deserialize_argument(value)
       end
-      result
+      hash[RUBY2_KEYWORDS_KEY].nil? ? result : ruby2_keywords_hash(result)
     end
   end
 

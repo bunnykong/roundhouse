@@ -3611,6 +3611,17 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         };
         let declared_instance = declared_on(false);
         let declared_class = declared_on(true);
+        let controller_shadows = app
+            .controllers
+            .iter()
+            .find(|controller| controller.name == lc.name)
+            .map(|controller| {
+                crate::lower::controller_to_library::route_helper_shadows(
+                    controller,
+                    &app.controllers,
+                )
+            })
+            .unwrap_or_default();
         // A framework-helper name the app defines on a SUPERCLASS or in an
         // INCLUDED module (`ApplicationRecord#dom_class`, a concern's
         // `number_to_currency`) is the same self-dispatch: qualifying it to
@@ -3675,6 +3686,9 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 MethodReceiver::Instance => declared_instance.clone(),
                 MethodReceiver::Class => declared_class.clone(),
             };
+            if m.receiver == MethodReceiver::Instance {
+                own_methods.extend(controller_shadows.iter().cloned());
+            }
             own_methods.extend(match m.receiver {
                 MethodReceiver::Instance => inherited_instance.iter().cloned(),
                 MethodReceiver::Class => inherited_class.iter().cloned(),
@@ -8532,6 +8546,45 @@ fn emit_library_class_decl_inner(
     let self_anchor = out_path.with_extension("").to_string_lossy().into_owned();
     let mut s = String::new();
 
+    // A file of constants alone: its writes at the top level, where Ruby
+    // binds them on Object. Each value runs as the file loads, so what it
+    // names is loaded just before it, after the constants written above
+    // it: a class body that file loads may read those. A stored lambda
+    // names its constants when it is called, not here.
+    if lc.is_file_constants() {
+        let mut required: BTreeSet<String> = BTreeSet::new();
+        for (cname, value) in &lc.constants {
+            let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
+            walk_load_time_const_paths(value, &mut paths);
+            let requires: BTreeSet<String> = paths
+                .iter()
+                .filter_map(|path| require_path_for_body_const(path, app, classes, ""))
+                .filter(|anchor| *anchor != self_anchor)
+                .map(|anchor| relpath(&out_dir, &anchor))
+                .filter(|require| !required.contains(require))
+                .collect();
+            if !requires.is_empty() {
+                if !s.is_empty() {
+                    writeln!(s).unwrap();
+                }
+                for require in &requires {
+                    writeln!(s, "require_relative {require:?}").unwrap();
+                }
+                writeln!(s).unwrap();
+                required.extend(requires);
+            }
+            // As an assignment, which groups a `(a; b)` or `(x if c)`
+            // value: bare, only its first statement, or only when `c`
+            // holds, would be the constant's.
+            let assign = Expr::new(
+                value.span,
+                ExprNode::Assign { target: LValue::Const { path: vec![cname.clone()] }, value: value.clone() },
+            );
+            writeln!(s, "{}", super::emit_expr(&assign)).unwrap();
+        }
+        return EmittedFile { path: out_path, content: s };
+    }
+
     let mut emitted_external_require = false;
     for included in &lc.includes {
         let detail = format!("{} includes unresolved {}", lc.name.0, included.0);
@@ -10691,6 +10744,14 @@ fn require_path_for_body_const(
         }
         return Some(format!("app/models/{}", crate::naming::underscore(&owner)));
     }
+    // Any constant of a file of constants alone is that file's, not only
+    // the one it is named for: `Labels = DEFAULT` beside `DEFAULT = […]`.
+    if let Some(file) = classes.iter().chain(&app.library_classes).find(|class| {
+        class.is_file_constants() && class.constants.iter().any(|(name, _)| name.as_str() == first)
+    }) {
+        let owner = file.name.0.as_str();
+        return (owner != self_name).then(|| format!("app/models/{}", crate::naming::underscore(owner)));
+    }
     if first == self_name {
         return None;
     }
@@ -10912,6 +10973,110 @@ pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
     e.node.for_each_child(&mut |child| walk_const_paths(child, out));
 }
 
+/// [`walk_const_paths`], for what runs as the expression does: not the
+/// body of a closure it stores (`-> { … }`, `proc { … }`, `lambda { … }`,
+/// `Proc.new { … }`), which runs when something calls it, unless the
+/// expression calls it right there (`(-> { … }).call`). A block a call
+/// runs now (`map`, `each`) is walked, as `partition_deferred_constants`
+/// reads it.
+fn walk_load_time_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
+    /// The body of a stored closure literal.
+    fn stored_body(e: &Expr) -> Option<&Expr> {
+        let block = match &*e.node {
+            ExprNode::Lambda { .. } => return Some(e),
+            ExprNode::Send { recv, method, block: Some(block), .. }
+                if matches!(method.as_str(), "proc" | "lambda")
+                    || (method.as_str() == "new"
+                        && matches!(
+                            recv.as_ref().map(|r| &*r.node),
+                            Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "Proc"
+                        )) =>
+            {
+                block
+            }
+            _ => return None,
+        };
+        Some(block)
+    }
+    /// A closure that runs now with at least `given` positional
+    /// arguments: the parameter defaults those leave unfilled, then its
+    /// body. Ruby fills the required parameters first, then the optional
+    /// ones in order. Without a rest parameter the closure has no others
+    /// (ingest folds post-rest parameters into one), so the count is
+    /// exact; with one, every default is walked.
+    fn run(closure: &Expr, given: usize, out: &mut BTreeSet<Vec<String>>) {
+        let ExprNode::Lambda { params, rest_param, extra_params, body, .. } = &*closure.node else {
+            return walk_load_time_const_paths(closure, out);
+        };
+        let mut optional = 0;
+        for param in extra_params {
+            let positional = !param.keyword && !param.rest && !param.forwarding && !param.from_keyword;
+            let filled = positional && rest_param.is_none() && given > params.len() + optional;
+            optional += usize::from(positional);
+            if let Some(default) = param.default.as_ref().filter(|_| !filled) {
+                walk_load_time_const_paths(default, out);
+            }
+        }
+        walk_load_time_const_paths(body, out);
+    }
+    match &*e.node {
+        ExprNode::Lambda { .. } => {}
+        ExprNode::Send { recv, method, args, block, .. } => {
+            let stores_block = stored_body(e).is_some();
+            // `(-> { … }).call`, `.()`, `[]`, `yield`: the closure runs now.
+            if matches!(method.as_str(), "call" | "[]" | "yield" | "===") {
+                if let Some(closure) = recv.as_ref().and_then(stored_body) {
+                    // The arguments that are surely positional: not a
+                    // splat, which may spread to none, nor a hash, which
+                    // may be keywords. A keyword splat of known keys is
+                    // one positional hash to a closure that takes no
+                    // keywords; `**{}` passes nothing.
+                    let takes_keywords = matches!(
+                        &*closure.node,
+                        ExprNode::Lambda { extra_params, .. }
+                            if extra_params.iter().any(|param| param.keyword || param.from_keyword)
+                    );
+                    let given = args
+                        .iter()
+                        .filter(|arg| {
+                            let splatted = match &*arg.node {
+                                ExprNode::KeywordSplat { value } => Some(value),
+                                _ if arg.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 => Some(*arg),
+                                _ => None,
+                            };
+                            if let Some(value) = splatted {
+                                return !takes_keywords
+                                    && matches!(&*value.node, ExprNode::Hash { entries, .. } if !entries.is_empty());
+                            }
+                            !matches!(
+                                &*arg.node,
+                                ExprNode::Splat { .. }
+                                    | ExprNode::Hash { .. }
+                                    | ExprNode::ForwardArgs
+                                    | ExprNode::ForwardKeywords
+                                    | ExprNode::ForwardKeywordsWithPairs { .. }
+                            )
+                        })
+                        .count();
+                    run(closure, given, out);
+                }
+            }
+            for child in recv.iter().chain(args.iter()) {
+                walk_load_time_const_paths(child, out);
+            }
+            if let Some(block) = block.as_ref().filter(|_| !stores_block) {
+                run(block, 0, out);
+            }
+        }
+        _ => {
+            if let ExprNode::Const { path } = &*e.node {
+                out.insert(path.iter().map(|s| s.as_str().to_string()).collect());
+            }
+            e.node.for_each_child(&mut |child| walk_load_time_const_paths(child, out));
+        }
+    }
+}
+
 // has_secure_password synthesis moved to the shared model lowering
 // (`lower::secure_password::push_secure_password_methods`) — every
 // target's model classes now carry authenticate + the plaintext
@@ -11056,6 +11221,7 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
         // `:boolean` already casts inline (`markers::push_attribute_api_methods`).
         {
             for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(&model.body) {
+                let Some(ty) = ty else { continue };
                 if model.enums.contains_key(&name) {
                     continue;
                 }

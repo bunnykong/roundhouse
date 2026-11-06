@@ -17,7 +17,6 @@
 //! server's), so it lives here, not in `SPINEL_TESTS`.
 
 use super::{emit_and_run, native_http};
-use roundhouse::project::BuildTarget;
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
@@ -144,10 +143,7 @@ end
 #[test]
 #[ignore = "requires Spinel; run in its CI lane"]
 fn rails_parity_fixes_run_on_spinel() {
-    let (tree, errors) = app().emit(BuildTarget::Spinel);
-    assert!(errors.is_empty(), "analysis/emission errors:\n{}", errors.join("\n"));
-
-    native_http::build(&tree);
+    let tree = app().native_http_tree();
     let server = native_http::Server::start(&tree);
 
     let seed = server.get("/widgets/seed");

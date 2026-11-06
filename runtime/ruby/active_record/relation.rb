@@ -1824,6 +1824,7 @@ module ActiveRecord
     # answer. Loop duplicated from `each`: a nested `{ |x| yield x }`
     # left `x` as TyVar under Bar A.
     def find_each
+      return self unless block_given?
       records = loaded_records
       i = 0
       n = records.length
@@ -1855,6 +1856,25 @@ module ActiveRecord
     # mutate the returned array.
     def map
       loaded_records.map { |x| yield x }
+    end
+
+    def filter_map
+      loaded_records.filter_map { |x| yield x }
+    end
+
+    def flat_map
+      loaded_records.flat_map { |x| yield x }
+    end
+
+    def each_with_index
+      return to_a.each_with_index unless block_given?
+      records = loaded_records
+      i = 0
+      while i < records.length
+        yield(records[i], i)
+        i += 1
+      end
+      self
     end
 
     # Enumerable's `to_h { |rec| [k, v] }` over the materialized rows
@@ -1913,6 +1933,7 @@ module ActiveRecord
     # value the block computes in Ruby, which is why campfire reaches
     # for it to sort direct rooms by their room's `updated_at`.
     def sort_by
+      return to_a.sort_by unless block_given?
       to_a.sort_by { |x| yield x }
     end
 
@@ -1920,6 +1941,12 @@ module ActiveRecord
     # corpus uses (vote-hash batchers). The no-initial and Symbol forms
     # aren't modeled; callers pass an explicit seed.
     def inject(initial)
+      acc = initial
+      to_a.each { |x| acc = yield(acc, x) }
+      acc
+    end
+
+    def reduce(initial)
       acc = initial
       to_a.each { |x| acc = yield(acc, x) }
       acc
@@ -2902,6 +2929,18 @@ module ActiveRecord
       return record if !record.nil?
       created = @model.new(scope_attributes.merge(conditions))
       created.save
+      created
+    end
+
+    def create(conditions = {})
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save
+      created
+    end
+
+    def create!(conditions = {})
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save!
       created
     end
 

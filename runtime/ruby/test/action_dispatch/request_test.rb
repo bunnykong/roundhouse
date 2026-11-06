@@ -17,6 +17,19 @@ require_relative "../test_helper"
 # same test file `spinel_toolchain` died on. This file exercises THIS
 # class on both.
 class ActionDispatchRequestTest < Minitest::Test
+  def test_request_id_and_uuid_read_the_trusted_env
+    r = ActionDispatch::Request.for({ "HTTP_X_REQUEST_ID" => "client-only" })
+    assert_nil r.request_id
+    assert_nil r.uuid
+    r.env["action_dispatch.request_id"] = "trusted-id"
+    assert_equal "trusted-id", r.request_id
+    assert_equal "trusted-id", r.uuid
+    r.request_id = "assigned-id"
+    assert_equal "assigned-id", r.env["action_dispatch.request_id"]
+    assert_equal "assigned-id", r.uuid
+    assert_nil ActionDispatch::Request.new.request_id
+  end
+
   def test_every_declared_ivar_has_a_value_after_new
     r = ActionDispatch::Request.new
     # Names from request.rbs's ivar block. A new one added there

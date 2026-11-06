@@ -354,9 +354,21 @@ fn assigned_literal(mut value: Expr, file: &str) -> Expr {
 }
 
 /// Does the source's leading comment block say `frozen_string_literal: true`?
-fn freezes_literals(text: &str) -> bool {
-    for line in text.lines() {
-        let line = line.trim();
+pub(crate) fn freezes_literals(text: &str) -> bool {
+    // Not a bare prefix test: `=endnotes` neither opens nor closes an embedded document.
+    let marks = |line: &str, word: &str| line.strip_prefix(word).is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t', '\r']));
+    let mut in_block = false;
+    for raw in text.lines() {
+        // Not the end of the comment section at `=begin`: Ruby still reads a directive after an `=begin`/`=end` block.
+        if in_block {
+            in_block = !marks(raw, "=end");
+            continue;
+        }
+        if marks(raw, "=begin") {
+            in_block = true;
+            continue;
+        }
+        let line = raw.trim();
         if line.is_empty() {
             continue;
         }

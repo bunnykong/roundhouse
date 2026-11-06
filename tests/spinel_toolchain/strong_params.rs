@@ -13,9 +13,7 @@ use super::{emit_and_run, native_http};
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn strong_params_refusals_answer_like_rails_natively() {
     const FORM: &str = "application/x-www-form-urlencoded";
-    let (tree, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+    let tree = emit_and_run::real_blog().native_http_tree();
     let mut server = native_http::Server::start(&tree);
     server.take_session("/articles/new");
     let cases = [
@@ -39,15 +37,13 @@ fn strong_params_refusals_answer_like_rails_natively() {
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn require_permit_refusals_answer_like_rails_natively() {
     const FORM: &str = "application/x-www-form-urlencoded";
-    let (tree, errors) = emit_and_run::real_blog()
+    let tree = emit_and_run::real_blog()
         .edit(
             "app/controllers/articles_controller.rb",
             "params.expect(article: [ :title, :body ])",
             "params.require(:article).permit(:title, :body)",
         )
-        .emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+        .native_http_tree();
     let mut server = native_http::Server::start(&tree);
     server.take_session("/articles/new");
     let cases = [

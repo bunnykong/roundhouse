@@ -18,6 +18,9 @@ use std::process::Command;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/content_tag_options.rs"]
+#[allow(dead_code)]
+mod content_tag_options;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -173,4 +176,24 @@ print("slice passed")
     let output = Command::new("python3").arg("probe.py").current_dir(&emitted).output().expect("run python3");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("slice passed"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A non-block `content_tag` with options renders as Rails 8.1.4 does
+/// (#1780): the app's integration test, run by `unittest`. Python's
+/// test emit spells `include?` as a missing `include_p`; the probe uses `in`.
+#[test]
+#[ignore]
+fn content_tag_with_options_renders() {
+    let (emitted, errors) = content_tag_options::app(content_tag_options::VIEW).emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("tests/test_probes_controller.py");
+    let source = std::fs::read_to_string(&test).expect("test_probes_controller.py");
+    std::fs::write(&test, source.replace(".include_p(", ".__contains__(")).expect("write probe");
+    let output = Command::new("python3")
+        .args(["-m", "unittest", "tests.test_probes_controller"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run python unittest");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success() && stderr.contains("Ran 1 test"), "{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
 }

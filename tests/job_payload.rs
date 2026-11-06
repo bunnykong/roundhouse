@@ -465,3 +465,88 @@ fn the_rest_reader_calls_only_runtime_readers() {
         );
     }
 }
+
+fn keyword_app(target: Option<roundhouse::build_target::BuildTarget>) -> App {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\n  def self.later\n    OptJob.perform_later(1, note: \"y\")\n    ReqJob.perform_later(1, note: \"y\")\n  end\nend\n"),
+        ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
+        ("app/jobs/opt_job.rb", "class OptJob < ApplicationJob\n  def perform(n, note: \"x\")\n    nil\n  end\nend\n"),
+        ("app/jobs/req_job.rb", "class ReqJob < ApplicationJob\n  def perform(n, note:)\n    nil\n  end\nend\n"),
+    ]))
+    .expect("ingest keyword job app");
+    match target {
+        Some(target) => {
+            roundhouse::session::analyze_and_lower_for(&mut app, target);
+        }
+        None => {
+            roundhouse::session::analyze_and_lower(&mut app);
+        }
+    }
+    app
+}
+
+/// On the Ruby family a job's keywords stay keywords: the wrappers forward
+/// them by name, the payload writes them in the trailing Hash Rails flags,
+/// and the drain passes them back by name.
+#[test]
+fn keyword_parameters_forward_and_ride_the_payload_on_the_ruby_family() {
+    let app = keyword_app(Some(roundhouse::build_target::BuildTarget::Ruby));
+    for job in ["OptJob", "ReqJob"] {
+        let p = plan(&app, job);
+        assert!(p.fallback.is_none(), "{job}: {:?}", p.fallback);
+        assert!(p.params.iter().any(|p| p.keyword && p.name.as_str() == "note" && p.codec == Codec::Str), "{:?}", p.params);
+    }
+    let req = emitted(&app, "req_job.rb");
+    assert!(req.contains("def self.perform_later(n, note:)"), "{req}");
+    assert!(req.contains("new.perform(n, note: note)"), "{req}");
+    let src = registry_source(&app.job_plans, false);
+    assert!(src.contains("ActiveJob::Arguments.keywords([\"note\"], [ActiveJob::Arguments.str(note)])"), "{src}");
+    assert!(
+        src.contains("ReqJob.new.perform(ActiveJob::Arguments.int_at(args, 0), note: ActiveJob::Arguments.str_at(ActiveJob::Arguments.keyword_args(args, \"note\"), 0))"),
+        "{src}"
+    );
+    assert!(
+        src.contains("note: (ActiveJob::Arguments.keyword_given?(args, \"note\") ? ActiveJob::Arguments.str_at(ActiveJob::Arguments.keyword_args(args, \"note\"), 0) : +\"x\")"),
+        "{src}"
+    );
+}
+
+/// A target whose keywords are trailing positionals has no slot a caller
+/// can fill by name for a required keyword, so that job gets no wrapper.
+#[test]
+fn a_required_keyword_still_has_no_wrapper_off_the_ruby_family() {
+    let app = keyword_app(None);
+    let req = emitted(&app, "req_job.rb");
+    assert!(!req.contains("def self.perform_later"), "{req}");
+}
+
+/// A literal default goes into the reader as Ruby that means the same
+/// value: a String is mutable unless the job's file freezes its literals, a `#{` stays text, a CR stays a CR, and a Symbol
+/// that is no bare identifier keeps the job on its Proc.
+#[test]
+fn keyword_defaults_are_written_as_the_same_ruby_values() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\n  def self.later\n    BufJob.perform_later(1)\n    TplJob.perform_later(1)\n    CrlfJob.perform_later(1)\n    FrozenJob.perform_later(1)\n    EndnotesJob.perform_later(1)\n    SymJob.perform_later(1)\n  end\nend\n"),
+        ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
+        ("app/jobs/buf_job.rb", "class BufJob < ApplicationJob\n  def perform(n, buf: +\"b\")\n    buf << \"x\"\n  end\nend\n"),
+        ("app/jobs/tpl_job.rb", "class TplJob < ApplicationJob\n  def perform(n, tpl: '#{x}')\n    nil\n  end\nend\n"),
+        ("app/jobs/sym_job.rb", "class SymJob < ApplicationJob\n  def perform(n, s: :\"9a\")\n    nil\n  end\nend\n"),
+        ("app/jobs/frozen_job.rb", "=begin\nA job.\n=end\n# frozen_string_literal: true\n\nclass FrozenJob < ApplicationJob\n  def perform(n, tag: \"kept\")\n    nil\n  end\nend\n"),
+        ("app/jobs/endnotes_job.rb", "=begin\n=endnotes\n# frozen_string_literal: true\n=end\n\nclass EndnotesJob < ApplicationJob\n  def perform(n, tag: \"loose\")\n    nil\n  end\nend\n"),
+        ("app/jobs/crlf_job.rb", "class CrlfJob < ApplicationJob\n  def perform(n, eol: \"\\r\\n\")\n    nil\n  end\nend\n"),
+    ]))
+    .expect("ingest default job app");
+    roundhouse::session::analyze_and_lower_for(&mut app, roundhouse::build_target::BuildTarget::Ruby);
+    let src = registry_source(&app.job_plans, false);
+    assert!(src.contains(": +\"b\")"), "{src}");
+    assert!(src.contains(": +\"\\#{x}\")"), "{src}");
+    assert!(src.contains(": +\"\\r\\n\")"), "{src}");
+    assert!(src.contains("0) : \"kept\")"), "{src}");
+    assert!(src.contains("0) : +\"loose\")"), "{src}");
+    let sym = plan(&app, "SymJob");
+    assert!(sym.fallback.as_ref().is_some_and(|f| f.reason.contains("not a literal")), "{:?}", sym.fallback);
+}

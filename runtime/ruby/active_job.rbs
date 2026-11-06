@@ -29,6 +29,8 @@ module ActiveJob
 
   class DeserializationError < StandardError
   end
+  class SerializationError < ArgumentError
+  end
 
   class EnqueueError < StandardError
   end

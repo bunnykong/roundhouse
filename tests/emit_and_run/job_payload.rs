@@ -168,3 +168,66 @@ fn an_sti_record_round_trips_under_its_subclass_name() {
     assert!(run.stdout.contains("performed Featured title"), "{}", run.stdout);
     assert!(run.stdout.contains("sti payload passed"), "{}", run.stdout);
 }
+
+const KEYWORD_JOB: &str = r#"class KeywordJob < ApplicationJob
+  def perform(article, label:, count: 1)
+    puts "keywords #{article.title} #{label} #{count}"
+  end
+end
+"#;
+
+const KEYWORD_ENQUEUE: &str = r#"  validates :title, presence: true
+
+  def enqueue_keywords
+    KeywordJob.perform_later(self, label: "first")
+    KeywordJob.perform_later(self, label: "second", count: 3)
+  end
+"#;
+
+const KEYWORD_SCRIPT: &str = r#"ActiveJob.register_drain
+article = Article.create!(title: "Keyword title", body: "A long enough article body.")
+article.enqueue_keywords
+payload = JSON.parse(JobRegistry.payload_keyword_job(article, "second", 3))
+want = { "label" => "second", "count" => 3, "_aj_ruby2_keywords" => ["label", "count"] }
+raise "keywords #{payload["arguments"][1].inspect}" unless payload["arguments"][1] == want
+raise "drain ran #{ActiveJob.pending_count}" unless ActiveJob.drain == 2
+# Rails leaves a defaulted keyword out of the Hash; perform binds its default.
+JobRegistry.perform("KeywordJob", [payload["arguments"][0], { "label" => "railsish", "_aj_ruby2_keywords" => ["label"] }])
+begin
+  JobRegistry.perform("KeywordJob", [payload["arguments"][0], { "count" => 2, "_aj_ruby2_keywords" => ["count"] }])
+  raise "a payload without a required keyword ran"
+rescue ActiveJob::DeserializationError => e
+  raise "message: #{e.message}" unless e.message.include?("missing keyword label")
+end
+puts "keyword payload passed"
+"#;
+
+/// A job's keyword parameters ride the payload as the trailing Hash Rails
+/// flags with `_aj_ruby2_keywords`, and come back by name. A keyword a call
+/// leaves to its default is written with that default, where Rails leaves
+/// the key out; a payload without the key binds the literal default, so
+/// `perform` sees the same value either way.
+#[test]
+fn keyword_arguments_round_trip_as_rails_flags_them() {
+    let run = emit_and_run::real_blog()
+        .write("app/jobs/keyword_job.rb", KEYWORD_JOB)
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", KEYWORD_ENQUEUE)
+        .run_ruby(KEYWORD_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("keywords Keyword title first 1"), "{}", run.stdout);
+    assert!(run.stdout.contains("keywords Keyword title second 3"), "{}", run.stdout);
+    assert!(run.stdout.contains("keywords Keyword title railsish 1"), "{}", run.stdout);
+    assert!(run.stdout.contains("keyword payload passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn keyword_arguments_round_trip_on_spinel() {
+    let run = emit_and_run::real_blog()
+        .write("app/jobs/keyword_job.rb", KEYWORD_JOB)
+        .edit("app/models/article.rb", "  validates :title, presence: true\n", KEYWORD_ENQUEUE)
+        .run_spinel(KEYWORD_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("keywords Keyword title second 3"), "{}", run.stdout);
+    assert!(run.stdout.contains("keyword payload passed"), "{}", run.stdout);
+}

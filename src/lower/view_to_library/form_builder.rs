@@ -1245,7 +1245,7 @@ pub(super) fn emit_form_builder_block_inline(
         }
         // Lexxy's editor takes a block — its children, campfire's
         // `<lexxy-prompt>` for mentions. Trix's helper takes none.
-        FormBuilderMethod::RichTextArea if ctx.lexxy => Some(emit_rich_text_area(
+        FormBuilderMethod::RichTextArea if ctx.lexxy && !binding.recordless => Some(emit_rich_text_area(
             positional.first().copied(),
             opts.as_slice(),
             binding,
@@ -1330,6 +1330,7 @@ fn emit_fields_for(
         // no form of its own.
         form_method_var: binding.form_method_var.clone(),
         id_prefix: binding.id_prefix.clone(),
+        recordless: binding.recordless && positional.get(1).is_none(),
     });
     let body = super::form_with::rewrite_form_object_reads(body, &nested_param_str, &record_var);
     out.extend(walk_body(&body, &inner));
@@ -1647,7 +1648,7 @@ fn label_for_attr(binding: &FormBuilderBinding, field: &str) -> String {
 /// `optional_value_attr(nil)` then omits the `value=` attr, matching Rails
 /// rendering an empty non-model field).
 fn field_value_read(binding: &FormBuilderBinding, field: Symbol, ctx: &ViewCtx) -> Expr {
-    if binding.model_name.is_empty() {
+    if binding.model_name.is_empty() || binding.recordless {
         Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })
     } else {
         record_field_read(binding, field, ctx)

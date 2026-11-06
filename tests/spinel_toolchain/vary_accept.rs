@@ -3,14 +3,11 @@
 
 use super::native_http;
 use super::vary_accept_contract as contract;
-use roundhouse::project::BuildTarget;
 
 #[test]
 #[ignore = "requires Spinel; run in its CI lane"]
 fn renders_negotiated_from_accept_carry_vary_accept_natively() {
-    let (tree, errors) = contract::overlay().emit(BuildTarget::Spinel);
-    assert!(errors.is_empty(), "analysis/emission errors:\n{}", errors.join("\n"));
-    native_http::build(&tree);
+    let tree = contract::overlay().native_http_tree();
     let server = native_http::Server::start(&tree);
     for (path, headers, varies) in contract::CASES {
         let response = server.get_with_headers(path, headers);

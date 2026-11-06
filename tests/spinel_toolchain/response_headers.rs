@@ -4,7 +4,7 @@
 //!
 //! The ruby-lane twin is `tests/environment_flags.rs`.
 
-use super::{emit_and_run, native_http};
+use super::{emit_and_run, json_flash_contract as flash_contract};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command};
@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 fn head(port: u16, path: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
     write!(
         stream,
         "GET {path} HTTP/1.1\r\nHost: blog.test:{port}\r\nConnection: close\r\n\r\n"
@@ -37,7 +39,7 @@ impl Drop for Running {
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn responses_carry_rails_headers_and_absolute_redirects() {
-    let (tree, errors) = emit_and_run::real_blog()
+    let app = emit_and_run::real_blog()
         .edit(
             "config/environments/production.rb",
             "# config.assume_ssl = true",
@@ -52,11 +54,13 @@ fn responses_carry_rails_headers_and_absolute_redirects() {
             "app/controllers/articles_controller.rb",
             "  # GET /articles or /articles.json\n",
             "  def go\n    redirect_to \"/articles\"\n  end\n\n  # GET /articles or /articles.json\n",
-        )
-        .emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        );
+    let tree = flash_contract::with_flash(app).native_http_tree();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let log_path = tree.join("server.log");
     let log = std::fs::File::create(&log_path).unwrap();
     let err = log.try_clone().unwrap();
@@ -85,7 +89,6 @@ fn responses_carry_rails_headers_and_absolute_redirects() {
     }
     let page = head(port, "/articles");
     let redirect = head(port, "/go");
-    drop(running);
     for h in [
         "X-Frame-Options: SAMEORIGIN",
         "X-XSS-Protection: 0",
@@ -94,11 +97,40 @@ fn responses_carry_rails_headers_and_absolute_redirects() {
         "Referrer-Policy: strict-origin-when-cross-origin",
     ] {
         assert!(page.contains(h), "{h} missing:\n{page}");
-        assert!(redirect.contains(h), "{h} missing on the redirect:\n{redirect}");
+        assert!(
+            redirect.contains(h),
+            "{h} missing on the redirect:\n{redirect}"
+        );
     }
     assert!(
         redirect.contains(&format!("Location: https://blog.test:{port}/articles")),
         "absolute, https under assume_ssl:\n{redirect}"
     );
-    assert!(page.contains("; Secure"), "the session cookie is Secure under assume_ssl:\n{page}");
+    assert!(
+        page.contains("; Secure"),
+        "the session cookie is Secure under assume_ssl:\n{page}"
+    );
+
+    let output = Command::new("ruby")
+        .env("FLASH_PORT", port.to_string())
+        .args([
+            "-e",
+            &format!(
+                "{}\n{}\n{}",
+                flash_contract::HTTP_ADAPTER,
+                flash_contract::RACK_ADAPTER,
+                flash_contract::ASSERTIONS
+            ),
+        ])
+        .output()
+        .expect("Ruby HTTP client");
+    assert!(
+        output.status.success(),
+        "{}\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        std::fs::read_to_string(&log_path).unwrap_or_default()
+    );
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    drop(running);
 }

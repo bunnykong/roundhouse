@@ -1,6 +1,36 @@
 module ActionDispatch
   class Flash
-    @others: Hash[String, String]
+    @notice: untyped
+    @alert: untyped
+    @notice_was: untyped
+    @alert_was: untyped
+    @others: Hash[String, untyped]
     @discard: Array[String]
+
+    def initialize: (?Hash[String, untyped]? other) -> void
+    def notice: () -> untyped
+    def notice=: (untyped value) -> untyped
+    def alert: () -> untyped
+    def alert=: (untyped value) -> untyped
+    def notice_was: () -> untyped
+    def alert_was: () -> untyped
+    def []: (String | Symbol key) -> untyped
+    def []=: (String | Symbol key, untyped value) -> untyped
+    def fetch: (String | Symbol key, ?untyped default) -> untyped
+    def delete: (String | Symbol key) -> untyped
+    def values: () -> Array[untyped]
+    def each: () { (String, untyped) -> void } -> Flash
+    def to_h: () -> Hash[String, untyped]
+    def to_persisted: () -> Hash[String, untyped]
+    def to_session_value: () -> Hash[String, untyped]?
+    def merge: (Hash[String, untyped] other) -> Flash
+
+    def self.signed_cookie: (untyped value, String name) -> String
+    def self.cookie_flashes: (String raw, String name) -> Hash[String, untyped]
+  end
+
+  class FlashNow
+    def []=: (String | Symbol key, untyped value) -> untyped
+    def []: (String | Symbol key) -> untyped
   end
 end

@@ -33,10 +33,16 @@ pub fn apply_fused_independent_rewrites(app: &mut App) {
     let skip_including = super::including::app_defines_including(app);
     let fold = super::errors_full_messages::Fold::of(app);
 
+    let controllers: HashSet<crate::ident::ClassId> = app.controllers.iter().map(|c| c.name.clone()).collect();
+    let own_redirect_back = app.controllers.iter().any(|c| c.actions().any(|a| a.name.as_str() == "redirect_back"));
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         let site = (owner, &fold);
+        let in_controller = !own_redirect_back && owner.is_some_and(|o| controllers.contains(o));
         walk_postorder(body, &mut |e| {
             rewrite_hook_node(e, skip_exclude, skip_in, skip_including, &site);
+            if in_controller {
+                super::redirect_back::rewrite_node(e);
+            }
         });
     });
     for view in &mut app.views {
@@ -491,6 +497,7 @@ fn rewrite_hook_node(
     super::destroy_by::rewrite_node(e);
     super::literal_append::rewrite_node(e);
     super::byte_size::rewrite_node(e);
+    super::ruby2_keywords_hash::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);
     super::relation_select_block::rewrite_node(e);
     super::arel_attribute::rewrite_node(e);
@@ -551,6 +558,7 @@ fn rewrite_test_node(e: &mut Expr, full_messages: &super::errors_full_messages::
     super::range_enumerable::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);
     super::byte_size::rewrite_node(e);
+    super::ruby2_keywords_hash::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);
     super::errors_full_messages::rewrite_node(e, full_messages);
 }

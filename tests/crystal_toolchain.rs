@@ -29,6 +29,12 @@ mod record_slice_app;
 #[path = "support/ts_controller_ivars.rs"]
 #[allow(dead_code)]
 mod ts_controller_ivars;
+#[path = "support/content_tag_options.rs"]
+#[allow(dead_code)]
+mod content_tag_options;
+#[path = "support/link_to_if_escape.rs"]
+#[allow(dead_code)]
+mod link_to_if_escape;
 #[path = "support/block_control_flow.rs"]
 #[allow(dead_code)]
 mod block_control_flow;
@@ -314,6 +320,79 @@ fn content_tag_blocks_render() {
     assert!(run.status.success(), "{stdout}\n{stderr}");
     for want in [r#"<section class="boxed">inside</section>"#, r#"<div class="btn primary">blk</div>"#] {
         assert!(stdout.contains(want), "expected {want} in\n{stdout}");
+    }
+}
+
+/// `GET /probe` rendered by `crystal run`: whether it ran, and its
+/// stdout and stderr.
+fn render_probe(app: emit_and_run::Overlay) -> (bool, String, String) {
+    let (emitted, errors) = app.emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        "require \"./src/app\"\nc = ProbesController.new\nc.request_method = \"GET\"\nc.process_action(:show)\nputs c.body\n",
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    (run.status.success(), String::from_utf8_lossy(&run.stdout).into_owned(), String::from_utf8_lossy(&run.stderr).into_owned())
+}
+
+/// A non-block `content_tag` with options reaches the runtime's
+/// `content_tag`, which escapes the content and the attribute values and
+/// names, as Rails 8.1.4 renders them (#1780).
+#[test]
+#[ignore]
+fn content_tag_with_options_renders() {
+    let (ok, stdout, stderr) = render_probe(content_tag_options::app(content_tag_options::VIEW));
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in content_tag_options::RENDERS {
+        assert!(stdout.contains(want), "expected {want} in\n{stdout}");
+    }
+}
+
+/// A name that is no HTML5 tag name is refused by the runtime's
+/// `content_tag_name`, as Rails raises `Invalid HTML5 tag name`.
+#[test]
+#[ignore]
+fn content_tag_with_a_bad_dynamic_name_raises() {
+    let view = "<% n = \"p onclick=x\" %><%= content_tag n, \"y\" %>\n";
+    let (ok, stdout, stderr) = render_probe(content_tag_options::app(view));
+    assert!(!ok && stderr.contains("Invalid HTML5 tag name"), "{stdout}\n{stderr}");
+    assert!(!stdout.contains("onclick"), "{stdout}");
+}
+
+/// `link_to_if`'s label is escaped in both branches, as Rails 8.1.4
+/// renders it.
+#[test]
+#[ignore]
+fn link_to_if_escapes_its_label() {
+    let (emitted, errors) = link_to_if_escape::app_with_truncate().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        "require \"./src/app\"\nc = ProbesController.new\nc.request_method = \"GET\"\nc.process_action(:show)\nputs c.body\n",
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    for want in link_to_if_escape::RENDERS.iter().chain([&link_to_if_escape::TRUNCATE_RENDERS]) {
+        assert!(stdout.contains(want), "expected {want} in\n{stdout}");
+    }
+    for absent in link_to_if_escape::ABSENT.iter().chain([&link_to_if_escape::TRUNCATE_ABSENT]) {
+        assert!(!stdout.contains(absent), "unexpected {absent} in\n{stdout}");
     }
 }
 

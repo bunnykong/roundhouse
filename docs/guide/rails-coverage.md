@@ -244,7 +244,7 @@ promise in the API prose.
 | Action Text | Campfire tier: `has_rich_text`, the safe-list sanitizer, attachment rendering. |
 | Action Mailer | Ruby tier: mailer classes, `mail(...)`, `deliver_now`/`deliver_later` — delivery appends to `ActionMailer::Base.deliveries` (Rails' `:test` method, which the emitted tests assert against). No SMTP. |
 | Routing | `resources`/`resource` (nested, `only:`/`except:`, `member`/`collection`), `namespace`/`scope`, `root`, `get`/`post`/…, `constraints`, format suffixes, Active Storage's mounted engine, Devise's `devise_for` (static default four: session/registration/password/confirmation + `controllers:` overrides for those mappings only — not model-module-driven), `devise_scope` as a path-transparent wrapper, and `with_options` (its options deep-merged into each block-free route call inside, the call's own keys winning; a child with its own block, a block parameter, or two hash values under one key is declined). Not: Devise `authenticate`/`authenticated`/`unauthenticated` route guards (unsupported because Warden constraints are not enforced; strict ingest fails, while survey mode records a gap and omits their route blocks), `concern`, `direct` (a custom URL helper with an arbitrary body — dropped), `mount` of any other engine, Doorkeeper's DSL, Devise OmniAuth callback routes, Devise `skip:`/`only:`/`path:` options, model-driven module narrowing. |
-| Configuration | `config.x.*`, initializers that define constants or mix modules into models, `Rails.application.config` reads, the app's inflections. Not: `Rails.application.credentials`. |
+| Configuration | `config.x.*`, initializers that define constants or mix modules into models (an in-tree engine's initializers define top-level constants too), `Rails.application.config` reads, the app's inflections. An autoloaded file that holds only constants (`LegacyName = CurrentName`) defines them on the CRuby and JRuby trees; other targets refuse it. Not: `Rails.application.credentials`. |
 | Caching | Fragment caching (`cache` in views, keyed by record) and `Rails.cache.fetch`, in-process. |
 | Gems | The census names what is modeled. Modeled today: bcrypt, devise (route helpers + static `devise_for`; no Warden route guards), image_processing/ruby-vips (Spinel), inertia_rails (`render inertia:` with a literal component and props, `inertia_share`, optional and deferred props written inline as `InertiaRails.optional { }` or `InertiaRails.defer { }`, partial reloads, the version check, `inertia: { errors: }` redirects; no SSR, no merge/scroll/once props, no dot-path partial keys, no optional or deferred wrapper returned from a helper method), invisible_captcha, pretender, representable (`Representable::Decorator` with `include Representable::JSON`: `property` / `collection`, rendered as JSON; Roar is not), rqrcode, useragent, web-push, net-http-persistent, concurrent-ruby's thread pool, importmap-rails, turbo-rails, stimulus-rails, tailwindcss-rails, jbuilder, propshaft. Everything else in a Gemfile is either infrastructure (never enters the analysis) or unknown. |
 
@@ -327,6 +327,10 @@ What differs from Rails, and why:
   an empty session or no message. The session payload is not Rails'
   JSON either, so a migration from Rails starts every session afresh;
   Campfire's login rides its own signed cookie and carries over.
+  On Ruby and Spinel, non-String flash values are JSON-encoded and
+  signed with a separate `flash.json.<cookie name>` purpose. String
+  flash values keep the existing cookie format. Strict targets keep
+  String notice/alert values.
   `cookies.encrypted` is Rails' jar (AES-256-GCM, the "authenticated
   encrypted cookie" key from `SECRET_KEY_BASE`, JSON values), so a value
   either side encrypted reads on the other; the session store does not

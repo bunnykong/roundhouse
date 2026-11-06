@@ -72,6 +72,20 @@ pub fn ingest_library_classes(
     ingest_library_classes_impl(source, file, Walk::All)
 }
 
+/// [`ingest_library_classes`] for an app file Rails' autoloader loads
+/// (`app/models`, the autoloaded support dirs): a file that declares no
+/// class or module but writes file-level constants still defines them,
+/// so it is carried as a `LibraryClassOrigin::FileConstants` holder
+/// named for its first constant (`RemoteThing = Thing` in
+/// `remote_thing.rb`). Other callers ingest snippets, or files whose
+/// constants another path owns (initializers, gem sources).
+pub fn ingest_app_library_classes(
+    source: &[u8],
+    file: &str,
+) -> IngestResult<Vec<LibraryClass>> {
+    ingest_library_classes_impl(source, file, Walk::App)
+}
+
 /// Like [`ingest_library_classes`], but only classes/modules NESTED
 /// inside some other class or module body — never a top-level
 /// declaration. For a model file, the model's own top-level class is
@@ -119,6 +133,8 @@ pub fn ingest_library_classes_beside(
 #[derive(Clone, Copy)]
 enum Walk<'a> {
     All,
+    /// `All`, for a file Rails autoloads (`ingest_app_library_classes`).
+    App,
     NestedIn(&'a str),
     Beside(&'a str),
 }
@@ -155,12 +171,12 @@ fn ingest_library_classes_impl(
         Walk::NestedIn(outer) => Some(outer),
         _ => None,
     };
-    let file_level = matches!(walk, Walk::All);
+    let file_level = matches!(walk, Walk::All | Walk::App);
     let outside = |model: &str, name: &str| {
         name != model && !name.strip_prefix(model).is_some_and(|rest| rest.starts_with("::"))
     };
     let walked = |scope: &[String], path: Option<Vec<String>>| match walk {
-        Walk::All => true,
+        Walk::All | Walk::App => true,
         Walk::NestedIn(_) if !scope.is_empty() => true,
         Walk::NestedIn(outer) => path.is_some_and(|path| {
             path.join("::").strip_prefix(outer).is_some_and(|rest| rest.starts_with("::"))
@@ -284,6 +300,23 @@ fn ingest_library_classes_impl(
         Vec::new()
     };
     let mut factories: Vec<LibraryClass> = made.into_iter().map(|(_, c)| c).collect();
+    // No class, module or factory to host them: the file is its
+    // constants, which Ruby binds on Object as the autoloader loads it.
+    // Only when they are all it runs: the holder carries the writes
+    // alone, so a `Labels << "ready"` after `Labels = []` would be lost.
+    // Such a file is not carried, as before, and a read of its constants
+    // stays refused.
+    if matches!(walk, Walk::App) && out.is_empty() && factories.is_empty() && !file_constants.is_empty() {
+        let only_writes = root.as_program_node().is_some_and(|program| {
+            program.statements().body().iter().all(|stmt| stmt.as_constant_write_node().is_some())
+        });
+        if !only_writes {
+            return Ok(Vec::new());
+        }
+        let mut holder = file_constants_holder(file, &file_constants);
+        holder.constants = file_constants;
+        return Ok(vec![holder]);
+    }
     if !file_constants.is_empty() {
         // A Class.new-only file with admitted factories: hoist onto the
         // first factory. Refuse when there is no host, or when the hoist
@@ -4687,7 +4720,12 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         if super::class_new_factory::file_has_factory(&root) {
             return Some(ClassKind::LibraryClass);
         }
-        return None;
+        // `RemoteThing = Thing`: a file of file-level constants declares
+        // those (`ingest_app_library_classes`), not a model.
+        let writes_constants = root.as_program_node().is_some_and(|program| {
+            program.statements().body().iter().any(|stmt| stmt.as_constant_write_node().is_some())
+        });
+        return writes_constants.then_some(ClassKind::LibraryClass);
     };
     let parent_path = class
         .superclass()
@@ -6519,4 +6557,29 @@ fn inert_value(node: &ruby_prism::Node<'_>, targets: &[String]) -> bool {
             && call.block().is_none()
             && call.receiver().is_some_and(|r| inert_value(&r, targets))
     })
+}
+
+/// The `LibraryClassOrigin::FileConstants` holder of `file`, named for
+/// the constant Rails' autoloader maps the file to (`Labels` in
+/// `labels.rb`), so the emitted file keeps that path, or else for its
+/// first constant.
+fn file_constants_holder(file: &str, constants: &[(Symbol, Expr)]) -> LibraryClass {
+    let stem = std::path::Path::new(file).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    let mapped = crate::naming::camelize(stem);
+    let name = constants.iter().find(|(name, _)| name.as_str() == mapped).unwrap_or(&constants[0]).0.clone();
+    LibraryClass {
+        name: ClassId(name),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: Some(crate::dialect::LibraryClassOrigin::FileConstants),
+        constants: Vec::new(),
+        conditional_definitions: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    }
 }

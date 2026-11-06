@@ -436,6 +436,11 @@ pub struct App {
     /// can define one name, and only one of them mark it.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub html_safe_method_owners: BTreeSet<(String, String)>,
+    /// The same marks as `(class, method, singleton)`: `def self.badge`
+    /// and `def badge` on one class are separate definitions, and either
+    /// can be the marked one.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub html_safe_method_defs: BTreeSet<(String, String, bool)>,
     /// App-registered `to_fs` formats from `config/initializers/`, in
     /// both spellings Rails accepts: the current
     /// `ActiveSupport::TimeFormats.register(:name, fmt)` and the
@@ -1266,6 +1271,7 @@ impl App {
             view_ivar_types: HashMap::default(),
             html_safe_methods: BTreeSet::new(),
             html_safe_method_owners: BTreeSet::new(),
+            html_safe_method_defs: BTreeSet::new(),
             time_formats: BTreeMap::new(),
             module_mixins: Vec::new(),
             rake_tasks_source: None,

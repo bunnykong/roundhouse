@@ -169,7 +169,7 @@ pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<V
         return None;
     }
     let url = value_for("url")?;
-    let method = value_for("method").unwrap_or_else(|| lit_sym(Symbol::from("post")));
+    let method = tag_option(&entries, "method").unwrap_or_else(|| lit_sym(Symbol::from("post")));
 
     let route_helpers = || {
         Expr::new(
@@ -186,17 +186,13 @@ pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<V
         id_prefix: String::new(),
     };
     let mut out: Vec<Expr> = form_with_entry(ctx).into_iter().collect();
-    out.extend([
-        emit_open_form_tag(&comps, ctx, false),
-        accumulator_append_call(
-            view_helpers_call("method_override_input", vec![method]),
-            ctx,
-        ),
-        accumulator_append_call(
-            view_helpers_call("csrf_token_hidden_input", Vec::new()),
-            ctx,
-        ),
-    ]);
+    out.push(emit_open_form_tag(&comps, ctx, false));
+    if !is_get(&comps.method) {
+        out.push(accumulator_append_call(view_helpers_call("method_override_input", vec![method]), ctx));
+        if sends_token(&comps.opts_entries) {
+            out.push(accumulator_append_call(view_helpers_call("csrf_token_hidden_input", Vec::new()), ctx));
+        }
+    }
     Some(out)
 }
 
@@ -280,30 +276,32 @@ pub(super) fn emit_form_with_inline(
     //    action expression spliced in. Order matches Rails'
     //    `render_attrs({action:, "accept-charset":, method:}.merge(opts))`:
     //    action, accept-charset, method, then user opts. The HTML
-    //    `method` attribute is always "post" for resource forms
-    //    (PATCH/DELETE flow through `_method` override below); :get
-    //    fixtures aren't exercised so we hard-code "post" here.
+    //    `method` attribute is "post" for resource forms (PATCH/DELETE
+    //    flow through `_method` override below), "get" for a GET form.
     out.push(emit_open_form_tag(&comps, ctx, block_has_file_field(body, form_param_str, ctx)));
 
     // 2. Method override: `<input type="hidden" name="_method"
     //    value="patch">` for non-get/post methods, empty string
     //    otherwise. Calls the runtime helper with the bound method
     //    local so the conditional evaluates once.
-    let method_var_ref = Expr::new(
-        Span::synthetic(),
-        ExprNode::Var { id: VarId(0), name: form_method_var.clone() },
-    );
-    out.push(accumulator_append_call(
-        view_helpers_call("method_override_input", vec![method_var_ref]),
-        ctx,
-    ));
-
-    // 3. CSRF token hidden input — emitted unconditionally to match
-    //    Rails' position (after _method, before the body).
-    out.push(accumulator_append_call(
-        view_helpers_call("csrf_token_hidden_input", Vec::new()),
-        ctx,
-    ));
+    // 3. CSRF token hidden input, in Rails' position (after _method,
+    //    before the body). Neither for a GET form, as Rails writes none.
+    if !is_get(&comps.method) {
+        let method_var_ref = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: form_method_var.clone() },
+        );
+        out.push(accumulator_append_call(
+            view_helpers_call("method_override_input", vec![method_var_ref]),
+            ctx,
+        ));
+        if sends_token(&comps.opts_entries) {
+            out.push(accumulator_append_call(
+                view_helpers_call("csrf_token_hidden_input", Vec::new()),
+                ctx,
+            ));
+        }
+    }
 
     // 4. Walk the block body against the OUTER accumulator. The
     //    binding registered below feeds `form.X` macro expansion
@@ -318,6 +316,7 @@ pub(super) fn emit_form_with_inline(
         record_var: record_var.clone(),
         form_method_var,
         id_prefix: comps.id_prefix.clone(),
+        recordless: !comps.model_name.is_empty() && matches!(&*comps.model.node, ExprNode::Lit { value: Literal::Nil }),
     });
     // `f.object` is the one FormBuilder method used in EXPRESSION
     // position (`errors_for f.object`) — substitute the record local
@@ -376,6 +375,9 @@ fn form_tag_attributes(opts: &[(Expr, Expr)]) -> Vec<(Expr, Expr)> {
     // `merge!`: an existing key keeps its position and takes html's
     // value; a new key appends.
     for (hk, hv) in html {
+        if matches!(key_of(&hk).as_deref(), Some("method" | "authenticity_token" | "multipart")) {
+            continue;
+        }
         match (key_of(&hk), out.iter().position(|(k, _)| key_of(k) == key_of(&hk))) {
             (Some(_), Some(i)) => out[i].1 = hv,
             _ => out.push((hk, hv)),
@@ -431,6 +433,27 @@ fn block_has_file_field(body: &Expr, form_param: &str, ctx: &ViewCtx) -> bool {
     found
 }
 
+/// `method: :get` (or "get") as written: Rails' form then says `method="get"` and carries no
+/// `_method` or authenticity token (mission_control-jobs' job filters).
+fn is_get(method: &Expr) -> bool {
+    str_or_sym_literal(method).is_some_and(|m| m.eq_ignore_ascii_case("get"))
+}
+
+/// A `<form>` option as Rails takes it: `html:`'s entry over the top-level one (`options.slice(...).merge!(html)`).
+fn tag_option(entries: &[(Expr, Expr)], name: &str) -> Option<Expr> {
+    let key_is = |k: &Expr, want: &str| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == want);
+    let html = entries.iter().find(|(k, _)| key_is(k, "html")).and_then(|(_, v)| match &*v.node {
+        ExprNode::Hash { entries, .. } => entries.iter().find(|(k, _)| key_is(k, name)).map(|(_, v)| v.clone()),
+        _ => None,
+    });
+    html.or_else(|| entries.iter().find(|(k, _)| key_is(k, name)).map(|(_, v)| v.clone()))
+}
+
+/// `authenticity_token: false` drops Rails' token input (a form posting to another site).
+fn sends_token(entries: &[(Expr, Expr)]) -> bool {
+    !matches!(tag_option(entries, "authenticity_token").map(|v| v.node), Some(n) if matches!(&*n, ExprNode::Lit { value: Literal::Bool { value: false } }))
+}
+
 fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx, multipart: bool) -> Expr {
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
@@ -440,7 +463,7 @@ fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx, multipart: bool
         expr: view_helpers_call("html_escape", vec![comps.action.clone()]),
     });
     parts.push(InterpPart::Text {
-        value: "\" accept-charset=\"UTF-8\" method=\"post\"".to_string(),
+        value: format!("\" accept-charset=\"UTF-8\" method=\"{}\"", if is_get(&comps.method) { "get" } else { "post" }),
     });
     // `enctype`: what Rails renders for `multipart: true`, which a
     // `file_field` in the block sets for it (`block_has_file_field`).
@@ -582,11 +605,14 @@ pub(super) fn emit_tag_builder_void_or_content(
         return out;
     }
     if let Some(c) = content {
-        let escaped = view_helpers_call(
-            "html_escape",
-            vec![send(Some(rewrite_helpers_in_expr(&c, ctx)), "to_s", Vec::new(), None, false)],
-        );
-        out.push(accumulator_append_call(escaped, ctx));
+        // Content Rails holds as an html-safe buffer (`truncate(x)`,
+        // `truncate(x) + "!"`) is written as it is; anything else escaped.
+        let rewritten = rewrite_helpers_in_expr(&c, ctx);
+        let written = match super::walker::safe_buffer_value(&rewritten, ctx) {
+            Some(safe) => send(Some(safe), "to_s", Vec::new(), None, false),
+            None => view_helpers_call("html_escape", vec![send(Some(rewritten), "to_s", Vec::new(), None, false)]),
+        };
+        out.push(accumulator_append_call(written, ctx));
     }
     out.push(accumulator_append_call(lit_str(format!("</{element}>")), ctx));
     out
@@ -788,6 +814,7 @@ fn classify_form_with_components(
     let mut url_expr: Option<Expr> = None;
     let mut method_expr: Option<Expr> = None;
     let mut namespace: Option<String> = None;
+    let mut scope: Option<String> = None;
     let mut opts_entries: Vec<(Expr, Expr)> = Vec::new();
 
     for arg in args {
@@ -820,10 +847,11 @@ fn classify_form_with_components(
                         // not an HTML attribute — left in opts it rendered
                         // a bogus `scope="…"` attr (keybase's
                         // `scope: :keybase_proof`) whose Symbol value
-                        // crashed html_escape. Dropped here (field-name
-                        // prefixing itself is a separate unimplemented gap;
-                        // fields name bare today either way).
+                        // crashed html_escape. A form with no model takes
+                        // it as the prefix (`filter[job_class_name]`); a
+                        // model form still names its fields after the model.
                         "scope" => {
+                            scope = str_or_sym_literal(v);
                             continue;
                         }
                         // form_with's generated-id prefix option, not an
@@ -847,6 +875,9 @@ fn classify_form_with_components(
         }
     }
 
+    if let Some(method) = tag_option(&opts_entries, "method") {
+        method_expr = Some(method);
+    }
     // form_with's POST default when no explicit `method:` was given.
     let default_post = || lit_sym(Symbol::from("post"));
 
@@ -868,7 +899,7 @@ fn classify_form_with_components(
             let url = url_expr?;
             return Some(FormWithComponents {
                 model: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
-                model_name: String::new(),
+                model_name: scope.clone().unwrap_or_default(),
                 action: route_helperize(url, &route_helpers, ctx),
                 method: method_expr.clone().unwrap_or_else(default_post),
                 opts_entries,

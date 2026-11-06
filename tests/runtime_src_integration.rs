@@ -1302,7 +1302,12 @@ fn every_runtime_method_body_concretely_typed() {
     // String's encoding fallback. Its deliberately untyped argument adds
     // 5 sites; all other files and method bodies are unchanged
     // (+5 in active_support_ext.rb).
-    const CEILING: usize = 929;
+    // MEASURED 937 on 2026-11-05 (main 9b89fd5d4: 927): Relation's
+    // filter_map, flat_map and each_with_index add one block-result site
+    // each; reduce adds seven generic accumulator/block-result sites,
+    // exactly as inject does. Existing methods' counts are unchanged.
+    // Add the ten new sites to 929, preserving its two-site headroom.
+    const CEILING: usize = 939;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

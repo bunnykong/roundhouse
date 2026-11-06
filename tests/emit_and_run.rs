@@ -127,6 +127,8 @@ mod source_gem_autoload;
 mod source_gem_load_order;
 #[path = "emit_and_run/unresolved_param_rbs.rs"]
 mod unresolved_param_rbs;
+#[path = "emit_and_run/declared_sig_rbs.rs"]
+mod declared_sig_rbs;
 #[path = "emit_and_run/unknown_receiver_param_rbs.rs"]
 mod unknown_receiver_param_rbs;
 #[path = "emit_and_run/is_a_self_narrowing.rs"]
@@ -20640,6 +20642,10 @@ mod concern_define_loop;
 mod mutated_loop_constant;
 #[path = "support/solid_queue_worker.rs"]
 mod solid_queue_worker_contract;
+#[path = "emit_and_run/solid_queue_surface.rs"]
+mod solid_queue_surface;
+#[path = "emit_and_run/controller_surface.rs"]
+mod controller_surface;
 #[path = "emit_and_run/solid_queue_worker.rs"]
 mod solid_queue_worker;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
@@ -20697,6 +20703,123 @@ mod concern_with_options;
 
 #[path = "emit_and_run/content_tag_block.rs"]
 mod content_tag_block;
+
+#[path = "support/html_safe_method_owner.rs"]
+mod html_safe_method_owner;
+
+/// A marked method is written unescaped only on a receiver that has the
+/// marked definition; another class's method of that name is escaped.
+#[test]
+fn an_html_safe_method_is_trusted_by_its_owner() {
+    html_safe_method_owner::app()
+        .write("test/controllers/probes_controller_test.rb", &html_safe_method_owner::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_html_safe_method_is_trusted_by_its_owner_on_spinel() {
+    html_safe_method_owner::app().run_spinel(&html_safe_method_owner::render_script()).assert_passes();
+}
+
+#[path = "support/content_tag_options.rs"]
+mod content_tag_options;
+
+#[test]
+fn a_content_tag_with_options_renders() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_content_tag_with_options_renders_on_spinel() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_spinel(&content_tag_options::render_script())
+        .assert_passes();
+}
+
+#[path = "support/link_to_if_escape.rs"]
+#[allow(dead_code)]
+mod link_to_if_escape;
+
+#[test]
+fn link_to_if_escapes_its_label() {
+    link_to_if_escape::app_with_app_escape()
+        .write("test/controllers/probes_controller_test.rb", &link_to_if_escape::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_if_escapes_its_label_on_spinel() {
+    link_to_if_escape::app_with_app_escape()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"link_to_if escaped\"\n",
+            link_to_if_escape::body_checks()
+        ))
+        .assert_passes();
+}
+
+#[test]
+fn link_to_if_shows_an_html_safe_app_label_once() {
+    link_to_if_escape::app_with_safe_escape()
+        .write("test/controllers/probes_controller_test.rb", &link_to_if_escape::safe_integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_if_shows_an_html_safe_app_label_once_on_spinel() {
+    link_to_if_escape::app_with_safe_escape()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"safe label once\"\n",
+            link_to_if_escape::safe_body_checks()
+        ))
+        .assert_passes();
+}
+
+#[path = "support/go_view_predicate.rs"]
+mod go_view_predicate;
+
+/// #1802's view on the ruby target: `F:true` is what it renders.
+#[test]
+fn a_views_model_predicate_call_renders_on_ruby() {
+    go_view_predicate::app().run_test("test/controllers/articles_featured_controller_test.rb").assert_passes();
+}
+
+/// The shapes' answers on the ruby target: the ones the Go run checks.
+#[test]
+fn a_views_model_method_shapes_render_on_ruby() {
+    go_view_predicate::shapes_app().run_test("test/controllers/articles_featured_controller_test.rb").assert_passes();
+}
+
+/// The Go view reads a trivial `attr_accessor` reader as its field, over
+/// the parent's method of that name (also when an intermediate parent
+/// model defines that reader), and calls a nilable or namespaced
+/// receiver's own method and a parent model's method.
+#[test]
+fn a_views_model_method_shapes_are_go_calls_or_fields() {
+    let (emitted, errors) = go_view_predicate::shapes_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let view = std::fs::read_to_string(emitted.join("app/v2/views_articles.go")).unwrap();
+    let missing: Vec<_> = ["a.FeaturedPred()", "a.Pinned)", "last.FeaturedPred()", "n.HotPred()", "a.SharedFlagPred()", "n.Pinned)"].into_iter().filter(|w| !view.contains(w)).collect();
+    let wrong: Vec<_> = ["a.PinnedPred()", "n.PinnedPred()"].into_iter().filter(|w| view.contains(w)).collect();
+    assert!(missing.is_empty() && wrong.is_empty(), "missing {missing:?}, wrong {wrong:?} in {view}");
+}
+
+/// The Go view calls the model's own predicate as its method.
+#[test]
+fn a_views_model_predicate_call_is_a_go_method_call() {
+    let (emitted, errors) = go_view_predicate::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let view = std::fs::read_to_string(emitted.join("app/v2/views_articles.go")).unwrap();
+    assert!(view.contains("a.FeaturedPred()") && !view.contains("a.Featured)"), "{view}");
+}
 
 #[path = "support/go_test_literal_receiver.rs"]
 mod go_test_literal_receiver;
@@ -20795,6 +20918,29 @@ fn pluralize_in_a_template_is_escaped_on_spinel() {
             pluralize_escape::body_checks()
         ))
         .assert_passes();
+}
+
+#[path = "support/helper_escape_at_output.rs"]
+mod helper_escape_at_output;
+
+/// #1796: a helper inside a larger template expression is escaped as
+/// Rails 8.1.4 escapes it.
+#[test]
+fn a_nested_helper_is_escaped_as_rails() {
+    let run = helper_escape_at_output::app(helper_escape_at_output::VIEW)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(helper_escape_at_output::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb");
+    eprintln!("{}", run.stdout);
+    run.assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_nested_helper_is_escaped_as_rails_on_spinel() {
+    let run = helper_escape_at_output::app(helper_escape_at_output::VIEW)
+        .run_spinel(&helper_escape_at_output::render_script(helper_escape_at_output::RENDERS));
+    eprintln!("{}", run.stdout);
+    run.assert_passes();
 }
 
 #[path = "emit_and_run/unknown_class_association.rs"]

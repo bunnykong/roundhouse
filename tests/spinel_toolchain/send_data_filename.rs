@@ -3,14 +3,11 @@
 
 use super::native_http;
 use super::send_data_filename_contract as contract;
-use roundhouse::project::BuildTarget;
 
 #[test]
 #[ignore = "requires Spinel; run in its CI lane"]
 fn send_data_filename_is_observable_in_the_native_http_response() {
-    let (tree, errors) = contract::overlay().emit(BuildTarget::Spinel);
-    assert!(errors.is_empty(), "analysis/emission errors:\n{}", errors.join("\n"));
-    native_http::build(&tree);
+    let tree = contract::overlay().native_http_tree();
     let server = native_http::Server::start(&tree);
 
     let expected = [

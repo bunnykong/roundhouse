@@ -18,7 +18,8 @@
 # * SIGNED, NOT ENCRYPTED. Rails' cookie store encrypts (AES-256-GCM,
 #   the "authenticated encrypted cookie" salt), so a client cannot read
 #   its own session either. Here it can: the session payload is base64
-#   of the url-encoded `k=v` pairs, the flash payload the message text.
+#   of the url-encoded `k=v` pairs. String flash payloads are message
+#   text; other flash values use JSON and a separate signing purpose.
 #   Integrity is HMAC; confidentiality is a named residual until an
 #   AES-GCM CookieStore lands in this runtime. Dispatch now emits
 #   `Secure` on HTTPS and `SameSite=Lax` on the session/flash cookies.

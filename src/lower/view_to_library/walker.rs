@@ -8,7 +8,7 @@ use crate::span::Span;
 
 use crate::lower::view::{
     classify_form_builder_method, classify_render_partial, classify_view_helper,
-    extract_sym_or_str, ViewHelperKind,
+    extract_sym_or_str, FormBuilderMethod, ViewHelperKind,
 };
 
 use super::form_builder::{
@@ -24,7 +24,7 @@ use super::partial::{emit_flagged_collection_render, emit_render_partial, emit_y
 use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
-    accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
+    accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_str, lit_sym,
     nil_lit, seq, noop_io_append, send, todo_io_append, var_ref, view_helpers_call, ViewCtx,
 };
 
@@ -746,6 +746,22 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         if method.as_str() == "form_with" {
             return emit_form_with_inline(sa, block, ctx);
         }
+        // `form_for :filter, url: ..., method: :get do |form|`: a form for
+        // no record, which is form_with's `scope:` form (Rails moves
+        // form_for's top-level `data:` into its html options, as
+        // form_with takes it).
+        if method.as_str() == "form_for" && matches!(sa.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { .. } })) {
+            if let Some(args) = form_for_scope_args(sa, ctx) {
+                return emit_form_with_inline(&args, block, ctx);
+            }
+            crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                inner.span,
+                None,
+                Symbol::from("form_for scope form"),
+                "form_for :scope is lowered only with url: and no @scope record to fill its fields",
+            ));
+            return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+        }
         // `<%= form_tag(action, opts) do ...inner... %>` — the
         // builder-less bare form, same inline expansion minus the
         // FormBuilder binding (lobsters' link_post).
@@ -837,7 +853,10 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 .find(|b| b.form_param == name)
             {
                 if let Some(fb) = classify_form_builder_method(method.as_str()) {
-                    return emit_form_builder_inline(binding, fb, sa, ctx);
+                    // Not for a recordless form: Trix's input id is the record's dom_id, which it has none of.
+                    if !(binding.recordless && matches!(fb, FormBuilderMethod::RichTextArea)) {
+                        return emit_form_builder_inline(binding, fb, sa, ctx);
+                    }
                 }
             }
         }
@@ -1379,6 +1398,11 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     if let Some(safe) = html_safe_value(&rewritten, ctx) {
         return vec![accumulator_append_call(coerce_to_s(safe), ctx)];
     }
+    // `truncate(x) + "!"`: Rails' SafeBuffer `+` stays html-safe, escaping
+    // only what it appends, so the whole is written as it is.
+    if let Some(safe) = safe_buffer_value(&rewritten, ctx) {
+        return vec![accumulator_append_call(coerce_to_s(safe), ctx)];
+    }
     // Not left to each emitter: only the Ruby one unwrapped the escape around `raw`, and TypeScript shipped `html_escape(raw(x))`
     if let ExprNode::Send { recv, method, args, block: None, .. } = &*rewritten.node
         && method.as_str() == "raw"
@@ -1542,18 +1566,91 @@ fn emit_turbo_frame_tag(args: &[Expr], block: Option<&Expr>, ctx: &ViewCtx) -> O
 /// The value behind an html-safe interpolation, or `None` when the
 /// expression has to be escaped. `<e>.html_safe` yields `<e>` (the mark
 /// is answered here rather than left for a runtime that has no
-/// safe-string type); a call to a recorded producer yields itself.
-fn html_safe_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+/// safe-string type); a call to a recorded producer yields itself, when
+/// its receiver is one of the classes that have the marked definition.
+pub(super) fn html_safe_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else {
         return None;
     };
     if method.as_str() == "html_safe" && args.is_empty() {
         return recv.clone();
     }
-    if recv.is_some() && ctx.html_safe_methods.contains(method.as_str()) {
-        return Some(e.clone());
+    let Some(r) = recv else { return None };
+    if !ctx.html_safe_methods.names(method.as_str()) {
+        return None;
     }
-    None
+    let (classes, singleton) = receiver_classes(r)?;
+    classes
+        .iter()
+        .all(|c| ctx.html_safe_methods.resolves_marked(c, method.as_str(), singleton))
+        .then(|| e.clone())
+}
+
+/// The classes a receiver can be, when they are all known, and whether
+/// the call is on the class itself: a constant (`Formatting.label`) is
+/// that class, singleton; a typed receiver is its class, or the non-nil
+/// classes of a union (`Hat | nil`). `None` for anything else, an
+/// untyped receiver among them.
+fn receiver_classes(r: &Expr) -> Option<(Vec<String>, bool)> {
+    if let ExprNode::Const { path } = &*r.node {
+        return Some((vec![path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::")], true));
+    }
+    fn of(ty: &crate::ty::Ty, out: &mut Vec<String>) -> bool {
+        match ty {
+            crate::ty::Ty::Class { id, .. } => {
+                out.push(id.0.as_str().to_string());
+                true
+            }
+            crate::ty::Ty::Nil => true,
+            crate::ty::Ty::Union { variants } => variants.iter().all(|v| of(v, out)),
+            _ => false,
+        }
+    }
+    let mut out = Vec::new();
+    (of(r.ty.as_ref()?, &mut out) && !out.is_empty()).then_some((out, false))
+}
+
+/// The value of a lowered expression that Rails holds as an html-safe
+/// buffer, ready to write unescaped, or `None` when it has to be escaped
+/// as a whole. A buffer is an escape the view helpers applied
+/// (`ActionView::ViewHelpers.html_escape(…)`, which is how `truncate`,
+/// `word_wrap` and `h` lower), an explicit `x.html_safe`, a call to an
+/// app method marked html-safe on every class its receiver can be
+/// ([`html_safe_value`]), or a buffer `+` anything: SafeBuffer's
+/// `+` stays safe and escapes the operand unless that is a buffer too. A
+/// String on the left (`"!" + truncate(x)`) is a plain String in Rails,
+/// so it isn't one.
+pub(super) fn safe_buffer_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, parenthesized } = &*e.node else {
+        return None;
+    };
+    if let Some(marked) = html_safe_value(e, ctx) {
+        return Some(marked);
+    }
+    match (method.as_str(), args.len()) {
+        ("html_escape", 1) if matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])) => {
+            Some(e.clone())
+        }
+        ("html_safe", 0) => Some((*r).clone()),
+        ("+", 1) => {
+            let left = safe_buffer_value(r, ctx)?;
+            let right = safe_buffer_value(&args[0], ctx)
+                .unwrap_or_else(|| view_helpers_call("html_escape", vec![coerce_to_s(args[0].clone())]));
+            let mut sum = Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(left),
+                    method: method.clone(),
+                    args: vec![right],
+                    block: None,
+                    parenthesized: *parenthesized,
+                },
+            );
+            sum.ty = Some(crate::ty::Ty::Str);
+            Some(sum)
+        }
+        _ => None,
+    }
 }
 
 /// Re-add the `.to_s` coercion that `unwrap_to_s` stripped, so the
@@ -1601,7 +1698,7 @@ fn coerce_to_s(expr: Expr) -> Expr {
 /// read of it: a partial handed `csrf_meta_tags:` reads the caller's
 /// value, as Ruby takes the bare name for the lvar, not the helper.
 /// `csrf_meta_tags()` is still the call.
-fn classify_template_helper<'a>(
+pub(super) fn classify_template_helper<'a>(
     method: &str,
     args: &'a [Expr],
     parenthesized: bool,
@@ -1661,6 +1758,16 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             parenthesized,
         } => {
             if let Some(kind) = classify_template_helper(method.as_str(), args, *parenthesized, ctx) {
+                // Rails' `pluralize` returns a String that isn't html-safe,
+                // so inside a larger expression (`pluralize(n, w) + "!"`,
+                // `"#{pluralize(n, w)}"`, a `link_to` label) it is plain
+                // text, escaped once where the whole is written. Only a
+                // whole `<%= pluralize(…) %>` takes the arm's escape.
+                if let ViewHelperKind::Pluralize { count, word } = &kind {
+                    let mut call = crate::lower::view::pluralize_helper_call((*count).clone(), (*word).clone());
+                    call.inherit_span(e.span);
+                    return call;
+                }
                 if let Some(mut call) = emit_view_helper_call(&kind, ctx) {
                     call.inherit_span(e.span);
                     return call;
@@ -2336,16 +2443,52 @@ mod tests {
 
     #[test]
     fn interpolating_a_recorded_producer_skips_the_escape() {
-        // One level down: `hat.to_html_label` ends in `.html_safe`, so
-        // `lower::html_safe` recorded the method name and this side
-        // must not escape the element it returns.
+        // One level down: `Hat#to_html_label` ends in `.html_safe`, so
+        // `lower::html_safe` recorded it and this side must not escape
+        // the element it returns on a `Hat` receiver, nilable or not.
+        let ctx = producer_ctx();
+        for ty in [class_ty("Hat"), crate::ty::Ty::Union { variants: vec![class_ty("Hat"), crate::ty::Ty::Nil].into() }] {
+            let stmts = walk_body(&buf_append(send_to_s(send0(typed_var("hat", ty), "to_html_label"))), &ctx);
+            let emitted = stmts.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join("\n");
+            assert!(!emitted.contains("html_escape"), "recorded producer must not be escaped:\n{emitted}");
+            assert!(emitted.contains("hat.to_html_label"), "call preserved:\n{emitted}");
+        }
+    }
+
+    #[test]
+    fn another_classs_method_of_a_marked_name_is_escaped() {
+        // `Badge#to_html_label` isn't marked: only `Hat`'s is. Neither is
+        // a `Hat | Badge` receiver, nor one whose class isn't known.
+        let ctx = producer_ctx();
+        let either = crate::ty::Ty::Union { variants: vec![class_ty("Hat"), class_ty("Badge")].into() };
+        for recv in [typed_var("badge", class_ty("Badge")), typed_var("item", either), var("hat")] {
+            let stmts = walk_body(&buf_append(send_to_s(send0(recv, "to_html_label"))), &ctx);
+            let emitted = stmts.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join("\n");
+            assert!(emitted.contains("html_escape"), "unmarked definition must be escaped:\n{emitted}");
+        }
+    }
+
+    fn producer_ctx() -> ViewCtx {
         let mut ctx = test_ctx();
-        ctx.html_safe_methods =
-            std::rc::Rc::new(["to_html_label".to_string()].into_iter().collect());
-        let stmts = walk_body(&buf_append(send_to_s(send0(var("hat"), "to_html_label"))), &ctx);
-        let emitted = stmts.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join("\n");
-        assert!(!emitted.contains("html_escape"), "recorded producer must not be escaped:\n{emitted}");
-        assert!(emitted.contains("hat.to_html_label"), "call preserved:\n{emitted}");
+        let class = |defines: &[&str]| super::super::MarkClass {
+            defines: defines.iter().map(|m| (m.to_string(), false)).collect(),
+            ..Default::default()
+        };
+        ctx.html_safe_methods = std::rc::Rc::new(super::super::HtmlSafeMarks {
+            classes: [("Hat".to_string(), class(&["to_html_label"])), ("Badge".to_string(), class(&["to_html_label"]))]
+                .into_iter()
+                .collect(),
+            marked: [("Hat".to_string(), "to_html_label".to_string(), false)].into_iter().collect(),
+        });
+        ctx
+    }
+    fn class_ty(name: &str) -> crate::ty::Ty {
+        crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from(name)), args: Vec::new().into() }
+    }
+    fn typed_var(name: &str, ty: crate::ty::Ty) -> Expr {
+        let mut e = var(name);
+        e.ty = Some(ty);
+        e
     }
 
     #[test]
@@ -3046,4 +3189,31 @@ fn emit_cached_fragment(
             },
         ),
     ]
+}
+
+/// `form_for :scope, k: v, ...` as `form_with(scope: :scope, k: v, ...)`.
+/// None for a record form (`form_for @user`), which names and fills its
+/// fields from the record.
+fn form_for_scope_args(args: &[Expr], ctx: &ViewCtx) -> Option<Vec<Expr>> {
+    let (first, rest) = args.split_first()?;
+    let ExprNode::Lit { value: Literal::Sym { value: scope } } = &*first.node else { return None };
+    // Not as recordless when the view has a `@<scope>` record: Rails fills the fields from it.
+    if ctx.record_classes.contains_key(scope.as_str()) || ctx.ivar_models.contains_key(scope.as_str()) {
+        return None;
+    }
+    let mut entries = vec![(
+        Expr::new(first.span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("scope") } }),
+        first.clone(),
+    )];
+    match rest {
+        [] => {}
+        [opts] => {
+            let ExprNode::Hash { entries: more, .. } = &*opts.node else { return None };
+            entries.extend(more.iter().cloned());
+        }
+        _ => return None,
+    }
+    // Not without `url:`: Rails posts to the current URL, which the form_with expansion has no spelling for.
+    let has_url = entries.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "url"));
+    has_url.then(|| vec![Expr::new(first.span, ExprNode::Hash { entries, kwargs: true })])
 }

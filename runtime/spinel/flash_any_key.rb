@@ -173,6 +173,33 @@ module ActionDispatch
       end
       result
     end
+
+    def self.signed_cookie(value, name)
+      return ActionDispatch::SignedCookie.sign(value, name) if value.is_a?(String)
+      ActionController::MessageVerifier.generate(
+        Rails.application.secret_key_base,
+        ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
+        JSON.generate(value), "flash.json." + name, true
+      )
+    end
+
+    def self.cookie_flashes(raw, name)
+      result = {}
+      encoded = ActionController::MessageVerifier.verified(
+        Rails.application.secret_key_base,
+        ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
+        raw, "flash.json." + name, true
+      )
+      if encoded.empty?
+        legacy = ActionDispatch::SignedCookie.verified(raw, name)
+        result[name[6, name.length - 6]] = legacy unless legacy.empty?
+      else
+        result[name[6, name.length - 6]] = JSON.parse(encoded)
+      end
+      result
+    rescue JSON::ParserError
+      {}
+    end
   end
 
 end

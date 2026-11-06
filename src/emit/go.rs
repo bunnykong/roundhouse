@@ -125,6 +125,12 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         });
     }
 
+    // `content_tag_html` of the transpiled `ActionView::ViewHelpers`, kept
+    // for the views' coercion pass below: its declared `opts` is what
+    // widens a view's options Hash literal to the `map[string]interface{}`
+    // it takes. Only that method: the views' other helper calls are
+    // emitted as they were (`dom_id`'s record param would cast a model).
+    let mut view_helpers: Vec<crate::dialect::LibraryClass> = Vec::new();
     let units = match crate::runtime_loader::go_units(|_ns, classes| {
         // ActionView::ViewHelpers's six slot methods (reset_slots!,
         // content_for_set/get, get_slot, get_yield, set_yield) are
@@ -153,7 +159,13 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                 c
             })
             .collect();
-        lower::lower_for_go(classes)
+        let lowered = lower::lower_for_go(classes);
+        for class in lowered.iter().filter(|c| c.name.0.as_str() == "ActionView::ViewHelpers") {
+            let mut class = class.clone();
+            class.methods.retain(|m| m.name.as_str() == "content_tag_html");
+            view_helpers.push(class);
+        }
+        lowered
     }) {
         Ok(u) => u,
         Err(e) => {
@@ -292,6 +304,10 @@ func main() {\n\
                 &params_specs,
             );
         let lowered_models = lower::lower_for_go(model_lcs);
+        // The methods each model's Go type has, by the class emit's own
+        // field-or-method choice: a view's 0-arg read of another record's
+        // method is a call only when the type has it as a method.
+        expr::set_all_model_methods(model_go_methods(&lowered_models));
 
         // Controllers are lowered next so we can build the variadic-
         // ctor registry across the full set (runtime + models +
@@ -396,7 +412,7 @@ func main() {\n\
                     })
                     .or_insert(lc);
             }
-            lower::lower_for_go(merged.into_values().collect())
+            lower::lower_for_go_with_extras(merged.into_values().collect(), &view_helpers)
         } else {
             Vec::new()
         };
@@ -1166,6 +1182,44 @@ pub(super) fn nullable_column_pairs(app: &crate::App) -> Vec<(String, String)> {
                 out.push((m.name.0.as_str().to_string(), c.name.as_str().to_string()));
             }
         }
+    }
+    out
+}
+
+/// `(Model path, method)` for every method a model's Go type has: its own,
+/// and its parent models' (`ApplicationRecord`'s), which Go promotes
+/// through the embedded `*Parent`. The parents are walked nearest first,
+/// and a name the model or a nearer parent defines, as a method or a
+/// field, shadows a farther parent's method.
+fn model_go_methods(models: &[crate::dialect::LibraryClass]) -> Vec<(String, String)> {
+    let by_name: crate::det::HashMap<&str, &crate::dialect::LibraryClass> =
+        models.iter().map(|lc| (lc.name.0.as_str(), lc)).collect();
+    let mut out = Vec::new();
+    for lc in models {
+        let defined = |c: &'_ crate::dialect::LibraryClass| -> Vec<String> {
+            c.methods
+                .iter()
+                .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance)
+                .map(|m| m.name.as_str().to_string())
+                .collect()
+        };
+        let mut shadowed: crate::det::HashSet<String> = defined(lc).into_iter().collect();
+        let mut names = library::emitted_instance_methods(lc);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut parent = lc.parent.as_ref().and_then(|p| by_name.get(p.0.as_str()));
+        while let Some(p) = parent {
+            if !seen.insert(p.name.0.as_str()) {
+                break;
+            }
+            for m in library::emitted_instance_methods(p) {
+                if !shadowed.contains(&m) && !names.contains(&m) {
+                    names.push(m);
+                }
+            }
+            shadowed.extend(defined(p));
+            parent = p.parent.as_ref().and_then(|q| by_name.get(q.0.as_str()));
+        }
+        out.extend(names.into_iter().map(|m| (lc.name.0.as_str().to_string(), m)));
     }
     out
 }

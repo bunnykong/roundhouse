@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use roundhouse::dialect::{MethodDef, MethodReceiver, MethodVisibility, ModelBodyItem};
 use roundhouse::ingest::{
-    ingest_app_from_tree, ingest_library_class, ingest_library_classes, ingest_model,
+    ingest_app_from_tree, ingest_library_class, ingest_library_classes, ingest_model, ingest_schema,
 };
 use roundhouse::schema::Schema;
 
@@ -416,24 +416,32 @@ end"#;
     }
 }
 
+/// A private `attr_reader` in a model is a reader method carrying that
+/// visibility (mission_control-jobs' `RecurringTask#queue_adapter`); a
+/// private writer or accessor is still refused, since mass assignment
+/// refuses its key in Rails and the model lowering does not model that.
 #[test]
-fn nonpublic_model_accessors_are_not_silently_accepted_without_method_metadata() {
-    for body in [
-        "private\n attr_reader :value",
-        "attr_reader :value\n private :value",
-    ] {
+fn nonpublic_model_readers_are_private_methods_and_writers_are_refused() {
+    for body in ["private\n attr_reader :value", "attr_reader :value\n private :value"] {
+        let source = format!("class Thing < ApplicationRecord\n{body}\nend");
+        assert_eq!(visibility(&methods(&source, true), "value", MethodReceiver::Instance), MethodVisibility::Private, "{source}");
+    }
+    let both = methods("class Thing < ApplicationRecord\n attr_reader :value, :shown\n private :value\nend", true);
+    assert_eq!(visibility(&both, "value", MethodReceiver::Instance), MethodVisibility::Private);
+    assert_eq!(visibility(&both, "shown", MethodReceiver::Instance), MethodVisibility::Public);
+    for body in ["private\n attr_writer :value", "attr_accessor :value\n private :value"] {
         let source = format!("class Thing < ApplicationRecord\n{body}\nend");
         assert!(
-            ingest_model(
-                source.as_bytes(),
-                "thing.rb",
-                &Schema::default(),
-                &Default::default()
-            )
-            .is_err(),
+            ingest_model(source.as_bytes(), "thing.rb", &Schema::default(), &Default::default()).is_err(),
             "{source}"
         );
     }
+    // Over a column, Rails' private reader reads an ivar the record never sets.
+    let schema = ingest_schema(b"ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :things do |t|\n    t.string :value\n  end\nend\n", "db/schema.rb").unwrap();
+    let source = "class Thing < ApplicationRecord\n private\n attr_reader :value\nend";
+    assert!(ingest_model(source.as_bytes(), "thing.rb", &schema, &Default::default()).is_err());
+    let source = "class Thing < ApplicationRecord\n attribute :secret, :string\n private\n attr_reader :secret\nend";
+    assert!(ingest_model(source.as_bytes(), "thing.rb", &Schema::default(), &Default::default()).is_err());
 }
 
 /// A model aliases a private def under `private` with `alias_method`. The

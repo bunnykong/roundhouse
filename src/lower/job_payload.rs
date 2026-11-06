@@ -60,6 +60,12 @@ pub struct JobParam {
     /// `*name`: every argument from this position on, each written as
     /// its own element of the argument list, as Rails flattens a splat.
     pub rest: bool,
+    /// `name:`: written in the trailing keyword Hash Rails flags with `_aj_ruby2_keywords`, and passed back by name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keyword: bool,
+    /// A keyword's literal default, as Ruby text: what `perform` binds when a payload leaves the key out, as Rails' do for a defaulted keyword.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
     pub codec: Codec,
 }
 
@@ -208,9 +214,14 @@ pub fn plan_jobs(app: &App, jobs: &BTreeSet<String>, wrapped: &BTreeSet<String>)
     plans
 }
 
-/// Each site is the argument types, in order; `None` for an argument
-/// whose type is unknown or which is a splat or a keyword hash.
-type Site = Vec<Option<Ty>>;
+/// One call site: the positional argument types, in order (`None` for an
+/// argument whose type is unknown or which is a splat or a Hash), and the
+/// keywords it passes by name.
+#[derive(Default)]
+struct Site {
+    args: Vec<Option<Ty>>,
+    keywords: Vec<(Symbol, Option<Ty>)>,
+}
 
 fn call_site_types(app: &App, jobs: &BTreeSet<String>) -> BTreeMap<String, Vec<Site>> {
     let mut out: BTreeMap<String, Vec<Site>> = BTreeMap::new();
@@ -305,9 +316,25 @@ fn collect_sites(e: &Expr, jobs: &BTreeSet<String>, out: &mut BTreeMap<String, V
                 let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
                 if jobs.contains(&name) {
                     let skip = if method.as_str() == "perform_later_with" { 2 } else { 0 };
-                    let site = args
+                    let mut given: Vec<&Expr> = args.iter().skip(skip).collect();
+                    let mut site = Site::default();
+                    if let Some(last) = given.last()
+                        && let ExprNode::Hash { entries, kwargs: true } = &*last.node
+                    {
+                        let named: Option<Vec<(Symbol, Option<Ty>)>> = entries
+                            .iter()
+                            .map(|(k, v)| match &*k.node {
+                                ExprNode::Lit { value: Literal::Sym { value } } => Some((value.clone(), v.ty.clone())),
+                                _ => None,
+                            })
+                            .collect();
+                        if let Some(named) = named {
+                            site.keywords = named;
+                            given.pop();
+                        }
+                    }
+                    site.args = given
                         .iter()
-                        .skip(skip)
                         .map(|a| match &*a.node {
                             ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. } => None,
                             ExprNode::Hash { .. } => None,
@@ -335,41 +362,50 @@ fn plan_params(
     if sites.is_empty() {
         return Err(gap(None, "no call site types its arguments".to_string()));
     }
-    let rest_at = params.iter().position(|p| p.rest);
-    if rest_at.is_some_and(|k| k != params.len() - 1) {
+    let positional: Vec<&crate::dialect::Param> = params.iter().filter(|p| !p.keyword).collect();
+    let keywords: Vec<&crate::dialect::Param> = params.iter().filter(|p| p.keyword).collect();
+    let rest_at = positional.iter().position(|p| p.rest);
+    if rest_at.is_some_and(|k| k != positional.len() - 1) {
         return Err(gap(None, "a rest parameter that is not last".to_string()));
     }
-    let fixed = rest_at.unwrap_or(params.len());
-    let mut out = Vec::new();
-    for (i, p) in params.iter().enumerate() {
-        if p.keyword || p.forwarding {
-            return Err(gap(Some(&p.name), "keyword or forwarding parameter".to_string()));
+    // Not a rest beside keywords: the rest readers run to the end of the list, where the keyword Hash sits.
+    if rest_at.is_some() && !keywords.is_empty() {
+        return Err(gap(None, "a rest parameter beside keyword parameters".to_string()));
+    }
+    if let Some(p) = params.iter().find(|p| p.forwarding || (p.keyword && p.rest)) {
+        return Err(gap(Some(&p.name), "keyword rest or forwarding parameter".to_string()));
+    }
+    for site in sites {
+        if let Some((name, _)) = site.keywords.iter().find(|(n, _)| !keywords.iter().any(|k| &k.name == n)) {
+            return Err(gap(Some(name), "a call site passes a keyword perform does not take".to_string()));
         }
+    }
+    let fixed = rest_at.unwrap_or(positional.len());
+    let mut out = Vec::new();
+    let mut join_codec = |p: &crate::dialect::Param, codec: Option<Codec>, ty: &Ty| -> Result<Option<Codec>, JobFallback> {
+        let Some(c) = codec_of(app, sti, ty) else {
+            return Err(gap(Some(&p.name), format!("no codec for `{}`", describe(ty))));
+        };
+        Ok(Some(match codec {
+            None => c,
+            Some(prev) => join(prev, c).ok_or_else(|| gap(Some(&p.name), "call sites disagree on its type".to_string()))?,
+        }))
+    };
+    for (i, p) in positional.iter().enumerate() {
         let mut codec: Option<Codec> = None;
         for site in sites {
-            if rest_at.is_none() && site.len() != params.len() {
+            if rest_at.is_none() && site.args.len() != positional.len() {
                 return Err(gap(Some(&p.name), "a call site passes a different number of arguments".to_string()));
             }
-            if site.len() < fixed {
+            if site.args.len() < fixed {
                 return Err(gap(Some(&p.name), "a call site passes too few arguments".to_string()));
             }
-            let slots: Vec<&Option<Ty>> = if p.rest { site[i..].iter().collect() } else { vec![&site[i]] };
+            let slots: Vec<&Option<Ty>> = if p.rest { site.args[i..].iter().collect() } else { vec![&site.args[i]] };
             for slot in slots {
                 let Some(ty) = slot else {
                     return Err(gap(Some(&p.name), "an argument's type is unknown".to_string()));
                 };
-                let Some(c) = codec_of(app, sti, ty) else {
-                    return Err(gap(Some(&p.name), format!("no codec for `{}`", describe(ty))));
-                };
-                codec = match codec.take() {
-                    None => Some(c),
-                    Some(prev) => match join(prev, c) {
-                        Some(j) => Some(j),
-                        None => {
-                            return Err(gap(Some(&p.name), "call sites disagree on its type".to_string()));
-                        }
-                    },
-                };
+                codec = join_codec(p, codec, ty)?;
             }
         }
         let Some(codec) = codec else {
@@ -378,9 +414,59 @@ fn plan_params(
         if p.rest && matches!(codec, Codec::NullableRecord { .. }) {
             return Err(gap(Some(&p.name), "a rest parameter of nullable records".to_string()));
         }
-        out.push(JobParam { name: p.name.clone(), rest: p.rest, codec });
+        out.push(JobParam { name: p.name.clone(), rest: p.rest, keyword: false, default: None, codec });
+    }
+    for p in &keywords {
+        let mut codec: Option<Codec> = None;
+        for site in sites {
+            match site.keywords.iter().find(|(n, _)| n == &p.name) {
+                Some((_, Some(ty))) => codec = join_codec(p, codec, ty)?,
+                Some((_, None)) => return Err(gap(Some(&p.name), "an argument's type is unknown".to_string())),
+                None if p.default.is_none() => return Err(gap(Some(&p.name), "a call site omits a required keyword".to_string())),
+                None => {}
+            }
+        }
+        if let Some(ty) = p.default.as_ref().and_then(|d| d.ty.as_ref()) {
+            codec = join_codec(p, codec, ty)?;
+        }
+        let Some(codec) = codec else {
+            return Err(gap(Some(&p.name), "no call site passes it".to_string()));
+        };
+        // Not a default that is no literal: the payload reader would evaluate it outside `perform`, where it may read what only `perform` sees.
+        let default = match p.default.as_ref() {
+            None => None,
+            Some(d) => Some(literal_ruby(app, d).ok_or_else(|| gap(Some(&p.name), "a keyword default that is not a literal".to_string()))?),
+        };
+        out.push(JobParam { name: p.name.clone(), rest: false, keyword: true, default, codec });
     }
     Ok(out)
+}
+
+fn literal_ruby(app: &App, e: &Expr) -> Option<String> {
+    let frozen = !matches!(e.hint(), Some(crate::expr::IrHint::MutableStringLiteral))
+        && (e.span.file.0 as usize)
+            .checked_sub(1)
+            .and_then(|i| app.sources.get(i))
+            .is_some_and(|f| crate::ingest::expr::freezes_literals(&f.text));
+    match &*e.node {
+        ExprNode::Lit { value } => match value {
+            Literal::Nil => Some("nil".to_string()),
+            Literal::Bool { value } => Some(value.to_string()),
+            Literal::Int { value } => Some(value.to_string()),
+            Literal::Float { value } if value.is_finite() => Some(format!("{value:?}")),
+            // Not a bare `"…"` unless the job's own file freezes its literals: the registry does, and elsewhere Ruby hands the job a String it may append to.
+            Literal::Str { value } if frozen => Some(ruby_str(value)),
+            Literal::Str { value } => Some(format!("+{}", ruby_str(value))),
+            Literal::Sym { value }
+                if value.as_str().chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && value.as_str().chars().all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+            {
+                Some(format!(":{}", value.as_str()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn describe(ty: &Ty) -> String {
@@ -1176,12 +1262,19 @@ pub fn push_model_to_gid_uri(methods: &mut Vec<crate::dialect::MethodDef>, model
 /// one writer per fixed parameter, and a rest parameter's elements
 /// appended, as Rails flattens a splat.
 fn arguments_list(plan: &JobPlan) -> String {
-    let fixed: Vec<String> = plan
+    let a = "ActiveJob::Arguments";
+    let mut fixed: Vec<String> = plan
         .params
         .iter()
-        .filter(|p| !p.rest)
+        .filter(|p| !p.rest && !p.keyword)
         .map(|p| write_expr(&p.codec, p.name.as_str()))
         .collect();
+    let keywords: Vec<&JobParam> = plan.params.iter().filter(|p| p.keyword).collect();
+    if !keywords.is_empty() {
+        let names: Vec<String> = keywords.iter().map(|p| ruby_str(p.name.as_str())).collect();
+        let parts: Vec<String> = keywords.iter().map(|p| write_expr(&p.codec, p.name.as_str())).collect();
+        fixed.push(format!("{a}.keywords([{}], [{}])", names.join(", "), parts.join(", ")));
+    }
     let mut list = format!("[{}]", fixed.join(", "));
     if let Some(rest) = plan.params.iter().find(|p| p.rest) {
         let elems = format!("{}.map {{ |a| {} }}", rest.name.as_str(), write_expr(&rest.codec, "a"));
@@ -1269,6 +1362,14 @@ pub fn registry_source_with_broadcasts(
             for (i, p) in plan.params.iter().enumerate() {
                 if p.rest {
                     call_args.push(format!("*{}", read_rest(&p.codec, i)));
+                } else if p.keyword {
+                    let key = ruby_str(p.name.as_str());
+                    let read = read_expr(&p.codec, &format!("ActiveJob::Arguments.keyword_args(args, {key}), 0"));
+                    let value = match &p.default {
+                        Some(default) => format!("(ActiveJob::Arguments.keyword_given?(args, {key}) ? {read} : {default})"),
+                        None => read,
+                    };
+                    call_args.push(format!("{}: {value}", p.name.as_str()));
                 } else {
                     call_args.push(read_expr(&p.codec, &format!("args, {i}")));
                 }
@@ -1470,7 +1571,23 @@ pub(crate) fn fresh_name(base: &str, taken: &[&str]) -> String {
 }
 
 fn ruby_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            // Not `#` as written: `#{`, `#@` and `#$` interpolate in a double-quoted literal.
+            '#' => out.push_str("\\#"),
+            '\n' => out.push_str("\\n"),
+            // Not a raw CR: Ruby reads a CRLF in source as LF.
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn write_expr(codec: &Codec, v: &str) -> String {
@@ -1511,7 +1628,7 @@ fn read_expr(codec: &Codec, at: &str) -> String {
             Codec::Str => format!("{a}.str_array_at({at})"),
             Codec::Sym => format!("{a}.sym_array_at({at})"),
             Codec::Record { model, .. } => {
-                let (args, i) = at.split_once(", ").unwrap_or((at, "0"));
+                let (args, i) = at.rsplit_once(", ").unwrap_or((at, "0"));
                 format!("locate_{}_from({args}[{i}], 0)", suffix(model))
             }
             // Excluded by `codec_of`.
@@ -1527,7 +1644,7 @@ fn read_rest(codec: &Codec, from: usize) -> String {
         Codec::Record { model, .. } => format!("locate_{}_from(args, {from})", suffix(model)),
         other => {
             let one = read_expr(other, "args, j");
-            format!("(({from})...{a}.count(args)).map {{ |j| {one} }}")
+            format!("(({from})...{a}.arg_count(args)).map {{ |j| {one} }}")
         }
     }
 }

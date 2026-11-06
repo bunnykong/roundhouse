@@ -49,9 +49,7 @@ fn decoded(response: &native_http::Response, log: &str) -> serde_json::Value {
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn json_body_values_and_source_precedence_match_rails_natively() {
     const JSON: &str = "application/json";
-    let (tree, errors) = probe_app(false).emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+    let tree = probe_app(false).native_http_tree();
     let mut server = native_http::Server::start(&tree);
     server.take_session("/articles/new");
 
@@ -166,9 +164,7 @@ fn json_body_values_and_source_precedence_match_rails_natively() {
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn params_wrapper_uses_body_values_when_query_and_path_collide() {
-    let (tree, errors) = probe_app(true).emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+    let tree = probe_app(true).native_http_tree();
     let mut server = native_http::Server::start(&tree);
     server.take_session("/articles/new");
 

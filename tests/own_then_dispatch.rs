@@ -44,9 +44,10 @@ fn the_owner_answers_and_kernel_then_still_hands_back_the_block() {
 
 #[test]
 fn a_class_side_then_answers_its_declaration_not_kernels() {
-    let account = "class Account < ApplicationRecord\n  #: () { (untyped) -> untyped } -> Account\n  def self.then(&block) = self\n  #: -> untyped\n  def use = [Account.then { |v| v }.zzz, \"x\".then { |s| s.upcase }.yyy]\nend\n";
+    // Class-side `self` is the class object, which the return contract names.
+    let account = "class Account < ApplicationRecord\n  #: () { (untyped) -> untyped } -> singleton(Account)\n  def self.then(&block) = self\n  #: -> untyped\n  def use = [Account.then { |v| v }.zzz, \"x\".then { |s| s.upcase }.yyy]\nend\n";
     let text = check("class", account);
     assert!(!text.contains("no known method `then`"), "{text}");
-    assert!(text.contains("no known method `zzz` on Account"), "{text}");
+    assert!(text.contains("no known method `zzz` on Class[Account]"), "{text}");
     assert!(text.contains("no known method `yyy` on String"), "{text}");
 }

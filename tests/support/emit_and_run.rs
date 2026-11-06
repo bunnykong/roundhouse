@@ -224,7 +224,8 @@ impl Overlay {
             bundle::record(&dir, &self, script, flags);
             panic!("spinel bundle collect: recorded, not run");
         }
-        if let Some(run) = bundle::run_shared(&self, script, flags) {
+        // Not the bundled run's failure as the test's: another case's added method or route rides in that build, so it is judged again alone.
+        if let Some(run) = bundle::run_shared(&self, script, flags).filter(|run| run.success) {
             return run;
         }
         let (emitted, errors) = self.emit_tree(BuildTarget::Spinel);
@@ -348,6 +349,24 @@ impl Overlay {
     pub fn emit(self, target: BuildTarget) -> (Emitted, Vec<String>) {
         let (dir, errors) = self.emit_tree(target);
         (Emitted(dir), errors)
+    }
+
+    /// The Spinel tree with its server built (`spin build blog`), for a
+    /// test driven over HTTP (`tests/support/native_http.rs`); one that
+    /// combines with other tests' overlays is built once for all of them
+    /// (`bundle::build_all`), and this answers a copy of that tree.
+    pub fn native_http_tree(self) -> Emitted {
+        if let Some(dir) = bundle::collect_dir() {
+            bundle::record(&dir, &self, "", &[bundle::HTTP]);
+            panic!("spinel bundle collect: recorded, not run");
+        }
+        if let Some(tree) = bundle::http_shared(&self) {
+            return Emitted(tree);
+        }
+        let (tree, errors) = self.emit(BuildTarget::Spinel);
+        assert!(errors.is_empty(), "analysis/emission errors:\n{}", errors.join("\n"));
+        bundle::spin_build(&tree).unwrap_or_else(|log| panic!("`spin build blog` failed in {}\n{log}", tree.display()));
+        tree
     }
 
     pub fn emit_target_neutral(self, target: BuildTarget) -> (Emitted, Vec<String>) {
@@ -625,6 +644,101 @@ pub mod bundle {
 
     const GROUP: usize = 8;
 
+    /// The flag a case recorded by `Overlay::native_http_tree` carries: a
+    /// server built with `spin build`, not a contract compiled by spinel.
+    pub const HTTP: &str = "<native-http>";
+
+    pub fn spin_build(tree: &Path) -> Result<(), String> {
+        let output = Command::new("spin").args(["build", "blog"]).current_dir(tree).output().map_err(|e| format!("spawn spin: {e}"))?;
+        if output.status.success() && tree.join("build/bin/blog").is_file() {
+            return Ok(());
+        }
+        Err(format!(
+            "=== stdout ===\n{}\n=== stderr ===\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+
+    // Not the group's tree itself: each test writes its database and its log into the tree, and tests run in parallel.
+    pub fn http_shared(overlay: &Overlay) -> Option<PathBuf> {
+        let (dir, map) = manifest()?;
+        let (group, _) = map.get(&key(overlay, "", &[HTTP])?)?;
+        let emitted = scratch_dir().join("emitted");
+        copy_tree(&dir.join(group), &emitted);
+        Some(emitted)
+    }
+
+    /// Every case's edits in one list when they compose on the base: a
+    /// file written alike by each case that writes it, and replacements
+    /// that each still find their text exactly once, in order, with the
+    /// others applied (routes added after one `draw do` line). None when
+    /// two cases disagree about a file.
+    fn merged_edits(cases: &[&Case]) -> Option<Vec<Edit>> {
+        let empty = cases[0].base.as_os_str() == EMPTY;
+        let mut files: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut written: BTreeMap<&str, &[u8]> = BTreeMap::new();
+        let mut removed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut seen: std::collections::BTreeSet<(&str, &str, &str)> = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for case in cases {
+            for edit in &case.edits {
+                match edit {
+                    Edit::Write { path, content } => {
+                        if removed.contains(path.as_str()) || files.contains_key(path.as_str()) {
+                            return None;
+                        }
+                        match written.insert(path.as_str(), content.as_slice()) {
+                            Some(before) if before != content.as_slice() => return None,
+                            Some(_) => continue,
+                            None => out.push(clone_edit(edit)),
+                        }
+                    }
+                    Edit::Replace { path, find, replace } => {
+                        if empty || written.contains_key(path.as_str()) || removed.contains(path.as_str()) {
+                            return None;
+                        }
+                        // Once: cases grouped together make the same edits to the app's files (`base_edits`, `http_base_edits`).
+                        if seen.contains(&(path.as_str(), find.as_str(), replace.as_str())) {
+                            continue;
+                        }
+                        seen.insert((path.as_str(), find.as_str(), replace.as_str()));
+                        let text = files
+                            .entry(path.clone())
+                            .or_insert_with(|| std::fs::read_to_string(case.base.join(path)).ok())
+                            .as_mut()?;
+                        if text.matches(find.as_str()).count() != 1 {
+                            return None;
+                        }
+                        *text = text.replacen(find.as_str(), replace, 1);
+                        out.push(clone_edit(edit));
+                    }
+                    Edit::Remove { path } => {
+                        if written.contains_key(path.as_str()) || files.contains_key(path.as_str()) {
+                            return None;
+                        }
+                        if removed.insert(path.as_str()) {
+                            out.push(clone_edit(edit));
+                        }
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
+    fn build_http(cases: &[&Case]) -> Option<PathBuf> {
+        let edits = merged_edits(cases)?;
+        let empty = cases[0].base.as_os_str() == EMPTY;
+        let overlay = Overlay { base: if empty { scratch_dir() } else { cases[0].base.clone() }, scratch_base: empty, edits };
+        let (emitted, errors) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| overlay.emit_tree(BuildTarget::Spinel))).ok()?;
+        if !errors.is_empty() || spin_build(&emitted).is_err() {
+            remove_scratch(&emitted);
+            return None;
+        }
+        Some(emitted)
+    }
+
     pub fn collect_dir() -> Option<PathBuf> {
         std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").map(PathBuf::from)
     }
@@ -747,31 +861,10 @@ pub mod bundle {
     }
 
     fn build(cases: &[&Case]) -> Option<PathBuf> {
-        // Not merged blindly: two cases writing one path differently would leave only the last.
-        // A path only one case touches, or one every case writes alike: a script would otherwise run against another case's edit of its file.
-        let mut written: BTreeMap<&str, Option<&[u8]>> = BTreeMap::new();
-        for case in cases {
-            let mut own: BTreeMap<&str, Option<&[u8]>> = BTreeMap::new();
-            for edit in &case.edits {
-                match edit {
-                    Edit::Write { path, content } => own.insert(path.as_str(), Some(content.as_slice())),
-                    Edit::Replace { path, .. } | Edit::Remove { path } => own.insert(path.as_str(), None),
-                };
-            }
-            for (path, now) in own {
-                if let Some(before) = written.insert(path, now) {
-                    if before.is_none() || before != now {
-                        return None;
-                    }
-                }
-            }
-        }
+        // Not merged blindly: two cases writing one path differently would leave only the last (`merged_edits`).
+        let edits = merged_edits(cases)?;
         let empty = cases[0].base.as_os_str() == EMPTY;
-        let overlay = Overlay {
-            base: if empty { scratch_dir() } else { cases[0].base.clone() },
-            scratch_base: empty,
-            edits: cases.iter().flat_map(|c| c.edits.iter().map(clone_edit)).collect(),
-        };
+        let overlay = Overlay { base: if empty { scratch_dir() } else { cases[0].base.clone() }, scratch_base: empty, edits };
         let (emitted, errors) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| overlay.emit_tree(BuildTarget::Spinel))).ok()?;
         if !errors.is_empty() {
             remove_scratch(&emitted);
@@ -798,7 +891,27 @@ pub mod bundle {
         Some(emitted)
     }
 
-    // The edits that change a file of the base app rather than add one beside it.
+    // Not any insertion: an added `validates`, or the rest of a kept line, changes what another case's script sees.
+    pub fn adds_only_methods(find: &str, replace: &str) -> bool {
+        let added = match (replace.strip_prefix(find), replace.strip_suffix(find)) {
+            (Some(after), _) if find.ends_with('\n') || after.starts_with('\n') => after,
+            (_, Some(before)) if before.ends_with('\n') => before,
+            _ => return false,
+        };
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let lines: Vec<&str> = added.lines().filter(|l| !l.trim().is_empty()).collect();
+        let Some(outer) = lines.iter().map(|l| indent(l)).min() else {
+            return false;
+        };
+        lines.iter().filter(|l| indent(l) == outer).all(|l| {
+            let l = l.trim_start();
+            l.starts_with("def ") || l == "end" || l.starts_with('#')
+        })
+    }
+
+    // The edits that change a file of the base app rather than add one beside it. Not one that only
+    // adds methods (`adds_only_methods`): it changes nothing another case's script calls, and a
+    // case that fails in the shared build is run again alone (`Overlay::run_spinel_with_flags`).
     fn base_edits(case: &Case) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let in_base = |path: &str| case.base.as_os_str() != EMPTY && case.base.join(path).exists();
@@ -806,6 +919,26 @@ pub mod bundle {
             match edit {
                 Edit::Write { path, content } if in_base(path) => ("w", path, content).hash(&mut h),
                 Edit::Write { .. } => {}
+                Edit::Replace { find, replace, .. } if adds_only_methods(find, replace) => {}
+                Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
+                Edit::Remove { path } => ("d", path).hash(&mut h),
+            }
+        }
+        h.finish()
+    }
+
+    const ROUTES: &str = "config/routes.rb";
+
+    // `base_edits` but for routes a case inserts, which change nothing another case's requests reach.
+    fn http_base_edits(case: &Case) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let in_base = |path: &str| case.base.as_os_str() != EMPTY && case.base.join(path).exists();
+        for edit in &case.edits {
+            match edit {
+                Edit::Write { path, content } if in_base(path) => ("w", path, content).hash(&mut h),
+                Edit::Write { .. } => {}
+                Edit::Replace { path, find, replace }
+                    if path == ROUTES && (replace.starts_with(find.as_str()) || replace.ends_with(find.as_str())) => {}
                 Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
                 Edit::Remove { path } => ("d", path).hash(&mut h),
             }
@@ -845,7 +978,7 @@ pub mod bundle {
             return;
         }
         let start = std::time::Instant::now();
-        let built = build(&cases);
+        let built = if cases[0].flags.iter().any(|f| f == HTTP) { build_http(&cases) } else { build(&cases) };
         charge(&cases, start.elapsed().as_secs_f64(), seconds);
         if let Some(tree) = built {
             let dest = out.join(name);
@@ -866,22 +999,64 @@ pub mod bundle {
         build_split(b.to_vec(), out, &format!("{name}b"), manifest, seconds);
     }
 
-    pub fn build_all(collected: &Path, out: &Path) {
+    fn read_cases(collected: &Path) -> Vec<Case> {
         let mut cases: Vec<Case> = std::fs::read_dir(collected)
             .map(|d| d.filter_map(|e| read_case(&e.ok()?.path())).collect())
             .unwrap_or_default();
         cases.sort_by(|a, b| a.key.cmp(&b.key));
+        cases
+    }
+
+    /// The cases that may share one build, at most `GROUP` each.
+    fn chunks(cases: &[Case]) -> Vec<Vec<&Case>> {
         // Not grouped on the base alone: an edit to a file the base already has (its schema,
         // routes, a model) changes the app every case in the binary boots, so only cases that
         // make the same such edits share one.
         let mut groups: BTreeMap<(PathBuf, Vec<String>, u64), Vec<&Case>> = BTreeMap::new();
-        for case in &cases {
-            groups.entry((case.base.clone(), case.flags.clone(), base_edits(case))).or_default().push(case);
+        for case in cases {
+            // Not apart on the routes they add: an HTTP case's assertions are its own requests, and `merged_edits` refuses what does not compose.
+            let edits = if case.flags.iter().any(|f| f == HTTP) { http_base_edits(case) } else { base_edits(case) };
+            groups.entry((case.base.clone(), case.flags.clone(), edits)).or_default().push(case);
         }
+        // Not the group cut in order: a whole-file write two cases make differently (an empty app's
+        // routes and schema) does not compose, so each chunk takes only cases that merge with it.
+        let mut out = Vec::new();
+        for group in groups.into_values() {
+            let mut left = group;
+            while !left.is_empty() {
+                let mut chunk = vec![left.remove(0)];
+                let mut rest = Vec::new();
+                for case in left {
+                    chunk.push(case);
+                    if chunk.len() > GROUP || merged_edits(&chunk).is_none() {
+                        rest.push(chunk.pop().unwrap());
+                    }
+                }
+                out.push(chunk);
+                left = rest;
+            }
+        }
+        out
+    }
+
+    /// The tests each shared build would take, for the lane to keep each such set on one shard
+    /// (`scripts/ci-plan.py toolchain-shard --units`): one JSON array of test-name arrays.
+    pub fn plan(collected: &Path, out: &Path) {
+        let cases = read_cases(collected);
+        let units: Vec<Vec<String>> = chunks(&cases)
+            .into_iter()
+            .filter(|chunk| chunk.len() > 1)
+            .map(|chunk| chunk.iter().filter_map(|c| c.test.clone()).collect())
+            .collect();
+        std::fs::write(out, serde_json::to_string(&units).unwrap()).expect("write bundle plan");
+    }
+
+    pub fn build_all(collected: &Path, out: &Path) {
+        let cases = read_cases(collected);
         std::fs::create_dir_all(out).expect("bundle out dir");
         let manifest = std::sync::Mutex::new(BTreeMap::new());
         let seconds = std::sync::Mutex::new(BTreeMap::new());
-        let chunks: Vec<Vec<&Case>> = groups.values().flat_map(|g| g.chunks(GROUP).map(|c| c.to_vec())).collect();
+        let chunks = chunks(&cases);
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|s| {

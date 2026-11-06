@@ -96,6 +96,9 @@ pub enum ViewHelperKind<'a> {
     WordWrap { text: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= stylesheet_link_tag :name [, opts] %>`.
     StylesheetLinkTag { name: &'a Expr, opts: Option<&'a Expr> },
+    /// `<%= content_tag :name, content [, opts] %>`, with no block: the
+    /// escaped content's `content_tag_html`, appended as it is.
+    ContentTag { name: &'a Expr, content: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= content_for(:slot) %>` (getter, no body).
     ContentForGetter { slot: &'a str },
     /// `<% content_for :slot, "body" %>` (statement-form setter).
@@ -731,6 +734,18 @@ pub fn classify_view_helper<'a>(
             name: &args[0],
             opts: Some(&args[1]),
         }),
+        // A Hash second argument with no third is Rails' content (it
+        // renders the Hash's `to_s`), not options: left to the generic path.
+        ("content_tag", 2) if !matches!(&*args[1].node, ExprNode::Hash { .. }) => {
+            Some(ViewHelperKind::ContentTag { name: &args[0], content: &args[1], opts: None })
+        }
+        // The options as a Hash literal, or a value typed as a Hash (an
+        // `attrs` local), which the runtime takes the same way.
+        ("content_tag", 3)
+            if matches!(&*args[2].node, ExprNode::Hash { .. }) || matches!(args[2].ty, Some(crate::ty::Ty::Hash { .. })) =>
+        {
+            Some(ViewHelperKind::ContentTag { name: &args[0], content: &args[1], opts: Some(&args[2]) })
+        }
         ("content_for", 1) => {
             let slot = extract_sym_or_str(&args[0])?;
             Some(ViewHelperKind::ContentForGetter { slot })

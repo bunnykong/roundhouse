@@ -169,6 +169,13 @@ pub(super) fn ingest_model_with_enum_constants(
         // As the library walk does: a `define_method` loop over a literal list unrolls into the `def`s it makes.
         let _loop_constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(&owner, &stmts));
         let loop_visibility = super::define_method_loop::named_visibility(&stmts);
+        let declared_attributes: Vec<Symbol> = stmts
+            .iter()
+            .filter_map(|st| st.as_call_node())
+            .filter(|c| c.receiver().is_none() && c.name().as_slice() == b"attribute")
+            .filter_map(|c| c.arguments()?.arguments().iter().next().and_then(|a| super::util::symbol_value(&a)))
+            .map(|n| Symbol::from(n.as_str()))
+            .collect();
         for statement in stmts {
             let definition = visibility::definition(&statement).map(|d| d.as_node());
             let stmt = definition.as_ref().unwrap_or(&statement);
@@ -446,7 +453,20 @@ pub(super) fn ingest_model_with_enum_constants(
             for (i, mut item) in items.into_iter().enumerate() {
                 if let ModelBodyItem::Method { method, .. } = &mut item {
                     visibility.apply(&statement, method);
-                } else if let ModelBodyItem::Unknown { .. } = &item {
+                } else if let ModelBodyItem::Unknown { expr, .. } = &item {
+                    if let Some(mut methods) = visibility.restricted_at(&statement).then(|| restricted_attr_methods(expr, &owner, &attributes, &declared_attributes)).flatten() {
+                        for method in &mut methods {
+                            visibility.apply(&statement, method);
+                        }
+                        for (j, method) in methods.into_iter().enumerate() {
+                            body.push(ModelBodyItem::Method {
+                                method,
+                                leading_comments: Vec::new(),
+                                leading_blank_line: leading_blank && i == 0 && j == 0,
+                            });
+                        }
+                        continue;
+                    }
                     if let Err(err) = visibility.check_model_item(&statement, file) {
                         super::survey::continue_or_fail(err)?;
                         continue;
@@ -836,6 +856,26 @@ fn expand_mattr_cattr(
     } else {
         Ok(Some(out))
     }
+}
+
+/// `private` then `attr_reader :queue_adapter` (MissionControl::Jobs::RecurringTask): the
+/// readers as methods, each to carry its own visibility, which a class-body `attr_*`
+/// statement has nowhere to hold.
+fn restricted_attr_methods(expr: &Expr, owner: &ClassId, columns: &Row, attributes: &[Symbol]) -> Option<Vec<crate::dialect::MethodDef>> {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { return None };
+    // Not a writer: mass assignment refuses a private writer's key in Rails, which the model lowering does not model, so `check_model_item` still refuses one.
+    if method.as_str() != "attr_reader" {
+        return None;
+    }
+    args.iter()
+        .map(|arg| match &*arg.node {
+            // Not over a column or an `attribute`: Rails' reader then reads an ivar the record never sets, which the attribute reader the lowering keeps would not.
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if !columns.fields.contains_key(value) && !attributes.contains(value) => {
+                Some(super::library_class::synth_attr_reader(owner, value, crate::dialect::MethodReceiver::Instance))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn synth_mattr_instance_reader(owner: &ClassId, name: &Symbol) -> crate::dialect::MethodDef {

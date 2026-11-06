@@ -1,7 +1,6 @@
 //! Real native HTTP coverage, run by the existing Spinel toolchain partition.
 
 use super::{emit_and_run, native_http};
-use roundhouse::project::BuildTarget;
 
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
@@ -48,13 +47,11 @@ class CachedFiles
   end
 end
 "#;
-    let (tree, errors) = emit_and_run::empty_app()
+    let tree = emit_and_run::empty_app()
         .write("db/schema.rb", "ActiveRecord::Schema[8.1].define do\nend\n")
         .write("app/controllers/static_files.rb", source)
         .write("config/routes.rb", "Rails.application.routes.draw do\n  mount StaticFiles, at: '/files'\n  mount PlainFiles, at: '/plain'\n  mount CachedFiles, at: '/cached'\nend\n")
-        .emit(BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+        .native_http_tree();
     let server = native_http::Server::start(&tree);
     let marker = tree.join("rack-body-closed.txt");
     for (path, remainder) in [("/files", "/"), ("/files/child", "/child")] {

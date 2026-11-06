@@ -1037,6 +1037,7 @@ const RESPONSE_TERMINALS: &[&str] = &[
 /// `has_toplevel_terminal` must not count them.
 pub const HTTP_AUTH_CHALLENGES: &[&str] = &[
     "authenticate_or_request_with_http_basic",
+    "http_basic_authenticate_or_request_with",
     "authenticate_or_request_with_http_token",
     "request_http_basic_authentication",
     "request_http_token_authentication",

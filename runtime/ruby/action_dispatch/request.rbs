@@ -67,6 +67,9 @@ module ActionDispatch
     def env: () -> Hash[String, untyped]
     def env=: (Hash[String, untyped]) -> Hash[String, untyped]
     def headers: () -> ActionDispatch::Http::Headers
+    def request_id: () -> String?
+    def request_id=: (String value) -> String
+    def uuid: () -> String?
     def path_parameters: () -> RequestPathParameters
     def path_parameters=: (Hash[String, String]) -> RequestPathParameters
     def authorization: () -> String?

@@ -249,7 +249,7 @@ pub struct ViewLowerCtx<'a> {
     reference_targets: std::rc::Rc<crate::det::HashMap<String, String>>,
     nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
     nilable_scalar_reads: std::rc::Rc<crate::det::HashSet<String>>,
-    html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
+    html_safe_methods: std::rc::Rc<HtmlSafeMarks>,
     model_singulars: std::rc::Rc<crate::det::HashSet<String>>,
     slug_models: std::rc::Rc<crate::det::HashSet<String>>,
     bool_readers: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
@@ -331,9 +331,7 @@ impl<'a> ViewLowerCtx<'a> {
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
             nested_record_classes: std::rc::Rc::new(nested_record_classes(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
-            html_safe_methods: std::rc::Rc::new(
-                app.html_safe_methods.iter().map(|m| m.as_str().to_string()).collect(),
-            ),
+            html_safe_methods: std::rc::Rc::new(HtmlSafeMarks::of(app)),
             model_singulars: std::rc::Rc::new(
                 app.models
                     .iter()
@@ -488,20 +486,21 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // present?") and downstream emitters don't need target-specific
     // `defined?` knowledge.
     let mut rewritten = rewritten;
-    // An app override owns pluralize, including nested ERB calls.
-    // Qualify it before the framework classifier consumes bare Sends.
-    if let Some(owner) = app.helper_method_index.get(&Symbol::from("pluralize")) {
-        fn qualify_pluralize(e: &mut Expr, owner: &ClassId) {
-            e.node.for_each_child_mut(&mut |c| qualify_pluralize(c, owner));
+    // An app override owns pluralize or content_tag, including nested ERB
+    // calls. Qualify it before the framework classifier consumes bare Sends.
+    for helper in ["pluralize", "content_tag"] {
+        let Some(owner) = app.helper_method_index.get(&Symbol::from(helper)) else { continue };
+        fn qualify_helper(e: &mut Expr, helper: &str, owner: &ClassId) {
+            e.node.for_each_child_mut(&mut |c| qualify_helper(c, helper, owner));
             if let ExprNode::Send { recv, method, .. } = &mut *e.node {
-                if recv.is_none() && method.as_str() == "pluralize" {
+                if recv.is_none() && method.as_str() == helper {
                     *recv = Some(Expr::new(e.span, ExprNode::Const {
                         path: owner.0.as_str().split("::").map(Symbol::from).collect(),
                     }));
                 }
             }
         }
-        qualify_pluralize(&mut rewritten, owner);
+        qualify_helper(&mut rewritten, helper, owner);
     }
     rewrite_defined_to_nil_check(&mut rewritten);
     // `local_assigns[:x]` → the bare local `x`. Same place and the same
@@ -940,6 +939,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             record_var: record_var.clone(),
             form_method_var: form_method_var.clone(),
             id_prefix: binding.id_prefix.clone(),
+            recordless: false,
         });
         let record_ref = Expr::new(
             Span::synthetic(),
@@ -5026,6 +5026,9 @@ pub(super) struct FormBuilderBinding {
     /// on one page don't collide. Field NAMES are untouched. Empty for
     /// the common un-namespaced form.
     pub(super) id_prefix: String,
+    /// A `scope:` form with no record (`form_for :filter, url: ...`): its
+    /// fields are named under the scope but read no attributes.
+    pub(super) recordless: bool,
 }
 
 impl FormBuilderBinding {
@@ -5133,12 +5136,13 @@ pub(super) struct ViewCtx {
         std::rc::Rc<crate::det::HashMap<String, String>>,
     /// Proven singular association targets, keyed by owner class and reader.
     pub(super) nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
-    /// Method names whose result is html-safe by construction —
-    /// their body ends in `.html_safe` (`App::html_safe_methods`,
-    /// recorded by `lower::html_safe`). A bare interpolation of one
-    /// skips the auto-escape wrap; escaping it would ship literal
-    /// `&lt;span&gt;` markup, which is what `hat.to_html_label` does.
-    pub(super) html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
+    /// Definitions whose result is html-safe by construction — their
+    /// body ends in `.html_safe` (`App::html_safe_method_defs`, recorded
+    /// by `lower::html_safe`). A bare interpolation of a call that
+    /// resolves to one skips the auto-escape wrap; escaping it would ship
+    /// literal `&lt;span&gt;` markup, which is what `hat.to_html_label`
+    /// does.
+    pub(super) html_safe_methods: std::rc::Rc<HtmlSafeMarks>,
     /// Nilable-scalar reader names through a record: typed_store
     /// attributes with no default (nil when unset). Emptiness
     /// predicates on these get the nil-safe forms (see
@@ -5337,6 +5341,429 @@ pub(super) struct ViewCtx {
     pub(super) held_ivars: Vec<String>,
 }
 
+/// The app's html-safe-marked definitions (`App::html_safe_method_defs`)
+/// with what is needed to find which definition a call resolves to:
+/// each class's or module's parent, included modules and own methods,
+/// and the names it gets from anything other than a `def`.
+#[derive(Default)]
+pub(super) struct HtmlSafeMarks {
+    classes: crate::det::HashMap<String, MarkClass>,
+    marked: crate::det::HashSet<(String, String, bool)>,
+}
+
+#[derive(Default)]
+struct MarkClass {
+    parent: Option<String>,
+    includes: Vec<String>,
+    /// `(method, singleton)` for every method the class defines itself.
+    defines: crate::det::HashSet<(String, bool)>,
+    /// Names a class-body call defines on the class or on a module it
+    /// mixes in ahead of its parent: `attr_reader`, `delegate`,
+    /// `alias_method`, `define_method`, `store_accessor`, an association's
+    /// readers. Read from the call's literal arguments, on either side.
+    shadows: crate::det::HashSet<String>,
+    /// Modules the class `extend`s, in source order: their instance
+    /// methods are the class's singleton methods, ahead of its parent's.
+    extends: Vec<String>,
+    /// The class prepends a module, mixes in one it computes, evaluates
+    /// code into itself (`class_eval`), or defines a method under a name
+    /// that isn't a literal: which definition it answers with isn't known
+    /// here.
+    opaque: bool,
+}
+
+/// What a class-body call (`attr_reader :label`, `extend Helpers`) adds
+/// to `c`: its literal symbol or string arguments to `shadows`, with
+/// `delegate`'s `prefix:` applied and `store`'s `accessors:` read; an
+/// extended module to `extends`. A call whose effect can't be read
+/// (`prepend`, `include` of a computed module, `class_eval`, a
+/// `define_method` or `send` with a computed name) sets `opaque`. A
+/// call's block is read as class-body code too (`block_shadows`), with
+/// `with_options`' literal options merged into each call in it.
+fn macro_shadows(e: &crate::expr::Expr, c: &mut MarkClass) {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Send { recv, method, args, block, .. } = &*e.node else { return };
+    if recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
+        return;
+    }
+    if let Some(b) = block {
+        if method.as_str() == "with_options" {
+            let mut outer = Vec::new();
+            for a in args {
+                match &*a.node {
+                    ExprNode::Hash { entries, .. } => outer.extend(entries.iter().cloned()),
+                    _ => {
+                        c.opaque = true;
+                        return;
+                    }
+                }
+            }
+            block_shadows(b, Some(&outer), c);
+            return;
+        }
+        if is_callback(method.as_str()) {
+            callback_block_shadows(b, c);
+        } else {
+            block_shadows(b, None, c);
+        }
+    }
+    let name = |a: &crate::expr::Expr| match &*a.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let is_const = |a: &crate::expr::Expr| matches!(&*a.node, ExprNode::Const { .. });
+    match method.as_str() {
+        "send" | "public_send" | "__send__" => {
+            // `send(:attr_reader, :label)` is the call it names, with its
+            // block (`send(:with_options, …) { |o| … }`).
+            match args.split_first() {
+                Some((m, rest)) if name(m).is_some() => {
+                    let node = ExprNode::Send {
+                        recv: None,
+                        method: crate::ident::Symbol::from(name(m).unwrap().as_str()),
+                        args: rest.to_vec(),
+                        block: block.clone(),
+                        parenthesized: true,
+                    };
+                    macro_shadows(&crate::expr::Expr::new(e.span, node), c);
+                }
+                _ => c.opaque = true,
+            }
+            return;
+        }
+        "prepend" | "class_eval" | "class_exec" | "module_eval" | "module_exec" | "instance_eval" | "instance_exec" => {
+            c.opaque = true;
+            return;
+        }
+        "include" => {
+            c.opaque |= !args.iter().all(is_const);
+            return;
+        }
+        "extend" => {
+            for a in args {
+                match &*a.node {
+                    ExprNode::Const { path } => c.extends.push(path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::")),
+                    ExprNode::SelfRef => {}
+                    _ => c.opaque = true,
+                }
+            }
+            return;
+        }
+        "define_method" | "define_singleton_method" if args.first().and_then(name).is_none() => {
+            c.opaque = true;
+            return;
+        }
+        "has_secure_password" => {
+            let attr = args.first().and_then(name).unwrap_or_else(|| "password".to_string());
+            if attr == "password" {
+                c.shadows.insert("authenticate".to_string());
+            }
+            c.shadows.extend([format!("authenticate_{attr}"), format!("{attr}_confirmation"), format!("{attr}_challenge")]);
+        }
+        _ => {}
+    }
+    let mut prefix = None;
+    for a in args {
+        let ExprNode::Hash { entries, .. } = &*a.node else { continue };
+        for (k, v) in entries {
+            match name(k).as_deref() {
+                Some("accessors") => {
+                    if let ExprNode::Array { elements, .. } = &*v.node {
+                        c.shadows.extend(elements.iter().filter_map(name));
+                    }
+                }
+                Some("prefix") => match &*v.node {
+                    ExprNode::Lit { value: Literal::Bool { value: false } } => {}
+                    ExprNode::Lit { value: Literal::Bool { value: true } } => {
+                        let to = entries.iter().find(|(k, _)| name(k).as_deref() == Some("to")).and_then(|(_, v)| name(v));
+                        match to {
+                            Some(to) => prefix = Some(to),
+                            None => {
+                                c.opaque = true;
+                                return;
+                            }
+                        }
+                    }
+                    _ => match name(v) {
+                        Some(p) => prefix = Some(p),
+                        None => {
+                            c.opaque = true;
+                            return;
+                        }
+                    },
+                },
+                _ => {}
+            }
+        }
+    }
+    for n in args.iter().filter_map(name) {
+        if let Some(p) = &prefix {
+            c.shadows.insert(format!("{p}_{n}"));
+        }
+        c.shadows.insert(n);
+    }
+}
+
+/// A callback or validation macro (`after_create_commit { … }`, `before_save
+/// do … end`, `validate do … end`): its block runs on a record, not in the
+/// class body.
+fn is_callback(method: &str) -> bool {
+    ["before_", "after_", "around_"].iter().any(|p| method.starts_with(p)) || matches!(method, "validate" | "validates_each")
+}
+
+/// A callback's block is the record's code, run later: a `def` in it
+/// defines its name on the class when it runs, so the name shadows; the
+/// block's other calls aren't class-body calls.
+fn callback_block_shadows(e: &crate::expr::Expr, c: &mut MarkClass) {
+    if let Some(d) = e.nested_def() {
+        c.shadows.insert(d.name.as_str().to_string());
+    }
+    e.node.for_each_child(&mut |ch| callback_block_shadows(ch, c));
+}
+
+/// What a class-body call's block adds to `c`. Each statement is a call
+/// on the block's param, on `self` or on no receiver, read as a
+/// class-body call (with `with_options`' entries merged into its options,
+/// its own keys winning, as Rails' `OptionMerger` merges them), or a
+/// `def`, whose name shadows. Anything else, a block that isn't a literal
+/// one among them, sets `opaque`: what it defines isn't read here.
+fn block_shadows(
+    b: &crate::expr::Expr,
+    merge: Option<&[(crate::expr::Expr, crate::expr::Expr)]>,
+    c: &mut MarkClass,
+) {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Lambda { params, body, .. } = &*b.node else {
+        c.opaque = true;
+        return;
+    };
+    let key = |k: &crate::expr::Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let stmts = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect::<Vec<_>>(),
+        _ => vec![body],
+    };
+    for st in stmts {
+        if let Some(d) = st.nested_def() {
+            c.shadows.insert(d.name.as_str().to_string());
+            continue;
+        }
+        match &*st.node {
+            ExprNode::Lit { value: Literal::Nil } => {}
+            ExprNode::Send { recv, method, args, block, parenthesized }
+                if recv.as_ref().is_none_or(|r| match &*r.node {
+                    ExprNode::SelfRef => true,
+                    ExprNode::Var { name, .. } => params.first() == Some(name),
+                    _ => false,
+                }) =>
+            {
+                let mut args = args.clone();
+                if let Some(outer) = merge {
+                    let own = args.iter().rposition(|a| matches!(&*a.node, ExprNode::Hash { .. }));
+                    let inner: Vec<_> = match own.map(|i| &*args[i].node) {
+                        Some(ExprNode::Hash { entries, .. }) => entries.clone(),
+                        _ => Vec::new(),
+                    };
+                    if outer.iter().chain(&inner).any(|(k, _)| key(k).is_none()) {
+                        c.opaque = true;
+                        return;
+                    }
+                    let mut entries: Vec<_> = outer.iter().filter(|(k, _)| !inner.iter().any(|(ik, _)| key(ik) == key(k))).cloned().collect();
+                    entries.extend(inner);
+                    let hash = crate::expr::Expr::new(st.span, ExprNode::Hash { entries, kwargs: true });
+                    match own {
+                        Some(i) => args[i] = hash,
+                        None => args.push(hash),
+                    }
+                }
+                let call = ExprNode::Send { recv: None, method: method.clone(), args, block: block.clone(), parenthesized: *parenthesized };
+                macro_shadows(&crate::expr::Expr::new(st.span, call), c);
+            }
+            _ => {
+                c.opaque = true;
+                return;
+            }
+        }
+    }
+}
+
+/// The readers an association declares on its model: Rails defines them
+/// in a module the model includes, so they come before its parent's
+/// methods.
+fn association_shadows(a: &crate::dialect::Association, shadows: &mut crate::det::HashSet<String>) {
+    use crate::dialect::Association;
+    let n = a.name().as_str();
+    shadows.insert(n.to_string());
+    match a {
+        Association::HasMany { .. } | Association::HasAndBelongsToMany { .. } => {
+            shadows.insert(format!("{}_ids", crate::naming::singularize(n)));
+        }
+        Association::BelongsTo { .. } | Association::HasOne { .. } => {
+            for f in ["build_{}", "create_{}", "create_{}!", "reload_{}", "reset_{}", "{}_changed?", "{}_previously_changed?"] {
+                shadows.insert(f.replace("{}", n));
+            }
+        }
+    }
+}
+
+impl HtmlSafeMarks {
+    fn of(app: &App) -> Self {
+        let mut classes: crate::det::HashMap<String, MarkClass> = crate::det::HashMap::default();
+        let singleton = |m: &crate::dialect::MethodDef| m.receiver == crate::dialect::MethodReceiver::Class;
+        for m in &app.models {
+            let c = classes.entry(m.name.0.as_str().to_string()).or_default();
+            c.parent = m.parent.as_ref().map(|p| p.0.as_str().to_string());
+            c.includes.extend(crate::analyze::model_includes(m).iter().map(|i| i.0.as_str().to_string()));
+            c.defines.extend(m.methods().map(|d| (d.name.as_str().to_string(), singleton(d))));
+            // A column's reader: the emitted model defines it on the class,
+            // so it comes before an inherited `def` of the same name.
+            c.shadows.extend(m.attributes.fields.keys().map(|k| k.as_str().to_string()));
+            for item in &m.body {
+                match item {
+                    crate::dialect::ModelBodyItem::Unknown { expr, .. } => macro_shadows(expr, c),
+                    crate::dialect::ModelBodyItem::Association { assoc, .. } => association_shadows(assoc, &mut c.shadows),
+                    crate::dialect::ModelBodyItem::Alias { new, .. } => {
+                        c.shadows.insert(new.as_str().to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for lc in &app.library_classes {
+            let c = classes.entry(lc.name.0.as_str().to_string()).or_default();
+            if c.parent.is_none() {
+                c.parent = lc.parent.as_ref().map(|p| p.0.as_str().to_string());
+            }
+            c.includes.extend(lc.includes.iter().map(|i| i.0.as_str().to_string()));
+            c.defines.extend(lc.methods.iter().map(|d| (d.name.as_str().to_string(), singleton(d))));
+            for e in &lc.unknown_calls {
+                macro_shadows(e, c);
+            }
+        }
+        // A concern's `included do` block defines its methods on each
+        // class whose includes reach it, ahead of or after the class's own
+        // `def` by source position: they shadow on the includer.
+        let redefs: crate::det::HashMap<String, Vec<String>> = app
+            .concern_included_redefs
+            .iter()
+            .map(|(m, names)| (m.0.as_str().to_string(), names.iter().map(|n| n.as_str().to_string()).collect()))
+            .collect();
+        if !redefs.is_empty() {
+            let includers: Vec<String> = classes.keys().cloned().collect();
+            for includer in includers {
+                let mut queue = classes[&includer].includes.clone();
+                let mut seen: crate::det::HashSet<String> = queue.iter().cloned().collect();
+                let mut names = Vec::new();
+                let mut i = 0;
+                while i < queue.len() {
+                    let m = queue[i].clone();
+                    i += 1;
+                    names.extend(redefs.get(&m).into_iter().flatten().cloned());
+                    let nested = classes.get(&m).map(|k| k.includes.clone()).unwrap_or_default();
+                    let spliced = app
+                        .concern_model_items
+                        .get(&ClassId(Symbol::from(m.as_str())))
+                        .map(|items| crate::analyze::body_includes(items).into_iter().map(|c| c.0.as_str().to_string()).collect())
+                        .unwrap_or_else(Vec::new);
+                    for n in nested.into_iter().chain(spliced) {
+                        if seen.insert(n.clone()) {
+                            queue.push(n);
+                        }
+                    }
+                }
+                if let Some(c) = classes.get_mut(&includer) {
+                    c.shadows.extend(names);
+                }
+            }
+        }
+        HtmlSafeMarks { classes, marked: app.html_safe_method_defs.iter().cloned().collect() }
+    }
+
+    /// Whether any definition of `method` is marked: the cheap test
+    /// before a receiver is resolved.
+    pub(super) fn names(&self, method: &str) -> bool {
+        self.marked.iter().any(|(_, m, _)| m == method)
+    }
+
+    /// Whether `method` on an instance of `class` (or, with `singleton`,
+    /// on the constant `class`) resolves to a marked definition. The
+    /// lookup takes Ruby's order, and the first class or module that
+    /// defines the method decides: an instance call looks in the class,
+    /// then its included modules, last included first, then its parent;
+    /// a singleton call looks in the class, then the modules it extends,
+    /// last extended first, then its parent. A method no known class
+    /// defines isn't trusted, and neither is one that a class on the way
+    /// gets from a call rather than a `def` (`attr_reader :label`), that
+    /// a class answers through a prepended module, or that an included
+    /// or extended module this app doesn't have could define. An
+    /// extended module's own method isn't trusted either.
+    pub(super) fn resolves_marked(&self, class: &str, method: &str, singleton: bool) -> bool {
+        let mut order = Vec::new();
+        self.lookup_order(class, singleton, Via::Class, &mut order);
+        for (c, via) in &order {
+            let Some(k) = self.classes.get(c) else {
+                if *via == Via::Class {
+                    // A parent this app doesn't have (`ActiveRecord::Base`)
+                    // ends the chain.
+                    continue;
+                }
+                return false;
+            };
+            if k.opaque || k.shadows.contains(method) {
+                return false;
+            }
+            if *via == Via::Extend {
+                if k.defines.contains(&(method.to_string(), false)) {
+                    return false;
+                }
+                continue;
+            }
+            if k.defines.contains(&(method.to_string(), singleton)) {
+                return self.marked.contains(&(c.clone(), method.to_string(), singleton));
+            }
+        }
+        false
+    }
+
+    fn lookup_order(&self, class: &str, singleton: bool, via: Via, out: &mut Vec<(String, Via)>) {
+        if out.iter().any(|(c, v)| c == class && *v == via) {
+            return;
+        }
+        out.push((class.to_string(), via));
+        let Some(k) = self.classes.get(class) else { return };
+        if via == Via::Extend || !singleton {
+            for inc in k.includes.iter().rev() {
+                self.lookup_order(inc, false, if via == Via::Extend { Via::Extend } else { Via::Include }, out);
+            }
+        }
+        if via != Via::Class {
+            return;
+        }
+        if singleton {
+            for ext in k.extends.iter().rev() {
+                self.lookup_order(ext, false, Via::Extend, out);
+            }
+        }
+        if let Some(p) = &k.parent {
+            self.lookup_order(p, singleton, Via::Class, out);
+        }
+    }
+}
+
+/// How the lookup reached a class or module: as the receiver's class or
+/// one of its parents, as an included module, or as an extended one
+/// (whose instance methods answer singleton calls).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Via {
+    Class,
+    Include,
+    Extend,
+}
+
 /// Every `belongs_to`/`has_one` association name across the app's models
 /// — the single-record readers whose result is a record or nil (see
 /// `ViewCtx::reference_reads`). has_many names stay out: collections keep
@@ -5385,7 +5812,7 @@ fn bool_reader_names(
             }
         }
         for (name, ty) in crate::lower::model_to_library::attribute_api_decls(&m.body) {
-            if ty.as_str() == "boolean" {
+            if ty.as_ref().is_some_and(|ty| ty.as_str() == "boolean") {
                 set.insert(name.as_str().to_string());
             }
         }
@@ -5967,6 +6394,110 @@ pub(super) fn noop_io_append() -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn class_call(method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: None, method: Symbol::from(method), args, block: None, parenthesized: true })
+    }
+
+    fn read_class_call(e: Expr) -> MarkClass {
+        let mut c = MarkClass::default();
+        macro_shadows(&e, &mut c);
+        c
+    }
+
+    #[test]
+    fn a_class_body_call_whose_effect_cant_be_read_makes_the_class_opaque() {
+        let computed = || class_call("computed_name", vec![]);
+        assert!(read_class_call(class_call("send", vec![lit_sym(Symbol::from("define_method")), computed()])).opaque);
+        assert!(read_class_call(class_call("send", vec![computed(), lit_sym(Symbol::from("label"))])).opaque);
+        for m in ["class_eval", "class_exec", "module_eval", "module_exec", "instance_eval", "instance_exec"] {
+            assert!(read_class_call(class_call(m, vec![])).opaque, "{m}");
+        }
+        assert!(read_class_call(class_call("include", vec![computed()])).opaque);
+        assert!(read_class_call(class_call("extend", vec![computed()])).opaque);
+    }
+
+    #[test]
+    fn a_class_body_call_with_literal_names_shadows_them() {
+        let c = read_class_call(class_call("send", vec![lit_sym(Symbol::from("attr_reader")), lit_sym(Symbol::from("label"))]));
+        assert!(!c.opaque && c.shadows.contains("label"));
+        let c = read_class_call(class_call("send", vec![lit_sym(Symbol::from("define_method")), lit_sym(Symbol::from("label"))]));
+        assert!(!c.opaque && c.shadows.contains("label"));
+        let helpers = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("Helpers")] });
+        let c = read_class_call(class_call("extend", vec![helpers.clone()]));
+        assert!(!c.opaque && c.extends == vec!["Helpers".to_string()]);
+        let c = read_class_call(class_call("include", vec![helpers]));
+        assert!(!c.opaque && c.shadows.is_empty());
+    }
+
+    fn block_call(method: &str, args: Vec<Expr>, params: &[&str], stmts: Vec<Expr>) -> Expr {
+        let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
+        let block = Expr::new(Span::synthetic(), ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: params.iter().map(|p| Symbol::from(*p)).collect(),
+            block_param: None,
+            body,
+            block_style: crate::expr::BlockStyle::Do,
+        });
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: None, method: Symbol::from(method), args, block: Some(block), parenthesized: false })
+    }
+
+    fn opts(pairs: &[(&str, Expr)]) -> Expr {
+        let entries = pairs.iter().map(|(k, v)| (lit_sym(Symbol::from(*k)), v.clone())).collect();
+        Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true })
+    }
+
+    fn on(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false })
+    }
+
+    fn var(name: &str) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(name) })
+    }
+
+    #[test]
+    fn a_with_options_block_shadows_the_names_its_calls_define() {
+        let label = || lit_sym(Symbol::from("label"));
+        let to = || opts(&[("to", lit_sym(Symbol::from("inner")))]);
+        let c = read_class_call(block_call("with_options", vec![to()], &["o"], vec![on(var("o"), "delegate", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("label"), "through the param");
+        let c = read_class_call(block_call("with_options", vec![to()], &[], vec![class_call("delegate", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("label"), "implicit receiver");
+        // The outer `prefix: true` merges into the inner `delegate`, with the outer `to:`.
+        let outer = opts(&[("prefix", Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Bool { value: true } })), ("to", lit_sym(Symbol::from("inner")))]);
+        let c = read_class_call(block_call("with_options", vec![outer], &[], vec![class_call("delegate", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("inner_label"), "{:?}", c.shadows);
+        let c = read_class_call(block_call("concerning", vec![lit_sym(Symbol::from("Labels"))], &[], vec![class_call("attr_reader", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("label"));
+    }
+
+    #[test]
+    fn a_sent_call_keeps_its_block() {
+        let prefix = opts(&[("prefix", lit_sym(Symbol::from("inner")))]);
+        let inner = on(var("o"), "delegate", vec![lit_sym(Symbol::from("label")), opts(&[("to", lit_sym(Symbol::from("x")))])]);
+        for m in ["send", "public_send", "__send__"] {
+            let c = read_class_call(block_call(m, vec![lit_sym(Symbol::from("with_options")), prefix.clone()], &["o"], vec![inner.clone()]));
+            assert!(!c.opaque && c.shadows.contains("inner_label"), "{m}: {:?}", c.shadows);
+        }
+    }
+
+    #[test]
+    fn a_block_whose_statements_cant_be_read_makes_the_class_opaque() {
+        let other = on(var("x"), "delegate", vec![lit_sym(Symbol::from("label"))]);
+        assert!(read_class_call(block_call("with_options", vec![], &["o"], vec![other.clone()])).opaque);
+        assert!(read_class_call(block_call("with_options", vec![var("computed")], &["o"], vec![])).opaque);
+        assert!(read_class_call(block_call("concerning", vec![], &[], vec![other])).opaque);
+    }
+
+    #[test]
+    fn a_callback_block_is_the_records_code_not_the_class_body() {
+        let body = on(var("article"), "touch", vec![]);
+        for m in ["after_create_commit", "before_save", "around_update", "validate"] {
+            let c = read_class_call(block_call(m, vec![], &[], vec![body.clone()]));
+            assert!(!c.opaque && c.shadows.is_empty(), "{m}");
+        }
+    }
 
     #[test]
     fn module_id_for_articles_dir() {

@@ -428,6 +428,10 @@ impl Ctx {
         let mut ctx = self.clone();
         let (prefix, _) = nest_path(&self.inner_path, &self.parents, self.within);
         ctx.ns_path = prefix_path(&self.ns_path, prefix.trim_end_matches('/'));
+        // Not the outer resources' names too: Rails' `collection`/`member` scope sets the path alone, so `resources :applications { resources :jobs { collection { resource :bulk_discards } } }` is `application_bulk_discards`.
+        if let Some((_, outer)) = self.parents.split_last() {
+            ctx.name_prefix.extend(outer.iter().map(|n| format!("{}_", n.singular)));
+        }
         ctx.parents.clear();
         ctx.inner_path.clear();
         ctx.within = ResourceScope::Nested;

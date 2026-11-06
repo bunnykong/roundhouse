@@ -3,7 +3,7 @@ use super::{emit_and_run, native_http};
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn repeated_multipart_files_reach_the_spinel_entrypoint() {
-    let (tree, errors) = emit_and_run::empty_app()
+    let tree = emit_and_run::empty_app()
         .write(
             "db/schema.rb",
             "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :widgets do |t|\n    t.string :name\n  end\nend\n",
@@ -28,9 +28,7 @@ fn repeated_multipart_files_reach_the_spinel_entrypoint() {
             "config/routes.rb",
             "Rails.application.routes.draw do\n  post \"/uploads\", to: \"uploads#create\"\nend\n",
         )
-        .emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+        .native_http_tree();
     let server = native_http::Server::start(&tree);
     let body = concat!(
         "--entrypoint-parts\r\nContent-Disposition: form-data; name=\"upload[files][]\"; filename=\"first.bin\"\r\n",

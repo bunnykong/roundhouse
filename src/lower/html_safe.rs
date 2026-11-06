@@ -79,12 +79,13 @@ use crate::ident::Symbol;
 pub fn apply_html_safe_lowering(app: &mut App) {
     apply_filter_chain_h_exemption(app);
     // Collect before rewriting: the marks are what is about to be erased.
-    let mut safe: Vec<(String, Symbol)> = Vec::new();
+    let mut safe: Vec<(String, Symbol, bool)> = Vec::new();
+    let singleton = |m: &crate::dialect::MethodDef| m.receiver == crate::dialect::MethodReceiver::Class;
     for model in &app.models {
         for item in &model.body {
             if let ModelBodyItem::Method { method, .. } = item {
                 if returns_html_safe(&method.body) {
-                    safe.push((model.name.0.as_str().to_string(), method.name.clone()));
+                    safe.push((model.name.0.as_str().to_string(), method.name.clone(), singleton(method)));
                 }
             }
         }
@@ -92,11 +93,12 @@ pub fn apply_html_safe_lowering(app: &mut App) {
     for lc in &app.library_classes {
         for m in &lc.methods {
             if returns_html_safe(&m.body) {
-                safe.push((lc.name.0.as_str().to_string(), m.name.clone()));
+                safe.push((lc.name.0.as_str().to_string(), m.name.clone(), singleton(m)));
             }
         }
     }
-    for (owner, name) in safe {
+    for (owner, name, singleton) in safe {
+        app.html_safe_method_defs.insert((owner.clone(), name.as_str().to_string(), singleton));
         app.html_safe_method_owners.insert((owner, name.as_str().to_string()));
         app.html_safe_methods.insert(name);
     }

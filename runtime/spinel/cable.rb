@@ -135,7 +135,7 @@ module Cable
   # its subscription table on the identifier and retries a subscription
   # it never heard back about, so a dropped frame is a reconnect loop.
   def self.subscribe(ws, connection, identifier, holder)
-    name = ActionCable::Channel::Parameters.read(identifier, "channel")
+    name = ActionCable::Channel::Parameters.read(identifier, "channel").to_s
     if name.length == 0
       return Cable.reject(ws, identifier)
     end

@@ -1763,8 +1763,8 @@ jobs:
     name: spinel-toolchain (suite, ${{ matrix.shard }})
     # Tracks matz/spinel master UNPINNED. Advisory unless ci:spinel focus
     # hardens the CORE lane (spinel-advisory=false).
-    needs: [generate-fixture, spinel-build, spinel-toolchain-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.spinel-toolchain-build.outputs.artifact-id != '' }}
+    needs: [generate-fixture, spinel-build, spinel-toolchain-build, spinel-toolchain-plan, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.spinel-toolchain-build.outputs.artifact-id != '' && needs.spinel-toolchain-plan.outputs.artifact-id != '' }}
     # Four shards, balanced by `ci-plan.py toolchain-shard` on recorded
     # seconds: a new test lands on the lightest shard instead of growing a
     # hand-kept catch-all one (two such shards reached 25 of 25 minutes).
@@ -1827,6 +1827,11 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.spinel-toolchain-plan.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/bundle-plan
       - name: Install libsqlite3-dev + libjemalloc-dev
         timeout-minutes: 8
         # jemalloc for the same reason the emitted README now lists it:
@@ -1848,19 +1853,35 @@ jobs:
           RUST_MIN_STACK: "33554432"
         run: |
           test -x "$SPINEL_TOOLCHAIN_BIN"
-          mapfile -t mine < <("$SPINEL_TOOLCHAIN_BIN" --ignored --list --format terse | sed -n 's/: test$//p' | grep -vx spinel_bundle_build | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
-          test "${#mine[@]}" -gt 0
-          # Not a compile per contract: this shard's run_spinel contracts are collected (each test stops
-          # at its contract) and built in shared groups first; a contract left out compiles in its test.
+          # The tests, cases and units spinel-toolchain-plan collected once for every shard.
+          mapfile -t all < "$RUNNER_TEMP/bundle-plan/tests.txt"
           start=$(date +%s)
-          printf '%s\n' "${mine[@]}" | RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" \
-            xargs -P "$(( $(nproc) * 2 ))" -I{} timeout 60 "$SPINEL_TOOLCHAIN_BIN" --ignored --exact {} >/dev/null 2>&1 || true
-          echo "collected $(ls "$RUNNER_TEMP/bundle-cases" 2>/dev/null | wc -l) contracts in $(( $(date +%s) - start ))s"
+          mapfile -t mine < <(printf '%s\n' "${all[@]}" | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }} --units "$RUNNER_TEMP/bundle-plan/bundle-plan.json")
+          test "${#mine[@]}" -gt 0
+          mkdir -p "$RUNNER_TEMP/bundle-cases"
+          printf '%s\n' "${mine[@]}" | python3 -c 'import json, pathlib, shutil, sys
+          mine = set(sys.stdin.read().split())
+          src, dst = map(pathlib.Path, sys.argv[1:])
+          for case in src.glob("*.json"):
+              if json.loads(case.read_text()).get("test") in mine:
+                  shutil.copy(case, dst / case.name)' "$RUNNER_TEMP/bundle-plan/bundle-all" "$RUNNER_TEMP/bundle-cases"
+          echo "$(ls "$RUNNER_TEMP/bundle-cases" | wc -l) of $(ls "$RUNNER_TEMP/bundle-plan/bundle-all" | wc -l) collected cases are this shard's"
+          # Not after the shared builds: a test no planned build takes compiles alone, so it runs
+          # while they build.
+          printf '%s\n' "${mine[@]}" | python3 -c 'import json, sys
+          units = {t for unit in json.load(open(sys.argv[1])) for t in unit} if len(sys.argv) > 1 else set()
+          for t in sys.stdin.read().split():
+              print(("later " if t in units else "now ") + t)' "$RUNNER_TEMP/bundle-plan/bundle-plan.json" > "$RUNNER_TEMP/split.txt"
+          sed -n 's/^now //p' "$RUNNER_TEMP/split.txt" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact &
+          alone=$!
           RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" RH_SPINEL_BUNDLE_OUT="$RUNNER_TEMP/spinel-bundles" \
             "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_build --nocapture || true
           echo "bundled in $(( $(date +%s) - start ))s"
-          export RH_SPINEL_BUNDLE="$RUNNER_TEMP/spinel-bundles"
-          printf '%s\n' "${mine[@]}" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact
+          status=0
+          sed -n 's/^later //p' "$RUNNER_TEMP/split.txt" | RH_SPINEL_BUNDLE="$RUNNER_TEMP/spinel-bundles" \
+            python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact || status=1
+          wait "$alone" || status=1
+          exit "$status"
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
@@ -1947,6 +1968,80 @@ jobs:
   # (matches the old independent jobs). ruby/jruby/spinel stay separate
   # below: two setup-ruby steps / an extra spinel-build dependency don't
   # fit this shape.
+  # Not per shard: a case one shard's collection missed would plan its unit apart, so that shard
+  # could place a test elsewhere than the rest did and it would run twice or never.
+  spinel-toolchain-plan:
+    name: spinel-toolchain-plan (bundles)
+    needs: [generate-fixture, spinel-build, spinel-toolchain-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.spinel-toolchain-build.outputs.artifact-id != '' }}
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
+    env:
+      ROUNDHOUSE_SPINEL_SLIM: ${{ inputs.full && '0' || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.spinel-toolchain-build.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/spinel-toolchain
+      - name: Restore spinel_toolchain binaries
+        run: |
+          python3 scripts/ci-spinel-toolchain.py restore \
+            --archive "$RUNNER_TEMP/spinel-toolchain/spinel-toolchain.tar.gz" \
+            --inventory "$RUNNER_TEMP/spinel-toolchain/inventory.json" \
+            --env-file "$RUNNER_TEMP/spinel-toolchain/bins.env"
+          set -a
+          # shellcheck disable=SC1090
+          . "$RUNNER_TEMP/spinel-toolchain/bins.env"
+          set +a
+          echo "SPINEL_TOOLCHAIN_BIN=$SPINEL_TOOLCHAIN_BIN" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      # Every run_spinel contract and HTTP server overlay is collected (each test stops at it), and
+      # the cases one build can share are planned as units; a case left out compiles in its test.
+      - name: Collect and plan shared toolchain builds
+        env:
+          RUST_MIN_STACK: "33554432"
+        run: |
+          test -x "$SPINEL_TOOLCHAIN_BIN"
+          out="$RUNNER_TEMP/bundle-plan"
+          mkdir -p "$out/bundle-all"
+          "$SPINEL_TOOLCHAIN_BIN" --ignored --list --format terse | sed -n 's/: test$//p' \
+            | grep -vx -e spinel_bundle_build -e spinel_bundle_plan > "$out/tests.txt"
+          test -s "$out/tests.txt"
+          start=$(date +%s)
+          # Not checked: a collected test stops by failing, and one that is not collected is killed.
+          RH_SPINEL_BUNDLE_COLLECT="$out/bundle-all" xargs -P "$(( $(nproc) * 2 ))" -I{} \
+            timeout 60 "$SPINEL_TOOLCHAIN_BIN" --ignored --exact {} < "$out/tests.txt" >/dev/null 2>&1 || true
+          RH_SPINEL_BUNDLE_COLLECT="$out/bundle-all" RH_SPINEL_BUNDLE_PLAN="$out/bundle-plan.json" \
+            "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_plan
+          python3 -c 'import json, sys; units = json.load(open(sys.argv[1])); assert units and all(units), units' "$out/bundle-plan.json"
+          echo "collected $(ls "$out/bundle-all" | wc -l) cases into $(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$out/bundle-plan.json") units in $(( $(date +%s) - start ))s"
+      - name: Upload the toolchain plan
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: spinel-toolchain-plan
+          overwrite: true
+          path: ${{ runner.temp }}/bundle-plan
+          if-no-files-found: error
+          retention-days: 1
+
   compare:
     needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare') }}
@@ -3920,7 +4015,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, docs-site, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain-plan, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, docs-site, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

@@ -16,7 +16,6 @@
 //! so it is a full `spin build`, not a `SPINEL_TESTS` entry.
 
 use super::{emit_and_run, native_http};
-use roundhouse::project::BuildTarget;
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
@@ -123,10 +122,7 @@ end
 #[test]
 #[ignore = "requires Spinel; run in its CI lane"]
 fn api_parity_round3_fixes_run_on_spinel() {
-    let (tree, errors) = app().emit(BuildTarget::Spinel);
-    assert!(errors.is_empty(), "analysis/emission errors:\n{}", errors.join("\n"));
-
-    native_http::build(&tree);
+    let tree = app().native_http_tree();
     let server = native_http::Server::start(&tree);
     let json = [("Accept", "application/json")];
 

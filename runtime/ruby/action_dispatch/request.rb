@@ -195,6 +195,21 @@ module ActionDispatch
       ActionDispatch::Http::Headers.new(@env)
     end
 
+    def request_id
+      value = @env["action_dispatch.request_id"]
+      return nil if value.nil?
+      value.to_s
+    end
+
+    def request_id=(value)
+      @env["action_dispatch.request_id"] = value
+      value
+    end
+
+    def uuid
+      request_id
+    end
+
     def session_options
       @session_options
     end

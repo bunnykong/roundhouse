@@ -245,6 +245,8 @@ module ActiveRecord
     def ==: (untyped other) -> bool
     def filter: () { (Base) -> bool } -> Array[Base]
     def map: () { (Base) -> untyped } -> untyped
+    def filter_map: () { (Base) -> untyped } -> untyped
+    def flat_map: () { (Base) -> untyped } -> untyped
     def to_h: () { (Base) -> Array[untyped] } -> Hash[untyped, untyped]
     def collect: () { (Base) -> untyped } -> untyped
     # `other` is `untyped`, NOT `Array[untyped]`, on all four set
@@ -266,7 +268,8 @@ module ActiveRecord
     def include?: (Base? record) -> bool
     def each: () { (Base) -> void } -> Relation
     def index_by: () { (Base) -> untyped } -> Hash[untyped, Base]
-    def find_each: () { (Base) -> void } -> Relation
+    def find_each: () ?{ (Base) -> void } -> Relation
+    def each_with_index: () ?{ (Base, Integer) -> void } -> (Relation | Enumerator[[Base, Integer], Array[Base]])
     def find_in_batches: () { (Array[Base]) -> void } -> Relation
     def in_batches: (?of: Integer, ?order: Symbol?) ?{ (Relation) -> void } -> Relation
     # `map`/`collect` return `untyped`, NOT `Array[untyped]`: the result's
@@ -276,12 +279,15 @@ module ActiveRecord
     # body built an `sp_IntArray *` for `{ |a| a.id }` — and the C build
     # stopped with no diagnostic naming the seed. The two agreed only for
     # as long as every id was boxed. Widen to `untyped` so the body
-    # decides the shape; `Array[U]` waits on Relation[T].
+    # decides the shape; `Array[U]` waits on Relation[T]. The same
+    # body inference applies to `filter_map` and `flat_map`, whose
+    # result element types also depend on the block.
     def group_by: () { (Base) -> untyped } -> Hash[untyped, Array[Base]]
     def partition: () { (Base) -> bool } -> Array[Array[Base]]
     def detect: () { (Base) -> bool } -> Base?
-    def sort_by: () { (Base) -> untyped } -> Array[Base]
+    def sort_by: () ?{ (Base) -> untyped } -> (Array[Base] | Enumerator[Base, Array[Base]])
     def inject: (untyped initial) { (untyped, Base) -> untyped } -> untyped
+    def reduce: (untyped initial) { (untyped, Base) -> untyped } -> untyped
     def each_with_object: (untyped memo) { (Base, untyped) -> untyped } -> untyped
     def first: () -> Base?
     def take: () -> Base?
@@ -357,6 +363,8 @@ module ActiveRecord
     def find_sole_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base
     def first_or_initialize: () -> Base
     def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
+    def create: (?Hash[Symbol, untyped] conditions) -> Base
+    def create!: (?Hash[Symbol, untyped] conditions) -> Base
     def find_or_create_by!: (Hash[Symbol, untyped] conditions) -> Base
     def find_or_initialize_by: (Hash[Symbol, untyped] conditions) -> Base
     def build: (Hash[Symbol, untyped] conditions) -> Base

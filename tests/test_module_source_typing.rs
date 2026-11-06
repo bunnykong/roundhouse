@@ -1,4 +1,5 @@
 //! Source test bodies must be typed before any emission-only cloning.
+use roundhouse::analyze::LoopEnd;
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::{App, Expr, ExprNode, Ty};
 use std::path::PathBuf;
@@ -733,5 +734,34 @@ fn test_constants_do_not_replace_or_poison_production_view_fallbacks() {
             id: roundhouse::ident::ClassId("TEST_ONLY".into()),
             args: vec![].into(),
         })]
+    );
+}
+
+#[test]
+fn a_helper_passed_its_own_returned_value_settles() {
+    let mut app = ingest(
+        r#"
+class SourceProbeTest < ActiveSupport::TestCase
+  test "the second probe reuses the first connection" do
+    connection, channel = open_probe
+    open_probe(connection:)
+  end
+
+  private
+
+  def open_probe(connection: nil)
+    connection ||= Connection.new
+    [connection, Channel.new]
+  end
+end
+"#,
+    );
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let rounds = analyzer.fixpoint_rounds();
+    assert!(
+        matches!(rounds.views_and_tests, LoopEnd::Settled(_))
+            && matches!(rounds.restamp.end, LoopEnd::Settled(_)),
+        "the test rounds stopped on a round cap: {rounds:?}"
     );
 }

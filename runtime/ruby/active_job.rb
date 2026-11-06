@@ -215,6 +215,10 @@ module ActiveJob
   class DeserializationError < StandardError
   end
 
+  # Raised by `Arguments.serialize` for an argument it cannot write.
+  class SerializationError < ArgumentError
+  end
+
   # `raise ActiveJob::EnqueueError, message` — the job was not queued.
   class EnqueueError < StandardError
   end

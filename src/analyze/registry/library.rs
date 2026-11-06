@@ -48,6 +48,11 @@ pub(in crate::analyze) fn register(
         .collect();
 
     for lc in &app.library_classes {
+        // A file of constants alone declares no class: `RemoteThing =
+        // Thing` is Thing to every reader, through the source index.
+        if lc.is_file_constants() {
+            continue;
+        }
         let cls = classes.entry(lc.name.clone()).or_default();
         // The AR instance surface a concern inherits from its includer.
         // `or_insert`, so a name the module DEFINES always wins, and so
@@ -209,7 +214,7 @@ pub(in crate::analyze) fn register(
         };
         let own_with = crate::lower::mailer_class_side::defines_with(app);
         for lc in &app.library_classes {
-            if !is_mailer(&lc.name) {
+            if lc.is_file_constants() || !is_mailer(&lc.name) {
                 continue;
             }
             let cls = classes.entry(lc.name.clone()).or_default();
@@ -326,7 +331,7 @@ pub(in crate::analyze) fn register(
             false
         };
         for lc in &app.library_classes {
-            if !is_job(&lc.name) {
+            if lc.is_file_constants() || !is_job(&lc.name) {
                 continue;
             }
             let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
@@ -392,7 +397,7 @@ pub(in crate::analyze) fn register(
             false
         };
         for lc in &app.library_classes {
-            if !is_worker(&lc.name) {
+            if lc.is_file_constants() || !is_worker(&lc.name) {
                 continue;
             }
             let cls = classes.entry(lc.name.clone()).or_default();

@@ -34,6 +34,8 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/json_flash.rs"]
+mod json_flash_contract;
 #[path = "support/response_content_type.rs"]
 mod response_content_type_contract;
 #[path = "spinel_toolchain/response_content_type.rs"]
@@ -206,6 +208,29 @@ fn spinel_bundle_build() {
         return;
     };
     emit_and_run::bundle::build_all(std::path::Path::new(&collected), std::path::Path::new(&out));
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn spinel_bundle_plan() {
+    let (Some(collected), Some(out)) =
+        (std::env::var_os("RH_SPINEL_BUNDLE_COLLECT"), std::env::var_os("RH_SPINEL_BUNDLE_PLAN"))
+    else {
+        return;
+    };
+    emit_and_run::bundle::plan(std::path::Path::new(&collected), std::path::Path::new(&out));
+}
+
+#[test]
+fn only_an_edit_adding_methods_shares_a_build() {
+    use emit_and_run::bundle::adds_only_methods;
+    let class = "class Article < ApplicationRecord\n";
+    assert!(adds_only_methods(class, &format!("{class}  def probe\n    1\n  end\n")));
+    assert!(adds_only_methods("end\n", "  def self.probe\n    1\n  end\nend\n"));
+    assert!(!adds_only_methods(class, &format!("{class}  validates :title, length: {{ maximum: 3 }}\n")));
+    assert!(!adds_only_methods("validates :title, presence: true", "validates :title, presence: true, length: { maximum: 3 }"));
+    assert!(!adds_only_methods(class, &format!("{class}  def probe\n    1\n  end\n  private\n")));
+    assert!(!adds_only_methods("a", "b"));
 }
 
 /// Compile and execute the shared custom Data factory contract with Spinel;

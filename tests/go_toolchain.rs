@@ -20,6 +20,11 @@ use std::process::Command;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/content_tag_options.rs"]
+#[allow(dead_code)]
+mod content_tag_options;
+#[path = "support/go_view_predicate.rs"]
+mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
 mod go_test_literal_receiver;
 #[path = "support/go_action_controller_api.rs"]
@@ -354,6 +359,82 @@ fn a_model_test_with_a_persisted_override_runs() {
         .expect("run go test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("--- PASS: TestTheOverrideAnswers"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A non-block `content_tag` with options renders as Rails 8.1.4 does
+/// (#1780): the app's integration test, run by `go test`. Go's
+/// test emit has no `assert_includes`; the probe defines it.
+#[test]
+#[ignore]
+fn content_tag_with_options_renders() {
+    assert_content_tag_test_passes(content_tag_options::app(content_tag_options::VIEW));
+}
+
+/// #1771's `content_tag … do … end` with options alone: the view's options
+/// Hash literal reaches `content_tag_html` as the `map[string]interface{}`
+/// it takes, where it was a `map[string]string` that didn't compile.
+#[test]
+#[ignore]
+fn content_tag_block_with_options_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(
+        "<%= content_tag :div, class: \"x\" do %>b<% end %>\n",
+        &["<div class=\"x\">b</div>"],
+    ));
+}
+
+fn assert_content_tag_test_passes(app: emit_and_run::Overlay) {
+    let (emitted, errors) = app.emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(
+        emitted.join("app/v2/assert_includes_test.go"),
+        "package v2\n\nimport \"strings\"\n\nfunc assert_includes(body string, want string) {\n\tif !strings.Contains(body, want) {\n\t\tpanic(\"missing \" + want + \" in \" + body)\n\t}\n}\n",
+    )
+    .expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestContentTagRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestContentTagRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1802: a view's call to a model's own predicate builds and renders.
+#[test]
+#[ignore]
+fn a_views_model_predicate_call_runs() {
+    let (emitted, errors) = go_view_predicate::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/assert_includes_test.go"), go_view_predicate::GO_ASSERT_INCLUDES).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheIndexRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheIndexRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A view's 0-arg reads of a model's own methods build and render: a
+/// trivial `attr_accessor` reader, an `Article | nil` receiver, a
+/// namespaced model, and a method whose omitted optional params take
+/// their literal Ruby defaults.
+#[test]
+#[ignore]
+fn a_views_model_method_shapes_run() {
+    let (emitted, errors) = go_view_predicate::shapes_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/assert_includes_test.go"), go_view_predicate::GO_ASSERT_INCLUDES).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheIndexRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheIndexRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// #1803: an assertion on a method of a new record parses and runs.

@@ -224,7 +224,12 @@ module Tep
         head = build_head(req, res)
         Sock.sphttp_write_str(client, head)
         out = Stream.new(client)
-        res.streamer.pump(out)
+        begin
+          res.streamer.pump(out)
+        rescue StandardError, ScriptError => e
+          Tep.log_dispatch_error(req.verb, req.path, e)
+          return false
+        end
         Sock.sphttp_write_chunk_end(client)
         return false
       end

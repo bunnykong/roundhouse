@@ -1164,6 +1164,39 @@ fn answer_file(
         let target = graph
             .name_id_to_declaration_id(*reference.name_id())
             .and_then(|id| graph.declarations().get(id).map(|decl| (*id, decl)))
+            // An app's own alias of a class or module in a file of
+            // constants alone (`RemoteThing = Thing`, which the autoloader
+            // maps by name): Ruby binds the name to the very class, so
+            // `RemoteThing.find` is `Thing.find`. Only a name defined once,
+            // in a file that declares no class or module: elsewhere a later
+            // `Core &&= Class`, which the index records as no definition,
+            // can rebind it.
+            .map(|(id, declaration)| match declaration {
+                Declaration::ConstantAlias(_)
+                    if declaration.definitions().len() == 1
+                        && declaration.definitions().iter().all(|definition| {
+                            graph.definitions().get(definition).is_some_and(|definition| {
+                                matches!(definition, Definition::ConstantAlias(_))
+                                    && graph.documents().get(definition.uri_id()).is_some_and(|document| {
+                                        !document.uri().starts_with(RUNTIME_URI_PREFIX)
+                                            && document.definitions().iter().all(|other| {
+                                                !matches!(
+                                                    graph.definitions().get(other),
+                                                    Some(Definition::Class(_) | Definition::Module(_))
+                                                )
+                                            })
+                                    })
+                            })
+                        }) =>
+                {
+                    graph
+                        .resolve_alias(&id)
+                        .and_then(|target| graph.declarations().get(&target).map(|decl| (target, decl)))
+                        .filter(|(_, target)| target.as_namespace().is_some() && !is_assigned_value(graph, target))
+                        .unwrap_or((id, declaration))
+                }
+                _ => (id, declaration),
+            })
             .map(|(id, declaration)| {
                 if declaration.kind() == "Class" {
                     answers.class_references.insert(key);

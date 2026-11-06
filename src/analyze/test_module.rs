@@ -24,9 +24,13 @@ pub(super) fn register(classes: &mut HashMap<ClassId, ClassInfo>, app: &App) {
                 MethodReceiver::Instance => &mut cls.instance_methods,
                 MethodReceiver::Class => &mut cls.class_methods,
             };
+            // Not `Untyped`: callers typed before the first harvest
+            // count it as evidence, and once the harvest replaces it
+            // the test rounds can alternate between two answers
+            // instead of settling.
             table
                 .entry(method.name.clone())
-                .or_insert_with(|| method.signature.clone().unwrap_or(Ty::Untyped));
+                .or_insert_with(|| method.signature.clone().unwrap_or_else(super::body::unknown));
             match method.receiver {
                 MethodReceiver::Instance => &mut cls.instance_method_kinds,
                 MethodReceiver::Class => &mut cls.class_method_kinds,

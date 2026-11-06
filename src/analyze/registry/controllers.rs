@@ -333,7 +333,7 @@ pub(in crate::analyze) fn register(
         for m in [
             "user_agent", "remote_ip", "ip", "url", "original_url", "fullpath", "path",
             "host", "host_with_port", "domain", "protocol", "scheme", "port_string",
-            "request_method", "method", "raw_post", "uuid", "request_id", "base_url",
+            "request_method", "method", "raw_post", "request_id=", "base_url",
             "script_name", "path_info", "query_string", "media_type",
             // The cookie-jar salts (`Request::Cookies`), read where an app
             // builds its own MessageVerifier off the request.
@@ -343,7 +343,7 @@ pub(in crate::analyze) fn register(
             request.instance_methods.insert(Symbol::from(m), Ty::Str);
         }
         for m in [
-            "referer", "referrer", "content_type", "origin", "subdomain", "remote_addr",
+            "referer", "referrer", "content_type", "origin", "subdomain", "remote_addr", "uuid", "request_id",
             // The CSP nonce a layout interpolates into a script tag —
             // `get_header(NONCE)`, so nil until a policy sets one.
             // Typing `request` on the view context is what surfaced
@@ -467,6 +467,8 @@ pub(in crate::analyze) fn register(
     for m in ["request_http_basic_authentication", "request_http_token_authentication"] {
         app_ctrl.class_methods.insert(Symbol::from(m), Ty::Nil);
     }
+    // The verdict, or nil once the challenge is rendered (runtime/spinel/http_authentication.rb).
+    app_ctrl.class_methods.insert(Symbol::from("http_basic_authenticate_or_request_with"), Ty::Untyped);
     app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
     // The controller delegates this writer to its response. Its assignment
     // value is the RHS, which need not have a concrete type yet. Register

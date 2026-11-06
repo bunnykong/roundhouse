@@ -2655,6 +2655,7 @@ fn sym_or_str_arg(arg: &Expr) -> Option<String> {
 
 pub(super) fn rewrite_redirect_to(
     expr: &Expr,
+    shadowed: &HashSet<Symbol>,
     route_helpers: &crate::det::HashMap<String, Vec<bool>>,
 ) -> Expr {
     map_expr(expr, &|e| match &*e.node {
@@ -2663,7 +2664,7 @@ pub(super) fn rewrite_redirect_to(
         {
             // Two recognized first-arg shapes:
             //   - `@x` (Ivar) → wrap as `RouteHelpers.<x>_path(@x.id)`.
-            //   - `<x>_path` (no-recv Send ending in _path) → prefix
+            //   - Unshadowed `<x>_path` (no-recv Send) → prefix
             //     with RouteHelpers so all redirect_to call sites
             //     render uniformly with the parenthesized form.
             //
@@ -2697,7 +2698,7 @@ pub(super) fn rewrite_redirect_to(
                     )
                 }
                 ExprNode::Send { recv: None, method: m, args: m_args, block: m_block, parenthesized }
-                    if m.as_str().ends_with("_path") =>
+                    if m.as_str().ends_with("_path") && !shadowed.contains(m) =>
                 {
                     Expr::new(
                         first.span,

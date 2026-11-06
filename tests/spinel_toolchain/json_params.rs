@@ -8,9 +8,7 @@ use super::{json_params_contract as contract, native_http};
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn a_malformed_json_body_is_answered_400_natively() {
-    let (tree, errors) = contract::blog().emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+    let tree = contract::blog().native_http_tree();
     let mut server = native_http::Server::start(&tree);
     server.take_session("/articles/new");
     let (body, expected) = contract::CASES[0];
