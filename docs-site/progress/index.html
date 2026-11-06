@@ -6,8 +6,8 @@ permalink: /progress/
 ---
 {%- comment -%}
   Every value is escaped: text with `escape`, links with `web_url` (which also
-  drops any scheme but http and https). The figures (*.figure, ac.spark,
-  t.chart) are SVG that _plugins/progress.rb builds with its own escaping.
+  drops any scheme but http and https). The figures (*.figure, *.spark,
+  *.chart and *_chart) are SVG that _plugins/progress.rb builds with its own escaping.
 {%- endcomment -%}
 {%- assign p = site.data.progress -%}
 {%- assign st = p.states -%}
@@ -79,19 +79,27 @@ permalink: /progress/
     </tbody>
   </table>
 
-  {%- comment -%} Whether it's moving: the measured trend, and the people doing the work. {%- endcomment %}
-  <dl class="movement">
-    <dt>Movement</dt>
-    <dd><span class="what">App results</span><span>{% if t.count == 0 %}No verified nightly run is recorded yet; each one adds a point.{% elsif t.count == 1 %}One nightly run recorded. The trend starts with the next comparable run.{% elsif t.change %}{{ t.change | escape }} <a href="#over-time">The trend</a>{% else %}History starts on {{ t.since | escape }}; each nightly run adds a point. <a href="#over-time">The trend</a>{% endif %}</span></dd>
-    {%- if ac %}
-    <dd><span class="what">Work merged</span><a href="#activity"><b>{{ ac.merged_7d_text | escape }}</b> in 7 days by <b>{{ ac.people_7d_text | escape }}</b></a>{% if st.activity.when %}<span class="when">{{ st.activity.when | escape }}</span>{% endif %}{% if ac.spark %}{{ ac.spark }}<span class="axis">{{ ac.weeks_text | escape }}{% if ac.bars.last.partial %}, the last so far{% endif %}</span>{% endif %}</dd>
-    {%- if ac.firsts.size > 0 %}
-    <dd><span class="what">First-timers</span><a href="#welcome"><b>{{ ac.firsts_text | escape }}</b> in 30 days</a>{% if st.activity.when %}<span class="when">{{ st.activity.when | escape }}</span>{% endif %}<span class="faces" aria-hidden="true">{% for f in ac.firsts_alpha limit: 16 %}<img src="{{ f.avatar | web_url }}&amp;s=48" alt="" width="24" height="24" loading="lazy">{% endfor %}{% if ac.firsts.size > 16 %}<span class="more">+{{ ac.firsts.size | minus: 16 | escape }}</span>{% endif %}</span></dd>
+  {%- comment -%} Whether it's moving: each measure as a mini series, its better direction in words. {%- endcomment %}
+  <div class="movement">
+    <h2 class="movement-title"><a href="#trends">Trends</a></h2>
+    {%- if p.tiles.size > 0 %}
+    <ul class="tiles">
+      {%- for m in p.tiles %}
+      <li><a class="tile" href="{{ m.href | escape }}">
+        <span class="t-label">{{ m.label | escape }}</span>
+        <span class="t-cue">{% if m.better == "lower" %}↓ {{ m.cue | escape }}{% elsif m.better == "higher" %}↑ {{ m.cue | escape }}{% else %}Context only{% endif %}</span>
+        <span class="t-value">{% if m.value %}{{ m.value_num | escape }}{% if m.value_unit %}<span class="unit">{{ m.value_unit | escape }}</span>{% endif %}{% else %}<span class="na">Not available</span>{% endif %}</span>
+        <span class="t-delta">{% if m.delta %}{{ m.delta.text | escape }}{% if m.delta.mark %} <span class="verdict {{ m.delta.verdict | escape }}">{{ m.delta.mark | escape }}</span>{% endif %}{% elsif m.count == 1 %}First measurement · {{ m.first | escape }}{% endif %}</span>
+        {%- if m.spark %}<span class="t-spark">{{ m.spark }}</span>{% endif %}
+        {%- if m.sub %}<span class="t-sub">{{ m.sub | escape }}</span>{% endif %}
+      </a></li>
+      {%- endfor %}
+    </ul>
     {%- endif %}
-    {%- else %}
-    <dd><span class="what">Work merged</span><span>{{ st.activity.note | escape }}</span></dd>
+    {%- if ac and ac.firsts.size > 0 %}
+    <p class="firsts-line"><a href="#welcome"><b>{{ ac.firsts_text | escape }}</b> in 30 days</a><span class="faces" aria-hidden="true">{% for f in ac.firsts_alpha limit: 16 %}<img src="{{ f.avatar | web_url }}&amp;s=48" alt="" width="24" height="24" loading="lazy">{% endfor %}{% if ac.firsts.size > 16 %}<span class="more">+{{ ac.firsts.size | minus: 16 | escape }}</span>{% endif %}</span>{% if st.activity.when %}<span class="when">{{ st.activity.when | escape }}</span>{% endif %}</p>
     {%- endif %}
-  </dl>
+  </div>
 </section>
 
 {%- comment -%} Where to help: the largest failure groups, each with a first step. {%- endcomment %}
@@ -217,30 +225,36 @@ permalink: /progress/
   </div>
 </section>
 
-<section class="sect" id="over-time" aria-labelledby="over-time-title">
-  <div class="sect-label"><h2 id="over-time-title">Is the gap closing?</h2></div>
+{%- assign tr = p.trends -%}
+<section class="sect" id="trends" aria-labelledby="trends-title">
+  <div class="sect-label">
+    <h2 id="trends-title">Trends</h2>
+    <p class="meta" id="over-time">Each point is a measured run. A line breaks where runs stop being comparable; a first measurement is a figure, not a line.</p>
+  </div>
   <div class="sect-body">
-    {%- if t.count == 0 %}
-    <p>No verified nightly run is recorded yet. Each one adds a point.</p>
-    {%- elsif t.count == 1 %}
-    {%- assign only = t.rows.first %}
-    <p>One run recorded so far: <b>{{ only.failed | escape }}</b> failing examples, {{ only.date | escape }}. The trend starts with the next comparable run.{% if t.interrupted %} History is incomplete before {{ t.since | escape }}.{% endif %}</p>
-    {%- else %}
-    <p>{% if t.change %}{{ t.change | escape }} A change in the count isn’t a diagnosis of its cause.{% else %}History starts on {{ t.since | escape }}; each nightly run adds a point.{% endif %}{% if t.interrupted %} History is incomplete before {{ t.since | escape }}.{% endif %}</p>
-    <figure class="chart-frame">
-      {{ t.chart }}
-      <figcaption>Failing model examples per run. A line breaks where the app revision or scope changed, or a run is missing.</figcaption>
-    </figure>
-    <details class="table-view">
-      <summary>Table view</summary>
-      <div class="table-wrap" tabindex="0" role="region" aria-label="Failing examples by run">
-        <table>
-          <thead><tr><th scope="col">Run</th><th scope="col" class="num">Failing</th><th scope="col" class="num">Examples</th><th scope="col" class="num">Spec files</th><th scope="col" class="num">Outside errors</th><th scope="col">Lobsters</th><th scope="col">Roundhouse</th><th scope="col">Note</th></tr></thead>
-          <tbody>{% for row in t.rows %}<tr><td>{{ row.date | escape }}</td><td class="num">{{ row.failed | escape }}</td><td class="num">{{ row.total | escape }}</td><td class="num">{{ row.files | escape }}</td><td class="num">{{ row.outside | escape }}</td><td><code>{{ row.lobsters_sha | escape }}</code></td><td><code>{{ row.roundhouse_sha | escape }}</code></td><td>{{ row.note | escape }}</td></tr>{% endfor %}</tbody>
-        </table>
+    <section class="family" aria-labelledby="fam-build">
+      <h3 class="family-title" id="fam-build">Build health</h3>{% if tr.findings.build %}<p class="finding">{{ tr.findings.build | escape }}</p>{% endif %}
+      <div class="family-grid build">
+        {%- if tr.ci %}{% include trend-cell.html m=tr.ci wide=true %}{% else %}<p class="notice">{{ st.ci.note | default: "CI runs couldn’t be loaded." | escape }}</p>{% endif %}
+        {%- if tr.outcomes %}{% include trend-cell.html m=tr.outcomes %}{% endif %}
       </div>
-    </details>
+    </section>
+    {%- if tr.runtime.size > 0 %}
+    <section class="family" aria-labelledby="fam-runtime">
+      <h3 class="family-title" id="fam-runtime">Runtime cost</h3>{% if tr.findings.runtime %}<p class="finding">{{ tr.findings.runtime | escape }}</p>{% endif %}
+      <p class="family-conditions">{{ tr.conditions | escape }}. Performance doesn’t establish behavioural parity.</p>
+      <div class="family-grid runtime">
+        {%- for m in tr.runtime %}{% include trend-cell.html m=m %}{% endfor %}
+      </div>
+    </section>
     {%- endif %}
+    <section class="family" aria-labelledby="fam-apps">
+      <h3 class="family-title" id="fam-apps">App results and footprint</h3>{% if tr.findings.apps %}<p class="finding">{{ tr.findings.apps | escape }}</p>{% endif %}
+      <div class="family-grid apps">
+        {%- if tr.specs %}{% include trend-cell.html m=tr.specs empty="No verified model-spec result in this snapshot." %}{% endif %}
+        {%- if tr.archive %}{% include trend-cell.html m=tr.archive %}{% else %}<p class="notice">No archive size recorded yet.</p>{% endif %}
+      </div>
+    </section>
   </div>
 </section>
 

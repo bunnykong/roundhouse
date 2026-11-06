@@ -1,0 +1,40 @@
+{%- comment -%}
+  One measure in the trends detail: its question, direction, definition, the chart
+  (two or more comparable points) or the single measurement, and its table.
+  Every value is escaped; m.chart is SVG that _plugins/progress.rb builds.
+{%- endcomment -%}
+{%- assign m = include.m -%}
+<article class="mult{% if include.wide %} wide{% endif %}" id="trend-{{ m.id | escape }}" aria-labelledby="trend-{{ m.id | escape }}-title">
+  <header><h4 id="trend-{{ m.id | escape }}-title">{{ m.label | escape }}</h4><p class="cue">{% if m.better == "lower" %}↓ {{ m.cue | escape }}{% elsif m.better == "higher" %}↑ {{ m.cue | escape }}{% else %}Context only{% endif %}</p></header>
+  <p class="def">{{ m.definition | escape }}</p>
+  {%- if m.value %}
+  <p class="now"><b>{{ m.value_num | escape }}{% if m.value_unit %}<span class="unit">{{ m.value_unit | escape }}</span>{% endif %}</b>{% if m.delta %}<span class="t-delta">{{ m.delta.text | escape }}{% if m.delta.mark %} <span class="verdict {{ m.delta.verdict | escape }}">{{ m.delta.mark | escape }}</span>{% endif %}</span>{% endif %}</p>
+  {%- if m.sub %}<p class="sub">{{ m.sub | escape }}</p>{% endif %}
+  {%- endif %}
+  {%- if m.chart %}
+  <figure class="chart-frame">
+    {{ m.chart }}
+    {%- if m.series.size > 1 or m.legend or m.legend_keys %}<figcaption>{% if m.series.size > 1 %}{% for x in m.series %}<span class="key {{ x.cls | escape }}">{{ x.name | escape }}</span>{% endfor %}{% endif %}{% for k in m.legend_keys %}<span class="key-box {{ k[0] | escape }}">{{ k[1] | escape }}</span>{% endfor %}{% if m.legend %}<span class="legend-note">{{ m.legend | escape }}</span>{% endif %}</figcaption>{% endif %}
+  </figure>
+  {%- elsif m.value %}
+  {%- if m.pair %}
+  <div class="pair" role="img" aria-label="{% for r in m.pair %}{{ r.name | escape }} {{ r.text | escape }}{% unless forloop.last %}; {% endunless %}{% endfor %}">
+    {%- for r in m.pair %}<div class="pair-row"><span class="pair-name">{{ r.name | escape }}</span><span class="pair-val">{{ r.text | escape }}</span><span class="pair-bar {{ r.cls | escape }}" style="--w: {{ r.pct | escape }}%"></span></div>{% endfor %}
+  </div>
+  {%- endif %}
+  <p class="single-note">First measurement · {{ m.first | escape }}. Change over time needs another comparable run.</p>
+  {%- elsif include.empty %}
+  <p class="notice">{{ include.empty | escape }}</p>
+  {%- endif %}
+  {%- if m.facts %}<dl class="facts">{% for f in m.facts %}<div><dt>{{ f[0] | escape }}</dt><dd>{{ f[1] | escape }}</dd></div>{% endfor %}</dl>{% endif %}
+  {%- if m.note %}<p class="note">{{ m.note | escape }}</p>{% endif %}
+  {%- if m.rows.size > 0 %}
+  <details class="table-view">
+    <summary>Table view</summary>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="{{ m.label | escape }}, as a table">
+      <table><thead><tr>{% for c in m.columns %}<th scope="col"{% unless forloop.first %} class="num"{% endunless %}>{{ c | escape }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for r in m.rows %}<tr>{% for v in r %}<td{% unless forloop.first %} class="num"{% endunless %}>{{ v | escape }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>
+    </div>
+  </details>
+  {%- endif %}
+</article>

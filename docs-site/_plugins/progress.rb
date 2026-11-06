@@ -13,7 +13,7 @@ module RoundhouseProgress
   module_function
 
   # How old a result may be before the page says so. Editorial, not a diagnosis.
-  STALE_HOURS = { "specs" => 36, "replay" => 36, "archives" => 12, "bench" => 24 * 7, "activity" => 24, "help" => 24 }.freeze
+  STALE_HOURS = { "specs" => 36, "replay" => 36, "archives" => 12, "bench" => 24 * 7, "activity" => 24, "help" => 24, "ci" => 48 }.freeze
 
   AREAS = { "compiler" => "Roundhouse compiler", "roundhouse" => "Roundhouse", "app" => "App behaviour", "gem" => "Gem support",
             "spinel" => "Spinel", "harness" => "Test harness" }.freeze
@@ -76,9 +76,10 @@ module RoundhouseProgress
     end
   end
 
-  def svg(width, height, title, desc, body, cls: nil)
+  # max: never drawn wider than its own width, so text keeps its size.
+  def svg(width, height, title, desc, body, cls: nil, max: false)
     id = "c#{"#{title}#{width}".hash.abs.to_s(36)}"
-    %(<svg class="chart#{" #{cls}" if cls}" viewBox="0 0 #{width} #{height}" role="group" aria-labelledby="#{id}-t #{id}-d"><title id="#{id}-t">#{h(title)}</title>) +
+    %(<svg class="chart#{" #{cls}" if cls}" viewBox="0 0 #{width} #{height}"#{%( style="max-width: #{width}px") if max} role="group" aria-labelledby="#{id}-t #{id}-d"><title id="#{id}-t">#{h(title)}</title>) +
       %(<desc id="#{id}-d">#{h(desc)}</desc>#{body}</svg>)
   end
 
@@ -201,8 +202,14 @@ module RoundhouseProgress
   def gap(feed, repo)
     d = feed["data"]
     failing = d.dig("examples", "failed").to_i
+    taken = Hash.new(0)
+    anchor = lambda do |slug| # two slugs can reduce to one id; the first keeps it
+      base = id_part(slug)
+      taken[base] += 1
+      "cause-#{base}#{"-#{taken[base]}" if taken[base] > 1}"
+    end
     group = lambda do |c|
-      { "slug" => c["slug"], "share" => failing.positive? ? (c["failures"] * 100.0 / failing).round(1) : 0, "anchor" => "cause-#{id_part(c["slug"])}", "title" => c["title"], "failures" => c["failures"],
+      { "slug" => c["slug"], "share" => failing.positive? ? (c["failures"] * 100.0 / failing).round(1) : 0, "anchor" => anchor.(c["slug"]), "title" => c["title"], "failures" => c["failures"],
         "area" => c["slug"] == "unclassified" ? "Needs triage" : AREAS.fetch(c["owner"].to_s, "Needs triage"),
         "step" => c["stale_rule"] ? "Recheck its original reproducer before retiring the rule." : STEPS.fetch(c["slug"], "Reproduce a named example."),
         "action" => c["stale_rule"] ? "Recheck the reproducer" : ACTIONS.fetch(c["slug"], "Reproduce a named example"),
@@ -229,6 +236,341 @@ module RoundhouseProgress
     )
   end
 
+  # --- Trends: measures with a direction, drawn as mini series and small multiples ---
+
+  # A tick value without trailing noise: 1,000 / 2.5 / 0.4.
+  def tick(v) = v >= 100 ? num(v.round) : (v == v.round ? v.round.to_s : v.round(2).to_s.sub(/0+\z/, ""))
+
+  def scale(pts, ref)
+    top = [pts.map { |p| p["hi"] || p["y"] }.max.to_f, ref.to_f].max
+    nice_max(top <= 4 ? top : top.ceil).then { |max, n| top <= 4 && top.positive? ? [[(top * 1.25).ceil(1), 0.5].max, 4] : [max, n] }
+  end
+
+  # A 12-point sparkline: the neutral line, its latest point in the accent, the
+  # reference (Rails = 1×) as a hairline, a hollow point for an unfinished period.
+  def spark(series, ref: nil, w: 132, hgt: 32)
+    series = series.select { |x| x["primary"] } # a tile draws its own measure; the detail chart carries references
+    pts = series.flat_map { |x| x["points"] }.map { |p| p.merge("hi" => nil) }
+    return nil if pts.map { |p| p["at"] }.uniq.size < 2
+    max, = scale(pts, ref)
+    times = pts.map { |p| Time.parse(p["at"]).to_f }
+    t0, t1 = times.minmax
+    x_of = ->(at) { t1 == t0 ? w / 2.0 : 4 + (w - 8) * (Time.parse(at).to_f - t0) / (t1 - t0) }
+    y_of = ->(v) { (hgt - 4) - (hgt - 8) * v / max.to_f }
+    body = ref ? %(<line class="ref" x1="0" x2="#{w}" y1="#{y_of.(ref).round(1)}" y2="#{y_of.(ref).round(1)}"/>) : +""
+    series.each do |x|
+      ps = x["points"].sort_by { |p| p["at"] }
+      ps.slice_when { |_, b| b["new_segment"] }.each do |seg|
+        body << %(<polyline class="line #{x["cls"]}" points="#{seg.map { |p| "#{x_of.(p["at"]).round(1)},#{y_of.(p["y"]).round(1)}" }.join(" ")}"/>) if seg.size > 1
+      end
+      last = ps.last
+      body << %(<circle class="end#{" open" if last["partial"]}" cx="#{x_of.(last["at"]).round(1)}" cy="#{y_of.(last["y"]).round(1)}" r="3.5"/>) if x["primary"]
+    end
+    %(<svg class="spark" viewBox="0 0 #{w} #{hgt}" width="#{w}" height="#{hgt}" aria-hidden="true" focusable="false">#{body}</svg>)
+  end
+
+  # A detail chart: one axis from zero (or a 1× reference for ratios), a faint
+  # band for spread, lines broken where runs stop being comparable, end labels,
+  # and one focusable column per date whose readout lists every series there.
+  def trend_chart(series, title:, desc:, fmt:, ref: nil, ref_label: nil, w: 480, cls: "wide", hgt: 180)
+    pts = series.flat_map { |x| x["points"] }
+    longest = series.map { |x| x["points"].empty? ? 0 : "#{x["short"]} #{fmt.(x["points"].max_by { |p| p["at"] }["y"])} so far".size }.max.to_i
+    left, right, top, bottom = 40, [48, (longest * 7.2 + 14).ceil].max, 14, 26
+    max, ticks = scale(pts, ref)
+    y_of = ->(v) { top + (hgt - top - bottom) * (1 - v / max.to_f) }
+    stamps = pts.map { |p| p["at"] }.uniq.sort
+    t0, t1 = stamps.map { |a| Time.parse(a).to_f }.minmax
+    x_of = ->(at) { t1 == t0 ? (left + (w - left - right) / 2.0) : left + (w - left - right) * (Time.parse(at).to_f - t0) / (t1 - t0) }
+    body = +""
+    body << (0..ticks).map do |i|
+      v = max * i / ticks.to_f
+      %(<line class="grid" x1="#{left}" x2="#{w - right}" y1="#{y_of.(v).round(1)}" y2="#{y_of.(v).round(1)}"/><text class="tick" x="#{left - 8}" y="#{(y_of.(v) + 4).round(1)}" text-anchor="end">#{tick(v)}</text>)
+    end.join
+    if ref
+      y = y_of.(ref).round(1)
+      body << %(<line class="ref" x1="#{left}" x2="#{w - right}" y1="#{y}" y2="#{y}"/><text class="ref-label" x="#{w - right + 8}" y="#{(y + 4).round(1)}">#{h(ref_label)}</text>)
+    end
+    labels = []
+    series.each do |x|
+      ps = x["points"].sort_by { |p| p["at"] }
+      next if ps.empty?
+      ps.slice_when { |_, b| b["new_segment"] }.each do |seg|
+        if seg.size > 1 && seg.all? { |p| p["hi"] }
+          edge = seg.map { |p| "#{x_of.(p["at"]).round(1)},#{y_of.(p["hi"]).round(1)}" } + seg.reverse.map { |p| "#{x_of.(p["at"]).round(1)},#{y_of.(p["lo"] || p["y"]).round(1)}" }
+          body << %(<polygon class="band #{x["cls"]}" points="#{edge.join(" ")}"/>)
+        end
+        body << %(<polyline class="line #{x["cls"]}" points="#{seg.map { |p| "#{x_of.(p["at"]).round(1)},#{y_of.(p["y"]).round(1)}" }.join(" ")}"/>) if seg.size > 1
+      end
+      ps.each { |p| body << %(<circle class="dot #{x["cls"]}#{" open" if p["partial"]}" cx="#{x_of.(p["at"]).round(1)}" cy="#{y_of.(p["y"]).round(1)}" r="4"/>) }
+      at = y_of.(ps.last["y"])
+      labels << [at + 4, "#{x["short"]} #{fmt.(ps.last["y"])}#{" so far" if ps.last["partial"] && ps.last["when"].to_s.include?("so far")}".strip, x_of.(ps.last["at"]), at]
+    end
+    labels.sort_by!(&:first).each_cons(2) { |a, b| b[0] = a[0] + 14 if b[0] - a[0] < 14 }
+    body << labels.map do |y, text, px, py|
+      leader = (y - 4 - py).abs > 2 ? %(<polyline class="leader" points="#{(px + 6).round(1)},#{py.round(1)} #{w - right + 2},#{(y - 4).round(1)} #{w - right + 6},#{(y - 4).round(1)}"/>) : ""
+      leader + %(<text class="value" x="#{w - right + 8}" y="#{y.round(1)}">#{h(text)}</text>)
+    end.join
+    # One column per date: the crosshair, and the readout for every series there.
+    step = stamps.size > 1 ? (w - left - right) / (stamps.size - 1).to_f : (w - left - right).to_f
+    stamps.each do |at|
+      x = x_of.(at).round(1)
+      tip = series.filter_map { |s| (p = s["points"].find { |q| q["at"] == at }) && "#{s["name"]}: #{p["tip"] || fmt.(p["y"])}" }.join(" · ")
+      head = series.flat_map { |s| s["points"] }.find { |q| q["at"] == at }&.dig("when") || date(at)
+      label = "#{head}. #{tip}"
+      body << %(<g class="mark col" tabindex="0" role="img" data-tip="#{h(label)}" aria-label="#{h(label)}"><rect class="hit" x="#{(x - step / 2).round(1)}" y="#{top}" width="#{[step, 24].max.round(1)}" height="#{hgt - top - bottom}"/><line class="cross" x1="#{x}" x2="#{x}" y1="#{top}" y2="#{hgt - bottom}"/></g>)
+    end
+    xt = ->(at, anchor) { %(<text class="tick" x="#{x_of.(at).round(1)}" y="#{hgt - bottom + 17}" text-anchor="#{anchor}">#{h(Time.parse(at).utc.strftime("%-d %b"))}</text>) }
+    if stamps.size == 1
+      body << xt.(stamps[0], "middle")
+    else
+      n = [[(w - left - right) / 110, 1].max, stamps.size - 1].min
+      picks = (0..n).map { |k| stamps[(k * (stamps.size - 1) / n.to_f).round] }.uniq
+      body << picks.each_with_index.map { |at, k| xt.(at, k.zero? ? "start" : (k == picks.size - 1 ? "end" : "middle")) }.join
+    end
+    if stamps.size > 1 && series.any? { |s| s["points"].find { |q| q["at"] == stamps.last }&.dig("when").to_s.include?("so far") }
+      x0 = ((x_of.(stamps[-2]) + x_of.(stamps[-1])) / 2).round(1)
+      body = %(<rect class="so-far" x="#{x0}" y="#{top}" width="#{(w - right - x0 + 4).round(1)}" height="#{hgt - top - bottom}"/><text class="so-far-label" x="#{(w - right).round(1)}" y="#{top - 3}" text-anchor="end">So far</text>) + body
+    end
+    svg(w, hgt, title, desc, %(<line class="axis" x1="#{left}" x2="#{w - right}" y1="#{y_of.(0)}" y2="#{y_of.(0)}"/>) + body, cls: cls, max: true)
+  end
+
+  def both(series, w: 480, **opts) = trend_chart(series, **opts, w: w) + trend_chart(series, **opts, w: 330, cls: "narrow")
+
+  # The delta a tile states: signed, against a named point, and judged only when
+  # the measure has a better direction and the change clears its noise.
+  def delta(now, was, better:, since:, fmt:, noise: 0)
+    return nil unless now && was
+    change = now - was
+    return { "text" => "No change since #{since}", "verdict" => "same" } if change.abs <= noise
+    good = better && (better == "higher" ? change.positive? : change.negative?)
+    { "text" => "#{change.positive? ? "▲" : "▼"} #{fmt.(change.abs)} since #{since}", "verdict" => better ? (good ? "better" : "worse") : "neutral",
+      "mark" => better ? (good ? "✓ better" : "✕ worse") : nil }
+  end
+
+  def short_date(iso) = iso && day(iso).strftime("%-d %b")
+  def ratio(v) = v >= 1 ? "#{v.round(1)}×" : "#{v.round(2)}×"
+
+  CUES = { "lower" => "Lower is better", "higher" => "Higher is better" }.freeze
+
+  # One sentence per family, from the numbers it heads; never a guess.
+  def findings(trends, status)
+    out = {}
+    if (weeks = status.dig("ci", "data", "weeks"))
+      done = weeks.reject { |x| x["partial"] }.select { |x| x["median_min"] }
+      if done.size >= 8
+        recent, before = done.last(4).sum { |x| x["median_min"] } / 4.0, done[-8..-5].sum { |x| x["median_min"] } / 4.0
+        change = (recent - before) / before
+        out["build"] = if change > 0.15 then "Green runs on main are taking longer."
+                       elsif change < -0.15 then "Green runs on main are getting faster."
+                       else "Time to a green run on main is steady."
+                       end
+      end
+    end
+    rt = trends["runtime"].to_a
+    if rt.any?
+      t = rt.find { |m| m["id"] == "throughput" }
+      out["runtime"] = if rt.all? { |m| m["count"] == 1 } then "A baseline to build on."
+                       elsif t && t["delta"] && t["delta"]["verdict"] == "better" then "Throughput is up on the last comparable run."
+                       elsif t && t["delta"] && t["delta"]["verdict"] == "worse" then "Throughput is down on the last comparable run."
+                       elsif t && t["delta"] then "No measurable change since the last comparable run."
+                       else "The latest run isn't comparable with the one before."
+                       end
+    end
+    sp = trends["specs"]
+    out["apps"] = sp && sp["value"] ? "#{sp["value"]} model specs pass." : "Model-spec results are missing upstream."
+    out
+  end
+
+  def measure(id, label:, definition:, better:, series:, value:, sub: nil, delta: nil, fmt:, ref: nil, ref_label: nil, rows: [], columns: [], note: nil, first: nil, legend: nil, facts: nil, conditions: nil, w: 480, pair: nil, headline_value: nil, href: nil)
+    pts = series.flat_map { |x| x["points"] }
+    stamps = pts.map { |p| p["at"] }.uniq
+    {
+      "id" => id, "label" => label, "definition" => definition, "better" => better, "cue" => CUES[better], "value" => value, "sub" => sub,
+      "value_num" => value&.split(" ", 2)&.first, "value_unit" => value&.split(" ", 2)&.dig(1),
+      "delta" => delta || nil, "note" => note, "count" => stamps.size, "first" => first, "legend" => legend, "facts" => facts, "conditions" => conditions,
+      "pair" => pair, "headline_value" => headline_value, "href" => href || "#trend-#{id}",
+      "spark" => spark(series, ref: ref), "series" => series.map { |x| x.slice("name", "cls") },
+      "chart" => stamps.size > 1 ? both(series, title: label, desc: definition, fmt: fmt, ref: ref, ref_label: ref_label, w: w) : nil,
+      "rows" => rows, "columns" => columns
+    }
+  end
+
+  # Time to a green run on main: the weekly median, with the 90th percentile as
+  # the band's upper edge. The latest finished week is the one a tile states.
+  def ci_measure(feed)
+    weeks = feed.dig("data", "weeks").to_a
+    timed = weeks.select { |x| x["median_min"] }
+    return nil if timed.empty?
+    min = ->(v) { "#{v.round} min" }
+    pts = timed.map do |x|
+      thin = x["timed"].to_i < 10
+      { "at" => "#{x["week"]}T00:00:00Z", "y" => x["median_min"], "lo" => x["median_min"], "hi" => x["p90_min"], "partial" => x["partial"] || thin,
+        "when" => "Week of #{date(x["week"])}#{", so far" if x["partial"]}",
+        "tip" => "#{min.(x["median_min"])}; 90th percentile #{min.(x["p90_min"])}; #{plural(x["timed"], "green run")}#{" (few runs)" if thin}" }
+    end
+    done = timed.reject { |x| x["partial"] }
+    now, was = done.last, timed.first
+    recent = weeks.last(4)
+    runs = recent.sum { |x| x["completed"] }
+    measure("ci", label: "Time to a green run on main", better: "lower", fmt: min, w: 720,
+            definition: "Minutes from a green run's start to its last update, for runs after a merge to main. Queueing before the start isn't included.",
+            series: [{ "name" => "Median", "short" => "median", "cls" => "s-n", "primary" => true, "points" => pts }],
+            value: now && min.(now["median_min"]), sub: now && "Week of #{short_date(now["week"])} · p90 #{min.(now["p90_min"])}",
+            delta: now && now != was && delta(now["median_min"], was["median_min"], better: "lower", since: short_date(was["week"]), fmt: min, noise: 1),
+            legend: "Line: weekly median. Band: up to the 90th percentile. Hollow: an unfinished week, or under 10 green runs.",
+            conditions: "ci.yml on pushes to main · green runs only · start to finish",
+            note: nil,
+            facts: (cur = weeks.last)["partial"] && cur["median_min"] ? [["This week, so far", "#{min.(cur["median_min"])} · #{plural(cur["timed"], "green run")}"]] : nil,
+            columns: ["Week of", "Runs", "Green", "Failed", "Cancelled", "Median, min", "90th percentile, min"],
+            rows: weeks.reverse.map { |x| [date(x["week"]) + (x["partial"] ? ", so far" : ""), x["completed"], x["green"], x["failed"], x["superseded"], x["median_min"]&.round, x["p90_min"]&.round] })
+  end
+
+  # Merged pull requests per week: activity, with no better direction.
+  def merges_measure(feed)
+    weekly = feed&.dig("data", "weekly_merged").to_a
+    return nil if weekly.size < 2
+    pts = weekly.map { |x| { "at" => "#{x["week"]}T00:00:00Z", "y" => x["merged"], "partial" => x["partial"], "when" => "Week of #{date(x["week"])}#{", so far" if x["partial"]}", "tip" => plural(x["merged"], "merge") } }
+    done = weekly.reject { |x| x["partial"] }
+    now = done.last
+    measure("merges", label: "Merged pull requests", better: nil, fmt: ->(v) { num(v.round) },
+            definition: "Pull requests merged each week. Merges measure activity, not progress.",
+            series: [{ "name" => "Merged", "short" => "", "cls" => "s-n", "primary" => true, "points" => pts }],
+            value: now && num(now["merged"]), sub: now && "Week of #{short_date(now["week"])}", legend: "Hollow: this week, so far.", href: "#activity",
+            columns: ["Week of", "Merged"], rows: weekly.reverse.map { |x| [date(x["week"]) + (x["partial"] ? ", so far" : ""), x["merged"]] })
+  end
+
+  # The blog at /articles, one worker: Roundhouse's generated Ruby on CRuby + YJIT,
+  # with Rails measured in the same run as its reference. Each benchmark run in
+  # the history is a point; a line breaks where host, toolchains or harness changed.
+  RUNTIME = [
+    ["throughput", 0, "higher", "Throughput", "Requests per second on the blog's /articles.", ->(v) { "#{num(v.round)} requests/s" }, ->(v) { num(v.round) }, "requests/s"],
+    ["memory", 1, "lower", "Resident memory", "Memory per worker on the same runs, in MB.", ->(v) { "#{num(v.round)} MB" }, ->(v) { "#{num(v.round)} MB" }, "MB"],
+    ["latency", 2, "lower", "Tail latency", "The slowest 1% of responses on the same runs: p99, in ms.", ->(v) { "#{v.round(1)} ms" }, ->(v) { "#{v.round(1)} ms" }, "ms"]
+  ].freeze
+
+  # What a benchmark run was: runtime versions, platform and harness.
+  def bench_conditions(feed)
+    env = feed&.dig("data", "environment") or return nil
+    t, hn = env["toolchains"].to_h, env["harness"].to_h
+    ruby = t["ruby"].to_s[/\Aruby (\S+)/, 1]
+    spinel = t["spinel"].to_s[/\Aspinel (\d{4}\.\d+\.\d+)/, 1]
+    host = env["host"].to_h.values_at("platform", "arch").compact.join(" ")
+    parts = ["Blog /articles, one worker", ("Ruby #{ruby} + YJIT" if ruby), ("Spinel #{spinel}" if spinel), (host unless host.empty?),
+             (hn["concurrency"] && "#{hn["concurrency"]} connections"), (hn["runs"] && "median of #{hn["runs"]} runs of #{hn["duration_sec"]} s")].compact
+    parts.join(" · ")
+  end
+
+  def runtime_measures(history, feed)
+    blocks = history["points"].filter_map { |p| p["bench"] }.uniq { |b| b["observed_at"] }.sort_by { |b| b["observed_at"] }
+    return [] if blocks.empty?
+    conditions = bench_conditions(feed)
+    RUNTIME.map do |id, i, better, label, definition, long, short_fmt, unit|
+      pick = lambda do |target|
+        prev = nil
+        blocks.filter_map do |b|
+          row = b.dig("rows", "#{target} /articles") or next
+          v = row[i]
+          next unless v.is_a?(Numeric)
+          lo, hi = (i.zero? ? [row[3], row[4]] : [nil, nil])
+          pt = { "at" => b["observed_at"], "y" => v, "lo" => lo, "hi" => hi, "new_segment" => !prev.nil? && prev != b["key"], "key" => b["key"], "sha" => b["sha"],
+                 "when" => datetime(b["observed_at"]), "tip" => "#{long.(v)}#{" (repeats #{num(lo.round)}–#{num(hi.round)})" if lo && hi}#{" at #{short(b["sha"])}" if b["sha"]}" }
+          prev = b["key"]
+          pt
+        end
+      end
+      mine, rails, native = pick.("ruby"), pick.("rails"), pick.("spinel")
+      now, base = mine.last, rails.last
+      prev = mine[-2]
+      comparable = prev && prev["key"] == now["key"]
+      # A change counts only beyond the spread of the two runs' repeats (throughput), or 2% otherwise.
+      noise = if i.zero? && now["lo"] && prev&.dig("lo") then ((now["hi"] - now["lo"]) + (prev["hi"] - prev["lo"])) / 2.0 else 0.02 * (prev&.dig("y") || 0) end
+      pct = ->(d) { "#{(100.0 * d / prev["y"]).abs.round(1)}%" }
+      saved = base && (100 * (1 - now["y"].fdiv(base["y"]))).round
+      against = base && if better == "higher" then "#{ratio(now["y"].fdiv(base["y"]))} the throughput in this run"
+                        elsif saved >= 0 then "#{saved}% #{id == "memory" ? "less memory" : "lower"} in this run"
+                        else "#{-saved}% #{id == "memory" ? "more memory" : "higher"} in this run"
+                        end
+      measure(id, label: label, definition: definition, better: better, fmt: short_fmt, conditions: conditions, w: 420,
+              series: [{ "name" => "Roundhouse, generated Ruby", "short" => "Roundhouse", "cls" => "s-a", "primary" => true, "points" => mine },
+                       { "name" => "Rails", "short" => "Rails", "cls" => "s-ref", "points" => rails }],
+              value: long.(now["y"]), sub: base && "Rails #{short_fmt.(base["y"])} · #{against}",
+              delta: comparable ? delta(now["y"], prev["y"], better: better, since: "the run of #{short_date(prev["at"])}", fmt: pct, noise: noise) : nil,
+              facts: native.last ? [["Spinel, native", "#{long.(native.last["y"])}#{" · #{ratio(native.last["y"].fdiv(base["y"]))} Rails" if base && i.zero?}"]] : nil,
+              first: short_date(blocks.first["observed_at"]),
+              pair: base && [["Roundhouse, generated Ruby", long.(now["y"]), now["y"], "s-a"], ["Rails", long.(base["y"]), base["y"], "s-ref"]].then { |rows| top = rows.map { |r| r[2] }.max.to_f; rows.map { |n, t, v, c| { "name" => n, "text" => t, "pct" => (100.0 * v / top).round(1), "cls" => c } } },
+              headline_value: against,
+              columns: ["Run", "Roundhouse (#{unit})", "Spinel (#{unit})", "Rails (#{unit})"],
+              rows: blocks.reverse.map { |b| r = b["rows"]; [datetime(b["observed_at"]), r.dig("ruby /articles", i)&.round(1), r.dig("spinel /articles", i)&.round(1), r.dig("rails /articles", i)&.round(1)] })
+    end
+  end
+
+  # CI outcomes on main by week: green, failed and cancelled (mostly superseded by a
+  # newer merge) as counts, never as a score.
+  def outcomes_measure(feed)
+    weeks = feed.dig("data", "weeks").to_a
+    return nil if weeks.empty?
+    max, ticks = nice_max(weeks.map { |x| x["completed"] }.max.to_i)
+    w, hgt, left, top, bottom, right = 330, 180, 36, 14, 26, 8
+    y_of = ->(v) { top + (hgt - top - bottom) * (1 - v / max.to_f) }
+    slot = (w - left - right) / weeks.size.to_f
+    bw = [slot - 4, 18].min
+    body = (0..ticks).map { |k| v = max * k / ticks.to_f; %(<line class="grid" x1="#{left}" x2="#{w - right}" y1="#{y_of.(v).round(1)}" y2="#{y_of.(v).round(1)}"/><text class="tick" x="#{left - 6}" y="#{(y_of.(v) + 4).round(1)}" text-anchor="end">#{num(v.round)}</text>) }.join
+    weeks.each_with_index do |x, k|
+      cx = left + slot * k + (slot - bw) / 2
+      base = 0
+      [["green", "f-ok"], ["failed", "f-bad"], ["superseded", "f-cancel"], ["other", "f-other"]].each do |key, cls|
+        n = x[key].to_i
+        next if n.zero?
+        y1, y0 = y_of.(base + n), y_of.(base)
+        body << %(<rect class="#{cls}#{" open" if x["partial"]}" x="#{cx.round(1)}" y="#{(y1 + 1).round(1)}" width="#{bw.round(1)}" height="#{[(y0 - y1 - 1), 0.5].max.round(1)}"/>)
+        base += n
+      end
+      tip = "Week of #{date(x["week"])}#{", so far" if x["partial"]}: #{x["completed"]} runs, #{x["green"]} green, #{x["failed"]} failed, #{x["superseded"]} cancelled#{", #{x["other"]} other" if x["other"].to_i.positive?}"
+      body << %(<g class="mark col" tabindex="0" role="img" data-tip="#{h(tip)}" aria-label="#{h(tip)}"><rect class="hit" x="#{(left + slot * k).round(1)}" y="#{top}" width="#{slot.round(1)}" height="#{hgt - top - bottom}"/></g>)
+    end
+    body << %(<text class="tick" x="#{left}" y="#{hgt - bottom + 17}">#{h(short_date(weeks.first["week"]))}</text><text class="tick" x="#{w - right}" y="#{hgt - bottom + 17}" text-anchor="end">#{h(short_date(weeks.last["week"]))}</text>)
+    chart = svg(w, hgt, "Runs on main by week, by outcome", "Green, failed and cancelled runs each week.", %(<line class="axis" x1="#{left}" x2="#{w - right}" y1="#{y_of.(0)}" y2="#{y_of.(0)}"/>) + body, max: true)
+    done = weeks.reject { |x| x["partial"] }.last || weeks.last
+    share = ->(n) { done["completed"].positive? ? "#{(100.0 * n / done["completed"]).round}%" : "–" }
+    {
+      "id" => "outcomes", "label" => "Runs on main, by outcome", "cue" => "Context only", "chart" => chart,
+      "definition" => "Each merge starts a run; a newer merge cancels one still running. Counts, not a score.",
+      "facts" => [["Week of #{short_date(done["week"])}", "#{num(done["completed"])} runs"], ["✓ Green", "#{done["green"]} · #{share.(done["green"])}"],
+                  ["✕ Failed", "#{done["failed"]} · #{share.(done["failed"])}"], ["Cancelled", "#{done["superseded"]} · #{share.(done["superseded"])}"]],
+      "legend_keys" => [["f-ok", "✓ Green"], ["f-bad", "✕ Failed"], ["f-cancel", "Cancelled"]],
+      "columns" => ["Week of", "Runs", "Green", "Failed", "Cancelled", "Other"],
+      "rows" => weeks.reverse.map { |x| [date(x["week"]) + (x["partial"] ? ", so far" : ""), x["completed"], x["green"], x["failed"], x["superseded"], x["other"]] }
+    }
+  end
+
+  # Campfire's Spinel archive, recorded when its size changes.
+  def size_measure(history)
+    blocks = history["points"].filter_map { |p| p["sizes"] }.select { |b| b.dig("bytes", "campfire/spinel.tgz") }
+    return nil if blocks.empty?
+    mb = ->(v) { "#{v.round(1)} MB" }
+    pts = blocks.map { |b| v = b.dig("bytes", "campfire/spinel.tgz") / 1e6; { "at" => b["observed_at"], "y" => v.round(2), "when" => datetime(b["observed_at"]), "tip" => "#{mb.(v)}#{" at #{short(b["sha"])}" if b["sha"]}" } }
+    measure("size", label: "Campfire's Spinel archive", better: "lower", fmt: mb,
+            definition: "The published source archive Spinel compiles Campfire from, in MB, recorded when it changes.",
+            series: [{ "name" => "Archive", "short" => "", "cls" => "s-a", "primary" => true, "points" => pts }],
+            value: mb.(pts.last["y"]), first: short_date(pts.first["at"]),
+            delta: pts.size > 1 && delta(pts.last["y"], pts.first["y"], better: "lower", since: short_date(pts.first["at"]), fmt: mb, noise: 0.05),
+            columns: ["Recorded", "MB"], rows: pts.reverse.map { |p| [p["when"], p["y"]] })
+  end
+
+  # Lobsters model specs passing: compared only at the same app revision and scope.
+  def specs_measure(over_time, gap)
+    pts = over_time["points"].to_a
+    series = [{ "name" => "Passing", "short" => "", "cls" => "s-a", "primary" => true,
+                "points" => pts.map { |p| { "at" => p["observed_at"], "y" => p["passed"].to_i, "new_segment" => p["new_segment"], "when" => datetime(p["observed_at"]), "tip" => "#{num(p["passed"].to_i)} of #{num(p["total"].to_i)} passing" } } }]
+    last, prev = pts[-1], pts[-2]
+    comparable = last && prev && !last["new_segment"]
+    measure("specs", label: "Lobsters model specs passing", better: "higher", fmt: ->(v) { num(v.round) }, series: series,
+            definition: "Examples passing in Lobsters' own model specs on the emitted Ruby. Lobsters isn't pinned, so runs compare only at the same app revision and scope.",
+            value: gap && gap["headline"] ? "#{gap["passed"]} of #{gap["total"]}" : nil, sub: gap && gap["headline"] ? "Nightly" : nil,
+            delta: comparable ? delta(last["passed"].to_i, prev["passed"].to_i, better: "higher", since: date(prev["observed_at"]), fmt: ->(v) { num(v.round) }) : nil,
+            first: pts.first && short_date(pts.first["observed_at"]))
+  end
+
   def over_time(history)
     seen = {}
     points = history["points"].filter_map { |p| p["specs"]&.dup }.select { |s| s["verified"] == true && !s["cached"] && s["observed_at"] }
@@ -247,7 +589,7 @@ module RoundhouseProgress
     end
     {
       "count" => points.size, "since" => date(history["points"].first&.dig("at")), "interrupted" => history["continuity"] == "interrupted",
-      "chart" => points.empty? ? nil : gap_chart(points) + gap_chart(points, w: 330, cls: "narrow"), "change" => change,
+      "chart" => points.empty? ? nil : gap_chart(points) + gap_chart(points, w: 330, cls: "narrow"), "change" => change, "points" => points,
       "rows" => points.reverse.map do |p|
         { "date" => datetime(p["observed_at"]), "failed" => num(p["failed"]), "total" => num(p["total"]), "files" => p["spec_files_run"],
           "outside" => p["errors_outside_examples"], "lobsters_sha" => short(p["lobsters_sha"]), "roundhouse_sha" => short(p["roundhouse_sha"]),
@@ -268,9 +610,13 @@ module RoundhouseProgress
         "reference" => l["kind"] == "rails", "outcome" => ok ? "Completed" : "Stopped at #{l["stage"] || "an unknown stage"}", "detail" => l["detail"], "comparison" => comparison }
     end
     failed = lanes.reject { |l| l["ok"] || l["comparison"] == "Reference" }
-    entries = routes_feed&.dig("data", "entries").to_a.sort_by { |e| e["route"] }.map do |e|
+    seen = Hash.new(0)
+    entries = routes_feed&.dig("data", "entries").to_a.sort_by { |e| e["route"].to_s }.map do |e|
       slug = id_part(e["route"])
-      e.merge("anchor" => "route-#{slug.empty? ? "root" : slug}", "area" => AREAS.fetch(e["owner"].to_s, e["owner"]))
+      slug = "root" if slug.empty?
+      seen[slug] += 1
+      slug = "#{slug}-#{seen[slug]}" if seen[slug] > 1 # two routes can reduce to one slug
+      e.merge("anchor" => "route-#{slug}", "area" => AREAS.fetch(e["owner"].to_s, e["owner"]))
     end
     compiled = lanes.reject { |l| l["comparison"] == "Reference" }
     lead = if compiled.empty? then nil
@@ -361,7 +707,7 @@ module RoundhouseProgress
 
   SOURCE_NAMES = { "specs" => "Lobsters model specs", "replay" => "Frozen Lobsters replay", "routes" => "Frozen route ledger",
                    "archives" => "Archive smoke checks", "bench" => "Reference blog benchmarks", "activity" => "Merged pull requests",
-                   "help" => "Labelled issues" }.freeze
+                   "help" => "Labelled issues", "ci" => "CI runs on main" }.freeze
 
   UNREADABLE = { "available" => false, "note" => "This result couldn’t be read." }.freeze
 
@@ -388,6 +734,20 @@ module RoundhouseProgress
     view["bench"] = guarded(states, "bench") { bench(status["bench"]) } if states.dig("bench", "available")
     view["activity"] = guarded(states, "activity") { activity(status["activity"]) } if states.dig("activity", "available")
     view["help"] = status.dig("help", "data")
+    history = site.data["status_history"] || { "points" => [] }
+    trends = guarded(states, "trends") do
+      runtime = runtime_measures(history, status["bench"])
+      ci = (ci_measure(status["ci"]) if states.dig("ci", "available"))
+      {
+        "ci" => ci, "outcomes" => (outcomes_measure(status["ci"]) if states.dig("ci", "available")), "runtime" => runtime,
+        "specs" => specs_measure(view["over_time"], view["gap"]), "archive" => size_measure(history), "merges" => merges_measure(status["activity"]),
+        "conditions" => bench_conditions(status["bench"])
+      }
+    end || {}
+    trends["findings"] = guarded(states, "trends") { findings(trends, status) } || {}
+    view["trends"] = trends
+    # The summary strip: build time first, then the runtime trio, then the work merged.
+    view["tiles"] = ([trends["ci"]] + trends["runtime"].to_a + [trends["merges"]]).compact
     # The results table shows one date when its rows share it; a row that differs,
     # or isn't current, carries its own.
     rows = %w[specs replay archives bench].select { |k| states.dig(k, "available") }
@@ -424,19 +784,22 @@ module RoundhouseProgress
 
     # Values in progress/index.html are escaped, except the figures progress.rb
     # draws; a new one without `escape` or `web_url` fails the build.
-    RAW = /\A\w+\.(figure|spark|chart)\z|\Asite\.repo_docs\.github\z/
+    RAW = /\A[\w.]+\.(\w+_)?(figure|spark|chart)\z|\Asite\.repo_docs\.github\z|\Acontent\z/
 
     def generate(site)
       check_escaping(site.pages.find { |page| page.url == "/progress/" })
+      (Dir[File.join(site.source, "_includes", "trend-*.html")] + [File.join(site.source, "_layouts", "progress.html")]).each do |f|
+        check_escaping(Struct.new(:content).new(File.read(f)), f.delete_prefix("#{site.source}/")) if File.file?(f)
+      end
       site.data["progress"] = RoundhouseProgress.build(site)
     end
 
-    def check_escaping(page)
+    def check_escaping(page, name = "progress/index.html")
       return unless page
       raw = page.content.scan(/\{\{-?(.*?)-?\}\}/m).flatten.map(&:strip)
                 .reject { |expr| expr.match?(/\|\s*(escape|web_url|relative_url|url_encode)\b/) || expr.match?(RAW) }
       return if raw.empty?
-      message = "progress/index.html: escape these values, or add them to RAW if progress.rb builds them: #{raw.uniq.join(", ")}"
+      message = "#{name}: escape these values, or add them to RAW if progress.rb builds them: #{raw.uniq.join(", ")}"
       raise Jekyll::Errors::FatalException, message unless ENV["ROUNDHOUSE_DOCS_LENIENT"] == "1"
       Jekyll.logger.warn "Progress:", message
     end

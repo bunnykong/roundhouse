@@ -18,7 +18,7 @@
 {{ content }}
 </main>
 <footer class="progress-footer">
-  <span>Built {{ site.data.progress.built }} from <a href="{{ site.repo_docs.github }}/commit/{{ site.data.status.site_sha }}"><code>{{ site.data.progress.site_sha }}</code></a>. Each result keeps its own date: see <a href="#sources">About these numbers</a>.</span>
+  <span>Built {{ site.data.progress.built | escape }} from <a href="{{ site.repo_docs.github }}/commit/{{ site.data.status.site_sha | url_encode }}"><code>{{ site.data.progress.site_sha | escape }}</code></a>. Each result keeps its own date: see <a href="#sources">About these numbers</a>.</span>
   <span><a href="{{ site.repo_docs.github }}/blob/main/docs-site/progress/index.html">Edit this page</a> · Roundhouse · MIT / Apache-2.0</span>
 </footer>
 </body>
