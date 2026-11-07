@@ -206,7 +206,14 @@ pub(super) fn emit_seq(exprs: &[Expr]) -> String {
             // covers the non-Nil expression case (Send returning T,
             // Var/Ivar reads, etc.). The `()` block-value falls
             // through implicitly after the `;`.
-            if i == last && !current_return_is_unit() {
+            // A tail `_ = x` is `let _ = x`, a statement with no value,
+            // so it keeps its `;` and the block is `()`.
+            let is_discard = matches!(
+                &*e.node,
+                ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+                    if name.as_str() == "_"
+            );
+            if i == last && !current_return_is_unit() && !is_discard {
                 lines.push(s);
             } else {
                 lines.push(format!("{s};"));

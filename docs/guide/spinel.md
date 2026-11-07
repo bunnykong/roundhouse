@@ -110,6 +110,19 @@ Puma retains its own socket lifecycle and `puma.socket` env value. These
 mode bits control pathname-socket connections on Linux; abstract sockets
 are not supported.
 
+Literal `after_booted` and `on_booted` blocks in `config/puma.rb` run after
+the native server starts its accept threads. Registration follows the source
+order, including `if`/`unless` conditions, before any callback runs. Loading
+the emitted libraries or invoking `--help` leaves the callbacks unrun. Ruby
+and JRuby use Puma's boot event.
+
+The native hook adapter requires one process and the threaded server.
+Callbacks must have no parameters or captured config locals, and cannot use
+the Puma DSL's `self` or implicit methods. Unsupported forms and unresolved
+callback calls produce errors. Other targets report that they have no server
+boot event. Source archives and Futamura retain the original Puma config.
+Other Puma lifecycle hooks are still not run, as before.
+
 ```sh
 spin test
 ```

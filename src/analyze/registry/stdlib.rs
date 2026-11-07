@@ -714,6 +714,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "ActiveSupport::ConfigurationFile", &[
         ("parse", Ty::Untyped),
     ], &[]);
+    // `config_for`'s Hash: Rails' own class, in the ruby family's overlay
+    // (`ruby_overlay/runtime/active_support_ordered_options.rb`).
+    let ordered_options = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::OrderedOptions")), args: vec![].into() };
+    register_stdlib_class(classes, "ActiveSupport::OrderedOptions", &[
+        ("new", ordered_options.clone()),
+    ], &[
+        ("update", ordered_options),
+    ]);
     {
         let continuable = classes.entry(ClassId(Symbol::from("ActiveJob::Continuable"))).or_default();
         continuable.is_module = true;

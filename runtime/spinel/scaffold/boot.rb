@@ -53,6 +53,12 @@ require_relative "runtime/action_controller_json_render"
 # (Rails' own synonyms and parameters included).
 require_relative "runtime/mime"
 require_relative "runtime/params"
+# Before any gem: rack-attack asks for it while it loads (runtime/action_dispatch_journey.rb).
+require_relative "runtime/action_dispatch_journey"
+# Before any gem: a gem's middleware subclasses it (rack-attack's Rack::Attack::Request).
+require_relative "runtime/rack_request"
+# Before any gem: a gem subclasses it (rack-attack's BaseProxy).
+require_relative "runtime/delegate_spinel"
 # ActionText::Content — the coder behind a `has_rich_text` attribute.
 # The RichText RECORD is an ordinary lowered model (it has a table);
 # this is only the value its `body` column reads back as, so it loads
@@ -200,6 +206,7 @@ require_relative "runtime/tep/tep"
 # Gem packages (runtime/gems/<gem>/) load right after this line, which
 # `project::apply_gem_packages` finds: they register their hooks here.
 require_relative "runtime/request_hooks"
+require_relative "runtime/gem_middleware"
 require_relative "runtime/faye_websocket"
 # Spinel-only CGI reopen: `require "cgi"` reaches spinel's bundled package
 # and this adds `parse`, which upstream moved to `cgi/core`. CRuby/JRuby use

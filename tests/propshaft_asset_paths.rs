@@ -38,6 +38,7 @@ out = StringIO.new
 Main.run({"REQUEST_METHOD" => "GET", "PATH_INFO" => "/", "HTTP_HOST" => "example.test"}, StringIO.new, out)
 html = out.string
 raise html unless html.include?("200")
+raise html unless html.include?(%(<link rel="stylesheet" href="/assets/application-55c8a0db.css" />))
 %w[/assets/application-55c8a0db.css /assets/icons/icon-d6065022.svg /assets/boot-cf177f03.js].each { |path| raise html unless html.include?(path) }
 h = ActionView::ViewHelpers
 raise unless h.asset_path("application.css?v=1#shape") == "/assets/application-55c8a0db.css?v=1#shape"

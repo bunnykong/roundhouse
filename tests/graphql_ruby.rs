@@ -379,6 +379,562 @@ fn coverage_counts_checked_unreached_arguments_and_skipped() {
     );
 }
 
+const BASE_OBJECT_WITH_FIELD_CLASS: &str = "module Types\n  class BaseObject < GraphQL::Schema::Object\n    \
+    field_class Types::BaseField\n  end\nend\n";
+
+/// A field class consuming the app's own options, GitLab's shape, plus `body`.
+fn base_field(body: &str) -> String {
+    format!(
+        "module Types\n  class BaseField < GraphQL::Schema::Field\n    \
+         def initialize(**kwargs, &block)\n      \
+         @authorize = kwargs.delete(:authorize)\n      @scopes = kwargs.delete(:scopes)\n      \
+         @calls_gitaly = kwargs.delete(:calls_gitaly)\n      \
+         @experiment = kwargs.delete(:experiment)\n      @deprecated = kwargs.delete(:deprecated)\n      \
+         super(**kwargs, &block)\n    end\n{body}  end\nend\n"
+    )
+}
+
+/// Coverage of one `post_type` field under the given field class.
+fn title_with_option(field_class: &str, option: &str, extra: &[(&str, &str)]) -> String {
+    let post = post_type(&format!("    field :title, String, null: false, {option}\n"));
+    let mut files = vec![
+        ("app/graphql/types/post_type.rb", post.as_str()),
+        ("app/graphql/types/base_object.rb", BASE_OBJECT_WITH_FIELD_CLASS),
+        ("app/graphql/types/base_field.rb", field_class),
+    ];
+    files.extend_from_slice(extra);
+    coverage_line(&analyzed(&files))
+}
+
+/// Without a field class to consume it, nothing says what an option does.
+#[test]
+fn an_app_option_with_no_field_class_is_skipped() {
+    let post = post_type("    field :title, String, null: false, authorize: :read_post\n");
+    let line = coverage_line(&analyzed(&[("app/graphql/types/post_type.rb", &post)]));
+    assert!(line.contains("`authorize:` option 1"), "{line}");
+}
+
+/// Whatever the option is called, a class that rewrites the value keyword
+/// has moved the value.
+#[test]
+fn a_field_class_rewriting_a_value_keyword_vouches_for_nothing() {
+    let class = "module Types\n  class BaseField < GraphQL::Schema::Field\n    \
+        def initialize(**kwargs, &block)\n      @a = kwargs.delete(:authorize)\n      \
+        kwargs[:method] = :other\n      super(**kwargs, &block)\n    end\n  end\nend\n";
+    let line = title_with_option(class, "authorize: :read_post", &[]);
+    assert!(line.contains("`authorize:` option 1"), "{line}");
+}
+
+#[test]
+fn a_field_class_overriding_resolve_vouches_for_nothing() {
+    let class = base_field("    def resolve(object, args, ctx)\n      nil\n    end\n");
+    let line = title_with_option(&class, "authorize: :read_post", &[]);
+    assert!(line.contains("`authorize:` option 1"), "{line}");
+}
+
+#[test]
+fn a_field_class_prepending_a_module_vouches_for_nothing() {
+    let class = base_field("    prepend SomeGem::Field\n");
+    let line = title_with_option(&class, "authorize: :read_post", &[]);
+    assert!(line.contains("`authorize:` option 1"), "{line}");
+}
+
+/// GitLab's `late_extensions:`: the option handed to `extension` can do
+/// anything; the options beside it cannot.
+#[test]
+fn an_option_handed_to_extension_is_skipped_and_its_neighbours_are_not() {
+    let class = "module Types\n  class BaseField < GraphQL::Schema::Field\n    \
+        def initialize(**kwargs, &block)\n      @a = kwargs.delete(:authorize)\n      \
+        late = kwargs.delete(:late_extensions) || []\n      super(**kwargs, &block)\n      \
+        late.each { extension _1 }\n    end\n  end\nend\n";
+    let moved = title_with_option(class, "late_extensions: [Foo]", &[]);
+    assert!(moved.contains("`late_extensions:` option 1"), "{moved}");
+    let kept = title_with_option(class, "authorize: :read_post", &[]);
+    assert!(!kept.contains("option"), "{kept}");
+}
+
+const KEEPING_EXTENSION: &str = "class KeepExtension < GraphQL::Schema::FieldExtension\n  \
+    def resolve(object:, arguments:, context:)\n    yield(object, arguments)\n  end\n  \
+    def after_resolve(value:, **rest)\n    return value if value.nil?\n    value = value.to_a\n    value\n  end\nend\n";
+
+const SWAPPING_EXTENSION: &str = "class SwapExtension < GraphQL::Schema::FieldExtension\n  \
+    def after_resolve(value:, **rest)\n    value.to_s\n  end\nend\n";
+
+/// An extension every field passes through is read, not assumed: one that
+/// keeps the value is quiet, and one that may not is named on the line.
+#[test]
+fn a_field_class_extension_that_may_change_the_value_is_named() {
+    let keeping = base_field("    def setup\n      extension KeepExtension\n    end\n");
+    let line = title_with_option(
+        &keeping,
+        "authorize: :read_post",
+        &[("app/graphql/keep_extension.rb", KEEPING_EXTENSION)],
+    );
+    assert!(!line.contains("not shown"), "{line}");
+    let swapping = base_field("    def setup\n      extension SwapExtension\n    end\n");
+    let line = title_with_option(
+        &swapping,
+        "authorize: :read_post",
+        &[("app/graphql/swap_extension.rb", SWAPPING_EXTENSION)],
+    );
+    assert!(line.contains("not shown to keep the value: SwapExtension on"), "{line}");
+}
+
+/// `extension X` in a field's block counts only if X keeps the value.
+#[test]
+fn a_block_extension_is_read_like_a_field_class_one() {
+    let with = |name: &str| {
+        post_type(&format!(
+            "    field :title, String, null: false do\n      extension {name}\n    end\n"
+        ))
+    };
+    let kept = with("KeepExtension");
+    let line = coverage_line(&analyzed(&[
+        ("app/graphql/types/post_type.rb", &kept),
+        ("app/graphql/keep_extension.rb", KEEPING_EXTENSION),
+    ]));
+    assert!(!line.contains("field block"), "{line}");
+    let swapped = with("SwapExtension");
+    let line = coverage_line(&analyzed(&[
+        ("app/graphql/types/post_type.rb", &swapped),
+        ("app/graphql/swap_extension.rb", SWAPPING_EXTENSION),
+    ]));
+    assert!(line.contains("field block 1"), "{line}");
+}
+
+/// `::Types::UserType` names the same type as `Types::UserType`, and its
+/// fields are reached through it.
+#[test]
+fn a_rooted_field_type_is_followed() {
+    let post = post_type("    field :user, ::Types::UserType, null: false\n");
+    let app = analyzed(&[("app/graphql/types/post_type.rb", &post)]);
+    let post_type = app
+        .graphql_types
+        .iter()
+        .find(|t| t.class.0.as_str() == "Types::PostType")
+        .expect("PostType");
+    let user = post_type
+        .fields
+        .iter()
+        .find(|f| f.name.as_str() == "user")
+        .expect("user");
+    assert_eq!(
+        user.object_type.as_ref().map(|c| c.0.as_str()),
+        Some("Types::UserType")
+    );
+    // A rooted name does not find a nested class of the same name.
+    let nested = "module Types\n  module Types\n    class UserType < BaseObject\n    end\n  end\nend\n";
+    let app = analyzed(&[
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/types/user_type.rb", nested),
+    ]);
+    let post_type = app
+        .graphql_types
+        .iter()
+        .find(|t| t.class.0.as_str() == "Types::PostType")
+        .expect("PostType");
+    assert_eq!(
+        post_type
+            .fields
+            .iter()
+            .find(|f| f.name.as_str() == "user")
+            .and_then(|f| f.object_type.as_ref())
+            .map(|c| c.0.as_str()),
+        Some("Types::UserType")
+    );
+}
+
+/// What a real schema writes on a field that does not move its value: who
+/// may read it, a connection, a type passed by keyword, a built scalar.
+/// None of it should cost the field its check.
+#[test]
+fn declarative_options_and_written_types_keep_a_field_checked() {
+    let post = post_type(
+        "    field :title, String, null: false, authorize: :read_post, scopes: [:api], \
+         calls_gitaly: true, experiment: { milestone: '1.0' }, deprecated: { reason: 'x' }\n    \
+         field :nickname, 'The title again', type: String, null: true, method: :title\n    \
+         field :global_id, Types::GlobalIDType[Post], null: true, method: :id\n    \
+         field :author_links, Types::UserType.connection_type, null: true, method: :user\n    \
+         field :missing_thing, String, null: true, authorize: :read_post\n",
+    );
+    let app = analyzed(&[
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/base_object.rb", BASE_OBJECT_WITH_FIELD_CLASS),
+        ("app/graphql/types/base_field.rb", &base_field("")),
+    ]);
+    let post_type = app
+        .graphql_types
+        .iter()
+        .find(|t| t.class.0.as_str() == "Types::PostType")
+        .expect("PostType");
+    for field in &post_type.fields {
+        assert!(
+            matches!(field.resolution, GraphqlResolution::Value { .. }),
+            "{} was not modeled: {:?}",
+            field.name.as_str(),
+            field.resolution
+        );
+    }
+    let connection = post_type
+        .fields
+        .iter()
+        .find(|f| f.name.as_str() == "author_links")
+        .expect("author_links");
+    assert_eq!(
+        connection.object_type.as_ref().map(|c| c.0.as_str()),
+        Some("Types::UserType")
+    );
+    assert!(connection.list, "a connection answers many");
+    // An `authorize:` on it does not excuse a field nothing backs.
+    assert!(
+        graphql_diagnostics(&app)
+            .iter()
+            .any(|(_, message)| message.contains("missing_thing")),
+        "{:?}",
+        graphql_diagnostics(&app)
+    );
+}
+
+/// GitLab's `Resolvers::BaseResolver#object` is `super.tap { … }`: it
+/// decorates the value, so a subclass still reads the record it was given.
+#[test]
+fn an_ancestor_object_through_super_keeps_a_resolver_modeled() {
+    let base = "module Resolvers\n  class BaseResolver < GraphQL::Schema::Resolver\n    \
+        def object\n      super.tap { |o| break o.itself if o.nil? }\n    end\n  end\nend\n";
+    let resolver = "module Resolvers\n  class AuthorResolver < BaseResolver\n    \
+        type Types::UserType, null: false\n    def resolve\n      object.user\n    end\n  end\nend\n";
+    let post = post_type("    field :author, resolver: Resolvers::AuthorResolver\n");
+    let app = analyzed(&[
+        ("app/graphql/resolvers/base_resolver.rb", base),
+        ("app/graphql/resolvers/author_resolver.rb", resolver),
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/user_type.rb", USER_TYPE),
+    ]);
+    let post_type = app
+        .graphql_types
+        .iter()
+        .find(|t| t.class.0.as_str() == "Types::PostType")
+        .expect("PostType");
+    let author = post_type
+        .fields
+        .iter()
+        .find(|f| f.name.as_str() == "author")
+        .expect("author");
+    assert!(
+        matches!(author.resolution, GraphqlResolution::Value { .. }),
+        "{:?}",
+        author.resolution
+    );
+    assert_eq!(
+        author.object_type.as_ref().map(|c| c.0.as_str()),
+        Some("Types::UserType")
+    );
+    let user = coverage_line(&app);
+    assert!(!user.contains("resolver defines"), "{user}");
+}
+
+/// An `object` that does not go through `super` answers something else.
+#[test]
+fn an_object_override_without_super_stays_unread() {
+    let base = "module Resolvers\n  class BaseResolver < GraphQL::Schema::Resolver\n    \
+        def object\n      context[:other]\n    end\n  end\nend\n";
+    let resolver = "module Resolvers\n  class AuthorResolver < BaseResolver\n    \
+        type Types::UserType, null: false\n    def resolve\n      object.user\n    end\n  end\nend\n";
+    let post = post_type("    field :author, resolver: Resolvers::AuthorResolver\n");
+    let app = analyzed(&[
+        ("app/graphql/resolvers/base_resolver.rb", base),
+        ("app/graphql/resolvers/author_resolver.rb", resolver),
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/user_type.rb", USER_TYPE),
+    ]);
+    assert!(coverage_line(&app).contains("resolver defines"), "{}", coverage_line(&app));
+}
+
+/// A failure on a type behind an extension that may swap its `object` is a
+/// question about the analysis: it stays visible as a note, and names why.
+#[test]
+fn a_failure_behind_an_unproven_extension_is_a_note_naming_it() {
+    let swapping = base_field("    def setup\n      extension SwapExtension\n    end\n");
+    let post = post_type("    field :nothing_has_this, String, null: true\n");
+    let app = analyzed(&[
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/base_object.rb", BASE_OBJECT_WITH_FIELD_CLASS),
+        ("app/graphql/types/base_field.rb", &swapping),
+        ("app/graphql/swap_extension.rb", SWAPPING_EXTENSION),
+    ]);
+    let failure = diagnose(&app)
+        .into_iter()
+        .find(|d| d.message.contains("`nothing_has_this`"))
+        .expect("the failure stays visible");
+    assert_eq!(failure.severity, Severity::Info, "{}", failure.message);
+    assert!(failure.message.contains("`SwapExtension`"), "{}", failure.message);
+}
+
+/// With every extension proven, the same failure is still an error.
+#[test]
+fn a_failure_behind_proven_extensions_stays_an_error() {
+    let keeping = base_field("    def setup\n      extension KeepExtension\n    end\n");
+    let post = post_type("    field :nothing_has_this, String, null: true\n");
+    let app = analyzed(&[
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/base_object.rb", BASE_OBJECT_WITH_FIELD_CLASS),
+        ("app/graphql/types/base_field.rb", &keeping),
+        ("app/graphql/keep_extension.rb", KEEPING_EXTENSION),
+    ]);
+    let failure = diagnose(&app)
+        .into_iter()
+        .find(|d| d.message.contains("`nothing_has_this`"))
+        .expect("the failure");
+    assert_eq!(failure.severity, Severity::Error, "{}", failure.message);
+}
+
+/// A field class that cannot be read leaves every field through it in doubt,
+/// including a field with no option for it to consume.
+#[test]
+fn a_field_class_that_cannot_be_read_is_named_for_every_field() {
+    for body in [
+        "    prepend SomeGem::Field\n",
+        "    def resolve(object, args, ctx)\n      nil\n    end\n",
+        "    def setup\n      extension some_extension\n    end\n",
+    ] {
+        let class = base_field(body);
+        let post = post_type("    field :nothing_has_this, String, null: true\n");
+        let app = analyzed(&[
+            ("app/graphql/types/post_type.rb", &post),
+            ("app/graphql/types/base_object.rb", BASE_OBJECT_WITH_FIELD_CLASS),
+            ("app/graphql/types/base_field.rb", &class),
+        ]);
+        let line = coverage_line(&app);
+        assert!(line.contains("not shown to keep the value: Types::BaseField on"), "{body}: {line}");
+        let failure = diagnose(&app)
+            .into_iter()
+            .find(|d| d.message.contains("`nothing_has_this`"))
+            .expect("the failure stays visible");
+        assert_eq!(failure.severity, Severity::Info, "{body}: {}", failure.message);
+        assert!(failure.message.contains("`Types::BaseField`"), "{}", failure.message);
+    }
+}
+
+fn line_for_declared_field_class(declaration: &str) -> String {
+    let post = post_type("    field :title, String, null: false\n");
+    let base = format!(
+        "module Types\n  class BaseObject < GraphQL::Schema::Object\n    {declaration}\n  end\nend\n"
+    );
+    coverage_line(&analyzed(&[
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/base_object.rb", &base),
+    ]))
+}
+
+/// A gem's field class is out of sight; graphql-ruby's own is the default.
+#[test]
+fn a_field_class_out_of_sight_is_named_and_the_default_is_not() {
+    let line = line_for_declared_field_class("field_class SomeGem::Field");
+    assert!(line.contains("not shown to keep the value: SomeGem::Field on"), "{line}");
+    let line = line_for_declared_field_class("field_class field_class_for(self)");
+    assert!(line.contains("a computed `field_class`"), "{line}");
+    for default in ["GraphQL::Schema::Field", "::GraphQL::Schema::Field"] {
+        let line = line_for_declared_field_class(&format!("field_class {default}"));
+        assert!(!line.contains("not shown"), "{default}: {line}");
+    }
+}
+
+fn line_with_extension_body(body: &str) -> String {
+    let extension = format!("class CustomExtension < GraphQL::Schema::FieldExtension\n{body}\nend\n");
+    let class = base_field("    def setup\n      extension CustomExtension\n    end\n");
+    title_with_option(
+        &class,
+        "authorize: :read_post",
+        &[("app/graphql/custom_extension.rb", &extension)],
+    )
+}
+
+/// `resolve` keeps the value only by answering what the block answers.
+#[test]
+fn an_extension_resolve_keeps_the_value_only_by_answering_the_yield() {
+    let resolve = |body: &str| {
+        line_with_extension_body(&format!(
+            "  def resolve(object:, arguments:, context:)\n{body}\n  end"
+        ))
+    };
+    for kept in [
+        "    yield(object, arguments)",
+        "    raise 'nope' if arguments.nil?\n    yield(object, arguments)",
+        "    return yield(object, arguments) if context\n    yield(object, arguments)",
+    ] {
+        let line = resolve(kept);
+        assert!(!line.contains("not shown"), "{kept}: {line}");
+    }
+    for replaced in [
+        "    nil",
+        "    yield(object, arguments)\n    nil",
+        "    yield(object, arguments).to_s",
+        "    yield(other_object, arguments)",
+        "    return nil if context\n    yield(object, arguments)",
+    ] {
+        let line = resolve(replaced);
+        assert!(line.contains("not shown to keep the value: CustomExtension on"), "{replaced}: {line}");
+    }
+}
+
+/// `after_resolve` must not change `value`, whether by reassigning it or in
+/// place. Reading it is fine.
+#[test]
+fn an_extension_after_resolve_that_changes_its_value_is_named() {
+    let after = |body: &str| {
+        line_with_extension_body(&format!("  def after_resolve(value:, **rest)\n{body}\n    value\n  end"))
+    };
+    let line = after("    log(value.size)");
+    assert!(!line.contains("not shown"), "{line}");
+    for changed in [
+        "    value ||= []",
+        "    value += [1]",
+        "    value << 1",
+        "    value.push(1)",
+        "    value.map!(&:to_s)",
+        "    value[0] = 1",
+        "    value.name = 'x'",
+    ] {
+        let line = after(changed);
+        assert!(line.contains("not shown to keep the value: CustomExtension on"), "{changed}: {line}");
+    }
+}
+
+/// A class-level call this pass does not know is named with how many types
+/// make it; the pass does not act on what it might mean.
+#[test]
+fn an_unread_macro_is_reported_with_its_count() {
+    let user = "module Types\n  class UserType < BaseObject\n    present_using UserPresenter\n    \
+        field :name, String, null: true\n  end\nend\n";
+    let post = "module Types\n  class PostType < BaseObject\n    present_using PostPresenter\n    \
+        field :title, String, null: false\n  end\nend\n";
+    let app = analyzed(&[
+        ("app/graphql/types/post_type.rb", post),
+        ("app/graphql/types/user_type.rb", user),
+    ]);
+    assert!(
+        coverage_line(&app).contains("macros not read: present_using on 2"),
+        "{}",
+        coverage_line(&app)
+    );
+}
+
+const LAZY: &str = "class Lazy\n  def initialize(&block)\n    @proc = block\n  end\n  \
+    def force\n    self.class.force(@proc.call)\n  end\n  \
+    def self.force(value)\n    case value\n    when Lazy then value.force\n    else value\n    end\n  end\nend\n";
+
+/// A helper that calls `Lazy.force` on unrelated values, as an app does.
+const LAZY_CALLER: &str = "class Elsewhere\n  def go\n    Lazy.force(\"text\")\n    Lazy.force([:a, 1])\n  end\nend\n";
+
+const LAZY_SCHEMA: &str = "class AppSchema < GraphQL::Schema\n  query Types::QueryType\n  lazy_resolve Lazy, :force\nend\n";
+
+fn lazy_author(body: &str) -> App {
+    let post = post_type(&format!(
+        "    field :author, Types::UserType, null: true\n    def author\n      {body}\n    end\n"
+    ));
+    let elsewhere_type = "module Types\n  class ElsewhereType < BaseObject\n    def go\n      Elsewhere.new.go\n    end\n  end\nend\n";
+    analyzed(&[
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/elsewhere_type.rb", elsewhere_type),
+        ("app/graphql/app_schema.rb", LAZY_SCHEMA),
+        ("app/models/lazy.rb", LAZY),
+        ("app/models/elsewhere.rb", LAZY_CALLER),
+    ])
+}
+
+fn dispatch_failures(app: &App) -> Vec<String> {
+    graphql_diagnostics(app)
+        .into_iter()
+        .filter(|(code, _)| code == "send_dispatch_failed")
+        .map(|(_, message)| message)
+        .collect()
+}
+
+/// graphql-ruby forces a lazy the schema declares before the next type wraps
+/// it, so the type's fields are not read off the lazy.
+#[test]
+fn a_declared_lazy_is_forced_before_the_type_sees_it() {
+    // Either a lazy or the record, chosen at run time. A value that is only
+    // ever the lazy still reads off the lazy: `is_a?` narrowing leaves a lone
+    // variant alone on its `else` side, and GitLab reports those falsely.
+    let failures = dispatch_failures(&lazy_author("object.title ? Lazy.new { object.user } : object.user"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// GitLab's `authorized_find!`: `Lazy.force(x)` must not answer with what
+/// every other caller in the app passed it.
+#[test]
+fn forcing_a_lazy_does_not_answer_with_every_callers_value() {
+    let failures = dispatch_failures(&lazy_author("Lazy.force(object.user)"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+const MOUNTING_MODULE: &str = "module MountMutation\n  extend ActiveSupport::Concern\n  class_methods do\n    \
+    def mount_mutation(mutation_class, **custom_kwargs)\n      \
+    field mutation_class.graphql_name.underscore.to_sym, mutation: mutation_class, **custom_kwargs\n    \
+    end\n  end\nend\n";
+
+fn mutation_app(include: &str) -> App {
+    let mutation = |module: &str| {
+        format!(
+            "module Mutations\n  module {module}\n    class Create < GraphQL::Schema::RelayClassicMutation\n      \
+             def resolve\n        {{ errors: [] }}\n      end\n    end\n  end\nend\n"
+        )
+    };
+    let posts = mutation("Posts");
+    let users = mutation("Users");
+    let root = format!(
+        "module Types\n  class MutationType < BaseObject\n    {include}\n    \
+         mount_mutation Mutations::Posts::Create\n    mount_mutation Mutations::Users::Create\n  end\nend\n"
+    );
+    let schema = "class AppSchema < GraphQL::Schema\n  query Types::QueryType\n  mutation Types::MutationType\nend\n";
+    analyzed(&[
+        ("app/graphql/mutations/posts/create.rb", &posts),
+        ("app/graphql/mutations/users/create.rb", &users),
+        ("app/graphql/types/mutation_type.rb", &root),
+        ("app/graphql/app_schema.rb", schema),
+        ("app/graphql/mount_mutation.rb", MOUNTING_MODULE),
+    ])
+}
+
+/// A macro the app defines around `field` is read from its own definition,
+/// and two mutations with the same last segment are two fields.
+#[test]
+fn a_macro_the_app_defines_around_field_declares_its_fields() {
+    let app = mutation_app("include MountMutation");
+    let root = app
+        .graphql_types
+        .iter()
+        .find(|t| t.class.0.as_str() == "Types::MutationType")
+        .expect("MutationType");
+    let names: Vec<&str> = root.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["mutations_posts_create", "mutations_users_create"]);
+    assert!(root
+        .fields
+        .iter()
+        .all(|f| matches!(f.resolution, GraphqlResolution::Value { .. })));
+    assert!(!coverage_line(&app).contains("mount_mutation"), "{}", coverage_line(&app));
+}
+
+/// Nothing to read it from: no fields, and the line says so.
+#[test]
+fn a_field_macro_out_of_sight_is_reported_not_guessed() {
+    let app = mutation_app("");
+    let root = app
+        .graphql_types
+        .iter()
+        .find(|t| t.class.0.as_str() == "Types::MutationType")
+        .expect("MutationType");
+    assert!(root.fields.is_empty());
+    assert!(coverage_line(&app).contains("mount_mutation on 1"), "{}", coverage_line(&app));
+}
+
+fn coverage_line(app: &App) -> String {
+    roundhouse::analyze::graphql::coverage(app)
+        .expect("graphql coverage")
+        .summary()
+}
+
 fn codes(app: &App) -> Vec<String> {
     graphql_diagnostics(app)
         .into_iter()

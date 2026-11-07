@@ -291,3 +291,42 @@ puts "Inherited relation class methods keep the defining class's model"
 "#)
         .assert_passes();
 }
+
+#[test]
+fn class_methods_returning_a_relation_from_each_branch_keep_it() {
+    emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\n  create_table :widgets do |t|\n    t.string :name\n  end\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\nend\n")
+        .write("app/models/widget.rb", r#"class Widget < ApplicationRecord
+  def self.for_kind(kind)
+    case kind
+    when "one" then where(name: "one")
+    when "any" then all
+    else none
+    end
+  end
+
+  def self.named_if(flag)
+    if flag
+      where(name: "one")
+    else
+      all
+    end
+  end
+end
+"#)
+        .run_ruby(r#"
+["one", "two"].each do |name|
+  widget = Widget.new
+  widget.name = name
+  widget.save!
+end
+raise "case where" unless Widget.for_kind("one").exists? && Widget.for_kind("one").where(name: "two").count == 0
+raise "case all" unless Widget.for_kind("any").where(name: "two").count == 1
+raise "case none" if Widget.for_kind("other").exists?
+raise "if where" unless Widget.named_if(true).where(name: "two").count == 0
+raise "if all" unless Widget.named_if(false).where(name: "two").count == 1
+puts "Class methods keep the relation each branch returns"
+"#)
+        .assert_passes();
+}

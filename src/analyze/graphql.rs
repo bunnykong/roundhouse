@@ -37,6 +37,7 @@ pub(super) fn diagnose(app: &App, walk: fn(&Expr, &mut Vec<Diagnostic>)) -> Vec<
         let Some(class) = classes.get(&gql.class).copied() else {
             continue;
         };
+        let type_diagnostics = out.len();
         let takes_arguments: Vec<&Symbol> = gql
             .fields
             .iter()
@@ -105,6 +106,35 @@ pub(super) fn diagnose(app: &App, walk: fn(&Expr, &mut Vec<Diagnostic>)) -> Vec<
                 ),
                 kind,
             });
+        }
+        // Inference read this type's `object` as the record the parent field
+        // answered. An extension that may swap it (GitLab's presenters) makes
+        // what follows from that a question about this analysis, not the app.
+        let mut unproven: Vec<&str> = gql
+            .fields
+            .iter()
+            .flat_map(|f| f.unproven_extensions.iter().map(|e| e.as_str()))
+            .collect();
+        unproven.sort_unstable();
+        unproven.dedup();
+        if !unproven.is_empty() {
+            for d in &mut out[type_diagnostics..] {
+                if matches!(
+                    d.kind,
+                    DiagnosticKind::SendDispatchFailed { .. }
+                        | DiagnosticKind::GraphqlNullableField { .. }
+                ) {
+                    d.severity = crate::diagnostic::Severity::Info;
+                    d.message.push_str(&format!(
+                        " — may not be an app error: this type's values pass through {}, not shown to keep them",
+                        unproven
+                            .iter()
+                            .map(|e| format!("`{e}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
         }
     }
     out
@@ -249,6 +279,12 @@ pub struct GraphqlCoverage {
     pub arguments: usize,
     /// Skipped fields by reason, most frequent first.
     pub skipped: Vec<(String, usize)>,
+    /// Checked fields that run through an extension this analysis could not
+    /// show keeps the value, by extension.
+    pub unproven: Vec<(String, usize)>,
+    /// Class-level calls nothing read, by how many types make them, most
+    /// frequent first.
+    pub unread_macros: Vec<(String, usize)>,
 }
 
 impl GraphqlCoverage {
@@ -275,6 +311,30 @@ impl GraphqlCoverage {
             }
             line.push(')');
         }
+        if !self.unproven.is_empty() {
+            let shown: Vec<String> = self
+                .unproven
+                .iter()
+                .map(|(extension, n)| format!("{extension} on {n}"))
+                .collect();
+            line.push_str(&format!(
+                "; not shown to keep the value: {}",
+                shown.join(", ")
+            ));
+        }
+        if !self.unread_macros.is_empty() {
+            const MAX_MACROS: usize = 8;
+            let shown: Vec<String> = self
+                .unread_macros
+                .iter()
+                .take(MAX_MACROS)
+                .map(|(name, n)| format!("{name} on {n}"))
+                .collect();
+            line.push_str(&format!("; macros not read: {}", shown.join(", ")));
+            if self.unread_macros.len() > MAX_MACROS {
+                line.push_str(&format!(", … {} more", self.unread_macros.len() - MAX_MACROS));
+            }
+        }
         line
     }
 }
@@ -291,12 +351,22 @@ pub fn coverage(app: &App) -> Option<GraphqlCoverage> {
         ..Default::default()
     };
     let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
+    let mut unproven: BTreeMap<String, usize> = BTreeMap::new();
+    let mut unread: BTreeMap<String, usize> = BTreeMap::new();
     for gql in types {
+        for name in &gql.unread_macros {
+            *unread.entry(name.as_str().to_owned()).or_default() += 1;
+        }
         let reached = classes.get(&gql.class).is_some_and(|c| reached(gql, c));
         for field in &gql.fields {
             out.fields += 1;
             match &field.resolution {
-                GraphqlResolution::Value { .. } if reached => out.checked += 1,
+                GraphqlResolution::Value { .. } if reached => {
+                    out.checked += 1;
+                    for extension in &field.unproven_extensions {
+                        *unproven.entry(extension.as_str().to_owned()).or_default() += 1;
+                    }
+                }
                 GraphqlResolution::Value { .. } => out.unreached += 1,
                 GraphqlResolution::Arguments { .. } => out.arguments += 1,
                 GraphqlResolution::Skipped { reason } => {
@@ -305,6 +375,10 @@ pub fn coverage(app: &App) -> Option<GraphqlCoverage> {
             }
         }
     }
+    out.unproven = unproven.into_iter().collect();
+    out.unread_macros = unread.into_iter().collect();
+    out.unread_macros
+        .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     out.skipped = skipped.into_iter().collect();
     out.skipped
         .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

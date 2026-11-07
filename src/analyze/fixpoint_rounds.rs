@@ -12,8 +12,8 @@ pub struct FixpointRounds {
     /// signature; otherwise one unchecked pass runs in its place.
     pub absorb: LoopEnd,
     /// Params re-joined from the restamped views and production retyped
-    /// until its returns settle, round after round until a re-join moves
-    /// no param.
+    /// once, round after round until a re-join moves no param and the pass
+    /// before it moved no return.
     pub restamp: Restamp,
 }
 
@@ -22,7 +22,7 @@ pub struct FixpointRounds {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Restamp {
     /// `Settled(round)` when that round's re-join moved no param and the
-    /// passes before it had settled; `RanToCap` when the budget ran out.
+    /// pass before it moved no return; `RanToCap` when the budget ran out.
     pub end: LoopEnd,
     /// Rounds run, each one re-join.
     pub rounds: usize,

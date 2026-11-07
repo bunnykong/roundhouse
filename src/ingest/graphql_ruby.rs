@@ -32,10 +32,17 @@
 //! or, for search_object, its `scope { … }` block; its `type`
 //! declaration types the field.
 //!
+//! A connection answers many of its node type. An option outside
+//! graphql-ruby's vocabulary, and an extension the app's field class applies,
+//! are judged from the field class's source (`field_class`).
+//!
 //! What else is not modeled is recorded on the field as `Skipped`,
 //! never guessed: a type with an include out of sight, `hash_key:`/
-//! `dig:`, connections, a field block holding more than `argument`s,
-//! and other options that move where the value comes from.
+//! `dig:`, a field block holding more than `argument`s and proven
+//! `extension`s, and options that move where the value comes from. Class-level
+//! calls nothing reads are named on the coverage line, and a failure behind an
+//! extension not shown to keep the value is a note naming it: no framework's
+//! or app's macro is recognized by name.
 
 use crate::det::{HashMap, HashSet};
 
@@ -48,6 +55,9 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
 
+mod field_class;
+
+const FIELD_BASE: &str = "GraphQL::Schema::Field";
 const OBJECT_BASE: &str = "GraphQL::Schema::Object";
 const SCHEMA_BASE: &str = "GraphQL::Schema";
 const RESOLVER_BASES: &[&str] = &[
@@ -58,6 +68,37 @@ const RESOLVER_BASES: &[&str] = &[
 
 const ENUM_BASE: &str = "GraphQL::Schema::Enum";
 const INPUT_BASE: &str = "GraphQL::Schema::InputObject";
+
+/// Class-level calls on an object type that this pass reads, or that are
+/// graphql-ruby's own and say nothing about where a value comes from. Any
+/// other is reported on the coverage line: it may matter, and nothing here
+/// knows what it does.
+const READ_MACROS: &[&str] = &[
+    "field",
+    "field_class",
+    "description",
+    "graphql_name",
+    "implements",
+    "include",
+    "extend",
+    "prepend",
+    "connection_type_class",
+    "edge_type_class",
+    "has_no_fields",
+    "introspection",
+    "comment",
+    "directive",
+    "visibility",
+    "global_id_field",
+    "private",
+    "public",
+    "protected",
+    "private_class_method",
+    "attr_reader",
+    "attr_writer",
+    "attr_accessor",
+    "alias_method",
+];
 
 /// Root operation types a schema names (`query Types::QueryType`).
 const ROOT_DECLARATIONS: &[&str] = &["query", "mutation", "subscription"];
@@ -94,6 +135,10 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         parents: &parents,
         by_name: &by_name,
     };
+
+    let lazy = lazy_resolves(&app.library_classes, &schemas, &names);
+    let field_bases = descendants_of(&app.library_classes, &parents, &[FIELD_BASE]);
+    let field_classes = field_class::read_field_classes(&ctx, &field_bases);
 
     // Resolver and mutation classes first: a field that names one takes
     // its value, and its declared `type`, from what is read here.
@@ -190,12 +235,13 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
     for class_id in concrete {
         let chain = ctx.chain(class_id);
         let opaque = ctx.opaque(&chain);
+        let field_macros = ctx.field_macros(&chain);
         let mut fields = Vec::new();
         // Ancestors first: a subclass's own `field` replaces an
         // inherited one of the same name, as graphql-ruby's does.
         for class in chain.iter().rev() {
             for call in &class.unknown_calls {
-                let Some(decl) = field_declaration(call) else {
+                let Some(decl) = field_declaration(call, &field_macros) else {
                     continue;
                 };
                 fields.retain(|f: &(GraphqlField, String)| f.0.name != decl.name);
@@ -206,8 +252,24 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
                 let mut list = decl.list;
                 let mut nullable = decl.nullable;
                 let value = method_name("__gql_value_", &decl.name);
+                let field_class =
+                    field_class::field_class_of(&ctx, &class.name, &field_bases, &field_classes);
+                // An option graphql-ruby does not know is the field class's to
+                // consume; only its source can say the value stays put.
+                let unvouched = decl
+                    .app_options
+                    .iter()
+                    .find(|o| !field_class.as_ref().is_some_and(|f| f.vouches_for(o)));
+                // An `extension` in the field's block runs around this field alone.
+                let unkept_extension = decl.extensions.iter().any(|path| {
+                    field_class::extension_keeps_value(&ctx, path, &class.name) != Some(true)
+                });
                 let (resolution, body): (GraphqlResolution, String) =
-                    if let Some(path) = &decl.resolver_class {
+                    if let Some(option) = unvouched {
+                        (skipped(&format!("`{option}:` option")), String::new())
+                    } else if unkept_extension {
+                        (skipped("field block"), String::new())
+                    } else if let Some(path) = &decl.resolver_class {
                         let target = resolve_const(path, &class.name, &resolvers);
                         match target.clone().and_then(|r| modeled.get(&r).map(|m| (r, m))) {
                             Some((r, model)) => {
@@ -276,6 +338,10 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
                     object_type,
                     list,
                     resolution,
+                    unproven_extensions: field_class
+                        .as_ref()
+                        .map(|f| f.unproven())
+                        .unwrap_or_default(),
                 };
                 fields.push((field, body));
             }
@@ -307,10 +373,24 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
                     format!("{}.new(v)", target.0.as_str())
                 };
                 let wrap = method_name("__gql_wrap_", &field.name);
+                // graphql-ruby forces a declared lazy before the type sees it. A
+                // value that is only ever the lazy keeps that type on the `else`
+                // side, since narrowing leaves a lone variant alone: known gap.
+                let forced: String = lazy
+                    .iter()
+                    .map(|(class, force)| {
+                        format!(
+                            "  v = v.is_a?({}) ? v.{} : v\n",
+                            class.0.as_str(),
+                            force.as_str()
+                        )
+                    })
+                    .collect();
                 source.push_str(&format!(
-                    " def {}\n  v = {}\n  if v\n   {}\n  end\n end\n",
+                    " def {}\n  v = {}\n{}  if v\n   {}\n  end\n end\n",
                     wrap.as_str(),
                     method.as_str(),
+                    forced,
                     construct
                 ));
                 synthesized.push(wrap.clone());
@@ -322,6 +402,7 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
             fields: fields.into_iter().map(|(f, _)| f).collect(),
             synthesized: Vec::new(),
             resolver: false,
+            unread_macros: ctx.unread_macros(&chain, &field_macros),
         };
         synthesized_sources.push((class_id.clone(), source, spans, synthesized, Some(record)));
     }
@@ -345,6 +426,24 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
             },
         ));
     }
+    // What a lazy answers depends on the block or value it was given, which
+    // differs at every call. Inferring one return from all of them gives a
+    // union no field is on, so it is declared unknown instead. A class method
+    // of the same name (GitLab's `Lazy.force(value)`) is the same operation.
+    for (class, force) in &lazy {
+        let index = by_name[class];
+        for method in &mut app.library_classes[index].methods {
+            if method.name == *force {
+                method.signature = Some(Ty::Fn {
+                    params: Vec::new().into(),
+                    block: None,
+                    ret: std::sync::Arc::new(Ty::Untyped),
+                    effects: EffectSet::pure(),
+                });
+            }
+        }
+        signatures.push((class.clone(), force.clone(), Ty::Untyped));
+    }
     let mut types = Vec::new();
     let mut synthesized_elsewhere = Vec::new();
     for (class_id, source, spans, synthesized, record) in synthesized_sources {
@@ -363,6 +462,7 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
                 fields: Vec::new(),
                 synthesized,
                 resolver: true,
+                unread_macros: Vec::new(),
             }),
         }
     }
@@ -469,6 +569,51 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// Macros along `chain` that an app defines to declare a field: a class
+    /// method whose body calls `field <name>, mutation: <its first parameter>`
+    /// (or `resolver:`). A call to one reads as that `field`.
+    fn field_macros(&self, chain: &[&'a LibraryClass]) -> HashSet<Symbol> {
+        let mut out = HashSet::default();
+        for class in chain {
+            for method in &class.methods {
+                if !matches!(method.receiver, MethodReceiver::Class) {
+                    continue;
+                }
+                let Some(param) = method.params.first() else {
+                    continue;
+                };
+                if declares_field_from(&method.body, param.name.as_str()) {
+                    out.insert(method.name.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Class-level calls along `chain` this pass does not read, by name.
+    fn unread_macros(&self, chain: &[&'a LibraryClass], macros: &HashSet<Symbol>) -> Vec<Symbol> {
+        let mut out: Vec<Symbol> = Vec::new();
+        for class in chain {
+            for call in &class.unknown_calls {
+                let ExprNode::Send {
+                    recv: None, method, ..
+                } = &*call.node
+                else {
+                    continue;
+                };
+                if READ_MACROS.contains(&method.as_str())
+                    || macros.contains(method)
+                    || out.contains(method)
+                {
+                    continue;
+                }
+                out.push(method.clone());
+            }
+        }
+        out.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        out
+    }
+
     /// The nearest instance method `name` along `chain`.
     fn defined(&self, chain: &[&'a LibraryClass], name: &str) -> Option<&'a MethodDef> {
         chain.iter().find_map(|c| {
@@ -497,14 +642,26 @@ fn plumbing(
     source: &mut String,
     synthesized: &mut Vec<Symbol>,
 ) -> Option<()> {
-    let defines = |name: &str| {
-        chain.iter().any(|c| {
+    let instance_defs = |name: &'static str| {
+        chain.iter().enumerate().flat_map(move |(depth, c)| {
             c.methods
                 .iter()
-                .any(|m| m.name.as_str() == name && matches!(m.receiver, MethodReceiver::Instance))
+                .filter(move |m| {
+                    m.name.as_str() == name && matches!(m.receiver, MethodReceiver::Instance)
+                })
+                .map(move |m| (depth, m))
         })
     };
-    if defines("initialize") || defines("object") {
+    if instance_defs("initialize").next().is_some() {
+        return None;
+    }
+    // An ancestor's `object` that goes through `super` decorates the value
+    // it was given (GitLab's `Resolvers::BaseResolver` unwraps a presenter),
+    // so the object the field passed still answers for it. The method below
+    // lands on the class itself, ahead of that ancestor in lookup. An
+    // override on the class itself would share a class with it, and one with
+    // no `super` answers something else: both stay unread.
+    if instance_defs("object").any(|(depth, m)| depth == 0 || !calls_super(&m.body)) {
         return None;
     }
     source.push_str(" def initialize(__gql_object)\n  @object = __gql_object\n end\n");
@@ -512,6 +669,15 @@ fn plumbing(
     synthesized.push(Symbol::from("initialize"));
     synthesized.push(Symbol::from("object"));
     Some(())
+}
+
+fn calls_super(expr: &Expr) -> bool {
+    if matches!(&*expr.node, ExprNode::Super { .. }) {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |child| found |= calls_super(child));
+    found
 }
 
 /// An `argument :name, Type, required: …` declaration.
@@ -862,14 +1028,88 @@ fn type_declaration(call: &Expr) -> Option<(Vec<Symbol>, bool)> {
     if method.as_str() != "type" {
         return None;
     }
-    match args.first().map(|a| &*a.node)? {
-        ExprNode::Const { path } => Some((path.clone(), false)),
-        ExprNode::Array { elements, .. } => match elements.first().map(|e| &*e.node)? {
-            ExprNode::Const { path } => Some((path.clone(), true)),
+    match written_type(args.first()?)? {
+        (Some(path), list) => Some((path, list)),
+        (None, _) => None,
+    }
+}
+
+/// A field type as written: the class it names, if it names one, and
+/// whether the field answers many. `None` is a type this pass cannot read.
+///
+/// A connection answers many of its node type: what the field resolves to is
+/// the collection, and graphql-ruby wraps it. `Types::GlobalIDType[Post]` is a
+/// scalar built on the spot, so it names no object type to construct.
+fn written_type(node: &Expr) -> Option<(Option<Vec<Symbol>>, bool)> {
+    match &*node.node {
+        ExprNode::Const { path } => Some((Some(path.clone()), false)),
+        ExprNode::Array { elements, .. } => {
+            let inner = elements.first().and_then(written_type);
+            Some((inner.and_then(|(path, _)| path), true))
+        }
+        ExprNode::Send {
+            recv: Some(recv),
+            method,
+            args,
+            ..
+        } if matches!(&*recv.node, ExprNode::Const { .. }) => match method.as_str() {
+            "connection_type" if args.is_empty() => {
+                let ExprNode::Const { path } = &*recv.node else {
+                    return None;
+                };
+                Some((Some(path.clone()), true))
+            }
+            "[]" => Some((None, false)),
             _ => None,
         },
         _ => None,
     }
+}
+
+/// Whether `body` calls `field …, mutation: <param>` or `resolver: <param>`.
+fn declares_field_from(body: &Expr, param: &str) -> bool {
+    fn walk<'e>(expr: &'e Expr, f: &mut dyn FnMut(&'e Expr)) {
+        f(expr);
+        expr.node.for_each_child(&mut |child| walk(child, f));
+    }
+    let is_param = |e: &Expr| matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == param);
+    let mut found = false;
+    walk(body, &mut |e| {
+        let ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            ..
+        } = &*e.node
+        else {
+            return;
+        };
+        if method.as_str() != "field" {
+            return;
+        }
+        // `mutation: x, **rest` need not be a plain hash argument.
+        for arg in args {
+            walk(arg, &mut |inner| {
+                if let ExprNode::Hash { entries, .. } = &*inner.node {
+                    found |= entries.iter().any(|(key, value)| {
+                        matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value: k } }
+                            if matches!(k.as_str(), "mutation" | "resolver"))
+                            && is_param(value)
+                    });
+                }
+            });
+        }
+    });
+    found
+}
+
+/// A mounted class as a field name: the class's path, unique within a root
+/// type, where the last segment alone would collide.
+fn mounted_name(path: &[Symbol]) -> String {
+    path.iter()
+        .map(|segment| crate::naming::snake_case(segment.as_str()))
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 /// A resolver's class-level `null false`.
@@ -950,13 +1190,17 @@ struct FieldDecl {
     null_given: bool,
     /// The `argument`s its block declares.
     arguments: Vec<ArgDecl>,
+    /// Options outside graphql-ruby's vocabulary, for the field class to answer for.
+    app_options: Vec<String>,
+    /// `extension Const` calls in its block.
+    extensions: Vec<Vec<Symbol>>,
     skip: Option<String>,
 }
 
 /// `field :name, Type, null: false, method: :x` → its parts. Options
 /// that change where the value comes from and that this pass does not
 /// model set `skip`; documentation-only options are ignored.
-fn field_declaration(call: &Expr) -> Option<FieldDecl> {
+fn field_declaration(call: &Expr, field_macros: &HashSet<Symbol>) -> Option<FieldDecl> {
     let ExprNode::Send {
         recv: None,
         method,
@@ -967,16 +1211,27 @@ fn field_declaration(call: &Expr) -> Option<FieldDecl> {
     else {
         return None;
     };
-    if method.as_str() != "field" {
-        return None;
-    }
-    let name = match args.first().map(|a| &*a.node) {
-        Some(ExprNode::Lit {
-            value: Literal::Sym { value },
-        }) => value.clone(),
-        Some(ExprNode::Lit {
-            value: Literal::Str { value },
-        }) => Symbol::from(value.as_str()),
+    // A macro the app defines around `field` (`Ctx::field_macros`), called
+    // with the mutation or resolver class.
+    let mounted = match (method.as_str(), args.first().map(|a| &*a.node)) {
+        ("field", _) => None,
+        (_, Some(ExprNode::Const { path })) if field_macros.contains(method) => Some(path.clone()),
+        _ => return None,
+    };
+    let name = match (&mounted, args.first().map(|a| &*a.node)) {
+        (Some(path), _) => Symbol::from(mounted_name(path)),
+        (
+            None,
+            Some(ExprNode::Lit {
+                value: Literal::Sym { value },
+            }),
+        ) => value.clone(),
+        (
+            None,
+            Some(ExprNode::Lit {
+                value: Literal::Str { value },
+            }),
+        ) => Symbol::from(value.as_str()),
         _ => return None,
     };
     let mut decl = FieldDecl {
@@ -986,9 +1241,11 @@ fn field_declaration(call: &Expr) -> Option<FieldDecl> {
         nullable: true,
         method_sym: name.clone(),
         resolver_method: name,
-        resolver_class: None,
+        resolver_class: mounted,
         null_given: false,
         arguments: Vec::new(),
+        app_options: Vec::new(),
+        extensions: Vec::new(),
         skip: None,
     };
     let mut skipped: Option<String> = None;
@@ -997,13 +1254,10 @@ fn field_declaration(call: &Expr) -> Option<FieldDecl> {
     };
     for arg in &args[1..] {
         match &*arg.node {
-            ExprNode::Const { path } => decl.type_path = Some(path.clone()),
-            ExprNode::Array { elements, .. } => {
-                decl.list = true;
-                if let Some(ExprNode::Const { path }) = elements.first().map(|e| &*e.node) {
-                    decl.type_path = Some(path.clone());
-                }
-            }
+            // `field :name, "A description", type: PostType`.
+            ExprNode::Lit {
+                value: Literal::Str { .. },
+            } => {}
             ExprNode::Hash { entries, .. } => {
                 for (key, value) in entries {
                     let ExprNode::Lit {
@@ -1035,9 +1289,21 @@ fn field_declaration(call: &Expr) -> Option<FieldDecl> {
                                 value: Literal::Sym { value },
                             },
                         ) => decl.resolver_method = value.clone(),
+                        ("type", _) => match written_type(value) {
+                            Some((path, list)) => {
+                                decl.type_path = path;
+                                decl.list = list;
+                            }
+                            None => skip("computed field type"),
+                        },
+                        // graphql-ruby's own: how the field is documented
+                        // and costed, not where its value comes from. `scope:`
+                        // narrows the collection the same field resolved.
                         (
                             "description" | "deprecation_reason" | "camelize" | "complexity"
-                            | "max_page_size" | "default_page_size" | "broadcastable",
+                            | "max_page_size" | "default_page_size" | "broadcastable" | "scope"
+                            | "dynamic_introspection" | "directives" | "trace" | "comment"
+                            | "ast_node",
                             _,
                         ) => {}
                         ("resolver" | "mutation", ExprNode::Const { path }) => {
@@ -1047,11 +1313,21 @@ fn field_declaration(call: &Expr) -> Option<FieldDecl> {
                         ("hash_key" | "dig", _) => skip("hash lookup"),
                         ("connection", _) => skip("connection"),
                         ("extras", _) => skip("extras"),
-                        (other, _) => skip(&format!("`{other}:` option")),
+                        // Its own, in a form this pass does not read.
+                        (other, _) if other == "null" || field_class::is_value_keyword(other) => {
+                            skip(&format!("`{other}:` option"))
+                        }
+                        (other, _) => decl.app_options.push(other.to_owned()),
                     }
                 }
             }
-            _ => skip("computed field type"),
+            _ => match written_type(arg) {
+                Some((path, list)) => {
+                    decl.type_path = path;
+                    decl.list = list;
+                }
+                None => skip("computed field type"),
+            },
         }
     }
     // A block declares the field's `argument`s; anything else in it
@@ -1070,6 +1346,15 @@ fn field_declaration(call: &Expr) -> Option<FieldDecl> {
                         ExprNode::Send {
                             recv: None, method, ..
                         } if matches!(method.as_str(), "description" | "deprecation_reason") => {}
+                        ExprNode::Send {
+                            recv: None,
+                            method,
+                            args,
+                            ..
+                        } if method.as_str() == "extension" => match args.first().map(|a| &*a.node) {
+                            Some(ExprNode::Const { path }) => decl.extensions.push(path.clone()),
+                            _ => skip("field block"),
+                        },
                         _ => skip("field block"),
                     }
                 }
@@ -1148,6 +1433,46 @@ fn descendants_of(
         .collect()
 }
 
+/// `lazy_resolve Lazy, :force`: an app class whose instances graphql-ruby
+/// forces, with the method it forces them through.
+fn lazy_resolves(
+    classes: &[LibraryClass],
+    schemas: &HashSet<ClassId>,
+    names: &HashSet<ClassId>,
+) -> Vec<(ClassId, Symbol)> {
+    let mut out: Vec<(ClassId, Symbol)> = classes
+        .iter()
+        .filter(|c| schemas.contains(&c.name))
+        .flat_map(|c| c.unknown_calls.iter().map(move |call| (c, call)))
+        .filter_map(|(c, call)| {
+            let ExprNode::Send {
+                recv: None,
+                method,
+                args,
+                ..
+            } = &*call.node
+            else {
+                return None;
+            };
+            if method.as_str() != "lazy_resolve" {
+                return None;
+            }
+            let ExprNode::Const { path } = &*args.first()?.node else {
+                return None;
+            };
+            let ExprNode::Lit {
+                value: Literal::Sym { value },
+            } = &*args.get(1)?.node
+            else {
+                return None;
+            };
+            Some((resolve_const(path, &c.name, names)?, value.clone()))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0 .0.as_str().cmp(b.0 .0.as_str()));
+    out
+}
+
 /// Object types a schema class names as a root operation type.
 fn root_types(
     classes: &[LibraryClass],
@@ -1182,6 +1507,18 @@ fn root_types(
 /// A constant written inside `scope`, resolved against `known` the way
 /// Ruby's lexical lookup would find it (innermost namespace first).
 fn resolve_const(path: &[Symbol], scope: &ClassId, known: &HashSet<ClassId>) -> Option<ClassId> {
+    // `::Types::Foo` keeps its root as an empty first segment, and skips the
+    // lexical walk: only the top level answers it.
+    if path.first().is_some_and(|s| s.as_str().is_empty()) {
+        let id = ClassId(Symbol::from(
+            path[1..]
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("::"),
+        ));
+        return known.contains(&id).then_some(id);
+    }
     let written: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
     let segments: Vec<&str> = scope.0.as_str().split("::").collect();
     (0..=segments.len()).rev().find_map(|n| {

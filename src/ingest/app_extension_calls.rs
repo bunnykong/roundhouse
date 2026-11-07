@@ -25,20 +25,46 @@ use crate::expr::ExprNode;
 pub(super) fn mark(app: &mut App) {
     let modules: HashSet<String> =
         app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()).map(|lc| lc.name.0.as_str().to_string()).collect();
+    let mut module_methods: std::collections::BTreeMap<String, HashSet<String>> = Default::default();
+    for lc in app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()) {
+        module_methods
+            .entry(lc.name.0.as_str().to_string())
+            .or_default()
+            .extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()));
+    }
     // Where the source has it, a module's or a class's: the emit otherwise drops a module's, and runs a class's after a `@@x = …` written before it.
     for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
         let owner = lc.name.0.as_str().to_string();
+        let mut extended: Vec<String> = Vec::new();
         for expr in &mut lc.unknown_calls {
-            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { continue };
+            let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else { continue };
+            if !recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) || expr.span.is_synthetic() {
+                continue;
+            }
             let known = |a: &crate::expr::Expr| match &*a.node {
                 ExprNode::Const { path } => {
                     let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
                     let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
-                    modules.contains(&written) || (!rooted && modules.contains(&format!("{owner}::{written}")))
+                    let nested = format!("{owner}::{written}");
+                    if !rooted && modules.contains(&nested) { Some(nested) } else { modules.contains(&written).then_some(written) }
                 }
-                _ => false,
+                _ => None,
             };
-            if method.as_str() == "extend" && !args.is_empty() && args.iter().all(known) && !expr.span.is_synthetic() {
+            if method.as_str() == "extend" {
+                // A mixed `extend Registry, Enumerable` is left whole to the dropped-call report: replaying half of it reorders the ancestors.
+                let found: Option<Vec<String>> = args.iter().map(known).collect();
+                if let Some(found) = found.filter(|f| !f.is_empty()) {
+                    extended.extend(found);
+                    expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+                }
+                continue;
+            }
+            // `module GrantFlow; extend Registry; register(:code, …)`: the registry is filled as the body loads.
+            // Not one that reads a local: the body's local assignments are not carried, so the replay would raise NameError.
+            if lc.is_module
+                && args.iter().all(reads_no_local)
+                && extended.iter().any(|m| module_methods.get(m).is_some_and(|ms| ms.contains(method.as_str())))
+            {
                 expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
             }
         }
@@ -312,6 +338,33 @@ fn plain_value(expr: &crate::expr::Expr) -> bool {
     let mut children = true;
     expr.node.for_each_child(&mut |child| children &= plain_value(child));
     allowed && children
+}
+
+fn reads_no_local(expr: &crate::expr::Expr) -> bool {
+    reads_only(expr, &mut Vec::new())
+}
+
+// A lambda's own parameters are its, not the body's locals: `register(:code, ->(value) { value })` replays whole.
+fn reads_only(expr: &crate::expr::Expr, bound: &mut Vec<crate::ident::Symbol>) -> bool {
+    match &*expr.node {
+        ExprNode::Var { name, .. } => return bound.contains(name),
+        // Not left to `for_each_child`, which does not enter a `defined?` operand.
+        ExprNode::Defined { operand } => return reads_only(operand, bound),
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+            let depth = bound.len();
+            bound.extend(params.iter().cloned());
+            bound.extend(rest_param.iter().cloned());
+            bound.extend(extra_params.iter().map(|p| p.name.clone()));
+            bound.extend(block_param.iter().cloned());
+            let clean = extra_params.iter().all(|p| p.default.as_ref().is_none_or(|d| reads_only(d, bound))) && reads_only(body, bound);
+            bound.truncate(depth);
+            return clean;
+        }
+        _ => {}
+    }
+    let mut clean = true;
+    expr.node.for_each_child(&mut |child| clean &= reads_only(child, bound));
+    clean
 }
 
 fn literal_argument(expr: &crate::expr::Expr) -> bool {

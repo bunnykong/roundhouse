@@ -1467,6 +1467,10 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
         _ => emit_expr(value),
     };
     match target {
+        // `_ = x`: Ruby's discard, which evaluates `x` and keeps nothing.
+        // Kotlin reserves `_` as a name, and an expression statement
+        // already evaluates its value and drops it.
+        LValue::Var { name, .. } if name.as_str() == "_" => val,
         LValue::Var { name, .. } => {
             let n = camel(name.as_str());
             let already = DECLARED.with(|d| d.borrow().contains(&n));

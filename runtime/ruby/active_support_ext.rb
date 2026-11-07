@@ -741,6 +741,28 @@ module ActiveSupport
     out
   end
 
+  def self.deep_stringify_keys(hash)
+    out = {}
+    hash.each do |key, value|
+      converted = case key
+                  when Symbol then key.name
+                  else key.to_s
+                  end
+      out[converted] = ActiveSupport.deep_stringify_keys_value(value)
+    end
+    out
+  end
+
+  def self.deep_stringify_keys_value(value)
+    if value.is_a?(Hash)
+      ActiveSupport.deep_stringify_keys(value)
+    elsif value.is_a?(Array)
+      value.map { |item| ActiveSupport.deep_stringify_keys_value(item) }
+    else
+      value
+    end
+  end
+
   # Not `stringify_keys`: Rails' indifferent hash converts only a Symbol key, and its Hash and Array values all the way down.
   def self.indifferent(hash)
     out = {}
@@ -1667,6 +1689,8 @@ module ActiveSupport
   end
 
   class TimeZone
+    MAPPING = ZONE_NAMES
+
     attr_reader :name
 
     def initialize(name, data)

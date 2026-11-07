@@ -483,6 +483,12 @@ module ActionCable
         nil
       end
 
+      def stop_all_streams
+        @connection.stop_streams(@identifier) unless @connection.nil?
+        @streams.clear
+        nil
+      end
+
       # `broadcasting_for` is spelled ONCE, on the class, because
       # `stream_for` subscribes to that name and `broadcast_to`
       # publishes on it: two spellings would be a subscription nobody
@@ -780,6 +786,12 @@ module ActionCable
       # `Connection::TestCase`'s `TestSocket`. Rails 8.2 hands both
       # `close` and `perform_work` to the socket, and so does this.
       attr_accessor :transport
+
+      def stop_streams(identifier)
+        live = @transport
+        live.stop_streams(identifier) unless live.nil?
+        nil
+      end
 
       def transmit(data)
         live = @transport

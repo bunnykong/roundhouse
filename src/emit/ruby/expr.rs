@@ -608,7 +608,15 @@ fn emit_node(n: &ExprNode) -> String {
             for rc in rescues {
                 s.push_str("rescue");
                 if !rc.classes.is_empty() {
-                    let cs: Vec<String> = rc.classes.iter().map(emit_expr).collect();
+                    // A `raise` standing for a class that is not there (Ruby's NameError when the clause is tested) parses only in parentheses.
+                    let cs: Vec<String> = rc
+                        .classes
+                        .iter()
+                        .map(|c| match &*c.node {
+                            ExprNode::Raise { .. } => format!("({})", emit_expr(c)),
+                            _ => emit_expr(c),
+                        })
+                        .collect();
                     s.push(' ');
                     s.push_str(&cs.join(", "));
                 }

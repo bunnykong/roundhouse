@@ -905,6 +905,25 @@ class Routing(unittest.TestCase):
                 self.assertIn("spinel-framework", plan["jobs"])
         self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
 
+    def test_validation_prepend_owns_its_registration_and_scheduling_inputs(self):
+        paths = [
+            "tests/validation_prepend.rs",
+            "src/dialect.rs",
+            "src/ingest/model.rs",
+            "src/ingest/model/validations.rs",
+            "src/ingest/each_validator.rs",
+            "src/ingest/app.rs",
+            "src/ingest/sti_validations.rs",
+            "src/ingest/validates_with.rs",
+            "src/lower/model_to_library/validations.rs",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("validation_prepend", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+        self.assertIn("validation_prepend", ci.select([], full=True)["spinel_tests"])
+
     def test_generated_columns_spinel_owns_schema_support_and_lowering_inputs(self):
         suite = "generated_columns_spinel"
         paths = [

@@ -34,9 +34,11 @@ pub(super) fn push_validate_method(
         .into_iter()
         .flat_map(|(_, attrs)| attrs.into_iter().map(|a| a.name))
         .collect();
+    let defaulted_attrs: crate::det::HashSet<Symbol> =
+        super::markers::attribute_api_defaults(&model.body).into_iter().map(|(name, _)| name).collect();
 
-    // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
-    for item in &model.body {
+    // Unprepended validations and belongs_to checks keep declaration order.
+    for item in model.validation_order() {
         let span = item.span();
         match item {
             crate::dialect::ModelBodyItem::Validation { validation: v, .. } => {
@@ -135,6 +137,13 @@ pub(super) fn push_validate_method(
                     } else {
                         validation_rule_to_calls(msgs, &v.attribute, rule, attr_ty, runtime_relation)
                     };
+                    // Not the `@attr` slot a column has: a typed_store attribute lives in its store column, behind the reader Rails validates through.
+                    // A defaulted `attribute` holds nil in `@attr` until its reader applies the default.
+                    if store_attrs.contains(&v.attribute) || defaulted_attrs.contains(&v.attribute) {
+                        for check in &mut produced {
+                            read_through_reader(check, &v.attribute);
+                        }
+                    }
                     if v.if_cond.is_some() || v.unless_cond.is_some() {
                         let body = if produced.len() == 1 {
                             produced.pop().unwrap()
@@ -142,12 +151,6 @@ pub(super) fn push_validate_method(
                             seq(produced)
                         };
                         produced = vec![with_condition_guard(body, &v.if_cond, &v.unless_cond)];
-                    }
-                    // Not the `@attr` slot a column has: a typed_store attribute lives in its store column, behind the reader Rails validates through.
-                    if store_attrs.contains(&v.attribute) {
-                        for check in &mut produced {
-                            read_through_reader(check, &v.attribute);
-                        }
                     }
                     for mut check in produced {
                         // Each expanded check attributes to its `validates` line.

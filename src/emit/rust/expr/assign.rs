@@ -24,6 +24,10 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
         emit_expr(value)
     };
     match target {
+        // `_ = x`: Ruby's discard, which evaluates `x` and keeps nothing.
+        // Rust's `_` is a pattern, not a binding (`let mut _` is a
+        // syntax error), and it is never declared or read.
+        LValue::Var { name, .. } if name.as_str() == "_" => format!("let _ = {rhs}"),
         LValue::Var { name, .. } => {
             let name_str = name.as_str().to_string();
             // `local = @field`: Ruby copies a reference; Rust would move

@@ -79,6 +79,7 @@ PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", 
 SPINEL_TESTS = [
     "spinel_stream_error",
     "did_you_mean",
+    "validation_prepend",
     "spinel_faye_websocket",
     "spinel_websocket_lifecycle",
     "select_alias_index",
@@ -512,6 +513,17 @@ def native_coverage(path):
         suites.add("class_object_return_rbs")
     if path in {"src/analyze/mod.rs", "src/analyze/body/mod.rs"}:
         suites.add("module_self_argument_rbs")
+    if path in {
+        "src/dialect.rs",
+        "src/ingest/model.rs",
+        "src/ingest/model/validations.rs",
+        "src/ingest/each_validator.rs",
+        "src/ingest/app.rs",
+        "src/ingest/sti_validations.rs",
+        "src/ingest/validates_with.rs",
+        "src/lower/model_to_library/validations.rs",
+    }:
+        suites.add("validation_prepend")
     if path in {"src/emit/ruby.rs", "src/emit/ruby/expr.rs"}:
         suites.add("conditional_expression_parens")
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):

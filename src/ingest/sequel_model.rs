@@ -463,6 +463,7 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                 attrs
                     .into_iter()
                     .map(|attribute| Validation {
+                            prepend: false,
                         attribute,
                         rules: vec![ValidationRule::Presence],
                         if_cond: None,
@@ -488,6 +489,7 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                 attrs
                     .into_iter()
                     .map(|attribute| Validation {
+                            prepend: false,
                         attribute,
                         rules: vec![ValidationRule::Length {
                             min,

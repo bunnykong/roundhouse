@@ -125,11 +125,12 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         });
     }
 
-    // `content_tag_html` of the transpiled `ActionView::ViewHelpers`, kept
-    // for the views' coercion pass below: its declared `opts` is what
-    // widens a view's options Hash literal to the `map[string]interface{}`
-    // it takes. Only that method: the views' other helper calls are
-    // emitted as they were (`dom_id`'s record param would cast a model).
+    // `content_tag_html` and `simple_format` of the transpiled
+    // `ActionView::ViewHelpers`, kept for the views' coercion pass below:
+    // their declared `opts` is what widens a view's options Hash (a
+    // literal or a local) to the `map[string]interface{}` they take. Only
+    // those: the views' other helper calls are emitted as they were
+    // (`dom_id`'s record param would cast a model).
     let mut view_helpers: Vec<crate::dialect::LibraryClass> = Vec::new();
     let units = match crate::runtime_loader::go_units(|_ns, classes| {
         // ActionView::ViewHelpers's six slot methods (reset_slots!,
@@ -162,7 +163,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         let lowered = lower::lower_for_go(classes);
         for class in lowered.iter().filter(|c| c.name.0.as_str() == "ActionView::ViewHelpers") {
             let mut class = class.clone();
-            class.methods.retain(|m| m.name.as_str() == "content_tag_html");
+            class.methods.retain(|m| matches!(m.name.as_str(), "content_tag_html" | "simple_format"));
             view_helpers.push(class);
         }
         lowered

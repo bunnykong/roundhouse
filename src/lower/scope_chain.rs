@@ -350,7 +350,7 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
             let ModelBodyItem::Method { method, .. } = item else { continue };
             if method.receiver == crate::dialect::MethodReceiver::Class {
                 reg.class_methods.insert((m.name.clone(), method.name.clone()));
-                if let Some(target) = relation_return_model(&method.body, &model_ids) {
+                if let Some(target) = relation_return_model(&method.body, &model_ids, Some(&m.name)) {
                     reg.class.insert((m.name.clone(), method.name.clone()), target);
                 }
                 continue;
@@ -358,7 +358,7 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
             if method.receiver != crate::dialect::MethodReceiver::Instance {
                 continue;
             }
-            let Some(target) = relation_return_model(&method.body, &model_ids) else {
+            let Some(target) = relation_return_model(&method.body, &model_ids, None) else {
                 continue;
             };
             reg.instance.entry(method.name.clone())
@@ -1235,19 +1235,41 @@ pub fn merge_scope_attributes(body: &mut Expr, owner: &ClassId, rel: &Symbol) {
 }
 
 /// The model whose relation `expr` evaluates to, when that is statically
-/// evident: the tail expression is a chain of relation-preserving hops
-/// (`where`/`order`/`includes`/… or further sends we can't classify are
-/// REJECTED) rooted at `Const(Model)` or `ActiveRecord::Relation.new(
-/// Model)`. Conservative: anything else — branches, terminals like
-/// `count`/`pluck`, unknown hops — returns None.
-fn relation_return_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<ClassId> {
-    let tail = match &*expr.node {
-        ExprNode::Seq { exprs } => exprs.last()?,
-        _ => expr,
-    };
+/// evident: every value tail ([`crate::analyze::value_tails`]) is a chain
+/// of relation-preserving hops (`where`/`order`/`includes`/… or further
+/// sends we can't classify are REJECTED) rooted at `Const(Model)`,
+/// `ActiveRecord::Relation.new(Model)`, or, in a class method of `owner`,
+/// implicit self or `self`; the same model on every branch.
+/// Conservative: anything else — terminals like `count`/`pluck`, unknown
+/// hops, a branch over another model — returns None.
+fn relation_return_model(
+    expr: &Expr,
+    models: &HashSet<ClassId>,
+    owner: Option<&ClassId>,
+) -> Option<ClassId> {
+    let mut targets = crate::analyze::value_tails(expr)?
+        .into_iter()
+        .map(|tail| tail_relation_model(tail, models, owner));
+    let first = targets.next()??;
+    targets.all(|target| target.as_ref() == Some(&first)).then_some(first)
+}
+
+fn tail_relation_model(
+    tail: &Expr,
+    models: &HashSet<ClassId>,
+    owner: Option<&ClassId>,
+) -> Option<ClassId> {
     let mut e = tail;
     loop {
         match &*e.node {
+            ExprNode::Send { recv, method, .. }
+                if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) =>
+            {
+                // An unknown name is not accepted here as it is at the
+                // constant root: a bare call in a class method is usually
+                // one of the class's own helpers, not a scope.
+                return owner.filter(|_| catalog_answers_relation(method) == Some(true)).cloned();
+            }
             ExprNode::Send { recv: Some(r), method, .. } => {
                 // `Relation.new(Model)` root.
                 if method.as_str() == "new" {
@@ -1271,12 +1293,7 @@ fn relation_return_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<Class
                 // catalog knows the name and no entry of it answers a
                 // relation (`pluck`, `ids`, `count`, `create!`).
                 if let Some(m) = const_model(r, models) {
-                    let mut entries = crate::catalog::lookup_any(method.as_str()).peekable();
-                    let answers_other = entries.peek().is_some()
-                        && entries.all(|entry| {
-                            entry.return_kind != Some(crate::catalog::ReturnKind::RelationOfSelf)
-                        });
-                    return (!answers_other).then_some(m);
+                    return (catalog_answers_relation(method) != Some(false)).then_some(m);
                 }
                 if !is_relation_chain_method(method.as_str()) {
                     return None;
@@ -1286,6 +1303,12 @@ fn relation_return_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<Class
             _ => return None,
         }
     }
+}
+
+fn catalog_answers_relation(method: &Symbol) -> Option<bool> {
+    let mut entries = crate::catalog::lookup_any(method.as_str()).peekable();
+    entries.peek()?;
+    Some(entries.any(|entry| entry.return_kind == Some(crate::catalog::ReturnKind::RelationOfSelf)))
 }
 
 /// Per-model association facts the chain rewriter consumes once a chain's

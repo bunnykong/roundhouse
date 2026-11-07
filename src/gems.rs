@@ -711,7 +711,8 @@ const FATES: &[(&str, GemFate)] = &[
     // ── Modeled (each row names where) ───────────────────────────
     ("acts_as_tenant", GemFate::Modeled), // ingest/acts_as_tenant: acts_as_tenant -> belongs_to + dynamic default_scope + create stamp; validates_uniqueness_to_tenant; ActsAsTenant as CurrentAttributes (current_tenant, with_tenant, without_tenant); set_current_tenant_through_filter (not has_global_records/through/polymorphic/require_tenant/subdomain/immutability)
     ("acts_as_votable", GemFate::Modeled), // ingest/acts_as_votable: ActsAsVotable::Vote on `votes`; acts_as_votable/acts_as_voter macros -> votes_for/votes + vote_by/liked_by/unvote_by/update_cached_votes (not vote_up_for/get_voted/association extensions)
-    ("addressable", GemFate::Modeled), // catalog/gems: Addressable::URI
+    // Not Modeled: the catalog types Addressable::URI, but no tree has a body for it, so it runs as the gem itself.
+    ("addressable", GemFate::Unknown),
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
     ("commonmarker", GemFate::Modeled), // catalog/gems: Commonmarker, Commonmarker::Node
     ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
@@ -1076,7 +1077,7 @@ pub fn loads_by_gem_name(gem: &str) -> bool {
 /// hand-written version of the rule, and every private gem that follows
 /// the same convention needed its own entry to be attributable at all —
 /// which, by definition, it cannot have here.
-fn namespace_candidates(gem: &str) -> Vec<String> {
+pub(crate) fn namespace_candidates(gem: &str) -> Vec<String> {
     let mut candidates = vec![namespace_of(gem)];
     if let Some((head, _)) = gem.split_once('-') {
         let first = camelize(head);

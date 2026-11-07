@@ -3000,6 +3000,10 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
         emit_expr(ctx, value)
     };
     match target {
+        // `_ = x`: Ruby's discard, which evaluates `x` and keeps nothing.
+        // Go's blank identifier is assigned, never declared (`_ := x`
+        // has no new variable on its left).
+        LValue::Var { name, .. } if name.as_str() == "_" => format!("_ = {v}"),
         LValue::Var { name, .. } => {
             // First assignment to this name → declare (`:=`).
             // Subsequent assignments → reassign (`=`). Matches Ruby's

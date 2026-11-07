@@ -640,3 +640,80 @@ end
         "the User must not be written onto the parameter:\n{out}"
     );
 }
+
+/// addressable's `punycode_adapt`: a parameter rebound and then written by
+/// `+=` and, in a loop, by `/=`. Split onto a fresh local, the compound
+/// writes stayed on the binder while the loop's test read the fresh one,
+/// and the loop never ended.
+#[test]
+fn a_parameter_a_compound_assignment_writes_stays_whole() {
+    let out = emit_classes(
+        r#"class Punycode
+  def self.adapt(delta, numpoints, firsttime)
+    delta = firsttime ? delta / 700 : delta >> 1
+    delta += delta / numpoints
+    k = 0
+    while delta > 455
+      delta /= 35
+      k += 36
+    end
+    k + 36 * delta / (delta + 38)
+  end
+end
+"#,
+    );
+    assert!(!out.contains("__rh_delta"), "{out}");
+}
+
+/// addressable's `normalize_path` loops until a pass of `gsub!` changes
+/// nothing: `mod ||= path.gsub!(…)` reads the bang call's nil. The
+/// frozen-literal rewrite to `path = path.gsub(…)` answers a String every
+/// time, so the loop never ended; a bang whose value is read stays a bang,
+/// and one standing as a statement still becomes the reassignment.
+#[test]
+fn a_bang_whose_value_is_read_stays_a_bang_call() {
+    let out = emit_app(
+        &[
+            ("db/schema.rb", SCHEMA),
+            (
+                "app/models/user.rb",
+                r#"class User < ApplicationRecord
+  def self.tidy(path)
+    normalized = path.dup
+    loop do
+      mod = nil
+      mod ||= normalized.gsub!(%r{/\./}, "/")
+      break if mod.nil?
+    end
+    normalized.strip!
+    normalized
+  end
+end
+"#,
+            ),
+        ],
+    );
+    assert!(out.contains("mod ||= normalized.gsub!("), "{out}");
+    assert!(out.contains("normalized = normalized.strip"), "{out}");
+}
+
+/// A parameter a `rescue => name` binds after a rebind: split, the rescue
+/// wrote the binder while the reads after it took the fresh local.
+#[test]
+fn a_parameter_a_rescue_binds_stays_whole() {
+    let out = emit_classes(
+        r#"class Fetch
+  def self.run(err)
+    err = err.to_s
+    begin
+      raise ArgumentError, "x"
+    rescue ArgumentError => err
+      nil
+    end
+    err
+  end
+end
+"#,
+    );
+    assert!(!out.contains("__rh_err"), "{out}");
+}

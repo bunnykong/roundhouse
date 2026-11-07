@@ -28,6 +28,7 @@ const DECLARATIONS: &[&str] = &["validate", "validates", "validates_with"];
 pub(super) struct Harvested {
     class: ClassId,
     items: Vec<ModelBodyItem>,
+    guard: Expr,
     calls: Vec<(u32, u32)>,
     /// The (file, start) of each `validates_with` among them.
     guards: Vec<(u32, u32)>,
@@ -72,9 +73,7 @@ pub(super) fn harvest(source: &[u8], file: &str) -> Vec<Harvested> {
                 guards.push(start as u32);
                 super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None, &consts).ok()
             } else {
-                super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None, &consts).ok().map(|items| {
-                    items.into_iter().map(|item| guarded(item, &guard)).collect()
-                })
+                super::model::ingest_model_body_items(stmt, &id, file, Vec::new(), None, &consts).ok()
             };
             let Some(got) = got.filter(|got: &Vec<ModelBodyItem>| !got.is_empty() && got.iter().all(is_declaration)) else {
                 continue;
@@ -83,9 +82,11 @@ pub(super) fn harvest(source: &[u8], file: &str) -> Vec<Harvested> {
             calls.push((start as u32, end as u32));
         }
         if !items.is_empty() {
+            crate::dialect::replace_validation_callbacks(&mut items);
+            let items = items.into_iter().map(|item| guarded(item, &guard)).collect();
             let file_id = super::sources::file_id(file).0;
             let guards = guards.into_iter().filter(|g| calls.iter().any(|(s, _)| s == g)).map(|g| (file_id, g)).collect();
-            out.push(Harvested { class: id, items, calls, guards });
+            out.push(Harvested { class: id, items, guard, calls, guards });
         }
     }
     out
@@ -151,14 +152,17 @@ fn guarded(item: ModelBodyItem, guard: &Expr) -> ModelBodyItem {
 /// Each harvested class under a model: its declarations go on the
 /// nearest model ancestor, a nearer subclass's first, and its calls
 /// leave the library class's dropped list.
-pub(super) fn apply(app: &mut App, harvested: Vec<Harvested>) {
+pub(super) fn apply(app: &mut App, harvested: Vec<Harvested>, owned: &crate::det::HashSet<(ClassId, crate::span::Span)>) {
     let parent_of = |app: &App, name: &str| -> Option<String> {
         let lc = app.library_classes.iter().find(|c| c.name.0.as_str() == name)?;
         Some(lc.parent.as_ref()?.0.as_str().trim_start_matches("::").to_string())
     };
     // (depth below the model, model index, harvest)
     let mut placed: Vec<(usize, usize, Harvested)> = Vec::new();
-    for h in harvested {
+    for mut h in harvested {
+        let declined: Vec<_> = h.items.iter().filter(|item| owned.contains(&(h.class.clone(), item.span()))).map(ModelBodyItem::span).collect();
+        h.items.retain(|item| !declined.contains(&item.span()));
+        h.calls.retain(|(start, end)| !declined.iter().any(|span| (span.start, span.end) == (*start, *end)));
         let mut cur = h.class.0.as_str().to_string();
         let mut depth = 0;
         let model = loop {
@@ -178,6 +182,28 @@ pub(super) fn apply(app: &mut App, harvested: Vec<Harvested>) {
     }
     placed.sort_by_key(|(depth, ..)| *depth);
     for (_, i, h) in placed {
+        // Replacing a callback in one STI subclass must leave its parent's
+        // callback intact for the parent and sibling records.
+        let methods: Vec<_> = h.items.iter().filter_map(|item| match item {
+            ModelBodyItem::Validation { validation, .. } => match validation.rules.first() {
+                Some(crate::dialect::ValidationRule::Custom { method, .. }) => Some(method),
+                _ => None,
+            },
+            _ => None,
+        }).collect();
+        for item in &mut app.models[i].body {
+            if let ModelBodyItem::Validation { validation, .. } = item
+                && validation.rules.iter().any(|r| matches!(r, crate::dialect::ValidationRule::Custom { method, .. } if methods.contains(&method)))
+            {
+                let outside = Expr::new(h.guard.span, ExprNode::Send {
+                    recv: Some(h.guard.clone()), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false,
+                });
+                validation.if_cond = Some(match validation.if_cond.take() {
+                    Some(own) => Expr::new(own.span, ExprNode::BoolOp { op: BoolOpKind::And, surface: Default::default(), left: outside, right: own }),
+                    None => outside,
+                });
+            }
+        }
         app.models[i].body.extend(h.items);
         for key in h.guards {
             let (file, start) = key;

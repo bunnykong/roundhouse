@@ -3,13 +3,13 @@
 //! `(name, receiver shape, arity, runtime receiver, runtime name)` for
 //! `humanize`, `titleize`/`titlecase`, `underscore`, `demodulize`,
 //! `singularize`, `camelize`/`camelcase`, `classify`, `dasherize`,
-//! `deconstantize`, `foreign_key`, `remove`, `ordinalize`, and
-//! `parameterize`. The bodies stay in
+//! `deconstantize`, `foreign_key`, `remove`, `strip_heredoc`,
+//! `ordinalize`, and `parameterize`. The bodies stay in
 //! `runtime/ruby/active_support_inflections.rb` and
 //! `runtime/ruby/inflector_ext.rb` (`Inflector.parameterize`); this
-//! pass only rewrites the call. `tableize` and `strip_heredoc` have no
-//! runtime body, so analysis refuses them (`String extension`) instead
-//! of typing them as a String.
+//! pass only rewrites the call. `tableize` has no runtime body, so
+//! analysis refuses it (`String extension`) instead of typing it as a
+//! String.
 //!
 //! `parameterize` stays on model `def` bodies and unknown model-body
 //! expressions. The fused view walk does not apply that row, which is
@@ -197,6 +197,15 @@ const STRING_CORE_EXT: &[StringCoreExt] = &[
         stamp_string: true,
     },
     StringCoreExt {
+        name: "strip_heredoc",
+        receiver: ReceiverShape::StringOrNil,
+        arity: 0,
+        runtime_receiver: &["ActiveSupport"],
+        runtime_name: "strip_heredoc",
+        site: Site::Fused,
+        stamp_string: true,
+    },
+    StringCoreExt {
         name: "ordinalize",
         receiver: ReceiverShape::Int,
         arity: 0,
@@ -343,6 +352,7 @@ mod tests {
         "deconstantize",
         "foreign_key",
         "remove",
+        "strip_heredoc",
         "ordinalize",
         "parameterize",
     ];

@@ -234,6 +234,22 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             let truncated = view_helpers_call("truncate", args);
             Some(view_helpers_call("html_escape", vec![truncated]))
         }
+        // Rails' `simple_format` with `sanitize: false` writes the text as
+        // it is (`raw`) inside each paragraph's tag and returns an html-safe
+        // buffer: appended as it is. The text gets `.to_s` as `truncate`'s
+        // does (a nullable column read; Rails renders nil as one empty
+        // paragraph, as it does ""). A literal `nil` is that `""` already.
+        SimpleFormat { text, html_opts, wrapper_tag } => {
+            let text = match &*text.node {
+                ExprNode::Lit { value: Literal::Nil } => lit_str(String::new()),
+                _ => lit_str_coerce((*text).clone()),
+            };
+            let mut args = vec![text, lit_sym(wrapper_tag.clone())];
+            if let Some(o) = html_opts {
+                args.push((*o).clone());
+            }
+            Some(view_helpers_call("simple_format", args))
+        }
         WordWrap { text, opts } => {
             let mut args = vec![lit_str_coerce((*text).clone())];
             if let Some(o) = opts {
@@ -358,7 +374,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
         // runtime `link_to`, which escapes its label itself — so a
         // label the Truncate arm already wrapped is handed over
         // unwrapped, and escaped once either way.
-        LinkToIf { cond, text, url, opts } => {
+        LinkToIf { cond, text, url, opts, negate } => {
             // The label as the template's own helpers lower it: a
             // `truncate(…)` arrives as `html_escape(truncate(…))`,
             // already escape-correct, which the two branches below
@@ -420,6 +436,9 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                     None => view_helpers_call("html_escape", vec![lit_str_coerce(lowered)]),
                 }
             };
+            // `link_to_unless` links when the condition doesn't hold: the
+            // same branches, swapped.
+            let (then_branch, else_branch) = if *negate { (bare, linked) } else { (linked, bare) };
             Some(Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
@@ -433,8 +452,8 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                         &ctx.reference_reads,
                         &ctx.nilable_scalar_reads,
                     ),
-                    then_branch: linked,
-                    else_branch: bare,
+                    then_branch,
+                    else_branch,
                 },
             ))
         }
@@ -701,11 +720,28 @@ fn emit_link_to_inline(
     opts: Option<&Expr>,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
-    let (prefix, suffix) = link_to_wrapper_parts(url, opts, ctx)?;
+    let (prefix, suffix) = link_to_wrapper_parts(url, opts, ctx, inert_label(text, ctx))?;
     let mut parts = prefix;
     parts.push(InterpPart::Expr { expr: escaped_label(text, ctx) });
     parts.extend(suffix);
     Some(string_interp(parts))
+}
+
+/// Whether a `link_to` / `button_to` label runs no code when evaluated (a
+/// literal, a local, an ivar, a constant, or an interpolation of those),
+/// so writing it after the url can't change what either does.
+fn inert_label(text: &Expr, ctx: &ViewCtx) -> bool {
+    match &*text.node {
+        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => true,
+        ExprNode::Send { recv: None, method, args, block: None, parenthesized: false } => {
+            args.is_empty() && ctx.binds_local(method.as_str())
+        }
+        ExprNode::StringInterp { parts } => parts.iter().all(|p| match p {
+            InterpPart::Text { .. } => true,
+            InterpPart::Expr { expr } => inert_label(expr, ctx),
+        }),
+        _ => false,
+    }
 }
 
 /// A `link_to` / `button_to` label, escaped once. Its helpers are lowered
@@ -756,8 +792,9 @@ fn link_to_wrapper_parts(
     url: &Expr,
     opts: Option<&Expr>,
     ctx: &ViewCtx,
+    string_ok: bool,
 ) -> Option<(Vec<InterpPart>, Vec<InterpPart>)> {
-    let url_expr = emit_url_arg(url, ctx)?;
+    let url_expr = emit_url_arg(url, ctx, string_ok)?;
     Some(link_to_wrapper_markup(url_expr, hash_entries(opts)))
 }
 
@@ -808,7 +845,7 @@ fn emit_button_to_inline(
     opts: Option<&Expr>,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
-    let (prefix, suffix) = button_to_wrapper_parts(url, opts, ctx)?;
+    let (prefix, suffix) = button_to_wrapper_parts(url, opts, ctx, inert_label(text, ctx))?;
     let mut parts = prefix;
     parts.push(InterpPart::Expr { expr: escaped_label(text, ctx) });
     parts.extend(suffix);
@@ -844,8 +881,10 @@ pub(super) fn emit_inline_helper_block(
     let url = args.first()?;
     let opts = args.get(1);
     let (prefix, suffix) = match method {
-        "button_to" => button_to_wrapper_parts(url, opts, ctx)?,
-        "link_to" => link_to_wrapper_parts(url, opts, ctx)?,
+        // The url is evaluated before the block's content, as the
+        // markup writes them.
+        "button_to" => button_to_wrapper_parts(url, opts, ctx, true)?,
+        "link_to" => link_to_wrapper_parts(url, opts, ctx, true)?,
         _ => return None,
     };
     let mut out = vec![super::accumulator_append_call(string_interp(prefix), ctx)];
@@ -863,8 +902,9 @@ fn button_to_wrapper_parts(
     url: &Expr,
     opts: Option<&Expr>,
     ctx: &ViewCtx,
+    string_ok: bool,
 ) -> Option<(Vec<InterpPart>, Vec<InterpPart>)> {
-    let url_expr = emit_url_arg(url, ctx)?;
+    let url_expr = emit_url_arg(url, ctx, string_ok)?;
     Some(button_to_wrapper_markup(url_expr, hash_entries(opts)))
 }
 
@@ -962,15 +1002,15 @@ fn typed_record_path(ctx: &ViewCtx, model: &str, record: &Expr) -> Option<Expr> 
 /// rewrite to `RouteHelpers.<name>(...)`, bare local records rewrite
 /// to `RouteHelpers.<singular>_path(name.id)`. Nested arrays defer
 /// to a later slice (form_with's nested-resource fixture forces them).
-fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+fn emit_url_arg(url: &Expr, ctx: &ViewCtx, string_ok: bool) -> Option<Expr> {
     // A CONDITIONAL url (`@root_path ? "/page/#{n}" : {controller: …}`
     // — every lobsters index's pagination link) is two urls, not one.
     // Resolve each branch on its own; the classifier below sees only the
     // whole `If` and gives up on it, which is how the options-hash
     // branch reached the tag renderer as attributes.
     if let ExprNode::If { cond, then_branch, else_branch } = &*url.node {
-        let then_url = emit_url_arg(then_branch, ctx)?;
-        let else_url = emit_url_arg(else_branch, ctx)?;
+        let then_url = emit_url_arg(then_branch, ctx, string_ok)?;
+        let else_url = emit_url_arg(else_branch, ctx, string_ok)?;
         return Some(Expr::new(
             url.span,
             ExprNode::If {
@@ -1076,8 +1116,25 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
             return Some(super::absolute_url_interp(stem, args.clone()));
         }
     }
+    // A url the template computes as a String (`"/x" + "y"`, a String
+    // local, `"/X".downcase`, `articles_path + "?p=1"`) is the url, as an
+    // interpolated one is: Rails' `url_for` returns a String unchanged.
+    // Without this it fell through to a `link_to` no compiled runtime
+    // defines (#1865). A record local's name convention doesn't apply to
+    // a String either. Only where the label before it is inert
+    // (`string_ok`): the markup writes the href first, and Rails
+    // evaluates the label first, so a label and a url that both run code
+    // keep the runtime helper, which evaluates them in order.
+    let string_url = || (string_ok && matches!(url.ty, Some(crate::ty::Ty::Str))).then(|| rewrite_helpers_in_expr(url, ctx));
     let is_local = |n: &str| ctx.is_local(n);
-    let kind = classify_view_url_arg(url, &is_local)?;
+    let Some(kind) = classify_view_url_arg(url, &is_local) else {
+        return string_url();
+    };
+    if matches!(kind, ViewUrlArg::RecordRef { .. })
+        && let Some(url) = string_url()
+    {
+        return Some(url);
+    }
     match kind {
         ViewUrlArg::Literal { value } => Some(lit_str(value.to_string())),
         // The local already holds the url — read it.

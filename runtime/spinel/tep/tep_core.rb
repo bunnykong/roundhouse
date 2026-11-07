@@ -355,6 +355,14 @@ module Tep
     0
   end
 
+  def self.boot_hooks?
+    false
+  end
+
+  def self.on_booted
+    nil
+  end
+
   # Shutdown hook. Tep::Server::Threaded calls Tep.on_shutdown after
   # the accept loop breaks on SIGTERM/SIGINT. Upstream tep fans this
   # out to run_end / Events hooks; roundhouse has none.

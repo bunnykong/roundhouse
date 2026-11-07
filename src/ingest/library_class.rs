@@ -18,9 +18,106 @@ use crate::span::Span;
 use crate::{ClassId, Symbol};
 
 use super::expr::{ingest_expr, ingest_expr_strict};
+
+/// A def hoisted out of a concern's `included do` that also includes modules (`include_hoists`).
+struct IncludedHoist {
+    owner: String,
+    name: Symbol,
+    span: Span,
+    includes: Vec<String>,
+}
+
+thread_local! {
+    static INCLUDED_HOISTS: std::cell::RefCell<Vec<IncludedHoist>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The hoisted defs a module the same `included do` includes also defines: Ruby defines the block's
+/// def on the includer, ahead of that module, where the hoisted copy on the concern sits behind it.
+pub(in crate::ingest) fn included_hoist_conflicts(classes: &[LibraryClass]) -> Vec<crate::diagnostic::Diagnostic> {
+    let hoists = INCLUDED_HOISTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
+    let mut out = Vec::new();
+    for hoist in hoists {
+        let found = hoist.includes.iter().find(|written| module_may_define(classes, &hoist.owner, written, &hoist.name, &mut Vec::new()));
+        if let Some(module) = found {
+            out.push(crate::diagnostic::Diagnostic::unsupported(
+                hoist.span,
+                None,
+                crate::diagnostic::NESTED_DEF,
+                format!(
+                    "`def {}` in `included do` is the includer's own method in Ruby, ahead of `{module}`, which may define it too; carried on the concern it would lose to that module",
+                    hoist.name.as_str()
+                ),
+            ));
+        }
+    }
+    out
+}
+fn module_may_define(classes: &[LibraryClass], owner: &str, written: &str, name: &Symbol, seen: &mut Vec<String>) -> bool {
+    let rooted = written.starts_with("::");
+    let written = written.trim_start_matches("::");
+    let mut candidates = Vec::new();
+    let mut scope = (!rooted).then_some(owner);
+    while let Some(prefix) = scope {
+        candidates.push(format!("{prefix}::{written}"));
+        scope = prefix.rsplit_once("::").map(|(p, _)| p);
+    }
+    candidates.push(written.to_string());
+    let Some(resolved) = candidates.into_iter().find(|c| classes.iter().any(|lc| lc.name.0.as_str() == c)) else {
+        // A module the program does not define (Comparable) may define the name too: as unsafe as one that does.
+        return true;
+    };
+    if seen.contains(&resolved) {
+        return false;
+    }
+    seen.push(resolved.clone());
+    // Every reopen: each declaration of the module is an entry of its own.
+    let decls: Vec<&LibraryClass> = classes.iter().filter(|lc| lc.name.0.as_str() == resolved).collect();
+    decls.iter().any(|lc| lc.methods.iter().any(|m| m.name == *name && m.receiver == MethodReceiver::Instance))
+        || decls.iter().flat_map(|lc| lc.includes.iter()).any(|inc| module_may_define(classes, &resolved, inc.0.as_str(), name, seen))
+}
+// A computed module (`include Foo.for(:x)`) is kept as a name no module has, so the hoist beside it is refused.
+fn collect_block_includes(node: &Node<'_>, out: &mut Vec<String>) {
+    if let Some(c) = node.as_call_node() {
+        if c.receiver().is_none_or(|r| r.as_self_node().is_some()) && matches!(constant_id_str(&c.name()).as_ref(), "include" | "prepend") {
+            for arg in c.arguments().map(|a| a.arguments().iter().collect::<Vec<_>>()).unwrap_or_default() {
+                out.push(constant_path_of(&arg).map(|p| p.join("::")).unwrap_or_else(|| "<computed module>".to_string()));
+            }
+        }
+        return;
+    }
+    let branches: Vec<Node<'_>> = if let Some(n) = node.as_if_node() {
+        [n.statements().map(|s| s.as_node()), n.subsequent()].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_unless_node() {
+        [n.statements().map(|s| s.as_node()), n.else_clause().map(|e| e.as_node())].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_else_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_begin_node() {
+        let mut parts: Vec<Node<'_>> = n.statements().map(|s| s.as_node()).into_iter().collect();
+        let mut rescue = n.rescue_clause();
+        while let Some(r) = rescue {
+            parts.extend(r.statements().map(|s| s.as_node()));
+            rescue = r.subsequent();
+        }
+        parts.extend(n.else_clause().map(|e| e.as_node()));
+        parts.extend(n.ensure_clause().and_then(|e| e.statements()).map(|s| s.as_node()));
+        parts
+    } else if let Some(n) = node.as_case_node() {
+        n.conditions().iter().chain(n.else_clause().map(|e| e.as_node())).collect()
+    } else if let Some(n) = node.as_when_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_statements_node() {
+        n.body().iter().collect()
+    } else {
+        Vec::new()
+    };
+    for branch in &branches {
+        collect_block_includes(branch, out);
+    }
+}
 use super::visibility::{self, Visibility};
 use super::util::{
-    class_name_path, constant_id_str, constant_path_of, find_all_classes_with_scope,
+    class_name_path, constant_id_str, constant_path_is_rooted, constant_path_of,
+    find_all_classes_with_scope,
     find_all_module_declarations_with_scope, find_all_modules_with_scope, find_first_class,
     flatten_statements, module_name_path, symbol_value,
 };
@@ -3112,6 +3209,46 @@ fn walk_decl_body_with_visibility<'pr>(
                 super::error_site::note(&err, span.start as usize, span.end as usize);
                 return Err(err);
             }
+            // `alias_method :unescape, :unencode` in the singleton names a
+            // `def self.unencode` the class body defined before it
+            // (addressable's URI): the singleton walk saw only its own defs.
+            if own {
+                let mut kept = Vec::new();
+                for call in std::mem::take(&mut inner.unknown_calls) {
+                    let pair = match &*call.node {
+                        crate::expr::ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "alias_method" => {
+                            match args.as_slice() {
+                                [to, from] => match (&*to.node, &*from.node) {
+                                    (
+                                        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value: to } },
+                                        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value: from } },
+                                    ) => Some((to.as_str().to_string(), from.as_str().to_string())),
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    // Not a def written after the alias: Ruby's alias_method copies what exists at its line.
+                    let source = pair.as_ref().and_then(|(_, from)| {
+                        out.methods.iter().chain(inner.methods.iter()).rev().find(|m| {
+                            m.name.as_str() == from
+                                && m.receiver == MethodReceiver::Class
+                                && (m.name_span.file != call.span.file || m.name_span.start < call.span.start)
+                        })
+                    });
+                    match (pair.as_ref(), source) {
+                        (Some((to, _)), Some(source)) => {
+                            let mut copy = copy_aliased_method(source, to);
+                            copy.name_span = call.span;
+                            inner.methods.push(copy);
+                        }
+                        _ => kept.push(call),
+                    }
+                }
+                inner.unknown_calls = kept;
+            }
             // The class's own singleton: its statements run, and its
             // constants live, there (`expr::SINGLETON_BODY`).
             if own {
@@ -3257,14 +3394,11 @@ fn walk_decl_body_with_visibility<'pr>(
                     && block.parameters().is_none()
                     && let Some(block_body) = block.body()
                     && let inner_stmts = flatten_statements(block_body)
-                    // A module the block includes sits ahead of this one, so a
-                    // hoisted def would lose to it where the includer's own wins.
-                    && !inner_stmts.iter().any(|inner| {
-                        inner.as_call_node().is_some_and(|c| {
-                            c.receiver().is_none() && matches!(constant_id_str(&c.name()), "include" | "prepend")
-                        })
-                    })
                 {
+                    let mut block_includes = Vec::new();
+                    for inner in &inner_stmts {
+                        collect_block_includes(inner, &mut block_includes);
+                    }
                     let mut hoisted: Vec<(u32, u32)> = Vec::new();
                     for inner in inner_stmts {
                         // `class << self` here opens the includer's singleton:
@@ -3303,6 +3437,15 @@ fn walk_decl_body_with_visibility<'pr>(
                         visibility.apply(&inner, &mut m);
                         if class_side {
                             m.receiver = MethodReceiver::Class;
+                        } else if !block_includes.is_empty() {
+                            INCLUDED_HOISTS.with(|h| {
+                                h.borrow_mut().push(IncludedHoist {
+                                    owner: owner.0.as_str().to_string(),
+                                    name: m.name.clone(),
+                                    span: m.name_span,
+                                    includes: block_includes.clone(),
+                                })
+                            });
                         }
                         out.methods.push(m);
                         hoisted.push((inner.location().start_offset() as u32, inner.location().end_offset() as u32));
@@ -4481,26 +4624,41 @@ impl ModelBases {
     /// `module ActionText` becomes `ActionText::Record` when that base
     /// is known. Qualified paths are unchanged. Falls back to the
     /// lexical spelling when no enclosing candidate is a known base.
-    pub fn resolve_superclass(&self, scope: &[String], parent_path: &[String]) -> String {
+    ///
+    /// `::ApplicationRecord` skips the enclosing modules. So does a bare
+    /// name that would find the class being declared: its superclass is
+    /// evaluated before the constant exists, so `module Ci; class
+    /// ApplicationRecord < ApplicationRecord` means the top-level one.
+    /// Either way a class is never its own parent, which would send
+    /// every walk up the chain around forever.
+    pub fn resolve_class_superclass(
+        &self,
+        scope: &[String],
+        class: &ruby_prism::ClassNode<'_>,
+    ) -> Option<String> {
+        let node = class.superclass()?;
+        let parent_path = constant_path_of(&node)?;
         let joined = parent_path.join("::");
         // Bare names: search enclosing scopes first (Ruby constant
         // lookup). A global `ApplicationRecord` base must not win over
         // a closer `Foo::ApplicationRecord` when both are known.
-        if parent_path.len() == 1 {
+        if parent_path.len() == 1 && !node.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) {
+            let own = class_name_path(class).map(|path| {
+                let mut full = scope.to_vec();
+                full.extend(path);
+                full.join("::")
+            });
             let bare = &parent_path[0];
             let mut segs = scope.to_vec();
             while !segs.is_empty() {
                 let candidate = format!("{}::{}", segs.join("::"), bare);
-                if self.contains(&candidate) {
-                    return candidate;
+                if own.as_deref() != Some(candidate.as_str()) && self.contains(&candidate) {
+                    return Some(candidate);
                 }
                 segs.pop();
             }
         }
-        if self.contains(&joined) {
-            return joined;
-        }
-        joined
+        Some(joined)
     }
 
     /// One file's `class X < Y` pairs, for the closure below — but
@@ -4520,16 +4678,15 @@ impl ModelBases {
             let Some(path) = class_name_path(&class) else { continue };
             let mut full = scope.clone();
             full.extend(path);
-            let Some(parent) = class.superclass().and_then(|n| constant_path_of(&n)) else {
-                continue;
-            };
             if !declares_abstract_class(&class) {
                 continue;
             }
             // Resolve bare parents (`Record` under `module ActionText`)
             // before close_over, which matches on the stored parent
             // spelling against seeded qualified bases.
-            let parent = self.resolve_superclass(&scope, &parent);
+            let Some(parent) = self.resolve_class_superclass(&scope, &class) else {
+                continue;
+            };
             pairs.push((full.join("::"), parent));
         }
     }
@@ -4585,7 +4742,10 @@ impl ModelBases {
                 self.tableless.insert(full.join("::"));
             }
             None => {}
-            Some(parent) => self.tableless_pairs.push((full.join("::"), scope, parent, own_initialize)),
+            Some(parent) => {
+                let lookup = superclass_lookup_scope(&scope, &class).to_vec();
+                self.tableless_pairs.push((full.join("::"), lookup, parent, own_initialize))
+            }
         }
     }
 
@@ -4645,7 +4805,7 @@ impl ModelBases {
         segs.pop();
         while !segs.is_empty() {
             let candidate = format!("{}::{}", segs.join("::"), parent);
-            if self.names.contains(&candidate) {
+            if candidate != child && self.names.contains(&candidate) {
                 return true;
             }
             segs.pop();
@@ -4653,6 +4813,18 @@ impl ModelBases {
         false
     }
 
+}
+
+/// The modules a class's superclass is looked up through: none for
+/// `::Foo`, which is rooted at the top level.
+fn superclass_lookup_scope<'a>(
+    scope: &'a [String],
+    class: &ruby_prism::ClassNode<'_>,
+) -> &'a [String] {
+    match class.superclass() {
+        Some(node) if node.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) => &[],
+        _ => scope,
+    }
 }
 
 /// Does this file's first class descend from an ActiveRecord base?
@@ -4674,10 +4846,9 @@ pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
     let Some((scope, class)) = super::util::primary_class_with_scope(&root) else {
         return false;
     };
-    class
-        .superclass()
-        .and_then(|n| constant_path_of(&n))
-        .is_some_and(|p| bases.contains(&bases.resolve_superclass(&scope, &p)))
+    bases
+        .resolve_class_superclass(&scope, &class)
+        .is_some_and(|p| bases.contains(&p))
 }
 
 /// A file whose primary class has no superclass and includes
@@ -4727,10 +4898,7 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         });
         return writes_constants.then_some(ClassKind::LibraryClass);
     };
-    let parent_path = class
-        .superclass()
-        .and_then(|n| constant_path_of(&n))
-        .map(|p| bases.resolve_superclass(&scope, &p));
+    let parent_path = bases.resolve_class_superclass(&scope, &class);
 
     Some(match parent_path.as_deref() {
         // Resolved through the app's own bases, not against two
@@ -4746,7 +4914,11 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
             if class
                 .superclass()
                 .and_then(|n| constant_path_of(&n))
-                .is_some_and(|p| bases.resolve_tableless(&scope, &p).is_some()) =>
+                .is_some_and(|p| {
+                    bases
+                        .resolve_tableless(superclass_lookup_scope(&scope, &class), &p)
+                        .is_some()
+                }) =>
         {
             ClassKind::Model
         }

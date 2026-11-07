@@ -177,6 +177,15 @@ fn collect_unsafe_writes(
         collect_unsafe_writes(&value, params, out, in_unsafe_scope);
         return;
     }
+    // Not splittable either: `rescue => p` and a pattern's `in p` bind the parameter where this pass renames no binder.
+    let mut bound: Vec<Symbol> = Vec::new();
+    match &*expr.node {
+        ExprNode::BeginRescue { rescues, .. } => bound.extend(rescues.iter().filter_map(|r| r.binding.clone())),
+        ExprNode::CaseMatch { arms, .. } => arms.iter().for_each(|arm| arm.pattern.bound_names(&mut bound)),
+        ExprNode::MatchPredicate { pattern, .. } | ExprNode::MatchRequired { pattern, .. } => pattern.bound_names(&mut bound),
+        _ => {}
+    }
+    out.extend(bound.into_iter().filter(|name| params.contains(name)));
     match &*expr.node {
         ExprNode::Assign {
             target: LValue::Var { name, .. },
@@ -184,6 +193,23 @@ fn collect_unsafe_writes(
         } => {
             if in_unsafe_scope && params.contains(name) {
                 out.insert(name.clone());
+            }
+            collect_unsafe_writes(value, params, out, in_unsafe_scope);
+        }
+        // Not splittable at all: `+=` and a multi-assign write the parameter where this pass renames no target.
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
+            if params.contains(name) {
+                out.insert(name.clone());
+            }
+            collect_unsafe_writes(value, params, out, in_unsafe_scope);
+        }
+        ExprNode::MultiAssign { targets, value } => {
+            for t in targets {
+                if let LValue::Var { name, .. } = t
+                    && params.contains(name)
+                {
+                    out.insert(name.clone());
+                }
             }
             collect_unsafe_writes(value, params, out, in_unsafe_scope);
         }

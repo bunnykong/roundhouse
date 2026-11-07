@@ -1307,7 +1307,12 @@ fn every_runtime_method_body_concretely_typed() {
     // each; reduce adds seven generic accumulator/block-result sites,
     // exactly as inject does. Existing methods' counts are unchanged.
     // Add the ten new sites to 929, preserving its two-site headroom.
-    const CEILING: usize = 939;
+    // MEASURED 944 on 2026-11-05 (exact main 310f2e61: 937):
+    // deep_stringify_keys adds 6 sites and deep_stringify_keys_value adds 5.
+    // Built-in Hash case narrowing removes 2 each from deep_dup and
+    // JSON.jsonable; every other method's count is unchanged.
+    // Add the net 7 sites to 939, preserving its two-site headroom.
+    const CEILING: usize = 946;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

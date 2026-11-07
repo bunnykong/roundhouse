@@ -10,6 +10,8 @@ module Sock
   def self.sphttp_write_bytes(fd, data, n)
     IO.for_fd(fd, autoclose: false).syswrite(data.byteslice(0, n))
   end
+  # The peer a scripted connection came from (net.rb's sp_net_peer_ip).
+  def self.sp_net_peer_ip(_fd) = "127.0.0.1"
   def self.sp_net_recv_some(fd, n)
     IO.for_fd(fd, autoclose: false).readpartial(n)
   rescue EOFError

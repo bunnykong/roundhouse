@@ -202,6 +202,13 @@ emitted code, that is a bug report: either a construct roundhouse
 should lower and doesn't, or a translation it gets wrong — and the
 [compare oracle](verifying.md) is how to show the second kind.
 
+Some files outside `app/` are read when the app is transpiled, not when
+the output runs. One example is the YAML file that `config_for(:name)`
+reads (`config/<name>.yml`). The output keeps the file's text with its
+ERB compiled, so a change to that file needs a new transpile. The `ruby`
+and `jruby` targets run `config_for` on their runtime, and `futamura`
+runs it on Rails itself. The other targets report it as unsupported.
+
 ## Which target
 
 For a service you intend to run, the answer depends on what you and

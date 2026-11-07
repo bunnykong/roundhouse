@@ -219,6 +219,8 @@ module Tep
           return false
         end
         req.listener_transport = transport
+        # Rack's REMOTE_ADDR: the peer a connection came from ("" over a UNIX socket).
+        req.remote_host = Sock.sp_net_peer_ip(client)
 
         # Before the drain, which is what held the bytes (Request#body_refusal).
         refusal = req.body_refusal(Tep.max_body_bytes)

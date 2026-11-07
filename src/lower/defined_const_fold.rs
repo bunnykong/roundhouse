@@ -298,6 +298,8 @@ impl Facts {
                 return match segs.as_slice() {
                     [_] => Some(true),
                     [_, "Base"] if head != "Rails" => Some(true),
+                    // A framework class the runtime itself declares loads before any gem or app file, as Rails' own does.
+                    _ if crate::gems::spinel_runtime_constants().contains(&full) => Some(true),
                     _ => None,
                 };
             }

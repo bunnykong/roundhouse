@@ -139,6 +139,11 @@ module ActionView
       Integer n,
       String w
     ) -> String
+    def self.simple_format: (String text, Symbol wrapper_tag, ?Hash[Symbol, untyped] opts) -> String
+    def self.simple_format_blank?: (String text) -> bool
+    def self.simple_format_paragraphs: (String text, Symbol wrapper_tag, Hash[Symbol, untyped] opts) -> String
+    def self.simple_format_break: (String para) -> String
+    def self.simple_format_join: (String out, String paragraph) -> String
   
     # ── DOM helpers ─────────────────────────────────────────────────
     # Monomorphic record-shape: dom_id takes an ActiveRecord::Base

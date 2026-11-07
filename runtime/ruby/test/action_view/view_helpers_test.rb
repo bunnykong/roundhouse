@@ -158,6 +158,35 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "12345678", ViewHelpers.word_wrap("1234 5678", line_width: 4, break_sequence: "")
   end
 
+  # Measured against ActionView 8.1.4's `simple_format(text, html_options,
+  # sanitize: false, wrapper_tag:)`: `\r\n` and `\r` are newlines, two or
+  # more end a paragraph, one between other characters gets `<br />`, and
+  # a blank text (Unicode spaces too) is one empty tag.
+  def test_simple_format_matches_rails_paragraphs_and_breaks
+    assert_equal "<p>a\n<br />b</p>\n\n<p>c</p>", ViewHelpers.simple_format("a\r\nb\r\n\r\nc", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\rb", :p)
+    assert_equal "<p></p>\n\n<p>a</p>", ViewHelpers.simple_format("\n\na", :p)
+    assert_equal "<p>\na</p>", ViewHelpers.simple_format("\na", :p)
+    assert_equal "<p>a\n</p>", ViewHelpers.simple_format("a\n", :p)
+    assert_equal "<p>a</p>", ViewHelpers.simple_format("a\n\n", :p)
+    assert_equal "<p></p>", ViewHelpers.simple_format(" \u00A0\n\u3000", :p)
+    assert_equal "<p>\u3042</p>", ViewHelpers.simple_format("\u3042", :p)
+    assert_equal "<div class=\"k\"><b>a</b></div>\n\n<div class=\"k\">b</div>",
+                 ViewHelpers.simple_format("<b>a</b>\n\nb", :div, { class: "k" })
+    assert_equal "<span class=\"k\"></span>", ViewHelpers.simple_format("", :span, { class: "k" })
+    assert_equal "<p></p>", ViewHelpers.simple_format("\r\n", :p)
+    assert_equal "<p></p>", ViewHelpers.simple_format(" \r\n　", :p)
+    assert_equal "<p>a\n</p>", ViewHelpers.simple_format("a\r\n", :p)
+    assert_equal "<p>\na</p>", ViewHelpers.simple_format("\r\na", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\n\nb", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\n\r\nb", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\r\nb", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\r\n\r\nb", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\n\rb", :p)
+    assert_equal "<p>a</p>", ViewHelpers.simple_format("a\r\r\n", :p)
+    assert_equal "<p></p>\n\n<p>a</p>", ViewHelpers.simple_format("\r\r\na", :p)
+  end
+
   # Rails raises for zero but returns nil for a negative width. Keep the
   # shared helper's String contract explicit instead of exposing that
   # inconsistent edge behavior across targets.
@@ -381,9 +410,24 @@ class ViewHelpersTest < Minitest::Test
   # ── stylesheet / importmap stubs ───────────────────────────
 
   def test_stylesheet_link_tag
-    out = ViewHelpers.stylesheet_link_tag("app")
-    assert_includes out, %(rel="stylesheet")
-    assert_includes out, %(href="/assets/app.css")
+    assert_equal %(<link rel="stylesheet" href="/assets/app.css" />), ViewHelpers.stylesheet_link_tag("app")
+    assert_equal %(<link rel="stylesheet" href="/assets/app.css" data-turbo-track="reload" />),
+      ViewHelpers.stylesheet_link_tag("app", "data-turbo-track": "reload")
+  end
+
+  def test_stylesheet_link_tag_escapes_the_href
+    assert_includes ViewHelpers.stylesheet_link_tag("/a\"b.css"), %(href="/a&quot;b.css")
+  end
+
+  def test_stylesheet_link_tag_option_replaces_rel_and_href
+    rel = ViewHelpers.stylesheet_link_tag("app", rel: "preload")
+    assert_includes rel, %(rel="preload")
+    refute_includes rel, %(rel="stylesheet")
+    assert_includes rel, %(href="/assets/app.css")
+    href = ViewHelpers.stylesheet_link_tag("app", href: "/other.css")
+    assert_includes href, %(href="/other.css")
+    refute_includes href, %(href="/assets/app.css")
+    assert_includes href, %(rel="stylesheet")
   end
 
   def test_javascript_importmap_tags_has_importmap_script

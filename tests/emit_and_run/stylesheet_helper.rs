@@ -75,7 +75,7 @@ fn a_helper_stylesheet_link_tag_renders_on_spinel() {
             "controller.request_method = \"GET\"\n",
             "controller.process_action(:index)\n",
             "body = controller.body\n",
-            "link = '<link rel=\"stylesheet\" href=\"/assets/theme.css\" data-turbo-track=\"reload\">'\n",
+            "link = '<link rel=\"stylesheet\" href=\"/assets/theme.css\" data-turbo-track=\"reload\" />'\n",
             "raise body unless body.scan(link).length == 2\n",
             "puts \"stylesheet helper passed\"\n",
         ))

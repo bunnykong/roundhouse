@@ -20,6 +20,7 @@ module Sock
   ffi_func :sp_net_listen,                [:int, :int],       :int
   ffi_func :sp_net_accept,                [:int],             :int
   ffi_func :sp_net_accept_nb,             [:int],             :int
+  ffi_func :sp_net_peer_ip,               [:int],             :str
   ffi_func :sp_net_set_nonblock,          [:int],             :int
   ffi_func :sp_net_close,                 [:int],             :int
   ffi_func :sp_net_write_str,             [:int, :str],       :int

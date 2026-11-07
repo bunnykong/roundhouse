@@ -68,6 +68,8 @@ require_relative "runtime/json_builder"
 # (Rails' own synonyms and parameters included).
 require_relative "runtime/mime"
 require_relative "runtime/params"
+# Before any gem: rack-attack asks for it while it loads (runtime/action_dispatch_journey.rb).
+require_relative "runtime/action_dispatch_journey"
 # ActionText::Content — see the spinel scaffold's main.rb. Both entry
 # points need it: a `has_rich_text` model's `body` reader constructs
 # one on every read, so an unloaded constant is a NameError on the
@@ -100,11 +102,15 @@ Rails.secret_key_base = LocalSecret.resolve(ENV["SECRET_KEY_BASE"])
 # runtime's Cache is a recompute-every-fetch no-op).
 require_relative "runtime/rails_cache"
 require_relative "runtime/rails_application_routes"
+require_relative "runtime/gem_middleware"
 require_relative "runtime/active_support_duration"
 require_relative "runtime/active_support_time_parsing"
 require_relative "runtime/active_support_core_ext"
 # type_toolkit's `not_nil!` (Kernel / NilClass reopen, CRuby overlay only).
 require_relative "runtime/type_toolkit"
+# `config_for`'s answer: a Hash subclass with `method_missing`, so it cannot
+# live in the shared runtime that reads it (CRuby overlay only).
+require_relative "runtime/active_support_ordered_options"
 # Blank-predicate helper for receivers `src/lower/blank.rs` had no static
 # type to ground on. CRuby could serve those sites through the core_ext
 # reopen above; it now takes the same lowered call every other

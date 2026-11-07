@@ -3,23 +3,72 @@
 # the perf model is "fork N workers, each runs its own Server"
 # (-w workers) sharing the parent's listeners.
 module Tep
+  # Rack 3.2's table and Puma's CUSTOM, not a short list: a 429 went out as "429 OK".
+  REASONS = {
+    100 => "Continue",
+    101 => "Switching Protocols",
+    102 => "Processing",
+    103 => "Early Hints",
+    200 => "OK",
+    201 => "Created",
+    202 => "Accepted",
+    203 => "Non-Authoritative Information",
+    204 => "No Content",
+    205 => "Reset Content",
+    206 => "Partial Content",
+    207 => "Multi-Status",
+    208 => "Already Reported",
+    226 => "IM Used",
+    300 => "Multiple Choices",
+    301 => "Moved Permanently",
+    302 => "Found",
+    303 => "See Other",
+    304 => "Not Modified",
+    305 => "Use Proxy",
+    307 => "Temporary Redirect",
+    308 => "Permanent Redirect",
+    400 => "Bad Request",
+    401 => "Unauthorized",
+    402 => "Payment Required",
+    403 => "Forbidden",
+    404 => "Not Found",
+    405 => "Method Not Allowed",
+    406 => "Not Acceptable",
+    407 => "Proxy Authentication Required",
+    408 => "Request Timeout",
+    409 => "Conflict",
+    410 => "Gone",
+    411 => "Length Required",
+    412 => "Precondition Failed",
+    413 => "Content Too Large",
+    414 => "URI Too Long",
+    415 => "Unsupported Media Type",
+    416 => "Range Not Satisfiable",
+    417 => "Expectation Failed",
+    421 => "Misdirected Request",
+    422 => "Unprocessable Content",
+    423 => "Locked",
+    424 => "Failed Dependency",
+    425 => "Too Early",
+    426 => "Upgrade Required",
+    428 => "Precondition Required",
+    429 => "Too Many Requests",
+    431 => "Request Header Fields Too Large",
+    451 => "Unavailable For Legal Reasons",
+    500 => "Internal Server Error",
+    501 => "Not Implemented",
+    502 => "Bad Gateway",
+    503 => "Service Unavailable",
+    504 => "Gateway Timeout",
+    505 => "HTTP Version Not Supported",
+    506 => "Variant Also Negotiates",
+    507 => "Insufficient Storage",
+    508 => "Loop Detected",
+    511 => "Network Authentication Required"
+  }.freeze
+
   def self.reason(status)
-    if status == 200; return "OK"; end
-    if status == 201; return "Created"; end
-    if status == 204; return "No Content"; end
-    if status == 301; return "Moved Permanently"; end
-    if status == 302; return "Found"; end
-    if status == 304; return "Not Modified"; end
-    if status == 400; return "Bad Request"; end
-    if status == 401; return "Unauthorized"; end
-    if status == 403; return "Forbidden"; end
-    if status == 404; return "Not Found"; end
-    if status == 405; return "Method Not Allowed"; end
-    if status == 409; return "Conflict"; end
-    if status == 413; return "Content Too Large"; end
-    if status == 422; return "Unprocessable Content"; end
-    if status == 500; return "Internal Server Error"; end
-    "OK"
+    REASONS.fetch(status, "CUSTOM")
   end
 
   # An exception out of the app is ONE request's failure, not the
@@ -178,6 +227,8 @@ module Tep
         return false
       end
       req.listener_transport = transport
+      # Rack's REMOTE_ADDR: the peer a connection came from ("" over a UNIX socket).
+      req.remote_host = Sock.sp_net_peer_ip(client)
       # Before the drain, which is what held the bytes (Request#body_refusal).
       refusal = req.body_refusal(Tep.max_body_bytes)
       if refusal != 0

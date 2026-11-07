@@ -91,6 +91,15 @@ pub(super) fn push(d: Diagnostic) {
     });
 }
 
+/// Keep only diagnostics whose ingest interpretation survived later resolution.
+pub(super) fn retain(keep: impl Fn(&Diagnostic) -> bool) {
+    PARSE_DIAGS.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.retain(keep);
+        }
+    });
+}
+
 /// Retain parse metadata without reporting context-only syntax errors.
 /// Compiled ERB and typed runtime sources keep their own diagnostic policy.
 ///

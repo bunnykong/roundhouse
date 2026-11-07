@@ -42,12 +42,14 @@ module Tep
     # answer as sp_oint and `== 0` fails C compilation.
     attr_reader :delivery_mode    # Integer
     attr_reader :ws      # Tep::WebSocket::Driver; the writer for modes 1 and 2
+    attr_reader :subscription_key
 
-    def initialize(topic, fd, delivery_mode, ws)
+    def initialize(topic, fd, delivery_mode, ws, subscription_key = "")
       @topic = topic
       @fd    = fd
       @delivery_mode = delivery_mode
       @ws    = ws
+      @subscription_key = subscription_key
     end
   end
 end

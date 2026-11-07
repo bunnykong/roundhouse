@@ -82,7 +82,8 @@ module Main
   end
 
   def self.dispatch_core(env, stdin)
-    env["action_dispatch.request_id"] = ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
+    # Not replaced when run_rack made it: the id a gem's middleware already saw is the one the response carries.
+    env["action_dispatch.request_id"] ||= ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
     # Rails wraps every request in the AR query cache: identical
     # SELECTs within one request replay the first result; any write
     # invalidates. The CRuby Db shim implements the same discipline
@@ -466,8 +467,21 @@ module Main
   # lowercased per the Rack 3 convention; Set-Cookie is an Array (one
   # entry per cookie) and reuses `CgiIo.url_encode` so values match the
   # CGI path exactly.
+  # Rails' RequestId and Rack::Runtime outermost, then the middleware a
+  # gem's Railtie `use`s (runtime/gem_middleware.rb), then the app: a
+  # response the middleware answers itself (rack-attack's 429) carries
+  # X-Request-Id and X-Runtime as in Rails.
   def self.run_rack(env)
     started = ActionDispatch::Runtime.clock_time
+    env["action_dispatch.request_id"] = ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
+    @gem_stack ||= GemMiddleware.wrap(->(inner_env) { Main.run_app(inner_env) })
+    status, headers, body = @gem_stack.call(env)
+    headers["x-request-id"] = env["action_dispatch.request_id"].to_s
+    headers["x-runtime"] = ActionDispatch::Runtime.header_value(started) unless headers.key?("x-runtime")
+    [status, headers, body]
+  end
+
+  def self.run_app(env)
     status, body, content_type, location, set_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies =
       dispatch_core(env, env["rack.input"] || StringIO.new(""))
     headers = {}
@@ -495,12 +509,6 @@ module Main
       end
     end
     headers["set-cookie"] = cookies unless cookies.empty?
-    # Rails' ActionDispatch::RequestId and Rack::Runtime around the whole
-    # request (runtime/action_dispatch/request_id.rb), as the spinel
-    # dispatcher stamps them: X-Request-Id always, X-Runtime unless the
-    # app set one. config.ru serves static and public files before this.
-    headers["x-request-id"] = env["action_dispatch.request_id"].to_s
-    headers["x-runtime"] = ActionDispatch::Runtime.header_value(started) unless headers.key?("x-runtime")
     [status, headers, [body]]
   end
 

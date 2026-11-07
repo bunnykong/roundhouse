@@ -140,7 +140,18 @@ module Tep
       # the next connection came in. Then a non-blocking accept, which
       # answers -1 for a spurious wake and is retried.
       def self.run_worker(sfd, ufd = -1)
-        if ufd >= 0
+        if Tep.boot_hooks?
+          tcp_accept = Thread.new(sfd) { |fd| Tep::Server::Threaded.accept_loop(fd, "tcp") }
+          if ufd >= 0
+            unix_accept = Thread.new(ufd) { |fd| Tep::Server::Threaded.accept_loop(fd, "unix") }
+            Tep.on_booted
+            tcp_accept.join
+            unix_accept.join
+          else
+            Tep.on_booted
+            tcp_accept.join
+          end
+        elsif ufd >= 0
           unix_accept = Thread.new(ufd) { |fd| Tep::Server::Threaded.accept_loop(fd, "unix") }
           Tep::Server::Threaded.accept_loop(sfd, "tcp")
           unix_accept.join
@@ -224,6 +235,8 @@ module Tep
           return false
         end
         req.listener_transport = transport
+        # Rack's REMOTE_ADDR: the peer a connection came from ("" over a UNIX socket).
+        req.remote_host = Sock.sp_net_peer_ip(client)
 
         # Before the drain, which is what held the bytes (Request#body_refusal).
         refusal = req.body_refusal(Tep.max_body_bytes)

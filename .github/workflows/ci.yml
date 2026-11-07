@@ -577,16 +577,24 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
       # These gates exercise the actual gems, not optional runtime fallbacks.
       - name: System libvips for the emitted ruby-vips processor
+        # One shard in most runs drew a slow mirror and waited 4-5 min on these debs.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips42
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
           gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt rest-client elastic-apm
           # The Rails the fixture locks (see generate-fixture).
           gem install --no-document activerecord -v 8.1.4
+          gem install --no-document sequel -v 5.99.0
           # solid_queue's record models, at the fixture's locked version (tests/support/solid_queue_worker.rs).
           gem install --no-document --ignore-dependencies solid_queue -v "$(sed -n 's/^    solid_queue (\(.*\))$/\1/p' fixtures/real-blog/Gemfile.lock)"
+          # rack-attack, compiled from its source (tests/emit_and_run/rack_attack.rs).
+          gem install --no-document --ignore-dependencies rack-attack -v 6.7.0
+          # addressable and its public_suffix, compiled from source (tests/emit_and_run/addressable.rs).
+          gem install --no-document --ignore-dependencies public_suffix -v 7.0.5
+          gem install --no-document --ignore-dependencies addressable -v 2.9.0
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8
         with:
@@ -1156,8 +1164,9 @@ jobs:
       - name: System libvips
         # Same slow-mirror bound as libvips-dev (#590) / campfire-conformance.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 sqlite3
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips42 sqlite3
       - name: Cache the prepared oracle
         id: oracle
         uses: actions/cache@v6
@@ -1568,8 +1577,9 @@ jobs:
         name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
         # libvips42 and ffmpeg are a slow apt install on a shared runner.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 ffmpeg
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips42 ffmpeg
       # concurrent-ruby, net-http-persistent, web-push: WebPush::Pool
       # loads them. concurrent-ruby is named even though sentry-ruby
       # also depends on it.
@@ -1844,6 +1854,11 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
+      - name: Install gems compiled from their source
+        run: |
+          # addressable and its public_suffix, built natively (tests/spinel_toolchain/addressable.rs).
+          gem install --no-document --ignore-dependencies public_suffix -v 7.0.5
+          gem install --no-document --ignore-dependencies addressable -v 2.9.0
       # One process per test, as many as libtest's threads, so each test's seconds are its own.
       - name: run spinel_toolchain ignored suite (${{ matrix.shard }})
         env:

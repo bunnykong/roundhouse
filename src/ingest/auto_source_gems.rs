@@ -120,6 +120,10 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
             named.insert((path.to_string(), in_source_gem(c)));
         })
     });
+    // An initializer setting of a gem no recognizer reads: the gem's own code would run it (`Rack::Attack.throttle`).
+    for path in &app.boot_gem_constants {
+        named.insert((path.clone(), false));
+    }
     for (path, from_gem) in &named {
         consider(path, *from_gem);
     }

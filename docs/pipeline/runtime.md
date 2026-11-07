@@ -3488,6 +3488,63 @@ Rails with the gem installed and no `SENTRY_DSN` also transmits
 nothing, so the *delivery* half of this is not a divergence for an
 unconfigured deployment; the lost detail is.
 
+### A gem's Rack middleware: rack-attack on CRuby, and on Spinel once matz/spinel#11154 lands
+
+A gem compiled from source (`ingest::auto_source_gems`) that is a Rack
+middleware runs where Rails runs it. Four general pieces carry it, none of
+them about rack-attack itself:
+
+- **Its initializer settings run.** A `config/initializers/` statement
+  whose holder is an unknown gem (`Rack::Attack.throttle(...)`) names that
+  gem's constant, which brings the gem in from source
+  (`App::boot_gem_constants`); once it is in, the statement joins the boot
+  program (`ingest::boot_program`) on both ruby-family trees, as the app's
+  own statements do.
+- **Its Railtie's `app.middleware.use(Klass)` is read**
+  (`ingest::railtie_middleware`, `App::gem_middlewares`). `use` appends, so
+  the middleware sits inside Rails' RequestId and Runtime and before the
+  routes: a response it answers itself (rack-attack's 429) carries
+  `X-Request-Id` and `X-Runtime`. CRuby stacks the real gem's class in
+  `Main.run_rack` (`runtime/spinel/scaffold/ruby_overlay/runtime/gem_middleware.rb`, written over per app); Spinel
+  builds the request's Rack env (`project::spinel_gem_middleware`) and runs
+  the stack from `Main.dispatch_app`, with the routes at its bottom. The
+  Spinel stack is built per request where Rails builds it once: the app at
+  its bottom holds that request's objects. A middleware that keeps state in
+  its own instance would see a fresh one each time. An insertion with
+  arguments, or by `insert_before` / `insert_after`, is reported
+  unsupported.
+- **The Rack pieces Rails has loaded before any gem exist first.**
+  `ActionDispatch::Journey::Router::Utils.normalize_path`
+  (`runtime/spinel/action_dispatch_journey.rb`) is required ahead of the
+  gems on both trees, as rack-attack's `PathNormalizer` tests for it while
+  it loads. On Spinel, rack 3.2's `Rack::Request` (`runtime/spinel/rack_request.rb`:
+  `ip` with its trusted-proxy and `Forwarded` / `X-Forwarded-For` reading,
+  the path and method reads) and the holding half of `SimpleDelegator`
+  (`runtime/spinel/delegate_spinel.rb`) stand in; the ruby family loads
+  rack's and Ruby's own instead. SimpleDelegator's forwarding is not
+  there: it sends by a run-time name, which Spinel does not compile, so a
+  call that needs it stays a refusal.
+- **The Spinel server records the peer.** `REMOTE_ADDR`, and so
+  `Rack::Request#ip` and `request.remote_ip`, is the connection's address
+  (`sp_net_peer_ip`, matz/spinel#11147); a UNIX-socket connection has none.
+
+The rest is the gem's own code. `Forwardable`'s `def_delegators` becomes
+forwarding methods with the target's parameters (`ingest::forwardable`).
+A constant the gem reads that no locked gem could define is Ruby's
+NameError where it runs, and `defined?(C) && …` / `if defined?(C)` guard
+like `return unless defined?(C)` (`ingest::absence_guards`). A gem class
+whose class method answers false without such a constant
+(rack-attack's `DalliProxy.handle?`) and that nothing else names is never
+instantiated, so its instance methods are left out of the Spinel tree.
+
+**Not yet on Spinel:** `Rack::Attack::Cache#store=`'s `proxy.new(store)`
+reads a Class out of `BaseProxy`'s `@@proxies`, and Spinel's class sets
+cannot yet tell the nil an element read adds from a builtin Class object,
+so the call reaches `String.new` and refuses the store (matz/spinel#11154).
+With that, the rest of the app compiles. Integration tests of the emitted
+harness call the router directly, so the middleware is not in their path
+on either tree; Rails' integration tests go through it.
+
 ### rack-mini-profiler: the panel, request, SQL and render timings on Spinel, nothing on CRuby
 
 On the Spinel tree the gem is a package, `runtime/gems/rack_mini_profiler/`
@@ -3541,10 +3598,10 @@ What differs:
 - **Only the three files the panel loads are served** from
   `/mini-profiler-resources/`; the gem's other `html/` files (speedscope,
   the templates) are a 404.
-- **The user key is empty.** The gem keys unviewed results by
-  `Rack::Request#ip`, and the Spinel server does not record the peer
-  address (`request.remote_ip` is empty on this tree generally), so every
-  client shares one list.
+- **The user key over a UNIX socket is empty.** The gem keys unviewed
+  results by `Rack::Request#ip`, the address the Spinel server reads off
+  each connection (`sp_net_peer_ip`); a UNIX-socket connection has none,
+  so its clients share one list.
 - **A response the gem sends without a Content-Type** (the results 404)
   gets the server's `text/html; charset=utf-8`.
 - **The CSP nonce attribute is empty**, as on the CRuby tree; Rails fills

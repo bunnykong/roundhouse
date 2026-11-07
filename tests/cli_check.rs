@@ -35,6 +35,24 @@ fn a_directory_without_app_is_not_a_clean_app() {
 }
 
 #[test]
+fn class_only_recurring_tasks_do_not_abort_check() {
+    let root = scratch::dir("roundhouse-class-only-recurring");
+    for (path, source) in [
+        ("app/jobs/solid_queue/recurring_job.rb", "module SolidQueue\n  class RecurringJob < ActiveJob::Base\n    def perform(command)\n      eval(command)\n    end\n  end\nend\n"),
+        ("app/jobs/cleanup_job.rb", "class CleanupJob < ActiveJob::Base\n  def perform\n    1\n  end\nend\n"),
+        ("config/recurring.yml", "production:\n  cleanup:\n    class: CleanupJob\n    schedule: every hour\n"),
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
+    let (code, err) = check(&["--continue", root.to_str().unwrap()]);
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("ingest failed"), "{err}");
+}
+
+#[test]
 fn malformed_test_path_configuration_is_not_a_clean_app() {
     let root = scratch::dir(&format!("roundhouse_bad_test_paths_{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

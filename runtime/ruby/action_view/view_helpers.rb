@@ -699,6 +699,83 @@ module ActionView
       end
     end
 
+    # Rails 8.1.4's TextHelper#simple_format with `sanitize: false`, the
+    # one form the lowering passes here (the default runs the HTML
+    # sanitizer, which isn't modeled): `\r\n` and `\r` are newlines, two
+    # or more newlines end a paragraph, one between two other characters
+    # is followed by `<br />`, and each paragraph is `content_tag(
+    # wrapper_tag, raw(paragraph), html_options)`, joined by a blank
+    # line. A blank text is one empty tag. Measured against actionview
+    # 8.1.4. The text is written as it is (Rails' `raw`): the result is
+    # html-safe.
+    def self.simple_format(text, wrapper_tag, opts = EMPTY_HTML_OPTS)
+      return content_tag_html(wrapper_tag, "", opts) if simple_format_blank?(text)
+      simple_format_paragraphs(text, wrapper_tag, opts)
+    end
+
+    # Rails' `String#blank?`: nothing but `[[:space:]]`, the ASCII
+    # whitespace and the Unicode spaces (U+0085, U+00A0, U+1680,
+    # U+2000..U+200A, U+2028, U+2029, U+202F, U+205F, U+3000).
+    # `text[i, 1]` is `"\r\n"` on a target whose characters are grapheme
+    # clusters (Swift), and it is blank too.
+    def self.simple_format_blank?(text)
+      spaces = " \t\n\v\f\r\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000"
+      blank = true
+      i = 0
+      while i < text.length
+        if !spaces.include?(text[i, 1]) && text[i, 1] != "\r\n"
+          blank = false
+        end
+        i += 1
+      end
+      blank
+    end
+
+    # One loop, ending in `i += 1` (Elixir): a run of newlines is counted
+    # in `nl` and settled at the next other character, and the `\n` of a
+    # `\r\n` isn't counted, so no index steps by two. Where characters are
+    # grapheme clusters (Swift), a `\r\n` is one `c`, and one newline, even
+    # after a `\r`.
+    def self.simple_format_paragraphs(text, wrapper_tag, opts)
+      out = ""
+      para = ""
+      nl = 0
+      prev = ""
+      i = 0
+      while i < text.length
+        c = text[i, 1]
+        if c == "\r" || c == "\n" || c == "\r\n"
+          if c == "\r" || c == "\r\n" || prev != "\r"
+            nl = nl + 1
+          end
+        elsif nl == 0
+          para = para + c
+        elsif nl == 1
+          para = para + simple_format_break(para) + c
+          nl = 0
+        else
+          out = simple_format_join(out, content_tag_html(wrapper_tag, para, opts))
+          para = c
+          nl = 0
+        end
+        prev = c
+        i += 1
+      end
+      # One trailing newline stays in the paragraph; more end it, and
+      # Ruby's `split` drops the empty one after.
+      para = para + "\n" if nl == 1
+      simple_format_join(out, content_tag_html(wrapper_tag, para, opts))
+    end
+
+    # The newline itself, then `<br />` unless it opens the text.
+    def self.simple_format_break(para)
+      para.empty? ? "\n" : "\n<br />"
+    end
+
+    def self.simple_format_join(out, paragraph)
+      out.empty? ? paragraph : out + "\n\n" + paragraph
+    end
+
     # ── DOM helpers ──────────────────────────────────────────────────
 
     # Monomorphic: param typed `ActiveRecord::Base`. Was previously a
@@ -976,8 +1053,16 @@ module ActionView
   
     def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
       href = stylesheet_href(name.to_s)
-      attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
-      "<link#{attrs}>"
+      given = opts.to_h
+      # Rel, href, then the options, as Rails writes them. Not through
+      # `render_attrs`, whose Hash iteration Swift sorts by key (its
+      # Dictionary keeps no order), which would put href first. An option
+      # that replaces either attribute takes the merge, as Rails' does.
+      if given.key?(:rel) || given.key?(:href)
+        attrs = render_attrs({ rel: "stylesheet", href: href }.merge(given))
+        return "<link#{attrs} />"
+      end
+      "<link rel=\"stylesheet\" href=\"#{html_escape(href)}\"#{render_attrs(given)} />"
     end
 
     # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`, type

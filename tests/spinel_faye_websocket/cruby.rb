@@ -52,6 +52,8 @@ module Sock
     -1
   end
   def self.sp_net_write_str(fd, bytes) = sp_net_write_bytes(fd, bytes, bytes.bytesize)
+  # The peer a scripted connection came from (net.rb's sp_net_peer_ip).
+  def self.sp_net_peer_ip(_fd) = "127.0.0.1"
   def self.sp_net_recv_some(fd, n)
     SOCKETS.fetch(fd).readpartial(n)
   rescue EOFError, SystemCallError

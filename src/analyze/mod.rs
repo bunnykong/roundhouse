@@ -75,6 +75,7 @@ mod parallel;
 mod inferred_types;
 pub mod inquiry;
 pub mod indifferent;
+pub(crate) mod hash_keys;
 pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_helper_modules, diagnose_with_coverage, unknown_receiver_sends, UnknownReceiverSend};
@@ -1822,7 +1823,8 @@ impl Analyzer {
         });
         // Not done at the restamp: lobsters' `upvoter_score` kept the `String` its view site saw before `comment_score_for_user` widened to `Integer | String`.
         // Both loops share one budget of FIXPOINT_CAP production passes: on an app whose production loop ran to its cap, the params or returns here may never settle, and a cap per loop spent up to 12 × 12 full passes.
-        let mut returns_settled = true;
+        // Not settled after a capped absorb: its last harvest may have moved a return that no production body has been typed against.
+        let mut returns_settled = rounds.absorb != LoopEnd::RanToCap;
         // One round past the cap: every round that goes on spends a pass, so round FIXPOINT_CAP only re-joins what the last restamp typed, then stops.
         for round in 0..=FIXPOINT_CAP {
             rounds.restamp.rounds = round + 1;
@@ -1831,35 +1833,28 @@ impl Analyzer {
             self.overlay_test_params(app);
             self.apply_pinned_params();
             // Not pinned while the loop still moves: a `Var` mid-loop may be an argument the next round types.
-            if self.inferred_params == before && !(app.pins_unresolved_params && self.pin_open_params()) {
-                if returns_settled {
-                    rounds.restamp.end = LoopEnd::Settled(round);
-                }
+            if self.inferred_params == before && returns_settled && !(app.pins_unresolved_params && self.pin_open_params()) {
+                rounds.restamp.end = LoopEnd::Settled(round);
                 break;
             }
             if rounds.restamp.passes == FIXPOINT_CAP {
                 break;
             }
             crate::timings::phase("typing passes (after view param restamp)", || {
-                // Not one production pass: a helper return the new params move is read by production callers typed before its harvest.
-                loop {
-                    rounds.restamp.passes += 1;
-                    let hints = self.capture_dirty_hints();
-                    self.run_typing_passes(
-                        app,
-                        &dynamic_render_ivars,
-                        &existing_view_names,
-                        &module_methods,
-                        &module_includes,
-                        &parent_link_by_name,
-                        TypingMode::Production { dirty: None },
-                    );
-                    self.harvest_returns_to_registry(app, true);
-                    returns_settled = self.inference_matches(&hints.sig);
-                    if returns_settled || rounds.restamp.passes == FIXPOINT_CAP {
-                        break;
-                    }
-                }
+                // Not retyped until the returns settle before the next re-join: every round then ended on a pass that only confirmed its returns, so a chain of view-fed helpers took two passes per helper instead of one.
+                rounds.restamp.passes += 1;
+                let hints = self.capture_dirty_hints();
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    TypingMode::Production { dirty: None },
+                );
+                self.harvest_returns_to_registry(app, true);
+                returns_settled = self.inference_matches(&hints.sig);
                 self.run_typing_passes(
                     app,
                     &dynamic_render_ivars,
@@ -7161,8 +7156,38 @@ impl Analyzer {
 /// - `only: [...]` limits to the listed actions
 /// - `except: [...]` excludes the listed actions
 /// - both empty → applies to all actions on the controller
+/// The expressions a body's value comes from: the last expression of a
+/// `Seq`, both branches of an `If`, and every arm of a `case/when`.
+/// `None` for a `case/when` without `else`, whose value is nil when no
+/// arm matches.
+///
+/// Shared by the analyzer's relation return ([`body_tail_yields_relation`])
+/// and the lowering's (`lower::scope_chain::relation_return_model`), so
+/// both read the same branches.
+pub(crate) fn value_tails(body: &Expr) -> Option<Vec<&Expr>> {
+    match &*body.node {
+        ExprNode::Seq { exprs } => value_tails(exprs.last()?),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            let mut tails = value_tails(then_branch)?;
+            tails.extend(value_tails(else_branch)?);
+            Some(tails)
+        }
+        ExprNode::Case { arms, .. } => {
+            if !arms.iter().any(|arm| matches!(arm.pattern, crate::expr::Pattern::Wildcard)) {
+                return None;
+            }
+            let mut tails = Vec::new();
+            for arm in arms {
+                tails.extend(value_tails(&arm.body)?);
+            }
+            Some(tails)
+        }
+        _ => Some(vec![body]),
+    }
+}
+
 /// Does this scope/class-method body *return* a relation? True iff
-/// the body's tail expression is a query-builder chain: the outermost
+/// every value tail ([`value_tails`]) is a query-builder chain: the outermost
 /// (tail) hop is a chain builder ([`crate::catalog::is_relation_builder_name`],
 /// or a Relation-context builder once the receiver is already a chain),
 /// a same-model scope call, or a relation root
@@ -7186,13 +7211,17 @@ fn body_tail_yields_relation(
     model_id: &ClassId,
     scope_names: &crate::det::HashSet<Symbol>,
 ) -> bool {
-    let mut e = match &*body.node {
-        ExprNode::Seq { exprs } => match exprs.last() {
-            Some(last) => last,
-            None => return false,
-        },
-        _ => body,
-    };
+    value_tails(body).is_some_and(|tails| {
+        tails.iter().all(|tail| tail_yields_relation(tail, model_id, scope_names))
+    })
+}
+
+fn tail_yields_relation(
+    tail: &Expr,
+    model_id: &ClassId,
+    scope_names: &crate::det::HashSet<Symbol>,
+) -> bool {
+    let mut e = tail;
     loop {
         let ExprNode::Send { recv, method, block, .. } = &*e.node else {
             return false;
@@ -10510,13 +10539,17 @@ fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol,
 /// and presence predicate typed per the `:type` symbol — same shape as
 /// `typed_store`, reusing its type map. A bare `attribute :name` with no
 /// type, or an unrecognized type, falls back to `Untyped` (gradual).
+/// The reader is nilable: the value is nil until written, and each of
+/// these types casts nil to nil.
 fn register_ar_attributes(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
     for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(body) {
         let ty = ty
             .as_ref()
             .and_then(|t| typed_store_ty(t.as_str()))
             .unwrap_or(Ty::Untyped);
-        methods.entry(name.clone()).or_insert(ty.clone());
+        let reader_ty =
+            if matches!(ty, Ty::Untyped) { Ty::Untyped } else { Ty::Union { variants: vec![ty.clone(), Ty::Nil].into() } };
+        methods.entry(name.clone()).or_insert(reader_ty);
         let setter = Symbol::from(format!("{}=", name.as_str()));
         methods.entry(setter).or_insert(ty.clone());
         let predicate = Symbol::from(format!("{}?", name.as_str()));

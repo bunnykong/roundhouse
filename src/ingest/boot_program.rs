@@ -85,7 +85,16 @@ pub(super) fn build<V: Vfs + ?Sized>(
             .findings
             .iter()
             .filter(|f| if engine { is_engine_initializer_constant(f) } else { f.path.starts_with("config/initializers/") })
-            .filter(|f| matches!(initializer_ledger::holder_of(&f.targets, lock, app_namespaces), Holder::App))
+            .filter(|f| match initializer_ledger::holder_of(&f.targets, lock, app_namespaces) {
+                Holder::App => true,
+                // A gem compiled from source runs its own setting, as the real gem would.
+                Holder::Gem { names, .. } if !engine && lock.is_some_and(|l| names.iter().all(|n| l.is_source(n))) => true,
+                Holder::Gem { fate: crate::gems::GemFate::Unknown, .. } if !engine => {
+                    app.boot_gem_constants.extend(f.targets.iter().filter_map(|t| target_constant(t)));
+                    false
+                }
+                _ => false,
+            })
             .map(|f| (f.path.clone(), f.start))
             .collect();
         let Some((path, _)) = wanted.first() else { continue };
@@ -156,6 +165,15 @@ pub(super) fn build<V: Vfs + ?Sized>(
         app.library_classes.push(module);
     }
     Ok(taken)
+}
+
+/// The constant a ledger target calls or writes: `Rack::Attack` of
+/// `Rack::Attack.throttle` and of `Rack::Attack.throttled_responder =`.
+fn target_constant(target: &str) -> Option<String> {
+    let target = target.strip_prefix("block:").unwrap_or(target).trim_start_matches("::");
+    let end = target.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':')).unwrap_or(target.len());
+    let head = target[..end].trim_end_matches(':');
+    head.starts_with(|c: char| c.is_ascii_uppercase()).then(|| head.to_string())
 }
 
 /// A statement of an engine's initializer, by its ledger owner: the

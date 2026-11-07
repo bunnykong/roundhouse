@@ -80,6 +80,58 @@ fn the_solid_queue_surface_runs_on_ruby() {
     app().run_ruby(SCRIPT).assert_passes();
 }
 
+fn recurring_app(schedule: &str) -> emit_and_run::Overlay {
+    app()
+        .write("config/recurring.yml", schedule)
+        .write(
+            "app/jobs/cleanup_job.rb",
+            "class CleanupJob < ActiveJob::Base\n  def perform(value)\n    value + \" cleaned\"\n  end\nend\n",
+        )
+}
+
+#[test]
+fn class_only_recurring_tasks_run_without_command_arms() {
+    recurring_app(
+        "production:\n  cleanup:\n    class: CleanupJob\n    args: [old]\n    schedule: every hour\n  cleanup_again:\n    class: CleanupJob\n    args: [new]\n    schedule: every day\n",
+    )
+    .run_ruby(r#"
+raise "class task" unless CleanupJob.new.perform("old") == "old cleaned"
+raise "second class task" unless CleanupJob.new.perform("new") == "new cleaned"
+["Article.count", ""].each do |command|
+  begin
+    SolidQueue::RecurringJob.new.perform(command)
+    raise "an unknown command ran"
+  rescue ArgumentError => e
+    expected = "recurring command " + command.inspect + " is not in config/recurring.yml as built"
+    raise "message: #{e.message}" unless e.message == expected
+  end
+end
+puts "ok"
+"#)
+    .assert_passes();
+}
+
+#[test]
+fn mixed_recurring_tasks_keep_class_jobs_and_command_arms() {
+    recurring_app(
+        "production:\n  cleanup:\n    class: CleanupJob\n    args: [old]\n    schedule: every hour\n  count_articles:\n    command: Article.count\n    schedule: every day\n",
+    )
+    .run_ruby(r#"
+raise "class task" unless CleanupJob.new.perform("old") == "old cleaned"
+job = SolidQueue::RecurringJob.new
+raise "command task" unless job.perform("Article.count") == Article.count
+begin
+  job.perform("not_in_the_file")
+  raise "an unknown command ran"
+rescue ArgumentError => e
+  expected = 'recurring command "not_in_the_file" is not in config/recurring.yml as built'
+  raise "message: #{e.message}" unless e.message == expected
+end
+puts "ok"
+"#)
+    .assert_passes();
+}
+
 #[test]
 fn a_recurring_command_is_code_in_the_spinel_tree() {
     let (tree, errors) = app().emit(BuildTarget::Spinel);

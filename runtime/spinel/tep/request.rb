@@ -142,10 +142,9 @@ module Tep
       @req_headers["content-type"].downcase.start_with?("application/json")
     end
 
-    # ---- Rack::Request-style accessors (reads only, no .ip yet) ----
-    # These are convenience getters over headers we already parse;
-    # `.ip` would need a sphttp_accept_with_peer C helper before it
-    # can land cleanly, so it's deferred.
+    # ---- Rack::Request-style accessors (reads only) ----
+    # Convenience getters over headers we already parse; the peer's
+    # address is `remote_host`, which the server sets per request.
 
     def host;          @req_headers["host"];        end
     def user_agent;    @req_headers["user-agent"];  end

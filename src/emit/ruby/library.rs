@@ -756,6 +756,7 @@ fn emit_library_class_with_nested(
             .filter(|l| !l.starts_with("require"))
             .collect();
         let Some(block) = child_block(&body, depth, kid.name.0.as_str()) else { continue };
+        let block = within_namespaces(block, parent.name.0.as_str(), kid.name.0.as_str(), classes);
         blocks.push(NestedBlock {
             name: kid.name.0.as_str().to_string(),
             requires: nested_dependencies(kid, kids),
@@ -769,7 +770,7 @@ fn emit_library_class_with_nested(
         let sidecar = super::rbs::emit_library_class_rbs(kid, &rb_path);
         let lines: Vec<&str> = sidecar.content.lines().collect();
         if let Some(block) = child_block(&lines, depth, kid.name.0.as_str()) {
-            sidecar_blocks.push(block);
+            sidecar_blocks.push(within_namespaces(block, parent.name.0.as_str(), kid.name.0.as_str(), classes));
         }
     }
     if blocks.is_empty() {
@@ -992,6 +993,40 @@ impl NestedEmitter<'_> {
 /// segment is the runtime's — with ONE compact header naming the whole
 /// path (`module WebPush::Connections::Stages`), which is renamed to
 /// its last segment.
+/// A child two or more levels below the parent (`Rack::Attack::StoreProxy::RedisProxy`
+/// in `Rack::Attack`) inside the namespaces between them: `child_block` names it by its
+/// last segment, which alone would define `Rack::Attack::RedisProxy`.
+fn within_namespaces(block: String, parent: &str, child: &str, classes: &[LibraryClass]) -> String {
+    let Some(relative) = child.strip_prefix(&format!("{parent}::")) else { return block };
+    let segments: Vec<&str> = relative.split("::").collect();
+    let Some((_, between)) = segments.split_last() else { return block };
+    // Already inside them: `unwrapped` kept the source's own `module StoreProxy`.
+    let first = block.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+    // Not a bare prefix test: `module StoreProxyHelpers` would pass for `StoreProxy`.
+    let opens = |kw: &str| {
+        first.strip_prefix(&format!("{kw} {}", between.first().copied().unwrap_or(""))).is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', ';']))
+    };
+    if between.is_empty() || opens("module") || opens("class") {
+        return block;
+    }
+    let mut out = String::new();
+    let mut name = parent.to_string();
+    for (i, seg) in between.iter().enumerate() {
+        name = format!("{name}::{seg}");
+        let keyword = if classes.iter().any(|c| c.name.0.as_str() == name && !c.is_module) { "class" } else { "module" };
+        out.push_str(&format!("{}{keyword} {seg}\n", "  ".repeat(i)));
+    }
+    out.push_str(&indent_lines(&block, between.len()));
+    out.push('\n');
+    for i in (0..between.len()).rev() {
+        out.push_str(&format!("{}end", "  ".repeat(i)));
+        if i > 0 {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn child_block(body: &[&str], depth: usize, full_name: &str) -> Option<String> {
     let first = body.iter().position(|l| !l.trim().is_empty())?;
     let header = body[first];
@@ -4744,51 +4779,11 @@ fn view_helpers_path() -> Vec<Symbol> {
 ///      `ActionView::ViewHelpers.name(args)`.
 /// Only receiver-less Sends are rewritten in (3)/(4): a call with a receiver
 /// already resolves, and a bare identifier with no call shape is a local read.
-fn rewrite_helper_calls(
-    expr: &mut Expr,
-    index: &HashMap<Symbol, ClassId>,
-    route_helpers: &crate::det::HashSet<Symbol>,
-    url_helper_classes: &crate::det::HashSet<Symbol>,
-    rewrite_request: bool,
-    own_methods: &crate::det::HashSet<Symbol>,
-    own_params: &crate::det::HashSet<Symbol>,
-    view_visible: &std::collections::BTreeSet<Symbol>,
-) {
-    expr.node.for_each_child_mut(&mut |c| {
-        rewrite_helper_calls(
-            c,
-            index,
-            route_helpers,
-            url_helper_classes,
-            rewrite_request,
-            own_methods,
-            own_params,
-            view_visible,
-        )
-    });
-
-    // Not left on `self` in a view or helper module: a helper reached as `self.x` is the bare `x` below, and the module function has no such method. A same-named param keeps `self`, which a bare call would read instead.
-    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
-        if rewrite_request
-            && matches!(&*r.node, ExprNode::SelfRef)
-            && (index.contains_key(method) || view_visible.contains(method))
-            && !own_methods.contains(method)
-            && !own_params.contains(method)
-        {
-            let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
-            *recv = None;
-        }
-    }
-
-    // Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
-    // spinel (frozen literals) — lobsters' link_to_different_page does
-    // `path.sub!(/…/, "")` on a route-helper literal (`active_path` → a
-    // frozen "/active"). For the in-place string mutators whose bang form
-    // modifies self and returns self-or-nil, the non-destructive
-    // `<lvalue> = <lvalue>.<m>(args)` is equivalent when the bang return is
-    // unused (statement position) and is frozen-safe. Assignable receiver
-    // (Var/Ivar) only; `slice!` and friends (which return the removed part,
-    // not the modified string) are deliberately excluded.
+/// Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
+/// spinel (frozen literals). For the in-place string mutators whose bang
+/// form modifies self and returns self-or-nil, `<lvalue> = <lvalue>.<m>(args)`
+/// is equivalent when the bang's value is unused, and frozen-safe.
+fn bang_to_reassign(expr: &mut Expr) {
     let bang_rewrite: Option<Symbol> =
         if let ExprNode::Send { recv: Some(r), method, block: None, .. } = &*expr.node {
             // A reserved-word local (`class:`) or a numbered parameter
@@ -4833,7 +4828,52 @@ fn rewrite_helper_calls(
             ExprNode::Send { recv: Some(r), method: base, args, block: None, parenthesized },
         );
         *expr.node = ExprNode::Assign { target, value: call };
-        return;
+    }
+}
+
+fn rewrite_helper_calls(
+    expr: &mut Expr,
+    index: &HashMap<Symbol, ClassId>,
+    route_helpers: &crate::det::HashSet<Symbol>,
+    url_helper_classes: &crate::det::HashSet<Symbol>,
+    rewrite_request: bool,
+    own_methods: &crate::det::HashSet<Symbol>,
+    own_params: &crate::det::HashSet<Symbol>,
+    view_visible: &std::collections::BTreeSet<Symbol>,
+) {
+    expr.node.for_each_child_mut(&mut |c| {
+        rewrite_helper_calls(
+            c,
+            index,
+            route_helpers,
+            url_helper_classes,
+            rewrite_request,
+            own_methods,
+            own_params,
+            view_visible,
+        )
+    });
+
+    // Not left on `self` in a view or helper module: a helper reached as `self.x` is the bare `x` below, and the module function has no such method. A same-named param keeps `self`, which a bare call would read instead.
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+        if rewrite_request
+            && matches!(&*r.node, ExprNode::SelfRef)
+            && (index.contains_key(method) || view_visible.contains(method))
+            && !own_methods.contains(method)
+            && !own_params.contains(method)
+        {
+            let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
+            *recv = None;
+        }
+    }
+
+    // Only a statement whose value nothing reads: `mod ||= path.gsub!(…)` tests the bang call's nil (addressable's normalize_path).
+    if let ExprNode::Seq { exprs } = &mut *expr.node
+        && let Some((_, statements)) = exprs.split_last_mut()
+    {
+        for statement in statements {
+            bang_to_reassign(statement);
+        }
     }
 
     // ActiveSupport `String#pluralize(count)` — count-aware inflection of
@@ -5083,15 +5123,16 @@ fn rewrite_helper_calls(
 
     // Cases 3/4: a bare call resolving to an app or framework helper module.
     let path: Option<Vec<Symbol>> = match &*expr.node {
-        ExprNode::Send { recv: None, method, args, block, .. } => {
+        ExprNode::Send { recv: None, method, args, block, parenthesized } => {
             // A method's own PARAM shadows the helper index only as a BARE
-            // reference (no args, no block) — that's a local read. `tag(x)`
-            // or `tag { }` is a method call that still needs helper
-            // qualification, so a same-named param must NOT capture it
-            // (that dropped the qualification → latent NameError). Real
-            // own-METHODS shadow at any arity (a self-dispatch).
+            // reference (no args, no block, no parens) — that's a local
+            // read. `tag(x)`, `tag()` or `tag { }` is a method call that
+            // still needs helper qualification, so a same-named param must
+            // NOT capture it (that dropped the qualification → latent
+            // NameError, or a partial local read in place of the helper's
+            // call). Real own-METHODS shadow at any arity (a self-dispatch).
             let param_shadow =
-                own_params.contains(method) && args.is_empty() && block.is_none();
+                own_params.contains(method) && args.is_empty() && block.is_none() && !parenthesized;
             if own_methods.contains(method) || param_shadow {
                 // Self wins: a bare call naming a method the enclosing
                 // class itself defines is a self-dispatch (Tag#to_param's

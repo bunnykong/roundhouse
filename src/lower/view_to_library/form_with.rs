@@ -1599,6 +1599,8 @@ mod tests {
         ViewCtx {
             locals: Vec::new(),
             ivar_params: Vec::new(),
+            assigned_locals: Vec::new(),
+            nested_assigned_locals: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             view_name: String::new(),

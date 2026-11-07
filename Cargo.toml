@@ -60,6 +60,12 @@ lsp-types = "0.97"
 # sender type it clones. Keep version-compatible with lsp-server's.
 crossbeam-channel = "0.5"
 
+# The global allocator of Linux builds, set in `src/lib.rs`; Linux is where
+# it was measured. `v2` builds mimalloc's 2.x line rather than the crate's
+# default 3.x: the same speed here, and a lower peak memory on most runs.
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc = { version = "0.1.52", default-features = false, features = ["v2"] }
+
 [build-dependencies]
 # (none yet)
 
@@ -100,6 +106,13 @@ debug = 1
 # Dependencies are never stepped into; their debuginfo is pure cost.
 [profile.dev.package."*"]
 debug = false
+
+# Debug and test builds, among them the CI jobs that run
+# `target/debug/roundhouse`, allocate through mimalloc too. Built
+# unoptimized, as dev dependencies are, it was no faster there than
+# glibc's allocator; optimized, it takes 8% off a Campfire transpile.
+[profile.dev.package.libmimalloc-sys]
+opt-level = 3
 
 # Hundreds of integration-test binaries repeatedly run the compiler pipeline.
 # Light optimization reduces that work without the build cost of release mode.

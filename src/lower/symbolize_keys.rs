@@ -229,6 +229,14 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
             Some(call)
         }
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if let Some(ty) = r.ty.as_ref()
+                .and_then(|recv| crate::analyze::hash_keys::deep_stringify_keys(recv, method, args)) =>
+        {
+            let mut call = active_support_call(expr.span, "deep_stringify_keys", r.clone());
+            call.ty = Some(ty);
+            Some(call)
+        }
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if method.as_str() == "stringify_keys" && args.is_empty() =>
         {
             match r.ty.as_ref() {

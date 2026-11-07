@@ -363,9 +363,9 @@ module ActionDispatch
 
     def trusted_forwarded_peer?
       ip = @remote_ip.to_s
-      # An empty peer is not loopback. Spinel's socket address is still
-      # unimplemented, so `remote_ip` is "" there; trusting that would
-      # honor a client-supplied X-Forwarded-Host on every connection.
+      # An empty peer is not loopback: a UNIX-socket connection on the
+      # Spinel server has no address, and trusting that would honor a
+      # client-supplied X-Forwarded-Host on every such connection.
       return false if ip.empty?
       return true if ip == "127.0.0.1" || ip == "::1" || ip == "localhost"
       return true if ip.start_with?("10.") || ip.start_with?("192.168.") || ip.start_with?("169.254.")

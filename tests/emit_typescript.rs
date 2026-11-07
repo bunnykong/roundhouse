@@ -299,6 +299,7 @@ fn length_validation_emits_with_options_object() {
         attributes: Row::closed(),
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
+                prepend: false,
                 attribute: Symbol::from("body"),
                 rules: vec![ValidationRule::Length {
                     min: Some(10),

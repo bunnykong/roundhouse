@@ -19,22 +19,23 @@ use super::super::util::{
 /// table is `push_subscriptions`.
 pub type TablePrefixes = crate::det::HashMap<String, String>;
 
+fn literal_prefix(def: &ruby_prism::DefNode<'_>) -> Option<String> {
+    if constant_id_str(&def.name()) != "table_name_prefix" {
+        return None;
+    }
+    let stmts = flatten_statements(def.body()?);
+    if stmts.len() != 1 {
+        return None;
+    }
+    string_value(&stmts[0])
+}
+
 /// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`,
 /// or the same def inside the module's `class << self`.
 /// Deliberately narrow: only a module-level singleton def whose body is a
 /// single string literal. A computed prefix would have to run to be known,
 /// and nothing in the corpus writes one.
 pub fn ingest_table_name_prefixes(source: &[u8], file: &str) -> TablePrefixes {
-    fn literal_prefix(def: &ruby_prism::DefNode<'_>) -> Option<String> {
-        if constant_id_str(&def.name()) != "table_name_prefix" {
-            return None;
-        }
-        let stmts = flatten_statements(def.body()?);
-        if stmts.len() != 1 {
-            return None;
-        }
-        string_value(&stmts[0])
-    }
     let result = super::super::prism::parse(source, file);
     let root = result.node();
     let mut out = TablePrefixes::default();
@@ -151,10 +152,11 @@ pub fn ingest_isolated_namespace_prefixes(source: &[u8], file: &str) -> TablePre
 }
 
 /// Each class one file declares with its own `self.table_name_prefix =
-/// "…"`, by full name. Rails keeps the prefix in a class attribute, so a
-/// model inherits it from its abstract base: an abstract
-/// `PrefixedRecord` that sets `legacy_` gives its
-/// models (`Line`, …) that name no table `legacy_lines`.
+/// "…"`, or a `def self.table_name_prefix` answering a literal, by full
+/// name. Rails keeps the prefix in a class attribute and a class method
+/// inherits just the same, so a model takes it from its abstract base: an
+/// abstract `PrefixedRecord` that sets `legacy_` gives its models (`Line`,
+/// …) that name no table `legacy_lines`.
 pub fn ingest_class_table_prefixes(source: &[u8], file: &str) -> TablePrefixes {
     let result = super::super::prism::parse(source, file);
     let root = result.node();
@@ -212,14 +214,47 @@ pub fn inherited_table_prefixes(own: &TablePrefixes, pairs: &[(String, String)])
     out
 }
 
-/// `self.table_name_prefix = "three_d_secure_"` in a model body: the
+/// `self.table_name_prefix = "three_d_secure_"` in a model body, or GitLab's
+/// `def self.table_name_prefix; 'ci_'; end` on `Ci::ApplicationRecord`: the
 /// class's own prefix, which wins over any namespace module's.
 pub(super) fn explicit_table_prefix(body: ruby_prism::Node<'_>) -> Option<String> {
-    explicit_class_setting(body, "table_name_prefix=")
+    let stmts = flatten_statements(body);
+    // As in Ruby, the last definition wins; a computed one is simply unknown.
+    let mut defined = None;
+    for stmt in &stmts {
+        if let Some(def) = stmt.as_def_node() {
+            if def.receiver().is_some_and(|r| r.as_self_node().is_some()) {
+                record_prefix_definition(&def, &mut defined);
+            }
+        } else if let Some(sclass) = stmt.as_singleton_class_node() {
+            if sclass.expression().as_self_node().is_none() {
+                continue;
+            }
+            let Some(body) = sclass.body() else { continue };
+            for inner in flatten_statements(body) {
+                if let Some(def) = inner.as_def_node().filter(|d| d.receiver().is_none()) {
+                    record_prefix_definition(&def, &mut defined);
+                }
+            }
+        }
+    }
+    match defined {
+        Some(prefix) => prefix,
+        None => explicit_class_setting(stmts, "table_name_prefix="),
+    }
 }
 
-fn explicit_class_setting(body: ruby_prism::Node<'_>, setter: &str) -> Option<String> {
-    for stmt in flatten_statements(body) {
+fn record_prefix_definition(
+    def: &ruby_prism::DefNode<'_>,
+    defined: &mut Option<Option<String>>,
+) {
+    if constant_id_str(&def.name()) == "table_name_prefix" {
+        *defined = Some(literal_prefix(def));
+    }
+}
+
+fn explicit_class_setting(stmts: Vec<ruby_prism::Node<'_>>, setter: &str) -> Option<String> {
+    for stmt in stmts {
         let Some(call) = stmt.as_call_node() else {
             continue;
         };

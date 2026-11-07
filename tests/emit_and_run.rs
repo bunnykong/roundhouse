@@ -9,6 +9,8 @@
 mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/deep_stringify_keys.rs"]
+mod deep_stringify_keys;
 #[path = "emit_and_run/controller_content_type_writer.rs"]
 mod controller_content_type_writer;
 #[path = "support/time_change_usec.rs"]
@@ -17,6 +19,8 @@ mod time_change_usec_contract;
 mod time_change_usec;
 #[path = "emit_and_run/rate_limits.rs"]
 mod rate_limits;
+#[path = "emit_and_run/config_for.rs"]
+mod config_for;
 #[path = "emit_and_run/rack_mounts.rs"]
 mod rack_mounts;
 #[path = "support/i18n_locales_app.rs"]
@@ -107,6 +111,8 @@ mod discard;
 mod callback_abort;
 #[path = "emit_and_run/dirty_clear_restore.rs"]
 mod dirty_clear_restore;
+#[path = "emit_and_run/will_save_change_to_attribute.rs"]
+mod will_save_change_to_attribute;
 #[path = "emit_and_run/pundit_source.rs"]
 mod pundit_source;
 #[path = "emit_and_run/constantize_by_name.rs"]
@@ -316,6 +322,10 @@ mod cable_allowed_origins;
 mod public_file_server_headers_contract;
 #[path = "emit_and_run/public_file_server_headers.rs"]
 mod public_file_server_headers;
+#[path = "support/puma_boot.rs"]
+mod puma_boot_contract;
+#[path = "emit_and_run/puma_boot.rs"]
+mod puma_boot;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "emit_and_run/cable_actions.rs"]
@@ -326,6 +336,12 @@ mod cable_broadcast_json_contract;
 mod cable_transmit_contract;
 #[path = "emit_and_run/cable_transmit.rs"]
 mod cable_transmit;
+#[path = "support/cable_stop_all_streams.rs"]
+mod cable_stop_all_streams_contract;
+#[path = "emit_and_run/cable_stop_all_streams.rs"]
+mod cable_stop_all_streams;
+#[path = "emit_and_run/cable_stop_all_streams_replacement.rs"]
+mod cable_stop_all_streams_replacement;
 #[path = "emit_and_run/cable_broadcast_json.rs"]
 mod cable_broadcast_json;
 #[path = "support/index_with.rs"]
@@ -750,6 +766,50 @@ fn model_concern_delegate_through_belongs_to_runs() {
     let run = delegate_association::overlay().run_ruby(delegate_association::ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("model concern delegate passed"));
+}
+
+/// A module that has no def of its own but extends one, and fills itself
+/// from its body (doorkeeper's `GrantFlow`: `extend Registry`, then
+/// `register(...)`), is a module code calls, not a bare namespace.
+#[test]
+fn a_module_that_extends_a_registry_answers_its_calls() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/flow_registry.rb",
+            "module FlowRegistry\n  def register(name, label)\n    flows[name] = label\n  end\n\n  def get(name)\n    flows[name]\n  end\n\n  def flows\n    @flows ||= {}\n  end\nend\n",
+        )
+        .write(
+            "app/models/grant_flows.rb",
+            "module GrantFlows\n  self.extend FlowRegistry\n\n  register(:code, \"authorization code\")\n  CODE = get(:code)\n  register(:token, \"implicit\")\nend\n",
+        )
+        .run_ruby(
+            r##"raise "GrantFlows.get: #{GrantFlows.get(:code).inspect}" unless GrantFlows.get(:code) == "authorization code" && GrantFlows.get(:token) == "implicit"
+raise "a constant between the calls: #{GrantFlows::CODE.inspect}" unless GrantFlows::CODE == "authorization code"
+puts "registry module passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("registry module passed"));
+}
+
+/// `String#strip_heredoc` as Rails takes it: the least indentation of a
+/// line that is not blank, by String order, off each line's start.
+#[test]
+fn strip_heredoc_runs_in_emitted_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/heredoc_probe.rb",
+            "class HeredocProbe\n  def self.message(name)\n    <<-TEXT.strip_heredoc\n      Hello #{name},\n        indented\n\n      bye\n    TEXT\n  end\n\n  def self.mixed\n    \" \\t a\\n\\t  b\\n\".strip_heredoc\n  end\n\n  def self.copies\n    plain = +\"a\\nb\\n\"\n    out = plain.strip_heredoc\n    out << \"x\"\n    frozen = \"  a\\n\".dup.freeze\n    [plain, out.equal?(plain), frozen.strip_heredoc.frozen?, (+\"  a\\n\").strip_heredoc.frozen?]\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"raise "strip_heredoc: #{HeredocProbe.message("Ann").inspect}" unless HeredocProbe.message("Ann") == "Hello Ann,\n  indented\n\nbye\n"
+raise "strip_heredoc by String order: #{HeredocProbe.mixed.inspect}" unless HeredocProbe.mixed == " \t a\nb\n"
+raise "strip_heredoc copies and keeps frozenness: #{HeredocProbe.copies.inspect}" unless HeredocProbe.copies == ["a\nb\n", false, true, false]
+puts "strip_heredoc passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("strip_heredoc passed"));
 }
 
 #[test]
@@ -7848,6 +7908,52 @@ end
         .assert_passes();
 }
 
+fn time_zone_mapping_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\n  create_table :reminders do |t|\n    t.string :time_zone\n  end\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write(
+            "app/models/reminder.rb",
+            r#"class Reminder < ApplicationRecord
+  def canonical_time_zone
+    zone = ActiveSupport::TimeZone[time_zone]
+    zone ? ActiveSupport::TimeZone::MAPPING.fetch(zone.name, zone.name) : time_zone
+  end
+
+  def self.rails_zone_count
+    ::ActiveSupport::TimeZone::MAPPING.size
+  end
+end
+"#,
+        )
+}
+
+/// `ActiveSupport::TimeZone::MAPPING` answers Rails' IANA identifier for a
+/// Rails zone name; an IANA identifier is not a key, so `fetch` with the
+/// name as its default passes it through. Expected values are
+/// ActiveSupport 8.1's.
+#[test]
+fn time_zone_mapping_reads_rails_zone_names() {
+    time_zone_mapping_app()
+        .run_ruby(
+            r#"got = ["Tokyo", "Eastern Time (US & Canada)", "UTC", "Asia/Tokyo", "Nowhere"].map { |name| Reminder.new(time_zone: name).canonical_time_zone }
+raise got.inspect unless got == ["Asia/Tokyo", "America/New_York", "Etc/UTC", "Asia/Tokyo", "Nowhere"]
+raise Reminder.rails_zone_count.inspect unless Reminder.rails_zone_count == 152
+"#,
+        )
+        .assert_passes();
+}
+
+/// The table is the ruby-family runtime's; a strict target reports the constant instead of emitting a name its runtime does not define.
+#[test]
+fn time_zone_mapping_is_unsupported_on_strict_targets() {
+    for (target, name) in [(roundhouse::project::BuildTarget::Rust, "rust"), (roundhouse::project::BuildTarget::Typescript, "typescript")] {
+        let (_emitted, errors) = time_zone_mapping_app().emit(target);
+        let want = format!("ruby_family_runtime_constant not supported ({name}): ActiveSupport::TimeZone::MAPPING");
+        assert_eq!(errors.iter().filter(|e| e.contains(&want)).count(), 2, "{target:?}: {errors:?}");
+    }
+}
+
 /// A class method `ApplicationRecord` defines runs on a subclass's relation,
 /// as Rails' scoping runs it: a relation-returning one filters that
 /// relation, and one that maps `pluck` rows to indifferent hashes answers
@@ -10190,6 +10296,47 @@ fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
             .check_errors();
         assert!(errors.iter().any(|e| e.contains("nested def")), "{concern}: {errors:?}");
     }
+}
+
+/// A block that includes a module the program defines hoists its defs
+/// when that module defines none of their names (doorkeeper's model
+/// mixins), and reports the one it does define: there the block's def is
+/// the includer's own in Ruby, ahead of the module.
+#[test]
+fn included_block_defs_beside_an_include_hoist_unless_the_module_defines_them() {
+    let helper = "module Shouty::Tone\n  def tone\n    \"module\"\n  end\nend\n";
+    emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include ::Shouty::Tone\n    def shout\n      title.upcase + tone\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .write(
+            "test/models/shouty_test.rb",
+            "require \"test_helper\"\n\nclass ShoutyTest < ActiveSupport::TestCase\n  test \"a def beside an include runs on the includer\" do\n    assert_equal \"HImodule\", Article.new(title: \"hi\").shout\n  end\nend\n",
+        )
+        .run_test("test/models/shouty_test.rb")
+        .assert_passes();
+    let errors = emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include ::Shouty::Tone\n    def tone\n      \"block\"\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("nested def")), "{errors:?}");
+    // An include inside a begin body is the block's include too.
+    let errors = emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    begin\n      include ::Shouty::Tone\n    rescue NameError\n      nil\n    end\n    def tone\n      \"block\"\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("nested def")), "{errors:?}");
 }
 
 /// The inner concern's own `included do` runs on the includer too: its
@@ -12927,14 +13074,11 @@ puts "string inflections passed"
 
 /// #293: `tableize` needs Rails' plural rules, which the runtime does not
 /// carry (its `pluralize_word` keeps a word that ends in "s", where Rails
-/// answers "statuses"), and `strip_heredoc` has no runtime body. Both are
-/// refused at check time, not emitted onto a String no runtime reopens.
+/// answers "statuses"). It is refused at check time, not emitted onto a
+/// String no runtime reopens.
 #[test]
 fn string_extensions_without_a_runtime_body_are_refused() {
-    for (call, method) in [
-        (r#""Status".tableize"#, "tableize"),
-        (r#""  gear\n  boxes\n".strip_heredoc"#, "strip_heredoc"),
-    ] {
+    for (call, method) in [(r#""Status".tableize"#, "tableize")] {
         let errors = emit_and_run::real_blog()
             .edit(
                 "app/models/article.rb",
@@ -19268,7 +19412,7 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     page = %({"component":"pages/show","props":{"title":"Hello \\u003c/script\\u003e","count":#{Article.count},"label":"eager-lambda"},) +
       %("url":"/pages/show","version":null,"encryptHistory":false,"clearHistory":false})
-    assert_includes response.body, %(<script data-page="app" type="application/json">#{page}</script>\n<div id="app"></div>)
+    assert_includes response.body, %(<script data-page="app" type="application/json">#{page}</script>\n<div id="app"></div>\n\n    </main>)
     assert_includes response.body, "<title>Real Blog</title>"
     assert_equal "X-Inertia", response.headers["vary"]
   end
@@ -19566,6 +19710,7 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
     end
     assert_includes response.body, %(<div id="app" data-page="{&quot;component&quot;:&quot;pages/show&quot;,&quot;props&quot;:{},) +
       %(&quot;url&quot;:&quot;/pages/show&quot;,&quot;version&quot;:&quot;#{format("%016x", digest)}&quot;,)
+    assert_includes response.body, %("></div>\n\n    </main>)
     assert File.exist?("public/vite/assets/inertia-abc.js")
   end
 end
@@ -20646,6 +20791,12 @@ mod solid_queue_worker_contract;
 mod solid_queue_surface;
 #[path = "emit_and_run/controller_surface.rs"]
 mod controller_surface;
+#[path = "emit_and_run/rack_attack.rs"]
+mod rack_attack;
+#[path = "support/addressable_gem.rs"]
+mod addressable_gem;
+#[path = "emit_and_run/addressable.rs"]
+mod addressable;
 #[path = "emit_and_run/solid_queue_worker.rs"]
 mod solid_queue_worker;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
@@ -20959,3 +21110,330 @@ fn full_forwarding_keeps_the_native_argument_contract() {
 }
 #[path = "emit_and_run/form_with_nilable_record.rs"]
 mod form_with_nilable_record;
+
+#[path = "support/link_to_unless.rs"]
+mod link_to_unless;
+
+/// `link_to_unless` links when its condition doesn't hold, and with a
+/// block, it and `link_to_if` show the block's output when no link is made.
+#[test]
+fn link_to_unless_and_the_block_form_render_as_rails() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_unless::VIEW)
+        .write("lib/tracker.rb", link_to_unless::TRACKER)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_unless::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_unless_and_the_block_form_render_as_rails_on_spinel() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_unless::VIEW)
+        .write("lib/tracker.rb", link_to_unless::TRACKER)
+        .run_spinel(&helper_escape_at_output::render_script(link_to_unless::RENDERS))
+        .assert_passes();
+}
+
+#[path = "support/link_to_if_eval_order.rs"]
+#[allow(dead_code)]
+mod link_to_if_eval_order;
+
+/// `link_to_if` and `link_to_unless` evaluate the condition, the name and
+/// the url, in that order, whether or not they link, and before the block.
+#[test]
+fn link_to_if_evaluates_its_arguments_as_rails() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::VIEW)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_if_eval_order::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_if_evaluates_its_arguments_as_rails_on_spinel() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::VIEW)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+        .run_spinel(&helper_escape_at_output::render_script(link_to_if_eval_order::RENDERS))
+        .assert_passes();
+}
+
+/// A partial local named `url` and an explicit `url()` to the app helper of
+/// that name: the call runs, with its effect, when no link is made; the
+/// bare `url` reads the local. Spinel doesn't build the probe (the link's
+/// url reads the local as a record, `url_path(url.id)`), so it is checked
+/// on the Ruby target, and in the emitted partial.
+#[test]
+fn link_to_if_calls_an_explicit_url_beside_a_url_local() {
+    url_call_app()
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_if_eval_order::URL_CALL_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+    let (emitted, _) = url_call_app().emit(roundhouse::project::BuildTarget::Ruby);
+    let part = std::fs::read_to_string(emitted.join("app/views/probes/_part.rb")).expect("probes/_part.rb");
+    assert!(part.contains("_ = UrlProbeHelper.url") && part.matches("_ = ").count() == 1, "{part}");
+}
+
+fn url_call_app() -> emit_and_run::Overlay {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::URL_CALL_SHOW)
+        .write("app/views/probes/_part.html.erb", link_to_if_eval_order::URL_CALL_PART)
+        .write("app/helpers/url_probe_helper.rb", link_to_if_eval_order::URL_HELPER)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+}
+
+/// A block parameter shadowing a template local only an earlier nested
+/// body assigned is refused, with the reason; one assigned in an `each`
+/// block, or at the top level as well, lowers.
+#[test]
+fn link_to_if_shadowing_a_nested_local_is_refused() {
+    let refusals = |markup: &str| -> Vec<String> {
+        html_safe_method_owner::app()
+            .write("app/views/probes/show.html.erb", markup)
+            .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+            .check_errors()
+            .into_iter()
+            .filter(|e| e.contains("earlier nested block"))
+            .collect()
+    };
+    let refused = refusals(link_to_if_eval_order::NESTED_REFUSED);
+    assert!(refused.len() == 1 && refused[0].contains("link_to_if not supported"), "{refused:?}");
+    // Emitted anyway (`--allow-unsupported`), the call raises where it
+    // runs: not the blockless helper, which would drop the block.
+    let (emitted, _) = html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::NESTED_REFUSED)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let view = std::fs::read_to_string(emitted.join("app/views/probes/show.rb")).expect("probes/show.rb");
+    assert!(view.contains("raise(\"link_to_if's block parameter `x` shadows") && !view.contains("link_to_if("), "{view}");
+    for markup in link_to_if_eval_order::NESTED_LOWERED {
+        assert!(refusals(markup).is_empty(), "{markup}");
+    }
+}
+
+#[path = "support/simple_format.rs"]
+mod simple_format;
+#[path = "support/link_to_computed_url.rs"]
+mod link_to_computed_url;
+
+/// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
+/// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
+#[test]
+fn simple_format_renders_as_rails() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", simple_format::VIEW)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(simple_format::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn simple_format_renders_as_rails_on_spinel() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", simple_format::VIEW)
+        .run_spinel(&helper_escape_at_output::render_script(simple_format::RENDERS))
+        .assert_passes();
+}
+
+/// The default `sanitize: true` runs Rails' HTML sanitizer, which isn't
+/// modeled: refused with the reason, as is a `sanitize:` that isn't a
+/// literal `false` or `nil`.
+#[test]
+fn simple_format_that_sanitizes_is_refused() {
+    for markup in [
+        "<%= simple_format(\"a\") %>\n",
+        "<%= simple_format(\"a\", class: \"k\") %>\n",
+        "<%= simple_format(\"a\", {}, sanitize: true) %>\n",
+        "<%= simple_format(\"a\", {}, wrapper_tag: :div) %>\n",
+        "<%= simple_format(\"a\", {}, sanitize: @article.nil?) %>\n",
+    ] {
+        let errors = html_safe_method_owner::app().write("app/views/probes/show.html.erb", markup).check_errors();
+        let refused: Vec<_> = errors.iter().filter(|e| e.contains("simple_format")).collect();
+        assert!(refused.len() == 1 && refused[0].contains("simple_format not supported") && refused[0].contains("HTML sanitizer"), "{markup}: {errors:?}");
+    }
+}
+
+/// Options that aren't a literal hash of `sanitize: false` and a literal
+/// `wrapper_tag:` are left as written and refused.
+#[test]
+fn simple_format_with_options_it_does_not_model_is_refused() {
+    for markup in [
+        "<%= simple_format(\"a\", {}, sanitize: false, wrapper_tag: @article.label) %>\n",
+        "<%= simple_format(\"a\", {}, sanitize: false, sanitize_options: {}) %>\n",
+        "<% opts = { sanitize: false } %><%= simple_format(\"a\", {}, opts) %>\n",
+        "<% opts = { sanitize: false } %><%= simple_format(\"a\", {}, **opts) %>\n",
+        "<%= simple_format(\"a\", nil, sanitize: false) %>\n",
+    ] {
+        let errors = html_safe_method_owner::app().write("app/views/probes/show.html.erb", markup).check_errors();
+        let refused: Vec<_> = errors.iter().filter(|e| e.contains("simple_format")).collect();
+        assert!(refused.len() == 1 && refused[0].contains("simple_format not supported") && refused[0].contains("literal options hash"), "{markup}: {errors:?}");
+    }
+}
+
+/// A library class's `simple_format` isn't lowered (an `include
+/// ActionView::Helpers::TextHelper` there doesn't define it, #1824), so it
+/// is refused rather than reaching the emit.
+#[test]
+fn simple_format_in_a_library_class_is_refused() {
+    let errors = html_safe_method_owner::app()
+        .write(
+            "app/lib/note_formatter.rb",
+            "class NoteFormatter\n  include ActionView::Helpers::TextHelper\n\n  def initialize(text)\n    @text = text\n  end\n\n  def to_s\n    simple_format(@text, {}, sanitize: false)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("simple_format not supported") && e.contains("library class")), "{errors:?}");
+}
+
+/// An app's own `simple_format` is what Rails calls, ahead of ActionView's:
+/// it is neither lowered nor refused.
+#[test]
+fn an_app_defined_simple_format_is_left_to_the_app() {
+    let overlay = || {
+        html_safe_method_owner::app()
+            .write("app/views/probes/show.html.erb", "L0:<%= simple_format(\"a\") %>|<%= simple_format(\"b\", {}, sanitize: false) %>\n")
+            .write("app/helpers/application_helper.rb", "module ApplicationHelper\n  def simple_format(text, html_options = {}, options = {})\n    \"own:\" + text\n  end\nend\n")
+    };
+    let errors = overlay().check_errors();
+    assert!(!errors.iter().any(|e| e.contains("simple_format")), "{errors:?}");
+    overlay()
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(&["L0:own:a|own:b"]))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// A controller's `helper_method` of `simple_format`, `pluralize` or
+/// `content_tag` that reads the controller's state: Rails calls it in the
+/// templates that controller renders, and ActionView's in the others. That
+/// isn't decided statically, so each call is refused: one error per call,
+/// whether the rendering controller declares it, another controller does,
+/// or an ancestor does. An app helper of the same name is no owner either:
+/// Rails calls the controller's in its templates and the helper's in the
+/// others. A template no request reaches gets a warning.
+#[test]
+fn a_controller_helper_method_shadowing_a_view_helper_is_refused() {
+    let own = "  helper_method :simple_format, :pluralize, :content_tag\n\n  def simple_format(text, html_options = {}, options = {})\n    @own ||= \"own:\"\n    @own + text\n  end\n\n  def pluralize(count, word)\n    @own ||= \"own:\"\n    @own + word\n  end\n\n  def content_tag(name, text)\n    @own ||= \"own:\"\n    @own + text\n  end\n\n";
+    let helper = "module ApplicationHelper\n  def simple_format(text, html_options = {}, options = {})\n    \"helper:\" + text\n  end\n\n  def pluralize(count, word)\n    \"helper:\" + word\n  end\n\n  def content_tag(name, text)\n    \"helper:\" + text\n  end\nend\n";
+    let view = "L0:<%= simple_format(\"a\", {}, sanitize: false) %>|<%= pluralize(2, \"b\") %>|<%= content_tag(:i, \"c\") %>\n";
+    for (file, header, with_helper) in [
+        ("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n", false),
+        ("app/controllers/comments_controller.rb", "class CommentsController < ApplicationController\n", false),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n", false),
+        ("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n", true),
+        ("app/controllers/comments_controller.rb", "class CommentsController < ApplicationController\n", true),
+    ] {
+        // The fixture's own templates call `pluralize` too: the probe's
+        // calls are what an empty probe doesn't refuse.
+        let refused = |view: &str| -> Vec<String> {
+            let overlay = html_safe_method_owner::app()
+                .write("app/views/probes/show.html.erb", view)
+                .write("app/views/articles/orphan.html.erb", view)
+                .edit(file, header, &format!("{header}{own}"));
+            let overlay = if with_helper { overlay.write("app/helpers/application_helper.rb", helper) } else { overlay };
+            overlay
+                .check_errors()
+                .into_iter()
+                .filter(|e| e.contains("isn't decided statically"))
+                .collect()
+        };
+        let baseline = refused("L0:\n");
+        let errors: Vec<String> = refused(view).into_iter().filter(|e| !baseline.contains(e)).collect();
+        assert_eq!(errors.len(), 3, "{file} (helper: {with_helper}): {errors:?}");
+        for name in ["simple_format", "pluralize", "content_tag"] {
+            assert!(errors.iter().any(|e| e.contains(&format!("`helper_method :{name}`"))), "{file}: {name}: {errors:?}");
+        }
+    }
+}
+
+/// A controller's arg-pure `helper_method :content_tag` has a class-side
+/// clone, which serves every template only when every controller is that
+/// controller or descends from it (`ApplicationController`'s:
+/// `promoted_module_helpers_and_controller_helpers_keep_their_view_dispatch`).
+/// `CommentsController`'s doesn't reach `ProbesController`'s templates,
+/// where Rails calls ActionView's, so the call is refused.
+#[test]
+fn a_pure_helper_method_of_one_controller_is_refused_in_the_others() {
+    let errors: Vec<String> = html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", "L0:<%= content_tag(:i, \"c\") %>\n")
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "class CommentsController < ApplicationController\n",
+            "class CommentsController < ApplicationController\n  helper_method :content_tag\n\n  def content_tag(name, text)\n    \"pure:\" + text\n  end\n\n",
+        )
+        .check_errors()
+        .into_iter()
+        .filter(|e| e.contains("isn't decided statically"))
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("`helper_method :content_tag`"), "{errors:?}");
+}
+
+/// `ApplicationController`'s arg-pure `helper_method :content_tag` doesn't
+/// serve the templates of a subclass that overrides the method: Rails'
+/// `helper_method` calls it on the rendering controller, so the override
+/// wins there, with or without its own `helper_method`, and so does a
+/// concern's. The call is refused.
+#[test]
+fn a_base_controllers_pure_helper_method_with_an_override_is_refused() {
+    let base = "class ApplicationController < ActionController::Base\n  helper_method :content_tag\n\n  def content_tag(name, text)\n    \"pure:\" + text\n  end\n\n";
+    let own = "  def content_tag(name, text)\n    @own ||= \"own:\"\n    @own + text\n  end\n\n";
+    let probes = "class ProbesController < ApplicationController\n";
+    for (label, header, concern) in [
+        ("declared override", format!("{probes}  helper_method :content_tag\n\n{own}"), false),
+        ("bare override", format!("{probes}{own}"), false),
+        ("concern override", format!("{probes}  include Tagging\n\n"), true),
+    ] {
+        let overlay = html_safe_method_owner::app()
+            .write("app/views/probes/show.html.erb", "L0:<%= content_tag(:i, \"c\") %>\n")
+            .edit("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n", base)
+            .edit("app/controllers/probes_controller.rb", probes, &header);
+        let overlay = if concern {
+            overlay.write("app/controllers/concerns/tagging.rb", &format!("module Tagging\n  extend ActiveSupport::Concern\n\n{own}end\n"))
+        } else {
+            overlay
+        };
+        let errors: Vec<String> =
+            overlay.check_errors().into_iter().filter(|e| e.contains("isn't decided statically")).collect();
+        assert_eq!(errors.len(), 1, "{label}: {errors:?}");
+        assert!(errors[0].contains("`helper_method :content_tag`"), "{label}: {errors:?}");
+    }
+}
+
+/// A template no request reaches keeps its errors as warnings, as analysis
+/// does, so its `simple_format` doesn't fail another target's build.
+#[test]
+fn simple_format_in_an_unreachable_template_is_a_warning() {
+    let overlay = || emit_and_run::real_blog().write("app/views/articles/orphan.html.erb", "<%= simple_format(\"a\") %>\n");
+    let (_, errors) = overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(!errors.iter().any(|e| e.contains("simple_format")), "{errors:?}");
+    let (_, errors) = overlay()
+        .edit("config/routes.rb", "Rails.application.routes.draw do\n", "Rails.application.routes.draw do\n  get \"orphan\", to: \"articles#orphan\"\n")
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.iter().any(|e| e.contains("simple_format not supported")), "a routed template keeps the error: {errors:?}");
+}
+
+/// #1865: `link_to` with a url the template computes renders as Rails
+/// 8.1.4 does (`link_to_computed_url::VIEW`).
+#[test]
+fn link_to_computed_url_renders_as_rails() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_computed_url::VIEW)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_computed_url::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1865: `link_to` with a url the template computes renders as Rails
+/// 8.1.4 does (`link_to_computed_url::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_computed_url_renders_as_rails_on_spinel() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_computed_url::VIEW)
+        .run_spinel(&helper_escape_at_output::render_script(link_to_computed_url::RENDERS))
+        .assert_passes();
+}

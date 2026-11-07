@@ -51,6 +51,7 @@ use crate::span::Span;
 use self::extra_params::{drop_closure_names, flash_params, local_reads, rewritten_extras};
 
 pub(crate) use self::extra_params::{flash_param_in_scope, flash_slot_of, local_key_of};
+pub(crate) use self::walker::link_to_if_params_shadowing_nested_locals;
 use self::form_wrapper::{FormWrapperHelper, form_wrapper_helpers};
 use self::walker::walk_body;
 
@@ -486,9 +487,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // present?") and downstream emitters don't need target-specific
     // `defined?` knowledge.
     let mut rewritten = rewritten;
-    // An app override owns pluralize or content_tag, including nested ERB
-    // calls. Qualify it before the framework classifier consumes bare Sends.
-    for helper in ["pluralize", "content_tag"] {
+    // An app override owns pluralize, content_tag or simple_format,
+    // including nested ERB calls. Qualify it before the framework
+    // classifier consumes bare Sends. A controller's `helper_method` of
+    // one of these names that isn't served by its own class-side clone is
+    // refused instead (`analyze::diagnostics::controller_shadowed_view_helpers`).
+    for helper in ["pluralize", "content_tag", "simple_format"] {
         let Some(owner) = app.helper_method_index.get(&Symbol::from(helper)) else { continue };
         fn qualify_helper(e: &mut Expr, helper: &str, owner: &ClassId) {
             e.node.for_each_child_mut(&mut |c| qualify_helper(c, helper, owner));
@@ -856,6 +860,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let mut ctx = ViewCtx {
         locals,
         ivar_params,
+        assigned_locals: Vec::new(),
+        nested_assigned_locals: Vec::new(),
         // Only layouts consult arg_name (emit_yield → the `body` local);
         // action views don't yield, so an empty name is fine for them.
         arg_name: if is_action_view { String::new() } else { arg_name.clone() },
@@ -1611,6 +1617,7 @@ pub(crate) fn insert_framework_stubs(
         ("button_to", &[("text", &untyped), ("href", &Ty::Str), ("opts", &any_hash)]),
         ("stylesheet_link_tag", &[("name", &Ty::Str), ("opts", &any_hash)]),
         ("content_tag_html", &[("name", &Ty::Sym), ("html", &Ty::Str), ("opts", &any_hash)]),
+        ("simple_format", &[("text", &Ty::Str), ("wrapper_tag", &Ty::Sym), ("opts", &any_hash)]),
     ];
     for (name, params) in opts_hash_helpers {
         let param_pairs: Vec<(Symbol, Ty)> = params
@@ -5100,6 +5107,16 @@ pub(super) struct ViewCtx {
     /// (`@post` threaded in as `post`), not a local Rails binds: the
     /// bare name still calls the method it names (`ViewCtx::binds_local`).
     pub(super) ivar_params: Vec<String>,
+    /// Template locals an earlier statement of this body or an enclosing
+    /// one assigned (`<% x = "o" %>`), kept apart from `locals` so they
+    /// classify as before: a `link_to_if` block parameter of that name
+    /// saves and restores it (`walker::emit_link_to_if_block`).
+    pub(super) assigned_locals: Vec<String>,
+    /// Template locals assigned only inside an earlier statement's
+    /// nested body (an `if` branch, a `case` arm), which Ruby keeps in
+    /// scope after it: a `link_to_if` block parameter of that name is
+    /// refused (`walker::link_to_if_params_shadowing_nested_locals`).
+    pub(super) nested_assigned_locals: Vec<String>,
     pub(super) arg_name: String,
     pub(super) resource_dir: String,
     /// Name of the local that accumulates output via `<<`. The

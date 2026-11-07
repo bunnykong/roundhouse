@@ -56,6 +56,10 @@ mod array_excluding;
 mod array_excluding_native;
 #[path = "spinel_toolchain/lobsters_zero.rs"]
 mod lobsters_zero;
+#[path = "support/addressable_gem.rs"]
+mod addressable_gem;
+#[path = "spinel_toolchain/addressable.rs"]
+mod addressable;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
@@ -94,6 +98,8 @@ mod cable_allowed_origins;
 mod public_file_server_headers_contract;
 #[path = "spinel_toolchain/public_file_server_headers.rs"]
 mod public_file_server_headers;
+#[path = "support/puma_boot.rs"]
+mod puma_boot_contract;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "spinel_toolchain/cable_actions.rs"]

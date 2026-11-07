@@ -399,7 +399,14 @@ fn transpile(
     // which the error-recovering parser otherwise drops on the floor —
     // are collected and routed through the same report as emit gaps.
     let ((app_result, parse_diags), mut deferred) = roundhouse::timings::phase("ingest", || {
-        let ingest = || roundhouse::ingest::prism::scope(|| ingest_app(input));
+        let ingest = || {
+            let parse = || roundhouse::ingest::prism::scope(|| ingest_app(input));
+            if target == BuildTarget::Futamura {
+                roundhouse::ingest::preserve_puma_config(parse)
+            } else {
+                parse()
+            }
+        };
         if defer { roundhouse::ingest::defer_accessor_surface(ingest) } else { (ingest(), None) }
     });
     let mut survey_gaps =

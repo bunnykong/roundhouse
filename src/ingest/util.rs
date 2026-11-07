@@ -470,6 +470,24 @@ fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
         || body_runs_module_code(m.body())
         || body_includes_into_constant(m.body())
         || body_registers_autoloads(m.body())
+        || body_extends_module(m.body())
+}
+
+// `extend ActiveSupport::Concern` is left out: it is the included-block machinery, not methods the module answers.
+fn body_extends_module(body: Option<Node<'_>>) -> bool {
+    let Some(body) = body else { return false };
+    flatten_statements(body).iter().any(|stmt| {
+        stmt.as_call_node().is_some_and(|call| {
+            call.receiver().is_none_or(|r| r.as_self_node().is_some())
+                && constant_id_str(&call.name()) == "extend"
+                && call.block().is_none()
+                && call.arguments().is_some_and(|a| {
+                    a.arguments().iter().any(|arg| {
+                        constant_path_of(&arg).is_some_and(|p| p.join("::") != "ActiveSupport::Concern" && p.join("::") != "self")
+                    })
+                })
+        })
+    })
 }
 
 /// A namespace whose body only registers its children's autoloads,

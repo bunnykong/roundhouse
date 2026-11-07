@@ -44,6 +44,9 @@ fn ingest_expr(node: &Node<'_>, file: &str) -> Result<Expr, crate::ingest::Inges
 ///   `CONST = { k: v, ... }.freeze`
 ///   `CONST = [a, b, ...]`
 ///   `CONST = [a, b, ...].freeze`
+///   `CONST = OTHER`, where `OTHER` is an earlier constant of the same
+///   source with one of these types, looked up in the enclosing
+///   module or class and then in each scope around it
 /// The returned map keys are the constant's last-segment name; values
 /// are the inferred Ty (Hash[K, V] / Array[T] / etc.). Used by the
 /// body-typer's `ExprNode::Const` arm so dispatch on a constant
@@ -61,7 +64,11 @@ pub(crate) fn parse_module_constant_tables(source: &str, with_owners: bool) -> (
     let mut by_owner = OwnedConstantTypes::default();
     let result = parse(source.as_bytes());
     if result.errors().count() == 0 {
-        walk_constants(&result.node(), "", &mut global, &mut by_owner, with_owners);
+        walk_constants(&result.node(), "", &mut global, &mut by_owner);
+    }
+    by_owner.remove(&ClassId(Symbol::from("")));
+    if !with_owners {
+        by_owner.clear();
     }
     (global, by_owner)
 }
@@ -269,15 +276,14 @@ fn walk_constants(
     owner: &str,
     global: &mut ConstantTypes,
     by_owner: &mut OwnedConstantTypes,
-    with_owners: bool,
 ) {
     if let Some(program) = node.as_program_node() {
         for stmt in program.statements().body().iter() {
-            collect_constant_from_stmt(&stmt, owner, global, by_owner, with_owners);
+            collect_constant_from_stmt(&stmt, owner, global, by_owner);
         }
     } else if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
-            collect_constant_from_stmt(&stmt, owner, global, by_owner, with_owners);
+            collect_constant_from_stmt(&stmt, owner, global, by_owner);
         }
     }
 }
@@ -287,13 +293,12 @@ fn collect_constant_from_stmt(
     owner: &str,
     global: &mut ConstantTypes,
     by_owner: &mut OwnedConstantTypes,
-    with_owners: bool,
 ) {
     if let Some(module) = node.as_module_node() {
         let Ok(name) = std::str::from_utf8(module.name().as_slice()) else { return };
         if let Some(body) = module.body() {
             let nested = join_owner(owner, name);
-            walk_constants(&body, &nested, global, by_owner, with_owners);
+            walk_constants(&body, &nested, global, by_owner);
         }
         return;
     }
@@ -301,17 +306,29 @@ fn collect_constant_from_stmt(
         let Ok(name) = std::str::from_utf8(class.name().as_slice()) else { return };
         if let Some(body) = class.body() {
             let nested = join_owner(owner, name);
-            walk_constants(&body, &nested, global, by_owner, with_owners);
+            walk_constants(&body, &nested, global, by_owner);
         }
         return;
     }
     if let Some(write) = node.as_constant_write_node() {
         let Ok(name) = std::str::from_utf8(write.name().as_slice()) else { return };
-        if let Some(ty) = type_of_const_literal(&write.value()) {
-            let name = Symbol::from(name);
-            if with_owners && !owner.is_empty() {
-                by_owner.entry(ClassId(Symbol::from(owner))).or_default().insert(name.clone(), ty.clone());
+        let value = write.value();
+        let ty = type_of_const_literal(&value).or_else(|| {
+            let read = Symbol::from(std::str::from_utf8(value.as_constant_read_node()?.name().as_slice()).ok()?);
+            let mut scope = owner;
+            loop {
+                if let Some(ty) = by_owner.get(&ClassId(Symbol::from(scope))).and_then(|own| own.get(&read)) {
+                    return Some(ty.clone());
+                }
+                if scope.is_empty() {
+                    return None;
+                }
+                scope = scope.rsplit_once("::").map_or("", |(outer, _)| outer);
             }
+        });
+        if let Some(ty) = ty {
+            let name = Symbol::from(name);
+            by_owner.entry(ClassId(Symbol::from(owner))).or_default().insert(name.clone(), ty.clone());
             global.insert(name, ty);
         }
     }
@@ -1684,6 +1701,16 @@ mod tests {
             "{:?}",
             class_value.node
         );
+    }
+
+    #[test]
+    fn a_constant_alias_reads_the_constant_its_scope_sees() {
+        let src = "module Outer\n  FLAGS = { \"a\" => 1 }.freeze\n  class Inner\n    FLAGS = [\"b\"].freeze\n  end\n  COPY = FLAGS\n  class Other\n    COPY = FLAGS\n  end\nend\n";
+        let (_, owners) = parse_module_constant_tables(src, true);
+        for owner in ["Outer", "Outer::Other"] {
+            let own = owners.get(&ClassId(Symbol::from(owner))).expect("owner constants");
+            assert!(matches!(own.get(&Symbol::from("COPY")), Some(Ty::Hash { .. })), "{owner}: {own:?}");
+        }
     }
 
     #[test]

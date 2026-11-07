@@ -1,5 +1,13 @@
 module ActiveSupport
   class ConfigurationFile
     def self.parse: (String path) -> untyped
+    def self.load_yaml: (String text, ?symbolize_names: bool) -> untyped
+  end
+end
+
+module Rails
+  class Application
+    def config_for: (Symbol | String name) -> untyped
+    def config_for_source: (Symbol | String name) -> String?
   end
 end

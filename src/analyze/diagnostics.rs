@@ -435,6 +435,168 @@ fn unlowered_time_tags(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// A `simple_format` the view lowering leaves as written: any form but
+/// `sanitize: false` in a template (`lower::view::simple_format_form`
+/// gives the reason), and every call in a library class, which nothing
+/// lowers (an `include ActionView::Helpers::TextHelper` there doesn't
+/// define it, #1824). No runtime defines the bare call, so it is refused
+/// rather than reaching the emit. The app's own `simple_format` is a call
+/// like any other.
+fn unlowered_simple_format(app: &App) -> Vec<Diagnostic> {
+    let name = Symbol::from("simple_format");
+    if app.helper_method_index.contains_key(&name) || app.view_visible_controller_methods.contains(&name) {
+        return Vec::new();
+    }
+    fn visit(expr: &Expr, site: Option<bool>, out: &mut Vec<Diagnostic>) {
+        if !expr.span.is_synthetic()
+            && let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
+            && method.as_str() == "simple_format"
+        {
+            // `Some(unreachable)` for a template, `None` for a library class.
+            let reason = match site {
+                Some(_) => crate::lower::view::simple_format_form(args).err(),
+                None => Some("a library class's `simple_format` is not lowered (only a template's `sanitize: false` form is)"),
+            };
+            if let Some(reason) = reason {
+                let mut d = Diagnostic::unsupported(expr.span, None, "simple_format", reason);
+                if site == Some(true) {
+                    d.severity = crate::diagnostic::Severity::Warning;
+                }
+                out.push(d);
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, site, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(&view.body, Some(app.unreachable_views.contains(&view.name)), &mut out);
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit(&method.body, None, &mut out);
+        }
+    }
+    out
+}
+
+/// A call to `pluralize`, `content_tag` or `simple_format` where a
+/// controller's `helper_method` of that name isn't served, in every
+/// template, by one controller's class-side clone. That is, the name's
+/// `helper_method_index` entry is missing, is an app helper's (whose
+/// insert overwrites a clone), or is a controller that isn't every app
+/// controller or an ancestor of it. The clone doesn't serve every template
+/// either when another controller, or a module that isn't an app helper
+/// (a concern), defines the name, or another controller marks it with
+/// `helper_method`. Rails' `helper_method` calls the method on the
+/// controller that renders the template, so a subclass's override wins in
+/// its templates, with or without its own `helper_method`. Rails calls the
+/// controller's method in the templates that controller and its
+/// subclasses render, and the app helper's or ActionView's in the others.
+/// Which controller renders a template isn't decided statically (`render
+/// template:` reaches any of them), so the call is refused rather than
+/// routed one way for every template.
+/// A `link_to_if` / `link_to_unless` block parameter shadowing a template
+/// local that only an earlier nested body (an `if` branch, a `case` arm)
+/// assigned: Ruby keeps that local after the block, and the lowering's
+/// save and restore would read it where a compiled target's scope doesn't
+/// have it, so the block isn't lowered
+/// (`lower::view_to_library::link_to_if_params_shadowing_nested_locals`).
+fn link_to_if_params_shadowing_nested_locals(app: &App) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for view in &app.views {
+        for (span, method) in crate::lower::view_to_library::link_to_if_params_shadowing_nested_locals(&view.body) {
+            if span.is_synthetic() {
+                continue;
+            }
+            let mut d = Diagnostic::unsupported(
+                span,
+                None,
+                method.as_str(),
+                "a `link_to_if`/`link_to_unless` block parameter shadows a template local assigned in an earlier nested block; not modeled".to_string(),
+            );
+            if app.unreachable_views.contains(&view.name) {
+                d.severity = crate::diagnostic::Severity::Warning;
+            }
+            out.push(d);
+        }
+    }
+    out
+}
+
+fn controller_shadowed_view_helpers(app: &App) -> Vec<Diagnostic> {
+    // `owner` is `controller` or one of its ancestors.
+    let descends = |controller: &crate::dialect::Controller, owner: &ClassId| {
+        let mut current = Some(controller);
+        let mut seen = crate::det::HashSet::default();
+        while let Some(c) = current {
+            if c.name == *owner {
+                return true;
+            }
+            if !seen.insert(c.name.0.as_str()) {
+                break;
+            }
+            current = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| o.name == *p));
+        }
+        false
+    };
+    let names: Vec<&str> = ["pluralize", "content_tag", "simple_format"]
+        .into_iter()
+        .filter(|n| {
+            let name = Symbol::from(*n);
+            let overridden = |owner: &ClassId| {
+                app.controllers.iter().filter(|c| c.name != *owner).any(|c| {
+                    c.actions().any(|a| a.name == name)
+                        || crate::lower::controller_to_library::helper_method_marked_names(c).contains(&name)
+                }) || app.library_classes.iter().any(|lc| {
+                    lc.is_module
+                        && !app.helper_modules.contains(&lc.name)
+                        && lc.methods.iter().any(|m| m.name == name && matches!(m.receiver, crate::dialect::MethodReceiver::Instance))
+                })
+            };
+            let everywhere = app.helper_method_index.get(&name).is_some_and(|owner| {
+                app.controllers.iter().any(|c| c.name == *owner)
+                    && app.controllers.iter().all(|c| descends(c, owner))
+                    && !overridden(owner)
+            });
+            app.view_visible_controller_methods.contains(&name) && !everywhere
+        })
+        .collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    fn visit(expr: &Expr, names: &[&str], unreachable: bool, out: &mut Vec<Diagnostic>) {
+        if !expr.span.is_synthetic()
+            && let ExprNode::Send { recv: None, method, .. } = &*expr.node
+            && names.contains(&method.as_str())
+        {
+            let mut d = Diagnostic::unsupported(
+                expr.span,
+                None,
+                method.as_str(),
+                format!(
+                    "a controller's `helper_method :{0}` is called in the templates that controller renders, and an app helper's or ActionView's `{0}` in the others; which controller renders a template isn't decided statically",
+                    method.as_str()
+                ),
+            );
+            if unreachable {
+                d.severity = crate::diagnostic::Severity::Warning;
+            }
+            out.push(d);
+        }
+        expr.node.for_each_child(&mut |child| visit(child, names, unreachable, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(&view.body, &names, app.unreachable_views.contains(&view.name), &mut out);
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit(&method.body, &names, false, &mut out);
+        }
+    }
+    out
+}
+
 /// Builder methods the view lowering serves outside
 /// `classify_form_builder_method`.
 const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
@@ -733,7 +895,12 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // this pass covers executable support methods and initializers.
     for class in app.library_classes.iter().chain(app.rails_application.iter()) {
         for method in &class.methods {
-            collect_constants(&method.body, &mut out);
+            if class.name.0.as_str() == crate::ingest::puma_boot::CLASS {
+                diagnose_expr_in(&method.body, &mut out, false);
+                unchecked_boot_calls(&method.body, method.name_span, &mut out);
+            } else {
+                collect_constants(&method.body, &mut out);
+            }
             for param in &method.params {
                 if let Some(default) = &param.default { collect_constants(default, &mut out); }
             }
@@ -760,6 +927,9 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     out.extend(unlowered_current_page(app));
     out.extend(helper_stylesheet_link_tags(app));
     out.extend(unlowered_time_tags(app));
+    out.extend(unlowered_simple_format(app));
+    out.extend(controller_shadowed_view_helpers(app));
+    out.extend(link_to_if_params_shadowing_nested_locals(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));
@@ -807,6 +977,8 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         None => out.extend(diagnose_helper_modules(app)),
     }
     out.extend(app.unknown_association_targets.iter().cloned());
+    out.extend(app.gem_middleware_refusals.iter().cloned());
+    out.extend(app.included_hoist_conflicts.iter().cloned());
     for class in &app.library_classes {
         for initializer in &class.class_ivar_initializers {
             diagnose_expr(initializer, &mut out);
@@ -974,6 +1146,25 @@ fn is_unknown_ty(ty: Option<&Ty>) -> bool {
         Some(Ty::Var { .. }) => true,
         _ => false,
     }
+}
+
+fn unchecked_boot_calls(expr: &Expr, source: crate::span::Span, out: &mut Vec<Diagnostic>) {
+    if let ExprNode::Send { recv, method, .. } = &*expr.node {
+        let unchecked = match recv {
+            Some(receiver) => is_unknown_ty(receiver.ty.as_ref()) || matches!(receiver.ty, Some(Ty::Untyped)),
+            None => is_unknown_ty(expr.ty.as_ref()) || matches!(expr.ty, Some(Ty::Untyped)),
+        };
+        if unchecked && expr.diagnostic().is_none() {
+            let span = if expr.span.file.0 == 0 { source } else { expr.span };
+            out.push(Diagnostic::unsupported(
+                span,
+                None,
+                "Puma boot callback call",
+                format!("`{method}` in config/puma.rb has no resolved receiver or method"),
+            ));
+        }
+    }
+    expr.node.for_each_child(&mut |child| unchecked_boot_calls(child, source, out));
 }
 
 /// A send whose explicit receiver the analysis could not type.

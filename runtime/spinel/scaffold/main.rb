@@ -368,7 +368,7 @@ module Main
     started = ActionDispatch::Runtime.clock_time
     request_obj = ActionDispatch::Request.new
     request_obj.request_id = ActionDispatch::RequestId.make(req.req_headers.fetch("x-request-id", ""))
-    Main.dispatch_request(req, res, request_obj)
+    GemMiddleware.dispatch(req, res, request_obj)
     return nil if res.file_path.length > 0 || res.upgrading_ws
     res.headers[ActionDispatch::RequestId::HEADER] =
       request_obj.request_id.to_s

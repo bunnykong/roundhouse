@@ -409,6 +409,38 @@ fn host_libvips_dev_jobs_share_cached_apt_deb_install() {
         // Still a .deb cache around ci-apt-install — never a dpkg-state restore.
         assert!(step.get("run").is_none(), "{job_name}");
     }
+
+    for (job_name, step_name, packages) in [
+        (
+            "unit",
+            "System libvips for the emitted ruby-vips processor",
+            "libvips42",
+        ),
+        ("campfire-compare", "System libvips", "libvips42 sqlite3"),
+        (
+            "campfire-conformance",
+            "Install libvips (ruby-vips binds it through FFI) and ffmpeg",
+            "libvips42 ffmpeg",
+        ),
+    ] {
+        let step = workflow["jobs"][job_name]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"].as_str() == Some(step_name))
+            .unwrap_or_else(|| panic!("{job_name}: missing {step_name}"));
+        assert_eq!(
+            step["uses"].as_str(),
+            Some("./.github/actions/ci-apt-install-cached"),
+            "{job_name}"
+        );
+        assert_eq!(
+            step["with"]["packages"].as_str(),
+            Some(packages),
+            "{job_name}"
+        );
+        assert_eq!(step["timeout-minutes"].as_u64(), Some(20), "{job_name}");
+    }
 }
 
 #[test]

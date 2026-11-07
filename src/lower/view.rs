@@ -24,6 +24,7 @@
 //! targets; emission differs.
 
 use crate::expr::{Expr, ExprNode, Literal};
+use crate::ident::Symbol;
 
 /// Numeric and formatted counts keep their label, not `count.to_i`:
 /// a delimited count must keep its commas. Ground ERB and app helpers
@@ -94,6 +95,11 @@ pub enum ViewHelperKind<'a> {
     /// `<%= word_wrap(text [, opts]) %>` — returns ordinary text, so
     /// the lowering must escape the result before appending it.
     WordWrap { text: &'a Expr, opts: Option<&'a Expr> },
+    /// `<%= simple_format(text, html_options, sanitize: false
+    /// [, wrapper_tag: :div]) %>`, the one form `simple_format_form`
+    /// models: the text is written as it is (Rails' `raw`), so the
+    /// result is html-safe and appended unescaped.
+    SimpleFormat { text: &'a Expr, html_opts: Option<&'a Expr>, wrapper_tag: Symbol },
     /// `<%= stylesheet_link_tag :name [, opts] %>`.
     StylesheetLinkTag { name: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= content_tag :name, content [, opts] %>`, with no block: the
@@ -107,7 +113,9 @@ pub enum ViewHelperKind<'a> {
     LinkTo { text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= link_to_if cond, text, url [, opts] %>` — the link when the
     /// condition holds, the escaped text alone otherwise.
-    LinkToIf { cond: &'a Expr, text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr> },
+    /// `link_to_unless` is the same with `negate` set: the link when the
+    /// condition doesn't hold.
+    LinkToIf { cond: &'a Expr, text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr>, negate: bool },
     /// `<%= button_to text, target [, opts] %>`.
     ButtonTo { text: &'a Expr, target: &'a Expr, opts: Option<&'a Expr> },
 }
@@ -666,6 +674,84 @@ pub fn classify_turbo_stream_call<'a>(
     }
 }
 
+/// The arguments of a `simple_format` call the lowering models.
+pub struct SimpleFormatForm<'a> {
+    pub text: &'a Expr,
+    /// `None` for no html options or a literal `{}`.
+    pub html_opts: Option<&'a Expr>,
+    pub wrapper_tag: Symbol,
+}
+
+const SIMPLE_FORMAT_SANITIZES: &str = "Rails runs the HTML sanitizer over the text (the default `sanitize: true`), which is not modeled; pass `sanitize: false` for text that is already safe";
+const SIMPLE_FORMAT_NOT_MODELED: &str = "its arguments are not a text, html options and a literal options hash with `sanitize: false` and an optional literal `wrapper_tag:`";
+
+/// `simple_format(text, html_options, options)` with `sanitize: false`
+/// (or `nil`) in a literal options hash, or why the call is left as it
+/// is: the default runs Rails' HTML sanitizer, which removes tags and
+/// re-serializes entities, so even an escaped text isn't the
+/// unsanitized form's output (`analyze::diagnostics` refuses the call
+/// with the reason). `wrapper_tag:` is a literal Symbol or String;
+/// `sanitize_options:` and any other key are left as written.
+pub fn simple_format_form(args: &[Expr]) -> Result<SimpleFormatForm<'_>, &'static str> {
+    let opaque = |a: &Expr| {
+        matches!(
+            &*a.node,
+            ExprNode::Splat { .. }
+                | ExprNode::KeywordSplat { .. }
+                | ExprNode::ForwardArgs
+                | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
+        )
+    };
+    fn hash_entries(a: &Expr) -> Option<&Vec<(Expr, Expr)>> {
+        match &*a.node {
+            ExprNode::Hash { entries, .. } => Some(entries),
+            _ => None,
+        }
+    }
+    if args.iter().any(opaque)
+        || args.iter().filter_map(hash_entries).any(|es| es.iter().any(|(k, v)| opaque(k) || opaque(v)))
+    {
+        return Err(SIMPLE_FORMAT_NOT_MODELED);
+    }
+    let [text, html_opts, options] = args else {
+        return match args.len() {
+            1 | 2 => Err(SIMPLE_FORMAT_SANITIZES),
+            _ => Err(SIMPLE_FORMAT_NOT_MODELED),
+        };
+    };
+    let Some(options) = hash_entries(options) else { return Err(SIMPLE_FORMAT_NOT_MODELED) };
+    let key = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let mut sanitize_off = false;
+    let mut wrapper_tag = Symbol::from("p");
+    for (k, v) in options {
+        match key(k).as_deref() {
+            Some("sanitize") => match &*v.node {
+                ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => sanitize_off = true,
+                _ => return Err(SIMPLE_FORMAT_SANITIZES),
+            },
+            Some("wrapper_tag") => match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => wrapper_tag = value.clone(),
+                ExprNode::Lit { value: Literal::Str { value } } => wrapper_tag = Symbol::from(value.as_str()),
+                _ => return Err(SIMPLE_FORMAT_NOT_MODELED),
+            },
+            _ => return Err(SIMPLE_FORMAT_NOT_MODELED),
+        }
+    }
+    if !sanitize_off {
+        return Err(SIMPLE_FORMAT_SANITIZES);
+    }
+    let html_opts = match &*html_opts.node {
+        ExprNode::Hash { entries, .. } if entries.is_empty() => None,
+        ExprNode::Hash { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Send { .. } => Some(html_opts),
+        _ => return Err(SIMPLE_FORMAT_NOT_MODELED),
+    };
+    Ok(SimpleFormatForm { text, html_opts, wrapper_tag })
+}
+
 pub fn classify_view_helper<'a>(
     method: &str,
     args: &'a [Expr],
@@ -718,6 +804,11 @@ pub fn classify_view_helper<'a>(
             text: &args[0],
             opts: Some(&args[1]),
         }),
+        ("simple_format", _) => simple_format_form(args).ok().map(|f| ViewHelperKind::SimpleFormat {
+            text: f.text,
+            html_opts: f.html_opts,
+            wrapper_tag: f.wrapper_tag,
+        }),
         ("word_wrap", 1) => Some(ViewHelperKind::WordWrap {
             text: &args[0],
             opts: None,
@@ -767,17 +858,19 @@ pub fn classify_view_helper<'a>(
             url: &args[1],
             opts: Some(&args[2]),
         }),
-        ("link_to_if", 3) => Some(ViewHelperKind::LinkToIf {
+        ("link_to_if" | "link_to_unless", 3) => Some(ViewHelperKind::LinkToIf {
             cond: &args[0],
             text: &args[1],
             url: &args[2],
             opts: None,
+            negate: method == "link_to_unless",
         }),
-        ("link_to_if", 4) => Some(ViewHelperKind::LinkToIf {
+        ("link_to_if" | "link_to_unless", 4) => Some(ViewHelperKind::LinkToIf {
             cond: &args[0],
             text: &args[1],
             url: &args[2],
             opts: Some(&args[3]),
+            negate: method == "link_to_unless",
         }),
         ("button_to", 2) => Some(ViewHelperKind::ButtonTo {
             text: &args[0],

@@ -41,6 +41,8 @@ mod dry_types;
 mod oj;
 pub(crate) mod source_gems;
 mod auto_source_gems;
+mod forwardable;
+mod railtie_middleware;
 mod absence_guards;
 mod uncalled_definers;
 mod job_class_lookup;
@@ -56,6 +58,7 @@ pub(crate) mod database_ownership;
 pub(crate) mod database_yml;
 pub mod sidekiq_yml;
 pub mod cable_yml;
+pub(crate) mod config_for;
 mod public_file_server_config;
 mod action_controller_caching_config;
 mod json_response_config;
@@ -71,6 +74,7 @@ mod active_model_super;
 mod queue_adapter_reader;
 mod library_concern_items;
 mod unreached_gem_modules;
+pub(crate) mod puma_boot;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
@@ -153,6 +157,7 @@ mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
 pub use concern_accessors::{defer as defer_accessor_surface, DeferredAccessorSurface};
+pub use puma_boot::preserve_config as preserve_puma_config;
 
 /// The construct an ActiveRecord class outside app/models is reported
 /// under (`app::report_unmodelled_records`): the CLI keys its per-target
@@ -211,3 +216,23 @@ impl From<std::io::Error> for IngestError {
 }
 
 type IngestResult<T> = Result<T, IngestError>;
+
+/// An empty reopen of `Rails::Application`, which ingest fills with the
+/// methods it lifts from the app's config.
+pub(crate) fn rails_application_class() -> crate::dialect::LibraryClass {
+    crate::dialect::LibraryClass {
+        name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: None,
+        constants: Vec::new(),
+        conditional_definitions: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    }
+}

@@ -22,6 +22,7 @@ the generated fixtures:
 gem install rails -v 8.1.4 --no-document
 gem install rails-html-sanitizer sqlite3 bcrypt rack minitest rake --no-document
 gem install activerecord -v 8.1.4 --no-document
+gem install sequel -v 5.99.0 --no-document
 (cd runtime/spinel/scaffold && bundle install)   # framework_tests_ruby runs through this bundle
 bin/rh fixture --rails 8.1.4
 (cd fixtures && ../scripts/create-store store)

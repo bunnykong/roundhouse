@@ -78,10 +78,11 @@ fn lower_library_class_delegates(
     app: &mut crate::App,
     model_concerns: &crate::det::HashSet<crate::ident::ClassId>,
 ) {
+    let lookup = ClassLookup::new(&app.library_classes);
     let enumerable: crate::det::HashSet<crate::ident::ClassId> = app
         .library_classes
         .iter()
-        .filter(|lc| includes_enumerable(&app.library_classes, &lc.name, &mut crate::det::HashSet::default()))
+        .filter(|lc| includes_enumerable(&lookup, &lc.name, &mut crate::det::HashSet::default()))
         .map(|lc| lc.name.clone())
         .collect();
     let mut generated: Vec<(usize, Vec<MethodDef>)> = Vec::new();
@@ -151,20 +152,43 @@ pub(crate) fn expand_delegates_in_class(lc: &mut LibraryClass) -> Vec<MethodDef>
     expand_delegates_with(lc, enumerable)
 }
 
+/// The first library class of each name, and every name a class could be
+/// written as from inside a namespace (`A::B::C` as `B::C` and `C`).
+struct ClassLookup<'a> {
+    first: crate::det::HashMap<&'a str, &'a LibraryClass>,
+    known: crate::det::HashSet<&'a str>,
+}
+
+impl<'a> ClassLookup<'a> {
+    fn new(classes: &'a [LibraryClass]) -> Self {
+        let mut first = crate::det::HashMap::default();
+        let mut known = crate::det::HashSet::default();
+        for c in classes {
+            let name = c.name.0.as_str();
+            first.entry(name).or_insert(c);
+            known.insert(name);
+            let mut rest = name;
+            while let Some(i) = rest.find("::") {
+                rest = &rest[i + 2..];
+                known.insert(rest);
+            }
+        }
+        Self { first, known }
+    }
+}
+
 /// Whether `name`'s ancestry, through its includes and superclasses, may have Enumerable:
 /// a module this app carries no body of (one that only includes others) counts, as Rails forwards the block anyway.
 fn includes_enumerable(
-    classes: &[LibraryClass],
+    classes: &ClassLookup<'_>,
     name: &crate::ident::ClassId,
     seen: &mut crate::det::HashSet<crate::ident::ClassId>,
 ) -> bool {
     if !seen.insert(name.clone()) {
         return false;
     }
-    let Some(lc) = classes.iter().find(|lc| &lc.name == name) else { return false };
-    let unseen = |m: &crate::ident::ClassId| {
-        !classes.iter().any(|c| c.name == *m || c.name.0.as_str().ends_with(&format!("::{}", m.0.as_str())))
-    };
+    let Some(lc) = classes.first.get(name.0.as_str()) else { return false };
+    let unseen = |m: &crate::ident::ClassId| !classes.known.contains(m.0.as_str());
     lc.includes.iter().any(|m| m.0.as_str() == "Enumerable" || unseen(m) || includes_enumerable(classes, m, seen))
         || lc.parent.as_ref().is_some_and(|p| includes_enumerable(classes, p, seen))
 }
@@ -751,5 +775,19 @@ mod tests {
             1,
             "a setter's fixed arity exempts it from the call-site-arguments heuristic"
         );
+    }
+
+    #[test]
+    fn an_include_written_relative_to_its_namespace_is_a_known_module() {
+        let src = "module Outer\n  module Walk\n    def walk\n      self\n    end\n  end\nend\nclass List\n  include Walk\nend\nclass Bag\n  include Missing\nend\nclass Deck\n  include Enumerable\nend\nclass Hand < Deck\nend\n";
+        let classes = crate::ingest::ingest_library_classes(src.as_bytes(), "app/lib/lists.rb").unwrap();
+        let lookup = ClassLookup::new(&classes);
+        let enumerable = |name: &str| {
+            includes_enumerable(&lookup, &crate::ident::ClassId(Symbol::from(name)), &mut crate::det::HashSet::default())
+        };
+        assert!(!enumerable("List"));
+        assert!(enumerable("Bag"));
+        assert!(enumerable("Deck"));
+        assert!(enumerable("Hand"));
     }
 }

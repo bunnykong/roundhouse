@@ -57,8 +57,9 @@ fn an_unread_option_is_ignored_with_a_note() {
     // Rails consumes these before the validator runs (Rails 8.1.4:
     // `except_on: :create` skips a new record, `attributes: [:count]`
     // validates `count` instead), so they are gaps, not ignored keys.
-    for attr in ["fresh", "other", "early"] {
+    for attr in ["fresh", "other"] {
         assert_eq!(numericality(&model, attr), None, "{attr} stays a gap");
     }
-    assert_eq!(gaps, 4, "odd:, except_on:, attributes: and prepend: are the survey gaps");
+    assert!(model.validations().any(|v| v.attribute.as_str() == "early" && v.prepend));
+    assert_eq!(gaps, 3, "odd:, except_on: and attributes: are the survey gaps");
 }

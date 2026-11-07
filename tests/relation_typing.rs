@@ -82,7 +82,8 @@ end
   scope :reloaded, -> { where(score: 1).reload }
   scope :top, -> { recent.where("score > 0") }
   scope :titles_only, -> { pluck(:title) }
-  scope :filtered, ->(uid) { uid ? where(user_id: uid) : all }
+  scope :filtered, ->(uid) { case uid when Integer then where(user_id: uid) end }
+  scope :either, ->(uid) { uid ? where(user_id: uid) : all }
 
   def self.for_user(user_id)
     where(user_id: user_id)
@@ -115,6 +116,7 @@ end
     @scope_on_scope = Story.top
     @terminal_scope = Story.titles_only
     @mixed = Story.filtered(1).recent
+    @either = Story.either(1).recent
     @last_page = Story.recent.last_page
     @page_before = Story.recent.page_before(Story.first)
     @page_around = Story.page_around(Story.first)
@@ -291,15 +293,15 @@ fn relation_typed_scope_delegates_on_array_representation_receiver() {
     // Mixed-representation chain. C1 converged class-side chain
     // starts (`Story.where(...)`) onto the Relation representation,
     // so this pins the seam that C1 did NOT close: a scope whose
-    // body the seed classifier can't read (`filtered`'s ternary)
+    // body the seed classifier can't read (`filtered`'s case/when
+    // without else, whose value can be nil)
     // still falls back to `Array<Story>`, and `.recent` — a scope
     // whose seed carries the Relation representation — must still
     // delegate on it, preserving the RECEIVER's representation:
     // `Array<Story>`, not Var. This is exactly the Mastodon
     // `Account.with_username(u).with_domain(d)` regression (CI
-    // browser-smoke-ide) in its original shape: the unflipped
-    // ternary-body scope keeps the chain on the Array
-    // representation, and the flipped scope's hop poisoned it to
+    // browser-smoke-ide): the unflipped scope keeps the chain on the
+    // Array representation, and the flipped scope's hop poisoned it to
     // Var → Untyped. Retire this test only when the scope-seed
     // fallback itself converges.
     let app = analyzed_app();
@@ -307,6 +309,13 @@ fn relation_typed_scope_delegates_on_array_representation_receiver() {
         ivar_ty(&app, "mixed"),
         Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: story(), args: vec![].into() }) },
     );
+}
+
+#[test]
+fn scope_with_a_relation_on_each_branch_types_as_relation() {
+    // `scope :either, ->(uid) { uid ? where(user_id: uid) : all }`.
+    let app = analyzed_app();
+    assert_eq!(ivar_ty(&app, "either"), relation_of_story());
 }
 
 #[test]

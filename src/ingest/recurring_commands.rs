@@ -53,6 +53,11 @@ fn commands<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Option<Vec<Str
 
 /// The `perform` that runs each known command as code.
 fn perform_source(commands: &[String]) -> String {
+    if commands.is_empty() {
+        return String::from(
+            "def perform(command)\n  raise ArgumentError, \"recurring command \" + command.inspect + \" is not in config/recurring.yml as built\"\nend\n",
+        );
+    }
     let mut src = String::from("def perform(command)\n  case command\n");
     for command in commands {
         src.push_str(&format!("  when {:?}\n    {}\n", command, command));

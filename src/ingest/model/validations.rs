@@ -74,6 +74,7 @@ pub(super) enum ParsedValidates {
 }
 
 struct BuiltRule {
+    prepend: bool,
     rule: crate::dialect::ValidationRule,
     if_cond: Option<Expr>,
     unless_cond: Option<Expr>,
@@ -104,6 +105,7 @@ struct BuiltRule {
 impl BuiltRule {
     fn bare(rule: crate::dialect::ValidationRule) -> Self {
         Self {
+            prepend: false,
             rule,
             if_cond: None,
             unless_cond: None,
@@ -130,6 +132,54 @@ enum RuleParse {
     Skip,
     Rule(BuiltRule),
     Gap(Vec<String>),
+}
+
+/// A mixed call registers every rule in Hash order, before callback scheduling.
+/// Expand one key at a time so an app validator occupies its written position
+/// beside built-ins, even though its class is resolved later in ingest.
+pub(super) fn split_custom_call(
+    call: &ruby_prism::CallNode<'_>,
+    owner: &crate::ClassId,
+    file: &str,
+    leading_comments: Vec<Comment>,
+    class_consts: &super::ClassConsts,
+    custom: &[String],
+    kept: &[String],
+) -> super::IngestResult<Vec<ModelBodyItem>> {
+    let text = |node: &Node<'_>| String::from_utf8_lossy(node.location().as_slice()).into_owned();
+    let mut shared = Vec::new();
+    let mut rules = Vec::new();
+    for arg in call.arguments().unwrap().arguments().iter() {
+        if let Some(elements) = hash_elements(&arg) {
+            for el in elements.iter() {
+                let Some(assoc) = el.as_assoc_node() else { continue };
+                let Some(key) = symbol_value(&assoc.key()) else { continue };
+                if custom.contains(&key) || kept.contains(&key) {
+                    rules.push((el.location().start_offset(), text(&el)));
+                } else if matches!(key.as_str(), "if" | "unless" | "on" | "allow_nil" | "allow_blank") {
+                    shared.push(text(&el));
+                }
+            }
+        } else {
+            shared.push(text(&arg));
+        }
+    }
+    let mut items = Vec::new();
+    for (offset, rule) in rules {
+        let source = format!("{}validates {}, {}", " ".repeat(offset), shared.join(", "), rule);
+        let parsed = super::super::prism::parse_silent(source.as_bytes());
+        let root = parsed.node();
+        let statement = root.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let comments = if items.is_empty() { leading_comments.clone() } else { Vec::new() };
+        let split = super::ingest_model_body_items(&statement, owner, file, comments, None, class_consts)?;
+        for item in &split {
+            if let ModelBodyItem::Unknown { expr, .. } = item {
+                super::super::each_validator::keep_diagnostic_context(expr.span, custom, kept);
+            }
+        }
+        items.extend(split);
+    }
+    Ok(items)
 }
 
 /// The attribute names a `*CONST` splat expands to: a list constant the
@@ -424,9 +474,11 @@ pub(super) fn parse_validates_call(
     }
 
     let mut out = Vec::new();
-    for attr in &attrs {
+    let mut prepended = Vec::new();
+    for (attr_index, attr) in attrs.iter().enumerate() {
         if drafts.is_empty() {
             out.push(Validation {
+                prepend: false,
                 attribute: attr.clone(),
                 rules: Vec::new(),
                 if_cond: and_guard(on_guard.clone(), call_if_cond.clone()),
@@ -436,7 +488,7 @@ pub(super) fn parse_validates_call(
             continue;
         }
         let mut grouped: Option<Validation> = None;
-        for draft in &drafts {
+        for (rule_index, draft) in drafts.iter().enumerate() {
             // A condition inside the rule hash replaces the call-level
             // one for that key — the other key still merges in.
             // The rule's own `on:` replaces the call's, as Rails merges the
@@ -446,6 +498,18 @@ pub(super) fn parse_validates_call(
             let rule_on = if draft.blank_skip { and_guard(Some(not_blank(attr)), rule_on) } else { rule_on };
             let if_cond = and_guard(rule_on, draft.if_cond.clone().or_else(|| call_if_cond.clone()));
             let unless_cond = draft.unless_cond.clone().or_else(|| call_unless_cond.clone());
+            let validation = Validation {
+                prepend: draft.prepend,
+                attribute: attr.clone(),
+                rules: vec![draft.rule.clone()],
+                if_cond: if_cond.clone(),
+                unless_cond: unless_cond.clone(),
+                message: draft.message.clone(),
+            };
+            if draft.prepend {
+                prepended.push((rule_index, std::cmp::Reverse(attr_index), validation));
+                continue;
+            }
             if let Some(current) = grouped.as_mut() {
                 if current.if_cond == if_cond && current.unless_cond == unless_cond && current.message == draft.message {
                     current.rules.push(draft.rule.clone());
@@ -453,18 +517,16 @@ pub(super) fn parse_validates_call(
                 }
                 out.push(grouped.take().unwrap());
             }
-            grouped = Some(Validation {
-                attribute: attr.clone(),
-                rules: vec![draft.rule.clone()],
-                if_cond,
-                unless_cond,
-                message: draft.message.clone(),
-            });
+            grouped = Some(validation);
         }
         if let Some(validation) = grouped {
             out.push(validation);
         }
     }
+    // A validator registers once for all its attributes. The scheduler reverses
+    // callbacks, so reverse its attribute expansion here to keep those together.
+    prepended.sort_by_key(|(rule, attr, _)| (*rule, *attr));
+    out.extend(prepended.into_iter().map(|(_, _, validation)| validation));
     if custom.is_empty() {
         ParsedValidates::Modeled(out)
     } else {
@@ -677,6 +739,7 @@ fn parse_uniqueness(value: &Node<'_>, file: &str, _class_consts: &super::ClassCo
         };
         let child = assoc.value();
         match key.as_str() {
+            "prepend" => {} // Read once by parse_validator.
             "scope" => {
                 let names: Option<Vec<Symbol>> = if let Some(array) = child.as_array_node() {
                     array.elements().iter().map(|e| symbol_value(&e).map(|s| Symbol::from(s.as_str()))).collect()
@@ -839,6 +902,7 @@ fn parse_of_options<'a>(
     let mut inclusion: Option<InclusionSpec> = None;
     let mut pattern: Option<(String, String)> = None;
     let mut saw_rule_key = false;
+    let mut prepend = false;
     for el in elements.iter() {
         let Some(assoc) = el.as_assoc_node() else {
             gaps.push("options".to_string());
@@ -850,6 +914,10 @@ fn parse_of_options<'a>(
         };
         let value = assoc.value();
         match key.as_str() {
+            "prepend" => match class_consts.truthiness(&value) {
+                Some(flag) => prepend = flag,
+                None => gaps.push("prepend".to_string()),
+            },
             "allow_blank" => match super::super::util::bool_value(&value) {
                 Some(true) => *allow_blank = true,
                 Some(false) => {}
@@ -965,12 +1033,14 @@ fn parse_of_options<'a>(
         },
         ValidatesKind::Map => return,
     };
-    drafts.push(BuiltRule::bare(rule));
+    let mut built = BuiltRule::bare(rule);
+    built.prepend = prepend;
+    drafts.push(built);
 }
 
 fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super::ClassConsts) -> RuleParse {
     use crate::dialect::ValidationRule;
-    match key {
+    let mut parsed = match key {
         "presence" => parse_bool_or_hash(value, ValidationRule::Presence, "presence", file),
         "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence", file),
         "acceptance" => parse_acceptance(value, file),
@@ -981,7 +1051,20 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
         "uniqueness" => parse_uniqueness(value, file, class_consts),
         "format" => parse_format(value, file, class_consts),
         other => RuleParse::Gap(vec![other.to_string()]),
+    };
+    // Scheduling is shared by every validator, independently of its own options.
+    if let (RuleParse::Rule(built), Some(elements)) = (&mut parsed, hash_elements(value)) {
+        for el in elements.iter() {
+            let Some(assoc) = el.as_assoc_node() else { continue };
+            if symbol_value(&assoc.key()).as_deref() == Some("prepend") {
+                match class_consts.truthiness(&assoc.value()) {
+                    Some(flag) => built.prepend = flag,
+                    None => return RuleParse::Gap(vec![format!("{key}: prepend")]),
+                }
+            }
+        }
     }
+    parsed
 }
 
 /// `acceptance: true`, `acceptance: false`, or `acceptance: { accept:,
@@ -1018,6 +1101,7 @@ fn parse_acceptance(value: &Node<'_>, file: &str) -> RuleParse {
         };
         let child = assoc.value();
         match key.as_str() {
+            "prepend" => {} // Read once by parse_validator.
             "accept" => match acceptance_values(&child) {
                 Some(values) => accept = Some(values),
                 None => gaps.push("acceptance: accept".to_string()),
@@ -1086,6 +1170,7 @@ fn parse_bool_or_hash(
         };
         let child = assoc.value();
         match key.as_str() {
+            "prepend" => {} // Read once by parse_validator.
             "on" => match context_guard(&child) {
                 Some(guard) => built.on_guard = Some(guard),
                 None => gaps.push("on".to_string()),
@@ -1220,6 +1305,7 @@ fn parse_numericality(value: &Node<'_>, file: &str, class_consts: &super::ClassC
         };
         let child = assoc.value();
         match key.as_str() {
+            "prepend" => {} // Read once by parse_validator.
             "only_integer" => match super::super::util::bool_value(&child) {
                 Some(flag) => only_integer = flag,
                 None => gaps.push("numericality: only_integer".to_string()),
@@ -1311,6 +1397,7 @@ fn parse_set(value: &Node<'_>, file: &str, exclusion: bool, class_consts: &super
         };
         let child = assoc.value();
         match key.as_str() {
+            "prepend" => {} // Read once by parse_validator.
             "in" | "within" => match inclusion_values(&child, class_consts).or_else(|| inclusion_call(&child, file)) {
                 Some(spec) => values = Some(spec),
                 None => gaps.push(format!("{label}: in")),
@@ -1392,6 +1479,7 @@ fn parse_format(value: &Node<'_>, file: &str, class_consts: &super::ClassConsts)
         };
         let child = assoc.value();
         match key.as_str() {
+            "prepend" => {} // Read once by parse_validator.
             "with" => match resolve_format_regex(&child, class_consts) {
                 Some(resolved) => pattern = Some(resolved),
                 None => gaps.push("format: with".to_string()),
@@ -1582,6 +1670,7 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>, file: &str, class_consts: &su
         };
         let child = assoc.value();
         match key.as_str() {
+            "prepend" => {} // Read once by parse_validator.
             "minimum" | "maximum" => match class_consts.integer(&child) {
                 Some(n) if n >= 0 => {
                     let n = n as u32;

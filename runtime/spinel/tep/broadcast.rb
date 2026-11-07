@@ -46,9 +46,9 @@ module Tep
 
     # Subscribe a WebSocket connection: payloads go out as TEXT frames
     # through its driver.
-    def self.subscribe_ws(topic, ws)
+    def self.subscribe_ws(topic, ws, subscription_key = "")
       sub = Tep::BroadcastSubscription.new(
-        topic, ws.fd, Tep::WebSocket::OPCODE_TEXT, ws)
+        topic, ws.fd, Tep::WebSocket::OPCODE_TEXT, ws, subscription_key)
       n = 0
       Tep::APP.broadcast_lock.synchronize do
         subs = Tep::APP.broadcast_subs
@@ -56,6 +56,24 @@ module Tep
         n = subs.length - 1
       end
       n
+    end
+
+    # Not an index: deleting another entry shifts the saved indices.
+    # Driver identity also keeps an old channel from cancelling a reused fd.
+    def self.unsubscribe_ws(ws, subscription_key)
+      dropped = 0
+      Tep::APP.broadcast_lock.synchronize do
+        subs = Tep::APP.broadcast_subs
+        i = subs.length - 1
+        while i >= 0
+          if subs[i].ws.equal?(ws) && subs[i].subscription_key == subscription_key
+            subs.delete_at(i)
+            dropped += 1
+          end
+          i -= 1
+        end
+      end
+      dropped
     end
 
     # Drop one subscription by index. Out-of-range is a no-op.

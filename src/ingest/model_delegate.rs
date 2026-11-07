@@ -271,6 +271,12 @@ fn model_zero_argument_surface(
         return surface.clone();
     }
 
+    // Ingest does not produce a model whose parents loop: classes that only
+    // inherit from each other are not models. Should that ever change, this
+    // walk must end rather than abort `check`, so the model in progress
+    // answers empty to anything that reaches it again.
+    cache.insert(model.name.clone(), MethodSurface::default());
+
     let mut surface = MethodSurface::default();
     if let Some(parent) = &model.parent {
         if let Some(parent_model) = models.get(parent) {
@@ -417,4 +423,47 @@ fn supported_association_delegates(
         }
     }
     supported
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::Symbol;
+    use std::path::PathBuf;
+
+    /// No source reaches this today, so the loop is built by hand.
+    #[test]
+    fn a_parent_cycle_ends_the_surface_walk_with_what_the_classes_define() {
+        let files = [
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/a.rb", "class A < ApplicationRecord\n  def from_a\n    'a'\n  end\nend\n"),
+            ("app/models/b.rb", "class B < ApplicationRecord\n  def from_b\n    'b'\n  end\nend\n"),
+        ];
+        let mut app = crate::ingest::ingest_app_from_tree(
+            files
+                .iter()
+                .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+                .collect(),
+        )
+        .expect("ingest");
+        for (name, parent) in [("A", "B"), ("B", "A")] {
+            let model = app.models.iter_mut().find(|m| m.name.0.as_str() == name).expect(name);
+            model.parent = Some(ClassId(Symbol::from(parent)));
+        }
+
+        let models: HashMap<_, _> = app.models.iter().map(|m| (m.name.clone(), m)).collect();
+        let classes: HashMap<_, _> = app.library_classes.iter().map(|c| (c.name.clone(), c)).collect();
+        let specs = crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+        let surface = model_zero_argument_surface(
+            models[&ClassId(Symbol::from("B"))],
+            &app.models,
+            &models,
+            &classes,
+            &app.schema,
+            &specs,
+            &mut HashMap::default(),
+        );
+        assert!(surface.methods.contains_key("from_a"));
+        assert!(surface.methods.contains_key("from_b"));
+    }
 }

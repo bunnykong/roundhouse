@@ -11,7 +11,8 @@
 //!
 //! - a class is reached when a reached body names it (a constant), or it
 //!   is the parent, an included module or an enclosing namespace of a
-//!   reached class;
+//!   reached class, or a subclass of a reached class whose `inherited`
+//!   hook hears of it as it loads;
 //! - a call reaches the method the receiver's class answers it with: the
 //!   named class's class method for `Const.m`, the receiver's type for a
 //!   typed receiver, and `self`'s class and its reached descendants for a
@@ -273,6 +274,10 @@ impl<'a> Gems<'a> {
             for call in &entry.unknown_calls {
                 scan(call, &mut s);
             }
+            // `@configuration = Configuration.new` in the body runs as the class loads, as a constant's value does.
+            for init in &entry.class_ivar_initializers {
+                scan(init, &mut s);
+            }
         }
         (implicit, s.calls, s.consts)
     }
@@ -338,6 +343,10 @@ impl<'a> Gems<'a> {
         for c in trimmed.library_classes.iter_mut().filter(|c| self.names.contains(c.name.0.as_str())) {
             let owner = c.name.0.to_string();
             c.methods.retain(|m| {
+                // Not one ingest proved never runs (`absence_guards`' gated classes), `initialize` included: no instance is made.
+                if m.body.decisions & crate::expr::UNCALLED_DEFINER != 0 {
+                    return false;
+                }
                 matches!(m.kind, AccessorKind::AttributeReader | AccessorKind::AttributeWriter)
                     || IMPLICIT.contains(&m.name.as_str())
                     || reached.methods.contains(&(owner.clone(), m.receiver == MethodReceiver::Class, m.name.to_string()))
@@ -376,7 +385,10 @@ impl Walk<'_, '_> {
     fn run(&mut self) {
         loop {
             if let Some((context, name)) = self.consts.pop() {
-                if let Some(c) = self.gems.resolve(context.as_deref(), &name) {
+                // A value constant (`CharacterClasses::UNRESERVED`) is its owner's: the owner's body defines it.
+                if let Some(c) = self.gems.resolve(context.as_deref(), &name)
+                    .or_else(|| name.rsplit_once("::").and_then(|(owner, _)| self.gems.resolve(context.as_deref(), owner)))
+                {
                     self.class(c);
                 }
             } else if let Some(c) = self.new_classes.pop() {
@@ -396,6 +408,13 @@ impl Walk<'_, '_> {
 
     fn class(&mut self, c: String) {
         if self.classes.insert(c.clone()) {
+            // A class with an `inherited` hook hears of each subclass as it loads (rack-attack's store proxies register so).
+            if self.gems.defined.contains(&(c.as_str(), true, "inherited")) {
+                let heirs: Vec<String> = self.gems.names.iter().filter(|d| **d != c && self.gems.ancestors(d).contains(&c)).cloned().collect();
+                for heir in heirs {
+                    self.class(heir);
+                }
+            }
             self.new_classes.push(c);
         }
     }
@@ -572,7 +591,18 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
                         let name = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
                         Target::Virtual(format!("\u{0}{}\u{0}{name}", s.context.map_or("", |c| c.0)), true)
                     }
+                    // `self.class.m` in an instance method: the class side of self's class (rack-attack's `self.class.default_store`).
+                    ExprNode::Send { recv: inner, method: m, args: a, .. }
+                        if m.as_str() == "class" && a.is_empty() && inner.as_ref().is_none_or(|i| matches!(&*i.node, ExprNode::SelfRef)) =>
+                    {
+                        s.context.map_or(Target::Any, |(c, side, _)| if side { Target::Any } else { Target::Virtual(c.to_string(), true) })
+                    }
                     _ => match r.ty.as_ref().map(Ty::peel_nilable) {
+                        // A class value's class: its class methods.
+                        Some(Ty::Class { id, args }) if id.0.as_str() == "Class" => match args.first() {
+                            Some(Ty::Class { id, .. }) => Target::Virtual(id.0.to_string(), true),
+                            _ => Target::Any,
+                        },
                         Some(Ty::Class { id, .. }) => Target::Virtual(id.0.to_string(), false),
                         _ => Target::Any,
                     },
@@ -651,6 +681,7 @@ mod tests {
             let mut changed = false;
             for (context, name) in std::mem::take(&mut consts) {
                 if let Some(c) = resolve(context.as_deref(), &name)
+                    .or_else(|| name.rsplit_once("::").and_then(|(owner, _)| resolve(context.as_deref(), owner)))
                     && live_classes.insert(c)
                 {
                     changed = true;
@@ -661,6 +692,9 @@ mod tests {
                 for c in &live_classes {
                     more.extend(parent_of(c));
                     more.extend(includes_of(c));
+                    if defines(c, true, "inherited") {
+                        more.extend(gem_names.iter().filter(|d| *d != c && ancestors(d).contains(c)).cloned());
+                    }
                     let mut outer = c.as_str();
                     while let Some((o, _)) = outer.rsplit_once("::") {
                         if known(o) {
@@ -690,6 +724,9 @@ mod tests {
                         }
                         for call in &entry.unknown_calls {
                             scan(call, &mut s);
+                        }
+                        for init in &entry.class_ivar_initializers {
+                            scan(init, &mut s);
                         }
                         calls.extend(s.calls);
                         consts.extend(s.consts);

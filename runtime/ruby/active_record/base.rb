@@ -1127,6 +1127,12 @@ module ActiveRecord
       changes.key?(name)
     end
 
+    # `to_s`: the pending diff is keyed by column-name String, and
+    # callers usually pass a Symbol.
+    def will_save_change_to_attribute?(name)
+      attribute_changed?(name.to_s)
+    end
+
     # Rails' `changed?` / `has_changes_to_save?`: any column pending.
     # campfire's `RecordCache` snapshots only records with none.
     def changed?

@@ -6,13 +6,10 @@
 //! [`Ctx`]s where the variable's type has been narrowed to reflect
 //! what the condition guarantees.
 //!
-//! Today's predicates cover the nil / class-check family. Negation
-//! is recognized (`!x.nil?`). Multi-clause conditions
-//! (`x.nil? && y.nil?`), guard-clause early returns, and `case`/`when`
-//! narrowing are not yet implemented — each can slot in here when a
-//! case forces them.
+//! Built-in Hash `case` arms reuse the class-check predicate. Literal
+//! patterns and exclusions from earlier case arms are not refined.
 //!
-//! Called from the `If` arm in the body-typer's `compute` match.
+//! Called from the `If` and `Case` arms in the body-typer's `compute` match.
 
 use crate::expr::{BoolOpKind, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
@@ -282,6 +279,18 @@ fn self_class_arg(e: &Expr) -> Option<Ty> {
         return Some(ty.clone());
     }
     Some(class_name_to_ty(&id.0, true, std::slice::from_ref(&id.0)))
+}
+
+pub(super) fn extract_case_hash_narrowing(
+    scrutinee: &Expr,
+    class: &Expr,
+    probe: &Probe,
+) -> Option<NarrowPred> {
+    let ty = const_to_ty(class)?;
+    if !matches!(ty, Ty::Hash { .. }) {
+        return None;
+    }
+    Some(NarrowPred::IsA(var_key(scrutinee, probe)?, ty))
 }
 
 fn is_nil_lit(e: &Expr) -> bool {
