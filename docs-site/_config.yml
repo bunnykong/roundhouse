@@ -1,6 +1,6 @@
 # The docs pages and /progress/ of roundhouse-rb.dev. Build: bundle exec jekyll build (from this
 # directory); CI copies the output's docs/, progress/, status.json and status-history.json into
-# _site (see .github/workflows/ci.yml, build-site). Previews: ROUNDHOUSE_STATUS=off builds offline;
+# _site (see .github/workflows/ci.yml, assemble-site). Previews: ROUNDHOUSE_STATUS=off builds offline;
 # ROUNDHOUSE_STATUS_FROM=path/to/status.json renders a saved snapshot (_plugins/status.rb).
 title: Roundhouse
 description: Rails is the specification; deployment is a build flag.

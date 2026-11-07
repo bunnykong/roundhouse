@@ -232,6 +232,7 @@ permalink: /progress/
     <p class="meta" id="over-time">Each point is a measured run. A line breaks where runs stop being comparable; a first measurement is a figure, not a line.</p>
   </div>
   <div class="sect-body">
+    {%- if t.interrupted %}<p class="notice">History is incomplete before {{ t.since | escape }}.</p>{% endif %}
     <section class="family" aria-labelledby="fam-build">
       <h3 class="family-title" id="fam-build">CI on main</h3>
       <div class="family-grid build">

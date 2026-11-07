@@ -3975,10 +3975,15 @@ jobs:
           fi
           # Into place only whole and readable: a cut-off history would restart the trend.
           for file in status.json status-history.json; do
-            if curl -fsS --max-time 20 "$SITE/$file" -o "$kept/$file" && python3 -m json.tool "$kept/$file" > /dev/null 2>&1; then
+            code=$(curl -sS --max-time 20 -o "$kept/$file" -w '%{http_code}' "$SITE/$file" || true)
+            if [ "$code" = 200 ] && python3 -m json.tool "$kept/$file" > /dev/null 2>&1; then
               mv "$kept/$file" "_site/$file"
             else
               echo "::warning::$file couldn't be published again."
+              # Only a 404 means there's no history. Otherwise the next run says it's incomplete.
+              if [ "$file" = status-history.json ] && [ "$code" != 404 ]; then
+                echo '{"schema":1,"continuity":"interrupted","points":[]}' > "_site/$file"
+              fi
             fi
           done
 

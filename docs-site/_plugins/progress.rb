@@ -66,16 +66,6 @@ module RoundhouseProgress
     [m * step, [3, 6].include?(m) ? 3 : 4]
   end
 
-  # A bar with its data end rounded (4px) and its baseline end square.
-  def bar_path(x, y, w, hgt, horizontal: false, r: 4)
-    r = [r, (horizontal ? hgt : w) / 2.0, horizontal ? w : hgt].min
-    if horizontal # baseline on the left
-      "M#{x},#{y}h#{w - r}a#{r},#{r} 0 0 1 #{r},#{r}v#{hgt - 2 * r}a#{r},#{r} 0 0 1 -#{r},#{r}h-#{w - r}z"
-    else # baseline at the bottom
-      "M#{x},#{y + hgt}v-#{hgt - r}a#{r},#{r} 0 0 1 #{r},-#{r}h#{w - 2 * r}a#{r},#{r} 0 0 1 #{r},#{r}v#{hgt - r}z"
-    end
-  end
-
   # max: never drawn wider than its own width, so text keeps its size.
   def svg(width, height, title, desc, body, cls: nil, max: false)
     id = "c#{"#{title}#{width}".hash.abs.to_s(36)}"
@@ -105,33 +95,6 @@ module RoundhouseProgress
   end
 
   # Drawn twice, wide and narrow, so its text stays legible; CSS shows one.
-  def gap_chart(points, w: 480, cls: "wide")
-    hgt, left, right, top, bottom = 150, 40, 44, 12, 26
-    max, ticks = nice_max(points.map { |p| p["failed"] }.max.to_i)
-    y_of = ->(v) { top + (hgt - top - bottom) * (1 - v / max.to_f) }
-    times = points.map { |p| Time.parse(p["observed_at"]).to_f }
-    span = times.max - times.min
-    x_of = ->(t) { span.zero? ? (left + (w - left - right) / 2.0) : left + (w - left - right) * (t - times.min) / span }
-    lines = points.each_with_index.slice_when { |(a, _), (b, _)| a["break"] || b["new_segment"] }.map do |seg|
-      next "" if seg.size < 2
-      %(<polyline class="line" points="#{seg.map { |p, i| "#{x_of.(times[i]).round(1)},#{y_of.(p["failed"]).round(1)}" }.join(" ")}"/>)
-    end.join
-    marks = points.each_with_index.map do |p, i|
-      x, y = x_of.(times[i]).round(1), y_of.(p["failed"]).round(1)
-      tip = "#{datetime(p["observed_at"])}: #{num(p["failed"])} failing of #{num(p["total"])} run (#{p["spec_files_run"]} spec files)"
-      %(<g class="mark" role="img" tabindex="0" data-tip="#{h(tip)}" aria-label="#{h(tip)}"><circle class="hit" cx="#{x}" cy="#{y}" r="14"/><circle class="dot" cx="#{x}" cy="#{y}" r="4.5"/></g>)
-    end.join
-    last = points.last
-    lx, ly = x_of.(times.last).round(1), y_of.(last["failed"]).round(1)
-    first_date = Time.parse(points.first["observed_at"]).strftime("%-d %b")
-    last_date = Time.parse(last["observed_at"]).strftime("%-d %b")
-    xticks = %(<text class="tick" x="#{x_of.(times.first).round(1)}" y="#{hgt - bottom + 17}" text-anchor="#{span.zero? ? "middle" : "start"}">#{h(first_date)}</text>) +
-             (span.zero? ? "" : %(<text class="tick" x="#{lx}" y="#{hgt - bottom + 17}" text-anchor="end">#{h(last_date)}</text>))
-    svg(w, hgt, "Failing Lobsters model examples over time", "#{points.size} observation(s); latest #{num(last["failed"])} failing on #{last_date}.",
-        grid(left, w - right, y_of, max, ticks: ticks) + %(<line class="axis" x1="#{left}" x2="#{w - right}" y1="#{y_of.(0)}" y2="#{y_of.(0)}"/>) +
-        lines + marks + %(<text class="value" x="#{lx + 10}" y="#{ly + 4}">#{num(last["failed"])}</text>) + xticks, cls: cls)
-  end
-
   # --- Figures beside the results (180 x 24; the table row carries the numbers) --
 
   def fig(label, body, w: 180, hgt: 24)
@@ -350,14 +313,14 @@ module RoundhouseProgress
 
   CUES = { "lower" => "Lower is better", "higher" => "Higher is better" }.freeze
 
-  def measure(id, label:, definition:, better:, series:, value:, sub: nil, delta: nil, fmt:, ref: nil, ref_label: nil, rows: [], columns: [], note: nil, first: nil, legend: nil, facts: nil, conditions: nil, w: 480, pair: nil, headline_value: nil, href: nil)
+  def measure(id, label:, definition:, better:, series:, value:, sub: nil, delta: nil, fmt:, ref: nil, ref_label: nil, rows: [], columns: [], first: nil, legend: nil, facts: nil, w: 480, pair: nil, href: nil)
     pts = series.flat_map { |x| x["points"] }
     stamps = pts.map { |p| p["at"] }.uniq
     {
       "id" => id, "label" => label, "definition" => definition, "better" => better, "cue" => CUES[better], "value" => value, "sub" => sub,
       "value_num" => value&.split(" ", 2)&.first, "value_unit" => value&.split(" ", 2)&.dig(1),
-      "delta" => delta || nil, "note" => note, "count" => stamps.size, "first" => first, "legend" => legend, "facts" => facts, "conditions" => conditions,
-      "pair" => pair, "headline_value" => headline_value, "href" => href || "#trend-#{id}",
+      "delta" => delta || nil, "count" => stamps.size, "first" => first, "legend" => legend, "facts" => facts,
+      "pair" => pair, "href" => href || "#trend-#{id}",
       "spark" => spark(series, ref: ref), "series" => series.map { |x| x.slice("name", "cls") },
       "chart" => stamps.size > 1 ? both(series, title: label, desc: definition, fmt: fmt, ref: ref, ref_label: ref_label, w: w) : nil,
       "rows" => rows, "columns" => columns
@@ -379,8 +342,6 @@ module RoundhouseProgress
     end
     done = timed.reject { |x| x["partial"] }
     now, was = done.last, timed.first
-    recent = weeks.last(4)
-    runs = recent.sum { |x| x["completed"] }
     measure("ci", label: "Time to a green run on main", better: "lower", fmt: min, w: 720,
             definition: "Minutes from a green run's start to its last update, for runs after a merge to main. Queueing before the start isn't included.",
             series: [{ "name" => "Median", "short" => "median", "cls" => "s-n", "primary" => true, "points" => pts }],
@@ -388,8 +349,6 @@ module RoundhouseProgress
             sub: now && ["Week of #{short_date(now["week"])}", "p90 #{min.(now["p90_min"])}", (done[-2] && "#{min.(done[-2]["median_min"])} the week before")].compact.join(" · "),
             delta: now && now != was && delta(now["median_min"], was["median_min"], better: "lower", since: short_date(was["week"]), fmt: min, noise: 1),
             legend: "Line: weekly median. Band: up to the 90th percentile. Hollow: an unfinished week, or under 10 green runs.",
-            conditions: "ci.yml on pushes to main · green runs only · start to finish",
-            note: nil,
             facts: (cur = weeks.last)["partial"] && cur["median_min"] ? [["This week, so far", "#{min.(cur["median_min"])} · #{plural(cur["timed"], "green run")}"]] : nil,
             columns: ["Week of", "Runs", "Green", "Failed", "Cancelled", "Median, min", "90th percentile, min"],
             rows: weeks.reverse.map { |x| [date(x["week"]) + (x["partial"] ? ", so far" : ""), x["completed"], x["green"], x["failed"], x["superseded"], x["median_min"]&.round, x["p90_min"]&.round] })
@@ -467,7 +426,6 @@ module RoundhouseProgress
   def runtime_measures(history, feed)
     blocks = history["points"].filter_map { |p| p["bench"] }.uniq { |b| b["observed_at"] }.sort_by { |b| b["observed_at"] }
     return [] if blocks.empty?
-    conditions = bench_conditions(feed)
     RUNTIME.filter_map do |id, i, better, label, definition, long, short_fmt, unit|
       pick = lambda do |target|
         prev = nil
@@ -495,7 +453,7 @@ module RoundhouseProgress
                         elsif saved >= 0 then "#{saved}% #{id == "memory" ? "less memory" : "lower"} in this run"
                         else "#{-saved}% #{id == "memory" ? "more memory" : "higher"} in this run"
                         end
-      measure(id, label: label, definition: definition, better: better, fmt: short_fmt, conditions: conditions, w: 420,
+      measure(id, label: label, definition: definition, better: better, fmt: short_fmt, w: 420,
               series: [{ "name" => "Roundhouse, generated Ruby", "short" => "Roundhouse", "cls" => "s-a", "primary" => true, "points" => mine },
                        { "name" => "Rails", "short" => "Rails", "cls" => "s-ref", "points" => rails }],
               value: long.(now["y"]), sub: base && "Rails #{short_fmt.(base["y"])} · #{against}",
@@ -503,7 +461,6 @@ module RoundhouseProgress
               facts: native.last ? [["Spinel, native", "#{long.(native.last["y"])}#{" · #{ratio(native.last["y"].fdiv(base["y"]))} Rails" if base && i.zero?}"]] : nil,
               first: short_date(blocks.first["observed_at"]),
               pair: base && [["Roundhouse, generated Ruby", long.(now["y"]), now["y"], "s-a"], ["Rails", long.(base["y"]), base["y"], "s-ref"]].then { |rows| top = rows.map { |r| r[2] }.max.to_f; rows.map { |n, t, v, c| { "name" => n, "text" => t, "pct" => (100.0 * v / top).round(1), "cls" => c } } },
-              headline_value: against,
               columns: ["Run", "Roundhouse (#{unit})", "Spinel (#{unit})", "Rails (#{unit})"],
               rows: blocks.reverse.map { |b| r = b["rows"]; [datetime(b["observed_at"]), r.dig("ruby /articles", i)&.round(1), r.dig("spinel /articles", i)&.round(1), r.dig("rails /articles", i)&.round(1)] })
     end
@@ -566,14 +523,19 @@ module RoundhouseProgress
   def specs_measure(over_time, gap)
     pts = over_time["points"].to_a
     series = [{ "name" => "Passing", "short" => "", "cls" => "s-a", "primary" => true,
-                "points" => pts.map { |p| { "at" => p["observed_at"], "y" => p["passed"].to_i, "new_segment" => p["new_segment"], "when" => datetime(p["observed_at"]), "tip" => "#{num(p["passed"].to_i)} of #{num(p["total"].to_i)} passing" } } }]
+                "points" => pts.each_with_index.map do |p, i|
+                  { "at" => p["observed_at"], "y" => p["passed"].to_i, "new_segment" => p["new_segment"] || (i.positive? && pts[i - 1]["break"]),
+                    "when" => datetime(p["observed_at"]), "tip" => "#{num(p["passed"].to_i)} of #{num(p["total"].to_i)} passing" }
+                end }]
     last, prev = pts[-1], pts[-2]
     comparable = last && prev && !last["new_segment"]
     measure("specs", label: "Lobsters model specs passing", better: "higher", fmt: ->(v) { num(v.round) }, series: series,
             definition: "Examples passing in Lobsters' own model specs on the emitted Ruby. Lobsters isn't pinned, so runs compare only at the same app revision and scope.",
             value: gap && gap["headline"] ? "#{gap["passed"]} of #{gap["total"]}" : nil, sub: gap && gap["headline"] ? "Nightly" : nil,
-            delta: comparable ? delta(last["passed"].to_i, prev["passed"].to_i, better: "higher", since: date(prev["observed_at"]), fmt: ->(v) { num(v.round) }) : nil,
-            first: pts.first && short_date(pts.first["observed_at"]))
+            delta: comparable ? delta(last["passed"].to_i, prev["passed"].to_i, better: "higher", since: short_date(prev["observed_at"]), fmt: ->(v) { num(v.round) }) : nil,
+            first: pts.first && short_date(pts.first["observed_at"]),
+            columns: ["Run", "Passing", "Failing", "Examples", "Spec files", "Outside errors", "Lobsters", "Roundhouse", "Note"],
+            rows: pts.reverse.map { |p| [datetime(p["observed_at"]), num(p["passed"].to_i), num(p["failed"].to_i), num(p["total"].to_i), p["spec_files_run"], p["errors_outside_examples"], short(p["lobsters_sha"]), short(p["roundhouse_sha"]), ("Scope changed" if p["new_segment"])] })
   end
 
   def over_time(history)
@@ -584,23 +546,7 @@ module RoundhouseProgress
       b["new_segment"] = a["scope_key"] != b["scope_key"]
       a["break"] = (Time.parse(b["observed_at"]) - Time.parse(a["observed_at"])) > 36 * 3600
     end
-    comparable = points.last(2).size == 2 && !points.last["new_segment"]
-    change = if comparable
-      diff = points[-1]["failed"] - points[-2]["failed"]
-      since = date(points[-2]["observed_at"])
-      if diff.zero? then "No change in failing examples since #{since}, with the same app revision and scope."
-      else "#{num(diff.abs)} #{diff.negative? ? "fewer" : "more"} failing #{diff.abs == 1 ? "example" : "examples"} since #{since}, with the same app revision and scope."
-      end
-    end
-    {
-      "count" => points.size, "since" => date(history["points"].first&.dig("at")), "interrupted" => history["continuity"] == "interrupted",
-      "chart" => points.empty? ? nil : gap_chart(points) + gap_chart(points, w: 330, cls: "narrow"), "change" => change, "points" => points,
-      "rows" => points.reverse.map do |p|
-        { "date" => datetime(p["observed_at"]), "failed" => num(p["failed"]), "total" => num(p["total"]), "files" => p["spec_files_run"],
-          "outside" => p["errors_outside_examples"], "lobsters_sha" => short(p["lobsters_sha"]), "roundhouse_sha" => short(p["roundhouse_sha"]),
-          "note" => p["new_segment"] ? "Scope changed" : nil }
-      end
-    }
+    { "count" => points.size, "since" => date(history["points"].first&.dig("at")), "interrupted" => history["continuity"] == "interrupted", "points" => points }
   end
 
   def replay(feed, routes_feed)

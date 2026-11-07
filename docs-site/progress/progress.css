@@ -202,7 +202,6 @@ svg.fig { display: block; overflow: visible; }
 .key { display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; color: var(--fg); }
 .key::before { content: ""; width: 18px; height: 0; border-top: 2px solid var(--rh-text-muted); }
 .key.s-a::before { border-top-color: var(--rh-accent); } .key.s-ref::before { border-top-color: var(--rh-text-faint); }
-.key.dash::before { border-top-style: dashed; }
 .chart .mark { outline: none; cursor: default; }
 .chart .mark:focus-visible .hit { stroke: var(--accent); stroke-width: 2; }
 .chart .mark:hover .dot, .chart .mark:focus-visible .dot { r: 6px; }
@@ -243,12 +242,10 @@ svg.fig { display: block; overflow: visible; }
 .t-value .na { font-size: 15px; font-weight: 500; color: var(--muted); }
 .t-delta { min-height: 16px; font-size: 12px; line-height: 16px; color: var(--muted); }
 
-.t-spark, .t-first { display: flex; align-items: center; height: 34px; }
-.t-first { font-size: 12px; line-height: 16px; color: var(--muted); }
+.t-spark { display: flex; align-items: center; height: 34px; }
 .t-sub { font-size: 12px; line-height: 17px; color: var(--muted); }
 .spark { display: block; overflow: visible; }
 .spark .line { fill: none; stroke: var(--rh-text-soft); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
-.spark .line.dash { stroke-dasharray: 3 3; }
 .spark .ref { stroke: var(--rh-line-strong); stroke-width: 1; }
 .spark .end { fill: var(--rh-accent); stroke: var(--rh-bg); stroke-width: 2; }
 .spark .end.open { fill: var(--rh-bg); stroke: var(--rh-accent); stroke-width: 1.5; }
@@ -257,7 +254,6 @@ svg.fig { display: block; overflow: visible; }
 .firsts-line .faces img { display: block; width: 24px; height: 24px; border-radius: 50%; background: var(--rh-surface-2); }
 
 .family + .family { margin-top: 36px; }
-.finding { margin: 2px 0 8px; font-size: 19px; line-height: 26px; font-weight: 600; letter-spacing: -0.01em; color: var(--rh-heading); }
 .unit { margin-left: 4px; font-size: 0.55em; font-weight: 500; letter-spacing: 0; color: var(--muted); }
 .pair { display: grid; gap: 10px; margin: 14px 0 0; }
 .pair-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; font-size: 13px; line-height: 18px; }
@@ -290,22 +286,15 @@ svg.fig { display: block; overflow: visible; }
 .mult h4 { margin: 0; font-size: 15px; line-height: 22px; font-weight: 600; color: var(--rh-heading); }
 .mult .cue { margin: 0; font: 11px/16px var(--mono); color: var(--muted); }
 .mult .def { margin: 4px 0 0; font-size: 13px; line-height: 19px; color: var(--muted); }
-.mult .conditions { margin: 4px 0 0; font: 11px/16px var(--mono); color: var(--rh-text-dim); }
 .chart .leader { fill: none; stroke: var(--rh-line-strong); stroke-width: 1; }
-.mult .single { margin: 14px 0 0; }
-.single-value { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0; }
-.single-value b { font-size: 28px; line-height: 34px; font-weight: 600; letter-spacing: -0.02em; color: var(--rh-heading); }
-.single-value span { font-size: 13px; color: var(--muted); }
 .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 16px; margin: 10px 0 0; font-size: 13px; line-height: 20px; }
 .facts div { display: contents; }
 .facts dt { color: var(--muted); } .facts dd { margin: 0; color: var(--rh-text); font-variant-numeric: tabular-nums; }
 .single-note { margin: 10px 0 0; font-size: 12px; line-height: 18px; color: var(--muted); }
 .legend-note { color: var(--muted); }
-.mult .note { margin: 8px 0 0; font-size: 13px; line-height: 19px; color: var(--muted); }
 .mult .chart-frame { max-width: none; }
 .chart .line.s-a { stroke: var(--rh-accent); } .chart .dot.s-a { fill: var(--rh-accent); }
 .chart .line.s-n { stroke: var(--rh-text-muted); } .chart .dot.s-n { fill: var(--rh-text-muted); }
-.chart .line.dash { stroke-dasharray: 6 4; }
 .chart .band { fill: var(--rh-text-muted); fill-opacity: 0.12; stroke: none; }
 .chart .band.s-a { fill: var(--rh-accent); }
 .chart .dot.open { fill: var(--rh-bg); stroke-width: 1.5; }
@@ -320,7 +309,6 @@ svg.fig { display: block; overflow: visible; }
 .key { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; color: var(--fg); }
 .key::before { content: ""; width: 18px; height: 0; border-top: 2px solid var(--rh-text-muted); }
 .key.s-a::before { border-top-color: var(--rh-accent); }
-.key.dash::before { border-top-style: dashed; }
 @media (max-width: 1100px) { .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } .tiles li:nth-child(3n+1) { border-left: 0; } .tiles li:nth-child(3n+1) .tile { padding-left: 0; } .tiles li:nth-child(n+4) { border-top: 1px solid var(--line); } }
 @media (max-width: 1100px) { .family-grid.runtime { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 860px) { .family-grid.build, .family-grid.runtime, .family-grid.apps { grid-template-columns: minmax(0, 1fr); } }

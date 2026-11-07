@@ -31,7 +31,6 @@
   <p class="notice">{{ include.empty | escape }}</p>
   {%- endif %}
   {%- if m.facts %}<dl class="facts">{% for f in m.facts %}<div><dt>{{ f[0] | escape }}</dt><dd>{{ f[1] | escape }}</dd></div>{% endfor %}</dl>{% endif %}
-  {%- if m.note %}<p class="note">{{ m.note | escape }}</p>{% endif %}
   {%- if m.rows.size > 0 %}
   <details class="table-view">
     <summary>Table view</summary>
