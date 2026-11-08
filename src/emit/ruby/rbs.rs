@@ -293,7 +293,9 @@ fn class_object_reader(lc: &LibraryClass, m: &MethodDef) -> Option<MethodDef> {
     if !found { return None; }
     let mut reader = m.clone();
     let Some(Ty::Fn { ret, .. }) = &mut reader.signature else { return None };
-    *ret = Ty::Untyped.into();
+    // RBS `top` asserts nothing, so Spinel leaves the slot to inference; `untyped` would box it.
+    // No Ruby constant is lowercase, so this name renders as the bare keyword.
+    *ret = Ty::Class { id: crate::ident::ClassId("top".into()), args: vec![].into() }.into();
     Some(reader)
 }
 fn accessor_body(body: &Expr) -> &Expr {

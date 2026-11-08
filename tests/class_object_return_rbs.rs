@@ -480,15 +480,15 @@ end
 "#;
 
 #[test]
-fn a_reader_with_a_class_object_write_is_untyped() {
+fn a_reader_with_a_class_object_write_returns_top() {
     let files = mixed_files(READERS);
     let rbs = &files.iter().find(|f| f.path.ends_with("kit.rbs")).expect("kit.rbs").content;
     for line in [
-        "attr_reader kind: untyped",
-        "attr_reader own: untyped",
+        "attr_reader kind: top",
+        "attr_reader own: top",
         // Callers may pass any value; only the default is known to be a class.
-        "attr_reader origin: untyped",
-        "def kind_reader: () -> untyped",
+        "attr_reader origin: top",
+        "def kind_reader: () -> top",
         "attr_reader label: String",
         "attr_reader part: Part",
     ] {
@@ -512,13 +512,13 @@ fn reader_rbs(source: &str) -> String {
 }
 
 #[test]
-fn a_class_write_in_one_method_and_an_instance_in_another_is_untyped() {
+fn a_class_write_in_one_method_and_an_instance_in_another_returns_top() {
     for methods in [
         "def initialize; @kind = Kit; end\ndef reset; @kind = Kit.new; end",
         "def reset; @kind = Kit.new; end\ndef initialize; @kind = Kit; end",
     ] {
         let rbs = reader_rbs(&format!("class Kit\nattr_reader :kind\n{methods}\nend\n"));
-        assert!(rbs.contains("attr_reader kind: untyped"), "{rbs}");
+        assert!(rbs.contains("attr_reader kind: top"), "{rbs}");
     }
 }
 
@@ -536,7 +536,7 @@ fn readers_without_a_class_object_write_keep_their_signatures() {
 fn array_literal_destructuring_erases_only_false_instance_assertions() {
     for (assignment, kind_type, count_type) in [
         ("@kind, @count = [Kit, 1]", "singleton(Kit)", "Integer"),
-        ("@count, @kind = [1, self.class]", "untyped", "(Integer | Kit)"),
+        ("@count, @kind = [1, self.class]", "top", "(Integer | Kit)"),
     ] {
         let rbs = reader_rbs(&format!("class Kit\nattr_reader :kind, :count\n\
             def initialize; {assignment}; end\nend\n"));
@@ -550,7 +550,7 @@ fn positional_and_keyword_class_defaults_erase_only_false_instance_assertions() 
     for parameter in ["kind = self.class", "kind: self.class", "kind = Kit", "kind: Kit"] {
         let rbs = reader_rbs(&format!("class Kit\nattr_reader :kind\n\
             def initialize({parameter}); @kind = kind; end\nend\n"));
-        let expected = if parameter.contains("self.class") { "untyped" } else { "singleton(Kit)" };
+        let expected = if parameter.contains("self.class") { "top" } else { "singleton(Kit)" };
         assert!(rbs.contains(&format!("attr_reader kind: {expected}")), "{parameter}\n{rbs}");
     }
 }
@@ -567,7 +567,7 @@ fn unrelated_class_side_writes_and_non_readers_keep_their_types() {
 }
 
 #[test]
-fn rooted_constants_local_class_values_and_conditional_writes_are_untyped() {
+fn rooted_constants_local_class_values_and_conditional_writes_return_top() {
     for body in [
         "@kind = ::Kit",
         "copy = Kit; @kind = copy",
@@ -577,7 +577,7 @@ fn rooted_constants_local_class_values_and_conditional_writes_are_untyped() {
     ] {
         let rbs = reader_rbs(&format!("class Kit\nattr_reader :kind\n\
             def initialize(flag = true); {body}; end\nend\n"));
-        let expected = if body.starts_with("@count,") { "singleton(Kit)" } else { "untyped" };
+        let expected = if body.starts_with("@count,") { "singleton(Kit)" } else { "top" };
         assert!(rbs.contains(&format!("attr_reader kind: {expected}")), "{body}\n{rbs}");
     }
 }
@@ -645,7 +645,7 @@ fn an_explicit_return_reader_erases_a_false_instance_return() {
     for source in explicit_or_reflective_readers().into_iter().take(1) {
         let rbs = reader_rbs(&source);
         let reader = rbs.lines().find(|line| line.contains("kind:")).unwrap();
-        assert!(reader.ends_with("untyped"), "{source}\n{rbs}");
+        assert!(reader.ends_with("top"), "{source}\n{rbs}");
     }
 }
 
@@ -653,7 +653,7 @@ fn an_explicit_return_reader_erases_a_false_instance_return() {
 fn literal_reflective_writes_erase_false_instance_returns() {
     for source in explicit_or_reflective_readers().into_iter().skip(1) {
         let rbs = reader_rbs(&source);
-        assert!(rbs.contains("attr_reader kind: untyped"), "{source}\n{rbs}");
+        assert!(rbs.contains("attr_reader kind: top"), "{source}\n{rbs}");
     }
 }
 
@@ -680,6 +680,37 @@ fn reflective_readers_dispatch_on_the_class_on_spinel() {
     }
 }
 
+// `top` asserts nothing, so Spinel keeps the slot a class; `untyped` would box it, and a
+// boxed class has no `singleton_class?` on Spinel today.
+const UNBOXED_CLASS_READER: &str = r#"class Box
+end
+class Holder
+  attr_reader :kind
+  def initialize; @kind = Box; end
+end
+class Shelf
+  def self.run
+    Holder.new.kind.singleton_class?.to_s
+  end
+end
+"#;
+
+#[test]
+fn an_erased_class_reader_runs_reflection_as_emitted_ruby() {
+    assert!(reader_rbs_in(UNBOXED_CLASS_READER, "holder.rbs").contains("attr_reader kind: top"));
+    run_emitted(UNBOXED_CLASS_READER, false, "false\n");
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_erased_class_reader_keeps_its_class_slot_on_spinel() {
+    run_emitted(UNBOXED_CLASS_READER, true, "false\n");
+}
+
+fn reader_rbs_in(source: &str, file: &str) -> String {
+    mixed_files(source).into_iter().find(|f| f.path.ends_with(file)).unwrap().content
+}
+
 #[test]
 fn class_shaped_returns_and_unrelated_nominals_are_preserved() {
     use roundhouse::ident::ClassId;
@@ -696,7 +727,7 @@ fn class_shaped_returns_and_unrelated_nominals_are_preserved() {
         (Ty::Union { variants: vec![named("Kit"), named("Class")].into() }, "(Kit | Class)"),
         (Ty::Union { variants: vec![named("Kit"), Ty::Class { id: ClassId("Class".into()), args: vec![named("Kit")].into() }].into() }, "(Kit | singleton(Kit))"),
         (Ty::Union { variants: vec![Ty::Union { variants: vec![Ty::Class { id: ClassId("Class".into()), args: vec![named("Kit")].into() }, Ty::Str].into() }, named("Kit")].into() }, "((singleton(Kit) | String) | Kit)"),
-        (Ty::Union { variants: vec![Ty::Class { id: ClassId("Class".into()), args: vec![named("Part")].into() }, named("Kit")].into() }, "untyped"),
+        (Ty::Union { variants: vec![Ty::Class { id: ClassId("Class".into()), args: vec![named("Part")].into() }, named("Kit")].into() }, "top"),
     ] {
         let tree = [
             ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
@@ -731,7 +762,7 @@ fn other_receivers_unrelated_slots_and_instance_values_do_not_erase_readers() {
     assert!(rbs.contains("attr_reader kind: Kit"), "{rbs}");
     for (write, expected) in [
         ("@kind = Box.new; self.instance_variable_set(:@kind, Box)", "Box"),
-        ("@kind = Box", "untyped"),
+        ("@kind = Box", "top"),
     ] {
         let rbs = reader_rbs(&format!("class Box; end\nclass Kit\nattr_reader :kind\n\
             def instance_variable_set(name, value); value; end\ndef initialize; {write}; end\nend\n"));
