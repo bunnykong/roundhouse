@@ -67,5 +67,31 @@ SERVERS.each_key do |s|
   end
 end
 
+# Stop between complete chunks, before the next chunk's size line. One-byte
+# reads make the modeled pause land on that boundary in all three servers.
+first = BODY.byteslice(0, 4000)
+last = BODY.byteslice(4000, BODY.bytesize - 4000)
+head = "POST /posts HTTP/1.1\r\nHost: localhost\r\n" \
+  "Content-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\n\r\n".b
+prefix = head + "#{first.bytesize.to_s(16)}\r\n".b + first + "\r\n".b
+chunked_request = prefix + "#{last.bytesize.to_s(16)}\r\n".b + last + "\r\n0\r\n\r\n".b
+
+SERVERS.each_key do |server|
+  [[7, true], [Tep::BODY_READ_TIMEOUT + 1, false]].each do |pause, read|
+    $pause_at = prefix.bytesize
+    $pause = pause
+    result = serve(server, chunked_request, chunk: 1)
+    status, _recvs, bodies, raised, keep_alive = result
+    ok = if read
+      status == 200 && bodies.map(&:b) == [BODY] && $pause == 0
+    else
+      bodies.empty? && keep_alive == false && Sock.wire.pos == $pause_at && $pause == pause
+    end
+    check("#{server}: next chunk pauses #{pause}s and is #{read ? 'read whole' : 'dropped without dispatch'}",
+      raised.nil? && ok, describe(*result))
+  end
+end
+
 puts "#{CHECKS.count(true)}/#{CHECKS.length} checks pass"
+abort "body pause checks failed" unless CHECKS.all?
 puts "done"

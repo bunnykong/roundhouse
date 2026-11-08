@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::process::Command;
 
-const CHECKS: usize = 6;
+const CHECKS: usize = 12;
 
 #[test]
 fn a_body_that_pauses_is_read_until_the_body_read_timeout() {

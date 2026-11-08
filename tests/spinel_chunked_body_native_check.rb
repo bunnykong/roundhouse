@@ -21,6 +21,43 @@ def post(body, coding = "chunked", close = true)
     "Transfer-Encoding: #{coding}\r\n#{close ? "Connection: close\r\n" : ""}\r\n".b + body.b
 end
 
+def paused_body(port, mode, chunked)
+  body = "title=hello"
+  head = "POST /posts HTTP/1.1\r\nHost: localhost\r\n" \
+    "Content-Type: application/x-www-form-urlencoded\r\nConnection: close\r\n"
+  prefix = if chunked
+    head + "Transfer-Encoding: chunked\r\n\r\n6\r\ntitle=\r\n"
+  else
+    head + "Content-Length: #{body.bytesize}\r\n\r\ntitle="
+  end
+  tail = chunked ? "5\r\nhello\r\n0\r\n\r\n" : "hello"
+  label = "#{mode}: #{chunked ? 'chunked' : 'plain'} body"
+
+  # Seven seconds exceeds the old wait, while remaining inside the shared 30s
+  # pause limit. A later 30s silence is a fresh wait, not a total upload budget.
+  TCPSocket.open("127.0.0.1", port) do |socket|
+    socket.write(prefix)
+    sleep 7
+    socket.write(tail)
+    response = ServerCheckIO.read_to_close(socket)
+    unless response.start_with?("HTTP/1.1 200") && response.end_with?("hello|11|false")
+      raise "#{label}: seven-second pause lost the complete body: #{response.inspect}"
+    end
+  end
+
+  TCPSocket.open("127.0.0.1", port) do |socket|
+    socket.write(prefix)
+    sleep 7
+    socket.write(chunked ? "2\r\nhe\r\n" : "he")
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    response = ServerCheckIO.read_to_close(socket, timeout: 45)
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    raise "#{label}: stalled body was dispatched: #{response.inspect}" unless response.empty?
+    raise "#{label}: closed before the 30s wait (#{elapsed}s)" if elapsed < 25
+  end
+  puts "ok #{label}: seven-second pause admitted, stalled next bytes close without dispatch"
+end
+
 %w[threaded scheduled blocking].each do |mode|
   port = TCPServer.open("127.0.0.1", 0) { |socket| socket.addr[1] }
   Tempfile.create("chunked-body") do |log|
@@ -54,6 +91,7 @@ end
       response = exchange(port, post(body, "chunked", false) +
         "GET /next HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
       raise "#{mode}: pipeline differs" unless response.scan(/HTTP\/1\.1 200/).size == 2 && response.end_with?("alive")
+      [false, true].each { |chunked| paused_body(port, mode, chunked) }
       puts "ok #{mode}: params/env, extensions/trailers, split delimiters, 501/400/413 and pipeline"
     ensure
       Process.kill("TERM", pid)

@@ -563,7 +563,8 @@ def native_coverage(path):
     if path.startswith("tests/spinel_chunked_body") or path in {
         "tests/spinel_toolchain/chunked_body.rs",
         "tests/support/server_check_io.rb",
-        "tests/tep_server_harness.rb", "runtime/spinel/tep/chunked_body.rb",
+        "tests/tep_server_harness.rb", "tests/spinel_body_pause.rs", "tests/spinel_body_pause.rb",
+        "runtime/spinel/tep/tep_core.rb", "runtime/spinel/tep/chunked_body.rb",
         "runtime/spinel/tep/request.rb", "runtime/spinel/tep/parser.rb",
         "runtime/spinel/tep/net.rb", "runtime/spinel/tep/tep.rb",
         "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",

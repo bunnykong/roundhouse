@@ -334,10 +334,10 @@ module Tep
       decoder.feed(input.take_pending_input)
       until decoder.finished?
         if scheduled
-          return false if Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, 5) == 0
+          return false if Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, Tep::BODY_READ_TIMEOUT) == 0
         else
           return false if io.nil?
-          return false if io.wait_readable(5).nil?
+          return false if io.wait_readable(Tep::BODY_READ_TIMEOUT).nil?
         end
         bytes = Sock.sphttp_recv_some(client_fd, 65535).b
         if bytes.empty?

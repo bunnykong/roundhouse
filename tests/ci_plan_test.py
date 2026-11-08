@@ -140,6 +140,7 @@ class Routing(unittest.TestCase):
             "runtime/spinel/tep/parser.rb", "runtime/spinel/tep/net.rb", "runtime/spinel/tep/tep.rb",
             "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
             "runtime/spinel/tep/server_scheduled.rb", "tests/tep_server_harness.rb",
+            "runtime/spinel/tep/tep_core.rb", "tests/spinel_body_pause.rs", "tests/spinel_body_pause.rb",
             "tests/spinel_chunked_body.rs", "tests/spinel_chunked_body.rb",
             "tests/spinel_chunked_body_native.rb", "tests/spinel_chunked_body_native_check.rb",
             "tests/spinel_chunked_body_app_check.rb",
