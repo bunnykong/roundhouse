@@ -525,7 +525,7 @@ def native_coverage(path):
         "tests/support/cipher_registrations.rb", "runtime/spinel/message_digest.rb",
     }:
         suites.add("openssl_registrations")
-    if path == "src/analyze/mod.rs":
+    if path in {"src/analyze/mod.rs", "src/emit/ruby/rbs.rs"}:
         suites.add("class_object_return_rbs")
     if path in {"src/analyze/mod.rs", "src/analyze/body/mod.rs"}:
         suites.add("module_self_argument_rbs")

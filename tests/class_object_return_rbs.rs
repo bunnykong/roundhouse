@@ -448,3 +448,293 @@ fn mixed_value_controls_run_as_emitted_ruby() {
         run_emitted(&source, false, expected);
     }
 }
+
+// A reader of an ivar that holds a class. The body typer gives the class
+// the type an instance has, so the sidecar declared `attr_reader kind: Kit`,
+// which spinel trusted: a call on the class refused to compile, and an
+// inherited `self.class` default raised a TypeError at run time.
+const READERS: &str = r#"class Part
+end
+class Kit
+  attr_reader :kind, :origin, :own, :label, :part
+  def initialize(origin: self.class)
+    @kind = Kit
+    @origin = origin
+    @own = self.class
+    @label = "kit"
+    @part = Part.new
+  end
+  def kind_reader
+    @kind
+  end
+end
+class Crate < Kit
+end
+class Shelf
+  def self.run
+    kit = Kit.new
+    crate = Crate.new
+    [kit.kind.name, kit.origin.name, crate.origin.name, crate.own.name, kit.kind_reader.name, kit.label]
+  end
+end
+"#;
+
+#[test]
+fn a_reader_with_a_class_object_write_is_untyped() {
+    let files = mixed_files(READERS);
+    let rbs = &files.iter().find(|f| f.path.ends_with("kit.rbs")).expect("kit.rbs").content;
+    for line in [
+        "attr_reader kind: untyped",
+        "attr_reader own: untyped",
+        // Callers may pass any value; only the default is known to be a class.
+        "attr_reader origin: untyped",
+        "def kind_reader: () -> untyped",
+        "attr_reader label: String",
+        "attr_reader part: Part",
+    ] {
+        assert!(rbs.contains(line), "{line}\n{rbs}");
+    }
+}
+
+#[test]
+fn class_valued_readers_run_as_emitted_ruby() {
+    run_emitted(READERS, false, "Kit\nKit\nCrate\nCrate\nKit\nkit\n");
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain with matz/spinel#11310"]
+fn class_valued_readers_run_on_spinel_with_generated_sidecars() {
+    run_emitted(READERS, true, "Kit\nKit\nCrate\nCrate\nKit\nkit\n");
+}
+
+fn reader_rbs(source: &str) -> String {
+    mixed_files(source).into_iter().find(|f| f.path.ends_with("kit.rbs")).unwrap().content
+}
+
+#[test]
+fn a_class_write_in_one_method_and_an_instance_in_another_is_untyped() {
+    for methods in [
+        "def initialize; @kind = Kit; end\ndef reset; @kind = Kit.new; end",
+        "def reset; @kind = Kit.new; end\ndef initialize; @kind = Kit; end",
+    ] {
+        let rbs = reader_rbs(&format!("class Kit\nattr_reader :kind\n{methods}\nend\n"));
+        assert!(rbs.contains("attr_reader kind: untyped"), "{rbs}");
+    }
+}
+
+#[test]
+fn readers_without_a_class_object_write_keep_their_signatures() {
+    let rbs = reader_rbs("class Part; end\nclass Kit\nattr_reader :kind, :label\n\
+        def initialize; @kind = Part.new; @label = \"kit\"; end\n\
+        def kind_reader; @kind; end\nend\n");
+    for line in ["attr_reader kind: Part", "attr_reader label: String", "def kind_reader: () -> Part"] {
+        assert!(rbs.contains(line), "{rbs}");
+    }
+}
+
+#[test]
+fn array_literal_destructuring_erases_only_false_instance_assertions() {
+    for (assignment, kind_type, count_type) in [
+        ("@kind, @count = [Kit, 1]", "singleton(Kit)", "Integer"),
+        ("@count, @kind = [1, self.class]", "untyped", "(Integer | Kit)"),
+    ] {
+        let rbs = reader_rbs(&format!("class Kit\nattr_reader :kind, :count\n\
+            def initialize; {assignment}; end\nend\n"));
+        assert!(rbs.contains(&format!("attr_reader kind: {kind_type}")), "{assignment}\n{rbs}");
+        assert!(rbs.contains(&format!("attr_reader count: {count_type}")), "{assignment}\n{rbs}");
+    }
+}
+
+#[test]
+fn positional_and_keyword_class_defaults_erase_only_false_instance_assertions() {
+    for parameter in ["kind = self.class", "kind: self.class", "kind = Kit", "kind: Kit"] {
+        let rbs = reader_rbs(&format!("class Kit\nattr_reader :kind\n\
+            def initialize({parameter}); @kind = kind; end\nend\n"));
+        let expected = if parameter.contains("self.class") { "untyped" } else { "singleton(Kit)" };
+        assert!(rbs.contains(&format!("attr_reader kind: {expected}")), "{parameter}\n{rbs}");
+    }
+}
+
+#[test]
+fn unrelated_class_side_writes_and_non_readers_keep_their_types() {
+    let rbs = reader_rbs("class Part; end\nclass Kit\nattr_reader :kind\n\
+        def initialize; @kind = Part.new; @other = Kit; end\n\
+        def self.reset; @kind = Kit; end\n\
+        def other; 1; end\nend\n");
+    // Analysis currently mixes the class-side slot into this type; keep its output.
+    assert!(rbs.contains("attr_reader kind: (Kit | Part)"), "{rbs}");
+    assert!(rbs.contains("def other: () -> Integer"), "{rbs}");
+}
+
+#[test]
+fn rooted_constants_local_class_values_and_conditional_writes_are_untyped() {
+    for body in [
+        "@kind = ::Kit",
+        "copy = Kit; @kind = copy",
+        "if flag; @kind = Kit; else; @kind = Kit.new; end",
+        "@kind ||= self.class",
+        "@count, @kind = [1, Kit]",
+    ] {
+        let rbs = reader_rbs(&format!("class Kit\nattr_reader :kind\n\
+            def initialize(flag = true); {body}; end\nend\n"));
+        let expected = if body.starts_with("@count,") { "singleton(Kit)" } else { "untyped" };
+        assert!(rbs.contains(&format!("attr_reader kind: {expected}")), "{body}\n{rbs}");
+    }
+}
+
+const CLASS_READER_DISPATCH: &str = r#"class Box
+  LABEL = "box"
+  def self.tag; "class"; end
+  def tag; "instance"; end
+end
+class Holder
+  attr_reader :kind
+  def initialize
+    @kind, @count = Box, 1
+  end
+end
+class Shelf
+  def self.run
+    Holder.new.kind.const_defined?(:LABEL).to_s
+  end
+end
+"#;
+
+#[test]
+fn an_existing_singleton_reader_keeps_its_signature() {
+    let files = mixed_files(CLASS_READER_DISPATCH);
+    let rbs = &files.iter().find(|f| f.path.ends_with("holder.rbs")).unwrap().content;
+    assert!(rbs.contains("attr_reader kind: singleton(Box)"), "{rbs}");
+}
+
+#[test]
+fn precise_class_readers_run_as_emitted_ruby() {
+    run_emitted(CLASS_READER_DISPATCH, false, "true\n");
+    run_emitted(&CLASS_READER_DISPATCH.replace(
+        "Holder.new.kind.const_defined?(:LABEL).to_s", "Holder.new.kind.new.tag"), false, "instance\n");
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_singleton_reader_runs_const_defined_on_spinel() {
+    run_emitted(CLASS_READER_DISPATCH, true, "true\n");
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_singleton_reader_constructs_an_instance_on_spinel() {
+    run_emitted(&CLASS_READER_DISPATCH.replace(
+        "Holder.new.kind.const_defined?(:LABEL).to_s", "Holder.new.kind.new.tag"), true, "instance\n");
+}
+
+fn explicit_or_reflective_readers() -> Vec<String> {
+    let explicit = "def kind; return @kind; end\ndef initialize; @kind = Box; end";
+    let mut bodies = vec![explicit.to_string()];
+    for receiver in ["", "self."] {
+        for initial in ["", "@kind = Box.new;"] {
+            bodies.push(format!("attr_reader :kind\ndef initialize(flag = true); {initial} {receiver}instance_variable_set(:@kind, Box); end"));
+        }
+    }
+    bodies.into_iter().map(|body| format!("class Box\n\
+        def self.tag; \"class\"; end\ndef tag; \"instance\"; end\nend\nclass Kit\n{body}\nend\n\
+        class Shelf\ndef self.run; Kit.new.kind.tag; end\nend\n")).collect()
+}
+
+#[test]
+fn an_explicit_return_reader_erases_a_false_instance_return() {
+    for source in explicit_or_reflective_readers().into_iter().take(1) {
+        let rbs = reader_rbs(&source);
+        let reader = rbs.lines().find(|line| line.contains("kind:")).unwrap();
+        assert!(reader.ends_with("untyped"), "{source}\n{rbs}");
+    }
+}
+
+#[test]
+fn literal_reflective_writes_erase_false_instance_returns() {
+    for source in explicit_or_reflective_readers().into_iter().skip(1) {
+        let rbs = reader_rbs(&source);
+        assert!(rbs.contains("attr_reader kind: untyped"), "{source}\n{rbs}");
+    }
+}
+
+#[test]
+fn explicit_return_and_reflective_readers_run_as_emitted_ruby() {
+    for source in explicit_or_reflective_readers() {
+        run_emitted(&source, false, "class\n");
+    }
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_explicit_return_reader_dispatches_on_the_class_on_spinel() {
+    for source in explicit_or_reflective_readers().into_iter().take(1) {
+        run_emitted(&source, true, "class\n");
+    }
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn reflective_readers_dispatch_on_the_class_on_spinel() {
+    for source in explicit_or_reflective_readers().into_iter().skip(1) {
+        run_emitted(&source, true, "class\n");
+    }
+}
+
+#[test]
+fn class_shaped_returns_and_unrelated_nominals_are_preserved() {
+    use roundhouse::ident::ClassId;
+    use roundhouse::ty::Ty;
+    let named = |name: &str| Ty::Class { id: ClassId(name.into()), args: vec![].into() };
+    let singleton = Ty::Class { id: ClassId("Class".into()), args: vec![named("Kit")].into() };
+    for (ret, expected) in [
+        (singleton.clone(), "singleton(Kit)"),
+        (named("Class"), "Class"),
+        (Ty::Union { variants: vec![singleton.clone(), named("Class")].into() }, "(singleton(Kit) | Class)"),
+        (Ty::Union { variants: vec![singleton, Ty::Nil].into() }, "singleton(Kit)?"),
+        (Ty::Untyped, "untyped"),
+        (named("Object"), "Object"),
+        (Ty::Union { variants: vec![named("Kit"), named("Class")].into() }, "(Kit | Class)"),
+        (Ty::Union { variants: vec![named("Kit"), Ty::Class { id: ClassId("Class".into()), args: vec![named("Kit")].into() }].into() }, "(Kit | singleton(Kit))"),
+        (Ty::Union { variants: vec![Ty::Union { variants: vec![Ty::Class { id: ClassId("Class".into()), args: vec![named("Kit")].into() }, Ty::Str].into() }, named("Kit")].into() }, "((singleton(Kit) | String) | Kit)"),
+        (Ty::Union { variants: vec![Ty::Class { id: ClassId("Class".into()), args: vec![named("Part")].into() }, named("Kit")].into() }, "untyped"),
+    ] {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+            ("app/services/probe.rb", "class Kit\nattr_reader :kind\ndef initialize; @kind = Kit; end\nend\n"),
+        ].into_iter().map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).unwrap();
+        roundhouse::session::analyze_and_lower(&mut app);
+        let method = app.library_classes.iter_mut().flat_map(|class| &mut class.methods)
+            .find(|method| method.name.as_str() == "kind").unwrap();
+        let Some(Ty::Fn { ret: reader_return, .. }) = &mut method.signature else { panic!("reader signature") };
+        *reader_return = ret.into();
+        let files = roundhouse::emit::ruby::emit_library(&app);
+        let rbs = &files.iter().find(|file| file.path.ends_with("kit.rbs")).unwrap().content;
+        assert!(rbs.contains(&format!("attr_reader kind: {expected}")), "{rbs}");
+    }
+}
+
+#[test]
+fn other_receivers_unrelated_slots_and_instance_values_do_not_erase_readers() {
+    for write in [
+        "other.instance_variable_set(:@kind, Box)",
+        "instance_variable_set(:@other, Box)",
+        "self.instance_variable_set(:@kind, Box.new)",
+    ] {
+        let rbs = reader_rbs(&format!("class Box; end\nclass Kit\nattr_reader :kind\n\
+            def initialize; @kind = Box.new; end\ndef reset(other); {write}; end\nend\n"));
+        assert!(rbs.contains("attr_reader kind: Box"), "{write}\n{rbs}");
+    }
+    let rbs = reader_rbs("class Box; end\nclass Kit\nattr_reader :kind\n\
+        def class; Box.new; end\ndef initialize; @kind = self.class; end\nend\n");
+    // Keep the analyzer's existing result when `class` is app-defined.
+    assert!(rbs.contains("attr_reader kind: Kit"), "{rbs}");
+    for (write, expected) in [
+        ("@kind = Box.new; self.instance_variable_set(:@kind, Box)", "Box"),
+        ("@kind = Box", "untyped"),
+    ] {
+        let rbs = reader_rbs(&format!("class Box; end\nclass Kit\nattr_reader :kind\n\
+            def instance_variable_set(name, value); value; end\ndef initialize; {write}; end\nend\n"));
+        assert!(rbs.contains(&format!("attr_reader kind: {expected}")), "{write}\n{rbs}");
+    }
+}

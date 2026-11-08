@@ -14,7 +14,7 @@ use super::super::EmittedFile;
 use crate::dialect::{
     AccessorKind, LibraryClass, MethodDef, MethodReceiver, MethodVisibility,
 };
-use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
+use crate::expr::{Expr, ExprNode, LValue, Literal, RESOLVED_DATA_FACTORY};
 use crate::ty::{Param, ParamKind, Ty};
 
 thread_local! {
@@ -170,7 +170,8 @@ fn render_class(
     }
 
     for m in &lc.methods {
-        let line = render_method(m, &segments);
+        let reader = class_object_reader(lc, m);
+        let line = render_method(reader.as_ref().unwrap_or(m), &segments);
         let visibility = if lc.data_define().is_some() && m.visibility != MethodVisibility::Public { "private " } else { "" };
         writeln!(s, "{body_pad}{visibility}{line}").unwrap();
     }
@@ -254,6 +255,47 @@ fn render_method(m: &MethodDef, enclosing: &[&str]) -> String {
     }
 }
 
+// None in the check means a class arm already admits the value; only Some(true) is a false instance assertion.
+fn class_object_reader(lc: &LibraryClass, m: &MethodDef) -> Option<MethodDef> {
+    let body = accessor_body(&m.body);
+    let body = if let ExprNode::Return { value } = &*body.node { accessor_body(value) } else { body };
+    let ExprNode::Ivar { name: ivar } = &*body.node else { return None };
+    if m.receiver != MethodReceiver::Instance { return None; }
+    let Some(Ty::Fn { ret, .. }) = &m.signature else { return None };
+    fn names_instance(ret: &Ty, value: &Ty) -> Option<bool> {
+        match (ret, value) {
+            (Ty::Union { variants }, _) => variants.iter().try_fold(false, |found, ret| names_instance(ret, value).map(|next| found || next)),
+            (Ty::Class { id, args }, _) if id.0.as_str() == "Class" && (args.is_empty() || args.len() == 1 && names_instance(&args[0], value) == Some(true)) => None,
+            (_, Ty::Class { id, args }) if id.0.as_str() == "Class" && args.len() == 1 => names_instance(ret, &args[0]),
+            (Ty::Class { id, .. }, Ty::Class { id: class, .. }) => Some(id.0.as_str() != "Class" && id == class),
+            _ => Some(false),
+        }
+    }
+    fn writes(e: &Expr, ivar: &crate::ident::Symbol, class: &impl Fn(&Expr) -> bool, kernel_setter: bool) -> bool {
+        let mut found = match &*e.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, value } | ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => name == ivar && class(value),
+            ExprNode::MultiAssign { targets, value } => matches!(&*value.node, ExprNode::Array { elements, .. } if elements.len() == targets.len() && targets.iter().zip(elements).any(|(t, v)| matches!(t, LValue::Ivar { name } if name == ivar) && class(v))),
+            ExprNode::Send { recv, method, args, block: None, .. } if kernel_setter && method.as_str() == "instance_variable_set" && args.len() == 2 && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) =>
+                matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str().strip_prefix('@') == Some(ivar.as_str())) && class(&args[1]),
+            _ => false,
+        };
+        e.node.for_each_child(&mut |child| found |= writes(child, ivar, class, kernel_setter));
+        found
+    }
+    let class = |e: &Expr| (e.decisions & crate::expr::CLASS_OBJECT_VALUE != 0
+        || matches!(&*e.node, ExprNode::Send { recv: Some(recv), method, args, block: None, .. } if method.as_str() == "class" && args.is_empty()
+            && (!matches!(&*recv.node, ExprNode::SelfRef) || !lc.methods.iter().any(|def| def.receiver == MethodReceiver::Instance && def.name.as_str() == "class"))))
+        && e.ty.as_ref().is_some_and(|ty| names_instance(ret, ty) == Some(true));
+    let found = lc.methods.iter().filter(|def| def.receiver == MethodReceiver::Instance).any(|def| {
+        let defaults: Vec<_> = def.params.iter().filter(|p| p.default.as_ref().is_some_and(&class)).map(|p| &p.name).collect();
+        writes(&def.body, ivar, &|e| class(e) || matches!(&*e.node, ExprNode::Var { name, .. } if defaults.contains(&name)), !lc.methods.iter().any(|def| def.receiver == MethodReceiver::Instance && def.name.as_str() == "instance_variable_set"))
+    });
+    if !found { return None; }
+    let mut reader = m.clone();
+    let Some(Ty::Fn { ret, .. }) = &mut reader.signature else { return None };
+    *ret = Ty::Untyped.into();
+    Some(reader)
+}
 fn accessor_body(body: &Expr) -> &Expr {
     match &*body.node {
         ExprNode::Seq { exprs } if exprs.len() == 1 => accessor_body(&exprs[0]),
