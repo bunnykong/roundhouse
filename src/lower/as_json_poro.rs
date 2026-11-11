@@ -556,7 +556,9 @@ fn rewrite_render_json_serializer(e: &Expr, serializers: &HashSet<ClassId>) -> O
         }
         let ExprNode::Send { recv: Some(c), method: new, .. } = &*r.node else { return None };
         let ExprNode::Const { path } = &*c.node else { return None };
-        let id = ClassId(Symbol::from(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")));
+        // A rooted `::S` (the rewrite keeps the root as written) is the
+        // serializer `S`: the ClassId has no leading empty segment.
+        let id = ClassId(Symbol::from(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::")));
         (new.as_str() == "new" && serializers.contains(&id)).then(|| r.clone())
     };
     if let Some(r) = instance(value) {

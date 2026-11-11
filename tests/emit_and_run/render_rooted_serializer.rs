@@ -53,3 +53,20 @@ fn a_rooted_render_serializer_in_a_module_renders_the_top_level_class() {
     run.assert_passes();
     assert!(run.stdout.contains("rooted render OK"), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
 }
+
+/// The serializer's own writer (`as_json_str`) renders the rooted
+/// serializer as it renders `Api::ArticleSerializer`: the root names the
+/// same lowered class, so the render is not left to the generic encoder
+/// of `serializable_hash`'s Hash. Python, where the generic encoder is
+/// `JsonRender.encode`.
+#[test]
+fn a_rooted_render_serializer_renders_through_its_writer_on_python() {
+    let (emitted, errors) = app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let controllers = std::fs::read_to_string(emitted.join("app/v2/controllers.py")).unwrap();
+    let renders: Vec<&str> = controllers.lines().filter(|l| l.contains("ArticleSerializer")).collect();
+    assert_eq!(renders.len(), 3, "{controllers}");
+    for render in &renders {
+        assert!(render.contains(".as_json_str()") && !render.contains("JsonRender.encode"), "{}", renders.join("\n"));
+    }
+}
