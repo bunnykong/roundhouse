@@ -264,6 +264,8 @@ fn class_object_reader(lc: &LibraryClass, m: &MethodDef) -> Option<MethodDef> {
     let Some(Ty::Fn { ret, .. }) = &m.signature else { return None };
     fn names_instance(ret: &Ty, value: &Ty) -> Option<bool> {
         match (ret, value) {
+            // `render_union` writes a union with an unknown arm as `untyped`, which asserts no instance.
+            (Ty::Union { variants }, _) if variants.iter().any(Ty::is_unknown) => Some(false),
             (Ty::Union { variants }, _) => variants.iter().try_fold(false, |found, ret| names_instance(ret, value).map(|next| found || next)),
             (Ty::Class { id, args }, _) if id.0.as_str() == "Class" && (args.is_empty() || args.len() == 1 && names_instance(&args[0], value) == Some(true)) => None,
             (_, Ty::Class { id, args }) if id.0.as_str() == "Class" && args.len() == 1 => names_instance(ret, &args[0]),

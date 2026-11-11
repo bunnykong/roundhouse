@@ -729,20 +729,75 @@ fn class_shaped_returns_and_unrelated_nominals_are_preserved() {
         (Ty::Union { variants: vec![Ty::Union { variants: vec![Ty::Class { id: ClassId("Class".into()), args: vec![named("Kit")].into() }, Ty::Str].into() }, named("Kit")].into() }, "((singleton(Kit) | String) | Kit)"),
         (Ty::Union { variants: vec![Ty::Class { id: ClassId("Class".into()), args: vec![named("Part")].into() }, named("Kit")].into() }, "top"),
     ] {
+        let rbs = kit_reader_rbs(ret);
+        assert!(rbs.contains(&format!("attr_reader kind: {expected}")), "{rbs}");
+    }
+}
+
+// Emits the `Kit#kind` reader of a class-object write with `ret` as its inferred return.
+fn kit_reader_rbs(ret: roundhouse::ty::Ty) -> String {
+    use roundhouse::ty::Ty;
+    let tree = [
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+        ("app/services/probe.rb", "class Kit\nattr_reader :kind\ndef initialize; @kind = Kit; end\nend\n"),
+    ].into_iter().map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec())).collect();
+    let mut app = ingest_app_from_tree(tree).unwrap();
+    roundhouse::session::analyze_and_lower(&mut app);
+    let method = app.library_classes.iter_mut().flat_map(|class| &mut class.methods)
+        .find(|method| method.name.as_str() == "kind").unwrap();
+    let Some(Ty::Fn { ret: reader_return, .. }) = &mut method.signature else { panic!("reader signature") };
+    *reader_return = ret.into();
+    let files = roundhouse::emit::ruby::emit_library(&app);
+    files.into_iter().find(|file| file.path.ends_with("kit.rbs")).unwrap().content
+}
+
+// A union with an unknown arm already renders `untyped`, which asserts no instance; keep it.
+#[test]
+fn a_reader_union_with_an_unknown_arm_keeps_untyped() {
+    use roundhouse::ident::{ClassId, TyVar};
+    use roundhouse::ty::Ty;
+    let kit = Ty::Class { id: ClassId("Kit".into()), args: vec![].into() };
+    let union = |variants: Vec<Ty>| Ty::Union { variants: variants.into() };
+    let mut wrong = Vec::new();
+    for (ret, expected) in [
+        (union(vec![kit.clone(), Ty::Untyped]), "untyped"),
+        (union(vec![kit.clone(), Ty::Var { var: TyVar(0) }]), "untyped"),
+        (union(vec![union(vec![kit.clone(), Ty::Untyped]), Ty::Str]), "(untyped | String)"),
+        // A known `Kit` arm beside the unknown one is still a false instance assertion.
+        (union(vec![union(vec![Ty::Str, Ty::Untyped]), kit]), "top"),
+    ] {
+        let rbs = kit_reader_rbs(ret.clone());
+        if !rbs.contains(&format!("attr_reader kind: {expected}")) {
+            wrong.push(format!("{ret:?} should render {expected}:\n{rbs}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+#[test]
+fn a_class_write_beside_an_unknown_value_keeps_untyped() {
+    let mut wrong = Vec::new();
+    for (class, writes) in [
+        ("Kit", "def initialize; @kind = Kit; end\ndef reset; @kind = Source.new.choice; end"),
+        ("Kit", "def initialize(flag); if flag; @kind = Kit; else; @kind = Source.new.choice; end; end"),
+        ("Box", "def initialize; @kind = Box; end\ndef reset; @kind = Source.new.choice; end"),
+    ] {
+        let source = format!("class Box\nend\nclass Kit\nattr_reader :kind\n{writes}\ndef kind_reader; @kind; end\nend\n");
         let tree = [
             ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
-            ("app/services/probe.rb", "class Kit\nattr_reader :kind\ndef initialize; @kind = Kit; end\nend\n"),
+            ("app/services/probe.rb", source.as_str()),
+            ("sig/source.rbs", "class Source\n  def choice: () -> untyped\nend\n"),
         ].into_iter().map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec())).collect();
         let mut app = ingest_app_from_tree(tree).unwrap();
         roundhouse::session::analyze_and_lower(&mut app);
-        let method = app.library_classes.iter_mut().flat_map(|class| &mut class.methods)
-            .find(|method| method.name.as_str() == "kind").unwrap();
-        let Some(Ty::Fn { ret: reader_return, .. }) = &mut method.signature else { panic!("reader signature") };
-        *reader_return = ret.into();
         let files = roundhouse::emit::ruby::emit_library(&app);
         let rbs = &files.iter().find(|file| file.path.ends_with("kit.rbs")).unwrap().content;
-        assert!(rbs.contains(&format!("attr_reader kind: {expected}")), "{rbs}");
+        // The writes give the slot the instance type of `{class}` beside an unknown arm.
+        if !["attr_reader kind: untyped", "def kind_reader: () -> untyped"].iter().all(|line| rbs.contains(line)) {
+            wrong.push(format!("{class}: {writes}\n{rbs}"));
+        }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 #[test]
