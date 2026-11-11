@@ -396,6 +396,9 @@ module ActiveRecord
     def bound_text: (untyped value) -> String
     def column_bound_value: (String col, untyped val) -> untyped
     def integer_column?: (String col) -> bool
+    def enum_column?: (String col) -> bool
+    def list_predicate: (String col, String qcol, Array[untyped] val) -> String
+    def enum_list_predicate: (String col, String qcol, Array[untyped] val) -> String
     def named_bind_start?: (String ch) -> bool
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String

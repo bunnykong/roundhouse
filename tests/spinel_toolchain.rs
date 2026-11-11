@@ -320,6 +320,10 @@ mod untyped_calendar;
 mod enumerable_mixin_contract;
 #[path = "spinel_toolchain/enumerable_mixin.rs"]
 mod enumerable_mixin;
+#[path = "support/enum_where_runtime_cast.rs"]
+mod enum_where_runtime_cast_contract;
+#[path = "spinel_toolchain/enum_where_runtime_cast.rs"]
+mod enum_where_runtime_cast;
 #[path = "support/file_level_struct.rs"]
 mod file_level_struct_contract;
 #[path = "spinel_toolchain/file_level_struct.rs"]

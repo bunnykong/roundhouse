@@ -238,6 +238,7 @@ pub(super) fn push_schema_methods(
     );
     if runtime_relation == super::RuntimeRelation::Present {
         push_enum_condition_methods(methods, model, table);
+        push_enum_where_methods(methods, model, table);
     }
     let mut demanded: Option<std::rc::Rc<crate::det::HashSet<Symbol>>> = None;
     for col in &table.columns {
@@ -3912,6 +3913,76 @@ fn push_enum_condition_methods(methods: &mut Vec<MethodDef>, model: &Model, tabl
             block_param: None,
         });
     }
+}
+
+/// The runtime relation's cast of a `where` value on an enum column
+/// (#2078): `def self.schema_enum_columns; [:status]; end`, and
+/// `def self._enum_where_value(col, value)` answering
+/// `ActiveRecord.enum_where_int(value, STATUS_ENUM_LABELS,
+/// STATUS_ENUM_VALUES, "")` for `col == "status"` and `value` for any
+/// other column. `lower::enum_symbols` casts a literal label when the
+/// app is lowered; this is the half for a label known only at runtime
+/// (a method argument, a `params` value), which Rails casts through the
+/// enum type as well. Nothing for a model without an enum, so the base
+/// class's defaults (no enum column) answer.
+fn push_enum_where_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &Table) {
+    let castable = |c: &Column| model.enums.contains_key(&c.name) && enum_arrays(model, c).is_some();
+    if !table.columns.iter().any(castable) {
+        return;
+    }
+    push_schema_symbol_list(methods, &model.name, "schema_enum_columns", table, castable);
+    let col_param = Symbol::from("col");
+    let value = Symbol::from("value");
+    let mut body = with_ty(var_ref(value.clone()), Ty::Untyped);
+    for col in table.columns.iter().rev().filter(|c| castable(c)) {
+        let Some((_, _, value_ty)) = enum_arrays(model, col) else { continue };
+        let (labels, values, _) = enum_array_refs(model, col, &value_ty);
+        let nil_label = enum_nil_label(model, col).unwrap_or_default();
+        let cast = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
+                    method: Symbol::from(if value_ty == Ty::Int { "enum_where_int" } else { "enum_where_str" }),
+                    args: vec![with_ty(var_ref(value.clone()), Ty::Untyped), labels, values, with_ty(lit_str(nil_label), Ty::Str)],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            Ty::Untyped,
+        );
+        let is_col = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(with_ty(var_ref(col_param.clone()), Ty::Str)),
+                    method: Symbol::from("=="),
+                    args: vec![with_ty(lit_str(col.name.as_str().to_string()), Ty::Str)],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Bool,
+        );
+        body = with_ty(Expr::new(Span::synthetic(), ExprNode::If { cond: is_col, then_branch: cast, else_branch: body }), Ty::Untyped);
+    }
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("_enum_where_value"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(col_param.clone()), Param::positional(value.clone())],
+        body,
+        signature: Some(fn_sig(vec![(col_param, Ty::Str), (value, Ty::Untyped)], Ty::Untyped)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
 }
 
 /// What `normalizes` on an enum hands its lambda: the label, as Rails'

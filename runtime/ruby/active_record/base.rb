@@ -79,6 +79,46 @@ module ActiveRecord
     text == "" ? nil : enum_str(text, labels, values, attr)
   end
 
+  # A `where` value on an Integer enum column, cast as Rails' enum type
+  # serializes one (activerecord 8.1.4): a label, Symbol or String, is
+  # its stored value, an Integer passes, and anything else casts as the
+  # Integer column would: a numeric String or a Float is its Integer,
+  # `true`/`false` are 1/0, and a label no mapping names is nil, which
+  # the predicate writes as `IS NULL`. `nil_label` is the mapping's `nil`
+  # entry's label (`unknown: nil`), "" when it has none. Unlike the
+  # writer's `enum_int` this does not raise: Rails' `where` doesn't.
+  def self.enum_where_int(value, labels, values, nil_label)
+    return value if value.is_a?(Integer)
+    return value.to_i if value.is_a?(Float)
+    return 1 if value == true
+    return 0 if value == false
+    return nil unless value.is_a?(Symbol) || value.is_a?(String)
+    text = value.to_s
+    return nil if nil_label != "" && text == nil_label
+    i = 0
+    while i < labels.length
+      return values[i] if labels[i] == text
+      i += 1
+    end
+    return text.to_i if value.is_a?(String) && text.match?(/\A\s*[+-]?\d/)
+    nil
+  end
+
+  # `enum_where_int` for a String-valued mapping: a label is its stored
+  # value, and anything else binds as given, as Rails' String column
+  # type passes it.
+  def self.enum_where_str(value, labels, values, nil_label)
+    return value unless value.is_a?(Symbol) || value.is_a?(String)
+    text = value.to_s
+    return nil if nil_label != "" && text == nil_label
+    i = 0
+    while i < labels.length
+      return values[i] if labels[i] == text
+      i += 1
+    end
+    value
+  end
+
   def self.enum_label_str(value, labels, values)
     found = -1
     i = 0
@@ -592,6 +632,17 @@ module ActiveRecord
 
     def self.schema_decimal_columns
       []
+    end
+
+    # The enum columns, which `where` casts through `_enum_where_value`.
+    def self.schema_enum_columns
+      []
+    end
+
+    # A `where` value on enum column `col` as its stored value; a model
+    # with an enum overrides it with its mapping.
+    def self._enum_where_value(_col, value)
+      value
     end
 
     def self.instantiate(_row)

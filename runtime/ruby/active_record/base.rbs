@@ -64,6 +64,8 @@ module ActiveRecord
   def self.enum_str_or_nil: (String text, Array[String] labels, Array[String] values, String attr) -> String?
   def self.enum_label_str: (String value, Array[String] labels, Array[String] values) -> String?
   def self.enum_label: (Integer value, Array[String] labels, Array[Integer] values) -> String?
+  def self.enum_where_int: (untyped value, Array[String] labels, Array[Integer] values, String nil_label) -> untyped
+  def self.enum_where_str: (untyped value, Array[String] labels, Array[String] values, String nil_label) -> untyped
 
   # First index in ascending `sorted` whose value is >= `value` (binary
   # search) — the `includes(:assoc)` distribute's run lookup; see `base.rb`.
@@ -181,6 +183,8 @@ module ActiveRecord
     def self.schema_date_columns: () -> Array[Symbol]
     def self.schema_boolean_columns: () -> Array[Symbol]
     def self.schema_decimal_columns: () -> Array[Symbol]
+    def self.schema_enum_columns: () -> Array[Symbol]
+    def self._enum_where_value: (String _col, untyped value) -> untyped
     def self.instantiate: (Hash[String, untyped] _row) -> Base
 
     # Eager-load hook consumed by `Relation#to_a`; the Ruby emit path

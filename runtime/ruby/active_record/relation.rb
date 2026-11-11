@@ -3341,19 +3341,7 @@ module ActiveRecord
         # its primary key here, not every column.
         "#{qcol} IN (#{val.to_subquery_sql})"
       elsif val.is_a?(Array)
-        # Record elements read their id — Rails' IN-of-records form
-        # (`where(comment: comments)`, lobsters Vote.comments_flags);
-        # scalar elements escape as-is. An empty list is Rails' none
-        # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
-        # `mark_null!` from `none` / lasting positive `where` only.
-        ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
-        if ids.empty?
-          "1=0"
-        elsif ids.any? { |x| x.nil? || x.is_a?(Range) }
-          array_with_ranges_predicate(qcol, ids)
-        else
-          "#{qcol} IN (#{escape_list(ids)})"
-        end
+        enum_column?(col) ? enum_list_predicate(col, qcol, val) : list_predicate(col, qcol, val)
       elsif val.is_a?(Range)
         range_predicate(qcol, val)
       elsif val.nil?
@@ -3365,8 +3353,30 @@ module ActiveRecord
         # runtime dispatch: hash values from untyped scope params can
         # be a record OR a collection, and only the runtime knows.
         "#{qcol} = #{bind_literal(val._primary_key_value)}"
+      elsif enum_column?(col)
+        # An enum label held in a variable (the literal ones were cast
+        # when the app was lowered): its stored value, and a label no
+        # mapping names is nil, which Rails writes as `IS NULL`.
+        stored = @model._enum_where_value(col, val)
+        stored.nil? ? "#{qcol} IS NULL" : "#{qcol} = #{bind_literal(stored)}"
       else
         "#{qcol} = #{bind_literal(column_bound_value(col, val))}"
+      end
+    end
+
+    # Record elements read their id — Rails' IN-of-records form
+    # (`where(comment: comments)`, lobsters Vote.comments_flags);
+    # scalar elements escape as-is. An empty list is Rails' none
+    # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
+    # `mark_null!` from `none` / lasting positive `where` only.
+    def list_predicate(col, qcol, val)
+      ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
+      if ids.empty?
+        "1=0"
+      elsif ids.any? { |x| x.nil? || x.is_a?(Range) }
+        array_with_ranges_predicate(qcol, ids)
+      else
+        "#{qcol} IN (#{escape_list(ids)})"
       end
     end
 
@@ -3381,6 +3391,36 @@ module ActiveRecord
       return 1 if val == true && integer_column?(col)
       return 0 if val == false && integer_column?(col)
       val
+    end
+
+    def enum_column?(col)
+      !col.include?(".") && @model.schema_enum_columns.include?(col.to_sym)
+    end
+
+    # An Array on an enum column, cast element by element as Rails'
+    # `ArrayHandler` does: nil and Range elements keep their own arms,
+    # and of several other values the ones that cast to nil (a label no
+    # mapping names) leave the `IN` list. When all of them do, Rails
+    # writes `IN (NULL)`, which matches no row, negated or not. A lone
+    # value is a scalar condition, so an unknown one is `IS NULL`.
+    def enum_list_predicate(col, qcol, val)
+      scalars = 0
+      val.each { |x| scalars += 1 unless x.nil? || x.is_a?(Range) }
+      cast = []
+      kept = 0
+      val.each do |x|
+        if x.nil? || x.is_a?(Range)
+          cast << x
+        else
+          stored = @model._enum_where_value(col, x)
+          next if stored.nil? && scalars > 1
+          cast << stored
+          kept += 1
+        end
+      end
+      return list_predicate(col, qcol, cast) unless scalars > 1 && kept == 0
+      return "#{qcol} IN (NULL)" if cast.empty?
+      "(#{qcol} IN (NULL) OR #{list_predicate(col, qcol, cast)})"
     end
 
     def integer_column?(col)
