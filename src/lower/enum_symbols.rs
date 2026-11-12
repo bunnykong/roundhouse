@@ -309,7 +309,16 @@ pub(crate) fn rewrite_node(expr: &mut Expr, map: &EnumMap, owner: Option<&crate:
         None => owner.filter(|id| map.models.contains(*id)).cloned(),
     };
     let model_columns = model.as_ref().map(|id| map.by_model.get(id));
+    let raw_write = RAW_WRITE_METHODS.contains(&method.as_str());
+    let mut hashes: Vec<&mut Expr> = Vec::new();
     for arg in args.iter_mut() {
+        if raw_write {
+            raw_write_hashes(arg, &mut hashes);
+        } else {
+            hashes.push(arg);
+        }
+    }
+    for arg in hashes {
         let ExprNode::Hash { entries, .. } = &mut *arg.node else { continue };
         for (key, value) in entries.iter_mut() {
             let ExprNode::Lit { value: Literal::Sym { value: col } } = &*key.node else {
@@ -333,7 +342,6 @@ pub(crate) fn rewrite_node(expr: &mut Expr, map: &EnumMap, owner: Option<&crate:
             // (`where(status: "queued")`) as a Symbol one. `update_all`
             // writes what it is given, so it is cast here everywhere.
             let string = string_mapping(mapping);
-            let raw_write = RAW_WRITE_METHODS.contains(&method.as_str());
             if string && !raw_write && (WRITER_METHODS.contains(&method.as_str()) || method.as_str() == "merge" || runtime_casts) {
                 continue;
             }
@@ -344,6 +352,28 @@ pub(crate) fn rewrite_node(expr: &mut Expr, map: &EnumMap, owner: Option<&crate:
             expand_symbol_list_constant(value, mapping, &map.symbol_lists);
             rewrite_value(value, mapping, query_label);
         }
+    }
+}
+
+/// The Hashes `update_all` writes: its own, and those of a `merge`
+/// chain that builds its argument (`{}.merge(status: :queued)`), whose
+/// own `merge` left a String mapping's label for a writer to cast.
+/// `update_all` casts the merged Hash once, as it does a literal one.
+fn raw_write_hashes<'a>(arg: &'a mut Expr, out: &mut Vec<&'a mut Expr>) {
+    if matches!(&*arg.node, ExprNode::Hash { .. }) {
+        out.push(arg);
+        return;
+    }
+    match &mut *arg.node {
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if matches!(method.as_str(), "merge" | "merge!") =>
+        {
+            raw_write_hashes(recv, out);
+            for arg in args.iter_mut() {
+                raw_write_hashes(arg, out);
+            }
+        }
+        _ => {}
     }
 }
 

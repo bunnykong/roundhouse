@@ -89,6 +89,12 @@ const TICKET: &str = "class Ticket < ApplicationRecord
     record = create!(name: \"w\", status: :queued)
     find(record.id).status
   end
+
+  def self.merged_update_all_count
+    record = create!(name: \"m\", status: :sent)
+    where(id: record.id).update_all({}.merge(status: :queued))
+    where(status: :queued, id: record.id).count
+  end
 end
 ";
 
@@ -131,5 +137,9 @@ raise "string enum where runtime: #{runtime.inspect}" unless runtime == ["q", "s
 # stores "sent", which reads back as `queued`.
 written = Ticket.literal_write_reads
 raise "string enum literal write: #{written.inspect}" unless written == "queued"
+# `update_all` casts a Hash built by `merge` as it does a literal one:
+# `:queued` is written as "sent".
+merged = Ticket.merged_update_all_count
+raise "string enum merged update_all: #{merged.inspect}" unless merged == 1
 puts "enum where cast OK"
 "#;
