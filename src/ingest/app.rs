@@ -8390,6 +8390,15 @@ fn map_enum_labels(app: &mut App) {
             if in_writer && kept.contains(column) {
                 continue;
             }
+            // A String mapping keeps its label: one cast turns it into the
+            // stored value later, the writer's (`enum_str`) for an
+            // assignment, and for a query the runtime relation's or, on a
+            // target without one, `lower::enum_symbols`. Mapped here as
+            // well, a stored value that is also a label (`{ queued: "sent",
+            // sent: "done" }`) was cast a second time.
+            if string_mapping(mapping) {
+                continue;
+            }
             let label = match &*value.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
                 ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
@@ -8398,6 +8407,12 @@ fn map_enum_labels(app: &mut App) {
             let Some((_, stored)) = mapping.iter().find(|(l, _)| *l == label) else { continue };
             *value.node = ExprNode::Lit { value: stored.clone() };
         }
+    }
+
+    /// Every stored value a String (the `nil` entry aside).
+    fn string_mapping(mapping: &[(String, Literal)]) -> bool {
+        let mut stored = mapping.iter().map(|(_, v)| v).filter(|v| !matches!(v, Literal::Nil)).peekable();
+        stored.peek().is_some() && stored.all(|v| matches!(v, Literal::Str { .. }))
     }
 
     /// Rule two: `Model.method(…)` anywhere in the app.

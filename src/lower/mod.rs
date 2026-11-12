@@ -988,7 +988,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("status_literal");
     ran!("to_param_residue");
     crate::timings::phase("post-analyze: fused mid rewrites", || {
-        fused::apply_fused_mid_rewrites(app);
+        fused::apply_fused_mid_rewrites(app, target);
     });
     ran!("route_format_suffix");
     ran!("route_url_options");

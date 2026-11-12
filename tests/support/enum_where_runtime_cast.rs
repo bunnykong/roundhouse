@@ -84,6 +84,11 @@ const TICKET: &str = "class Ticket < ApplicationRecord
      first_name(where(status: [:queued])), first_name(where.not(status: :queued)),
      first_name(where(status: \"queued\")), first_name(queued), first_name(sent)]
   end
+
+  def self.literal_write_reads
+    record = create!(name: \"w\", status: :queued)
+    find(record.id).status
+  end
 end
 ";
 
@@ -122,5 +127,9 @@ tickets = Ticket.literal_names
 raise "string enum where literal: #{tickets.inspect}" unless tickets == ["q", "s", "q", "s", "q", "s", "s"]
 runtime = [Ticket.with_status(:queued), Ticket.with_status("sent"), Ticket.with_status([:queued]), Ticket.with_status(["sent"])]
 raise "string enum where runtime: #{runtime.inspect}" unless runtime == ["q", "s", "q", "s"]
+# A literal label is assigned through the writer's one cast as well: it
+# stores "sent", which reads back as `queued`.
+written = Ticket.literal_write_reads
+raise "string enum literal write: #{written.inspect}" unless written == "queued"
 puts "enum where cast OK"
 "#;

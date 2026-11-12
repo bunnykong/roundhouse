@@ -565,6 +565,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
 
     let permitted_fields = self::params::permitted_field_tys(&params_specs);
 
+    let string_enums = if ruby_read_values { crate::lower::arel::StringEnums::of_models(models) } else { Default::default() };
     let mut out = Vec::new();
     // Params classes a kept `update(<params object>)` reads `to_attrs`
     // of (`typed_update::hand_update_the_attrs`).
@@ -611,7 +612,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             if let Some(schema) = schema {
                 if !refined_across_methods {
                     rewritten |= crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
-                        &mut method.body, schema, &classes, assocs, ruby_read_values,
+                        &mut method.body, schema, &classes, assocs, ruby_read_values.then_some(&string_enums),
                         &relation_scope_names,
                         crate::lower::arel::SqliteVisitor { param_binds },
                     );

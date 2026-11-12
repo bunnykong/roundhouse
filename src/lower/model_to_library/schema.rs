@@ -697,7 +697,7 @@ pub(super) fn push_schema_methods(
     // there (`rewrite_update_to_typed_variant`), and `update` stays
     // Rails-shaped for everyone else.
     for bang in [false, true] {
-        methods.push(synth_update_hash(owner, model, table, bang));
+        methods.push(synth_update_hash(owner, model, table, bang, runtime_relation));
     }
 
     // def fill_timestamps(creating); now = ActiveSupport.db_now; @updated_at = now; @created_at = now if creating; end
@@ -2893,7 +2893,7 @@ fn synth_initialize(
                 target: LValue::Ivar { name: col_storage_name(col) },
                 value: with_ty(raw_default, slot_ty.clone()),
             }), slot_ty));
-            stmts.push(given_value_assign(col, &attrs, enum_label_cast(model, col, lookup.clone()).unwrap_or_else(|| Expr::new(Span::synthetic(), ExprNode::Cast { value: lookup, target_ty: super::ty_of_column_slot(col) }))));
+            stmts.push(given_value_assign(col, &attrs, enum_writer_input(model, col, lookup.clone(), runtime_relation).unwrap_or_else(|| Expr::new(Span::synthetic(), ExprNode::Cast { value: lookup, target_ty: super::ty_of_column_slot(col) }))));
             continue;
         }
         // is_id_column reference retained as a feature flag for
@@ -3835,6 +3835,29 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model, runtime_relat
 /// label (`new(status: :archived)`) then reached the runtime unconverted.
 fn enum_label_cast(model: &Model, col: &Column, raw: Expr) -> Option<Expr> {
     enum_setter_value(model, col, raw)
+}
+
+/// What the constructor and `update` hand an enum column's public
+/// writer, which casts what it is given (`enum_setter_value`). A String
+/// mapping's value goes in as assigned, so it is cast once, as Rails
+/// casts an assigned value once: cast here as well, a stored value that
+/// is also a label (`{ queued: "sent", sent: "done" }`) was read again
+/// as that label. An Integer mapping keeps the cast ahead of the writer,
+/// whose own cast passes a stored Integer through.
+///
+/// The Ruby-family writer takes the value untyped (`synth_attr_writer`'s
+/// `raw_inputs`) and keeps it for `<col>_before_type_cast`, so it is
+/// handed over as is; elsewhere the writer takes the column's type, so a
+/// `Cast` bridges the untyped attrs value.
+fn enum_writer_input(model: &Model, col: &Column, raw: Expr, runtime_relation: super::RuntimeRelation) -> Option<Expr> {
+    match enum_arrays(model, col) {
+        Some((_, _, Ty::Str)) if runtime_relation == super::RuntimeRelation::Present => Some(raw),
+        Some((_, _, Ty::Str)) => Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Cast { value: raw, target_ty: super::ty_of_column_slot(col) },
+        )),
+        _ => enum_label_cast(model, col, raw),
+    }
 }
 
 /// The setter's twin of [`enum_label_cast`]: `record.status = "archived"` reaches the column through `status=`.
@@ -5308,6 +5331,7 @@ fn synth_update_hash(
     model: &Model,
     table: &Table,
     bang: bool,
+    runtime_relation: super::RuntimeRelation,
 ) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
@@ -5378,7 +5402,7 @@ fn synth_update_hash(
             lookup(&col.name),
             slot_ty.clone(),
         )
-        .or_else(|| enum_label_cast(model, col, lookup(&col.name)))
+        .or_else(|| enum_writer_input(model, col, lookup(&col.name), runtime_relation))
         .or_else(|| column.is_json().then(|| lookup(&col.name)))
         .unwrap_or_else(|| {
             Expr::new(

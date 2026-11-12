@@ -47,6 +47,11 @@ const ATTR_METHODS: &[&str] = &[
     "merge",
 ];
 
+/// The call among those that writes the value as given, with no cast
+/// at run time: a String mapping's label is its stored value here on
+/// every target.
+const RAW_WRITE_METHODS: &[&str] = &["update_all"];
+
 /// The calls among those that assign through the model's writer, which
 /// casts a label itself. A column whose `_before_type_cast` is read keeps
 /// the label as written here, since that reader answers it.
@@ -72,6 +77,17 @@ pub(crate) struct EnumMap {
     symbol_lists: crate::det::HashMap<String, Vec<crate::ident::Symbol>>,
     /// Columns whose assigned value `_before_type_cast` reads back.
     raw_input_columns: std::collections::BTreeSet<crate::ident::Symbol>,
+    /// The String-valued enum columns whose label the runtime casts
+    /// itself, by model, on a target with the runtime relation: its
+    /// `where` (`_enum_where_value`) and its writer (`enum_str`) each
+    /// turn a label into its stored value. A label rewritten here as
+    /// well is cast twice, and a stored value that is also a label
+    /// (`{ queued: "sent", sent: "done" }`) reads as the other label.
+    /// Empty on the strict targets, where this rewrite is the cast.
+    runtime_cast: crate::det::HashMap<crate::ident::ClassId, crate::det::HashSet<String>>,
+    /// The columns of `runtime_cast` every declaring model casts, for a
+    /// receiver that names no model.
+    runtime_cast_columns: crate::det::HashSet<String>,
 }
 
 impl EnumMap {
@@ -81,7 +97,7 @@ impl EnumMap {
 }
 
 pub fn apply_enum_symbol_lowering(app: &mut App) {
-    let map = enum_columns(app);
+    let map = enum_columns(app, false);
     if map.is_empty() {
         return;
     }
@@ -107,7 +123,10 @@ pub fn apply_enum_symbol_lowering(app: &mut App) {
 /// map differently is not in the model-agnostic map: a receiver that
 /// names no model has no single right answer for it, and guessing one
 /// would write the wrong integer into a real query.
-pub(crate) fn enum_columns(app: &App) -> EnumMap {
+///
+/// `runtime_relation`: the target casts a String mapping's label at run
+/// time (`BuildTarget::has_runtime_relation`'s Ruby-family targets).
+pub(crate) fn enum_columns(app: &App, runtime_relation: bool) -> EnumMap {
     let by_model: crate::det::HashMap<_, _> = app
         .models
         .iter()
@@ -125,7 +144,41 @@ pub(crate) fn enum_columns(app: &App) -> EnumMap {
     let columns = enum_column_mappings(app);
     let symbol_lists = if by_model.is_empty() { Default::default() } else { symbol_list_constants(app) };
     let raw_input_columns = crate::analyze::raw_input_columns(app);
-    EnumMap { by_model, models, columns, symbol_lists, raw_input_columns }
+    let (runtime_cast, runtime_cast_columns) =
+        if runtime_relation { runtime_cast_columns(app) } else { Default::default() };
+    EnumMap { by_model, models, columns, symbol_lists, raw_input_columns, runtime_cast, runtime_cast_columns }
+}
+
+/// The columns `EnumMap::runtime_cast` names: a mapping whose stored
+/// values are all Strings, on a column of the model's table (what
+/// `model_to_library` generates the casts for), with no `normalizes`,
+/// whose own condition method stands in for the cast.
+fn runtime_cast_columns(
+    app: &App,
+) -> (crate::det::HashMap<crate::ident::ClassId, crate::det::HashSet<String>>, crate::det::HashSet<String>) {
+    let mut by_model: crate::det::HashMap<crate::ident::ClassId, crate::det::HashSet<String>> = Default::default();
+    let mut cast: crate::det::HashSet<String> = Default::default();
+    let mut uncast: crate::det::HashSet<String> = Default::default();
+    for model in &app.models {
+        let table = app.schema.tables.get(&model.table.0);
+        let normalized = super::normalizes::normalizations(model);
+        for (column, mapping) in &model.enums {
+            let stored: Vec<&Literal> = mapping.iter().map(|(_, v)| v).filter(|v| !matches!(v, Literal::Nil)).collect();
+            let castable = !stored.is_empty()
+                && stored.iter().all(|v| matches!(v, Literal::Str { .. }))
+                && table.is_some_and(|t| t.columns.iter().any(|c| c.name == *column))
+                && !normalized.contains_key(column);
+            let col = column.as_str().to_string();
+            if castable {
+                by_model.entry(model.name.clone()).or_default().insert(col.clone());
+                cast.insert(col);
+            } else {
+                uncast.insert(col);
+            }
+        }
+    }
+    cast.retain(|c| !uncast.contains(c));
+    (by_model, cast)
 }
 
 fn enum_column_mappings(
@@ -268,11 +321,28 @@ pub(crate) fn rewrite_node(expr: &mut Expr, map: &EnumMap, owner: Option<&crate:
                 None => map.columns.get(col.as_str()),
             };
             let Some(mapping) = mapping else { continue };
+            let runtime_casts = match &model {
+                Some(id) => map.runtime_cast.get(id).is_some_and(|c| c.contains(col.as_str())),
+                None => map.runtime_cast_columns.contains(col.as_str()),
+            };
+            // A String mapping's label reaches this pass as written
+            // (`ingest::app::map_enum_labels` leaves it), and is cast once:
+            // an assignment by the model's writer (`enum_str`), on every
+            // target, so it stays; a query by the runtime relation where
+            // there is one, and here where there is none, a String label
+            // (`where(status: "queued")`) as a Symbol one. `update_all`
+            // writes what it is given, so it is cast here everywhere.
+            let string = string_mapping(mapping);
+            let raw_write = RAW_WRITE_METHODS.contains(&method.as_str());
+            if string && !raw_write && (WRITER_METHODS.contains(&method.as_str()) || method.as_str() == "merge" || runtime_casts) {
+                continue;
+            }
+            let query_label = string;
             if WRITER_METHODS.contains(&method.as_str()) && map.raw_input_columns.contains(col) {
                 continue;
             }
             expand_symbol_list_constant(value, mapping, &map.symbol_lists);
-            rewrite_value(value, mapping);
+            rewrite_value(value, mapping, query_label);
         }
     }
 }
@@ -359,12 +429,13 @@ fn expand_symbol_list_constant(
 fn rewrite_value(
     value: &mut Expr,
     mapping: &crate::det::HashMap<String, Literal>,
+    strings: bool,
 ) {
     if let ExprNode::Array { elements, style } = &mut *value.node {
         let mut all_int = !elements.is_empty();
         let mut any = false;
         for el in elements.iter_mut() {
-            let rewrote = rewrite_label(el, mapping);
+            let rewrote = rewrite_label(el, mapping, strings);
             any |= rewrote.is_some();
             all_int &= rewrote.is_some_and(|l| matches!(l, Literal::Int { .. }));
         }
@@ -384,19 +455,28 @@ fn rewrite_value(
         }
         return;
     }
-    rewrite_label(value, mapping);
+    rewrite_label(value, mapping, strings);
 }
 
-/// Replace a label Symbol with its stored value in place; answers the
-/// stored literal when it did.
+/// Every stored value a String (the `nil` entry aside).
+fn string_mapping(mapping: &Mapping) -> bool {
+    let mut stored = mapping.values().filter(|v| !matches!(v, Literal::Nil)).peekable();
+    stored.peek().is_some() && stored.all(|v| matches!(v, Literal::Str { .. }))
+}
+
+/// Replace a label Symbol (and, with `strings`, a label String) with its
+/// stored value in place; answers the stored literal when it did.
 fn rewrite_label(
     value: &mut Expr,
     mapping: &crate::det::HashMap<String, Literal>,
+    strings: bool,
 ) -> Option<Literal> {
-    let ExprNode::Lit { value: Literal::Sym { value: label } } = &*value.node else {
-        return None;
+    let label = match &*value.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+        ExprNode::Lit { value: Literal::Str { value } } if strings => value.as_str(),
+        _ => return None,
     };
-    let stored = mapping.get(label.as_str())?.clone();
+    let stored = mapping.get(label)?.clone();
     *value = crate::lower::typing::with_ty(
         Expr::new(value.span, ExprNode::Lit { value: stored.clone() }),
         match stored {
