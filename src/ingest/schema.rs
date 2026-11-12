@@ -41,6 +41,8 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
 /// Ingest a Rails schema while validating generated expressions for an
 /// explicit DDL source dialect. Application ingestion passes the one its
 /// `config/database.yml` settles, never Postgres; [`ingest_schema`] is Portable.
+/// Under `OtherDatabase` a CHECK or index expression the grammar can't
+/// read is left out with a warning (in the [`super::prism::scope`] buffer).
 pub fn ingest_schema_with_generated_expression_dialect(
     source: &[u8],
     file: &str,
@@ -677,14 +679,18 @@ fn apply_table_verb(
                 if expression.is_some() || !columns.is_empty() {
                     if let Some(table) = schema.tables.get_mut(&Symbol::from(t.clone())) {
                         if expression.is_some() || columns.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
-                            if expression.as_ref().is_some_and(|e| !crate::emit::shared::schema_sql::schema_expression_supported(e, Some(table), dialect)) {
-                                return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported index expression on {t}") });
+                            if let Some(e) = expression.as_ref().filter(|e| !crate::emit::shared::schema_sql::schema_expression_supported(e, Some(table), dialect)) {
+                                return leave_out_or_refuse(dialect, file, node_span(keys), &t, "index expression", e, || {
+                                    IngestError::Unsupported { file: file.into(), message: format!("unsupported index expression on {t}") }
+                                });
                             }
                             let index = build_index(&t, columns, expression, args.iter().skip(2), file)?;
-                            if index.expression.is_some()
-                                && index.predicate.as_ref().is_some_and(|p| !crate::emit::shared::schema_sql::schema_expression_supported(p, Some(table), dialect)) {
-                                let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
-                                return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") });
+                            if let Some(p) = index.predicate.as_ref().filter(|p| index.expression.is_some()
+                                && !crate::emit::shared::schema_sql::schema_expression_supported(p, Some(table), dialect)) {
+                                return leave_out_or_refuse(dialect, file, node_span(keys), &t, "expression index `where:`", p, || {
+                                    let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
+                                    IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") }
+                                });
                             }
                             table.indexes.push(index);
                         }
@@ -745,7 +751,9 @@ fn apply_table_verb(
                     let check = check_constraint(&args[1..], file, table.name.as_str())?;
                     if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect)
                         && !crate::emit::shared::schema_sql::sqlite_check_expression(&check.expression, table, dialect) {
-                        return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) });
+                        return leave_out_or_refuse(dialect, file, node_span(&args[1]), table.name.as_str(), "CHECK", &check.expression, || {
+                            IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) }
+                        });
                     }
                     table.check_constraints.push(check);
                 } else {
@@ -1554,6 +1562,45 @@ fn index_access_method(value: &Node<'_>, file: &str, table: &str) -> IngestResul
     Ok(method.to_ascii_lowercase())
 }
 
+/// Where a `create_table` block's SQL text stands: a CHECK, an index's
+/// keys, or the `where:` of the expression index named.
+enum SqlSite {
+    Check,
+    Index,
+    Predicate(Symbol),
+}
+
+fn node_span(node: &Node<'_>) -> (usize, usize) {
+    (node.location().start_offset(), node.location().end_offset())
+}
+
+/// A CHECK, index expression or expression-index predicate the grammar
+/// can't read. Under [`GeneratedExpressionDialect::OtherDatabase`] it is
+/// the app's database's own SQL: the caller leaves it out of the schema,
+/// as ingest did before it modeled them, and this warns that the
+/// compiled app does not enforce it. Any other grammar refuses it.
+fn leave_out_or_refuse(
+    dialect: GeneratedExpressionDialect,
+    file: &str,
+    (start, end): (usize, usize),
+    table: &str,
+    what: &str,
+    expression: &str,
+    refusal: impl FnOnce() -> IngestError,
+) -> IngestResult<()> {
+    if dialect != GeneratedExpressionDialect::OtherDatabase {
+        return Err(refusal());
+    }
+    let span = crate::span::Span { file: super::sources::file_id(file), start: start as u32, end: end as u32 };
+    let mut warning = crate::diagnostic::Diagnostic::unsupported(span, None, "schema_expression", format!(
+        "{what} `{expression}` on {table} is left out of the emitted schema: config/database.yml names a database other than SQLite, \
+         and SQLite does not read this text alike, so the compiled app does not enforce it"
+    ));
+    warning.severity = crate::diagnostic::Severity::Warning;
+    super::prism::push(warning);
+    Ok(())
+}
+
 /// `create_table NAME[, opts] do |t| … end` → (table key, Table).
 /// Shared by the schema.rb walker and the migration fold.
 fn table_from_create_table(
@@ -1698,8 +1745,9 @@ fn table_from_create_table(
                     if let Some(call) = stmt.as_call_node() {
                         let call_name = constant_id_str(&call.name()).to_string();
                         if matches!(call_name.as_str(), "index" | "check_constraint") {
-                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, n.location().start_offset(), call_name == "check_constraint")))
-                                .filter(|(s, _, check)| *check || s.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_'))
+                            let site = if call_name == "check_constraint" { SqlSite::Check } else { SqlSite::Index };
+                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, node_span(n), site)))
+                                .filter(|(s, _, site)| matches!(site, SqlSite::Check) || s.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_'))
                             {
                                 sql_locations.push(value);
                             }
@@ -1721,7 +1769,7 @@ fn table_from_create_table(
                                 Ok(Some(idx)) => {
                                     if idx.expression.is_some() {
                                         if let Some(value) = kwarg_value(call_arguments(&call).iter().skip(1), "where") {
-                                            if let Some(sql) = string_value(&value) { sql_locations.push((sql, value.location().start_offset(), false)); }
+                                            if let Some(sql) = string_value(&value) { sql_locations.push((sql, node_span(&value), SqlSite::Predicate(idx.name.clone()))); }
                                         }
                                     }
                                     indexes.push(idx);
@@ -1780,17 +1828,25 @@ fn table_from_create_table(
             idx.columns.iter().all(|name| table.columns.iter().any(|col| col.name == *name))
         });
     }
-    for (expression, offset, check) in sql_locations {
+    for (expression, span, site) in sql_locations {
+        let check = matches!(site, SqlSite::Check);
         if !crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect)
             && !(check && crate::emit::shared::schema_sql::sqlite_check_expression(&expression, &table, dialect))
         {
-            let line = super::sources::line_at(file, offset).unwrap_or(1);
-            gaps.push(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported schema expression on {table_name}: {expression}") });
+            let what = match &site { SqlSite::Check => "CHECK", SqlSite::Index => "index expression", SqlSite::Predicate(_) => "expression index `where:`" };
+            if let Err(gap) = leave_out_or_refuse(dialect, file, span, &table_name, what, &expression, || {
+                let line = super::sources::line_at(file, span.0).unwrap_or(1);
+                IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported schema expression on {table_name}: {expression}") }
+            }) {
+                gaps.push(gap);
+            }
             // Only the rejected kind goes: SQLite may accept a CHECK whose text an index can't use.
-            if check {
-                table.check_constraints.retain(|c| c.expression != expression);
-            } else {
-                table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str()));
+            match site {
+                SqlSite::Check => table.check_constraints.retain(|c| c.expression != expression),
+                SqlSite::Index => table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str())),
+                // Left out, the predicate's index goes with it, as the whole index did before predicates were kept.
+                SqlSite::Predicate(name) if dialect == GeneratedExpressionDialect::OtherDatabase => table.indexes.retain(|i| i.name != name),
+                SqlSite::Predicate(_) => table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str())),
             }
         }
     }
