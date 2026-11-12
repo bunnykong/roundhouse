@@ -760,21 +760,33 @@ pub mod bundle {
     fn merged_edits(cases: &[&Case]) -> Option<Vec<Edit>> {
         let empty = cases[0].base.as_os_str() == EMPTY;
         let mut files: BTreeMap<String, Option<String>> = BTreeMap::new();
-        let mut written: BTreeMap<&str, &[u8]> = BTreeMap::new();
+        let mut written: BTreeMap<&str, (usize, Vec<u8>)> = BTreeMap::new();
         let mut removed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         let mut seen: std::collections::BTreeSet<(&str, &str, &str)> = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         for case in cases {
+            let mut own: BTreeMap<&str, &[u8]> = BTreeMap::new();
             for edit in &case.edits {
                 match edit {
                     Edit::Write { path, content } => {
                         if removed.contains(path.as_str()) || files.contains_key(path.as_str()) {
                             return None;
                         }
-                        match written.insert(path.as_str(), content.as_slice()) {
-                            Some(before) if before != content.as_slice() => return None,
-                            Some(_) => continue,
-                            None => out.push(clone_edit(edit)),
+                        // Not merged with the case's own earlier write: in its own build the later one replaces it.
+                        if own.insert(path.as_str(), content.as_slice()).is_some_and(|before| before != content.as_slice()) {
+                            return None;
+                        }
+                        match written.get_mut(path.as_str()) {
+                            Some((_, before)) if *before == *content => continue,
+                            Some((at, before)) => {
+                                let merged = merged_listing(path, before, content)?;
+                                out[*at] = Edit::Write { path: path.clone(), content: merged.clone() };
+                                *before = merged;
+                            }
+                            None => {
+                                written.insert(path.as_str(), (out.len(), content.clone()));
+                                out.push(clone_edit(edit));
+                            }
                         }
                     }
                     Edit::Replace { path, find, replace } => {
@@ -808,6 +820,69 @@ pub mod bundle {
             }
         }
         Some(out)
+    }
+
+    // Not refused as two writes of one file: each empty-app case writes its whole schema and routes, which sit side by side.
+    pub fn merged_listing(path: &str, before: &[u8], content: &[u8]) -> Option<Vec<u8>> {
+        if path != "db/schema.rb" && path != ROUTES {
+            return None;
+        }
+        let (head, mut merged) = listing(std::str::from_utf8(before).ok()?)?;
+        let (other_head, added) = listing(std::str::from_utf8(content).ok()?)?;
+        // Not one head for both: a schema's version is part of what it declares.
+        if head != other_head {
+            return None;
+        }
+        for statement in added {
+            let name = listing_name(&statement);
+            match merged.iter().find(|s| listing_name(s) == name) {
+                Some(s) if *s == statement => {}
+                Some(_) => return None,
+                None => merged.push(statement),
+            }
+        }
+        let mut text = format!("{head}\n");
+        for statement in &merged {
+            text.push_str(statement);
+        }
+        text.push_str("end\n");
+        Some(text.into_bytes())
+    }
+
+    fn listing(text: &str) -> Option<(&str, Vec<String>)> {
+        let (head, rest) = text.split_once('\n')?;
+        if !head.ends_with(" do") || head.starts_with(' ') {
+            return None;
+        }
+        let rest = rest.trim_end_matches('\n');
+        let body = if rest == "end" { "" } else { rest.strip_suffix("\nend")? };
+        let mut statements: Vec<String> = Vec::new();
+        for line in body.lines() {
+            let top = line.starts_with("  ") && !line.starts_with("   ") && line.trim() != "end";
+            match statements.last_mut() {
+                Some(last) if !top => {
+                    last.push_str(line);
+                    last.push('\n');
+                }
+                _ => statements.push(format!("{line}\n")),
+            }
+        }
+        Some((head, statements))
+    }
+
+    fn listing_name(statement: &str) -> String {
+        let first = statement.trim_start();
+        let mut words = first.splitn(3, |c: char| c.is_whitespace() || c == '(');
+        let verb = words.next().unwrap_or("");
+        match verb {
+            "create_table" | "get" | "post" | "put" | "patch" | "delete" | "match" | "resources" | "resource" | "namespace" | "scope" => {
+                // Not the spelling: `:widgets`, `"widgets"` and `'widgets'` name one table.
+                let name = words.next().unwrap_or("").trim_end_matches(',').trim_start_matches(':');
+                format!("{verb} {}", name.trim_matches(|c| c == '"' || c == '\''))
+            }
+            "root" => "root".to_string(),
+            _ => first.to_string(),
+        }
     }
 
     fn build_http(cases: &[&Case]) -> Option<PathBuf> {

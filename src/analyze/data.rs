@@ -5,7 +5,7 @@ use crate::det::{HashMap, HashSet};
 
 use crate::App;
 use crate::diagnostic::Diagnostic;
-use crate::dialect::{LibraryClassOrigin, ModelBodyItem};
+use crate::dialect::{LibraryClassOrigin, MethodReceiver, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, Literal, LValue, RESOLVED_DATA_FACTORY};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
@@ -82,7 +82,7 @@ pub(super) fn register(
             return;
         }
         let mut info = classes.remove(&id).unwrap_or_default();
-        let instance = add_data_methods(&mut info, &id, members);
+        let instance = add_data_methods(app, &mut info, &id, members);
         classes.insert(id, info);
         factories.insert(value.span, instance);
     };
@@ -111,7 +111,7 @@ pub(super) fn register(
             continue;
         }
         let Some(info) = classes.get_mut(&class.name) else { continue };
-        let instance = add_data_methods(info, &class.name, members.iter().cloned());
+        let instance = add_data_methods(app, info, &class.name, members.iter().cloned());
         factories.insert(span, instance);
     }
     factories
@@ -182,13 +182,24 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
 
 /// `new`, `with` and one reader per member, on the class that a
 /// factory creates. The result is the instance type.
-fn add_data_methods(info: &mut ClassInfo, id: &ClassId, members: impl IntoIterator<Item = Symbol>) -> Ty {
+fn add_data_methods(app: &App, info: &mut ClassInfo, id: &ClassId, members: impl IntoIterator<Item = Symbol>) -> Ty {
     let instance = Ty::Class {
         id: id.clone(),
         args: vec![].into(),
     };
+    // A source definition replaces the generated method, so its return
+    // starts unknown and harvest reads the last definition's body. One
+    // that calls `super` keeps the generated return.
+    let generated = |name: &str, receiver: MethodReceiver| {
+        let replaced = app.library_classes.iter().filter(|class| class.name == *id)
+            .flat_map(|class| &class.methods)
+            .filter(|method| method.name.as_str() == name && method.receiver == receiver)
+            .last()
+            .is_some_and(|method| method.signature.is_none() && !super::expr_calls_super(&method.body));
+        if replaced { Ty::Untyped } else { instance.clone() }
+    };
     info.class_methods
-        .insert(Symbol::from("new"), instance.clone());
+        .insert(Symbol::from("new"), generated("new", MethodReceiver::Class));
     info.declares_constructor = true;
     // A member declaration establishes a reader, not its value type.
     // Data has no generated writers. A block method of the same name
@@ -196,7 +207,7 @@ fn add_data_methods(info: &mut ClassInfo, id: &ClassId, members: impl IntoIterat
     for member in members {
         info.instance_methods.entry(member).or_insert(Ty::Untyped);
     }
-    info.instance_methods.entry(Symbol::from("with")).or_insert(instance.clone());
+    info.instance_methods.entry(Symbol::from("with")).or_insert_with(|| generated("with", MethodReceiver::Instance));
     instance
 }
 

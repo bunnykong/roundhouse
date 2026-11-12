@@ -28,7 +28,7 @@ end
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
-        .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\nend\n")
         .write(
             "app/controllers/application_controller.rb",
             "class ApplicationController < ActionController::Base\nend\n",

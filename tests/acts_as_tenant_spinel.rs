@@ -16,7 +16,7 @@ fn app() -> emit_and_run::Overlay {
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"accounts\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"widgets\", force: :cascade do |t|\n    t.integer \"account_id\"\n    t.string \"name\"\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"accounts\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"widgets\", force: :cascade do |t|\n    t.integer \"account_id\"\n    t.string \"name\"\n  end\nend\n",
         )
         .write("app/models/account.rb", "class Account < ApplicationRecord\n  has_many :widgets\nend\n")
         .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  acts_as_tenant :account\n  validates_uniqueness_to_tenant :name\nend\n")

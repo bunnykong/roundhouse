@@ -1,0 +1,21 @@
+module ActiveModel
+  class Name
+    @name: String
+    @human: String
+    @element: String
+    @singular: String
+    @plural: String
+    @i18n_key: Symbol
+    def initialize: (String name, String human, String element, String singular, String plural, Symbol i18n_key) -> void
+    def name: () -> String
+    def to_s: () -> String
+    def human: (?Hash[Symbol, untyped] options) -> String
+    def element: () -> String
+    def singular: () -> String
+    def plural: () -> String
+    def param_key: () -> String
+    def route_key: () -> String
+    def singular_route_key: () -> String
+    def i18n_key: () -> Symbol
+  end
+end

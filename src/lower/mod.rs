@@ -1098,7 +1098,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("current_set");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
-    diags.extend(mailer_templates::apply_mailer_templates(app));
+    diags.extend(mailer_templates::apply_mailer_templates_for(app, target));
     ran!("mailer_templates");
     diags.extend(job_class_side::apply_job_class_side(app));
     ran!("job_class_side");

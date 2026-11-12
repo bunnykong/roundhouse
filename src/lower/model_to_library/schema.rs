@@ -389,6 +389,47 @@ pub(super) fn push_schema_methods(
         });
     }
 
+    // `Model.model_name`, Rails' `ActiveModel::Name` of the class, each form written in: the runtime derives none, and a
+    // strict target has no inflector to. The ruby family's only, whose runtime carries `ActiveModel::Name`.
+    if runtime_relation == super::RuntimeRelation::Present
+        && !model.methods().any(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == "model_name")
+    {
+        let name = owner.0.as_str();
+        let underscored = crate::naming::snake_case(&name.replace("::", "/"));
+        let singular = underscored.replace('/', "_");
+        let element = crate::naming::snake_case(name.rsplit("::").next().unwrap_or(name));
+        let args = vec![
+            lit_str(name.to_string()),
+            lit_str(model.i18n.model_human_name()),
+            lit_str(element),
+            lit_str(singular.clone()),
+            lit_str(crate::naming::pluralize(&singular)),
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from(underscored.as_str()) } }),
+        ];
+        let mut class = Expr::new(crate::span::Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveModel"), Symbol::from("Name")] });
+        class.decisions |= crate::expr::GENERATED_CONST_REF;
+        let name_ty = Ty::Class { id: ClassId(Symbol::from("ActiveModel::Name")), args: vec![].into() };
+        let mut body = Expr::new(crate::span::Span::synthetic(), ExprNode::Send { recv: Some(class), method: Symbol::from("new"), args, block: None, parenthesized: true });
+        body.ty = Some(name_ty.clone());
+        methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("model_name"),
+            receiver: MethodReceiver::Class,
+            params: Vec::new(),
+            body,
+            signature: Some(fn_sig(vec![], name_ty)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(owner.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+
     // Custom keys keep their existing declarations. Only a plain,
     // unchanged id:false table supplies evidence for a nil override.
     let primary_key = model.primary_key.as_ref().or_else(|| {
@@ -2442,6 +2483,15 @@ fn synth_column_prev_was(owner: &ClassId, col: &Column) -> MethodDef {
 /// question in Rails, as the two saved-change predicates are. Shared
 /// by the synthesis and `shakeable_synthesized_names`, so the two lists
 /// cannot drift.
+/// Whether `name` is spelled as one of [`pending_change_methods`]' names for some column.
+pub(crate) fn is_pending_change_spelling(name: &str) -> bool {
+    name.ends_with("_changed?")
+        || name.starts_with("will_save_change_to_")
+        || name.ends_with("_was")
+        || (name.starts_with("clear_") && name.ends_with("_change"))
+        || (name.starts_with("restore_") && name.ends_with('!'))
+}
+
 fn pending_change_methods(col: &Column) -> Vec<(Symbol, &'static str, Ty)> {
     let n = col.name.as_str();
     vec![
@@ -2545,6 +2595,7 @@ fn model_body_names(models: &[Model]) -> crate::det::HashSet<Symbol> {
     for model in models {
         #[cfg(test)]
         lookup_test_support::MODEL_VISITS.with(|n| n.set(n.get() + 1));
+        out.extend(model.mixin_sends.iter().cloned());
         for item in &model.body {
             match item {
                 ModelBodyItem::Method { method, .. } => walk(&method.body, &mut out),

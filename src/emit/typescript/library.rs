@@ -1953,8 +1953,9 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         // the per-target Send rewriter can map them directly to the
         // host equivalent. Adding SelfRef here would force the typer
         // and emitter to invent a `this.puts` shim on every class.
+        // The class's own `puts` (`expr::APP_KERNEL_NAME`) is a self call.
         ExprNode::Send { recv: None, method, args, block, parenthesized }
-            if is_kernel_call(method.as_str()) =>
+            if is_kernel_call(method.as_str()) && e.decisions & crate::expr::APP_KERNEL_NAME == 0 =>
         {
             ExprNode::Send {
                 recv: None,

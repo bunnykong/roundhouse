@@ -1531,7 +1531,7 @@ mod tests {
                 primary_key_columns: Vec::new(),
             },
         );
-        (Schema { tables }, ClassId(Symbol::from("Article")))
+        (Schema { tables, ..Default::default() }, ClassId(Symbol::from("Article")))
     }
 
     fn id_col() -> ColRef {

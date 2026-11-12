@@ -13,7 +13,7 @@ mod emit_and_run;
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
-        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
         .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/search\", to: \"searches#show\"\n  get \"/filter\", to: \"searches#filter\"\n  get \"/keyed\", to: \"searches#keyed\"\nend\n")
         .write("app/controllers/searches_controller.rb", r#"class SearchesController < ApplicationController
   def show

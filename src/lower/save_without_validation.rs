@@ -56,6 +56,52 @@ pub fn apply_bare_model_saves(app: &mut App) {
             rewrite_bare(&mut method.body);
         }
     }
+    // A module only models include, defining no `save` of its own (Devise's `Recoverable`): its bare `save` is the
+    // model's, as Ruby looks it up on the includer.
+    let mut included: crate::det::HashSet<crate::ident::ClassId> = crate::det::HashSet::default();
+    for model in &app.models {
+        if model.methods().any(|m| matches!(m.name.as_str(), "save" | "save!")) {
+            continue;
+        }
+        let mut pending = crate::analyze::model_includes(model);
+        while let Some(id) = pending.pop() {
+            if included.insert(id.clone()) {
+                pending.extend(app.library_classes.iter().filter(|c| c.name == id).flat_map(|c| c.includes.iter().cloned()));
+            }
+        }
+    }
+    let saving_models: crate::det::HashSet<crate::ident::ClassId> = app
+        .models
+        .iter()
+        .filter(|m| m.methods().any(|d| matches!(d.name.as_str(), "save" | "save!")))
+        .map(|m| m.name.clone())
+        .collect();
+    // Through every module those include as well: a module reached from a saving model is that model's too.
+    let mut elsewhere: crate::det::HashSet<crate::ident::ClassId> = crate::det::HashSet::default();
+    let mut pending: Vec<crate::ident::ClassId> = app
+        .library_classes
+        .iter()
+        .filter(|c| !c.is_module)
+        .flat_map(|c| c.includes.iter().cloned())
+        .chain(app.models.iter().filter(|m| saving_models.contains(&m.name)).flat_map(crate::analyze::model_includes))
+        .collect();
+    while let Some(id) = pending.pop() {
+        if elsewhere.insert(id.clone()) {
+            pending.extend(app.library_classes.iter().filter(|c| c.name == id).flat_map(|c| c.includes.iter().cloned()));
+        }
+    }
+    for lc in app.library_classes.iter_mut() {
+        if !lc.is_module
+            || !included.contains(&lc.name)
+            || elsewhere.contains(&lc.name)
+            || lc.methods.iter().any(|m| matches!(m.name.as_str(), "save" | "save!"))
+        {
+            continue;
+        }
+        for method in lc.methods.iter_mut().filter(|m| matches!(m.receiver, crate::dialect::MethodReceiver::Instance)) {
+            rewrite_bare(&mut method.body);
+        }
+    }
 }
 
 fn rewrite_bare(expr: &mut Expr) {

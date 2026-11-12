@@ -742,7 +742,7 @@ mod tests {
                 primary_key_columns: Vec::new(),
             },
         );
-        let schema = Schema { tables };
+        let schema = Schema { tables, ..Default::default() };
 
         let mut registry = HashMap::default();
         let mut comment_info = ClassInfo::default();

@@ -62,7 +62,7 @@ fn tiny_blog_round_trips() {
             primary_key_columns: Vec::new(),
         },
     );
-    let schema = Schema { tables };
+    let schema = Schema { tables, ..Default::default() };
 
     let mut attrs = IndexMap::new();
     attrs.insert(Symbol::from("id"), Ty::Int);
@@ -81,6 +81,7 @@ fn tiny_blog_round_trips() {
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        mixin_sends: Vec::new(),
         select_aliases: Vec::new(),
         i18n: Default::default(),
         span: Span::synthetic(),

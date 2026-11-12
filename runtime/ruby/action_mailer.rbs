@@ -71,6 +71,9 @@ module ActionMailer
 
     def self.default: (?Hash[Symbol, untyped]? opts) -> nil
     def self.deliveries: () -> Array[Message]
+    def self.__deliveries: () -> Array[Message]
+    def self.base_default_params: () -> Hash[Symbol, String | Array[String]]
+    def default_params: () -> Hash[Symbol, String | Array[String]]
     def mail: (?Hash[Symbol, untyped]? opts, ?String? text_body, ?String? html_body) -> Message
     def params: () -> Hash[Symbol, untyped]
     def _with_params: (Hash[Symbol, untyped] params) -> self

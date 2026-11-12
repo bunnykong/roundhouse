@@ -312,6 +312,10 @@ mod mutable_literals;
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]
 mod auto_source_gem;
+#[path = "support/block_arg_conditional.rs"]
+mod block_arg_conditional_contract;
+#[path = "spinel_toolchain/block_arg_conditional.rs"]
+mod block_arg_conditional;
 #[path = "support/untyped_calendar.rs"]
 mod untyped_calendar_contract;
 #[path = "spinel_toolchain/untyped_calendar.rs"]

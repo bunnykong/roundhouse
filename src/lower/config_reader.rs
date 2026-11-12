@@ -161,10 +161,10 @@ fn body_ty(body: &Expr) -> Option<crate::ty::Ty> {
 /// that answers any key as a method — nil when the key is absent — and
 /// apps read it that way (lobsters' `Pushover.enabled?` is
 /// `credentials.pushover&.api_token.present?`, on every settings page).
-/// The runtime's store is a Hash, deliberately EMPTY (the master key is
-/// not in the repo — see `Rails::Application#credentials`), so the
-/// method spelling was a NoMethodError where Rails answers nil. The
-/// index is the same question, asked of the store we have. A `!` key
+/// The runtime's store is deliberately EMPTY (the master key is not in
+/// the repo — see `Rails::Application#credentials`) and answers by
+/// index, so the method spelling is read as the index, the same
+/// question asked of the store we have. A `!` key
 /// (`credentials.x!`, "raise when absent") and the Hash's own methods
 /// are left alone.
 fn rewrite_credentials_node(expr: &mut Expr) {

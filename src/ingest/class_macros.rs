@@ -979,7 +979,7 @@ fn replay_text(source: &str, owner: &ClassId, defaults: &mut indexmap::IndexMap<
 }
 
 // A replayed statement's span points into a fragment the constant resolver never indexed, so its constants are read as written
-fn mark_constants(item: &mut ModelBodyItem) {
+pub(super) fn mark_constants(item: &mut ModelBodyItem) {
     fn mark(e: &mut Expr) {
         if matches!(&*e.node, ExprNode::Const { .. }) {
             e.decisions |= crate::expr::GENERATED_CONST_REF;

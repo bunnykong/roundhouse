@@ -15,7 +15,7 @@ fn app() -> emit_and_run::Overlay {
         )
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"secrets\" do |t|\n    t.string \"name\"\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"secrets\" do |t|\n    t.string \"name\"\n  end\nend\n",
         )
         .write(
             "config/routes.rb",

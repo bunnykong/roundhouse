@@ -20,7 +20,7 @@ fn jbuilder_string_names_and_array_attributes_under_spinel() {
         )
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define(version: 1) do\n  create_table :widgets do |t|\n    t.string :name\n    t.integer :size\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :widgets do |t|\n    t.string :name\n    t.integer :size\n  end\nend\n",
         )
         .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
         .write(

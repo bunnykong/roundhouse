@@ -1790,7 +1790,7 @@ pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
         // lobsters' `Rails.cache.fetch(key, &block)` forward returned
         // the Proc, poisoning `@comments` to Proc under spinel and
         // silently mis-caching on CRuby. Re-attach as a `&` argument.
-        let fwd = emit_expr(block);
+        let fwd = emit_arg(block);
         return if let Some(stripped) = base.strip_suffix(')') {
             if stripped.ends_with('(') {
                 format!("{stripped}&{fwd})")

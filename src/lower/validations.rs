@@ -186,6 +186,8 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
         // Not a `Check`: the emitted `validate` body is
         // `inline_acceptance_check`.
         ValidationRule::Acceptance { .. } => {}
+        // Not a `Check`: the emitted `validate` body is `inline_confirmation_check`.
+        ValidationRule::Confirmation { .. } => {}
         // Not a `Check`: the set is read on the record when it validates
         // (`inline_set_call_check`).
         ValidationRule::InclusionCall { .. } | ValidationRule::ExclusionCall { .. } => {}

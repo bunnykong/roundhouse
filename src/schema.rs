@@ -18,6 +18,11 @@ use crate::ident::{Symbol, TableRef};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
     pub tables: IndexMap<Symbol, Table>,
+    /// The grammar application ingest read this schema's CHECKs under,
+    /// which records whose SQL their text is. `Portable` when nothing
+    /// says: every schema built or ingested outside an application.
+    #[serde(default, skip_serializing_if = "generated::GeneratedExpressionDialect::is_portable")]
+    pub expression_dialect: generated::GeneratedExpressionDialect,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

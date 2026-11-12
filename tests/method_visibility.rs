@@ -45,6 +45,30 @@ fn visibility(methods: &[MethodDef], name: &str, receiver: MethodReceiver) -> Me
 }
 
 #[test]
+fn a_reopened_data_factory_accepts_local_visibility_markers() {
+    for block in [
+        "private\n  def hidden = digest.to_s\n  public\n  def label = hidden",
+        "def hidden = digest.to_s\n  private :hidden\n  def label = hidden",
+        "def hidden = digest.to_s\n  private 'hidden'\n  def label = hidden",
+        "private def hidden = digest.to_s\n  def label = hidden",
+    ] {
+        let source = format!("Artifact = Data.define(:digest) do\n  {block}\n  def self.build(value) = new(value)\n  private_class_method :build\n  def self.make(value) = build(value)\nend\nclass Artifact\n  def extra = label\nend\n");
+        let classes = ingest_library_classes(source.as_bytes(), "artifact.rb").expect("safe Data reopening");
+        let record = classes.iter().find(|c| c.name.0.as_str() == "Artifact").unwrap();
+        assert_eq!(classes.iter().filter(|c| c.name == record.name).count(), 1);
+        for (name, receiver, want) in [
+            ("hidden", MethodReceiver::Instance, MethodVisibility::Private),
+            ("label", MethodReceiver::Instance, MethodVisibility::Public),
+            ("extra", MethodReceiver::Instance, MethodVisibility::Public),
+            ("build", MethodReceiver::Class, MethodVisibility::Private),
+            ("make", MethodReceiver::Class, MethodVisibility::Public),
+        ] {
+            assert_eq!(visibility(&record.methods, name, receiver), want, "{source}: {name}");
+        }
+    }
+}
+
+#[test]
 fn instance_and_singleton_defaults_are_lexical_not_sticky() {
     use MethodReceiver::{Class, Instance};
     use MethodVisibility::{Private, Protected, Public};

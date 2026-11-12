@@ -124,6 +124,10 @@ pub struct Model {
     /// `Rooms::Open` rows say `rooms_open`, not `room`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sti_subclass_names: Vec<ClassId>,
+    /// The per-column Dirty methods a module the model includes sends (Devise's `DirtyTrackingNewMethods`'
+    /// `will_save_change_to_email?`): run on the model, they are its own demand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mixin_sends: Vec<Symbol>,
 
     // Stamped at ingest, not derived per model: the `select` naming them may sit on another model or class.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -686,6 +690,12 @@ pub struct InclusionRange {
 pub enum ValidationRule {
     Presence,
     Absence,
+    /// `confirmation: true` / `{ case_sensitive: }`: the error is on `<attr>_confirmation`, and a nil confirmation
+    /// passes. `case_sensitive` `None` is Rails' default, `true`.
+    Confirmation {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        case_sensitive: Option<bool>,
+    },
     /// `acceptance: true` / `{ accept:, allow_nil: }`. `accept` holds the
     /// literal values Rails' `AcceptanceValidator` accepts (its default is
     /// `["1", true]`). `allow_nil` is from the validator's own hash or the

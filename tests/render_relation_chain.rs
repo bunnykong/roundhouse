@@ -51,7 +51,7 @@ fn app() -> emit_and_run::Overlay {
         .write("app/controllers/authors_controller.rb", &controller)
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"authors\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n    t.boolean \"published\", default: false\n    t.bigint \"author_id\"\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"authors\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n    t.boolean \"published\", default: false\n    t.bigint \"author_id\"\n  end\nend\n",
         )
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write(

@@ -96,7 +96,7 @@ fn generate_project(fixture_path: &Path, out: &Path) {
 
     let mut app = ingest_app(fixture_path).expect("ingest");
     // Emit from the post-analyze lowered IR, as `roundhouse --target typescript` does
-    roundhouse::session::analyze_and_lower(&mut app);
+    roundhouse::session::analyze_and_lower_for(&mut app, roundhouse::build_target::BuildTarget::Typescript);
     let files = typescript::emit(&app);
 
     for file in &files {
@@ -117,7 +117,7 @@ fn generate_project_with_profile(
 
     let mut app = ingest_app(fixture_path).expect("ingest");
     // Emit from the post-analyze lowered IR, as `roundhouse --target typescript` does
-    roundhouse::session::analyze_and_lower(&mut app);
+    roundhouse::session::analyze_and_lower_for(&mut app, roundhouse::build_target::BuildTarget::Typescript);
     let files = typescript::emit_with_profile(&app, profile);
 
     for file in &files {

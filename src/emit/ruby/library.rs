@@ -9254,7 +9254,7 @@ fn emit_library_class_decl_inner(
         if render_conditional(s, m) {
             return;
         }
-        if data_block {
+        if lc.data_define().is_some_and(|(_, span)| m.name_span.file == span.file && m.name_span.start >= span.start && m.name_span.end <= span.end) {
             let mut m = m.clone();
             m.body = top_level(&m.body);
             for param in m.params.iter_mut().chain(m.block_param.iter_mut()) {

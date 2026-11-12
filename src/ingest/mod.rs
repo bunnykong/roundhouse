@@ -16,6 +16,7 @@
 //! cross-cutting Prism AST helpers live in [`util`].
 
 mod alba;
+mod built_send;
 mod conditional_permit;
 pub(crate) mod unreachable_views;
 mod view_paths;
@@ -217,6 +218,16 @@ impl std::fmt::Display for IngestError {
 }
 
 impl std::error::Error for IngestError {}
+
+/// Render the current failure before another ingest replaces its noted source site.
+pub fn render_error(err: &IngestError) -> String {
+    if let IngestError::Unsupported { file, message } = err
+        && let Some((start, _)) = error_site::of(err)
+        && let Some(line) = sources::line_at(file, start) {
+        return format!("unsupported construct in {file}:{line}: {message}");
+    }
+    err.to_string()
+}
 
 impl From<std::io::Error> for IngestError {
     fn from(e: std::io::Error) -> Self {

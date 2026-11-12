@@ -384,15 +384,47 @@ fn ingest_library_classes_impl(
     };
     if file_level && let Some(program) = root.as_program_node() {
         for statement in program.statements().body().iter() {
-            if let Some(class) = file_data_class(&statement, file)
+            if let Some(mut class) = file_data_class(&statement, file)
                 .map_err(|err| super::error_site::at(err, &statement))?
             {
-                if out.iter().chain(made.iter().map(|(_, class)| class)).any(|other| other.name == class.name) {
+                let reopenings = find_all_classes_with_scope(&root).into_iter().filter(|(scope, node)| {
+                    class_name_path(node).is_some_and(|path| scope.iter().cloned().chain(path).collect::<Vec<_>>().join("::") == class.name.0.as_str())
+                }).collect::<Vec<_>>();
+                if !reopenings.is_empty() && let Some((_, call)) = file_data_declaration(&statement)
+                    && let Some(body) = call.block().and_then(|block| block.as_block_node()).and_then(|block| block.body()) {
+                    if let Some(work) = flatten_statements(body).iter().find(|stmt| !data_method_statement(stmt)) {
+                        return Err(super::error_site::at(IngestError::Unsupported {
+                            file: file.into(), message: "Data.define reopening with load-time statements in its block is not modeled".into(),
+                        }, work)); }
+                }
+                let invalid_reopen = reopenings.iter().any(|(_, node)| {
+                    node.location().start_offset() < statement.location().end_offset() || node.superclass().is_some()
+                        || node.body().is_some_and(|body| flatten_statements(body).iter().any(|stmt| !data_method_statement(stmt)))
+                });
+                let last_reopen = reopenings.iter().map(|(_, node)| node.location().start_offset()).max().unwrap_or(0);
+                let separated = program.statements().body().iter().any(|stmt| {
+                    let at = stmt.location().start_offset();
+                    at >= statement.location().end_offset() && at < last_reopen
+                        && !reopenings.iter().any(|(_, node)| node.location().start_offset() == at)
+                });
+                if invalid_reopen || separated || out.iter().any(|other| other.name == class.name && other.is_module)
+                    || made.iter().any(|(_, other)| other.name == class.name) {
                     return Err(super::error_site::at(IngestError::Unsupported {
                         file: file.into(),
                         message: "Data.define beside another declaration of the same class".into(),
                     }, &statement));
                 }
+                // Only later, method-only reopenings can join the factory without moving load-time work.
+                for reopening in out.extract_if(.., |other| other.name == class.name) {
+                    class.methods.extend(reopening.methods);
+                }
+                class.methods.sort_by_key(|method| method.name_span.start);
+                // Nothing runs between the block's definitions and the reopenings', so a later
+                // definition replaces an earlier one before any call can reach it, as in Ruby.
+                let mut seen = HashSet::default();
+                class.methods.reverse();
+                class.methods.retain(|method| seen.insert((method.name.clone(), method.receiver)));
+                class.methods.reverse();
                 made.push((class.name.0.clone(), class));
             }
         }
@@ -401,8 +433,10 @@ fn ingest_library_classes_impl(
                 let qualified_factory = statement.as_constant_path_write_node()
                     .and_then(|write| static_constant_path(&write.target().as_node()))
                     .is_some_and(|path| made.iter().any(|(_, class)| class.name.0.as_str() == path.join("::")));
+                let stdlib_require = statement.as_call_node().and_then(|call| super::file_program::literal_require(&call))
+                    .is_some_and(|(feature, relative)| !relative && super::app::APP_REQUIRABLE_STDLIB.contains(&feature.as_str()));
                 if statement.as_constant_write_node().is_none() && statement.as_class_node().is_none()
-                    && statement.as_module_node().is_none() && !qualified_factory
+                    && statement.as_module_node().is_none() && !qualified_factory && !stdlib_require
                 {
                     return Err(super::error_site::at(IngestError::Unsupported {
                         file: file.into(),
@@ -544,6 +578,14 @@ fn data_block_classes(
     Ok(out)
 }
 
+fn data_method_statement(stmt: &Node<'_>) -> bool {
+    if let Some(def) = visibility::definition(stmt) {
+        return def.receiver().is_none_or(|receiver| receiver.as_self_node().is_some());
+    }
+    stmt.as_call_node().filter(|call| call.receiver().is_none() && call.block().is_none() && visibility::marker(call))
+        .is_some_and(|call| call.arguments().is_none_or(|args| args.arguments().iter().all(|arg| super::util::symbol_or_string_value(&arg).is_some())))
+}
+
 /// The class a file-level statement `X = Data.define(:a, :b)` creates.
 /// This is the Zeitwerk shape of a value class: Ruby
 /// creates the class when it assigns the constant, so it is a library
@@ -561,14 +603,26 @@ fn file_data_class(statement: &ruby_prism::Node<'_>, file: &str) -> IngestResult
     let owner = ClassId(Symbol::from(name));
     let body = || call.block().and_then(|block| block.as_block_node()).and_then(|block| block.body());
     if let Some(body) = body() {
-        if flatten_statements(body)
-            .iter()
-            .any(|stmt| stmt.as_class_node().is_some() || stmt.as_module_node().is_some())
-        {
+        let statements = flatten_statements(body);
+        if statements.iter().any(|stmt| stmt.as_class_node().is_some() || stmt.as_module_node().is_some()) {
             return Err(IngestError::Unsupported {
                 file: file.into(),
                 message: "class or module inside a Data.define block".into(),
             });
+        }
+        // Ruby runs a load-time statement while the earlier definition is active,
+        // but only the last definition is kept and emitted.
+        let mut first: HashMap<(&str, bool), usize> = HashMap::default();
+        for (index, stmt) in statements.iter().enumerate() {
+            let Some(def) = visibility::definition(stmt) else { continue };
+            let key = (constant_id_str(&def.name()), def.receiver().is_some());
+            let start = *first.entry(key).or_insert(index);
+            if let Some(work) = statements[start..index].iter().skip(1).find(|stmt| !data_method_statement(stmt)) {
+                return Err(super::error_site::at(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "Data.define block with a load-time statement between two definitions of a method is not modeled".into(),
+                }, work));
+            }
         }
     }
     let DeclBody { includes, include_spans, methods, constants, mut unknown_calls, mut class_initializers, class_attributes: _, conditional_definitions } =

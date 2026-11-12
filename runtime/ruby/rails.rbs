@@ -99,7 +99,7 @@ module Rails
     def secret_key_base: () -> String
     def domain: () -> String
     def protocol: () -> String
-    def credentials: () -> Hash[Symbol, untyped]
+    def credentials: () -> Credentials
     ENV_CONFIG: Hash[String, Symbol?]
     def env_config: () -> Hash[String, Symbol?]
     def config_time_zone: () -> String
@@ -118,6 +118,27 @@ module Rails
 
   class AssetConfig
     def prefix: () -> String
+  end
+
+  class Credentials
+    def secret_key_base: () -> String?
+    def []: (Symbol key) -> untyped
+    def dig: (*Symbol keys) -> untyped
+    def fetch: (Symbol key, *untyped default) ?{ (Symbol) -> untyped } -> untyped
+    def key?: (Symbol key) -> bool
+    def has_key?: (Symbol key) -> bool
+    def include?: (Symbol key) -> bool
+    def keys: () -> Array[Symbol]
+    def values: () -> Array[untyped]
+    def to_h: () -> Hash[Symbol, untyped]
+    def config: () -> Hash[Symbol, untyped]
+    def merge: (Hash[Symbol, untyped] other) -> Hash[Symbol, untyped]
+    def each: () -> Credentials
+    def empty?: () -> bool
+    def any?: () -> bool
+    def present?: () -> bool
+    def blank?: () -> bool
+    def nil?: () -> bool
   end
 
   class FrameworkConfig

@@ -381,7 +381,10 @@ fn parameters_on_hash(expr: &mut Expr) -> bool {
     }
     // Not a String read of a value that may be either: Parameters hold String keys here, the Hash beside them Symbols.
     let value_holder = !matches!(&*r.node, ExprNode::Send { method, .. } if method.as_str() == "params");
-    if value_holder && may_be_parameters(r.ty.as_ref()) && !is_parameters(r.ty.as_ref()) {
+    // A Symbol read of a request value that may be Parameters among scalars (Devise's `attributes[:reset_password_token]`
+    // over `params.fetch(resource_name, {})`): only Parameters answer it, a String or an Array raising as in Rails.
+    let symbol_read = method.as_str() == "[]" && matches!(args.as_slice(), [k] if matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } }));
+    if value_holder && (may_be_parameters(r.ty.as_ref()) || (symbol_read && holds_parameters(r.ty.as_ref()))) && !is_parameters(r.ty.as_ref()) {
         // Not a literal String key, which reads alike either way.
         let symbol_key = |k: &Expr| !matches!(&*k.node, ExprNode::Lit { value: Literal::Str { .. } }) && !matches!(k.ty, Some(Ty::Str | Ty::Int));
         if method.as_str() == "[]" && let [key] = args.as_slice() && symbol_key(key) {

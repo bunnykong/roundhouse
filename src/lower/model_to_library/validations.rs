@@ -49,7 +49,9 @@ pub(super) fn push_validate_method(
                 // for fields the schema declares as `Str` — tsc narrows
                 // `Array.isArray(stringField)` to `never` and rejects the
                 // subsequent `.length` access.
-                let attr_ty = model.attributes.fields.get(&v.attribute);
+                // Not the column's type where the model writes its own reader over it: that reader answers what Rails validates, of any type.
+                let own_reader = model.methods().any(|d| d.receiver == MethodReceiver::Instance && d.name == v.attribute);
+                let attr_ty = model.attributes.fields.get(&v.attribute).filter(|_| !own_reader);
                 // `validates :user, presence: true` on a `belongs_to :user` (or
                 // `has_one`) names the ASSOCIATION, and Rails asks its reader —
                 // `user.blank?`, nil for a record. There is no `@user` slot: the
@@ -139,9 +141,19 @@ pub(super) fn push_validate_method(
                     };
                     // Not the `@attr` slot a column has: a typed_store attribute lives in its store column, behind the reader Rails validates through.
                     // A defaulted `attribute` holds nil in `@attr` until its reader applies the default.
-                    if store_attrs.contains(&v.attribute) || defaulted_attrs.contains(&v.attribute) {
+                    // Nor for an attribute no column holds (Devise's `password`): Rails validates what its reader answers.
+                    let virtual_attr = attr_ty.is_none() && !is_assoc && attachment.is_none() && !is_collection && !own_ivar_accessor(model, &v.attribute);
+                    // Nor where the model writes its own reader over the column's or the accessor's: Rails validates what that answers.
+                    if store_attrs.contains(&v.attribute) || defaulted_attrs.contains(&v.attribute) || virtual_attr || own_reader {
                         for check in &mut produced {
                             read_through_reader(check, &v.attribute);
+                        }
+                    }
+                    // Rails reads the confirmation through its reader (`public_send("#{attr}_confirmation")`).
+                    if matches!(rule, ValidationRule::Confirmation { .. }) {
+                        let confirmation = Symbol::from(format!("{}_confirmation", v.attribute.as_str()));
+                        for check in &mut produced {
+                            read_through_reader(check, &confirmation);
                         }
                     }
                     if v.if_cond.is_some() || v.unless_cond.is_some() {
@@ -659,6 +671,7 @@ fn validation_rule_to_calls(
     match rule {
         ValidationRule::Presence => vec![inline_presence_check(msgs, attr, attr_ty, runtime_relation)],
         ValidationRule::Absence => vec![inline_absence_check(msgs, attr, attr_ty, runtime_relation)],
+        ValidationRule::Confirmation { case_sensitive } => vec![inline_confirmation_check(msgs, attr, *case_sensitive != Some(false), attr_ty)],
         ValidationRule::Acceptance { accept, allow_nil } => {
             vec![inline_acceptance_check(msgs, attr, accept, *allow_nil != Some(false), attr_ty, runtime_relation)]
         }
@@ -1009,6 +1022,15 @@ fn with_condition_guard(body: Expr, if_cond: &Option<Expr>, unless_cond: &Option
 
 /// `@<attr>` — direct ivar read passed as the `value` positional arg
 /// to every validates_* helper.
+/// The model's own file declares `attr` by `attr_accessor` / `attr_reader`, whose reader is the ivar itself.
+fn own_ivar_accessor(model: &Model, attr: &Symbol) -> bool {
+    model.body.iter().any(|item| matches!(item, crate::dialect::ModelBodyItem::Unknown { expr, .. }
+        if expr.span.file == model.span.file
+            && matches!(&*expr.node, ExprNode::Send { recv: None, method, args, .. }
+                if matches!(method.as_str(), "attr_accessor" | "attr_reader")
+                    && args.iter().any(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { value } } if value == attr)))))
+}
+
 fn read_through_reader(expr: &mut Expr, attr: &Symbol) {
     expr.node.for_each_child_mut(&mut |c| read_through_reader(c, attr));
     if matches!(&*expr.node, ExprNode::Ivar { name } if name == attr) {
@@ -1435,6 +1457,32 @@ fn inline_exclusion_check(
     let push_err =
         errors_push(attr.as_str(), msgs.error(attr.as_str(), "exclusion", &Default::default()));
     if_with_nil_else(reserved, push_err)
+}
+
+/// Rails' `ConfirmationValidator`: a `<attr>_confirmation` that was given and differs (by `casecmp` for a String
+/// when not case-sensitive) is an error on the confirmation, naming the attribute.
+fn inline_confirmation_check(msgs: Messages, attr: &Symbol, case_sensitive: bool, attr_ty: Option<&Ty>) -> Expr {
+    let confirmation_name = format!("{}_confirmation", attr.as_str());
+    let confirmation = ivar(&Symbol::from(confirmation_name.as_str()));
+    let value = ivar(attr);
+    let casecmp = send(send(value.clone(), "casecmp", vec![confirmation.clone()]), "==", vec![Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: 0 } })]);
+    let equal = send(value.clone(), "==", vec![confirmation.clone()]);
+    // Not the column's type alone: Rails asks the value `is_a?(String)`, and a nil one compares by `==`.
+    let same = match (case_sensitive, peel_nilable(attr_ty).0) {
+        (true, _) => equal,
+        (false, Some(Ty::Str)) => bool_op(BoolOpKind::And, send(send(value, "nil?", vec![]), "!", vec![]), casecmp),
+        (false, None) => Expr::new(
+            Span::synthetic(),
+            ExprNode::If { cond: is_a_check(&value, "String"), then_branch: casecmp, else_branch: equal },
+        ),
+        (false, Some(_)) => equal,
+    };
+    let differs = bool_op(BoolOpKind::And, send(send(confirmation, "nil?", vec![]), "!", vec![]), send(same, "!", vec![]));
+    let human = msgs.0.map(|m| m.human_attribute_name(attr.as_str())).unwrap_or_else(|| crate::i18n::humanize(attr.as_str()));
+    if_with_nil_else(
+        differs,
+        errors_push(&confirmation_name, msgs.error(&confirmation_name, "confirmation", &ErrorOpts { attribute: Some(human), ..Default::default() })),
+    )
 }
 
 /// Inline `validates :attr, acceptance: { accept: [...], allow_nil: }`.

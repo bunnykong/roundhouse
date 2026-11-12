@@ -106,7 +106,7 @@ puts "dispatcher encoding passed"
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
-        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
         .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/settings\", to: \"payloads#settings\"\n  get \"/count\", to: \"payloads#count\"\n  get \"/stamp\", to: \"payloads#stamp\"\nend\n")
         .write("app/models/badge.rb", r#"class Badge
   def initialize(label)

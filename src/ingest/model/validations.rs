@@ -1043,6 +1043,7 @@ fn parse_validator(key: &str, value: &Node<'_>, file: &str, class_consts: &super
     let mut parsed = match key {
         "presence" => parse_bool_or_hash(value, ValidationRule::Presence, "presence", file),
         "absence" => parse_bool_or_hash(value, ValidationRule::Absence, "absence", file),
+        "confirmation" => parse_confirmation(value, file),
         "acceptance" => parse_acceptance(value, file),
         "length" => parse_length_rule(value, file, class_consts),
         "numericality" => parse_numericality(value, file, class_consts),
@@ -1143,6 +1144,20 @@ fn acceptance_values(node: &Node<'_>) -> Option<Vec<Literal>> {
 }
 
 /// `presence: true`, `presence: false`, or `presence: { if: :live? }`.
+fn parse_confirmation(value: &Node<'_>, file: &str) -> RuleParse {
+    let mut case_sensitive = None;
+    for el in hash_elements(value).iter().flat_map(|e| e.iter()) {
+        let Some(assoc) = el.as_assoc_node() else { continue };
+        if symbol_value(&assoc.key()).as_deref() == Some("case_sensitive") {
+            match super::super::util::bool_value(&assoc.value()) {
+                Some(b) => case_sensitive = Some(b),
+                None => return RuleParse::Gap(vec!["confirmation: case_sensitive".to_string()]),
+            }
+        }
+    }
+    parse_bool_or_hash(value, crate::dialect::ValidationRule::Confirmation { case_sensitive }, "confirmation", file)
+}
+
 fn parse_bool_or_hash(
     value: &Node<'_>,
     rule: crate::dialect::ValidationRule,
@@ -1971,3 +1986,56 @@ fn literal_atom(node: &Node<'_>) -> Option<Literal> {
     node.as_nil_node().is_some().then_some(Literal::Nil)
 }
 
+
+/// `validates_length_of :password, within: 6..128, allow_blank: true` as the `validates` call Rails makes of it
+/// (`validates_with LengthValidator, _merge_attributes(attr_names)`): the validator's own options in its hash, the
+/// ones `validates` hands every validator beside it. Padded to the call's offset in its file, so the spans read back
+/// land where it is written.
+pub(super) fn validates_of_as_validates(call: &ruby_prism::CallNode<'_>, file: &str) -> Option<String> {
+    const SHARED: &[&str] = &["if", "unless", "on", "allow_blank", "allow_nil", "strict"];
+    let name = String::from_utf8_lossy(call.name().as_slice()).into_owned();
+    let kind = name.strip_prefix("validates_")?.strip_suffix("_of")?;
+    let kind = match kind {
+        "size" => "length",
+        "presence" | "absence" | "uniqueness" | "length" | "acceptance" | "confirmation" | "comparison" => kind,
+        _ => return None,
+    };
+    let text = |n: &Node<'_>| String::from_utf8_lossy(n.location().as_slice()).into_owned();
+    let mut attrs = Vec::new();
+    let mut own = Vec::new();
+    let mut shared = Vec::new();
+    let args: Vec<Node<'_>> = call.arguments()?.arguments().iter().collect();
+    for (i, arg) in args.iter().enumerate() {
+        if super::super::util::symbol_or_string_value(arg).is_some() {
+            attrs.push(text(arg));
+            continue;
+        }
+        let elements: Vec<Node<'_>> = if let Some(h) = arg.as_keyword_hash_node() {
+            h.elements().iter().collect()
+        } else if let Some(h) = arg.as_hash_node() {
+            h.elements().iter().collect()
+        } else {
+            return None;
+        };
+        if i + 1 != args.len() {
+            return None;
+        }
+        for element in elements {
+            let assoc = element.as_assoc_node()?;
+            let key = symbol_value(&assoc.key())?;
+            if SHARED.contains(&key.as_str()) { shared.push(text(&element)) } else { own.push(text(&element)) }
+        }
+    }
+    if attrs.is_empty() {
+        return None;
+    }
+    let rule = if own.is_empty() { format!("{kind}: true") } else { format!("{kind}: {{ {} }}", own.join(", ")) };
+    let written = std::iter::once(attrs.join(", ")).chain(std::iter::once(rule)).chain(shared).collect::<Vec<_>>().join(", ");
+    let start = call.location().start_offset();
+    let padding = super::super::sources::with_text(file, |t| {
+        t.as_bytes().get(..start).map(|b| b.iter().map(|&c| if c == b'\n' { '\n' } else { ' ' }).collect::<String>())
+    })
+    .flatten()
+    .unwrap_or_default();
+    Some(format!("{padding}validates {written}\n"))
+}

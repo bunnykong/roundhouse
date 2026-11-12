@@ -14,7 +14,7 @@
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
-const SCHEMA: &str = r#"ActiveRecord::Schema.define do
+const SCHEMA: &str = r#"ActiveRecord::Schema[8.1].define(version: 1) do
   create_table "docs", force: :cascade do |t|
     t.string "name"
   end
