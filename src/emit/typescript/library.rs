@@ -670,7 +670,7 @@ pub(super) fn emit_class_file_full(
 /// The outermost name a nested app class (`Importer::TooBig`) is declared
 /// under. Its file is that root's, where a namespace carries it: a file of
 /// its own named `importer::too_big.ts` left `Importer.TooBig` undefined.
-pub(super) fn nested_class_root(lc: &LibraryClass) -> Option<&str> {
+pub(crate) fn nested_class_root(lc: &LibraryClass) -> Option<&str> {
     let name = lc.name.0.as_str();
     if lc.is_module || lc.origin.is_some() || !name.contains("::") {
         return None;

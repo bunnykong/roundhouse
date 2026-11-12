@@ -86,8 +86,30 @@ fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
     }
 }
 
+/// What a record of no model known here answers, from the runtime's signatures: its class's `primary_key` and
+/// `base_class`, and its `id` (orm_adapter's `value.send(value.class.primary_key)` over a record of any model).
+fn register_record_key_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
+    const BASE: &str = include_str!("../../../runtime/ruby/active_record/base.rbs");
+    const KEYS: &str = include_str!("../../../runtime/spinel/active_record_attribute_keys.rbs");
+    let id = ClassId(Symbol::from("ActiveRecord::Base"));
+    for (rbs, class_side, instance) in [(BASE, &["primary_key"][..], &["id"][..]), (KEYS, &["base_class"][..], &[][..])] {
+        let Ok(parsed) = crate::rbs::parse_app_signatures(rbs) else { continue };
+        let Some(methods) = parsed.get(&id) else { continue };
+        let cls = classes.entry(id.clone()).or_default();
+        for (m, ty) in methods {
+            if class_side.contains(&m.as_str()) {
+                cls.class_methods.entry(m.clone()).or_insert_with(|| ty.clone());
+            }
+            if instance.contains(&m.as_str()) {
+                cls.instance_methods.entry(m.clone()).or_insert_with(|| ty.clone());
+            }
+        }
+    }
+}
+
 pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_connection_surface(classes);
+    register_record_key_surface(classes);
     // `ActiveRecord::Base` itself — the literal base class, called
     // directly as `ActiveRecord::Base.transaction { ... }` and
     // `ActiveRecord::Base.connection.exec_query(...)`. It sits at the

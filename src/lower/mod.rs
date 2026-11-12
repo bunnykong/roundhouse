@@ -193,6 +193,7 @@ pub mod ruby_family_gems;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod gem_refusal;
 pub mod constantize;
+pub mod rooted_constants;
 pub mod params_residue;
 pub mod params_permit;
 pub mod normalizes;
@@ -1596,24 +1597,39 @@ macro_rules! forwarding_roots {
     ($app:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
         for view in & $($mutable)? $app.views { $f(& $($mutable)? view.body); }
         for tm in & $($mutable)? $app.test_modules {
-            if let Some(setup) = tm.setup.$option() { $f(setup); }
-            for test in & $($mutable)? tm.tests { $f(& $($mutable)? test.body); }
-            for (_, value) in & $($mutable)? tm.constants { $f(value); }
-            for method in & $($mutable)? tm.helpers {
+            test_module_roots!(tm, $f, $iter, $option $(, $mutable)?);
+        }
+    }
+}
+
+// Every emit-bound body of one test module: its setup, tests, constants,
+// helpers (and their defaults), and its own classes' methods (and
+// defaults), constants, class-body calls and class-level ivars.
+macro_rules! test_module_roots {
+    ($tm:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
+        if let Some(setup) = $tm.setup.$option() { $f(setup); }
+        for test in & $($mutable)? $tm.tests { $f(& $($mutable)? test.body); }
+        for (_, value) in & $($mutable)? $tm.constants { $f(value); }
+        for method in & $($mutable)? $tm.helpers {
+            $f(& $($mutable)? method.body);
+            for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+        }
+        for class in & $($mutable)? $tm.inner_classes {
+            for method in & $($mutable)? class.methods {
                 $f(& $($mutable)? method.body);
                 for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
             }
-            for class in & $($mutable)? tm.inner_classes {
-                for method in & $($mutable)? class.methods {
-                    $f(& $($mutable)? method.body);
-                    for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
-                }
-                for (_, value) in & $($mutable)? class.constants { $f(value); }
-                for call in & $($mutable)? class.unknown_calls { $f(call); }
-                for initializer in & $($mutable)? class.class_ivar_initializers { $f(initializer); }
-            }
+            for (_, value) in & $($mutable)? class.constants { $f(value); }
+            for call in & $($mutable)? class.unknown_calls { $f(call); }
+            for initializer in & $($mutable)? class.class_ivar_initializers { $f(initializer); }
         }
     }
+}
+
+/// Every emit-bound body of one test module, the part of
+/// [`for_each_forwarding_body`] that walks it.
+pub(crate) fn for_each_test_module_body(tm: &mut crate::dialect::TestModule, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+    test_module_roots!(tm, f, iter_mut, as_mut, mut);
 }
 
 pub(crate) fn for_each_forwarding_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {

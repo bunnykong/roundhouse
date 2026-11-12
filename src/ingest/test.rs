@@ -143,6 +143,7 @@ fn ingest_test_class(
         }
     }
     let ClassBody { tests, setup, mut inner_classes, mut helpers, constants, includes, teardowns, target, .. } = acc;
+    let body_classes = inner_classes.iter().map(|c| c.name.clone()).collect();
 
     // ActiveSupport runs `teardown do … end` blocks after every test,
     // passed or failed, after the class's own `def teardown` and in
@@ -320,6 +321,7 @@ fn ingest_test_class(
         tests,
         setup,
         inner_classes,
+        body_classes,
         helpers,
         constants,
         includes,

@@ -22170,5 +22170,7 @@ mod library_concern_included_include_contract;
 mod library_concern_included_include;
 #[path = "emit_and_run/param_default_constant_rooting.rs"]
 mod param_default_constant_rooting;
+#[path = "emit_and_run/compiled_rooted_constants.rs"]
+mod compiled_rooted_constants;
 #[path = "emit_and_run/serializable_resource_as_json.rs"]
 mod serializable_resource_as_json;

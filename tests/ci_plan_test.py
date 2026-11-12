@@ -1148,7 +1148,6 @@ class Routing(unittest.TestCase):
             "runtime/spinel/param_builder.rb": "spinel_param_builder",
             "runtime/spinel/multipart.rb": "spinel_param_builder",
             "runtime/spinel/active_support_date_parsing.rb": "date_columns_spinel",
-            "runtime/spinel/net_http.rb": "spinel_net_http_start",
             "runtime/spinel/http_stub.rb": "spinel_net_http_start",
             "runtime/spinel/http_stub.rbs": "spinel_net_http_start",
             "runtime/spinel/tcp_socket_stub.rb": "spinel_net_http_start",
@@ -1160,6 +1159,23 @@ class Routing(unittest.TestCase):
         for path, binary in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["spinel_tests"], [binary])
+
+    def test_http_tls_inputs_select_the_native_contract(self):
+        for path in [
+            "runtime/spinel/net_http.rb",
+            "src/analyze/registry/stdlib.rs",
+            "src/analyze/body/send.rs",
+            "tests/net_http_tls.rs",
+            "tests/net_http_tls/client.rb",
+            "tests/net_http_tls/driver.rb",
+            "tests/net_http_tls/check.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("net_http_tls", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+        self.assertIn("spinel_net_http_start", ci.select(["runtime/spinel/net_http.rb"])["spinel_tests"])
 
     def test_sqlite_date_quote_inputs_select_the_native_regression(self):
         for path in [

@@ -7951,6 +7951,9 @@ pub(crate) struct ClassIvarWrites {
     modules: BTreeSet<Symbol>,
     /// The modules with a computed `instance_variable_set`.
     dynamic_modules: BTreeSet<ClassId>,
+    /// Each indexed class's direct subclasses among `classes`, so a lookup walks down from one class instead of up
+    /// from every class.
+    children: HashMap<ClassId, Vec<ClassId>>,
 }
 
 impl ClassIvarWrites {
@@ -7974,11 +7977,33 @@ impl ClassIvarWrites {
         if !class_side && own.last().and_then(|c| self.classes.get(c)).and_then(|e| e.parent.as_ref()).is_some_and(|p| !self.classes.contains_key(p) && p.0.as_str() != "Object") {
             return true;
         }
-        self.classes.iter().any(|(c, e)| {
-            (own.contains(c) || ancestors(c).contains(class))
-                && (e.any
-                    || e.mixins.iter().any(|m| self.dynamic_modules.contains(m))
-                    || if class_side { e.class.contains(name) } else { e.instance.contains(name) })
+        // The classes whose chain reaches `class` within the 64 links `ancestors` follows: its subclasses, walked down.
+        let mut related: Vec<&ClassId> = own.iter().filter(|c| self.classes.contains_key(*c)).collect();
+        let mut seen: HashSet<&ClassId> = HashSet::default();
+        let mut frontier: Vec<&ClassId> = vec![class];
+        seen.insert(class);
+        for _ in 0..=64 {
+            let mut next = Vec::new();
+            for c in frontier {
+                if self.classes.contains_key(c) && !own.contains(c) {
+                    related.push(c);
+                }
+                for child in self.children.get(c).into_iter().flatten() {
+                    if seen.insert(child) {
+                        next.push(child);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        related.into_iter().any(|c| {
+            let e = &self.classes[c];
+            e.any
+                || e.mixins.iter().any(|m| self.dynamic_modules.contains(m))
+                || if class_side { e.class.contains(name) } else { e.instance.contains(name) }
         })
     }
 }
@@ -8072,7 +8097,13 @@ fn class_ivar_writes(app: &App) -> Option<ClassIvarWrites> {
     for (model, m) in &app.macro_includes {
         classes.entry(model.clone()).or_default().mixins.push(m.clone());
     }
-    Some(ClassIvarWrites { classes, modules, dynamic_modules })
+    let mut children: HashMap<ClassId, Vec<ClassId>> = HashMap::default();
+    for (c, e) in &classes {
+        if let Some(p) = &e.parent {
+            children.entry(p.clone()).or_default().push(c.clone());
+        }
+    }
+    Some(ClassIvarWrites { classes, modules, dynamic_modules, children })
 }
 
 fn collect_ivar_reads(e: &Expr, out: &mut BTreeSet<Symbol>) {

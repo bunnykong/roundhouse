@@ -99,6 +99,7 @@ SPINEL_TESTS = [
     "db_sqlite_concurrency",
     "spinel_param_builder",
     "spinel_net_http_start",
+    "net_http_tls",
     "rails_compat_vectors_spinel",
     "spinel_pg_db",
     "spinel_db_contract",
@@ -595,6 +596,8 @@ def native_coverage(path):
         "runtime/spinel/tep/server_scheduled.rb",
     }:
         suites.add("spinel_chunked_body")
+    if path in {"runtime/spinel/net_http.rb", "src/analyze/registry/stdlib.rs", "src/analyze/body/send.rs"} or path.startswith("tests/net_http_tls/"):
+        suites.add("net_http_tls")
     if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":
         suites.add("spinel_faye_websocket")
     if path.startswith(("tests/spinel_websocket_lifecycle", "runtime/spinel/tep/websocket")) or path in {

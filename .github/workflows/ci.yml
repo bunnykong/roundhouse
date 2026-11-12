@@ -2276,6 +2276,17 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/rust_toolchain-real_blog_rescue_from_runs.json" \
             --select rust_toolchain::real_blog_rescue_from_runs
+      - name: cargo test --test rust_record_tests record_tests_app_cargo_test_passes_what_it_lowers
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/rust_record_tests-record_tests_app_cargo_test_passes_what_it_lowers.json" \
+            --select rust_record_tests::record_tests_app_cargo_test_passes_what_it_lowers
       - name: cargo test --test emit_and_run render json writer on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
         env:

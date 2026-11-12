@@ -907,6 +907,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // hands them — campfire assigns an ActiveSupport::Duration — so
         // asserting Int there would be a narrower answer than the truth.
         ("use_ssl=", Ty::Bool),
+        // TLS writers answer the supplied value, which can also be nil.
+        ("verify_mode=", Ty::Untyped),
+        ("verify_hostname=", Ty::Untyped),
+        ("cert_store=", Ty::Untyped),
         ("open_timeout=", Ty::Untyped),
         ("read_timeout=", Ty::Untyped),
         ("use_ssl?", Ty::Bool), ("started?", Ty::Bool),
