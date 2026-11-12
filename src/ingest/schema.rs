@@ -775,12 +775,15 @@ fn apply_table_verb(
         "add_check_constraint" | "remove_check_constraint" => {
             if let Some(table) = arg_name(0).and_then(|n| schema.tables.get_mut(&Symbol::from(n))) {
                 if verb == "add_check_constraint" {
-                    let check = check_constraint(&args[1..], file, table.name.as_str())?;
+                    let mut check = check_constraint(&args[1..], file, table.name.as_str())?;
                     if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect)
                         && !crate::emit::shared::schema_sql::sqlite_check_expression(&check.expression, table, dialect) {
-                        return leave_out_or_refuse(dialect, file, node_span(&args[1]), table.name.as_str(), "CHECK", &check.expression, || {
-                            IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) }
-                        });
+                        match carry_check(dialect, &check.expression, table) {
+                            Some(carried) => check.expression = carried,
+                            None => return leave_out_or_refuse(dialect, file, node_span(&args[1]), table.name.as_str(), "CHECK", &check.expression, || {
+                                IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) }
+                            }),
+                        }
                     }
                     table.check_constraints.push(check);
                 } else {
@@ -790,9 +793,11 @@ fn apply_table_verb(
                         || args.get(1).is_some_and(|n| n.as_keyword_hash_node().is_none() && n.as_nil_node().is_none() && string_value(n).is_none()) {
                         return Err(IngestError::Unsupported { file: file.into(), message: "remove_check_constraint requires a literal name or expression".into() });
                     }
+                    // A carried CHECK is stored as carried; its source text still names it.
+                    let carried = expression.as_deref().and_then(|e| carry_check(dialect, e, table));
                     table.check_constraints.retain(|c| !match &name {
                         Some(name) => c.name.as_ref() == Some(name),
-                        None => expression.as_ref().is_some_and(|e| &c.expression == e),
+                        None => expression.as_ref().is_some_and(|e| &c.expression == e) || carried.as_ref() == Some(&c.expression),
                     });
                 }
             }
@@ -1835,6 +1840,18 @@ fn node_span(node: &Node<'_>) -> (usize, usize) {
     (node.location().start_offset(), node.location().end_offset())
 }
 
+/// Under [`GeneratedExpressionDialect::OtherDatabase`], a CHECK the
+/// grammar can't read rewritten to what SQLite reads alike, when it is in
+/// the forms Rails' PostgreSQL dump writes for plain comparisons
+/// ([`carry_postgres_check`](crate::emit::shared::schema_sql::carry_postgres_check)).
+/// Index expressions are never carried: PostgreSQL's `lower` folds case
+/// beyond ASCII, which SQLite's does not.
+fn carry_check(dialect: GeneratedExpressionDialect, expression: &str, table: &Table) -> Option<String> {
+    (dialect == GeneratedExpressionDialect::OtherDatabase)
+        .then(|| crate::emit::shared::schema_sql::carry_postgres_check(expression, table))
+        .flatten()
+}
+
 /// A CHECK, index expression or expression-index predicate the grammar
 /// can't read. Under [`GeneratedExpressionDialect::OtherDatabase`] it is
 /// the app's database's own SQL: the caller leaves it out of the schema,
@@ -2166,6 +2183,12 @@ fn table_from_create_table(
         if !crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect)
             && !(check && crate::emit::shared::schema_sql::sqlite_check_expression(&expression, &table, dialect))
         {
+            if check && let Some(carried) = carry_check(dialect, &expression, &table) {
+                for c in table.check_constraints.iter_mut().filter(|c| c.expression == expression) {
+                    c.expression = carried.clone();
+                }
+                continue;
+            }
             let what = match &site { SqlSite::Check => "CHECK", SqlSite::Index => "index expression", SqlSite::Predicate(_) => "expression index `where:`" };
             if let Err(gap) = leave_out_or_refuse(dialect, file, span, &table_name, what, &expression, || {
                 let line = super::sources::line_at(file, span.0).unwrap_or(1);

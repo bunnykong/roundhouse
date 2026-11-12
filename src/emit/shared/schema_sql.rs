@@ -502,6 +502,248 @@ pub(crate) fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
     sqlite_expression(predicate, Some(table))
 }
 
+/// A CHECK as Rails' PostgreSQL dump writes it (`pg_get_constraintdef`),
+/// rewritten to the text SQLite reads alike, when it uses only what that
+/// dump adds to plain comparisons:
+///
+/// - an identity cast, `::text` or `::character varying`, on a string
+///   literal or on a Rails `string` or `text` column, which becomes its
+///   operand: `status::text = 'pending'::text` is `status = 'pending'`;
+/// - `c = ANY (ARRAY[...])` and `c <> ALL (ARRAY[...])`, a column on the
+///   left and literals of its kind in the array (cast as above, or
+///   `::text[]` as a whole), which become `c IN (...)` and `c NOT IN (...)`.
+///
+/// The result may use only columns, literals, `=`, `<>`, `!=`,
+/// `IS [NOT] NULL`, `[NOT] IN`, `AND`, `OR`, `NOT` and parentheses, and an
+/// ordering comparison only between integers. Strings are only ever
+/// compared for equality, which compares bytes in SQLite and, under a
+/// deterministic collation, in PostgreSQL: no collation order and no case
+/// folding (`lower`) enters. A column ingest reads as a string that
+/// PostgreSQL stores otherwise (`citext`, `inet`, an enum) has no identity
+/// cast to `text`, so it is not carried. `None` for anything else.
+pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
+    #[derive(Clone, PartialEq)]
+    enum Token {
+        Str(String),
+        Num(String),
+        Name(String, bool),
+        Op(&'static str),
+    }
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Text,
+        Integer,
+    }
+    const OPS: &[&str] = &["::", "<>", "!=", "<=", ">=", "(", ")", "[", "]", ",", "=", "<", ">"];
+    const KEYWORDS: &[&str] = &["AND", "OR", "NOT", "IS", "NULL", "IN", "TRUE", "FALSE", "ANY", "ALL", "SOME", "ARRAY", "BETWEEN", "LIKE"];
+    let keyword = |token: Option<&Token>| matches!(token, Some(Token::Name(n, false)) if KEYWORDS.iter().any(|w| n.eq_ignore_ascii_case(w)));
+    let kind_of = |token: &Token| -> Option<Kind> {
+        match token {
+            Token::Str(_) => Some(Kind::Text),
+            Token::Num(n) if n.bytes().all(|b| b.is_ascii_digit()) => Some(Kind::Integer),
+            Token::Name(_, false) if keyword(Some(token)) => None,
+            Token::Name(name, quoted) => table
+                .columns
+                .iter()
+                .find(|c| if *quoted { c.name.as_str() == name } else { c.name.as_str().eq_ignore_ascii_case(name) })
+                .filter(|c| !c.array)
+                .and_then(|c| match c.col_type {
+                    ColumnType::String { .. } | ColumnType::Text if c.generated_text_compatible != Some(false) => Some(Kind::Text),
+                    ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => Some(Kind::Integer),
+                    _ => None,
+                }),
+            Token::Num(_) | Token::Op(_) => None,
+        }
+    };
+    let word = |token: Option<&Token>, w: &str| matches!(token, Some(Token::Name(n, false)) if n.eq_ignore_ascii_case(w));
+
+    // Tokens. Anything else (comments, `$` quoting, `E'...'`) is not carried.
+    let chars: Vec<char> = sql.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if matches!(c, ' ' | '\t' | '\n' | '\r') {
+            i += 1;
+        } else if c == '\'' || c == '"' {
+            let start = i;
+            let mut text = String::new();
+            i += 1;
+            loop {
+                match chars.get(i) {
+                    None => return None,
+                    Some(&q) if q == c && chars.get(i + 1) == Some(&c) => {
+                        text.push(c);
+                        i += 2;
+                    }
+                    Some(&q) if q == c => break,
+                    Some(&ch) => {
+                        text.push(ch);
+                        i += 1;
+                    }
+                }
+            }
+            i += 1;
+            tokens.push(if c == '\'' { Token::Str(chars[start..i].iter().collect()) } else { Token::Name(text, true) });
+        } else if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while chars.get(i).is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_') {
+                i += 1;
+            }
+            if matches!(chars.get(i), Some('\'' | '"')) {
+                return None;
+            }
+            tokens.push(Token::Name(chars[start..i].iter().collect(), false));
+        } else if c.is_ascii_digit() {
+            let start = i;
+            while chars.get(i).is_some_and(|ch| ch.is_ascii_digit() || *ch == '.') {
+                i += 1;
+            }
+            if chars.get(i).is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == '_') {
+                return None;
+            }
+            tokens.push(Token::Num(chars[start..i].iter().collect()));
+        } else {
+            let rest: String = chars[i..chars.len().min(i + 2)].iter().collect();
+            let op = OPS.iter().find(|op| rest.starts_with(**op))?;
+            tokens.push(Token::Op(op));
+            i += op.len();
+        }
+    }
+
+    // Identity casts. A cast applies to what precedes it.
+    let mut uncast: Vec<Token> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i] != Token::Op("::") {
+            uncast.push(tokens[i].clone());
+            i += 1;
+            continue;
+        }
+        i += if word(tokens.get(i + 1), "text") {
+            2
+        } else if word(tokens.get(i + 1), "character") && word(tokens.get(i + 2), "varying") {
+            3
+        } else {
+            return None;
+        };
+        // A length (`::character varying(5)`) truncates: no identity.
+        if tokens.get(i) == Some(&Token::Op("(")) {
+            return None;
+        }
+        let n = uncast.len();
+        if tokens.get(i) == Some(&Token::Op("[")) && tokens.get(i + 1) == Some(&Token::Op("]")) {
+            i += 2;
+            // `ARRAY[...]::text[]` or `(ARRAY[...])::text[]`, its elements already carried.
+            if n >= 2 && uncast[n - 1] == Token::Op(")") && uncast[n - 2] == Token::Op("]") {
+                let open = uncast.iter().rposition(|t| *t == Token::Op("("))?;
+                if !word(uncast.get(open + 1), "array") {
+                    return None;
+                }
+                uncast.truncate(n - 1);
+                uncast.remove(open);
+            }
+            let close = uncast.len().checked_sub(1)?;
+            let start = uncast.iter().rposition(|t| *t == Token::Op("["))?;
+            if uncast[close] != Token::Op("]")
+                || !word(start.checked_sub(1).and_then(|s| uncast.get(s)), "array")
+                || !uncast[start + 1..close].iter().all(|t| matches!(t, Token::Str(_) | Token::Op(",")))
+            {
+                return None;
+            }
+        } else if n >= 3
+            && uncast[n - 1] == Token::Op(")")
+            && uncast[n - 3] == Token::Op("(")
+            && matches!(uncast[n - 2], Token::Name(..))
+            && kind_of(&uncast[n - 2]) == Some(Kind::Text)
+            && n.checked_sub(4).map(|s| &uncast[s]).is_none_or(|t| keyword(Some(t)) || matches!(t, Token::Op(op) if *op != ")"))
+        {
+            // `(c)::text`: the parentheses go with the cast.
+            let operand = uncast.remove(n - 2);
+            uncast.truncate(n - 3);
+            uncast.push(operand);
+        } else if uncast.last().and_then(kind_of) != Some(Kind::Text) {
+            return None;
+        }
+    }
+
+    // `c = ANY (ARRAY[...])` and `c <> ALL (ARRAY[...])`.
+    let mut carried: Vec<Token> = Vec::new();
+    let mut i = 0;
+    while i < uncast.len() {
+        if !matches!(uncast[i], Token::Op("=" | "<>")) || !(word(uncast.get(i + 1), "any") || word(uncast.get(i + 1), "all")) {
+            if ["any", "all", "some", "array"].iter().any(|w| word(uncast.get(i), w)) {
+                return None;
+            }
+            carried.push(uncast[i].clone());
+            i += 1;
+            continue;
+        }
+        let negated = uncast[i] == Token::Op("<>");
+        let lhs = carried.last().filter(|t| matches!(t, Token::Name(..))).and_then(kind_of)?;
+        if negated != word(uncast.get(i + 1), "all")
+            || uncast.get(i + 2) != Some(&Token::Op("("))
+            || !word(uncast.get(i + 3), "array")
+            || uncast.get(i + 4) != Some(&Token::Op("["))
+        {
+            return None;
+        }
+        let close = i + 5 + uncast[i + 5..].iter().position(|t| *t == Token::Op("]"))?;
+        let elements = &uncast[i + 5..close];
+        let listed = elements.len() % 2 == 1
+            && elements.iter().enumerate().all(|(k, t)| {
+                if k % 2 == 1 { *t == Token::Op(",") } else { !matches!(t, Token::Name(..)) && kind_of(t) == Some(lhs) }
+            });
+        if !listed || uncast.get(close + 1) != Some(&Token::Op(")")) {
+            return None;
+        }
+        if negated {
+            carried.push(Token::Name("NOT".into(), false));
+        }
+        carried.push(Token::Name("IN".into(), false));
+        carried.push(Token::Op("("));
+        carried.extend(elements.iter().cloned());
+        carried.push(Token::Op(")"));
+        i = close + 2;
+    }
+
+    // What the result may use.
+    let operand = |token: Option<&Token>| token.is_some_and(|t| kind_of(t).is_some());
+    for (k, token) in carried.iter().enumerate() {
+        let (before, after) = (k.checked_sub(1).and_then(|b| carried.get(b)), carried.get(k + 1));
+        let sides = (before.and_then(kind_of), after.and_then(kind_of));
+        let ok = match token {
+            // Two operands, or an operand and `(`, are never adjacent.
+            _ if (operand(Some(token)) || *token == Token::Op(")")) && (operand(after) || after == Some(&Token::Op("("))) => false,
+            Token::Str(_) | Token::Num(_) | Token::Name(_, true) => operand(Some(token)),
+            Token::Name(n, false) if n.eq_ignore_ascii_case("IS") => {
+                word(after, "null") || word(after, "not") && word(carried.get(k + 2), "null")
+            }
+            Token::Name(n, false) => ["AND", "OR", "NOT", "NULL", "IN"].iter().any(|w| n.eq_ignore_ascii_case(w)) || operand(Some(token)),
+            Token::Op("=" | "<>" | "!=") => matches!(sides, (Some(a), Some(b)) if a == b),
+            Token::Op("<" | ">" | "<=" | ">=") => sides == (Some(Kind::Integer), Some(Kind::Integer)),
+            Token::Op("(" | ")" | ",") => true,
+            Token::Op(_) => false,
+        };
+        if !ok {
+            return None;
+        }
+    }
+    let mut text = String::new();
+    for (k, token) in carried.iter().enumerate() {
+        if k > 0 && !matches!(token, Token::Op(")" | ",")) && carried[k - 1] != Token::Op("(") {
+            text.push(' ');
+        }
+        match token {
+            Token::Str(s) | Token::Num(s) => text.push_str(s),
+            Token::Name(n, true) => text.push_str(&format!("\"{}\"", n.replace('"', "\"\""))),
+            Token::Name(n, false) => text.push_str(n),
+            Token::Op(op) => text.push_str(op),
+        }
+    }
+    sqlite_reads_alike(&text, table).then_some(text)
+}
+
 /// Defaults cannot reference columns; randomblob is allowed only there.
 pub(crate) fn schema_expression_supported(sql: &str, table: Option<&Table>, dialect: crate::schema::generated::GeneratedExpressionDialect) -> bool {
     if dialect != crate::schema::generated::GeneratedExpressionDialect::Postgres {
@@ -993,6 +1235,82 @@ end
             for source in [Portable, Postgres] {
                 assert!(!sqlite_check_expression(sql, &items, source), "{sql} under {source:?}");
             }
+        }
+    }
+
+    /// Rails' PostgreSQL dump of a plain CHECK reaches SQLite as the plain
+    /// comparison; anything that may read differently there does not.
+    #[test]
+    fn postgres_checks_carry_only_identity_casts_and_quantified_lists() {
+        let schema = ingest_schema(
+            br#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "exports", force: :cascade do |t|
+    t.string "status"
+    t.text "label"
+    t.string "kind", limit: 20
+    t.integer "amount"
+    t.string "Mixed Case"
+    t.citext "handle"
+    t.inet "address"
+    t.decimal "price"
+    t.string "tags", array: true
+  end
+end
+"#,
+            "db/schema.rb",
+        )
+        .unwrap();
+        let table = &schema.tables[&Symbol::from("exports")];
+        // What PostgreSQL 18's `pg_get_constraintdef(oid, true)`, Rails 8.1.4's dump, writes for the plain CHECK.
+        for (dumped, carried) in [
+            ("status::text = 'pending'::text", "status = 'pending'"),
+            ("status::text = ANY (ARRAY['pending'::character varying, 'done'::character varying]::text[])", "status IN ('pending', 'done')"),
+            ("status::text <> ALL (ARRAY['void'::character varying, 'gone'::character varying]::text[])", "status NOT IN ('void', 'gone')"),
+            // The same two as PostgreSQL dumps them again once that schema.rb is loaded.
+            ("status::text = ANY (ARRAY['pending'::character varying::text, 'done'::character varying::text])", "status IN ('pending', 'done')"),
+            ("status::text <> ALL (ARRAY['void'::character varying::text, 'gone'::character varying::text])", "status NOT IN ('void', 'gone')"),
+            ("label = 'x'::text OR label IS NULL", "label = 'x' OR label IS NULL"),
+            ("label = ANY (ARRAY['a'::text, 'b'::text])", "label IN ('a', 'b')"),
+            ("kind::text <> 'bad'::text", "kind <> 'bad'"),
+            ("status::text = 'done'::text AND amount > 0 OR status::text <> 'done'::text", "status = 'done' AND amount > 0 OR status <> 'done'"),
+            ("amount = ANY (ARRAY[1, 2, 3])", "amount IN (1, 2, 3)"),
+            ("((status)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[]))", "(status IN ('a', 'b'))"),
+            ("\"Mixed Case\"::text = 'it''s'::text AND NOT label IS NOT NULL", "\"Mixed Case\" = 'it''s' AND NOT label IS NOT NULL"),
+        ] {
+            assert_eq!(carry_postgres_check(dumped, table).as_deref(), Some(carried), "{dumped}");
+            assert!(!sqlite_reads_alike(dumped, table) && sqlite_reads_alike(carried, table), "{dumped}");
+        }
+        for kept_out in [
+            // Case folding and collation order differ.
+            "lower(label) = label",
+            "lower(status::text) = status::text",
+            "status::text > 'm'::text",
+            "length(status::text) > 0",
+            // No identity cast.
+            "handle::text = 'a'::text",
+            "address::text = '10.0.0.1/32'::text",
+            "amount::text = '1'::text",
+            "status::character varying(3) = 'abc'::character varying(3)",
+            "price > 0::numeric",
+            "tags::text = '{}'::text",
+            "amount > '-1'::integer",
+            // Not one of the dumped forms.
+            "status::text = ANY (ARRAY[label, 'a'::text])",
+            "amount = ANY (ARRAY['a'::text])",
+            "status::text <> ANY (ARRAY['a'::text])",
+            "status::text = SOME (ARRAY['a'::text])",
+            "lower(status)::text = 'a'::text",
+            "status::text = 'a'::text OR amount = 1.5",
+            "status::text = amount",
+            "status::text IS 'a'::text",
+            "status::text = E'a'::text",
+            "status::text = 'a'::text -- comment",
+            "status::text ~~ 'a%'::text",
+            "status::text = 'a'::text || 'b'::text",
+            "status::text = $$a$$::text",
+            "status::text = 'a'::text 'b'",
+        ] {
+            assert_eq!(carry_postgres_check(kept_out, table), None, "{kept_out}");
         }
     }
 
