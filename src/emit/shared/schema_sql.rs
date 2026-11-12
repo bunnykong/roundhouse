@@ -525,7 +525,10 @@ pub(crate) fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
 /// (`(a, b) IS NULL`) on every insert. Strings are only ever compared for
 /// equality, which compares bytes in SQLite and, under a deterministic
 /// collation, in PostgreSQL: no collation order and no case folding
-/// (`lower`) enters. A column that declares `collation:`, which may not be
+/// (`lower`) enters. A string column with `limit:` is compared only with
+/// literals shorter than the limit, as PostgreSQL cuts the spaces past it
+/// before the CHECK and SQLite does not. Integers are compared only within
+/// `i64`. A column that declares `collation:`, which may not be
 /// deterministic, is not carried, nor is a column ingest reads as a string
 /// that PostgreSQL stores otherwise (`citext`, `inet`, an enum), which has
 /// no identity cast to `text`. `None` for anything else.
@@ -545,24 +548,36 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
     const OPS: &[&str] = &["::", "<>", "!=", "<=", ">=", "(", ")", "[", "]", ",", "=", "<", ">"];
     const KEYWORDS: &[&str] = &["AND", "OR", "NOT", "IS", "NULL", "IN", "TRUE", "FALSE", "ANY", "ALL", "SOME", "ARRAY", "BETWEEN", "LIKE"];
     let keyword = |token: Option<&Token>| matches!(token, Some(Token::Name(n, false)) if KEYWORDS.iter().any(|w| n.eq_ignore_ascii_case(w)));
+    let column = |token: &Token| match token {
+        Token::Name(_, false) if keyword(Some(token)) => None,
+        Token::Name(name, quoted) => table.columns.iter().find(|c| if *quoted { c.name.as_str() == name } else { c.name.as_str().eq_ignore_ascii_case(name) }),
+        _ => None,
+    };
     let kind_of = |token: &Token| -> Option<Kind> {
         match token {
             Token::Str(_) => Some(Kind::Text),
             // An exact integer in both: SQLite reads a longer one as a float.
             Token::Num(n) if n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<i64>().is_ok() => Some(Kind::Integer),
-            Token::Name(_, false) if keyword(Some(token)) => None,
-            Token::Name(name, quoted) => table
-                .columns
-                .iter()
-                .find(|c| if *quoted { c.name.as_str() == name } else { c.name.as_str().eq_ignore_ascii_case(name) })
-                .filter(|c| !c.array && !c.collated)
-                .and_then(|c| match c.col_type {
-                    ColumnType::String { .. } | ColumnType::Text if c.generated_text_compatible != Some(false) => Some(Kind::Text),
-                    ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => Some(Kind::Integer),
-                    _ => None,
-                }),
+            Token::Name(..) => column(token).filter(|c| !c.array && !c.collated).and_then(|c| match c.col_type {
+                ColumnType::String { .. } | ColumnType::Text if c.generated_text_compatible != Some(false) => Some(Kind::Text),
+                ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => Some(Kind::Integer),
+                _ => None,
+            }),
             Token::Num(_) | Token::Op(_) => None,
         }
+    };
+    // PostgreSQL cuts the spaces past a bounded string column's limit
+    // before the CHECK (`'pending '` in `character varying(7)` is stored
+    // as `pending`); SQLite stores the value as written. Such a column is
+    // compared only with a string literal shorter than the limit, which no
+    // cut value equals.
+    let bounded = |token: Option<&Token>| match token.and_then(|t| column(t)).map(|c| &c.col_type) {
+        Some(ColumnType::String { limit: Some(limit) }) => Some(*limit as usize),
+        _ => None,
+    };
+    let shorter = |literal: Option<&Token>, limit: usize| matches!(literal, Some(Token::Str(s)) if s[1..s.len() - 1].replace("''", "'").chars().count() < limit);
+    let unbounded_or_shorter = |a: Option<&Token>, b: Option<&Token>| {
+        bounded(a).is_none_or(|limit| shorter(b, limit)) && bounded(b).is_none_or(|limit| shorter(a, limit))
     };
     let word = |token: Option<&Token>, w: &str| matches!(token, Some(Token::Name(n, false)) if n.eq_ignore_ascii_case(w));
     // An `IN` list: literals of the left column's kind, between commas.
@@ -731,7 +746,7 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
             return None;
         }
         let close = k + 2 + carried[k + 2..].iter().position(|t| *t == Token::Op(")"))?;
-        if !literals_of(&carried[k + 2..close], lhs) {
+        if !literals_of(&carried[k + 2..close], lhs) || !carried[k + 2..close].iter().all(|t| *t == Token::Op(",") || unbounded_or_shorter(Some(&carried[left]), Some(t))) {
             return None;
         }
         listed[left..=close].fill(true);
@@ -753,7 +768,7 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
                 word(after, "null") || word(after, "not") && word(carried.get(k + 2), "null")
             }
             Token::Name(n, false) => ["AND", "OR", "NOT", "NULL", "IN"].iter().any(|w| n.eq_ignore_ascii_case(w)) || operand(Some(token)),
-            Token::Op("=" | "<>" | "!=") => matches!(sides, (Some(a), Some(b)) if a == b),
+            Token::Op("=" | "<>" | "!=") => matches!(sides, (Some(a), Some(b)) if a == b) && unbounded_or_shorter(before, after),
             Token::Op("<" | ">" | "<=" | ">=") => sides == (Some(Kind::Integer), Some(Kind::Integer)),
             Token::Op("(" | ")") => true,
             Token::Op(_) => false,
@@ -1402,6 +1417,37 @@ end
         }
         let carried = carry_postgres_check("status::text = 'pending'::text OR amount < 9223372036854775807", &table);
         assert_eq!(carried.as_deref(), Some("status = 'pending' OR amount < 9223372036854775807"));
+    }
+
+    /// PostgreSQL 18.3 stores `'pending '` in a `character varying(7)`
+    /// column as `pending`, cutting spaces past the limit, so
+    /// `code::text = 'pending'::text` accepts it; SQLite stores it as
+    /// written and would reject it. A literal shorter than the limit meets
+    /// no cut value, and two bounded columns may be cut differently.
+    #[test]
+    fn postgres_checks_carry_bounded_strings_only_against_shorter_literals() {
+        let schema = ingest_schema(
+            b"ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"exports\" do |t|\n    t.string \"status\"\n    t.string \"code\", limit: 7\n    t.string \"kind\", limit: 20\n  end\nend\n",
+            "db/schema.rb",
+        )
+        .unwrap();
+        let table = &schema.tables[&Symbol::from("exports")];
+        for kept_out in [
+            "code::text = 'pending'::text",
+            "'pending'::text <> code::text",
+            "code::text = ANY (ARRAY['a'::character varying, 'pending'::character varying]::text[])",
+            "code::text = status::text",
+            "kind::text = code::text",
+        ] {
+            assert_eq!(carry_postgres_check(kept_out, table), None, "{kept_out}");
+        }
+        for (dumped, carried) in [
+            ("code::text = 'done'::text", "code = 'done'"),
+            ("code::text <> ALL (ARRAY['it''s'::character varying, 'pendin'::character varying]::text[])", "code NOT IN ('it''s', 'pendin')"),
+            ("kind::text <> 'bad'::text", "kind <> 'bad'"),
+        ] {
+            assert_eq!(carry_postgres_check(dumped, table).as_deref(), Some(carried), "{dumped}");
+        }
     }
 
     /// PostgreSQL reads a string literal standing as a condition as a
