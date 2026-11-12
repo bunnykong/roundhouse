@@ -12889,7 +12889,7 @@ fn drop_facades_the_program_defines(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 30] = [
+const BUNDLED: [(&str, &str); 31] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -12913,6 +12913,10 @@ const BUNDLED: [(&str, &str); 30] = [
     ("OptionParser", "optparse"),
     ("Pathname", "pathname"),
     ("Set", "set"),
+    // `include Singleton`: a default library ActiveSupport has loaded before
+    // the app, so an app never requires it. Spinel has `Singleton` (and its
+    // `.instance`) only once the file requires it.
+    ("Singleton", "singleton"),
     ("StringIO", "stringio"),
     ("StringScanner", "strscan"),
     // `Vips::Image.new_from_buffer`: the ruby-vips gem on CRuby/JRuby, the
