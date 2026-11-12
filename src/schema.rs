@@ -123,6 +123,12 @@ pub struct Column {
     /// reader still answers the column's own type. Lowering-only.
     #[serde(skip)]
     pub unset_until_assigned: bool,
+    /// Ingest-only evidence: the column declares `collation:`. Its
+    /// database compares the column's text under that collation, which
+    /// may ignore case, so no CHECK comparing it is rewritten for SQLite
+    /// (`carry_postgres_check`).
+    #[serde(skip)]
+    pub collated: bool,
 }
 
 impl Column {

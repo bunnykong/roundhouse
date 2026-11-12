@@ -250,6 +250,7 @@ fn ingest_column_stmt(
                 array: false,
                 array_stored: false,
                 unset_until_assigned: false,
+                collated: false,
             });
         }
         "foreign_key" => {
@@ -287,6 +288,7 @@ fn ingest_column_stmt(
                 array: false,
                 array_stored: false,
                 unset_until_assigned: false,
+                collated: false,
             });
         }
         "index" => {
@@ -362,6 +364,7 @@ fn ingest_column_stmt(
                 array: false,
                 array_stored: false,
                 unset_until_assigned: false,
+                collated: false,
             });
         }
     }

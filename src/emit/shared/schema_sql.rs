@@ -515,12 +515,20 @@ pub(crate) fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
 ///
 /// The result may use only columns, literals, `=`, `<>`, `!=`,
 /// `IS [NOT] NULL`, `[NOT] IN`, `AND`, `OR`, `NOT` and parentheses, and an
-/// ordering comparison only between integers. Strings are only ever
-/// compared for equality, which compares bytes in SQLite and, under a
-/// deterministic collation, in PostgreSQL: no collation order and no case
-/// folding (`lower`) enters. A column ingest reads as a string that
-/// PostgreSQL stores otherwise (`citext`, `inet`, an enum) has no identity
-/// cast to `text`, so it is not carried. `None` for anything else.
+/// ordering comparison only between integers. Every column and literal is
+/// compared: PostgreSQL reads a string literal standing as a condition
+/// (`... AND 'true'`) as a Boolean, SQLite as 0. Every `[NOT] IN`, written
+/// or rewritten, has a column on the left that nothing else compares and
+/// literals of its kind in the list, the only place a comma may stand:
+/// SQLite gives the list's values no affinity (`'1' IN (amount)` is false
+/// for 1), binds `IN` no tighter than `=`, and fails a row value
+/// (`(a, b) IS NULL`) on every insert. Strings are only ever compared for
+/// equality, which compares bytes in SQLite and, under a deterministic
+/// collation, in PostgreSQL: no collation order and no case folding
+/// (`lower`) enters. A column that declares `collation:`, which may not be
+/// deterministic, is not carried, nor is a column ingest reads as a string
+/// that PostgreSQL stores otherwise (`citext`, `inet`, an enum), which has
+/// no identity cast to `text`. `None` for anything else.
 pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
     #[derive(Clone, PartialEq)]
     enum Token {
@@ -546,7 +554,7 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
                 .columns
                 .iter()
                 .find(|c| if *quoted { c.name.as_str() == name } else { c.name.as_str().eq_ignore_ascii_case(name) })
-                .filter(|c| !c.array)
+                .filter(|c| !c.array && !c.collated)
                 .and_then(|c| match c.col_type {
                     ColumnType::String { .. } | ColumnType::Text if c.generated_text_compatible != Some(false) => Some(Kind::Text),
                     ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => Some(Kind::Integer),
@@ -556,6 +564,13 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
         }
     };
     let word = |token: Option<&Token>, w: &str| matches!(token, Some(Token::Name(n, false)) if n.eq_ignore_ascii_case(w));
+    // An `IN` list: literals of the left column's kind, between commas.
+    let literals_of = |elements: &[Token], kind: Kind| {
+        elements.len() % 2 == 1
+            && elements.iter().enumerate().all(|(k, t)| {
+                if k % 2 == 1 { *t == Token::Op(",") } else { !matches!(t, Token::Name(..)) && kind_of(t) == Some(kind) }
+            })
+    };
 
     // Tokens. Anything else (comments, `$` quoting, `E'...'`) is not carried.
     let chars: Vec<char> = sql.chars().collect();
@@ -690,11 +705,7 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
         }
         let close = i + 5 + uncast[i + 5..].iter().position(|t| *t == Token::Op("]"))?;
         let elements = &uncast[i + 5..close];
-        let listed = elements.len() % 2 == 1
-            && elements.iter().enumerate().all(|(k, t)| {
-                if k % 2 == 1 { *t == Token::Op(",") } else { !matches!(t, Token::Name(..)) && kind_of(t) == Some(lhs) }
-            });
-        if !listed || uncast.get(close + 1) != Some(&Token::Op(")")) {
+        if !literals_of(elements, lhs) || uncast.get(close + 1) != Some(&Token::Op(")")) {
             return None;
         }
         if negated {
@@ -707,6 +718,24 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
         i = close + 2;
     }
 
+    // Every `[NOT] IN`, from `ANY` or written so: a column on the left
+    // that no comparison precedes, as PostgreSQL's `IN` binds tighter than
+    // `=` and SQLite's does not, and a list of literals of its kind.
+    let comparison = |token: Option<&Token>| matches!(token, Some(Token::Op("=" | "<>" | "!=" | "<" | ">" | "<=" | ">=")));
+    let mut listed = vec![false; carried.len()];
+    for k in (0..carried.len()).filter(|&k| word(carried.get(k), "in")) {
+        let left = k.checked_sub(if word(k.checked_sub(1).and_then(|b| carried.get(b)), "not") { 2 } else { 1 })?;
+        let lhs = Some(&carried[left]).filter(|t| matches!(t, Token::Name(..))).and_then(kind_of)?;
+        if carried.get(k + 1) != Some(&Token::Op("(")) || comparison(left.checked_sub(1).and_then(|b| carried.get(b))) {
+            return None;
+        }
+        let close = k + 2 + carried[k + 2..].iter().position(|t| *t == Token::Op(")"))?;
+        if !literals_of(&carried[k + 2..close], lhs) {
+            return None;
+        }
+        listed[left..=close].fill(true);
+    }
+
     // What the result may use.
     let operand = |token: Option<&Token>| token.is_some_and(|t| kind_of(t).is_some());
     for (k, token) in carried.iter().enumerate() {
@@ -715,6 +744,9 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
         let ok = match token {
             // Two operands, or an operand and `(`, are never adjacent.
             _ if (operand(Some(token)) || *token == Token::Op(")")) && (operand(after) || after == Some(&Token::Op("("))) => false,
+            // An operand is compared or listed, never a condition alone.
+            _ if operand(Some(token)) && !(listed[k] || comparison(before) || comparison(after) || word(after, "is")) => false,
+            Token::Op(",") => listed[k],
             Token::Str(_) | Token::Num(_) | Token::Name(_, true) => operand(Some(token)),
             Token::Name(n, false) if n.eq_ignore_ascii_case("IS") => {
                 word(after, "null") || word(after, "not") && word(carried.get(k + 2), "null")
@@ -722,7 +754,7 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
             Token::Name(n, false) => ["AND", "OR", "NOT", "NULL", "IN"].iter().any(|w| n.eq_ignore_ascii_case(w)) || operand(Some(token)),
             Token::Op("=" | "<>" | "!=") => matches!(sides, (Some(a), Some(b)) if a == b),
             Token::Op("<" | ">" | "<=" | ">=") => sides == (Some(Kind::Integer), Some(Kind::Integer)),
-            Token::Op("(" | ")" | ",") => true,
+            Token::Op("(" | ")") => true,
             Token::Op(_) => false,
         };
         if !ok {
@@ -1013,6 +1045,7 @@ mod tests {
             array: false,
             array_stored: false,
             unset_until_assigned: false,
+            collated: false,
         }
     }
 
@@ -1312,6 +1345,68 @@ end
         ] {
             assert_eq!(carry_postgres_check(kept_out, table), None, "{kept_out}");
         }
+    }
+
+    fn carried_exports() -> Table {
+        let schema = ingest_schema(
+            b"ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"exports\" do |t|\n    t.string \"status\"\n    t.text \"label\"\n    t.integer \"amount\"\n  end\nend\n",
+            "db/schema.rb",
+        )
+        .unwrap();
+        schema.tables[&Symbol::from("exports")].clone()
+    }
+
+    /// PostgreSQL reads `(a, b) IS NOT NULL` as a test of every field;
+    /// SQLite refuses a row value there and fails every insert.
+    #[test]
+    fn postgres_checks_carry_commas_only_in_in_lists() {
+        let table = carried_exports();
+        for kept_out in ["(status::text, label::text) IS NOT NULL", "(status::text, label) IS NULL", "status::text = 'a'::text AND (label, status::text) IS NOT NULL"] {
+            assert_eq!(carry_postgres_check(kept_out, &table), None, "{kept_out}");
+        }
+        let carried = carry_postgres_check("status::text = 'a'::text AND label IN ('a', 'b')", &table);
+        assert_eq!(carried.as_deref(), Some("status = 'a' AND label IN ('a', 'b')"));
+    }
+
+    /// SQLite gives the values of an `IN` list no affinity, so
+    /// `'1' IN (amount)` is false for 1 there and true in PostgreSQL. An
+    /// `IN` already in the text gets the rewritten `ANY`'s operand rule:
+    /// a column on the left, literals of its kind in the list. PostgreSQL
+    /// reads `'t' = status IN ('a')` as `'t' = (status IN ('a'))`, SQLite as
+    /// `('t' = status) IN ('a')`.
+    #[test]
+    fn postgres_checks_carry_in_lists_of_the_left_columns_kind() {
+        let table = carried_exports();
+        for kept_out in [
+            "status::text = 'pending'::text AND '1' IN (amount)",
+            "status::text = 'pending'::text AND status IN (label)",
+            "status::text = 'pending'::text AND amount IN ('1')",
+            "status::text = 'pending'::text AND 1 IN (1, amount)",
+            "status::text = 'pending'::text AND status NOT IN ()",
+            "'t' = status::text IN ('a'::text)",
+        ] {
+            assert_eq!(carry_postgres_check(kept_out, &table), None, "{kept_out}");
+        }
+        let carried = carry_postgres_check("status::text = 'pending'::text AND amount NOT IN (1, 2)", &table);
+        assert_eq!(carried.as_deref(), Some("status = 'pending' AND amount NOT IN (1, 2)"));
+    }
+
+    /// PostgreSQL reads a string literal standing as a condition as a
+    /// Boolean (`'true'`); SQLite reads it as the number 0.
+    #[test]
+    fn postgres_checks_carry_no_operand_standing_as_a_condition() {
+        let table = carried_exports();
+        for kept_out in [
+            "status::text = 'pending'::text AND 'true'",
+            "'t' OR status::text = 'pending'::text",
+            "NOT 'false' AND status::text = 'pending'::text",
+            "status::text = 'pending'::text AND ('true')",
+            "status::text = 'pending'::text OR label",
+        ] {
+            assert_eq!(carry_postgres_check(kept_out, &table), None, "{kept_out}");
+        }
+        let carried = carry_postgres_check("'pending'::text = status::text AND label IS NOT NULL", &table);
+        assert_eq!(carried.as_deref(), Some("'pending' = status AND label IS NOT NULL"));
     }
 
     /// What SQLite is trusted to run as written: Mastodon's predicates,

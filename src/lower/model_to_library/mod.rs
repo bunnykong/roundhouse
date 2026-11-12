@@ -3703,6 +3703,7 @@ mod tests {
                 array: false,
                 array_stored: false,
                 unset_until_assigned: true,
+                collated: false,
             }],
             indexes: Vec::new(),
             foreign_keys: Vec::new(),

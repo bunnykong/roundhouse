@@ -793,12 +793,12 @@ fn apply_table_verb(
                         || args.get(1).is_some_and(|n| n.as_keyword_hash_node().is_none() && n.as_nil_node().is_none() && string_value(n).is_none()) {
                         return Err(IngestError::Unsupported { file: file.into(), message: "remove_check_constraint requires a literal name or expression".into() });
                     }
-                    // A carried CHECK is stored as carried; its source text still names it.
-                    let carried = expression.as_deref().and_then(|e| carry_check(dialect, e, table));
-                    table.check_constraints.retain(|c| !match &name {
-                        Some(name) => c.name.as_ref() == Some(name),
-                        None => expression.as_ref().is_some_and(|e| &c.expression == e) || carried.as_ref() == Some(&c.expression),
-                    });
+                    // Rails 8.1.4 removes the CHECK named `name:`, or else the
+                    // name the expression generates, and compares names only
+                    // (`check_constraint_for`): another CHECK that reads the
+                    // same, or a carried one's rewritten text, stays.
+                    let name = name.or_else(|| expression.as_deref().map(|e| rails_check_name(table.name.as_str(), e)));
+                    table.check_constraints.retain(|c| c.name != name);
                 }
             }
         }
@@ -1794,12 +1794,17 @@ fn check_constraint(args: &[Node<'_>], file: &str, table: &str) -> IngestResult<
             if !matches!(key.as_deref(), Some("name" | "validate")) { return Err(gap()); }
         }
     }
-    let name = kwarg_value(args.iter().skip(1), "name").map(|n| name_value(&n).ok_or_else(gap)).transpose()?.unwrap_or_else(|| {
-        let digest = format!("{:x}", Sha256::digest(format!("{table}_{expression}_chk")));
-        format!("chk_rails_{}", &digest[..10])
-    });
+    let name = kwarg_value(args.iter().skip(1), "name").map(|n| name_value(&n).ok_or_else(gap)).transpose()?.unwrap_or_else(|| rails_check_name(table, &expression));
     if kwarg_value(args.iter().skip(1), "validate").is_some_and(|v| bool_value(&v) != Some(true)) { return Err(gap()); }
     Ok(crate::schema::CheckConstraint { name: Some(name), expression })
+}
+
+/// Rails 8.1.4's name for a CHECK given without `name:`
+/// (`check_constraint_name`): `chk_rails_` and the first ten hex digits
+/// of the SHA-256 of `<table>_<expression>_chk`.
+fn rails_check_name(table: &str, expression: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(format!("{table}_{expression}_chk")));
+    format!("chk_rails_{}", &digest[..10])
 }
 
 /// Rails interpolates `using:` as an unquoted SQL identifier. Fold its
@@ -2038,6 +2043,7 @@ fn table_from_create_table(
                 array: false,
                 array_stored: false,
                 unset_until_assigned: false,
+                collated: false,
             }),
             Some(t) => column_with_type(t, id_name.clone(), &opts, &table_name, file),
         };
@@ -2248,6 +2254,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             array: false,
             array_stored: false,
             unset_until_assigned: false,
+            collated: false,
         })
         .collect();
     Some((
@@ -2363,6 +2370,7 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
             array,
             array_stored: false,
             unset_until_assigned: false,
+            collated: false,
         });
     }
     columns
@@ -2441,6 +2449,7 @@ fn timestamp_columns_with(nullable: bool) -> [Column; 2] {
         array: false,
         array_stored: false,
         unset_until_assigned: false,
+        collated: false,
     };
     [col("created_at"), col("updated_at")]
 }
@@ -2463,6 +2472,7 @@ fn reference_column(name: &str) -> Column {
         array: false,
         array_stored: false,
         unset_until_assigned: false,
+        collated: false,
     }
 }
 
@@ -2482,6 +2492,8 @@ struct ColumnOpts {
     array: bool,
     /// `default: []`, which `default_value` reads as no default.
     empty_array_default: bool,
+    /// `collation:` with a value ([`Column::collated`]).
+    collated: bool,
 }
 
 // Not `string_value` alone: schema.rb dumps an integer, float or boolean default unquoted (`default: 0`, `default: true`).
@@ -2636,6 +2648,7 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
                         None => value.as_nil_node().is_none(),
                     };
                 }
+                "collation" => opts.collated = value.as_nil_node().is_none(),
                 _ => {}
             }
         }
@@ -2934,6 +2947,7 @@ fn column_with_type(
         array: opts.array,
         array_stored: false,
         unset_until_assigned: false,
+        collated: opts.collated,
     })
 }
 

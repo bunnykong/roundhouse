@@ -255,3 +255,67 @@ fn native_spinel_enforces_carried_checks_as_postgres_does() {
     run.assert_passes();
     assert_carried(&run.stdout);
 }
+
+/// PostgreSQL compares a column's text under the column's collation, which
+/// may ignore case (`deterministic = false`): PostgreSQL 18.3 accepts
+/// `Pending` for `status::text = 'pending'::text` on such a column, and
+/// SQLite's byte comparison would not. A CHECK naming a column that
+/// declares any `collation:` is left out with the warning.
+#[test]
+fn checks_on_collated_columns_are_left_out() {
+    let schema = exports_schema(concat!(
+        "    t.string \"code\", collation: \"case_insensitive\"\n",
+        "    t.text \"label\", collation: \"C\"\n",
+        "    t.check_constraint \"code::text = 'pending'::text\", name: \"code_check\"\n",
+        "    t.check_constraint \"label = ANY (ARRAY['a'::text, 'b'::text])\", name: \"label_check\"\n",
+        "    t.check_constraint \"status::text <> 'void'::text\", name: \"status_check\"\n",
+    ));
+    let migration = concat!(
+        "class CreateExports < ActiveRecord::Migration[8.1]\n  def change\n",
+        "    create_table :exports do |t|\n      t.string :status\n    end\n",
+        "    add_column :exports, :code, :string, collation: \"case_insensitive\"\n",
+        "    add_check_constraint :exports, \"code::text <> 'x'::text\", name: \"code_check\"\n",
+        "    add_check_constraint :exports, \"status::text <> 'void'::text\", name: \"status_check\"\n",
+        "  end\nend\n",
+    );
+    for (path, source, left_out) in [
+        ("db/schema.rb", schema.as_str(), &["code::text = 'pending'::text", "label = ANY (ARRAY['a'::text, 'b'::text])"][..]),
+        ("db/migrate/20260101000000_create_exports.rb", migration, &["code::text <> 'x'::text"][..]),
+    ] {
+        let (schema, warnings, _) = ingest(&[(path, source), ("config/database.yml", POSTGRES)]).unwrap();
+        let checks = &schema.tables[&roundhouse::Symbol::from("exports")].check_constraints;
+        assert_eq!(checks.iter().map(|c| (c.name.as_deref(), c.expression.as_str())).collect::<Vec<_>>(), [(Some("status_check"), "status <> 'void'")], "{path}");
+        assert_eq!(warnings.len(), left_out.len(), "{path}: {warnings:#?}");
+        for expression in left_out {
+            assert!(warnings.iter().any(|w| w.contains(&format!("`{expression}` on exports is left out"))), "{expression}: {warnings:#?}");
+        }
+    }
+}
+
+/// Rails 8.1.4 removes a CHECK given by its expression through the name that
+/// text generates (`check_constraint_for`, `abstract/schema_statements.rb`
+/// line 1867, compares names only), so another CHECK reading the same stays.
+#[test]
+fn check_removal_by_expression_removes_only_the_check_its_text_names() {
+    let migration = |unnamed: &str| format!(
+        "class AddChecks < ActiveRecord::Migration[8.1]\n  def change\n    create_table :exports do |t|\n      t.string :status\n    end\n    add_check_constraint :exports, {unnamed:?}\n    add_check_constraint :exports, \"status <> 'void'\", name: \"keep\"\n    remove_check_constraint :exports, {unnamed:?}\n  end\nend\n"
+    );
+    for (database, unnamed) in [(POSTGRES, "status::text <> 'void'::text"), (SQLITE, "status <> 'void'")] {
+        let (schema, _, _) = ingest(&[("db/migrate/20260101000000_add_checks.rb", &migration(unnamed)), ("config/database.yml", database)]).unwrap();
+        let checks = &schema.tables[&roundhouse::Symbol::from("exports")].check_constraints;
+        assert_eq!(checks.iter().map(|c| (c.name.as_deref(), c.expression.as_str())).collect::<Vec<_>>(), [(Some("keep"), "status <> 'void'")], "{unnamed}");
+    }
+    let helper = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let script = format!(
+        "require {helper:?}\nunless RailsOracle.available?(\"activerecord\", sqlite3: \">= 2.9\")\n  puts \"skip: Rails oracle and sqlite3 are unavailable\"\n  exit\nend\nRailsOracle.activate(\"activerecord\", sqlite3: \">= 2.9\")\nrequire \"active_record\"\nActiveRecord::Base.establish_connection(adapter: \"sqlite3\", database: \":memory:\")\nActiveRecord::Migration.verbose = false\n{}AddChecks.migrate(:up)\nputs ActiveRecord::Base.connection.check_constraints(:exports).map {{ |c| \"#{{c.name}}=#{{c.expression}}\" }}\n",
+        migration("status <> 'void'"),
+    );
+    let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert_eq!(stdout.trim(), "keep=status <> 'void'");
+}
