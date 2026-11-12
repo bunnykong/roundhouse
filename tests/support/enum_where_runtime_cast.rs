@@ -17,6 +17,10 @@ const SCHEMA: &str = "ActiveRecord::Schema.define do
     t.integer \"status\"
     t.integer \"rank\"
   end
+  create_table \"tickets\", force: :cascade do |t|
+    t.string \"name\"
+    t.string \"status\"
+  end
 end
 ";
 
@@ -52,11 +56,43 @@ const WIDGET: &str = "class Widget < ApplicationRecord
 end
 ";
 
+// A String-valued mapping whose stored values are also labels: `queued`
+// stores "sent" and `sent` stores "done". Rails casts each `where` value
+// once, so `where(status: :queued)` is `status = 'sent'`; a second cast
+// would read that "sent" as the label `sent` and ask for 'done'. The
+// generated scope is the exception, in Rails as well: `queued` is
+// `where(status: "sent")`, whose cast makes it 'done' (8.1.4 answers
+// "s" for it), and roundhouse keeps that answer.
+const TICKET: &str = "class Ticket < ApplicationRecord
+  enum :status, { queued: \"sent\", sent: \"done\" }
+
+  def self.make(name, value)
+    create!(name: name, status: value)
+  end
+
+  def self.first_name(rel)
+    record = rel.first
+    record.nil? ? \"none\" : record.name
+  end
+
+  def self.with_status(value)
+    first_name(where(status: value))
+  end
+
+  def self.literal_names
+    [first_name(where(status: :queued)), first_name(where(status: :sent)),
+     first_name(where(status: [:queued])), first_name(where.not(status: :queued)),
+     first_name(where(status: \"queued\")), first_name(queued), first_name(sent)]
+  end
+end
+";
+
 pub fn overlay() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write("db/schema.rb", SCHEMA)
         .write("app/models/widget.rb", WIDGET)
+        .write("app/models/ticket.rb", TICKET)
 }
 
 pub const ASSERTIONS: &str = r#"Widget.create!(name: "a", status: :draft, rank: 1)
@@ -80,5 +116,11 @@ raise "enum where unknown: #{unknown.inspect}" unless unknown == [1, 2, 1, 1, 1,
 # A record in the list is its id, cast as any other element: Widget "b"
 # has id 2, which no row's status holds.
 raise "enum where record" unless Widget.with_status([Widget.find_by(name: "b")]) == 0
+Ticket.make("q", :queued)
+Ticket.make("s", "sent")
+tickets = Ticket.literal_names
+raise "string enum where literal: #{tickets.inspect}" unless tickets == ["q", "s", "q", "s", "q", "s", "s"]
+runtime = [Ticket.with_status(:queued), Ticket.with_status("sent"), Ticket.with_status([:queued]), Ticket.with_status(["sent"])]
+raise "string enum where runtime: #{runtime.inspect}" unless runtime == ["q", "s", "q", "s"]
 puts "enum where cast OK"
 "#;
