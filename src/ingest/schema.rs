@@ -533,6 +533,9 @@ fn apply_table_verb(
         "add_column" | "change_column" => {
             if let (Some(t), Some(c), Some(ty)) = (arg_name(0), arg_name(1), arg_name(2)) {
                 fold_column(verb, &t, c, &ty, &args[3..], file, schema, dialect)?;
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
+                    carry_checks_again(table, dialect, file, node_span(&args[1]))?;
+                }
             }
         }
         "remove_column" => {
@@ -779,7 +782,7 @@ fn apply_table_verb(
                     if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect)
                         && !crate::emit::shared::schema_sql::sqlite_check_expression(&check.expression, table, dialect) {
                         match carry_check(dialect, &check.expression, table) {
-                            Some(carried) => check.expression = carried,
+                            Some(carried) => check.carried_from = Some(std::mem::replace(&mut check.expression, carried)),
                             None => return leave_out_or_refuse(dialect, file, node_span(&args[1]), table.name.as_str(), "CHECK", &check.expression, || {
                                 IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) }
                             }),
@@ -1796,7 +1799,7 @@ fn check_constraint(args: &[Node<'_>], file: &str, table: &str) -> IngestResult<
     }
     let name = kwarg_value(args.iter().skip(1), "name").map(|n| name_value(&n).ok_or_else(gap)).transpose()?.unwrap_or_else(|| rails_check_name(table, &expression));
     if kwarg_value(args.iter().skip(1), "validate").is_some_and(|v| bool_value(&v) != Some(true)) { return Err(gap()); }
-    Ok(crate::schema::CheckConstraint { name: Some(name), expression })
+    Ok(crate::schema::CheckConstraint { name: Some(name), expression, carried_from: None })
 }
 
 /// Rails 8.1.4's name for a CHECK given without `name:`
@@ -1855,6 +1858,29 @@ fn carry_check(dialect: GeneratedExpressionDialect, expression: &str, table: &Ta
     (dialect == GeneratedExpressionDialect::OtherDatabase)
         .then(|| crate::emit::shared::schema_sql::carry_postgres_check(expression, table))
         .flatten()
+}
+
+/// After a column changes, each carried CHECK is carried again from its
+/// PostgreSQL text, as PostgreSQL rereads that text against the new type or
+/// collation (`ALTER COLUMN ... TYPE`). One that no longer carries is left
+/// out with the warning.
+fn carry_checks_again(table: &mut Table, dialect: GeneratedExpressionDialect, file: &str, span: (usize, usize)) -> IngestResult<()> {
+    let again: Vec<_> = table.check_constraints.iter().map(|c| c.carried_from.as_deref().map(|source| carry_check(dialect, source, table))).collect();
+    let mut kept = Vec::new();
+    for (mut check, again) in std::mem::take(&mut table.check_constraints).into_iter().zip(again) {
+        match (again, check.carried_from.as_deref()) {
+            (Some(None), Some(source)) => leave_out_or_refuse(dialect, file, span, table.name.as_str(), "CHECK", source, || {
+                IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) }
+            })?,
+            (Some(Some(carried)), _) => {
+                check.expression = carried;
+                kept.push(check);
+            }
+            _ => kept.push(check),
+        }
+    }
+    table.check_constraints = kept;
+    Ok(())
 }
 
 /// A CHECK, index expression or expression-index predicate the grammar
@@ -2192,6 +2218,7 @@ fn table_from_create_table(
             if check && let Some(carried) = carry_check(dialect, &expression, &table) {
                 for c in table.check_constraints.iter_mut().filter(|c| c.expression == expression) {
                     c.expression = carried.clone();
+                    c.carried_from = Some(expression.clone());
                 }
                 continue;
             }

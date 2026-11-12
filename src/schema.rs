@@ -259,6 +259,11 @@ fn deserialize_key_columns<'de, D: serde::Deserializer<'de>>(input: D) -> Result
 pub struct CheckConstraint {
     pub name: Option<String>,
     pub expression: String,
+    /// Ingest-only: the PostgreSQL text `expression` was rewritten from
+    /// for SQLite (`carry_postgres_check`). PostgreSQL rereads that text
+    /// when a column it names changes, so ingest carries it again then.
+    #[serde(skip)]
+    pub carried_from: Option<String>,
 }
 
 /// Column a `pluck` or `pick` argument selects.

@@ -319,3 +319,30 @@ fn check_removal_by_expression_removes_only_the_check_its_text_names() {
     }
     assert_eq!(stdout.trim(), "keep=status <> 'void'");
 }
+
+/// PostgreSQL rereads a CHECK's text when `change_column` gives a column it
+/// names a new collation or type (18.3: `status::text <> 'admin'::text`
+/// rejects `ADMIN` once the column is case-insensitive, and
+/// `code::text = '01'::text` rejects 1 once it is an integer). A carried
+/// CHECK is carried again from that text, or left out with the warning.
+#[test]
+fn a_changed_column_carries_its_checks_again() {
+    let migration = concat!(
+        "class CreateExports < ActiveRecord::Migration[8.1]\n  def change\n",
+        "    create_table :exports do |t|\n      t.string :status\n      t.string :code\n      t.string :kind\n",
+        "      t.check_constraint \"code::text = '01'::text OR code IS NULL\", name: \"code_check\"\n    end\n",
+        "    add_check_constraint :exports, \"status::text <> 'admin'::text\", name: \"status_check\"\n",
+        "    add_check_constraint :exports, \"kind::text <> 'bad'::text\", name: \"kind_check\"\n",
+        "    change_column :exports, :status, :string, collation: \"case_insensitive\"\n",
+        "    change_column :exports, :code, :integer, using: \"code::integer\"\n",
+        "    change_table :exports do |t|\n      t.change :kind, :string, limit: 20\n    end\n",
+        "  end\nend\n",
+    );
+    let (schema, warnings, _) = ingest(&[("db/migrate/20260101000000_create_exports.rb", migration), ("config/database.yml", POSTGRES)]).unwrap();
+    let checks = &schema.tables[&roundhouse::Symbol::from("exports")].check_constraints;
+    assert_eq!(checks.iter().map(|c| (c.name.as_deref(), c.expression.as_str())).collect::<Vec<_>>(), [(Some("kind_check"), "kind <> 'bad'")]);
+    for expression in ["status::text <> 'admin'::text", "code::text = '01'::text OR code IS NULL"] {
+        assert_eq!(warnings.iter().filter(|w| w.contains(&format!("`{expression}` on exports is left out"))).count(), 1, "{expression}: {warnings:#?}");
+    }
+    assert_eq!(warnings.len(), 2, "{warnings:#?}");
+}

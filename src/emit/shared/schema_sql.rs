@@ -548,7 +548,8 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
     let kind_of = |token: &Token| -> Option<Kind> {
         match token {
             Token::Str(_) => Some(Kind::Text),
-            Token::Num(n) if n.bytes().all(|b| b.is_ascii_digit()) => Some(Kind::Integer),
+            // An exact integer in both: SQLite reads a longer one as a float.
+            Token::Num(n) if n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<i64>().is_ok() => Some(Kind::Integer),
             Token::Name(_, false) if keyword(Some(token)) => None,
             Token::Name(name, quoted) => table
                 .columns
@@ -1389,6 +1390,18 @@ end
         }
         let carried = carry_postgres_check("status::text = 'pending'::text AND amount NOT IN (1, 2)", &table);
         assert_eq!(carried.as_deref(), Some("status = 'pending' AND amount NOT IN (1, 2)"));
+    }
+
+    /// PostgreSQL compares integer literals past `i64` as exact `numeric`;
+    /// SQLite reads them as floats, which round to the same value.
+    #[test]
+    fn postgres_checks_carry_only_integers_both_read_exactly() {
+        let table = carried_exports();
+        for kept_out in ["status::text = 'pending'::text OR 9223372036854775808 = 9223372036854775809", "amount = ANY (ARRAY[1, 99999999999999999999])"] {
+            assert_eq!(carry_postgres_check(kept_out, &table), None, "{kept_out}");
+        }
+        let carried = carry_postgres_check("status::text = 'pending'::text OR amount < 9223372036854775807", &table);
+        assert_eq!(carried.as_deref(), Some("status = 'pending' OR amount < 9223372036854775807"));
     }
 
     /// PostgreSQL reads a string literal standing as a condition as a
