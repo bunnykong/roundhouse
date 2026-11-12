@@ -155,6 +155,23 @@ defmodule Db do
   def escape_string_opt(nil), do: "NULL"
   def escape_string_opt(s), do: escape_string(s)
 
+  # `t.binary` columns: an Elixir string is its bytes (`Digest::BLAKE3`
+  # is not emitted for this target). One holding a NUL or bytes that are
+  # not UTF-8 is written as an `X'…'` blob literal, since a NUL inside a
+  # quoted literal ends the SQL text; anything else is the text literal.
+  # A BLOB cell reads back as the same binary, so the read side is the
+  # text functions.
+  def escape_binary(s) do
+    if String.contains?(s, <<0>>) or not String.valid?(s),
+      do: "X'" <> Base.encode16(s) <> "'",
+      else: escape_string(s)
+  end
+
+  def escape_binary_opt(nil), do: "NULL"
+  def escape_binary_opt(s), do: escape_binary(s)
+  def column_binary(id, i), do: column_text(id, i)
+  def column_binary_opt(id, i), do: column_text_opt(id, i)
+
   def escape_int_opt(nil), do: "NULL"
   def escape_int_opt(n), do: escape_int(n)
 

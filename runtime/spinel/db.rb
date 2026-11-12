@@ -2556,6 +2556,25 @@ module Db
     s.nil? ? "NULL" : escape_string(s)
   end
 
+  # `t.binary` columns (the lowerer's `ValueType::Binary`). This shim
+  # tells bytes from text by the value's encoding, so they are its text
+  # methods; the separate names are for a target that cannot (Rust).
+  def self.escape_binary(s)
+    escape_string(s)
+  end
+
+  def self.escape_binary_opt(s)
+    escape_string_opt(s)
+  end
+
+  def self.column_binary(stmt, i)
+    column_text(stmt, i)
+  end
+
+  def self.column_binary_opt(stmt, i)
+    column_text_opt(stmt, i)
+  end
+
   def self.escape_int_opt(n)
     n.nil? ? "NULL" : escape_int(n)
   end

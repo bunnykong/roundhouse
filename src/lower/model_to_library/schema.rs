@@ -2388,6 +2388,10 @@ pub(crate) fn column_read_method_for(col: &Column) -> &'static str {
     if col.array_stored {
         return "column_text_opt";
     }
+    // A `t.binary` column keeps its bytes (`Db.column_binary`).
+    if col.col_type == crate::schema::ColumnType::Binary {
+        return if matches!(super::ty_of_column_slot(col), Ty::Union { .. }) { "column_binary_opt" } else { "column_binary" };
+    }
     let base = ty_of_column(&col.col_type);
     if !matches!(super::ty_of_column_slot(col), Ty::Union { .. }) {
         return column_read_method(&base);

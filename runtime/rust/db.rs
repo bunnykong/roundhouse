@@ -361,6 +361,35 @@ impl Db {
         })
     }
 
+    /// Read a `t.binary` column: one char per byte (U+0000–U+00FF),
+    /// the way this runtime holds bytes in a `String` (Ruby's BINARY
+    /// encoding has no Rust counterpart). A BLOB keeps every byte, where
+    /// `column_text`'s UTF-8 read would replace the ones that are not
+    /// text; a TEXT value (an ASCII-only one `escape_binary` wrote as
+    /// text) reads as itself. NULL → "".
+    pub fn column_binary(stmt_id: i64, i: i64) -> String {
+        STATEMENTS.with(|s| {
+            let map = s.borrow();
+            let Some(entry) = map.get(&stmt_id) else { return String::new() };
+            let Some(row) = entry.current.as_ref() else { return String::new() };
+            match row.get(i as usize) {
+                Some(Value::Blob(b)) => b.iter().map(|&byte| byte as char).collect(),
+                Some(Value::Text(t)) => t.clone(),
+                Some(Value::Integer(v)) => v.to_string(),
+                Some(Value::Real(v)) => v.to_string(),
+                _ => String::new(),
+            }
+        })
+    }
+
+    pub fn column_binary_opt(stmt_id: i64, i: i64) -> Option<String> {
+        if Self::column_is_null(stmt_id, i) {
+            None
+        } else {
+            Some(Self::column_binary(stmt_id, i))
+        }
+    }
+
     /// Read a boolean column. SQLite stores booleans as 0/1 integers
     /// — widen to bool. Nulls coerce to false.
     pub fn column_bool(stmt_id: i64, i: i64) -> bool {
@@ -442,6 +471,38 @@ impl Db {
         }
         out.push('\'');
         out
+    }
+
+    /// SQL-quote a `t.binary` value, held one char per byte
+    /// (`column_binary`). The CRuby shim's rule for bytes, so a value
+    /// lands in the same storage class on both: a hex BLOB literal when
+    /// any byte is a NUL (which would end the SQL text) or not ASCII,
+    /// quoted text otherwise. A string with a char past U+00FF is text,
+    /// not bytes, and goes out as its UTF-8 bytes.
+    pub fn escape_binary(s: &str) -> String {
+        let bytes: Vec<u8> = if s.chars().all(|c| (c as u32) <= 0xFF) {
+            s.chars().map(|c| c as u8).collect()
+        } else {
+            s.as_bytes().to_vec()
+        };
+        if bytes.iter().any(|&b| b == 0 || b >= 0x80) {
+            let mut out = String::with_capacity(bytes.len() * 2 + 3);
+            out.push_str("X'");
+            for b in &bytes {
+                out.push_str(&format!("{b:02x}"));
+            }
+            out.push('\'');
+            out
+        } else {
+            Self::escape_string(s)
+        }
+    }
+
+    pub fn escape_binary_opt(s: Option<&str>) -> String {
+        match s {
+            Some(v) => Self::escape_binary(v),
+            None => "NULL".to_string(),
+        }
     }
 
     /// Render an integer for SQL inlining.

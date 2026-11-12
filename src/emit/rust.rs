@@ -858,6 +858,29 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // source's literal attribute names; values are quoted
                 // through `Db`, never spliced.
                 if !has_method("find_by") {
+                    // A `t.binary` column compares through
+                    // `escape_binary`, as the lowered writes store it.
+                    let binary: Vec<String> = app
+                        .models
+                        .iter()
+                        .find(|m| m.name == lc.name)
+                        .and_then(|m| app.schema.tables.get(&m.table.0))
+                        .map(|t| {
+                            t.columns
+                                .iter()
+                                .filter(|c| c.col_type == crate::schema::ColumnType::Binary)
+                                .map(|c| format!("{:?}", c.name.as_str()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let binary_arm = if binary.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "serde_json::Value::String(bytes) if [{}].contains(&k.as_ref()) => format!(\"{{column}} = {{}}\", crate::db::Db::escape_binary(&bytes)),\n",
+                            binary.join(", ")
+                        )
+                    };
                     extras.push_str(&format!(
                         "pub fn find_by<K: AsRef<str>, V: Into<serde_json::Value>>(conditions: std::collections::HashMap<K, V>) -> Option<{name}> {{\n\
                          let mut clauses: Vec<String> = conditions.into_iter().map(|(k, v)| {{\n\
@@ -866,7 +889,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                          serde_json::Value::Null => format!(\"{{column}} IS NULL\"),\n\
                          serde_json::Value::Bool(b) => format!(\"{{column}} = {{}}\", crate::db::Db::escape_bool(b)),\n\
                          serde_json::Value::Number(n) => format!(\"{{column}} = {{n}}\"),\n\
-                         serde_json::Value::String(text) => format!(\"{{column}} = {{}}\", crate::db::Db::escape_string(&text)),\n\
+                         {binary_arm}serde_json::Value::String(text) => format!(\"{{column}} = {{}}\", crate::db::Db::escape_string(&text)),\n\
                          other => format!(\"{{column}} = {{}}\", crate::db::Db::escape_string(&other.to_string())),\n\
                          }}\n\
                          }}).collect();\n\
@@ -1591,6 +1614,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
              /// schema, so there is no database to create and nothing to load.\n\
              pub fn setup() {}\n",
         );
+    }
+
+    // `Digest::BLAKE3` (`expr::send::ops::try_stdlib_class_method`) is
+    // the one bridge whose crate is not in every tree: declared only
+    // where an emitted body calls it.
+    if files.iter().any(|f| f.content.contains("blake3::hash(")) {
+        if let Some(cargo) = files.iter_mut().find(|f| f.path == PathBuf::from("Cargo.toml")) {
+            cargo.content = cargo.content.replacen("chrono = {", "blake3 = \"1\"\nchrono = {", 1);
+        }
     }
 
     // src/lib.rs — declares the modules emitted above (hand-written +

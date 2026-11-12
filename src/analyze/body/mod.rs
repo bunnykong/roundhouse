@@ -260,6 +260,14 @@ pub struct ClassInfo {
     /// Instance methods a model, library class or controller defines in
     /// source, known before the first harvest registers their returns.
     pub source_instance_methods: crate::det::HashSet<Symbol>,
+    /// The `private` / `protected` ones among `source_instance_methods`:
+    /// what `respond_to?` (public only, by default) answers `false` for
+    /// although the class defines it (`lower::respond_to`).
+    pub nonpublic_instance_methods: crate::det::HashSet<Symbol>,
+    /// The public ones. A name in both sets has a public and a non-public
+    /// definition across reopenings, and which one Ruby keeps is load
+    /// order, so `lower::respond_to` answers it neither way.
+    pub public_instance_methods: crate::det::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
     /// A source `new` that calls `super` still needs the inherited constructor.

@@ -2747,6 +2747,106 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel, &jobs));
 }
 
+/// `Digest::BLAKE3` is the digest gem's from 3.3.0 (Ruby 4.0 bundles
+/// 3.2.1, without it). The CRuby tree declares the gem
+/// (`apply_digest_gem`) and the Rust target hashes over the `blake3`
+/// crate; spinel's `packages/digest`, JRuby's digest and every other
+/// target's runtime have no BLAKE3, so a call there is refused rather
+/// than emitted against a class that is not there.
+fn report_digest_blake3(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Rust) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && let crate::expr::ExprNode::Const { path } = &*recv.node
+            && path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Digest", "BLAKE3"])
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target.as_str(),
+                "Digest::BLAKE3",
+                format!("Digest::BLAKE3.{method} is only available on CRuby (the digest gem, 3.3.0 or later) and Rust"),
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    // Test bodies too (the walk includes them): a model test that
+    // builds a digest is where the call usually is.
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
+/// A constant read in a test file that analysis could not resolve, on a
+/// strict target. Its emitted test names it all the same, as an undeclared
+/// type, so the build refuses it the way it refuses one in app code. The
+/// Ruby family is exempt: there the name resolves at run time against
+/// whatever is loaded (`TCPServer` from socket, a gem's
+/// `Rack::Test::UploadedFile`, the emitted test_helper's `SchemaSetup`),
+/// which the registry does not model for test files. A class a test file
+/// declares itself (`inner_classes`) is emitted with it, so it is not
+/// unknown either. Only the constant: the test files' other diagnostics
+/// are not part of the contract yet.
+fn report_test_unknown_constants(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    use crate::diagnostic::DiagnosticKind;
+    use crate::expr::{Expr, ExprNode};
+    let declared: crate::det::HashSet<String> = app
+        .test_modules
+        .iter()
+        .flat_map(|m| m.inner_classes.iter())
+        .flat_map(|c| {
+            // The class by its full name and its last segment (as the
+            // test reads it), and each constant it defines under either.
+            let full = c.name.0.as_str().to_string();
+            let last = full.rsplit("::").next().unwrap_or_default().to_string();
+            let constants: Vec<String> = c
+                .constants
+                .iter()
+                .flat_map(|(name, _)| [format!("{full}::{}", name.as_str()), format!("{last}::{}", name.as_str())])
+                .collect();
+            [full, last].into_iter().chain(constants)
+        })
+        .collect();
+    let walk = |expr: &Expr| {
+        fn visit(expr: &Expr, target: BuildTarget, declared: &crate::det::HashSet<String>) {
+            if let Some(DiagnosticKind::Unsupported { construct, detail, .. }) = &expr.diagnostic()
+                && construct.as_str() == "constant"
+                && let ExprNode::Const { path } = &*expr.node
+            {
+                let segments: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                // The exact path only: a declared `Known` does not
+                // declare `Known::Missing`.
+                if !declared.contains(&segments.join("::")) {
+                    emit::diagnostics::report_unsupported(expr.span, target.as_str(), "constant", detail.clone());
+                }
+            }
+            expr.node.for_each_child(&mut |child| visit(child, target, declared));
+        }
+        visit(expr, target, &declared)
+    };
+    for module in &app.test_modules {
+        for test in &module.tests {
+            walk(&test.body);
+        }
+        if let Some(setup) = &module.setup {
+            walk(setup);
+        }
+        let methods = module.helpers.iter().chain(module.inner_classes.iter().flat_map(|c| c.methods.iter()));
+        for method in methods {
+            walk(&method.body);
+            for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                walk(default);
+            }
+        }
+        for (_, value) in &module.constants {
+            walk(value);
+        }
+    }
+}
+
 /// An ancestor controller's method reading an ivar only a descendant
 /// writes: analysis types it from the descendants (Phase B″), which the
 /// ruby family runs as written, but a strict target's ancestor has no
@@ -3578,6 +3678,8 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_digest_blake3(app, target);
+    report_test_unknown_constants(app, target);
     report_boot_program(app, target);
     report_uri_reader_sends(app, target);
     report_descendant_ivar_reads(app, target);
@@ -5519,6 +5621,12 @@ fn ruby_family_runtime_files(
     }
     apply_conditional_declarations(&mut files, app);
     apply_file_programs(&mut files, app);
+    // After every pass that writes app code into a file: the boot
+    // program (an initializer may be the only caller) and the file
+    // programs (a top-level statement may be).
+    if flavor == RubyFlavor::CRuby {
+        apply_digest_gem(&mut files);
+    }
     drop_solid_queue_standin(app, &mut files);
     Ok(files)
 }
@@ -11794,6 +11902,34 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>, app: &App) -> Res
         }
     }
     apply_git_gem_load_paths(files, &needed, app.gem_lock.as_ref())
+}
+
+/// `Digest::BLAKE3` is the digest gem's from 3.3.0; the digest Ruby 4.0
+/// bundles is 3.2.1, which has no BLAKE3. A tree whose own code names
+/// it declares the version that does (`report_digest_blake3` keeps the
+/// constant off the targets with no BLAKE3 at all). Every emitted Ruby
+/// file is the app's (app/, lib/, config/ with the initializers the boot
+/// program writes, test/, boot.rb) except the framework runtime and the
+/// emitted test helper.
+fn apply_digest_gem(files: &mut Vec<(String, String)>) {
+    const DECLARATION: &str = "gem \"digest\", \">= 3.3.0\"";
+    let demanded = files.iter().any(|(p, c)| {
+        !p.starts_with("runtime/")
+            && p != "test/test_helper.rb"
+            && p.ends_with(".rb")
+            && c.contains("Digest::BLAKE3")
+    });
+    if !demanded {
+        return;
+    }
+    let Some((_, gemfile)) = files.iter_mut().find(|(p, _)| p == "Gemfile") else { return };
+    if gemfile.contains(DECLARATION) {
+        return;
+    }
+    ensure_runtime_gem_declaration(gemfile, "digest", DECLARATION);
+    // The scaffold lock may pin an older digest; `bundle install`
+    // resolves the edited Gemfile fresh.
+    files.retain(|(p, _)| p != "Gemfile.lock");
 }
 
 /// Activate the locked Git checkouts before any guarded native requires.

@@ -604,6 +604,8 @@ jobs:
           # Gem extensions whose finders the native controls run (tests/finder_ownership_and_form_keys.rs).
           gem install --no-document friendly_id -v 5.5.1
           gem install --no-document sorbet-runtime -v 0.5.11934
+          # Digest::BLAKE3, which the digest Ruby bundles (3.2.1) lacks (tests/binary_digest.rs).
+          gem install --no-document digest -v 3.3.0
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8
         with:
@@ -3599,7 +3601,7 @@ jobs:
   # publish *current emit* even when per-target toolchain/compare jobs
   # fail (broken emit is exactly what's interesting to investigate).
   #
-  # So build-site gates on the fixture, plus wasm for full site builds. It does
+  # So build-site gates on the fixture alone; assemble-site adds the wasm. It does
   # not gate on unit / toolchain-* / compare-* — a flaky elixir CI run
   # or a known-broken target shouldn't stall the archive workflow, and
   # the archive itself is available via the workflow-run artifact even
@@ -3613,8 +3615,9 @@ jobs:
   build-site:
     # Publish blog archives before waiting for the independent Campfire
     # inputs. assemble-site adds those to the same bytes before deployment.
-    needs: [generate-fixture, build-wasm, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-site') && needs.generate-fixture.result == 'success' && (needs.plan.outputs.site != 'true' || needs.build-wasm.result == 'success') }}
+    # Not on build-wasm: every smoke waits for this job, and a PR's archives need no compiler wasm.
+    needs: [generate-fixture, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-site') && needs.generate-fixture.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -3627,13 +3630,6 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
-      # The compiler wasm, built fresh from source by the parallel build-wasm
-      # job (no committed binary). Lands in _site/lib/ for /playground/+/studio/.
-      - uses: actions/download-artifact@v8
-        if: needs.plan.outputs.site == 'true'
-        with:
-          name: roundhouse-wasm
-          path: wasm-artifact
       # Compile the static asset graph once and inject it into every emit
       # archive's static/assets/ (via ROUNDHOUSE_ASSETS_DIR) so the published
       # archives are self-contained — no build step required by a downloader.
@@ -3740,8 +3736,8 @@ jobs:
       # /playground/ = edit Ruby → emitted code, any target; /studio/ = edit
       # Ruby → run the emitted TS blog live (rung D). fixture.json is regenerated
       # from the just-built real-blog so it tracks create-blog. The compiler wasm
-      # is built fresh from source by the parallel build-wasm job and pulled in
-      # as an artifact (NOT committed) — see wasm/vendor/ruby-rbs-sys/README.md
+      # is built fresh from source by the parallel build-wasm job and added by
+      # assemble-site (NOT committed) — see wasm/vendor/ruby-rbs-sys/README.md
       # and the "Publishing to Pages" section of docs/archive/browser-demo-plan.md. Pure
       # static files (no npm/vite, no COOP/COEP), so they serve straight off Pages.
       - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio, _site/fractal)
@@ -3750,7 +3746,6 @@ jobs:
           set -euo pipefail
           # Shared with the site-only publisher, including each browser entrypoint.
           python3 scripts/ci-site.py browser-assets --root _site
-          cp wasm-artifact/roundhouse_wasm.wasm _site/lib/
           # Fresh seed app from the just-generated real-blog fixture (→ lib).
           (cd wasm/browser-spike && node gen-fixture.mjs)
           cp wasm/browser-spike/fixture.json _site/lib/fixture.json
@@ -4181,8 +4176,8 @@ jobs:
     # for triage, but a failed compact floor still prevents Pages deploy.
     # A missing summary degrades to a skipped render and warning here;
     # assembly does not override the separate publication guards.
-    needs: [build-site, campfire-conformance, campfire-archive-build, archive-results, plan]
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.archive-results.result == 'success' }}
+    needs: [build-site, build-wasm, campfire-conformance, campfire-archive-build, archive-results, plan]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.build-wasm.result == 'success' && needs.archive-results.result == 'success' }}
     # actions: read lets Progress list this workflow's runs on main (its CI trend);
     # the scheduled caller already grants it.
     permissions:
@@ -4204,6 +4199,14 @@ jobs:
           path: site-base
       - name: Restore the site
         run: mkdir -p _site && tar -xf site-base/artifact.tar -C _site
+      # The compiler wasm, built fresh from source by the parallel build-wasm
+      # job (no committed binary). Lands in _site/lib/ for /playground/+/studio/.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-wasm
+          path: wasm-artifact
+      - name: Add the compiler wasm to the site
+        run: cp wasm-artifact/roundhouse_wasm.wasm _site/lib/
       - name: Attach archive outcomes alongside the immutable downloads
         uses: actions/download-artifact@v8
         with:

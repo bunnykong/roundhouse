@@ -270,13 +270,19 @@ pub enum ValueType {
     StrOpt,
     FloatOpt,
     BoolOpt,
+    /// A `t.binary` column: `Db.escape_binary(_opt)`. Its own variant
+    /// because a target whose strings carry no encoding (Rust holds
+    /// bytes one char per byte) cannot tell bytes from text by the
+    /// value; the ruby family's shims answer it as they answer text.
+    Binary,
+    BinaryOpt,
 }
 
 impl ValueType {
     /// True for the nullable variants. Optional binds and inline escapes
     /// both preserve nil as SQL NULL.
     pub fn is_nullable(self) -> bool {
-        matches!(self, ValueType::IntOpt | ValueType::StrOpt | ValueType::FloatOpt | ValueType::BoolOpt)
+        matches!(self, ValueType::IntOpt | ValueType::StrOpt | ValueType::FloatOpt | ValueType::BoolOpt | ValueType::BinaryOpt)
     }
 }
 

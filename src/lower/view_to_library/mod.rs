@@ -1307,6 +1307,34 @@ pub fn insert_db_stub(
         Symbol::from("escape_string"),
         fn_sig(vec![(Symbol::from("s"), Ty::Str)], Ty::Str),
     );
+    // `t.binary` columns: the same shapes as the text pair, a separate
+    // name because a target without string encodings (Rust) cannot tell
+    // bytes from text by the value.
+    db_info.class_methods.insert(
+        Symbol::from("escape_binary"),
+        fn_sig(vec![(Symbol::from("s"), Ty::Str)], Ty::Str),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("escape_binary_opt"),
+        fn_sig(
+            vec![(Symbol::from("s"), Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })],
+            Ty::Str,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_binary"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Str,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_binary_opt"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
+        ),
+    );
     db_info.class_methods.insert(
         Symbol::from("escape_int"),
         fn_sig(vec![(Symbol::from("n"), Ty::Int)], Ty::Str),

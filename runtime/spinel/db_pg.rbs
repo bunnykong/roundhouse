@@ -149,6 +149,8 @@ module Db
   def self.column_value: (Integer stmt, Integer i) -> (Integer | Float | String | nil)
   def self.int_value: (String v) -> Integer
   def self.bool_value: (String v) -> bool
+  def self.bytea_decode: (String s) -> String
+  def self.octal_digit?: (Integer b) -> bool
   def self.tag_count: (String tag) -> Integer
   def self.insert_target: (String sql) -> String
   def self.identifier_end: (String sql, Integer i) -> Integer

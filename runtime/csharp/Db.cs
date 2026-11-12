@@ -224,6 +224,27 @@ public static class Db
     public static string EscapeBoolOpt(bool? value) =>
         value is null ? "NULL" : (value.Value ? "1" : "0");
 
+    // `t.binary` columns: a value is its UTF-8 bytes (`Digest::BLAKE3` is
+    // not emitted for this target). One holding a NUL is written as an
+    // `X'…'` blob literal, since a NUL inside a quoted literal ends the
+    // SQL text; anything else is the text literal. A BLOB cell reads
+    // back as byte[], which Convert.ToString renders as "System.Byte[]",
+    // so the binary readers decode it as the UTF-8 it was written from.
+    public static string EscapeBinary(string? value) =>
+        value is not null && value.Contains('\0')
+            ? "X'" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(value)) + "'"
+            : EscapeString(value);
+    public static string EscapeBinaryOpt(string? value) =>
+        value is null ? "NULL" : EscapeBinary(value);
+    public static string ColumnBinary(long stmt, long index) => ColumnBinaryOpt(stmt, index) ?? "";
+    public static string? ColumnBinaryOpt(long stmt, long index)
+    {
+        var r = OpenReaders[stmt].reader;
+        if (r.IsDBNull((int)index)) return null;
+        var v = r.GetValue((int)index);
+        return v is byte[] bytes ? System.Text.Encoding.UTF8.GetString(bytes) : Convert.ToString(v);
+    }
+
     // Comma-joined ids for an `IN (...)` clause (the association preload).
     // Empty → `NULL` so `IN (NULL)` stays valid SQL and matches nothing.
     public static string EscapeIntList(List<long> ids) =>

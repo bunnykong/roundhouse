@@ -976,10 +976,16 @@ pub mod bundle {
         let (group, case) = map.get(&key(overlay, script, flags)?)?;
         let emitted = scratch_dir().join("emitted");
         copy_tree(&dir.join(group), &emitted);
-        let output = Command::new(emitted.join("contract"))
-            .arg(case.to_string())
-            .current_dir(&emitted)
-            .output()
+        // Not one spawn: another test thread's fork can still hold the copied binary open for writing, and Linux refuses to run it then.
+        let output = (0..100)
+            .find_map(|_| match Command::new(emitted.join("contract")).arg(case.to_string()).current_dir(&emitted).output() {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    None
+                }
+                result => Some(result),
+            })
+            .expect("bundled native consumer stayed busy")
             .expect("run bundled native consumer");
         // The recorded script already ends in the completion line (`run_spinel_with_flags`).
         Some(Run::new(format!("spinel bundle {group} && ./contract {case}"), emitted, Vec::new(), output).expecting_completion())

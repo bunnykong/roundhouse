@@ -1298,6 +1298,12 @@ impl Analyzer {
                 }
             } else {
                 classes.entry(id.clone()).or_default().source_instance_methods.insert(method.name.clone());
+                let by_visibility = if method.visibility == crate::dialect::MethodVisibility::Public {
+                    &mut classes.entry(id.clone()).or_default().public_instance_methods
+                } else {
+                    &mut classes.entry(id.clone()).or_default().nonpublic_instance_methods
+                };
+                by_visibility.insert(method.name.clone());
                 if method.name.as_str() == "each" && forwards_block_to_each(method) {
                     classes.entry(id.clone()).or_default().each_forwards_block = true;
                 }
@@ -1317,9 +1323,43 @@ impl Analyzer {
                 classes.entry(id.clone()).or_default().constructor_calls_super = expr_calls_super(&method.body);
             }
         }
+        use crate::dialect::ControllerBodyItem;
+        // Visibility is positional: a bare `private` makes what follows
+        // private. Any other visibility call (`protected`, `public`,
+        // `private :name`, `private def …`) is not modeled, so every
+        // action then counts as both, which `lower::respond_to` leaves
+        // unanswered. Per controller NAME: such a call in one reopening
+        // (`private :ping`) can name an action another one defines.
+        let unmodeled_visibility: crate::det::HashSet<&ClassId> = app
+            .controllers
+            .iter()
+            .filter(|controller| {
+                controller.body.iter().any(|item| {
+                    matches!(item, ControllerBodyItem::Unknown { expr, .. }
+                        if matches!(&*expr.node, crate::expr::ExprNode::Send { recv: None, method, .. }
+                            if matches!(method.as_str(), "private" | "protected" | "public" | "module_function")))
+                })
+            })
+            .map(|controller| &controller.name)
+            .collect();
         for controller in &app.controllers {
-            for action in controller.actions() {
-                classes.entry(controller.name.clone()).or_default().source_instance_methods.insert(action.name.clone());
+            let unmodeled = unmodeled_visibility.contains(&controller.name);
+            let entry = classes.entry(controller.name.clone()).or_default();
+            let mut private = false;
+            for item in &controller.body {
+                match item {
+                    ControllerBodyItem::PrivateMarker { .. } => private = true,
+                    ControllerBodyItem::Action { action, .. } => {
+                        entry.source_instance_methods.insert(action.name.clone());
+                        if unmodeled || !private {
+                            entry.public_instance_methods.insert(action.name.clone());
+                        }
+                        if unmodeled || private {
+                            entry.nonpublic_instance_methods.insert(action.name.clone());
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
 

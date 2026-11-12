@@ -37,7 +37,7 @@
 //! call sites.
 
 #[path = "delegate_declarations.rs"]
-mod declarations;
+pub(crate) mod declarations;
 
 use declarations::{
     DelegateEligibility, Delegation, names_called_with_arguments, take_delegate_decls_from_calls,
