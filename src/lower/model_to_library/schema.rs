@@ -3919,11 +3919,12 @@ fn push_enum_condition_methods(methods: &mut Vec<MethodDef>, model: &Model, tabl
 /// (#2078): `def self.schema_enum_columns; [:status]; end`, and
 /// `def self._enum_where_value(col, value)` answering
 /// `ActiveRecord.enum_where_int(value, STATUS_ENUM_LABELS,
-/// STATUS_ENUM_VALUES, "")` for `col == "status"` and `value` for any
-/// other column. `lower::enum_symbols` casts a literal label when the
-/// app is lowered; this is the half for a label known only at runtime
-/// (a method argument, a `params` value), which Rails casts through the
-/// enum type as well. Nothing for a model without an enum, so the base
+/// STATUS_ENUM_VALUES, "")` for `col == "status"` and nil for any
+/// other column, which `schema_enum_columns` keeps from calling it.
+/// `lower::enum_symbols` casts a literal label when the app is lowered;
+/// this is the half for a label known only at runtime (a method
+/// argument, a `params` value), which Rails casts through the enum type
+/// as well. Nothing for a model without an enum, so the base
 /// class's defaults (no enum column) answer.
 fn push_enum_where_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &Table) {
     let castable = |c: &Column| model.enums.contains_key(&c.name) && enum_arrays(model, c).is_some();
@@ -3933,23 +3934,27 @@ fn push_enum_where_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &
     push_schema_symbol_list(methods, &model.name, "schema_enum_columns", table, castable);
     let col_param = Symbol::from("col");
     let value = Symbol::from("value");
-    let mut body = with_ty(var_ref(value.clone()), Ty::Untyped);
+    // The value types `ActiveRecord.enum_where_int` / `enum_where_str`
+    // take, and the stored value either answers.
+    let value_ty = Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Bool, Ty::Sym, Ty::Str, Ty::Nil].into() };
+    let stored_ty = Ty::Union { variants: vec![Ty::Int, Ty::Str, Ty::Nil].into() };
+    let mut body = nil_lit();
     for col in table.columns.iter().rev().filter(|c| castable(c)) {
-        let Some((_, _, value_ty)) = enum_arrays(model, col) else { continue };
-        let (labels, values, _) = enum_array_refs(model, col, &value_ty);
+        let Some((_, _, col_value_ty)) = enum_arrays(model, col) else { continue };
+        let (labels, values, _) = enum_array_refs(model, col, &col_value_ty);
         let nil_label = enum_nil_label(model, col).unwrap_or_default();
         let cast = with_ty(
             Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
                     recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
-                    method: Symbol::from(if value_ty == Ty::Int { "enum_where_int" } else { "enum_where_str" }),
-                    args: vec![with_ty(var_ref(value.clone()), Ty::Untyped), labels, values, with_ty(lit_str(nil_label), Ty::Str)],
+                    method: Symbol::from(if col_value_ty == Ty::Int { "enum_where_int" } else { "enum_where_str" }),
+                    args: vec![with_ty(var_ref(value.clone()), value_ty.clone()), labels, values, with_ty(lit_str(nil_label), Ty::Str)],
                     block: None,
                     parenthesized: true,
                 },
             ),
-            Ty::Untyped,
+            Ty::Union { variants: vec![if col_value_ty == Ty::Int { Ty::Int } else { Ty::Str }, Ty::Nil].into() },
         );
         let is_col = with_ty(
             Expr::new(
@@ -3964,7 +3969,7 @@ fn push_enum_where_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &
             ),
             Ty::Bool,
         );
-        body = with_ty(Expr::new(Span::synthetic(), ExprNode::If { cond: is_col, then_branch: cast, else_branch: body }), Ty::Untyped);
+        body = with_ty(Expr::new(Span::synthetic(), ExprNode::If { cond: is_col, then_branch: cast, else_branch: body }), stored_ty.clone());
     }
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -3975,7 +3980,7 @@ fn push_enum_where_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(col_param.clone()), Param::positional(value.clone())],
         body,
-        signature: Some(fn_sig(vec![(col_param, Ty::Str), (value, Ty::Untyped)], Ty::Untyped)),
+        signature: Some(fn_sig(vec![(col_param, Ty::Str), (value, value_ty)], stored_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(model.name.0.clone()),
         kind: AccessorKind::Method,

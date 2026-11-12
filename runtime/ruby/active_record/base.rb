@@ -88,35 +88,58 @@ module ActiveRecord
   # entry's label (`unknown: nil`), "" when it has none. Unlike the
   # writer's `enum_int` this does not raise: Rails' `where` doesn't.
   def self.enum_where_int(value, labels, values, nil_label)
-    return value if value.is_a?(Integer)
-    return value.to_i if value.is_a?(Float)
-    return 1 if value == true
-    return 0 if value == false
-    return nil unless value.is_a?(Symbol) || value.is_a?(String)
-    text = value.to_s
-    return nil if nil_label != "" && text == nil_label
-    i = 0
-    while i < labels.length
-      return values[i] if labels[i] == text
-      i += 1
+    result = nil
+    if value.is_a?(Integer)
+      result = value
+    elsif value.is_a?(Float)
+      result = value.to_i
+    elsif value == true
+      result = 1
+    elsif value == false
+      result = 0
+    elsif value.is_a?(Symbol) || value.is_a?(String)
+      text = value.to_s
+      found = nil_label != "" && text == nil_label
+      i = 0
+      while !found && i < labels.length
+        if labels[i] == text
+          result = values[i]
+          found = true
+        end
+        i += 1
+      end
+      result = text.to_i if !found && value.is_a?(String) && text.match?(/\A\s*[+-]?\d/)
     end
-    return text.to_i if value.is_a?(String) && text.match?(/\A\s*[+-]?\d/)
-    nil
+    result
   end
 
   # `enum_where_int` for a String-valued mapping: a label is its stored
-  # value, and anything else binds as given, as Rails' String column
-  # type passes it.
+  # value, and anything else binds as Rails' String column type
+  # serializes it: a Symbol or a number is its text, `true`/`false` are
+  # "t"/"f".
   def self.enum_where_str(value, labels, values, nil_label)
-    return value unless value.is_a?(Symbol) || value.is_a?(String)
-    text = value.to_s
-    return nil if nil_label != "" && text == nil_label
-    i = 0
-    while i < labels.length
-      return values[i] if labels[i] == text
-      i += 1
+    result = nil
+    if value.is_a?(Symbol) || value.is_a?(String)
+      text = value.to_s
+      result = text
+      found = nil_label != "" && text == nil_label
+      result = nil if found
+      i = 0
+      while !found && i < labels.length
+        if labels[i] == text
+          result = values[i]
+          found = true
+        end
+        i += 1
+      end
+    elsif value == true
+      result = "t"
+    elsif value == false
+      result = "f"
+    elsif value.is_a?(Integer) || value.is_a?(Float)
+      result = value.to_s
     end
-    value
+    result
   end
 
   def self.enum_label_str(value, labels, values)
@@ -639,10 +662,11 @@ module ActiveRecord
       []
     end
 
-    # A `where` value on enum column `col` as its stored value; a model
-    # with an enum overrides it with its mapping.
-    def self._enum_where_value(_col, value)
-      value
+    # A `where` value on enum column `col` as its stored value. Only a
+    # column `schema_enum_columns` names reaches it, and a model with an
+    # enum overrides both, so this default never casts.
+    def self._enum_where_value(_col, _value)
+      nil
     end
 
     def self.instantiate(_row)

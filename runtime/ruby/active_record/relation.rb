@@ -3404,21 +3404,18 @@ module ActiveRecord
     # writes `IN (NULL)`, which matches no row, negated or not. A lone
     # value is a scalar condition, so an unknown one is `IS NULL`.
     def enum_list_predicate(col, qcol, val)
-      scalars = 0
-      val.each { |x| scalars += 1 unless x.nil? || x.is_a?(Range) }
       cast = []
-      kept = 0
+      stored = []
       val.each do |x|
         if x.nil? || x.is_a?(Range)
           cast << x
         else
-          stored = @model._enum_where_value(col, x)
-          next if stored.nil? && scalars > 1
-          cast << stored
-          kept += 1
+          stored << @model._enum_where_value(col, x)
         end
       end
-      return list_predicate(col, qcol, cast) unless scalars > 1 && kept == 0
+      known = stored.compact
+      return list_predicate(col, qcol, cast + stored) if stored.length < 2
+      return list_predicate(col, qcol, cast + known) unless known.empty?
       return "#{qcol} IN (NULL)" if cast.empty?
       "(#{qcol} IN (NULL) OR #{list_predicate(col, qcol, cast)})"
     end
