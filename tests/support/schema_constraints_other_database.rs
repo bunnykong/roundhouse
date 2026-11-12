@@ -386,6 +386,34 @@ fn conditions_sqlite_evaluates_otherwise_are_not_kept_for_other_databases() {
             assert_eq!(kept, [condition], "{condition} on SQLite");
         }
     }
+    // Case folding and text ordering depend on the database: PostgreSQL
+    // 18.3 under ICU `en-US` folds `É` and orders `Z` after `a`. Another
+    // database's app leaves them out; an unconfigured one may be SQLite and
+    // keeps them, as before.
+    for condition in ["lower(label) = label", "label > 'a'"] {
+        let source = migration("", &format!("    add_check_constraint :exports, {condition:?}, name: \"form_check\"\n"));
+        let (schema, warnings, _) = ingest(&[(path, &source), ("config/database.yml", POSTGRES)]).unwrap();
+        assert!(schema.tables[&roundhouse::Symbol::from("exports")].check_constraints.is_empty(), "{condition}");
+        assert_eq!(warnings.iter().filter(|w| w.contains(&format!("`{condition}` on exports is left out"))).count(), 1, "{condition}: {warnings:#?}");
+        for database in [None, Some(SQLITE)] {
+            let mut files = vec![(path, source.as_str())];
+            files.extend(database.map(|d| ("config/database.yml", d)));
+            let (schema, _, _) = ingest(&files).unwrap_or_else(|error| panic!("{condition} {database:?}: {error}"));
+            assert_eq!(schema.tables[&roundhouse::Symbol::from("exports")].check_constraints.len(), 1, "{condition} {database:?}");
+        }
+    }
+    // A kept condition is read again when `change_column` gives a column
+    // it names a collation, as PostgreSQL rereads it (18.3 then rejects
+    // `ADMIN` for `status <> 'admin'`).
+    let changed = migration("", "    add_check_constraint :exports, \"status <> 'admin'\", name: \"form_check\"\n    add_index :exports, \"lower(label)\", name: \"exports_form\", where: \"status <> 'admin'\"\n    change_column :exports, :status, :string, collation: \"case_insensitive\"\n");
+    let (schema, warnings, _) = ingest(&[(path, &changed), ("config/database.yml", POSTGRES)]).unwrap();
+    let exports = &schema.tables[&roundhouse::Symbol::from("exports")];
+    assert!(exports.check_constraints.is_empty() && exports.indexes.is_empty(), "{exports:?}");
+    assert_eq!(warnings.iter().filter(|w| w.contains("`status <> 'admin'` on exports is left out")).count(), 2, "{warnings:#?}");
+    assert!(ingest(&[(path, &changed)]).unwrap_err().contains("unsupported"), "unconfigured");
+    let (schema, _, _) = ingest(&[(path, &changed), ("config/database.yml", SQLITE)]).unwrap();
+    let exports = &schema.tables[&roundhouse::Symbol::from("exports")];
+    assert_eq!((exports.check_constraints.len(), exports.indexes.len()), (1, 1), "SQLite keeps its own text");
     for condition in [
         "length(label) > 3",
         "coalesce(status, 'none') <> 'void'",

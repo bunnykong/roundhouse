@@ -534,7 +534,7 @@ fn apply_table_verb(
             if let (Some(t), Some(c), Some(ty)) = (arg_name(0), arg_name(1), arg_name(2)) {
                 fold_column(verb, &t, c, &ty, &args[3..], file, schema, dialect)?;
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
-                    carry_checks_again(table, dialect, file, node_span(&args[1]))?;
+                    read_conditions_again(table, dialect, file, node_span(&args[1]))?;
                 }
             }
         }
@@ -1860,26 +1860,44 @@ fn carry_check(dialect: GeneratedExpressionDialect, expression: &str, table: &Ta
         .flatten()
 }
 
-/// After a column changes, each carried CHECK is carried again from its
-/// PostgreSQL text, as PostgreSQL rereads that text against the new type or
-/// collation (`ALTER COLUMN ... TYPE`). One that no longer carries is left
-/// out with the warning.
-fn carry_checks_again(table: &mut Table, dialect: GeneratedExpressionDialect, file: &str, span: (usize, usize)) -> IngestResult<()> {
-    let again: Vec<_> = table.check_constraints.iter().map(|c| c.carried_from.as_deref().map(|source| carry_check(dialect, source, table))).collect();
+/// After a column changes, PostgreSQL rereads each CHECK and index
+/// predicate against the new type or collation (`ALTER COLUMN ... TYPE`).
+/// For an app whose database may not be SQLite, ingest reads them again
+/// too: a carried CHECK is carried again from its PostgreSQL text, and any
+/// other CHECK or expression index's `where:` must still read alike
+/// ([`schema_condition_supported`](crate::emit::shared::schema_sql::schema_condition_supported)).
+/// One that no longer does is left out with the warning, or refused, as
+/// when it was added. A SQLite app's text is SQLite's own.
+fn read_conditions_again(table: &mut Table, dialect: GeneratedExpressionDialect, file: &str, span: (usize, usize)) -> IngestResult<()> {
+    use crate::emit::shared::schema_sql::schema_condition_supported;
+    if !matches!(dialect, GeneratedExpressionDialect::Portable | GeneratedExpressionDialect::OtherDatabase) {
+        return Ok(());
+    }
+    let name = table.name.clone();
+    let refusal = |what: &str| IngestError::Unsupported { file: file.into(), message: format!("unsupported {what} on {name}") };
+    let again: Vec<_> = table.check_constraints.iter().map(|c| match &c.carried_from {
+        Some(source) => carry_check(dialect, source, table),
+        None => schema_condition_supported(&c.expression, table, dialect).then(|| c.expression.clone()),
+    }).collect();
     let mut kept = Vec::new();
     for (mut check, again) in std::mem::take(&mut table.check_constraints).into_iter().zip(again) {
-        match (again, check.carried_from.as_deref()) {
-            (Some(None), Some(source)) => leave_out_or_refuse(dialect, file, span, table.name.as_str(), "CHECK", source, || {
-                IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) }
-            })?,
-            (Some(Some(carried)), _) => {
-                check.expression = carried;
+        match again {
+            Some(expression) => {
+                check.expression = expression;
                 kept.push(check);
             }
-            _ => kept.push(check),
+            None => leave_out_or_refuse(dialect, file, span, name.as_str(), "CHECK", check.carried_from.as_deref().unwrap_or(&check.expression), || refusal("CHECK expression"))?,
         }
     }
     table.check_constraints = kept;
+    let mut kept = Vec::new();
+    for index in std::mem::take(&mut table.indexes) {
+        match index.predicate.as_deref().filter(|p| index.expression.is_some() && !schema_condition_supported(p, table, dialect)) {
+            Some(predicate) => leave_out_or_refuse(dialect, file, span, name.as_str(), "expression index `where:`", predicate, || refusal("index predicate"))?,
+            None => kept.push(index),
+        }
+    }
+    table.indexes = kept;
     Ok(())
 }
 

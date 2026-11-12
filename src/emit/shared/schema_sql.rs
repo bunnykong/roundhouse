@@ -690,7 +690,7 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
             Token::Op(op) => text.push_str(op),
         }
     }
-    (sqlite_reads_alike(&text, table) && sqlite_evaluates_alike(&text, table)).then_some(text)
+    (sqlite_reads_alike(&text, table) && sqlite_evaluates_alike(&text, table, true)).then_some(text)
 }
 
 /// A token of a schema condition as [`sql_tokens`] reads it: a string
@@ -779,15 +779,29 @@ fn sql_tokens(sql: &str) -> Option<Vec<SqlToken>> {
 /// - No literal and no column but a Boolean stands as a condition:
 ///   PostgreSQL reads `... AND 'true'` as true, SQLite as 0.
 /// - An integer fits `i64`: SQLite reads a longer one as a float.
+///
+/// When the database is known not to be SQLite (`other_database`), also:
+///
+/// - No `lower` or `upper`: PostgreSQL folds case beyond ASCII (`'É'`),
+///   SQLite does not.
+/// - No ordering (`<`, `>`, `<=`, `>=`, `BETWEEN`) on text: PostgreSQL
+///   orders by the database's collation (`'Z' > 'a'` under ICU `en-US`),
+///   SQLite by bytes. An operand is text when it is a string literal, a
+///   string column, or a call or parenthesis that may return text (any
+///   but `length` and `abs`).
+///
+/// An app without a readable `database.yml` keeps #1853's reading of
+/// those two: its database may be SQLite, whose own reading they are.
 /// - A column whose text PostgreSQL compares by rules of its own (a
 ///   `collation:`, which may ignore case; `citext`, `inet`, an enum or an
-///   array) is only tested with `IS [NOT] NULL`.
+///   array) is only tested with `IS [NOT] NULL` or measured with
+///   `length(...)`.
 /// - A string column with `limit:` is tested with `IS [NOT] NULL`, or alone
 ///   with `=`, `<>`, `!=` or `IN` against string literals shorter than the
 ///   limit: PostgreSQL cuts the spaces past the limit before the CHECK
 ///   (`'pending '` is stored as `pending` in a `limit: 7` column), and
 ///   SQLite stores the value as written.
-pub(crate) fn sqlite_evaluates_alike(sql: &str, table: &Table) -> bool {
+pub(crate) fn sqlite_evaluates_alike(sql: &str, table: &Table, other_database: bool) -> bool {
     use SqlToken::*;
     #[derive(Clone, Copy, PartialEq)]
     enum Paren {
@@ -802,6 +816,7 @@ pub(crate) fn sqlite_evaluates_alike(sql: &str, table: &Table) -> bool {
     let keyword = |token: Option<&SqlToken>| matches!(token, Some(Name(n, false)) if KEYWORDS.iter().any(|w| n.eq_ignore_ascii_case(w)));
     // Each parenthesis and comma's enclosing kind; a name before `(` is a call.
     let mut paren: Vec<Option<Paren>> = vec![None; tokens.len()];
+    let mut opened_at = vec![0; tokens.len()];
     let mut open = Vec::new();
     for (k, token) in tokens.iter().enumerate() {
         let before = at(k.checked_sub(1));
@@ -814,14 +829,17 @@ pub(crate) fn sqlite_evaluates_alike(sql: &str, table: &Table) -> bool {
                 } else {
                     Paren::Group
                 };
-                open.push(kind);
+                open.push((kind, k));
                 paren[k] = Some(kind);
             }
             Op(")") => match open.pop() {
-                Some(kind) => paren[k] = Some(kind),
+                Some((kind, at)) => {
+                    paren[k] = Some(kind);
+                    opened_at[k] = at;
+                }
                 None => return false,
             },
-            Op(",") => paren[k] = open.last().copied(),
+            Op(",") => paren[k] = open.last().map(|(kind, _)| *kind),
             _ => {}
         }
     }
@@ -866,7 +884,20 @@ pub(crate) fn sqlite_evaluates_alike(sql: &str, table: &Table) -> bool {
         _ => None,
     };
     let shorter = |token: Option<&SqlToken>, limit: usize| matches!(token, Some(Str(s)) if s[1..s.len() - 1].replace("''", "'").chars().count() < limit);
+    // Whether the operand ending at `k`, or starting at `k`, may be text.
+    let numeric_call = |name: Option<&SqlToken>| word(name, "length") || word(name, "abs");
+    let text_column = |token: &SqlToken| column(token).is_some_and(|c| matches!(c.col_type, ColumnType::String { .. } | ColumnType::Text));
+    let text_before = |k: usize| match &tokens[k] {
+        Op(")") => paren[k] != Some(Paren::Call) || !numeric_call(at(opened_at[k].checked_sub(1))),
+        token => matches!(token, Str(_)) || text_column(token),
+    };
+    let text_after = |k: usize| match &tokens[k] {
+        Op("(") => true,
+        Name(..) if tokens.get(k + 1) == Some(&Op("(")) && !keyword(at(Some(k))) => !numeric_call(at(Some(k))),
+        token => matches!(token, Str(_)) || text_column(token),
+    };
     let tested_for_null = |k: usize| word(at(Some(k + 1)), "is") && (word(at(Some(k + 2)), "null") || word(at(Some(k + 2)), "not") && word(at(Some(k + 3)), "null"));
+    let measured = |k: usize| k >= 2 && word(at(Some(k - 2)), "length") && paren[k - 1] == Some(Paren::Call) && tokens.get(k + 1) == Some(&Op(")"));
     // Each `IN`: the list's closing parenthesis, and its column's position.
     let mut listed = vec![false; tokens.len()];
     for k in (0..tokens.len()).filter(|&k| word(at(Some(k)), "in")) {
@@ -883,13 +914,18 @@ pub(crate) fn sqlite_evaluates_alike(sql: &str, table: &Table) -> bool {
         listed[k + 2..close].iter_mut().for_each(|l| *l = true);
     }
     for (k, token) in tokens.iter().enumerate() {
+        let ordering = matches!(token, Op("<" | ">" | "<=" | ">=")) || word(Some(token), "between") || between_and[k];
+        if other_database && ordering && (k == 0 || k + 1 >= tokens.len() || text_before(k - 1) || text_after(k + 1)) {
+            return false;
+        }
         let ok = match token {
             Op(",") => matches!(paren[k], Some(Paren::Call | Paren::List)),
+            Name(..) if other_database && (word(Some(token), "lower") || word(Some(token), "upper")) => false,
             Num(n) if n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<i64>().is_err() => false,
             Str(_) | Num(_) => !(starts(k) && ends(k)),
             Name(..) => match column(token).filter(|_| tokens.get(k + 1) != Some(&Op("("))) {
                 None => true,
-                Some(c) if c.collated || c.array || c.generated_text_compatible == Some(false) => tested_for_null(k),
+                Some(c) if c.collated || c.array || c.generated_text_compatible == Some(false) => tested_for_null(k) || measured(k),
                 Some(c) => {
                     let alone = |a: usize, b: usize| starts(a) && ends(b);
                     let bounded = match c.col_type {
@@ -922,10 +958,12 @@ pub(crate) fn sqlite_evaluates_alike(sql: &str, table: &Table) -> bool {
 /// ([`Portable`](crate::schema::generated::GeneratedExpressionDialect::Portable),
 /// [`OtherDatabase`](crate::schema::generated::GeneratedExpressionDialect::OtherDatabase))
 /// also needs SQLite to evaluate it as that database does
-/// ([`sqlite_evaluates_alike`]). A SQLite app's text is SQLite's own.
+/// ([`sqlite_evaluates_alike`]; case folding and text ordering only when
+/// `database.yml` names the other database). A SQLite app's text is
+/// SQLite's own.
 pub(crate) fn schema_condition_supported(sql: &str, table: &Table, dialect: crate::schema::generated::GeneratedExpressionDialect) -> bool {
     use crate::schema::generated::GeneratedExpressionDialect::{OtherDatabase, Portable};
-    schema_expression_supported(sql, Some(table), dialect) && (!matches!(dialect, Portable | OtherDatabase) || sqlite_evaluates_alike(sql, table))
+    schema_expression_supported(sql, Some(table), dialect) && (!matches!(dialect, Portable | OtherDatabase) || sqlite_evaluates_alike(sql, table, dialect == OtherDatabase))
 }
 
 /// Defaults cannot reference columns; randomblob is allowed only there.
@@ -1612,9 +1650,10 @@ end
             "code IS NULL OR code = 'abc'",
             "'abc' <> code AND code IN ('a', 'b')",
             "kind IS NOT NULL AND tags IS NULL",
-            "lower(status) = status",
+            "length(handle) > 0 AND length(kind) < 9",
+            "abs(amount) <= 5 AND length(label) BETWEEN 1 AND 9",
         ] {
-            assert!(sqlite_reads_alike(alike, table) && sqlite_evaluates_alike(alike, table), "{alike}");
+            assert!(sqlite_reads_alike(alike, table) && sqlite_evaluates_alike(alike, table, true), "{alike}");
         }
         for otherwise in [
             "(status, label) IS NOT NULL",
@@ -1637,8 +1676,20 @@ end
             "length(code) <= 7",
             "code IN ('a', 'pending')",
             "code = 'abc' || 'defg'",
+            "lower(status) = status",
+            "upper(label) <> label",
+            "label > 'a'",
+            "'m' <= status",
+            "status BETWEEN 'a' AND 'm'",
+            "substr(label, 1, 1) < 'n'",
+            "coalesce(label, '') >= status",
         ] {
-            assert!(!sqlite_evaluates_alike(otherwise, table), "{otherwise}");
+            assert!(!sqlite_evaluates_alike(otherwise, table, true), "{otherwise}");
+        }
+        // Case folding and text ordering depend on the database, which may
+        // be SQLite when no `database.yml` names it.
+        for unknown in ["lower(status) = status", "upper(label) <> label", "label > 'a'", "status BETWEEN 'a' AND 'm'"] {
+            assert!(sqlite_evaluates_alike(unknown, table, false), "{unknown}");
         }
     }
 
