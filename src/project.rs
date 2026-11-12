@@ -14808,6 +14808,32 @@ mod tests {
         assert!(!names_constant("  include RaabroExt\n", "Raabro"));
     }
 
+    /// Code behind `defined?(Name)` runs without the library, so it is not
+    /// a use; an unguarded reference, and an `else` branch, still are.
+    #[test]
+    fn names_constant_skips_a_reference_a_defined_guard_covers() {
+        let guarded = [
+            "if value.is_a?(Method) || (defined?(::Singleton) && value.is_a?(::Singleton))\n",
+            "x = defined?(Singleton) ? Singleton.name : nil\n",
+            "return Singleton.name if defined?(::Singleton)\n",
+            "if defined?(::Singleton)\n  Singleton.name\n\n  ::Singleton.name\nend\n",
+            "if x\n  1\nelsif defined?(Singleton)\n  Singleton.name\nend\n",
+        ];
+        for src in guarded {
+            assert!(!names_constant(src, "Singleton"), "{src:?}");
+        }
+        let used = [
+            "  include Singleton\n",
+            "x = Singleton.name\n",
+            "if defined?(::Singleton)\n  1\nelse\n  Singleton.name\nend\n",
+            "if defined?(::Singleton)\n  1\nend\nSingleton.name\n",
+            "Singleton.name if defined?(::Other)\n",
+        ];
+        for src in used {
+            assert!(names_constant(src, "Singleton"), "{src:?}");
+        }
+    }
+
     /// A rooted `::Name` names the top-level constant, and so does a value
     /// use; `Outer::Name` does not.
     #[test]

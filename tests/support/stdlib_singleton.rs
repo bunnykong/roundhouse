@@ -35,3 +35,28 @@ puts "singleton passed"
 pub fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog().write("app/models/feeds/registry.rb", REGISTRY).write("app/models/partials.rb", PARTIALS)
 }
+
+/// A model that names `Singleton` only behind `defined?` guards, the way
+/// ActiveSupport's `deep_dup` does: it runs without the library loaded.
+/// Ruby 4.0.7, which has not loaded `singleton` here, answers
+/// `Keeper.kind(1)` "plain" and `Keeper.loaded` "none".
+pub const GUARDED: &str = r##"class Keeper
+  def self.kind(value)
+    return "single" if defined?(::Singleton) && value.is_a?(::Singleton)
+    defined?(Singleton) ? "loaded" : "plain"
+  end
+
+  def self.loaded
+    if defined?(::Singleton)
+      Singleton.name
+    else
+      "none"
+    end
+  end
+end
+"##;
+
+#[allow(dead_code)]
+pub fn guarded_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().write("app/models/keeper.rb", GUARDED)
+}
