@@ -515,69 +515,42 @@ pub(crate) fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
 ///
 /// The result may use only columns, literals, `=`, `<>`, `!=`,
 /// `IS [NOT] NULL`, `[NOT] IN`, `AND`, `OR`, `NOT` and parentheses, and an
-/// ordering comparison only between integers. Every column and literal is
-/// compared: PostgreSQL reads a string literal standing as a condition
-/// (`... AND 'true'`) as a Boolean, SQLite as 0. Every `[NOT] IN`, written
-/// or rewritten, has a column on the left that nothing else compares and
-/// literals of its kind in the list, the only place a comma may stand:
-/// SQLite gives the list's values no affinity (`'1' IN (amount)` is false
-/// for 1), binds `IN` no tighter than `=`, and fails a row value
-/// (`(a, b) IS NULL`) on every insert. Strings are only ever compared for
-/// equality, which compares bytes in SQLite and, under a deterministic
-/// collation, in PostgreSQL: no collation order and no case folding
-/// (`lower`) enters. A string column with `limit:` is compared only with
-/// literals shorter than the limit, as PostgreSQL cuts the spaces past it
-/// before the CHECK and SQLite does not. Integers are compared only within
-/// `i64`. A column that declares `collation:`, which may not be
-/// deterministic, is not carried, nor is a column ingest reads as a string
-/// that PostgreSQL stores otherwise (`citext`, `inet`, an enum), which has
-/// no identity cast to `text`. `None` for anything else.
+/// ordering comparison only between integers. Strings are only ever
+/// compared for equality, which compares bytes in SQLite and, under a
+/// deterministic collation, in PostgreSQL: no collation order and no case
+/// folding (`lower`) enters. A column ingest reads as a string that
+/// PostgreSQL stores otherwise (`citext`, `inet`, an enum) has no identity
+/// cast to `text`, so it is not carried. The result must still pass the
+/// shared reader and [`sqlite_evaluates_alike`], as any condition of an app
+/// whose database may not be SQLite does (row values, `IN` operands, bare
+/// literals, integer range, collated and bounded columns). `None` for
+/// anything else.
 pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
-    #[derive(Clone, PartialEq)]
-    enum Token {
-        Str(String),
-        Num(String),
-        Name(String, bool),
-        Op(&'static str),
-    }
+    type Token = SqlToken;
     #[derive(Clone, Copy, PartialEq)]
     enum Kind {
         Text,
         Integer,
     }
-    const OPS: &[&str] = &["::", "<>", "!=", "<=", ">=", "(", ")", "[", "]", ",", "=", "<", ">"];
     const KEYWORDS: &[&str] = &["AND", "OR", "NOT", "IS", "NULL", "IN", "TRUE", "FALSE", "ANY", "ALL", "SOME", "ARRAY", "BETWEEN", "LIKE"];
     let keyword = |token: Option<&Token>| matches!(token, Some(Token::Name(n, false)) if KEYWORDS.iter().any(|w| n.eq_ignore_ascii_case(w)));
-    let column = |token: &Token| match token {
-        Token::Name(_, false) if keyword(Some(token)) => None,
-        Token::Name(name, quoted) => table.columns.iter().find(|c| if *quoted { c.name.as_str() == name } else { c.name.as_str().eq_ignore_ascii_case(name) }),
-        _ => None,
-    };
     let kind_of = |token: &Token| -> Option<Kind> {
         match token {
             Token::Str(_) => Some(Kind::Text),
-            // An exact integer in both: SQLite reads a longer one as a float.
-            Token::Num(n) if n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<i64>().is_ok() => Some(Kind::Integer),
-            Token::Name(..) => column(token).filter(|c| !c.array && !c.collated).and_then(|c| match c.col_type {
-                ColumnType::String { .. } | ColumnType::Text if c.generated_text_compatible != Some(false) => Some(Kind::Text),
-                ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => Some(Kind::Integer),
-                _ => None,
-            }),
+            Token::Num(n) if n.bytes().all(|b| b.is_ascii_digit()) => Some(Kind::Integer),
+            Token::Name(_, false) if keyword(Some(token)) => None,
+            Token::Name(name, quoted) => table
+                .columns
+                .iter()
+                .find(|c| if *quoted { c.name.as_str() == name } else { c.name.as_str().eq_ignore_ascii_case(name) })
+                .filter(|c| !c.array)
+                .and_then(|c| match c.col_type {
+                    ColumnType::String { .. } | ColumnType::Text if c.generated_text_compatible != Some(false) => Some(Kind::Text),
+                    ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => Some(Kind::Integer),
+                    _ => None,
+                }),
             Token::Num(_) | Token::Op(_) => None,
         }
-    };
-    // PostgreSQL cuts the spaces past a bounded string column's limit
-    // before the CHECK (`'pending '` in `character varying(7)` is stored
-    // as `pending`); SQLite stores the value as written. Such a column is
-    // compared only with a string literal shorter than the limit, which no
-    // cut value equals.
-    let bounded = |token: Option<&Token>| match token.and_then(|t| column(t)).map(|c| &c.col_type) {
-        Some(ColumnType::String { limit: Some(limit) }) => Some(*limit as usize),
-        _ => None,
-    };
-    let shorter = |literal: Option<&Token>, limit: usize| matches!(literal, Some(Token::Str(s)) if s[1..s.len() - 1].replace("''", "'").chars().count() < limit);
-    let unbounded_or_shorter = |a: Option<&Token>, b: Option<&Token>| {
-        bounded(a).is_none_or(|limit| shorter(b, limit)) && bounded(b).is_none_or(|limit| shorter(a, limit))
     };
     let word = |token: Option<&Token>, w: &str| matches!(token, Some(Token::Name(n, false)) if n.eq_ignore_ascii_case(w));
     // An `IN` list: literals of the left column's kind, between commas.
@@ -588,59 +561,8 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
             })
     };
 
-    // Tokens. Anything else (comments, `$` quoting, `E'...'`) is not carried.
-    let chars: Vec<char> = sql.chars().collect();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if matches!(c, ' ' | '\t' | '\n' | '\r') {
-            i += 1;
-        } else if c == '\'' || c == '"' {
-            let start = i;
-            let mut text = String::new();
-            i += 1;
-            loop {
-                match chars.get(i) {
-                    None => return None,
-                    Some(&q) if q == c && chars.get(i + 1) == Some(&c) => {
-                        text.push(c);
-                        i += 2;
-                    }
-                    Some(&q) if q == c => break,
-                    Some(&ch) => {
-                        text.push(ch);
-                        i += 1;
-                    }
-                }
-            }
-            i += 1;
-            tokens.push(if c == '\'' { Token::Str(chars[start..i].iter().collect()) } else { Token::Name(text, true) });
-        } else if c.is_ascii_alphabetic() || c == '_' {
-            let start = i;
-            while chars.get(i).is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_') {
-                i += 1;
-            }
-            if matches!(chars.get(i), Some('\'' | '"')) {
-                return None;
-            }
-            tokens.push(Token::Name(chars[start..i].iter().collect(), false));
-        } else if c.is_ascii_digit() {
-            let start = i;
-            while chars.get(i).is_some_and(|ch| ch.is_ascii_digit() || *ch == '.') {
-                i += 1;
-            }
-            if chars.get(i).is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == '_') {
-                return None;
-            }
-            tokens.push(Token::Num(chars[start..i].iter().collect()));
-        } else {
-            let rest: String = chars[i..chars.len().min(i + 2)].iter().collect();
-            let op = OPS.iter().find(|op| rest.starts_with(**op))?;
-            tokens.push(Token::Op(op));
-            i += op.len();
-        }
-    }
+    // Tokens. Anything else (`$` quoting, `E'...'`) is not carried.
+    let tokens = sql_tokens(sql)?;
 
     // Identity casts. A cast applies to what precedes it.
     let mut uncast: Vec<Token> = Vec::new();
@@ -734,24 +656,6 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
         i = close + 2;
     }
 
-    // Every `[NOT] IN`, from `ANY` or written so: a column on the left
-    // that no comparison precedes, as PostgreSQL's `IN` binds tighter than
-    // `=` and SQLite's does not, and a list of literals of its kind.
-    let comparison = |token: Option<&Token>| matches!(token, Some(Token::Op("=" | "<>" | "!=" | "<" | ">" | "<=" | ">=")));
-    let mut listed = vec![false; carried.len()];
-    for k in (0..carried.len()).filter(|&k| word(carried.get(k), "in")) {
-        let left = k.checked_sub(if word(k.checked_sub(1).and_then(|b| carried.get(b)), "not") { 2 } else { 1 })?;
-        let lhs = Some(&carried[left]).filter(|t| matches!(t, Token::Name(..))).and_then(kind_of)?;
-        if carried.get(k + 1) != Some(&Token::Op("(")) || comparison(left.checked_sub(1).and_then(|b| carried.get(b))) {
-            return None;
-        }
-        let close = k + 2 + carried[k + 2..].iter().position(|t| *t == Token::Op(")"))?;
-        if !literals_of(&carried[k + 2..close], lhs) || !carried[k + 2..close].iter().all(|t| *t == Token::Op(",") || unbounded_or_shorter(Some(&carried[left]), Some(t))) {
-            return None;
-        }
-        listed[left..=close].fill(true);
-    }
-
     // What the result may use.
     let operand = |token: Option<&Token>| token.is_some_and(|t| kind_of(t).is_some());
     for (k, token) in carried.iter().enumerate() {
@@ -760,17 +664,14 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
         let ok = match token {
             // Two operands, or an operand and `(`, are never adjacent.
             _ if (operand(Some(token)) || *token == Token::Op(")")) && (operand(after) || after == Some(&Token::Op("("))) => false,
-            // An operand is compared or listed, never a condition alone.
-            _ if operand(Some(token)) && !(listed[k] || comparison(before) || comparison(after) || word(after, "is")) => false,
-            Token::Op(",") => listed[k],
             Token::Str(_) | Token::Num(_) | Token::Name(_, true) => operand(Some(token)),
             Token::Name(n, false) if n.eq_ignore_ascii_case("IS") => {
                 word(after, "null") || word(after, "not") && word(carried.get(k + 2), "null")
             }
             Token::Name(n, false) => ["AND", "OR", "NOT", "NULL", "IN"].iter().any(|w| n.eq_ignore_ascii_case(w)) || operand(Some(token)),
-            Token::Op("=" | "<>" | "!=") => matches!(sides, (Some(a), Some(b)) if a == b) && unbounded_or_shorter(before, after),
+            Token::Op("=" | "<>" | "!=") => matches!(sides, (Some(a), Some(b)) if a == b),
             Token::Op("<" | ">" | "<=" | ">=") => sides == (Some(Kind::Integer), Some(Kind::Integer)),
-            Token::Op("(" | ")") => true,
+            Token::Op("(" | ")" | ",") => true,
             Token::Op(_) => false,
         };
         if !ok {
@@ -789,7 +690,242 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
             Token::Op(op) => text.push_str(op),
         }
     }
-    sqlite_reads_alike(&text, table).then_some(text)
+    (sqlite_reads_alike(&text, table) && sqlite_evaluates_alike(&text, table)).then_some(text)
+}
+
+/// A token of a schema condition as [`sql_tokens`] reads it: a string
+/// literal as written (quotes included), a number, a name (quoted or not)
+/// or an operator.
+#[derive(Clone, PartialEq)]
+enum SqlToken {
+    Str(String),
+    Num(String),
+    Name(String, bool),
+    Op(&'static str),
+}
+
+/// `sql` as [`SqlToken`]s; `None` for anything else (`$` quoting,
+/// `E'...'`, an unclosed quote). A comment reads as two operators, which
+/// both callers refuse.
+fn sql_tokens(sql: &str) -> Option<Vec<SqlToken>> {
+    const OPS: &[&str] = &["::", "<>", "!=", "<=", ">=", "||", "(", ")", "[", "]", ",", "=", "<", ">", "+", "-", "*", "/", "%", "|"];
+    let chars: Vec<char> = sql.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if matches!(c, ' ' | '\t' | '\n' | '\r') {
+            i += 1;
+        } else if c == '\'' || c == '"' {
+            let start = i;
+            let mut text = String::new();
+            i += 1;
+            loop {
+                match chars.get(i) {
+                    None => return None,
+                    Some(&q) if q == c && chars.get(i + 1) == Some(&c) => {
+                        text.push(c);
+                        i += 2;
+                    }
+                    Some(&q) if q == c => break,
+                    Some(&ch) => {
+                        text.push(ch);
+                        i += 1;
+                    }
+                }
+            }
+            i += 1;
+            tokens.push(if c == '\'' { SqlToken::Str(chars[start..i].iter().collect()) } else { SqlToken::Name(text, true) });
+        } else if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while chars.get(i).is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_') {
+                i += 1;
+            }
+            if matches!(chars.get(i), Some('\'' | '"')) {
+                return None;
+            }
+            tokens.push(SqlToken::Name(chars[start..i].iter().collect(), false));
+        } else if c.is_ascii_digit() {
+            let start = i;
+            while chars.get(i).is_some_and(|ch| ch.is_ascii_digit() || *ch == '.') {
+                i += 1;
+            }
+            if chars.get(i).is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == '_') {
+                return None;
+            }
+            tokens.push(SqlToken::Num(chars[start..i].iter().collect()));
+        } else {
+            let rest: String = chars[i..chars.len().min(i + 2)].iter().collect();
+            let op = OPS.iter().find(|op| rest.starts_with(**op))?;
+            tokens.push(SqlToken::Op(op));
+            i += op.len();
+        }
+    }
+    Some(tokens)
+}
+
+/// Whether SQLite evaluates the condition `sql` (a CHECK, or an index's
+/// `where:`) as PostgreSQL does on the same rows, for text
+/// [`sqlite_expression`] reads. That reader checks the words; this checks
+/// how they combine where the two databases differ (PostgreSQL 18.3 and
+/// SQLite 3.51 disagree on a row for each):
+///
+/// - A comma stands only in a call's arguments or an `IN` list: SQLite
+///   fails every insert on a row value, `(a, b) IS NOT NULL`.
+/// - An `IN` has a column on the left that nothing binds first, and a
+///   non-empty list of literals of its kind. SQLite gives the list's values
+///   no affinity (`'1' IN (amount)` is false for 1) and binds `IN` no
+///   tighter than `=` (`'t' = status IN ('a')`).
+/// - No literal and no column but a Boolean stands as a condition:
+///   PostgreSQL reads `... AND 'true'` as true, SQLite as 0.
+/// - An integer fits `i64`: SQLite reads a longer one as a float.
+/// - A column whose text PostgreSQL compares by rules of its own (a
+///   `collation:`, which may ignore case; `citext`, `inet`, an enum or an
+///   array) is only tested with `IS [NOT] NULL`.
+/// - A string column with `limit:` is tested with `IS [NOT] NULL`, or alone
+///   with `=`, `<>`, `!=` or `IN` against string literals shorter than the
+///   limit: PostgreSQL cuts the spaces past the limit before the CHECK
+///   (`'pending '` is stored as `pending` in a `limit: 7` column), and
+///   SQLite stores the value as written.
+pub(crate) fn sqlite_evaluates_alike(sql: &str, table: &Table) -> bool {
+    use SqlToken::*;
+    #[derive(Clone, Copy, PartialEq)]
+    enum Paren {
+        Call,
+        List,
+        Group,
+    }
+    const KEYWORDS: &[&str] = &["AND", "OR", "NOT", "IS", "NULL", "TRUE", "FALSE", "IN", "BETWEEN"];
+    let Some(tokens) = sql_tokens(sql) else { return false };
+    let at = |k: Option<usize>| k.and_then(|k| tokens.get(k));
+    let word = |token: Option<&SqlToken>, w: &str| matches!(token, Some(Name(n, false)) if n.eq_ignore_ascii_case(w));
+    let keyword = |token: Option<&SqlToken>| matches!(token, Some(Name(n, false)) if KEYWORDS.iter().any(|w| n.eq_ignore_ascii_case(w)));
+    // Each parenthesis and comma's enclosing kind; a name before `(` is a call.
+    let mut paren: Vec<Option<Paren>> = vec![None; tokens.len()];
+    let mut open = Vec::new();
+    for (k, token) in tokens.iter().enumerate() {
+        let before = at(k.checked_sub(1));
+        match token {
+            Op("(") => {
+                let kind = if word(before, "in") {
+                    Paren::List
+                } else if matches!(before, Some(Name(_, false))) && !keyword(before) {
+                    Paren::Call
+                } else {
+                    Paren::Group
+                };
+                open.push(kind);
+                paren[k] = Some(kind);
+            }
+            Op(")") => match open.pop() {
+                Some(kind) => paren[k] = Some(kind),
+                None => return false,
+            },
+            Op(",") => paren[k] = open.last().copied(),
+            _ => {}
+        }
+    }
+    if !open.is_empty() {
+        return false;
+    }
+    // The `AND` of `x BETWEEN a AND b` joins no conditions.
+    let mut between_and = vec![false; tokens.len()];
+    for k in (0..tokens.len()).filter(|&k| word(at(Some(k)), "between")) {
+        let mut depth = 0usize;
+        for j in k + 1..tokens.len() {
+            match &tokens[j] {
+                Op("(") => depth += 1,
+                Op(")") if depth == 0 => break,
+                Op(")") => depth -= 1,
+                _ if depth == 0 && word(at(Some(j)), "and") => {
+                    between_and[j] = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    // Whether a condition starts just after token `k - 1`, or ends just before `k + 1`.
+    let joins = |k: usize| (word(at(Some(k)), "and") && !between_and[k]) || word(at(Some(k)), "or");
+    let starts = |k: usize| k.checked_sub(1).is_none_or(|b| joins(b) || word(at(Some(b)), "not") || paren[b] == Some(Paren::Group) && tokens[b] == Op("("));
+    let ends = |k: usize| k + 1 >= tokens.len() || joins(k + 1) || paren[k + 1] == Some(Paren::Group) && tokens[k + 1] == Op(")");
+    let column = |token: &SqlToken| match token {
+        Name(..) if keyword(Some(token)) => None,
+        Name(name, quoted) => table.columns.iter().find(|c| if *quoted { c.name.as_str() == name } else { c.name.as_str().eq_ignore_ascii_case(name) }),
+        _ => None,
+    };
+    // Text or integer: what an `IN` list's literals must match.
+    let kind = |token: &SqlToken| match token {
+        Str(_) => Some(true),
+        Num(n) if n.bytes().all(|b| b.is_ascii_digit()) => Some(false),
+        Name(..) => column(token).and_then(|c| match c.col_type {
+            ColumnType::String { .. } | ColumnType::Text => Some(true),
+            ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => Some(false),
+            _ => None,
+        }),
+        _ => None,
+    };
+    let shorter = |token: Option<&SqlToken>, limit: usize| matches!(token, Some(Str(s)) if s[1..s.len() - 1].replace("''", "'").chars().count() < limit);
+    let tested_for_null = |k: usize| word(at(Some(k + 1)), "is") && (word(at(Some(k + 2)), "null") || word(at(Some(k + 2)), "not") && word(at(Some(k + 3)), "null"));
+    // Each `IN`: the list's closing parenthesis, and its column's position.
+    let mut listed = vec![false; tokens.len()];
+    for k in (0..tokens.len()).filter(|&k| word(at(Some(k)), "in")) {
+        let Some(left) = k.checked_sub(if word(at(k.checked_sub(1)), "not") { 2 } else { 1 }) else { return false };
+        let Some(lhs) = column(&tokens[left]).and(kind(&tokens[left])) else { return false };
+        let Some(close) = (paren.get(k + 1) == Some(&Some(Paren::List))).then(|| (k + 2..tokens.len()).find(|&j| tokens[j] == Op(")"))).flatten() else { return false };
+        let elements = &tokens[k + 2..close];
+        let literals = elements.len() % 2 == 1
+            && elements.iter().enumerate().all(|(e, t)| if e % 2 == 1 { *t == Op(",") } else { matches!(t, Str(_) | Num(_)) && kind(t) == Some(lhs) });
+        if !literals || !starts(left) {
+            return false;
+        }
+        listed[left] = true;
+        listed[k + 2..close].iter_mut().for_each(|l| *l = true);
+    }
+    for (k, token) in tokens.iter().enumerate() {
+        let ok = match token {
+            Op(",") => matches!(paren[k], Some(Paren::Call | Paren::List)),
+            Num(n) if n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<i64>().is_err() => false,
+            Str(_) | Num(_) => !(starts(k) && ends(k)),
+            Name(..) => match column(token).filter(|_| tokens.get(k + 1) != Some(&Op("("))) {
+                None => true,
+                Some(c) if c.collated || c.array || c.generated_text_compatible == Some(false) => tested_for_null(k),
+                Some(c) => {
+                    let alone = |a: usize, b: usize| starts(a) && ends(b);
+                    let bounded = match c.col_type {
+                        ColumnType::String { limit: Some(limit) } => Some(limit as usize),
+                        _ => None,
+                    };
+                    let compared = |limit| {
+                        tested_for_null(k)
+                            || matches!(at(Some(k + 1)), Some(Op("=" | "<>" | "!="))) && shorter(at(Some(k + 2)), limit) && alone(k, k + 2)
+                            || matches!(at(k.checked_sub(1)), Some(Op("=" | "<>" | "!="))) && shorter(at(k.checked_sub(2)), limit) && k >= 2 && alone(k - 2, k)
+                            || listed[k] && word(at(Some(k + 1 + word(at(Some(k + 1)), "not") as usize)), "in") && {
+                                let list = k + 3 + word(at(Some(k + 1)), "not") as usize;
+                                tokens[list..].iter().take_while(|t| **t != Op(")")).all(|t| *t == Op(",") || shorter(Some(t), limit))
+                            }
+                    };
+                    bounded.is_none_or(compared) && (c.col_type == ColumnType::Boolean || !(starts(k) && ends(k)))
+                }
+            },
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// [`schema_expression_supported`] for a condition at ingest: a CHECK or
+/// an expression index's `where:`. An app whose database may not be SQLite
+/// ([`Portable`](crate::schema::generated::GeneratedExpressionDialect::Portable),
+/// [`OtherDatabase`](crate::schema::generated::GeneratedExpressionDialect::OtherDatabase))
+/// also needs SQLite to evaluate it as that database does
+/// ([`sqlite_evaluates_alike`]). A SQLite app's text is SQLite's own.
+pub(crate) fn schema_condition_supported(sql: &str, table: &Table, dialect: crate::schema::generated::GeneratedExpressionDialect) -> bool {
+    use crate::schema::generated::GeneratedExpressionDialect::{OtherDatabase, Portable};
+    schema_expression_supported(sql, Some(table), dialect) && (!matches!(dialect, Portable | OtherDatabase) || sqlite_evaluates_alike(sql, table))
 }
 
 /// Defaults cannot reference columns; randomblob is allowed only there.
@@ -1447,6 +1583,62 @@ end
             ("kind::text <> 'bad'::text", "kind <> 'bad'"),
         ] {
             assert_eq!(carry_postgres_check(dumped, table).as_deref(), Some(carried), "{dumped}");
+        }
+    }
+
+    /// The shared reader's conditions both databases evaluate alike stay
+    /// readable for an app whose database may not be SQLite; the forms they
+    /// evaluate differently do not.
+    #[test]
+    fn sqlite_evaluates_alike_only_what_postgres_evaluates_the_same() {
+        let schema = ingest_schema(
+            b"ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"exports\" do |t|\n    t.string \"status\"\n    t.text \"label\"\n    t.integer \"amount\"\n    t.boolean \"active\"\n    t.decimal \"price\"\n    t.string \"code\", limit: 7\n    t.string \"kind\", collation: \"ci\"\n    t.citext \"handle\"\n    t.string \"tags\", array: true\n  end\nend\n",
+            "db/schema.rb",
+        )
+        .unwrap();
+        let table = &schema.tables[&Symbol::from("exports")];
+        for alike in [
+            "length(label) > 3",
+            "coalesce(status, 'none') <> 'void'",
+            "substr(label, 1, 2) = 'ab'",
+            "amount BETWEEN 1 AND 5 OR amount IS NULL",
+            "status IN ('a', 'b') AND NOT label IS NULL",
+            "amount NOT IN (1, 2)",
+            "active OR amount > 0",
+            "NOT active",
+            "(amount > 0) = (status = 'paid')",
+            "price > 0 AND amount > -1",
+            "\"label\" IS NULL OR json_valid(\"label\")",
+            "code IS NULL OR code = 'abc'",
+            "'abc' <> code AND code IN ('a', 'b')",
+            "kind IS NOT NULL AND tags IS NULL",
+            "lower(status) = status",
+        ] {
+            assert!(sqlite_reads_alike(alike, table) && sqlite_evaluates_alike(alike, table), "{alike}");
+        }
+        for otherwise in [
+            "(status, label) IS NOT NULL",
+            "status = 'a' AND 'true'",
+            "NOT 'false'",
+            "(1)",
+            "status OR active",
+            "'1' IN (amount)",
+            "length(label) IN ('1')",
+            "status IN (label)",
+            "'t' = status IN ('a')",
+            "amount IN ()",
+            "amount <> 9223372036854775808",
+            "kind = 'a'",
+            "lower(kind) = 'a'",
+            "handle = 'a'",
+            "tags = '{}'",
+            "code = 'pending'",
+            "code = status",
+            "length(code) <= 7",
+            "code IN ('a', 'pending')",
+            "code = 'abc' || 'defg'",
+        ] {
+            assert!(!sqlite_evaluates_alike(otherwise, table), "{otherwise}");
         }
     }
 

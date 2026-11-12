@@ -716,7 +716,7 @@ fn apply_table_verb(
                             }
                             let index = build_index(&t, columns, expression, args.iter().skip(2), file)?;
                             if let Some(p) = index.predicate.as_ref().filter(|p| index.expression.is_some()
-                                && !crate::emit::shared::schema_sql::schema_expression_supported(p, Some(table), dialect)) {
+                                && !crate::emit::shared::schema_sql::schema_condition_supported(p, table, dialect)) {
                                 return leave_out_or_refuse(dialect, file, node_span(keys), &t, "expression index `where:`", p, || {
                                     let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
                                     IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") }
@@ -779,7 +779,7 @@ fn apply_table_verb(
             if let Some(table) = arg_name(0).and_then(|n| schema.tables.get_mut(&Symbol::from(n))) {
                 if verb == "add_check_constraint" {
                     let mut check = check_constraint(&args[1..], file, table.name.as_str())?;
-                    if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect)
+                    if !crate::emit::shared::schema_sql::schema_condition_supported(&check.expression, table, dialect)
                         && !crate::emit::shared::schema_sql::sqlite_check_expression(&check.expression, table, dialect) {
                         match carry_check(dialect, &check.expression, table) {
                             Some(carried) => check.carried_from = Some(std::mem::replace(&mut check.expression, carried)),
@@ -2212,8 +2212,11 @@ fn table_from_create_table(
     }
     for (expression, span, site) in sql_locations {
         let check = matches!(site, SqlSite::Check);
-        if !crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect)
-            && !(check && crate::emit::shared::schema_sql::sqlite_check_expression(&expression, &table, dialect))
+        let supported = match site {
+            SqlSite::Index => crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect),
+            SqlSite::Check | SqlSite::Predicate(_) => crate::emit::shared::schema_sql::schema_condition_supported(&expression, &table, dialect),
+        };
+        if !supported && !(check && crate::emit::shared::schema_sql::sqlite_check_expression(&expression, &table, dialect))
         {
             if check && let Some(carried) = carry_check(dialect, &expression, &table) {
                 for c in table.check_constraints.iter_mut().filter(|c| c.expression == expression) {

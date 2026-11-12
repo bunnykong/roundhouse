@@ -346,3 +346,63 @@ fn a_changed_column_carries_its_checks_again() {
     }
     assert_eq!(warnings.len(), 2, "{warnings:#?}");
 }
+
+/// Conditions the shared reader reads without a cast but SQLite evaluates
+/// otherwise than PostgreSQL 18.3 (a row value, a literal as a condition,
+/// an `IN` without the column's affinity or binding as SQLite's does, an
+/// integer past `i64`, a bounded or collated column). Since #1853 they
+/// reached SQLite DDL; now another database's app leaves them out with the
+/// warning and an unconfigured app refuses them. A SQLite app's text is
+/// SQLite's own and is kept, and the conditions both read alike stay kept.
+#[test]
+fn conditions_sqlite_evaluates_otherwise_are_not_kept_for_other_databases() {
+    let table = "    create_table :exports do |t|\n      t.string :status\n      t.text :label\n      t.integer :amount\n      t.string :code, limit: 7\n      t.string :kind, collation: \"case_insensitive\"\n";
+    let migration = |inside: &str, after: &str| format!("class CreateExports < ActiveRecord::Migration[8.1]\n  def change\n{table}{inside}    end\n{after}  end\nend\n");
+    let path = "db/migrate/20260101000000_create_exports.rb";
+    let otherwise = [
+        "(status, label) IS NOT NULL",
+        "status = 'pending' AND 'true'",
+        "'1' IN (amount)",
+        "'t' = status IN ('a')",
+        "amount <> 9223372036854775808",
+        "code = 'pending'",
+        "kind = 'pending'",
+    ];
+    for condition in otherwise {
+        for source in [
+            migration(&format!("      t.check_constraint {condition:?}, name: \"form_check\"\n"), ""),
+            migration("", &format!("    add_check_constraint :exports, {condition:?}, name: \"form_check\"\n")),
+            migration("", &format!("    add_index :exports, \"lower(label)\", name: \"exports_form\", where: {condition:?}\n")),
+        ] {
+            let (schema, warnings, ddl) = ingest(&[(path, &source), ("config/database.yml", POSTGRES)]).unwrap_or_else(|error| panic!("{condition}: {error}"));
+            let exports = &schema.tables[&roundhouse::Symbol::from("exports")];
+            assert!(exports.check_constraints.is_empty() && exports.indexes.is_empty(), "{condition}: {exports:?}");
+            assert_eq!(warnings.iter().filter(|w| w.contains(&format!("`{condition}` on exports is left out"))).count(), 1, "{condition}: {warnings:#?}");
+            assert!(!ddl.contains(condition), "{condition}: {ddl}");
+            assert!(ingest(&[(path, &source)]).unwrap_err().contains("unsupported"), "{condition} unconfigured");
+            let (schema, _, _) = ingest(&[(path, &source), ("config/database.yml", SQLITE)]).unwrap_or_else(|error| panic!("{condition} on SQLite: {error}"));
+            let exports = &schema.tables[&roundhouse::Symbol::from("exports")];
+            let kept: Vec<_> = exports.check_constraints.iter().map(|c| c.expression.as_str()).chain(exports.indexes.iter().filter_map(|i| i.predicate.as_deref())).collect();
+            assert_eq!(kept, [condition], "{condition} on SQLite");
+        }
+    }
+    for condition in [
+        "length(label) > 3",
+        "coalesce(status, 'none') <> 'void'",
+        "amount BETWEEN 1 AND 5 OR amount IS NULL",
+        "status IN ('a', 'b') AND NOT label IS NULL",
+        "code IS NULL OR code = 'abc'",
+        "kind IS NOT NULL",
+        "(amount > 0) = (status = 'paid')",
+    ] {
+        let source = migration("", &format!("    add_check_constraint :exports, {condition:?}, name: \"form_check\"\n"));
+        for database in [Some(POSTGRES), None] {
+            let mut files = vec![(path, source.as_str())];
+            files.extend(database.map(|d| ("config/database.yml", d)));
+            let (schema, warnings, _) = ingest(&files).unwrap_or_else(|error| panic!("{condition} {database:?}: {error}"));
+            let checks = &schema.tables[&roundhouse::Symbol::from("exports")].check_constraints;
+            assert_eq!(checks.iter().map(|c| c.expression.as_str()).collect::<Vec<_>>(), [condition], "{database:?}");
+            assert!(warnings.is_empty(), "{condition}: {warnings:#?}");
+        }
+    }
+}
