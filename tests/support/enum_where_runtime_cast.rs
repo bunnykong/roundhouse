@@ -46,7 +46,8 @@ const WIDGET: &str = "class Widget < ApplicationRecord
 
   def self.literal_counts
     [where(status: :archived).count, where(status: \"archived\").count, where(status: 1).count,
-     where(status: [:draft, :archived]).count, where.not(status: :archived).count]
+     where(status: [:draft, :archived]).count, where.not(status: :archived).count,
+     where(status: %i[draft archived]).count]
   end
 end
 ";
@@ -64,7 +65,7 @@ got = [Widget.with_status(:archived), Widget.with_status("archived"), Widget.wit
        Widget.with_status([:draft, :archived]), Widget.without_status(:archived), Widget.without_status("archived")]
 raise "enum where: #{got.inspect}" unless got == [1, 1, 1, 2, 1, 1]
 literal = Widget.literal_counts
-raise "enum where literal: #{literal.inspect}" unless literal == [1, 1, 1, 2, 1]
+raise "enum where literal: #{literal.inspect}" unless literal == [1, 1, 1, 2, 1, 2]
 raise "find_by symbol" unless Widget.name_with_status(:archived) == "b"
 raise "find_by string" unless Widget.name_with_status("draft") == "a"
 raise "exists? symbol" unless Widget.status_exists?(:archived)

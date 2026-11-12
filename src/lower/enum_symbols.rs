@@ -360,11 +360,19 @@ fn rewrite_value(
     value: &mut Expr,
     mapping: &crate::det::HashMap<String, Literal>,
 ) {
-    if let ExprNode::Array { elements, .. } = &mut *value.node {
+    if let ExprNode::Array { elements, style } = &mut *value.node {
         let mut all_int = !elements.is_empty();
+        let mut any = false;
         for el in elements.iter_mut() {
             let rewrote = rewrite_label(el, mapping);
+            any |= rewrote.is_some();
             all_int &= rewrote.is_some_and(|l| matches!(l, Literal::Int { .. }));
+        }
+        // `%i[active banned]` holds stored values now, which `%i[0 2]`
+        // would render as the Symbols `:"0"` and `:"2"`: the brackets
+        // keep them Integers (or Strings).
+        if any && *style == crate::expr::ArrayStyle::PercentI {
+            *style = crate::expr::ArrayStyle::Brackets;
         }
         // The container's own type follows its elements: an `Array[Sym]`
         // stamped at ingest, left standing over Int elements, is the kind
