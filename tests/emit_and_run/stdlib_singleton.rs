@@ -1,5 +1,6 @@
 use roundhouse::build_target::BuildTarget;
 
+use super::emit_and_run;
 use super::stdlib_singleton_contract as contract;
 
 #[test]
@@ -18,14 +19,8 @@ fn the_spinel_emit_requires_singleton_where_a_class_includes_it() {
     assert!(registry.lines().any(|l| l.trim() == "require \"singleton\""), "{registry}");
 }
 
-/// Code behind `defined?(::Singleton)` runs without the library, so it
-/// asks for no require: not in the model that guards its references,
-/// and not in the runtime (ActiveSupport's `deep_dup` port guards its
-/// one), so a program that never includes Singleton does not load it.
-#[test]
-fn the_spinel_emit_writes_no_singleton_require_for_guarded_references() {
-    let (emitted, errors) = contract::guarded_app().emit(BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:#?}");
+/// Every `.rb` file of an emitted tree with a `require "singleton"` line.
+fn singleton_requires(emitted: &std::path::Path) -> Vec<String> {
     fn walk(dir: &std::path::Path, root: &std::path::Path, hits: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -39,7 +34,28 @@ fn the_spinel_emit_writes_no_singleton_require_for_guarded_references() {
         }
     }
     let mut hits = Vec::new();
-    walk(&emitted, &emitted, &mut hits);
+    walk(emitted, emitted, &mut hits);
+    hits
+}
+
+/// The runtime names `::Singleton` only behind `defined?(::Singleton)`
+/// (ActiveSupport's `deep_dup` port), code written to run without the
+/// library: a program that never includes Singleton does not load it.
+#[test]
+fn the_spinel_emit_of_an_app_without_singleton_requires_no_singleton() {
+    let (emitted, errors) = emit_and_run::real_blog().emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let hits = singleton_requires(&emitted);
+    assert!(hits.is_empty(), "{hits:#?}");
+}
+
+/// An app's own guarded references ask for no require either. (Analysis
+/// reports them as unsupported constants with or without the require;
+/// only the require is asserted here.)
+#[test]
+fn the_spinel_emit_writes_no_singleton_require_for_guarded_references() {
+    let (emitted, _errors) = contract::guarded_app().emit(BuildTarget::Spinel);
     assert!(emitted.join("app/models/keeper.rb").exists());
+    let hits = singleton_requires(&emitted);
     assert!(hits.is_empty(), "{hits:#?}");
 }
