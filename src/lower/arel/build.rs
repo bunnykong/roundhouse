@@ -705,6 +705,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                     Column {
                         name: Symbol::from("article_id"),
@@ -719,6 +720,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                     Column {
                         name: Symbol::from("body"),
@@ -733,6 +735,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                 ],
                 indexes: vec![],

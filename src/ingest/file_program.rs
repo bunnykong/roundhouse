@@ -172,11 +172,24 @@ fn program_items(
             if !opened.is_empty() {
                 items.push(ProgramItem::Opened(opened));
             }
+            let mut loads = Vec::new();
+            body_requires(&stmt, &[], file, list_dir, &span_of, &mut loads);
+            // A module's autoloads go ahead of its declaration: its body can read them as it loads (simple_form's
+            // `wrappers` reads `Wrappers::Leaf`), and registering one early is lazy. Not a class's: opening it ahead
+            // of the declaration would drop its superclass.
+            let modules_only: Vec<String> = nestings(&stmt)
+                .into_iter()
+                .filter(|chain| chain.iter().all(|(_, is_class)| !is_class))
+                .map(|chain| chain.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join("::"))
+                .collect();
+            let (early, late): (Vec<_>, Vec<_>) =
+                loads.into_iter().partition(|item| matches!(item, ProgramItem::Autoload { owner, .. } if modules_only.contains(owner)));
+            items.extend(early);
             if !names.is_empty() {
                 items.push(ProgramItem::Declared(names));
             }
-            // What the bodies require and autoload as they load, after them.
-            body_requires(&stmt, &[], file, list_dir, &span_of, &mut items);
+            // What the bodies require as they load, after them.
+            items.extend(late);
             continue;
         }
         // A constant rides with the file's classes (`carry_file_constants`).

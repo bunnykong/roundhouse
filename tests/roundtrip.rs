@@ -38,6 +38,7 @@ fn tiny_blog_round_trips() {
                     generated_int4_compatible: None,
                     array: false,
                     array_stored: false,
+                    unset_until_assigned: false,
                 },
                 Column {
                     name: Symbol::from("title"),
@@ -52,6 +53,7 @@ fn tiny_blog_round_trips() {
                     generated_int4_compatible: None,
                     array: false,
                     array_stored: false,
+                    unset_until_assigned: false,
                 },
             ],
             indexes: vec![],

@@ -364,6 +364,35 @@ fn emit_form_inline(
     //    (form_builder.rs::emit_form_builder_inline) — no runtime
     //    FormBuilder construction; the form.X calls inline directly
     //    to `<label>...`/`<input>...` HTML.
+    // A builder of another class (`builder: MoneyFormBuilder`) whose own methods the body calls: Rails' object, at
+    // request time, for those calls (`form.money_field :title`), as the lowering expands only the stock fields.
+    if let Some(builder) = custom_builder(args)
+        && calls_unexpanded(body, form_param_str)
+    {
+        // Rails' object name is the model's `param_key`, a String.
+        let object_name = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: comps.model_name.clone() } });
+        let template = send(Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("Base")] })), "new", Vec::new(), None, false);
+        let record = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: record_var.clone() });
+        // The form's own options, which Rails hands the builder (`layout: :horizontal` a builder reads).
+        let entries: Vec<(Expr, Expr)> = args
+            .iter()
+            .filter_map(|arg| match &*arg.node {
+                ExprNode::Hash { entries, .. } => Some(entries.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|(k, _)| !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "builder"))
+            .map(|(k, v)| (k.clone(), rewrite_helpers_in_expr(v, ctx)))
+            .collect();
+        let options = Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false });
+        out.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: Symbol::from(form_param_str) },
+                value: send(Some(builder), "new", vec![object_name, record, template, options], None, true),
+            },
+        ));
+    }
     let mut inner_ctx = ctx.with_locals([form_param_str.to_string()]);
     inner_ctx.form_records.push(FormBuilderBinding {
         form_param: form_param_str.to_string(),
@@ -1479,6 +1508,38 @@ pub(super) fn rewrite_errors_each_body(body: &Expr, var_name: &str) -> Expr {
 /// new-records, complex expressions). Used to seed
 /// `ctx.form_records` so FormBuilder method dispatch can resolve
 /// attribute lookups.
+/// The `builder:` a form names, when it is a class of its own.
+fn custom_builder(args: &[Expr]) -> Option<Expr> {
+    args.iter().find_map(|arg| {
+        let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+        entries.iter().find_map(|(k, v)| {
+            (matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "builder")
+                && matches!(&*v.node, ExprNode::Const { .. }))
+            .then(|| v.clone())
+        })
+    })
+}
+
+/// Whether the body calls a method of the builder the form lowering does not expand, or hands the builder to a call
+/// (`render_money(form)`), which may call one.
+fn calls_unexpanded(body: &Expr, form_param: &str) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, form_param: &str, found: &mut bool) {
+        let is_form = |e: &Expr| matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == form_param);
+        if let ExprNode::Send { recv, method, args, .. } = &*e.node
+            && (recv.as_ref().is_some_and(|r| is_form(r))
+                && method.as_str() != "object"
+                && crate::lower::classify_form_builder_method(method.as_str()).is_none()
+                || args.iter().any(is_form))
+        {
+            *found = true;
+        }
+        e.node.for_each_child(&mut |c| walk(c, form_param, found));
+    }
+    walk(body, form_param, &mut found);
+    found
+}
+
 fn find_kwarg_local_name(args: &[Expr]) -> Option<String> {
     for arg in args {
         let ExprNode::Hash { entries, .. } = &*arg.node else {
@@ -1683,6 +1744,7 @@ mod tests {
             store_readers: Default::default(),
             route_helper_names: Default::default(),
             app_helper_names: Default::default(),
+            view_context_helpers: Default::default(),
             direct_route_helpers: Default::default(),
             i18n: Default::default(),
             route_helper_arity: Default::default(),

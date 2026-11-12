@@ -250,6 +250,13 @@ pub(super) fn push_schema_methods(
         if model.enums.contains_key(&col.name) {
             methods.push(synth_enum_storage_writer(owner, col));
         }
+        if col.unset_until_assigned {
+            // Stored nilable at `<col>_raw`, as a temporal column's text:
+            // the raw pair (below, `synth_attr_writer`) is the slot, and
+            // `<col>=` assigns the column's own type to it.
+            methods.push(synth_raw_reader(owner, col));
+            methods.push(synth_unset_writer(owner, col));
+        }
         if col.array_stored {
             methods.push(synth_array_storage_writer(owner, col));
         }
@@ -1107,7 +1114,9 @@ fn col_storage_setter(col: &Column) -> Symbol {
 /// Unknown stored enum values remain intact; JSON text skips dump so
 /// already-serialized DB bytes are not double-encoded.
 fn hydration_setter(model: &Model, col: &Column) -> Symbol {
-    if col.array_stored {
+    if col.unset_until_assigned {
+        col_storage_setter(col)
+    } else if col.array_stored {
         array_storage_writer(col)
     } else if model.enums.contains_key(&col.name) {
         enum_storage_writer(col)
@@ -1316,6 +1325,25 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     } else if let Some((body, ret_ty)) = ColumnSlot::classify(col, model).coerced_reader() {
         // Temporal and JSON: the slot's read coercion, not the storage ivar.
         (body, ret_ty)
+    } else if col.unset_until_assigned {
+        // Held nilable for its presence check, read as the column's own
+        // type: an unassigned value reads 0, where Rails reads nil.
+        let col_ty = super::ty_of_column(&col.col_type);
+        let zero = match col_ty {
+            Ty::Float => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Float { value: 0.0 } }),
+            _ => Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: 0 } }),
+        };
+        let slot = with_ty(Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }), super::ty_of_column_slot(col));
+        (
+            with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BoolOp { op: BoolOpKind::Or, surface: BoolOpSurface::default(), left: slot, right: with_ty(zero, col_ty.clone()) },
+                ),
+                col_ty.clone(),
+            ),
+            col_ty,
+        )
     } else {
         // The slot type, not the bare column type: a nullable column
         // reads back nil until something sets it.
@@ -1340,7 +1368,9 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
         signature: Some(fn_sig(vec![], ret_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::AttributeReader,
+        // A column held unset reads through a body, not its slot: a
+        // method, so no target folds it into a field of the slot's name.
+        kind: if col.unset_until_assigned { AccessorKind::Method } else { AccessorKind::AttributeReader },
         is_async: false,
             mutates_self: false,
             block_param: None,
@@ -1363,9 +1393,11 @@ pub(crate) fn temporal_seam(col: &Column) -> (Ty, &'static str, &'static str) {
 /// seam can read/serialize the raw text honestly).
 fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
     let name = col_storage_name(col);
+    // Temporal text, or the nilable slot of a column held unset.
+    let ty = if col.unset_until_assigned { super::ty_of_column_slot(col) } else { Ty::Str };
     let body = with_ty(
         Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() }),
-        Ty::Str,
+        ty.clone(),
     );
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -1376,12 +1408,48 @@ fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: Some(fn_sig(vec![], Ty::Str)),
+        signature: Some(fn_sig(vec![], ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeReader,
         is_async: false,
         mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// `def <col>=(value)` for a column held nilable for its presence check
+/// (`Column::unset_until_assigned`): the column's own type, stored in
+/// the `<col>_raw` slot. A method, as `synth_temporal_writer` is, so
+/// per-target field collapsing keeps it apart from the slot.
+fn synth_unset_writer(owner: &ClassId, col: &Column) -> MethodDef {
+    let value_param = Symbol::from("value");
+    let value_ty = super::ty_of_column(&col.col_type);
+    let body = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: col_storage_name(col) },
+                value: with_ty(var_ref(value_param.clone()), value_ty.clone()),
+            },
+        ),
+        value_ty.clone(),
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from(format!("{}=", col.name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value_param.clone())],
+        body,
+        signature: Some(fn_sig(vec![(value_param, value_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
         block_param: None,
     }
 }
@@ -1635,6 +1703,11 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model, raw_inputs: b
 /// Internal enum hydration accepts the typed DB slot without assignment
 /// validation. This is a method, not an additional public attribute/field.
 fn synth_enum_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
+    synth_slot_writer(owner, col, enum_storage_writer(col))
+}
+
+/// A storage writer named `name`: the typed slot, assigned as given.
+fn synth_slot_writer(owner: &ClassId, col: &Column, name: Symbol) -> MethodDef {
     let value = Symbol::from("value");
     let slot_ty = super::ty_of_column_slot(col);
     let assign = Expr::new(Span::synthetic(), ExprNode::Assign {
@@ -1646,7 +1719,7 @@ fn synth_enum_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: Span::synthetic(),
-        name: enum_storage_writer(col),
+        name,
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(value.clone())],
         body: seq(vec![assign, nil_lit()]),

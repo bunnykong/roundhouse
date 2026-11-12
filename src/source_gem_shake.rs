@@ -706,6 +706,11 @@ impl<'a> Gems<'a> {
                 }
             }
         }
+        // A template runs as a method of `ActionView::Base`: what a gem mixes into it (`on_load(:action_view) { include
+        // SimpleForm::ActionViewExtensions::FormHelper }`) answers the template's receiverless calls.
+        if !app.views.is_empty() && app.library_classes.iter().any(|c| c.name.0.as_str() == "ActionView::Base") {
+            consts.push((None, "ActionView::Base".to_string()));
+        }
         // Not only the app's code: the stack builds each middleware (`Warden::Manager.new(app) { … }`) and calls it.
         for class in &app.gem_middlewares {
             consts.push((None, class.clone()));
@@ -1939,11 +1944,13 @@ pub(crate) fn shakes_source_gems(app: &App, target: crate::build_target::BuildTa
 pub(crate) fn compiled_on_the_ruby_family(app: &App) -> crate::det::HashSet<String> {
     let Some(lock) = app.gem_lock.as_ref() else { return Default::default() };
     let deps = |gem: &str| lock.spec_deps.get(gem).cloned().unwrap_or_default();
+    // Not railties alone: a gem on Rails' view or model stack (simple_form's `require 'action_view'`) would load the
+    // real framework beside the runtime's own `ActionView`/`ActiveModel`, which the emitted tree is instead.
     let needs_railties = |gem: &str| {
         let mut seen: crate::det::HashSet<String> = Default::default();
         let mut stack = vec![gem.to_string()];
         while let Some(g) = stack.pop() {
-            if g == "railties" {
+            if matches!(g.as_str(), "railties" | "actionpack" | "actionview" | "activemodel" | "activerecord" | "actionmailer" | "activejob" | "actiontext" | "activestorage") {
                 return true;
             }
             if seen.insert(g.clone()) {

@@ -1849,7 +1849,7 @@ broadcast had already gone out. `scripts/campfire-cable-walk` splices
 header. What this runtime does not have is the third option Rails
 actually uses: enqueue now, run elsewhere, later.
 
-### Queued jobs are serialized payloads, durable only under `:sidekiq`
+### Queued jobs are serialized payloads
 
 On the ruby, jruby and spinel lanes, a served app's `perform_later`
 queues an ActiveJob-format JSON payload: the `job.serialize` hash of
@@ -1880,7 +1880,7 @@ evaluate, at run time) gets no wrapper, and each call to its
 
 **What is still missing.**
 
-- **Durability, unless the app is on Sidekiq.** By default the payloads
+- **Durability requires a durable adapter.** By default the payloads
   sit in a process-local Array. Nothing is retried (`retry_on` is
   inert), nothing is scheduled (`set(wait:)` is dropped), and nothing
   survives a restart. An app whose `ApplicationJob` sets
@@ -1916,7 +1916,14 @@ evaluate, at run time) gets no wrapper, and each call to its
   (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
   job carries `"retry":true`, or the job's literal `sidekiq_options`
   (`retry`, `retry_queue`, `retry_for`, `dead`), where Sidekiq writes
-  them. TLS (`rediss://`) and per-job adapters are still missing.
+  them. TLS (`rediss://`) and per-job durable adapters are still missing.
+  A literal Symbol or String `inline`/`test` setter on the exact job class
+  selects immediate/held dispatch, including that class's reopenings.
+  This exemption does not resolve inherited, constant, computed or runtime
+  adapter changes. It models dispatch, not Rails' inline/test serialization:
+  an Object argument can still execute/be held where Rails raises SerializationError.
+  An app carrying Solid Queue's record models uses its SQL runner:
+  payloads go to `solid_queue_jobs`, and the drain claims those records.
 - **The worker role has no heartbeat.** The same build runs the pushed
   jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
   a Sidekiq 8.1 server process with BasicFetch
@@ -1967,7 +1974,16 @@ evaluate, at run time) gets no wrapper, and each call to its
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
   `ResticJob`, `WalCheckpointJob` and `MastodonSyncListJob` are the
-  corpus cases.
+  corpus cases. Under `:sidekiq` or Solid Queue's SQL runner, this is
+  an error instead: a closure cannot reach the durable store. It names
+  the job and unsupported payload at the enqueue call or a literal
+  recurring task's class declaration. Under SQL-backed Solid Queue an
+  unused enqueue wrapper, including a `perform_now`-only job, needs no
+  durable payload. Sidekiq still refuses it at the job declaration.
+  Omitted default arguments and mixed primitive types at one argument
+  position are also refused: the existing payload writer cannot encode
+  those shapes, although Rails can. The in-process adapter keeps its
+  closure behavior. No new serializers are supplied here.
 - **One queue in process.** `queue_name` is recorded, but every entry
   drains in arrival order. Under `:sidekiq` it names the Redis queue.
 - **The test adapter keeps closures.** `assert_enqueued_with` still

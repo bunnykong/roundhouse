@@ -112,6 +112,17 @@ class SafeString < String
   def to_s
     self
   end
+
+  # Rails' `SafeBuffer#safe_concat`: appended as it is, the buffer still safe.
+  def safe_concat(value)
+    concat(value.to_s)
+  end
+
+  # Rails' `SafeBuffer#+`: still safe, the other side escaped unless it is safe too (a builder's `label + text_field`).
+  def +(other)
+    return String.new(self) + other.to_s unless html_safe?
+    SafeString.new(String.new(self) + ActionView::ViewHelpers.html_escape(other))
+  end
 end
 
 class String
@@ -352,6 +363,135 @@ unless Object.method_defined?(:try)
 
     def try!(*)
       nil
+    end
+  end
+end
+
+# ActiveSupport's `Class#class_attribute` (core_ext/class/attribute.rb), for a call the class body does not write
+# itself, which the ingest lowers: a gem's `self.extended(base)` hook's `base.class_attribute :mappings`.
+unless Class.method_defined?(:class_attribute)
+  class Class
+    def class_attribute(*attrs, instance_accessor: true, instance_reader: instance_accessor, instance_writer: instance_accessor, instance_predicate: true, default: nil)
+      attrs.each do |name|
+        ivar = :"@#{name}"
+        singleton_class.send(:redefine_class_attribute, name, default)
+        singleton_class.define_method(:"#{name}=") do |value|
+          singleton_class.send(:redefine_class_attribute, name, value)
+          value
+        end
+        singleton_class.define_method(:"#{name}?") { !!public_send(name) } if instance_predicate
+        if instance_reader
+          define_method(name) { instance_variable_defined?(ivar) ? instance_variable_get(ivar) : self.class.public_send(name) }
+          define_method(:"#{name}?") { !!public_send(name) } if instance_predicate
+        end
+        define_method(:"#{name}=") { |value| instance_variable_set(ivar, value) } if instance_writer
+      end
+    end
+  end
+
+  class Module
+    private
+
+    # Not `define_method` over the old one: Ruby warns of each redefinition under -w, as Rails silences it.
+    def redefine_class_attribute(name, value)
+      remove_method(name) if method_defined?(name, false) || private_method_defined?(name, false)
+      define_method(name) { value }
+    end
+  end
+end
+
+# ActiveSupport's String inflections and Hash/Array extensions, for a receiver the analysis did not type, which the
+# lowering would otherwise rewrite to the typed runtime's (`ActiveSupport.camelize(s)`): a gem's own code, such as
+# simple_form's `options.reverse_merge!(…)`. Each only where ActiveSupport itself has not defined it.
+class String
+  unless method_defined?(:camelize)
+    def camelize(first_letter = :upper)
+      s = sub(/^[a-z\d]*/) { |m| first_letter == :lower ? m : m.capitalize }
+      s.gsub(%r{(?:_|(/))([a-z\d]*)}i) { "#{$1}#{$2.capitalize}" }.gsub("/", "::")
+    end
+  end
+
+  unless method_defined?(:underscore)
+    def underscore
+      return dup unless match?(/[A-Z-]|::/)
+      gsub("::", "/").gsub(/([A-Z\d]+)([A-Z][a-z])/, '\1_\2').gsub(/([a-z\d])([A-Z])/, '\1_\2').tr("-", "_").downcase
+    end
+  end
+
+  unless method_defined?(:humanize)
+    def humanize(capitalize: true, keep_id_suffix: false)
+      s = tr("_", " ").lstrip
+      s = s.delete_suffix(" id") unless keep_id_suffix
+      s = s.downcase
+      capitalize ? s.sub(/\A\w/) { |m| m.upcase } : s
+    end
+  end
+
+  unless method_defined?(:demodulize)
+    def demodulize
+      (i = rindex("::")) ? self[(i + 2)..] : dup
+    end
+  end
+
+  unless method_defined?(:constantize)
+    def constantize
+      Object.const_get(self)
+    end
+  end
+end
+
+class Hash
+  unless method_defined?(:reverse_merge)
+    def reverse_merge(other_hash)
+      other_hash.merge(self)
+    end
+
+    def reverse_merge!(other_hash)
+      replace(reverse_merge(other_hash))
+    end
+    alias_method :with_defaults, :reverse_merge
+    alias_method :with_defaults!, :reverse_merge!
+  end
+
+  unless method_defined?(:deep_merge)
+    def deep_merge(other_hash, &block)
+      dup.deep_merge!(other_hash, &block)
+    end
+
+    def deep_merge!(other_hash, &block)
+      merge!(other_hash) do |key, this_val, other_val|
+        if this_val.is_a?(Hash) && other_val.is_a?(Hash)
+          this_val.deep_merge(other_val, &block)
+        elsif block
+          block.call(key, this_val, other_val)
+        else
+          other_val
+        end
+      end
+    end
+  end
+
+  unless method_defined?(:stringify_keys)
+    def stringify_keys
+      transform_keys(&:to_s)
+    end
+
+    def symbolize_keys
+      transform_keys { |key| key.to_sym rescue key }
+    end
+  end
+
+  unless method_defined?(:extractable_options?)
+    def extractable_options?
+      instance_of?(Hash)
+    end
+  end
+end
+
+class Array
+  unless method_defined?(:extract_options!)
+    def extract_options!
+      last.is_a?(Hash) && last.extractable_options? ? pop : {}
     end
   end
 end

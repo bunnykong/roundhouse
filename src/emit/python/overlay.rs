@@ -433,8 +433,12 @@ fn emit_fixtures(
 ) -> Result<String, String> {
     let mut body = String::new();
     for lc in fixtures {
+        let mut lc = lc.clone();
+        for m in &mut lc.methods {
+            call_method_writers(&mut m.body, models);
+        }
         body.push('\n');
-        body.push_str(&emit_library_class(lc)?);
+        body.push_str(&emit_library_class(&lc)?);
     }
     let mut out = String::from(HEADER);
     out.push_str(&stdlib_imports(&body));
@@ -454,6 +458,24 @@ fn emit_fixtures(
         ));
     }
     Ok(out)
+}
+
+/// A fixture's `record.x = v` where the models define `x=` only as a
+/// method (a column's own-typed writer over its `_raw` slot): the call
+/// the analyzer marks in an analyzed body, which a fixture body is not,
+/// so it reaches `x_set` rather than shadowing it with a field.
+fn call_method_writers(expr: &mut crate::expr::Expr, models: &[LibraryClass]) {
+    use crate::dialect::AccessorKind;
+    expr.node.for_each_child_mut(&mut |c| call_method_writers(c, models));
+    if let crate::expr::ExprNode::Send { recv: Some(recv), method, args, parenthesized, .. } = &mut *expr.node
+        && args.len() == 1
+        && method.as_str().ends_with('=')
+        && let Some(crate::ty::Ty::Class { id, .. }) = &recv.ty
+        && let Some(model) = models.iter().find(|lc| lc.name == *id)
+        && model.methods.iter().any(|m| m.name == *method && m.kind == AccessorKind::Method)
+    {
+        *parenthesized = true;
+    }
 }
 
 /// One emitted unittest file per test-module LC —

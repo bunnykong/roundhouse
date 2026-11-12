@@ -2281,7 +2281,22 @@ impl DeclBody {
             _ => false,
         });
         // Not `include`: an ancestor's `@@x` is shared with this body's. An extended module's methods read their own (rolify's `extend Configure` beside `@@resource_types = []`).
+        let autoload_only = |e: &Expr| {
+            let statements: Vec<&Expr> = match &*e.node {
+                ExprNode::Seq { exprs } => exprs.iter().collect(),
+                _ => vec![e],
+            };
+            statements.iter().all(|s| matches!(&*s.node, ExprNode::Send { recv: None, method, block: None, .. } if method.as_str() == "autoload"))
+        };
+        // A call of the body's own class method (simple_form's `wrappers … do |b| … end` at its module's end) is replayed
+        // where it stands, and the emitter then writes the body in source order around it.
+        let own_class_method = |name: &Symbol| self.methods.iter().any(|m| m.receiver == MethodReceiver::Class && m.name == *name);
         let mixins_only = self.unknown_calls.iter().all(|call| match &*call.node {
+            ExprNode::Send { recv: None, method, .. } if own_class_method(method) => true,
+            // `eager_autoload do autoload :X end` (ActiveSupport::Autoload): the names it registers read no class variable.
+            ExprNode::Send { recv: None, method, args, block: Some(block), .. } if method.as_str() == "eager_autoload" && args.is_empty() => {
+                matches!(&*block.node, ExprNode::Lambda { params, body, .. } if params.is_empty() && autoload_only(body))
+            }
             ExprNode::Send { recv: None, method, args, block: None, .. } => {
                 (method.as_str() == "extend"
                     && !args.is_empty()
@@ -2289,6 +2304,8 @@ impl DeclBody {
                     // A visibility declaration over names reads no class variable.
                     || (method.as_str() == "autoload"
                         && matches!(args.as_slice(), [name, path] if matches!(&*name.node, ExprNode::Lit { value: Literal::Sym { .. } }) && matches!(&*path.node, ExprNode::Lit { value: Literal::Str { .. } })))
+                    // ActiveSupport::Autoload's `autoload :Helpers`, whose path is the name's underscored file.
+                    || (method.as_str() == "autoload" && matches!(args.as_slice(), [name] if matches!(&*name.node, ExprNode::Lit { value: Literal::Sym { .. } })))
                     || (matches!(method.as_str(), "private_constant" | "public_constant" | "private_class_method" | "public_class_method")
                         && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })))
             }
@@ -2342,6 +2359,11 @@ fn runs_own_writer(expr: &Expr, methods: &[crate::dialect::MethodDef]) -> bool {
 /// local or method of the body's own.
 fn is_order_safe_value(e: &Expr) -> bool {
     match &*e.node {
+        // A block's body runs when it is called, not at the write: only a local it closes over is read here.
+        ExprNode::Lambda { .. } => closes_over_nothing(e),
+        ExprNode::Send { recv: None, method, args, block: Some(block), .. } if matches!(method.as_str(), "proc" | "lambda") && args.is_empty() => {
+            closes_over_nothing(block)
+        }
         ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef => false,
         ExprNode::Send { recv: None, .. } => false,
         ExprNode::Send { block: Some(_), .. } => false,
@@ -2351,6 +2373,42 @@ fn is_order_safe_value(e: &Expr) -> bool {
             ok
         }
     }
+}
+
+/// Whether a block reads no local but its own parameters (and its nested blocks' own).
+fn closes_over_nothing(e: &Expr) -> bool {
+    fn free(e: &Expr, bound: &mut Vec<Symbol>) -> bool {
+        match &*e.node {
+            ExprNode::Var { name, .. } => return bound.contains(name),
+            ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } => {
+                let ok = free(value, bound);
+                bound.push(name.clone());
+                return ok;
+            }
+            ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+                let depth = bound.len();
+                bound.extend(params.iter().cloned());
+                bound.extend(rest_param.iter().cloned());
+                // A default reads what is bound before it (`->(label = prefix) { … }` closes over `prefix`).
+                let mut ok = true;
+                for param in extra_params {
+                    if let Some(default) = &param.default {
+                        ok = ok && free(default, bound);
+                    }
+                    bound.push(param.name.clone());
+                }
+                bound.extend(block_param.iter().cloned());
+                let ok = ok && free(body, bound);
+                bound.truncate(depth);
+                return ok;
+            }
+            _ => {}
+        }
+        let mut ok = true;
+        e.node.for_each_child(&mut |c| ok = ok && free(c, bound));
+        ok
+    }
+    free(e, &mut Vec::new())
 }
 
 /// A literal (or an array/hash of literals): a value that reads no other

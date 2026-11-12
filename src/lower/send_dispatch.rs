@@ -897,7 +897,10 @@ fn rewrite(
     if let ExprNode::Send { recv: Some(r), method, args, block: Some(block), .. } = &mut *e.node {
         // The block parameter that takes each element: `each`'s only one,
         // `reduce`'s second (the first is the memo, with or without an
-        // initial value).
+        // initial value). Without an initial value, `reduce` hands the
+        // first element over as the memo, so the element parameter never
+        // holds it and that name's arm is never taken: harmless, since
+        // the arm only adds a branch that doesn't run.
         let element = match method.as_str() {
             "each" | "map" | "flat_map" if args.is_empty() => Some(0),
             "reduce" | "inject" if args.len() <= 1 => Some(1),
@@ -1005,6 +1008,11 @@ fn rewrite(
     // evaluated once; what could change is ORDER, and a plain variable
     // scrutinee, or an interpolation of literals and variables, has no
     // effect to reorder against. `:"#{status}_x"` is that String's Symbol.
+    // The interpolation case is safe only because `enumerate_names`
+    // accepts no other pieces: literals and walk parameters bound to
+    // literal elements. If it ever accepts a piece with an effect (a call,
+    // say), a receiver that isn't duplicable must stop passing here, or
+    // the case would evaluate that piece before the receiver.
     let symbol = matches!(&*target.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
         if method.as_str() == "to_sym" && args.is_empty() && matches!(&*r.node, ExprNode::StringInterp { .. }));
     let interpolated = symbol || matches!(&*target.node, ExprNode::StringInterp { .. });

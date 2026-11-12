@@ -489,7 +489,12 @@ impl<'a> BodyTyper<'a> {
             // not model) must not cost the app its own builder methods.
             if let Some(name) = params.first() {
                 let model = Self::form_model_ty(method, args);
-                let builder = Self::form_builder_id(args);
+                // simple_form's own builder, which its `simple_form_for` passes `form_for` (`options[:builder] ||=
+                // SimpleForm::FormBuilder`), when the gem's source is the app's.
+                let builder = Self::form_builder_id(args).or_else(|| {
+                    let own = ClassId(Symbol::from("SimpleForm::FormBuilder"));
+                    (method.as_str() == "simple_form_for" && self.classes().contains_key(&own)).then_some(own)
+                });
                 if model.is_some() || builder.is_some() {
                     let id = builder.unwrap_or_else(|| {
                         ClassId(Symbol::from("ActionView::Helpers::FormBuilder"))

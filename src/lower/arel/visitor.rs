@@ -1223,6 +1223,19 @@ fn push_predicate_segments(
             segments.push(lit_str(format!("{} = ", crate::naming::sql_ident(col.column.as_str()))));
             push_value_segment(segments, val, param, binds);
         }
+        Predicate::NullSafeEq(col, val) => {
+            segments.push(lit_str(format!("{} {} ", crate::naming::sql_ident(col.column.as_str()), Dialect::current().null_safe_eq())));
+            push_value_segment(segments, val, param, binds);
+        }
+        Predicate::NotEq(col, val) => {
+            segments.push(lit_str(format!("{} != ", crate::naming::sql_ident(col.column.as_str()))));
+            push_value_segment(segments, val, param, binds);
+        }
+        Predicate::LowerEq(col, val) => {
+            segments.push(lit_str(format!("LOWER({}) = LOWER(", crate::naming::sql_ident(col.column.as_str()))));
+            push_value_segment(segments, val, param, binds);
+            segments.push(lit_str(")".to_string()));
+        }
         Predicate::And(l, r) => {
             push_predicate_segments(segments, l, param, binds, read_id);
             segments.push(lit_str(" AND ".to_string()));
@@ -1513,6 +1526,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                     Column {
                         name: Symbol::from("title"),
@@ -1527,6 +1541,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                 ],
                 indexes: vec![],

@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -108,6 +109,7 @@ SPINEL_TESTS = [
     "spinel_db_contract",
     "generated_columns_spinel",
     "schema_constraints",
+    "schema_keys",
     "schema_default_expressions",
     "postgres_json_types_spinel",
     "array_column_storage_spinel",
@@ -134,6 +136,7 @@ SPINEL_TESTS = [
     "kernel_method_shadowing",
     "jbuilder_array_value_spinel",
     "active_job_payload",
+    "solid_queue_durability",
     "render_json_encoder_spinel",
     "url_helpers_absolute_spinel",
     "jbuilder_extract_attributes_spinel",
@@ -652,6 +655,12 @@ def native_coverage(path):
         "src/lower/model_to_library/schema.rs", "src/session.rs", "src/project.rs",
     } or path.startswith("tests/support/schema_defaults_"):
         suites.add("schema_default_expressions")
+    if path in {
+        "tests/schema_keys.rs", "src/schema.rs", "src/ingest/schema.rs", "src/emit/shared/schema_sql.rs",
+        "src/emit/roda.rs", "src/ingest/sequel_model.rs", "src/analyze/graphql.rs",
+        "src/ingest/sequel_migration.rs", "src/ingest/structure_sql.rs", "src/ingest/roda_app.rs",
+    } or path.startswith("tests/support/schema_keys_"):
+        suites.add("schema_keys")
     if path in JSON_TYPES_SPINEL_INPUTS:
         suites.add("postgres_json_types_spinel")
     if path in APP_REOPENS_INPUTS:
@@ -768,6 +777,9 @@ def native_coverage(path):
         suites.update(owned_tests)
     if path in ACTIVE_JOB_PAYLOAD_INPUTS or path.startswith("tests/active_job_payload/"):
         suites.add("active_job_payload")
+    if path in {"src/ingest/app.rs", "src/lower/job_payload.rs", "src/lower/job_class_side.rs",
+                "runtime/spinel/solid_queue_runner.rb", "tests/support/solid_queue_worker.rs"} or path.startswith("tests/solid_queue_durability/"):
+        suites.add("solid_queue_durability")
     if path in SIDEKIQ_PUSH_INPUTS or path.startswith("tests/sidekiq_push/"):
         suites.add("sidekiq_push")
     if path in SIDEKIQ_WORKER_INPUTS or path.startswith("tests/sidekiq_worker/"):
@@ -1155,9 +1167,29 @@ def record_timing(kind, name, seconds, ok, timed_out=False):
             f.write(json.dumps(record) + "\n")
 
 
+def deadline_left():
+    """Seconds until CI_SPINEL_DEADLINE (epoch seconds), or None when no deadline is set."""
+    try:
+        return int(os.environ["CI_SPINEL_DEADLINE"]) - time.time()
+    except (KeyError, ValueError):
+        return None
+
+
 def run_timed(kind, name, command, charged=0):
     start = time.monotonic()
-    status = subprocess.run(command).returncode
+    left = deadline_left()
+    if left is not None and left <= 0:
+        print(f"::error::{name} not started: past this shard's deadline")
+        return 124
+    # Its own process group: killing the test alone would leave its spinel and cc children on the CPUs.
+    proc = subprocess.Popen(command, start_new_session=left is not None)
+    try:
+        status = proc.wait(timeout=left)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        print(f"::error::{name} stopped at this shard's deadline")
+        status = 124
     # 124 is timeout(1) stopping the command: its seconds are still worth recording.
     record_timing(kind, name, time.monotonic() - start + charged, status == 0, status == 124)
     return status

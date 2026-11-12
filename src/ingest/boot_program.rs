@@ -109,11 +109,9 @@ pub(super) fn build<V: Vfs + ?Sized>(
             let start = node.location().start_offset() as u32;
             // `Devise.setup do |config| … end` of a gem compiled from source: its `setup` is `yield self`, so the
             // block's statements are writes on the module, run where the initializer runs them.
-            if !engine && let Some(statements) = yielded_self_setup(&node, app, &file_name, &wanted) {
-                for (inner, expr) in statements {
-                    app.boot_program.push(expr);
-                    taken.insert((path.clone(), inner));
-                }
+            if !engine && let Some((starts, exprs)) = yielded_self_setup(&node, app, &file_name, &wanted) {
+                app.boot_program.extend(exprs);
+                taken.extend(starts.into_iter().map(|inner| (path.clone(), inner)));
                 continue;
             }
             if !wanted.iter().any(|(_, s)| *s == start) || is_hook(&node) {
@@ -178,7 +176,9 @@ pub(super) fn build<V: Vfs + ?Sized>(
 
 /// The statements of `Mod.setup do |config| … end`, the ledger's to take, with `config` read as `Mod`, where the
 /// app's `Mod.setup` is `yield self`. A `require` among them stays out: the gem's files are loaded already.
-fn yielded_self_setup(node: &ruby_prism::Node<'_>, app: &App, file: &str, wanted: &[(String, u32)]) -> Option<Vec<(u32, crate::expr::Expr)>> {
+/// A `setup` that does more before it yields (simple_form's `@@configured = true`) is called as written, the block
+/// with it, when the ledger takes each statement of the block.
+fn yielded_self_setup(node: &ruby_prism::Node<'_>, app: &App, file: &str, wanted: &[(String, u32)]) -> Option<(Vec<u32>, Vec<crate::expr::Expr>)> {
     use crate::expr::{Expr, ExprNode};
     let call = node.as_call_node()?;
     if call.name().as_slice() != b"setup" || call.arguments().is_some() {
@@ -186,20 +186,32 @@ fn yielded_self_setup(node: &ruby_prism::Node<'_>, app: &App, file: &str, wanted
     }
     let path = super::util::constant_path_of(&call.receiver()?)?;
     let name = path.join("::");
-    let yields_self = app.library_classes.iter().filter(|c| c.name.0.as_str() == name).flat_map(|c| c.methods.iter()).any(|m| {
-        m.receiver == MethodReceiver::Class
-            && m.name.as_str() == "setup"
-            && m.params.is_empty()
-            && match &*m.body.node {
-                ExprNode::Yield { args } => matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::SelfRef)),
-                ExprNode::Seq { exprs } => matches!(exprs.as_slice(), [e] if matches!(&*e.node, ExprNode::Yield { args } if matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::SelfRef)))),
-                _ => false,
-            }
-    });
-    if !yields_self {
-        return None;
-    }
+    let yields_self = |e: &Expr| matches!(&*e.node, ExprNode::Yield { args } if matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::SelfRef)));
+    // `Some(true)`: the body is the yield alone; `Some(false)`: statements come before it.
+    let shape = app.library_classes.iter().filter(|c| c.name.0.as_str() == name).flat_map(|c| c.methods.iter()).find_map(|m| {
+        if m.receiver != MethodReceiver::Class || m.name.as_str() != "setup" || !m.params.is_empty() {
+            return None;
+        }
+        match &*m.body.node {
+            ExprNode::Seq { exprs } => match exprs.as_slice() {
+                [e] if yields_self(e) => Some(true),
+                [_, .., last] if yields_self(last) => Some(false),
+                _ => None,
+            },
+            _ if yields_self(&m.body) => Some(true),
+            _ => None,
+        }
+    })?;
     let block = call.block()?.as_block_node()?;
+    if !shape {
+        let statements = block.body()?.as_statements_node()?;
+        let starts: Vec<u32> = statements.body().iter().map(|stmt| stmt.location().start_offset() as u32).collect();
+        if !starts.iter().all(|start| wanted.iter().any(|(_, s)| s == start)) {
+            return None;
+        }
+        let (read, _) = super::prism::scope(|| super::survey::without_recording(|| super::expr::ingest_expr(node, file)));
+        return Some((starts, vec![read.ok()?]));
+    }
     let param = block.parameters()?.as_block_parameters_node()?.parameters()?;
     let requireds: Vec<_> = param.requireds().iter().collect();
     let [required] = requireds.as_slice() else { return None };
@@ -227,7 +239,7 @@ fn yielded_self_setup(node: &ruby_prism::Node<'_>, app: &App, file: &str, wanted
         });
         out.push((start, written));
     }
-    Some(out)
+    Some(out.into_iter().unzip())
 }
 
 /// The constant a ledger target calls or writes: `Rack::Attack` of

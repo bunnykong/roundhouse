@@ -29,7 +29,7 @@
 use ruby_prism::Node;
 
 use crate::schema::{
-    Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table,
+    Column, ColumnType, Deferrable, ForeignKey, Index, ReferentialAction, Schema, Table,
 };
 use crate::{Symbol, TableRef};
 
@@ -38,7 +38,9 @@ use super::{IngestError, IngestResult};
 
 /// Fold one Sequel migration file into `schema`. Files are applied in
 /// filename order by the caller (Sequel's integer prefixes sort the
-/// same way Rails' timestamps do).
+/// same way Rails' timestamps do). A `foreign_key` without `key:` whose
+/// target a later file creates has no target columns until that file is
+/// folded; the caller settles the rest once every file is folded.
 pub fn ingest_sequel_migration(
     source: &[u8],
     file: &str,
@@ -118,11 +120,15 @@ fn ingest_table_stmt(
             if let Some(body) =
                 call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body())
             {
-                for col_stmt in flatten_statements(body) {
+                let mut statements = flatten_statements(body);
+                statements.sort_by_key(|n| n.as_call_node().is_some_and(|c| matches!(constant_id_str(&c.name()), "primary_key" | "foreign_key")
+                    && c.arguments().is_some_and(|a| a.arguments().iter().next().is_some_and(|n| n.as_array_node().is_some()))));
+                for col_stmt in statements {
                     ingest_column_stmt(&col_stmt, file, &mut table)?;
                 }
             }
             schema.tables.insert(Symbol::from(name.as_str()), table);
+            resolve_implicit_keys(schema, file)?;
         }
         // alter_table / drop_table land when a fixture forces them.
         other => {
@@ -134,6 +140,46 @@ fn ingest_table_stmt(
                 return Err(err);
             }
             super::survey::record(&err);
+        }
+    }
+    Ok(())
+}
+
+/// Sequel's `foreign_key` without `key:` references the target's primary
+/// key, which SQLite reads when rows are written, so the target may come
+/// from a later migration. Resolve each such key whose target is folded.
+fn resolve_implicit_keys(schema: &mut Schema, file: &str) -> IngestResult<()> {
+    let primary_key = |t: &Table| if t.primary_key_columns.is_empty() {
+        t.columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect()
+    } else {
+        t.primary_key_columns.clone()
+    };
+    let targets: std::collections::HashMap<Symbol, Vec<Symbol>> = schema.tables.values()
+        .flat_map(|t| t.foreign_keys.iter().filter(|fk| fk.to_columns.is_empty()))
+        .filter_map(|fk| schema.tables.get(&fk.to_table.0).map(|t| (fk.to_table.0.clone(), primary_key(t))))
+        .collect();
+    for table in schema.tables.values_mut() {
+        for fk in table.foreign_keys.iter_mut().filter(|fk| fk.to_columns.is_empty()) {
+            let Some(keys) = targets.get(&fk.to_table.0) else { continue };
+            if keys.is_empty() || keys.len() != fk.from_columns.len() {
+                return Err(IngestError::Unsupported { file: file.into(), message: format!("Sequel foreign key from {} requires a primary key on {} that matches its columns", table.name, fk.to_table.0) });
+            }
+            fk.to_columns = keys.clone();
+        }
+    }
+    Ok(())
+}
+
+/// Once every migration is folded, a one-column key without `key:` whose
+/// target no migration creates references `id`, the conventional key. A
+/// composite one has no such default and is refused.
+pub(super) fn settle_absent_targets(schema: &mut Schema, file: &str) -> IngestResult<()> {
+    for table in schema.tables.values_mut() {
+        for fk in table.foreign_keys.iter_mut().filter(|fk| fk.to_columns.is_empty()) {
+            if fk.from_columns.len() != 1 {
+                return Err(IngestError::Unsupported { file: file.into(), message: format!("Sequel foreign key from {} needs key: because no migration creates {}", table.name, fk.to_table.0) });
+            }
+            fk.to_columns = vec![Symbol::from("id")];
         }
     }
     Ok(())
@@ -154,32 +200,38 @@ fn ingest_column_stmt(
         .map(|a| a.arguments().iter().collect())
         .unwrap_or_default();
     let col_name = args.first().and_then(symbol_value);
-    let opts = args.iter().find_map(|a| a.as_keyword_hash_node());
+    let opts = args.last().and_then(|n| n.as_keyword_hash_node().map(|h| h.elements())
+        .or_else(|| n.as_hash_node().map(|h| h.elements())));
 
     // Kwarg readers over the trailing options hash.
-    let opt_bool = |key: &str| -> Option<bool> {
-        let kh = opts.as_ref()?;
-        for el in kh.elements().iter() {
-            let Some(assoc) = el.as_assoc_node() else { continue };
-            if symbol_value(&assoc.key()).as_deref() == Some(key) {
-                return bool_value(&assoc.value());
-            }
+    let opt_value = |key: &str| opts.as_ref()?.iter().filter_map(|el| {
+        let assoc = el.as_assoc_node()?;
+        (symbol_value(&assoc.key()).as_deref() == Some(key)).then(|| assoc.value())
+    }).last();
+    let opt_bool = |key: &str| opt_value(key).as_ref().and_then(bool_value);
+    let opt_sym = |key: &str| opt_value(key).as_ref().and_then(symbol_value);
+    let gap = || IngestError::Unsupported { file: file.into(), message: "Sequel key requires literal columns, target and supported options".into() };
+    // Array (composite) keys accept only the literal options read below.
+    // Scalar keys ignore the options they don't read, such as `type:` and `index:`.
+    if matches!(method.as_str(), "primary_key" | "foreign_key") && args.first().is_some_and(|n| n.as_array_node().is_some()) {
+        let offset = if method == "primary_key" { 1 } else { 2 };
+        if call.block().is_some() || call.receiver().is_some_and(|r| r.as_self_node().is_none()) || args.len() > offset + 1 || args.iter().skip(offset).any(|n| n.as_keyword_hash_node().is_none() && n.as_hash_node().is_none())
+            || opts.as_ref().is_some_and(|h| h.iter().any(|n| n.as_assoc_node().is_none_or(|a|
+                method == "primary_key" || !matches!(symbol_value(&a.key()).as_deref(), Some("key" | "deferrable" | "null" | "on_delete" | "on_update"))))) {
+            return Err(gap());
         }
-        None
-    };
-    let opt_sym = |key: &str| -> Option<String> {
-        let kh = opts.as_ref()?;
-        for el in kh.elements().iter() {
-            let Some(assoc) = el.as_assoc_node() else { continue };
-            if symbol_value(&assoc.key()).as_deref() == Some(key) {
-                return symbol_value(&assoc.value());
-            }
-        }
-        None
     };
 
     match method.as_str() {
         "primary_key" => {
+            if let Some(array) = args.first().and_then(|n| n.as_array_node()) {
+                table.primary_key_columns = key_columns(&args[0], true).ok_or_else(gap)?;
+                if table.primary_key_columns.iter().any(|n| !table.columns.iter().any(|c| c.name == *n)) { return Err(gap()); }
+                for name in array.elements().iter().filter_map(|n| symbol_value(&n)) {
+                    table.columns.iter_mut().find(|c| c.name.as_str() == name).unwrap().nullable = false;
+                }
+                return Ok(());
+            }
             let name = col_name.ok_or_else(|| IngestError::Unsupported {
                 file: file.into(),
                 message: "primary_key without a column name".into(),
@@ -197,20 +249,28 @@ fn ingest_column_stmt(
                 generated_int4_compatible: None,
                 array: false,
                 array_stored: false,
+                unset_until_assigned: false,
             });
         }
         "foreign_key" => {
             // `foreign_key :article_id, :articles, null: false, on_delete: :cascade`
-            let name = col_name.ok_or_else(|| IngestError::Unsupported {
-                file: file.into(),
-                message: "foreign_key without a column name".into(),
-            })?;
-            let target = args.get(1).and_then(symbol_value).ok_or_else(|| {
-                IngestError::Unsupported {
-                    file: file.into(),
-                    message: format!("foreign_key :{name} without a target table"),
-                }
-            })?;
+            let from_columns = key_columns(args.first().ok_or_else(gap)?, false).ok_or_else(gap)?;
+            let target = args.get(1).and_then(symbol_value).ok_or_else(gap)?;
+            let to_columns = opt_value("key").map(|n| key_columns(&n, false).ok_or_else(gap)).transpose()?.unwrap_or_default();
+            if (!to_columns.is_empty() && from_columns.len() != to_columns.len()) || (col_name.is_none() && from_columns.iter().any(|n| !table.columns.iter().any(|c| c.name == *n))) { return Err(gap()); }
+            let deferrable = match opt_value("deferrable").filter(|n| bool_value(n) != Some(false) && n.as_nil_node().is_none()) {
+                None => None,
+                Some(n) if bool_value(&n) == Some(true) || symbol_value(&n).as_deref() == Some("deferred") => Some(Deferrable::Deferred),
+                Some(n) if symbol_value(&n).as_deref() == Some("immediate") => Some(Deferrable::Immediate),
+                _ => return Err(gap()),
+            };
+            table.foreign_keys.push(ForeignKey {
+                from_columns, to_columns, deferrable,
+                to_table: TableRef(Symbol::from(target.as_str())),
+                on_delete: referential_action(opt_sym("on_delete").as_deref()),
+                on_update: referential_action(opt_sym("on_update").as_deref()),
+            });
+            let Some(name) = col_name else { return Ok(()); };
             table.columns.push(Column {
                 name: Symbol::from(name.as_str()),
                 col_type: ColumnType::Reference {
@@ -226,13 +286,7 @@ fn ingest_column_stmt(
                 generated_int4_compatible: None,
                 array: false,
                 array_stored: false,
-            });
-            table.foreign_keys.push(ForeignKey {
-                from_column: Symbol::from(name.as_str()),
-                to_table: TableRef(Symbol::from(target.as_str())),
-                to_column: Symbol::from("id"),
-                on_delete: referential_action(opt_sym("on_delete").as_deref()),
-                on_update: referential_action(opt_sym("on_update").as_deref()),
+                unset_until_assigned: false,
             });
         }
         "index" => {
@@ -307,10 +361,25 @@ fn ingest_column_stmt(
                 generated_int4_compatible: None,
                 array: false,
                 array_stored: false,
+                unset_until_assigned: false,
             });
         }
     }
     Ok(())
+}
+
+fn key_columns(node: &Node<'_>, identifiers: bool) -> Option<Vec<Symbol>> {
+    let nodes: Vec<_> = node.as_array_node().map(|a| a.elements().iter().collect()).or_else(|| node.as_symbol_node().map(|s| vec![s.as_node()]))?;
+    let columns = nodes.into_iter().map(|n| {
+        symbol_value(&n).or_else(|| {
+            let c = n.as_call_node()?;
+            let args = c.arguments()?;
+            (identifiers && constant_id_str(&c.name()) == "identifier" && c.block().is_none()
+                && c.receiver().and_then(|r| r.as_constant_read_node()).is_some_and(|r| constant_id_str(&r.name()) == "Sequel")
+                && args.arguments().len() == 1).then(|| args.arguments().iter().next().and_then(|n| symbol_value(&n))).flatten()
+        }).filter(|s| !s.is_empty()).map(Symbol::from)
+    }).collect::<Option<Vec<_>>>()?;
+    (!columns.is_empty()).then_some(columns)
 }
 
 /// Sequel's Ruby-class-named column types → shared `ColumnType`.

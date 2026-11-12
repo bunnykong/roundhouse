@@ -1187,6 +1187,22 @@ pub(super) fn nullable_column_pairs(app: &crate::App) -> Vec<(String, String)> {
     out
 }
 
+/// The struct field and pointer converter a test or fixture writes the
+/// column `column` of `model` through, when the shared lowering holds it
+/// unset for its presence check (`lower::validations::held_unset_columns`):
+/// its nilable `<Col>Raw` slot, not a `<Col>` field the struct lacks.
+pub(super) fn held_column_field(app: &crate::App, model: &str, column: &str) -> Option<(String, &'static str)> {
+    let model_ref = app.models.iter().find(|m| m.name.0.as_str().rsplit("::").next() == Some(model))?;
+    let held = crate::lower::validations::held_unset_columns(&app.models, &app.schema);
+    let (_, name) = held.iter().find(|(m, c)| *m == model_ref.name && c.as_str() == column)?;
+    let col = app.schema.tables.get(&model_ref.table.0)?.columns.iter().find(|c| c.name == *name)?;
+    let conv = match col.col_type {
+        crate::schema::ColumnType::Float | crate::schema::ColumnType::Decimal { .. } => "OptFloat64",
+        _ => "OptInt64",
+    };
+    Some((shared::go_field_name(&format!("{column}_raw")), conv))
+}
+
 /// `(Model path, method)` for every method a model's Go type has: its own,
 /// and its parent models' (`ApplicationRecord`'s), which Go promotes
 /// through the embedded `*Parent`. The parents are walked nearest first,

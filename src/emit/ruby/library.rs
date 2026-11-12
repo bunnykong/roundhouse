@@ -11311,8 +11311,19 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
         // Columns only: an ActiveModel attribute has no `_before_type_cast`,
         // so its check reads the cast value (`"abc"` is 0, Rails 8.1.4).
         checked.retain(|c| casts.contains_key(c) && table.is_some_and(|t| t.columns.iter().any(|col| col.name == *c)));
+        // A column held unset until assigned has a method writer over its
+        // `@<col>_raw` slot (`validations::hold_unset_presence_columns`).
+        let held: Vec<Symbol> = crate::lower::validations::held_unset_columns(&app.models, &app.schema)
+            .into_iter()
+            .filter(|(class, _)| *class == model.name)
+            .map(|(_, col)| col)
+            .collect();
+        let held_writer = |m: &crate::dialect::MethodDef| {
+            m.kind == crate::dialect::AccessorKind::Method
+                && m.name.as_str().strip_suffix('=').is_some_and(|c| held.iter().any(|h| h.as_str() == c))
+        };
         for m in &mut lc.methods {
-            if m.receiver != MethodReceiver::Instance || m.kind != crate::dialect::AccessorKind::AttributeWriter {
+            if m.receiver != MethodReceiver::Instance || (m.kind != crate::dialect::AccessorKind::AttributeWriter && !held_writer(m)) {
                 if !checked.is_empty() {
                     read_raw_in_numericality_checks(&mut m.body, &checked);
                     forget_raw_on_internal_writes(&mut m.body, &checked);
@@ -11340,7 +11351,7 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
             let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = assign else {
                 continue;
             };
-            if *ivar != col {
+            if *ivar != col && !(held.contains(&col) && ivar.as_str() == format!("{}_raw", col.as_str())) {
                 continue;
             }
             cast_param_reads(value, &param, cast);

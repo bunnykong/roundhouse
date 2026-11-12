@@ -422,6 +422,10 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     runtime_relation: RuntimeRelation,
     partial_stems: &crate::lower::view_to_library::PartialStems,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    // Every target's lowering holds a NOT NULL integer that `presence:`
+    // checks unset until assigned, as Rails reads it nil until then.
+    let unset_schema = crate::lower::validations::hold_unset_presence_columns(models, schema);
+    let schema = &unset_schema;
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::default();
     let _body_names = schema::share_model_body_names(models, &Default::default());
@@ -623,6 +627,9 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                     crate::lower::arel::SqliteVisitor { param_binds },
                 );
             }
+            // After the Arel pass, which inlines a finder over `@<col>`
+            // (an association reader) and not over a reader call.
+            read_held_columns_through_readers(std::slice::from_mut(method), table);
             type_method_body(method, &classes, table, Some(model));
         }
         out.push(model_class(model, methods, table));
@@ -1732,8 +1739,8 @@ fn build_methods_with_finder_inputs(
             })
         })
         .unwrap_or_else(|| Symbol::from("id"));
-    push_validate_method(&mut methods, model, errors_readers, runtime_relation, &primary_key);
-    push_association_methods(&mut methods, model, models, &through_joins, runtime_relation);
+    push_validate_method(&mut methods, model, errors_readers, runtime_relation, &primary_key, schema.tables.get(&model.table.0), schema);
+    push_association_methods(&mut methods, model, models, &through_joins, runtime_relation, schema.tables.get(&model.table.0));
     push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
@@ -3596,15 +3603,61 @@ pub(super) fn is_id_column(name: &Symbol) -> bool {
     s == "id" || s.ends_with("_id")
 }
 
+/// A column held unset for its presence check
+/// (`validations::hold_unset_presence_columns`) has no `@<col>` slot:
+/// a body that reads it (a `belongs_to`'s reader and autosave, a model
+/// method) reads its reader, which answers 0 until it is assigned, as
+/// the slot did before; one that assigns it calls its writer, or unsets
+/// `@<col>_raw` for a nil.
+fn read_held_columns_through_readers(methods: &mut [MethodDef], table: Option<&Table>) {
+    use crate::expr::{Expr, ExprNode, LValue};
+    fn rewrite(expr: &mut Expr, col: &Symbol, storage: &Symbol) {
+        expr.node.for_each_child_mut(&mut |c| rewrite(c, col, storage));
+        match &mut *expr.node {
+            ExprNode::Ivar { name } if name == col => {
+                *expr.node = ExprNode::Send { recv: None, method: col.clone(), args: vec![], block: None, parenthesized: false };
+            }
+            // `@<col> = nil` unsets the slot; any other value goes
+            // through the writer, which fills it (so a strict target's
+            // slot stays nilable however the body's value is typed).
+            ExprNode::Assign { target: LValue::Ivar { name }, value } if name == col => {
+                if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
+                    *name = storage.clone();
+                } else {
+                    let value = value.clone();
+                    *expr.node = ExprNode::Send {
+                        recv: Some(Expr::new(expr.span, ExprNode::SelfRef)),
+                        method: Symbol::from(format!("{}=", col.as_str())),
+                        args: vec![value],
+                        block: None,
+                        parenthesized: false,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(table) = table else { return };
+    for col in table.columns.iter().filter(|c| c.unset_until_assigned) {
+        let storage = schema::col_storage_name(col);
+        // Instance methods only: a class method's `@<col>` is the class's own state.
+        for method in methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Instance) {
+            rewrite(&mut method.body, &col.name, &storage);
+        }
+    }
+}
+
 /// The schema columns a class stores that the DB declares nullable —
 /// the `LibraryClass::nullable_columns` payload. Same rule as
-/// `ty_of_column_slot`: nullable, primary key excluded.
+/// `ty_of_column_slot`: nullable, primary key excluded. A column held
+/// unset for its presence check is named by its `<col>_raw` slot, the
+/// nilable field; its reader answers the column's own type.
 pub(crate) fn nullable_column_names(table: Option<&Table>) -> Vec<Symbol> {
     let Some(t) = table else { return Vec::new() };
     t.columns
         .iter()
         .filter(|c| c.nullable && !c.primary_key)
-        .map(|c| c.name.clone())
+        .map(|c| if c.unset_until_assigned { schema::col_storage_name(c) } else { c.name.clone() })
         .collect()
 }
 
@@ -3612,6 +3665,57 @@ pub(crate) fn nullable_column_names(table: Option<&Table>) -> Vec<Symbol> {
 mod tests {
     use super::*;
     use std::{collections::HashMap, path::PathBuf};
+
+    /// The held column's `@<col>` reads become reader calls in instance
+    /// methods only; a class method's `@<col>` is the class's own state.
+    #[test]
+    fn held_column_reads_rewrite_in_instance_methods_only() {
+        let method = |receiver| MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: Span::synthetic(),
+            name: Symbol::from("cached"),
+            receiver,
+            params: Vec::new(),
+            body: Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("quota") }),
+            signature: None,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        };
+        let table = crate::schema::Table {
+            name: Symbol::from("plans"),
+            columns: vec![crate::schema::Column {
+                name: Symbol::from("quota"),
+                col_type: crate::schema::ColumnType::Integer,
+                nullable: true,
+                default: None,
+                default_expression: None,
+                legacy_default_persistence: false,
+                primary_key: false,
+                generated: None,
+                generated_text_compatible: None,
+                generated_int4_compatible: None,
+                array: false,
+                array_stored: false,
+                unset_until_assigned: true,
+            }],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            check_constraints: Vec::new(),
+            known_keyless: false,
+            primary_key_columns: Vec::new(),
+            virtual_module: None,
+        };
+        let mut methods = vec![method(MethodReceiver::Instance), method(MethodReceiver::Class)];
+        read_held_columns_through_readers(&mut methods, Some(&table));
+        assert!(matches!(&*methods[0].body.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "quota"), "{:?}", methods[0].body);
+        assert!(matches!(&*methods[1].body.node, ExprNode::Ivar { name } if name.as_str() == "quota"), "{:?}", methods[1].body);
+    }
 
     /// Framework normalization must not replace a same-named application class.
     #[test]

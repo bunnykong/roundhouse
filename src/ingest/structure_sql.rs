@@ -412,6 +412,7 @@ fn parse_column_def(
         generated_int4_compatible,
         array: false,
         array_stored: false,
+        unset_until_assigned: false,
     }))
 }
 
@@ -846,13 +847,26 @@ fn handle_add_foreign_key(
     if from_cols.len() == 1 && to_cols.len() == 1 {
         let on_delete = action_after(words, close2, "DELETE");
         let on_update = action_after(words, close2, "UPDATE");
+        // PostgreSQL: `NOT DEFERRABLE` is the default, `DEFERRABLE` starts
+        // immediate, and `INITIALLY DEFERRED` implies `DEFERRABLE`.
+        let after_refs = |seq: &[&str]| word_seq_pos_after(words, close2, seq).is_some();
+        let deferrable = if after_refs(&["NOT", "DEFERRABLE"]) {
+            None
+        } else if after_refs(&["INITIALLY", "DEFERRED"]) {
+            Some(crate::schema::Deferrable::Deferred)
+        } else if after_refs(&["DEFERRABLE"]) {
+            Some(crate::schema::Deferrable::Immediate)
+        } else {
+            None
+        };
         if let Some(table) = schema.tables.get_mut(&table_sym) {
             table.foreign_keys.push(ForeignKey {
-                from_column: Symbol::from(from_cols[0].clone()),
+                from_columns: vec![Symbol::from(from_cols[0].clone())],
                 to_table: TableRef(Symbol::from(ref_table_raw)),
-                to_column: Symbol::from(to_cols[0].clone()),
+                to_columns: vec![Symbol::from(to_cols[0].clone())],
                 on_delete,
                 on_update,
+                deferrable,
             });
         }
     } else {

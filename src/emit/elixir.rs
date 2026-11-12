@@ -89,10 +89,13 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // dispatch (`record.title.empty?` → `record.title == ""` when
     // `title: Str`) — the body-typer's annotations don't survive the
     // functionalize passes, so the schema type is recorded here instead.
+    // The lowering's own schema copy, whose held columns store under `<col>_raw`.
+    let held_schema = crate::lower::validations::hold_unset_presence_columns(&app.models, &app.schema);
     for model in &app.models {
-        if let Some(table) = app.schema.tables.get(&model.table.0) {
+        if let Some(table) = held_schema.tables.get(&model.table.0) {
             // MODEL struct slots use the STORAGE name (`created_at_raw`
-            // for a temporal column — the shared lowering's split); the
+            // for a temporal column, `<col>_raw` for one held unset until
+            // assigned — the shared lowering's split); the
             // Row class is the raw transport and keeps plain column
             // names. A temporal reader's public name is NOT a slot — it
             // resolves to the emitted parsing function

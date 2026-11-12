@@ -51,6 +51,7 @@ use super::{fn_sig, ty_of_column};
 
 mod exists;
 use exists::{synth_adapter_any, synth_adapter_exists_by_id};
+pub(super) mod uniqueness;
 
 pub(super) fn push_adapter_methods(
     methods: &mut Vec<MethodDef>,

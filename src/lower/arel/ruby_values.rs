@@ -46,7 +46,7 @@ fn normalize_predicate(predicate: &mut Predicate, schema: &Schema) {
                 }
             }
         }
-        Predicate::Eq(_, _) | Predicate::NullableEq(_, _) => {}
+        Predicate::Eq(_, _) | Predicate::NullableEq(_, _) | Predicate::NullSafeEq(_, _) | Predicate::NotEq(_, _) | Predicate::LowerEq(_, _) => {}
     }
 }
 

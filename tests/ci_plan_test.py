@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -368,6 +369,21 @@ class Routing(unittest.TestCase):
         self.assertFalse(
             any("campfire" in job for job in plan["jobs"] if job not in ci.BASE)
         )
+
+    def test_solid_queue_durability_inputs_select_the_native_contract(self):
+        for path in [
+            "src/ingest/app.rs",
+            "src/lower/job_payload.rs",
+            "src/lower/job_class_side.rs",
+            "runtime/spinel/solid_queue_runner.rb",
+            "tests/support/solid_queue_worker.rs",
+            "tests/solid_queue_durability.rs",
+            "tests/solid_queue_durability/oracle.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("solid_queue_durability", plan["spinel_tests"])
+                self.assertIn("unit", plan["jobs"])
 
     def test_solid_queue_schema_selection_keeps_its_ruby_execution_coverage(self):
         for path in [
@@ -1147,6 +1163,25 @@ class Routing(unittest.TestCase):
                 self.assertIn("schema_default_expressions", plan["spinel_tests"])
                 self.assertIn("spinel-framework", plan["jobs"])
 
+    def test_schema_keys_owns_declarations_and_consumers(self):
+        for path in [
+            "tests/schema_keys.rs", "tests/support/schema_keys_schema.rb", "tests/support/schema_keys_contract.rb",
+            "tests/support/schema_keys_implicit.rb", "tests/support/schema_keys_implicit_contract.rb",
+            "src/schema.rs", "src/ingest/schema.rs", "src/emit/shared/schema_sql.rs", "src/emit/roda.rs",
+            "src/ingest/sequel_model.rs", "src/analyze/graphql.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_keys", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
+    def test_schema_key_readers_select_the_native_contract(self):
+        for path in ["src/ingest/sequel_migration.rs", "src/ingest/structure_sql.rs", "src/ingest/roda_app.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_keys", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_jdbc_probes_select_the_existing_comparison_without_archives(self):
         for path, native_jobs, suites in [
             ("tests/support/jdbc_cleanup_failures.rb", set(), []),
@@ -1825,6 +1860,24 @@ class Results(unittest.TestCase):
                     )
                     records = [json.loads(line) for line in out.read_text().splitlines()]
                     self.assertEqual({r["name"]: r["seconds"] for r in records}, expected)
+
+    def test_run_tests_stops_at_the_deadline_with_the_tests_children_and_records_a_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "records.jsonl"
+            env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": str(out), "CI_SPINEL_DEADLINE": str(int(time.time()) + 2)}
+            start = time.monotonic()
+            run = subprocess.run(
+                ["python3", spec.origin, "run-tests", "--kind", "toolchain", "--parallel", "1",
+                 "--", "sh", "-c", "sleep 60 & wait", "sh"],
+                input="slow\nlate\n", capture_output=True, text=True, env=env,
+            )
+            # Not a PID check on the sleep: killed, it can stay a zombie; its end shows as the pipes it holds closing.
+            self.assertLess(time.monotonic() - start, 30, run)
+            self.assertEqual(run.returncode, 1, run)
+            self.assertIn("::error::slow stopped at this shard's deadline", run.stdout)
+            self.assertIn("::error::late not started: past this shard's deadline", run.stdout)
+            records = [json.loads(line) for line in out.read_text().splitlines()]
+            self.assertEqual([(r["name"], r.get("timed_out")) for r in records], [("slow", True)])
 
     def test_merge_averages_passing_records_into_the_last_seconds(self):
         merged = ci.merge_timings(

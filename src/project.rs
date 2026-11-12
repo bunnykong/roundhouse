@@ -3547,6 +3547,14 @@ fn target_files_inner(
         }
         None => app,
     };
+    let without_gem_marks;
+    let app = match crate::lower::html_safe::lower_for_target(app, target) {
+        Some(lowered) => {
+            without_gem_marks = lowered;
+            &without_gem_marks
+        }
+        None => app,
+    };
     let with_closed_constantize;
     let app = match crate::lower::constantize::lower_for_target(app, target) {
         Some(lowered) => {
@@ -5913,7 +5921,17 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                     Some(target) if programs.contains_key(&target) => {
                         edges.entry(from.clone()).or_default().push(target.clone());
                         // Not left to its declaration: a namespace that holds nothing the program reaches is not in the tree (`source_gem_shake`), and the autoload is still registered on it.
-                        if owner != "Object" && !app.library_classes.iter().any(|c| c.name.0.as_str() == owner) {
+                        // Nor to one this program declares later (a module's autoloads come ahead of its body).
+                        let declared_later = !loaded.contains(&crate::emit::ruby::library_file_anchor(owner, app))
+                            && owner.split("::").scan(String::new(), |path, segment| {
+                                if !path.is_empty() {
+                                    path.push_str("::");
+                                }
+                                path.push_str(segment);
+                                Some(path.clone())
+                            })
+                            .all(|path| !app.library_classes.iter().any(|c| c.name.0.as_str() == path && !c.is_module));
+                        if owner != "Object" && (declared_later || !app.library_classes.iter().any(|c| c.name.0.as_str() == owner)) {
                             let segments: Vec<&str> = owner.split("::").collect();
                             let open: Vec<String> = (0..segments.len())
                                 .map(|i| {

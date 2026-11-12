@@ -2667,6 +2667,19 @@ fn native_classvar_initialization_uses_owned_initializer_ir() {
     }
 }
 
+/// simple_form's module body: ActiveSupport::Autoload's `autoload :X` and `eager_autoload do … end`, class variables
+/// written a block that closes over nothing, and a call of the module's own class method at its end, which the
+/// emitter replays in source order. A block that reads a local of the class body is not carried.
+#[test]
+fn native_classvar_initialization_beside_autoloads_blocks_and_an_own_class_method_call() {
+    let source = b"module Probe\n  extend ActiveSupport::Autoload\n  autoload :Helpers\n  eager_autoload do\n    autoload :Inputs\n  end\n  @@label = ->(label, required) { \"#{required} #{label}\" }\n  @@error = proc do |tag, _| tag end\n  @@wrappers = {}\n  def self.wrappers(name, &block)\n    @@wrappers[name] = block\n  end\n  wrappers :default do |b| b end\nend\n";
+    roundhouse::ingest::ingest_library_classes(source, "probe.rb").expect("ingests");
+    let closing = b"module Probe\n  prefix = \"x\"\n  @@label = ->(label) { prefix + label }\nend\n";
+    // Not a library class at all: a body that assigns a local is left to the file's program.
+    let closed = roundhouse::ingest::ingest_library_classes(closing, "probe.rb");
+    assert!(matches!(&closed, Ok(classes) if classes.is_empty()), "{closed:?}");
+}
+
 #[test]
 fn native_initializers_keep_order_across_singleton_body_merges() {
     let classes = roundhouse::ingest::ingest_library_classes(

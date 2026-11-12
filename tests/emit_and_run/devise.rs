@@ -1115,6 +1115,37 @@ fn a_devise_sign_in_is_tracked_over_rack_on_the_ruby_family() {
     assert!(run.stdout.contains("devise tracking over rack passed"), "{}", run.stdout);
 }
 
+/// `:trackable` natively: the same two sign-ins, each counted, the current address the peer's and the last one the
+/// previous sign-in's, read back through an action, as the Rack test reads the record.
+const TRACKED: &str = "class AccountsController < ApplicationController\n  def create\n    User.create!(email: \"a@example.com\", password: \"secret123\")\n    head :ok\n  end\n\n  def tracked\n    user = User.find_by(email: \"a@example.com\")\n    render plain: \"#{user.sign_in_count}|#{user.current_sign_in_ip}|#{user.last_sign_in_ip}|#{user.current_sign_in_at == user.last_sign_in_at}\"\n  end\nend\n";
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_sign_in_is_tracked_over_http_natively() {
+    let tree = app(":database_authenticatable, :trackable", "  devise_for :users\n  get \"/account/new\", to: \"accounts#create\"\n  get \"/account/tracked\", to: \"accounts#tracked\"\n")
+        .edit("db/schema.rb", "    t.datetime \"reset_password_sent_at\"\n", &format!("    t.datetime \"reset_password_sent_at\"\n{TRACKABLE_COLUMNS}"))
+        .write("app/controllers/accounts_controller.rb", TRACKED)
+        .native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    assert_eq!(server.get("/account/new").status, 200, "{}", server.log());
+    let form_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let sign_in = || {
+        let mut jar = Vec::new();
+        let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_in", &[], "");
+        kept(&mut jar, &cookies);
+        let token = form_encode(between(&page.body, "name=\"authenticity_token\" value=\"", "\""));
+        let cookie = header(&jar);
+        let body = format!("authenticity_token={token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=secret123");
+        server.request_with_set_cookies("POST", "/users/sign_in", &[form_type, ("Cookie", cookie.as_str())], &body).0
+    };
+    assert_eq!(sign_in().status, 302, "{}", server.log());
+    let first = server.get("/account/tracked");
+    assert_eq!(first.body, "1|127.0.0.1|127.0.0.1|true", "{}", server.log());
+    assert_eq!(sign_in().status, 302, "{}", server.log());
+    let second = server.get("/account/tracked");
+    assert!(second.body.starts_with("2|127.0.0.1|127.0.0.1|"), "{}\n{}", second.body, server.log());
+}
+
 /// `:lockable`, as Rails 8.1.4 with Devise 4.9.4 answers it with `config.maximum_attempts = 3`: the third wrong
 /// password locks the account and mails an unlock link, the right password is refused while it is locked, and the link
 /// unlocks it. Its `delegate ..., to: "self.class"` forwards the strategy, as Rails' generated method does.
@@ -1270,6 +1301,47 @@ fn a_devise_user_is_remembered_by_cookie_over_rack_on_the_ruby_family() {
     assert!(run.stdout.contains("devise remember-me over rack passed"), "{}", run.stdout);
 }
 
+/// `:rememberable` natively: the remember-me sign-in sets the signed `remember_user_token`, which alone (no session
+/// cookie) signs the user back in through the route's `authenticate`, and signing out expires it.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_user_is_remembered_by_cookie_over_http_natively() {
+    let tree = app(":database_authenticatable, :rememberable", "  devise_for :users\n  get \"/account/new\", to: \"accounts#create\"\n  authenticate :user do\n    get \"/secret\", to: \"articles#index\"\n  end\n")
+        .edit("db/schema.rb", "    t.datetime \"reset_password_sent_at\"\n", "    t.datetime \"reset_password_sent_at\"\n    t.datetime \"remember_created_at\"\n")
+        .write("app/controllers/accounts_controller.rb", ACCOUNTS)
+        .native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    assert_eq!(server.get("/account/new").status, 200, "{}", server.log());
+    let form_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let mut jar = Vec::new();
+    let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_in", &[], "");
+    kept(&mut jar, &cookies);
+    let token = form_encode(between(&page.body, "name=\"authenticity_token\" value=\"", "\""));
+    let cookie = header(&jar);
+    let body = format!("authenticity_token={token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=secret123&user%5Bremember_me%5D=1");
+    let (signed, set) = server.request_with_set_cookies("POST", "/users/sign_in", &[form_type, ("Cookie", cookie.as_str())], &body);
+    assert_eq!(signed.status, 302, "{}", server.log());
+    let remember = set.iter().find(|c| c.starts_with("remember_user_token=")).unwrap_or_else(|| panic!("no remember cookie: {set:?}"));
+    assert!(remember.to_lowercase().contains("expires="), "{remember}");
+    kept(&mut jar, &set);
+    // The remember cookie alone, as a browser keeps it after the session ends.
+    jar.retain(|(name, _)| name == "remember_user_token");
+    let only_remember = header(&jar);
+    let (back, set) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", only_remember.as_str())], "");
+    assert_eq!(back.status, 200, "{}\n{}", back.body, server.log());
+    kept(&mut jar, &set);
+    let cookie = header(&jar);
+    let (home, set) = server.request_with_set_cookies("GET", "/", &[("Cookie", cookie.as_str())], "");
+    kept(&mut jar, &set);
+    let csrf = form_encode(between(&home.body, "name=\"csrf-token\" content=\"", "\""));
+    let cookie = header(&jar);
+    let (out, set) = server.request_with_set_cookies("POST", "/users/sign_out", &[form_type, ("Cookie", cookie.as_str())], &format!("_method=delete&authenticity_token={csrf}"));
+    assert_eq!(out.status, 302, "{}\n{}", out.body, server.log());
+    assert!(set.iter().any(|c| c.starts_with("remember_user_token=;") && c.contains("Max-Age=0")), "{set:?}");
+    let (after, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", only_remember.as_str())], "");
+    assert_eq!(after.status, 302, "the forgotten token signs no one in: {}", server.log());
+}
+
 /// `:timeoutable`, as Rails 8.1.4 with Devise 4.9.4 answers it with `config.timeout_in = 2.seconds`: a request past
 /// the timeout signs the user out and redirects back to the page, the redirect to sign in that follows keeps the
 /// flash's `:timedout` and its alert (`flash.keep`), and the alert is the session-expired one.
@@ -1321,6 +1393,43 @@ fn a_devise_session_times_out_over_rack_on_the_ruby_family() {
         .run_ruby(RACK_TIMEOUT);
     run.assert_passes();
     assert!(run.stdout.contains("devise timeout over rack passed"), "{}", run.stdout);
+}
+
+/// `:timeoutable` natively, with `config.timeout_in = 2.seconds`: a request past the timeout is redirected back to the
+/// page it asked for, and the next one, now signed out, to the sign-in page.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_session_times_out_over_http_natively() {
+    let tree = app(":database_authenticatable, :timeoutable", "  devise_for :users\n  get \"/account/new\", to: \"accounts#create\"\n  authenticate :user do\n    get \"/secret\", to: \"articles#index\"\n  end\n")
+        .write("config/initializers/devise.rb", "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  config.timeout_in = 2.seconds\n  require \"devise/orm/active_record\"\nend\n")
+        .write("app/controllers/accounts_controller.rb", ACCOUNTS)
+        .native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    assert_eq!(server.get("/account/new").status, 200, "{}", server.log());
+    let form_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let mut jar = Vec::new();
+    let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_in", &[], "");
+    kept(&mut jar, &cookies);
+    let token = form_encode(between(&page.body, "name=\"authenticity_token\" value=\"", "\""));
+    let cookie = header(&jar);
+    let body = format!("authenticity_token={token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=secret123");
+    let (signed, set) = server.request_with_set_cookies("POST", "/users/sign_in", &[form_type, ("Cookie", cookie.as_str())], &body);
+    assert_eq!(signed.status, 302, "{}", server.log());
+    kept(&mut jar, &set);
+    let cookie = header(&jar);
+    let (fresh, set) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(fresh.status, 200, "{}", server.log());
+    kept(&mut jar, &set);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let cookie = header(&jar);
+    let (timed_out, set) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(timed_out.status, 302, "{}", server.log());
+    assert!(timed_out.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("location") && v.ends_with("/secret")), "{:?}", timed_out.headers);
+    kept(&mut jar, &set);
+    let cookie = header(&jar);
+    let (signed_out, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(signed_out.status, 302, "{}", server.log());
+    assert!(signed_out.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("location") && v.ends_with("/users/sign_in")), "{:?}", signed_out.headers);
 }
 
 /// `:omniauthable` with OmniAuth's `developer` strategy, as Rails 8.1.4 with Devise 4.9.4 and OmniAuth 2.1.4 answer
@@ -1419,4 +1528,44 @@ fn a_devise_user_signs_in_through_omniauth_over_rack_on_the_ruby_family() {
     let run = omniauth_app().run_ruby(RACK_OMNIAUTH);
     run.assert_passes();
     assert!(run.stdout.contains("devise omniauth over rack passed"), "{}", run.stdout);
+}
+
+/// The same flow natively, with OmniAuth compiled from source on Spinel: the provider button, the developer
+/// strategy's request phase, and its callback signing in the user `from_omniauth` made.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_user_signs_in_through_omniauth_over_http_natively() {
+    let tree = omniauth_app()
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/account/me\", to: \"accounts#me\"\n")
+        .write("app/controllers/accounts_controller.rb", "class AccountsController < ApplicationController\n  def me\n    render plain: \"#{current_user.provider}|#{current_user.uid}|#{current_user.email}\"\n  end\nend\n")
+        .native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    let mut jar = Vec::new();
+    let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_in", &[], "");
+    assert_eq!(page.status, 200, "{}", server.log());
+    assert!(page.body.contains(r#"<form action="/users/auth/developer" method="post" class="button_to">"#), "{}", page.body);
+    kept(&mut jar, &cookies);
+    let cookie = header(&jar);
+    let (form, cookies) = server.request_with_set_cookies("POST", "/users/auth/developer", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(form.status, 200, "{}\n{}", form.body, server.log());
+    assert!(form.body.contains("action='/users/auth/developer/callback'"), "{}", form.body);
+    kept(&mut jar, &cookies);
+    let cookie = header(&jar);
+    let (before, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(before.status, 302, "signed in before the callback: {}", server.log());
+    let (callback, cookies) = server.request_with_set_cookies(
+        "POST",
+        "/users/auth/developer/callback",
+        &[("Content-Type", "application/x-www-form-urlencoded"), ("Cookie", cookie.as_str())],
+        "name=Dev&email=dev%40example.com",
+    );
+    assert_eq!(callback.status, 302, "{}\n{}", callback.body, server.log());
+    assert!(callback.headers.get("location").is_some_and(|l| l.ends_with("/secret")), "{:?}", callback.headers);
+    kept(&mut jar, &cookies);
+    let cookie = header(&jar);
+    let (after, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(after.status, 200, "{}", server.log());
+    // The user `from_omniauth` made from the callback's `email`, signed in.
+    let (me, _) = server.request_with_set_cookies("GET", "/account/me", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(me.body, "developer|dev@example.com|dev@example.com", "{}", server.log());
 }

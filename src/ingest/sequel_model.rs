@@ -316,7 +316,7 @@ fn fk_cascades(schema: &Schema, assoc_plural: &str, owner_table: &str, fk: &Symb
         .get(&Symbol::from(assoc_plural))
         .map(|t| {
             t.foreign_keys.iter().any(|f| {
-                f.from_column == *fk
+                f.from_columns.as_slice() == std::slice::from_ref(fk)
                     && f.to_table.0.as_str() == owner_table
                     && matches!(f.on_delete, ReferentialAction::Cascade)
             })

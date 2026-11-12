@@ -509,6 +509,8 @@ impl Overlay {
         let mut found: Vec<_> = ingest_diags.into_iter().chain(diagnose(&app)).chain(lower_diags).collect();
         // As the CLI does: a gem's code the app does not reach is no error of the emitted program.
         roundhouse::source_gem_shake::demote_unreached_gem_errors(&app, &mut found);
+        // As the CLI does: what the target's runtime answers is no error of its tree.
+        roundhouse::session::drop_runtime_answered(target, &mut found);
         let mut errors: Vec<_> = found.into_iter().filter(|d| d.severity == Severity::Error).collect();
 
         let emitted = scratch.join("emitted");

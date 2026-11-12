@@ -247,6 +247,8 @@ pub struct Analyzer {
     /// Per model and library class, the ivars its instance side and its class side write, and its parent
     /// ([`class_ivar_writes`]).
     class_ivar_writes: Option<ClassIvarWrites>,
+    /// The parameters of a private method every call of which passes a class object ([`class_object_params`]).
+    class_object_params: crate::det::HashSet<(ClassId, Symbol, usize)>,
     /// Each class-owned unification work item's send sites and the
     /// targets it calls, as the last unification collected them. A
     /// site is read off its body's stamped types, so a body no typing
@@ -1487,6 +1489,7 @@ impl Analyzer {
             settle: oscillation::Settle::default(),
             written_ivars: None,
             class_ivar_writes: None,
+            class_object_params: Default::default(),
             site_cache: Vec::new(),
             retyped_since_unify: None,
             settled_constants: None,
@@ -1582,6 +1585,7 @@ impl Analyzer {
         self.settle = oscillation::Settle::default();
         self.written_ivars = None;
         self.class_ivar_writes = class_ivar_writes(app);
+        self.class_object_params = class_object_params(app, &self.classes);
         self.site_cache = Vec::new();
         self.retyped_since_unify = None;
         self.settled_constants = None;
@@ -5314,6 +5318,12 @@ impl Analyzer {
                 ctx.local_bindings.insert(param.name.clone(), ty);
             }
         }
+        // simple_form's `attempt_mapping(input_name, Object)` and `attempt_mapping(input_name, namespace.constantize)`.
+        for (i, param) in method.params.iter().enumerate() {
+            if self.class_object_params.contains(&(class_id.clone(), method.name.clone(), i)) {
+                ctx.query_class_objects.insert(param.name.clone());
+            }
+        }
         // An indexed module's Ruby callback gets its host as a Module object,
         // even when the hook is dormant and no explicit call site supplies types.
         if ctx.class_side && self.classes.get(class_id).is_some_and(|c| c.is_module)
@@ -8109,6 +8119,60 @@ impl ClassIvarWrites {
                 || if class_side { e.class.contains(name) } else { e.instance.contains(name) }
         })
     }
+}
+
+/// Each positional parameter of a private method that every call of it, a receiverless call from its own class,
+/// passes a class object in: a constant naming a class, an object's `class`, or a name's `constantize`. Its body may ask the parameter
+/// a Module query (`at.const_get(mapping)`), as of a local assigned one.
+fn class_object_params(app: &App, classes: &crate::det::HashMap<ClassId, ClassInfo>) -> crate::det::HashSet<(ClassId, Symbol, usize)> {
+    use crate::dialect::MethodVisibility;
+    let constantize_owned = app.library_classes.iter().flat_map(|c| c.methods.iter()).chain(app.models.iter().flat_map(|m| m.methods()))
+        .any(|m| m.name.as_str() == "constantize");
+    let class_owned = app.library_classes.iter().flat_map(|c| c.methods.iter()).chain(app.models.iter().flat_map(|m| m.methods()))
+        .any(|m| m.name.as_str() == "class");
+    let proves = |arg: &Expr| match &*arg.node {
+        ExprNode::Const { path } => {
+            let name = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+            // Not left to the registry, which seeds no class for Ruby's root ones.
+            matches!(name.as_str(), "Object" | "BasicObject" | "Module" | "Class") || classes.contains_key(&ClassId(Symbol::from(name.as_str())))
+        }
+        ExprNode::Send { recv: Some(_), method, args, block: None, .. } if args.is_empty() => match method.as_str() {
+            "constantize" => !constantize_owned,
+            "class" => !class_owned,
+            _ => false,
+        },
+        _ => false,
+    };
+    fn sites<'a>(e: &'a Expr, name: &Symbol, out: &mut Vec<&'a [Expr]>) {
+        if let ExprNode::Send { recv: None, method, args, .. } = &*e.node
+            && method == name
+        {
+            out.push(args.as_slice());
+        }
+        e.node.for_each_child(&mut |c| sites(c, name, out));
+    }
+    let mut out = crate::det::HashSet::default();
+    for lc in &app.library_classes {
+        for m in lc.methods.iter().filter(|m| m.visibility != MethodVisibility::Public) {
+            let mut calls = Vec::new();
+            for caller in lc.methods.iter().filter(|c| c.receiver == m.receiver) {
+                sites(&caller.body, &m.name, &mut calls);
+            }
+            if calls.is_empty() {
+                continue;
+            }
+            for (i, param) in m.params.iter().enumerate() {
+                if param.keyword || param.rest || param.from_keyword {
+                    continue;
+                }
+                let splat = |args: &[Expr]| args.iter().take(i + 1).any(|a| matches!(&*a.node, ExprNode::Splat { .. }));
+                if calls.iter().all(|args| !splat(args) && args.get(i).is_some_and(|a| proves(a))) {
+                    out.insert((lc.name.clone(), m.name.clone(), i));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn class_ivar_writes(app: &App) -> Option<ClassIvarWrites> {

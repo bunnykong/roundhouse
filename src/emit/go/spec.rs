@@ -240,6 +240,21 @@ fn emit_test_send_go(
         }
     }
 
+    // `assert_predicate obj, :m?` / `refute_predicate obj, :m?` → the
+    // `assert` / `assert_not` of `obj.m?`.
+    if recv.is_none()
+        && matches!(method, "assert_predicate" | "refute_predicate")
+        && args.len() == 2
+        && let ExprNode::Lit { value: Literal::Sym { value: pred } } = &*args[1].node
+    {
+        let call = emit_test_send_go(Some(&args[0]), pred.as_str(), &[], None, ctx);
+        return if method == "assert_predicate" {
+            format!("if !({call}) {{ t.Errorf(\"expected true\") }}")
+        } else {
+            format!("if {call} {{ t.Errorf(\"expected false\") }}")
+        };
+    }
+
     // Assertion macros → Go's inline `if ... { t.Errorf(...) }` pattern.
     if recv.is_none() {
         match (method, args_s.len()) {
@@ -298,49 +313,18 @@ fn emit_test_send_go(
     {
         return format!("New{}()", class_name.as_str());
     }
-    // `Class.new(hash)` → `&Class{ Field: val, ... }` struct literal.
-    if let Some(r) = recv {
-        if method == "new" && args.len() == 1 {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class_name) = path.last() {
-                    if ctx.known_models.iter().any(|s| s == class_name) {
-                        if let ExprNode::Hash { entries, .. } = &*args[0].node {
-                            let pairs: Vec<String> = entries
-                                .iter()
-                                .filter_map(|(k, v)| {
-                                    if let ExprNode::Lit {
-                                        value: Literal::Sym { value: f },
-                                    } = &*k.node
-                                    {
-                                        let val = emit_test_expr_go(v, ctx);
-                                        let val = match super::opt_converter_for(
-                                            ctx.nullable_columns,
-                                            class_name.as_str(),
-                                            f.as_str(),
-                                        ) {
-                                            Some(conv) => format!("{conv}({val})"),
-                                            None => val,
-                                        };
-                                        Some(format!(
-                                            "{}: {}",
-                                            go_field_name(f.as_str()),
-                                            val
-                                        ))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                            return format!(
-                                "&{}{{{}}}",
-                                class_name,
-                                pairs.join(", ")
-                            );
-                        }
-                    }
-                }
-            }
-        }
+    // `Class.new(hash)` → `NewClass(attrs)`, the model's constructor: it
+    // converts each value to its column's field, and wires the embedded
+    // base a bare struct literal would leave nil.
+    if let Some(r) = recv
+        && method == "new"
+        && args.len() == 1
+        && let ExprNode::Const { path } = &*r.node
+        && let Some(class_name) = path.last()
+        && ctx.known_models.iter().any(|s| s == class_name)
+        && matches!(&*args[0].node, ExprNode::Hash { .. })
+    {
+        return format!("New{}({})", class_name.as_str(), args_s[0]);
     }
 
     match recv {
@@ -377,6 +361,35 @@ fn emit_test_send_go(
                     format!("{recv_s}_{}", super::library::sanitize_method_name(method))
                 };
                 return format!("{name}({})", args_s.join(", "));
+            }
+            // A column held unset until assigned keeps its value in a
+            // `<col>_raw` pointer field behind a reader and writer method.
+            let held = |col: &str| {
+                receiver_model_name(r, ctx)
+                    .and_then(|m| super::held_column_field(ctx.app, &m, col))
+                    .is_some()
+            };
+            if args_s.is_empty() && held(method) {
+                return format!("{recv_s}.{}()", go_field_name(method));
+            }
+            if args_s.len() == 1
+                && let Some(col) = method.strip_suffix('=')
+                && held(col)
+            {
+                return format!("{recv_s}.{}Eq({})", go_field_name(col), args_s[0]);
+            }
+            // An association writer (`tag.slot = rec`) is the model's
+            // `<Assoc>Eq` method; there is no struct field to assign.
+            if args_s.len() == 1
+                && let Some(assoc) = method.strip_suffix('=')
+                && receiver_model_name(r, ctx).is_some_and(|m| {
+                    ctx.app.models.iter().any(|model| {
+                        model.name.0.as_str().rsplit("::").next() == Some(m.as_str())
+                            && model.associations().any(|a| a.name().as_str() == assoc)
+                    })
+                })
+            {
+                return format!("{recv_s}.{}Eq({})", go_field_name(assoc), args_s[0]);
             }
             let is_attr = args_s.is_empty()
                 && ctx.model_attrs.iter().any(|s| s.as_str() == method);
@@ -418,6 +431,22 @@ fn emit_test_send_go(
 /// rather than leaving the field as its reader? The model is the
 /// receiver's type, or else the model its local is named after
 /// (`article`); with neither, any model that defines it counts.
+/// The model a test receiver is: its type, or else the model its local or
+/// fixture accessor is named after (`slot`, `slots(:far)`).
+fn receiver_model_name(recv: &Expr, _ctx: GoTestCtx) -> Option<String> {
+    match (&recv.ty, &*recv.node) {
+        (Some(crate::ty::Ty::Class { id, .. }), _) => Some(id.0.as_str().rsplit("::").next().unwrap_or("").to_string()),
+        (_, ExprNode::Var { name, .. }) => Some(crate::naming::camelize(&crate::naming::singularize(name.as_str()))),
+        (_, ExprNode::Send { recv: None, method, block: None, .. }) => {
+            Some(crate::naming::camelize(&crate::naming::singularize(method.as_str())))
+        }
+        (_, ExprNode::Send { recv: Some(c), method, .. }) if matches!(&*c.node, ExprNode::Const { .. }) && matches!(method.as_str(), "new" | "find" | "create" | "create!" | "first" | "last" | "find_by") => {
+            match &*c.node { ExprNode::Const { path } => path.last().map(|s| s.to_string()), _ => None }
+        }
+        _ => None,
+    }
+}
+
 fn model_defines_predicate(recv: &Expr, method: &str, ctx: GoTestCtx) -> bool {
     let own = |m: &crate::dialect::Model| {
         m.methods().any(|d| {
@@ -533,6 +562,10 @@ fn try_emit_assoc_create_go(
     for (k, v) in &hash_entries {
         if let ExprNode::Lit { value: Literal::Sym { value: field_name } } = &*k.node {
             let val = emit_test_expr_go(v, ctx);
+            if let Some((field, conv)) = super::held_column_field(ctx.app, target_class, field_name.as_str()) {
+                pairs.push(format!("{field}: {conv}({val})"));
+                continue;
+            }
             let val = match super::opt_converter_for(
                 ctx.nullable_columns,
                 &target_class,
