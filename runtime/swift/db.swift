@@ -139,6 +139,12 @@ enum Db {
     static func escapeIntOpt(_ n: Int?) -> String { n.map { String($0) } ?? "NULL" }
     static func escapeFloatOpt(_ f: Double?) -> String { f.map { String($0) } ?? "NULL" }
     static func escapeBoolOpt(_ b: Bool?) -> String { b.map { $0 ? "1" : "0" } ?? "NULL" }
+    // `t.binary` columns: the text methods. No value here reaches the
+    // column as bytes (`Digest::BLAKE3` is not emitted for this target).
+    static func escapeBinary(_ s: String) -> String { escapeString(s) }
+    static func escapeBinaryOpt(_ s: String?) -> String { escapeStringOpt(s) }
+    static func columnBinary(_ stmtId: Int, _ i: Int) -> String { columnText(stmtId, i) }
+    static func columnBinaryOpt(_ stmtId: Int, _ i: Int) -> String? { columnTextOpt(stmtId, i) }
     static func escapeIntList(_ ids: [Int]) -> String {
         ids.map(String.init).joined(separator: ", ")
     }

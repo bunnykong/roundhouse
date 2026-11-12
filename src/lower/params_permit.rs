@@ -381,13 +381,17 @@ fn parameters_on_hash(expr: &mut Expr) -> bool {
     }
     // Not a String read of a value that may be either: Parameters hold String keys here, the Hash beside them Symbols.
     let value_holder = !matches!(&*r.node, ExprNode::Send { method, .. } if method.as_str() == "params");
-    if value_holder && may_be_parameters(r.ty.as_ref()) && !is_parameters(r.ty.as_ref()) {
+    // A Symbol read of a request value that may be Parameters among scalars (Devise's `attributes[:reset_password_token]`
+    // over `params.fetch(resource_name, {})`): only Parameters answer it, a String or an Array raising as in Rails.
+    let symbol_read = matches!(method.as_str(), "[]" | "delete") && matches!(args.as_slice(), [k] if matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } }));
+    if value_holder && (may_be_parameters(r.ty.as_ref()) || (symbol_read && holds_parameters(r.ty.as_ref()))) && !is_parameters(r.ty.as_ref()) {
         // Not a literal String key, which reads alike either way.
         let symbol_key = |k: &Expr| !matches!(&*k.node, ExprNode::Lit { value: Literal::Str { .. } }) && !matches!(k.ty, Some(Ty::Str | Ty::Int));
-        if method.as_str() == "[]" && let [key] = args.as_slice() && symbol_key(key) {
+        if matches!(method.as_str(), "[]" | "delete") && let [key] = args.as_slice() && symbol_key(key) {
             let params = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Params")] });
             let ty = expr.ty.clone();
-            *expr = send(span, Some(params), "indifferent_read", vec![r.clone(), key.clone()]);
+            let via = if method.as_str() == "delete" { "indifferent_delete" } else { "indifferent_read" };
+            *expr = send(span, Some(params), via, vec![r.clone(), key.clone()]);
             expr.ty = ty;
             return true;
         }
@@ -403,6 +407,27 @@ fn parameters_on_hash(expr: &mut Expr) -> bool {
             test.ty = Some(Ty::Bool);
             *expr = test;
             true
+        }
+        // A Symbol literal read or removed on Parameters a method is handed (Devise's `update_with_password(params)`,
+        // a plain class's `initialize(params)`): either key, as Rails' Parameters answer, since the request's Hash holds
+        // the String and a `permit` the emit lowered the Symbol. Not a controller's own `params`, which the emit's
+        // coercion writes as Rails reads it.
+        ("[]" | "delete", [key]) if matches!(&*r.node, ExprNode::Var { .. }) && matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { .. } }) => {
+            let params = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Params")] });
+            let ty = expr.ty.clone();
+            let via = if method.as_str() == "delete" { "indifferent_delete" } else { "indifferent_read" };
+            *expr = send(span, Some(params), via, vec![r.clone(), key.clone()]);
+            expr.ty = ty;
+            true
+        }
+        // Any other receiver of Parameters (Warden's `params_auth_hash[:remember_me]`) holds the request's String keys.
+        ("[]" | "delete" | "fetch" | "key?" | "has_key?", [key, ..])
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*key.node =>
+        {
+            let mut text = Expr::new(key.span, ExprNode::Lit { value: Literal::Str { value: value.as_str().to_string() } });
+            text.ty = Some(Ty::Str);
+            *key = text;
+            false
         }
         // Not a literal key: the emit's coercion writes those as Rails reads them.
         ("[]" | "fetch" | "key?" | "has_key?", [key, ..])

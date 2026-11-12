@@ -13,10 +13,12 @@
 use super::{Column, ColumnType, Table};
 
 /// Expression syntax admitted while ingesting generated-column schema
-/// metadata. This is a source-expression validation mode, not a project
-/// database selector. Application ingest uses [`Portable`](Self::Portable)
-/// so PostgreSQL-only syntax remains unsupported by current targets.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// metadata and CHECKs. This is a source-expression validation mode: it
+/// says whose SQL the text is, not which database a target runs.
+/// Application ingest never uses [`Postgres`](Self::Postgres), so
+/// PostgreSQL-only syntax remains unsupported by current targets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GeneratedExpressionDialect {
     /// The existing expression grammar shared by SQLite and PostgreSQL DDL.
     #[default]
@@ -24,6 +26,16 @@ pub enum GeneratedExpressionDialect {
     /// The portable grammar plus bounded text/int4 casts and JSON extraction
     /// used by the PostgreSQL schema-DDL renderer.
     Postgres,
+    /// The portable grammar, plus SQLite's own in a CHECK: every database
+    /// in the application's `config/database.yml` is sqlite3, so SQLite DDL
+    /// carries the text to the engine it was written for.
+    Sqlite,
+}
+
+impl GeneratedExpressionDialect {
+    pub(crate) fn is_portable(&self) -> bool {
+        *self == Self::Portable
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -5,5 +5,7 @@ module Rack
     def self.select_best_encoding: (Array[String] available_encodings, Array[[String?, Float]] accept_encoding) -> String?
     def self.unescape_path: (String s) -> String
     def self.path_hex_value: (Integer b) -> Integer
+    def self.escape: (untyped s) -> String
+    def self.secure_compare: (String a, String b) -> bool
   end
 end

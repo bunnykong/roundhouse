@@ -60,7 +60,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files: Vec<EmittedFile> = Vec::new();
     files.push(file("Gemfile", GEMFILE));
     files.push(file("config.ru", CONFIG_RU));
-    files.push(file("db.rb", DB_RB));
+    // Sequel's SQLite connection makes LIKE case-sensitive unless told not
+    // to; Rails' leaves SQLite's default. A SQLite application's LIKE, its
+    // CHECKs included, keeps Rails' reading. Any other app's file is unchanged.
+    let sqlite = app.schema.expression_dialect == crate::schema::generated::GeneratedExpressionDialect::Sqlite;
+    files.push(file("db.rb", &if sqlite { DB_RB.replacen("__dir__)))", "__dir__)), case_sensitive_like: false)", 1) } else { DB_RB.to_string() }));
     files.extend(emit_migrations(app));
     files.extend(emit_models(app));
     files.push(emit_app_rb(app));
@@ -2204,7 +2208,7 @@ mod tests {
             .split('/')
             .filter_map(|s| s.strip_prefix(':').map(|p| p.to_string()))
             .collect();
-        FlatRoute {
+        FlatRoute { request_defaults: Vec::new(),
             method,
             source_path: path.to_string(),
             path: path.to_string(),

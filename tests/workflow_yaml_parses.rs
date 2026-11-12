@@ -551,7 +551,7 @@ fn pr_archives_remain_tested_without_pages_publication_work() {
     assert_eq!(
         jobs["build-site"]["if"].as_str(),
         Some(
-            "${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-site') && needs.generate-fixture.result == 'success' && (needs.plan.outputs.site != 'true' || needs.build-wasm.result == 'success') }}"
+            "${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-site') && needs.generate-fixture.result == 'success' }}"
         )
     );
     assert_eq!(jobs["smoke"]["needs"][0].as_str(), Some("build-site"));
@@ -625,7 +625,7 @@ fn pr_archives_remain_tested_without_pages_publication_work() {
     assert_eq!(
         jobs["assemble-site"]["if"].as_str(),
         Some(
-            "${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.archive-results.result == 'success' }}"
+            "${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.build-wasm.result == 'success' && needs.archive-results.result == 'success' }}"
         )
     );
     assert!(

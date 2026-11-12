@@ -21,6 +21,23 @@ fn app(files: &[(&str, &str)]) -> roundhouse::App {
 const PROBE: &str = "require \"io/console\"\nclass TerminalProbe\n  def self.rows = 1\nend\n";
 
 #[test]
+fn require_collection_does_not_repeat_syntax_diagnostics_in_survey_mode() {
+    let source = "require \"stringio\"\nclass TerminalProbe\n  def self.rows = 1\nend\n)\n";
+    // The declaration and on-load ingesters already report syntax errors;
+    // collecting requires must not introduce a third reporting pass.
+    let expected = 2 * ruby_prism::parse(source.as_bytes()).errors().count();
+    assert!(expected > 0, "the source must have a syntax error");
+    roundhouse::ingest::survey::activate();
+    let (app, diagnostics) = roundhouse::ingest::prism::scope(|| {
+        app(&[("lib/terminal_probe.rb", source)])
+    });
+    roundhouse::ingest::survey::drain();
+    assert_eq!(app.app_requires, ["stringio"]);
+    let parse: Vec<_> = diagnostics.iter().filter(|d| d.code() == "parse").collect();
+    assert_eq!(parse.len(), expected, "a read-only require scan repeated diagnostics: {parse:?}");
+}
+
+#[test]
 fn an_ingested_library_file_contributes_its_require() {
     let app = app(&[("lib/terminal_probe.rb", PROBE)]);
     assert!(
@@ -29,6 +46,26 @@ fn an_ingested_library_file_contributes_its_require() {
             .any(|class| class.name.0.as_str() == "TerminalProbe")
     );
     assert_eq!(app.app_requires, ["io/console"]);
+}
+
+#[test]
+fn a_data_records_sibling_declaration_contributes_its_require() {
+    for kind in ["class", "module"] {
+        for indent in ["", "  "] {
+            // The unindented form was also collected by the old line scanner.
+            let source = format!(
+                "Artifact = Data.define(:value)\n{kind} TerminalProbe\n{indent}require \"io/console\"\n  def self.rows = 1\nend\n"
+            );
+            for path in ["lib/terminal_probe.rb", "app/models/terminal_probe.rb"] {
+                let app = app(&[(path, &source)]);
+                for name in ["Artifact", "TerminalProbe"] {
+                    assert!(app.library_classes.iter().any(|class| class.name.0.as_str() == name),
+                        "{path}: {source}: {name} was dropped");
+                }
+                assert_eq!(app.app_requires, ["io/console"], "{path}: {source}");
+            }
+        }
+    }
 }
 
 #[test]

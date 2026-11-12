@@ -121,6 +121,7 @@ pub(super) fn settle(app: &mut App, held: Vec<Held>) {
                     call.span == *span
                         && alias_call(call).is_some_and(|(receiver, _, from)| {
                             ancestor_method(&candidates, lc, from, receiver, call.span).is_some()
+                                || answered_outside_the_app(&candidates, lc, from, receiver)
                         })
                 })
             })
@@ -137,6 +138,35 @@ pub(super) fn settle(app: &mut App, held: Vec<Held>) {
         }
         if !changed {
             break;
+        }
+    }
+    // An alias Ruby resolves outside the app's classes (`answered_outside_the_app`) gets no copy, so every Ruby tree
+    // writes it where the source has it, Spinel's too (an `alias_method` of a Hash subclass's `[]`).
+    let mut outside: Vec<(usize, usize, String)> = Vec::new();
+    {
+        let candidates: Vec<&LibraryClass> = app.library_classes.iter().collect();
+        for (_, h) in held.iter().enumerate().filter(|(i, _)| carried[*i]) {
+            for k in h.classes.clone() {
+                let lc = &app.library_classes[k];
+                for (j, call) in lc.unknown_calls.iter().enumerate() {
+                    let Some((receiver, _, from)) = alias_call(call) else { continue };
+                    // Not a class-side one (`class << self; alias [] new; end`): the in-place replay writes the class body.
+                    if receiver == MethodReceiver::Instance
+                        && h.spans.contains(&call.span)
+                        && ancestor_method(&candidates, lc, from, receiver, call.span).is_none()
+                        && answered_outside_the_app(&candidates, lc, from, receiver)
+                    {
+                        outside.push((k, j, h.path.clone()));
+                    }
+                }
+            }
+        }
+    }
+    for (k, j, path) in outside {
+        app.library_classes[k].unknown_calls[j].decisions |= crate::expr::REPLAYED_CLASS_BODY;
+        // Still the gap's on the other targets, which get no copy of what the alias names.
+        if super::survey::is_active() {
+            super::survey::record(&super::IngestError::Unsupported { file: path, message: REFUSAL.into() });
         }
     }
     let mut refused: Vec<(usize, Span)> =
@@ -325,6 +355,49 @@ fn ancestor_method<'a>(
         class = resolved;
     }
     None
+}
+
+/// Whether Ruby resolves the alias's original outside the app's classes: a module the class includes defines it, or
+/// the superclass chain ends at a core container class (Hashie's `Dash < Hash` aliasing `[]`). The Ruby family writes
+/// the alias back (`BODY_STATEMENT`), which Ruby resolves as the source's did, and gives no copy to the other targets.
+// Not checked against the core class's methods: an original it lacks fails as the source's alias does, at load.
+fn answered_outside_the_app(app: &[&LibraryClass], lc: &LibraryClass, name: &str, receiver: MethodReceiver) -> bool {
+    const CORE: &[&str] = &["Hash", "Array", "String", "Object", "BasicObject"];
+    // On the class side: a method of Ruby's `Class` (Hashie's `class << self; alias [] new; end`), or of a module the
+    // class extends that is not the app's (rack-protection's `extend Rack::Utils` then `alias escape_url escape`).
+    const CLASS_METHODS: &[&str] = &["new", "allocate", "name", "to_s", "inspect", "superclass"];
+    if receiver == MethodReceiver::Class {
+        let extends_outside = lc.unknown_calls.iter().any(|call| {
+            matches!(&*call.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "extend"
+                && args.iter().any(|a| matches!(&*a.node, ExprNode::Const { path } if {
+                    let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+                    !app.iter().any(|c| c.is_module && (c.name.0.as_str() == written || c.name.0.as_str().ends_with(&format!("::{written}"))))
+                })))
+        });
+        return CLASS_METHODS.contains(&name) || extends_outside;
+    }
+    if receiver != MethodReceiver::Instance {
+        return false;
+    }
+    let includes_it = |class: &str| {
+        named(app, class).into_iter().flat_map(|c| c.includes.iter()).any(|module| {
+            app.iter().filter(|c| c.is_module && c.name == *module).flat_map(|c| c.methods.iter()).any(|m| m.name.as_str() == name)
+        })
+    };
+    let mut class = lc.name.0.as_str().to_string();
+    for _ in 0..32 {
+        if includes_it(&class) {
+            return true;
+        }
+        let Some(written) = named(app, &class).into_iter().filter(|c| !c.is_module).find_map(|c| c.parent.clone()) else { return false };
+        // Not the class itself: `class Hash < ::Hash` in `module Hashie` names the top-level one, whose `::` the
+        // written parent may not keep.
+        match superclass(app, &class, written.0.as_str()).filter(|resolved| *resolved != class) {
+            Some(resolved) => class = resolved,
+            None => return CORE.contains(&written.0.as_str().trim_start_matches("::")),
+        }
+    }
+    false
 }
 
 /// The library class `written` names as `class`'s superclass: looked up

@@ -506,6 +506,18 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 {
                     return emit_expr_as_value(ctx, left);
                 }
+                // A nullable column's pointer field: nil takes the fallback,
+                // any stored value (0 included) is itself, as in Ruby.
+                if let Some(ptr) = nullable_field_go_ty(left)
+                    && let Some(scalar) = ptr.strip_prefix('*')
+                    && primitive_kind(&right.ty)
+                {
+                    return format!(
+                        "func() {scalar} {{ if p := {}; p != nil {{ return *p }}; return {} }}()",
+                        emit_expr_as_value(ctx, left),
+                        emit_expr_as_value(ctx, right)
+                    );
+                }
                 if primitive_kind(&left.ty) || primitive_kind(&right.ty) {
                     return format!(
                         "cmp.Or({}, {})",
@@ -1371,6 +1383,15 @@ pub(super) fn emit_send(
     if is_writer_method_name(method) && args.len() == 1 && recv.is_some() {
         let r = recv.unwrap();
         let recv_s = emit_expr(ctx, r);
+        // A writer the class defines as a real method (a column held
+        // unset: `def <col>=(v) = @<col>_raw = v`) is called, not
+        // bypassed with a write to a field that doesn't exist.
+        if matches!(&*r.node, ExprNode::SelfRef)
+            && ctx.self_methods.as_ref().is_some_and(|m| m.contains(method))
+        {
+            let name = super::library::pascalize_instance_method_name(method);
+            return format!("{recv_s}.{name}({})", args_s[0]);
+        }
         let field_ruby = &method[..method.len() - 1];
         let field_go = go_field_name(field_ruby);
         // If/Case-shaped RHS needs IIFE wrap — Go's `if`/`switch` are
@@ -3241,6 +3262,13 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
                 format!("{} = {v}", name.as_str())
             } else {
                 let pascal = go_field_name(name.as_str());
+                // A plain scalar into a nullable column's pointer field (a
+                // column held unset: `@<col>_raw = value`, the column's own type).
+                if matches!(value.ty, Some(Ty::Int | Ty::Float | Ty::Str | Ty::Bool))
+                    && let Some(conv) = nullable_column_converter(name.as_str(), value)
+                {
+                    return format!("self.{pascal} = {conv}({v})");
+                }
                 format!("self.{pascal} = {v}")
             }
         }

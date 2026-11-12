@@ -1,8 +1,13 @@
-//! `App::sidekiq_redis`: the `url:` and `password:` of an app's
+//! `App::sidekiq_redis`: the Redis settings of an app's
 //! `Sidekiq.configure_client` block, read at ingest from
-//! `config/initializers`. Other keys, and values in forms ingest doesn't
-//! read, are warnings and are not read. A tree on `:sidekiq` left with
-//! no `url:` is an error: there is no environment fallback.
+//! `config/initializers`. `url:`, `password:`, `username:`, `db:`, the
+//! timeouts and `reconnect_attempts:` are honored. A key that would
+//! connect somewhere, or some way, the app didn't ask for (TLS,
+//! Sentinel, `id:`, `host:`) is an error on `:sidekiq` and a warning off
+//! it. A key that changes nothing here (the pool's `size:`, `driver:`),
+//! an unknown key, and a `url:` in a form ingest doesn't read are
+//! warnings. A tree on `:sidekiq` left with no `url:` is an error: there
+//! is no environment fallback.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -100,6 +105,116 @@ fn other_keys_are_warned_about_and_ignored() {
     assert_eq!(warnings.len(), 2, "{warnings:#?}");
     assert!(warnings.iter().any(|w| w.contains("`size:`")), "{warnings:#?}");
     assert!(warnings.iter().any(|w| w.contains("`ssl_params:`")), "{warnings:#?}");
+}
+
+fn redis(settings: &str) -> String {
+    format!("Sidekiq.configure_client do |config|\n  config.redis = {{ url: ENV[\"REDIS_URL\"], {settings} }}\nend\n")
+}
+
+/// `username:`, `db:`, the timeouts and `reconnect_attempts:` in each
+/// form they are read in, as Sidekiq 8.1.7 hands them to redis-client.
+#[test]
+fn connection_settings_in_each_form() {
+    let (config, warnings) = ingest(&redis(
+        "username: ENV.fetch(\"REDIS_USER\", \"jobs\"), db: 3, timeout: 5, connect_timeout: 0.5, reconnect_attempts: 2",
+    ));
+    assert!(warnings.is_empty(), "{warnings:#?}");
+    assert_eq!(
+        config.username,
+        Some(RedisSetting::EnvFetch { name: "REDIS_USER".into(), default: Some("jobs".into()) })
+    );
+    assert_eq!(config.db, Some(RedisSetting::Literal("3".into())));
+    assert_eq!((config.effective_connect_timeout(), config.effective_read_timeout()), (0.5, 5.0));
+    assert_eq!(config.effective_reconnect_delays(), vec![0.0, 0.0]);
+
+    let (config, warnings) = ingest(&redis(
+        "db: ENV[\"REDIS_DB\"], read_timeout: 2.seconds, network_timeout: 4, timeout: 9, reconnect_attempts: [0.1, 0.5]",
+    ));
+    assert!(warnings.is_empty(), "{warnings:#?}");
+    assert_eq!(config.db, env("REDIS_DB"));
+    // `network_timeout:` replaces `timeout:` wherever it is written.
+    assert_eq!((config.effective_connect_timeout(), config.effective_read_timeout()), (4.0, 2.0));
+    assert_eq!(config.effective_reconnect_delays(), vec![0.1, 0.5]);
+    // A String literal naming a database reads as that Integer.
+    let (config, warnings) = ingest(&redis("db: \"7\""));
+    assert!(warnings.is_empty(), "{warnings:#?}");
+    assert_eq!(config.db, Some(RedisSetting::Literal("7".into())));
+
+    // Sidekiq's defaults: 3-second timeouts and one retry, which
+    // `reconnect_attempts: false` (or nil) keeps, as Sidekiq's `||= 1`
+    // does. 0 turns retrying off.
+    let (config, _) = ingest(CLIENT);
+    assert_eq!((config.effective_connect_timeout(), config.effective_read_timeout()), (3.0, 3.0));
+    assert_eq!(config.effective_reconnect_delays(), vec![0.0]);
+    let (config, _) = ingest(&redis("reconnect_attempts: false"));
+    assert_eq!(config.effective_reconnect_delays(), vec![0.0]);
+    let (config, _) = ingest(&redis("reconnect_attempts: 0"));
+    assert_eq!(config.effective_reconnect_delays(), Vec::<f64>::new());
+
+    // Values that ask for what the push does already.
+    let (_, warnings) = ingest(&redis("id: nil, ssl: false, protocol: 3"));
+    assert!(warnings.is_empty(), "{warnings:#?}");
+}
+
+/// A key that can't be honored is one error naming it on `:sidekiq`,
+/// where ignoring it would connect somewhere, or some way, the app
+/// didn't ask for. Off `:sidekiq` it reaches no client and is a warning.
+#[test]
+fn settings_that_cant_be_honored_are_errors_on_sidekiq() {
+    for (settings, key, why) in [
+        ("ssl_params: { verify_mode: OpenSSL::SSL::VERIFY_NONE }", "ssl_params", "TLS"),
+        ("ssl: true", "ssl", "TLS"),
+        ("sentinels: [{ host: \"s1\", port: 26379 }]", "sentinels", "Sentinel"),
+        ("name: \"mymaster\"", "name", "Sentinel"),
+        ("role: :master", "role", "Sentinel"),
+        ("id: \"jobs-client\"", "id", "CLIENT SETNAME"),
+        ("path: \"/tmp/redis.sock\"", "path", "unix sockets"),
+        ("host: \"cache\"", "host", "put it in url:"),
+        ("namespace: \"app\"", "namespace", "namespace"),
+        ("nodes: [\"redis://a:6379\"]", "nodes", "Cluster"),
+        ("protocol: 2", "protocol", "RESP3"),
+        ("username: Rails.application.credentials.redis_user", "username", "String literal"),
+        ("db: -1", "db", "negative"),
+        ("db: \"two\"", "db", "Integer"),
+        ("db: \"08\"", "db", "without leading zeros"),
+        ("db: \"010\"", "db", "without leading zeros"),
+        ("db: Rails.env.test? ? 1 : 0", "db", "Integer literal"),
+        ("timeout: ENV.fetch(\"REDIS_TIMEOUT\", 1).to_f", "timeout", "positive"),
+        ("read_timeout: 0", "read_timeout", "positive"),
+        ("reconnect_attempts: \"twice\"", "reconnect_attempts", "Array of literal delays"),
+    ] {
+        let init = redis(settings);
+        let diags = on_sidekiq(&init);
+        let errors: Vec<&String> = diags.iter().filter(|(error, _)| *error).map(|(_, m)| m).collect();
+        assert_eq!(errors.len(), 1, "{settings}: {diags:#?}");
+        assert!(
+            errors[0].contains(&format!("`{key}:`")) && errors[0].contains("can't be honored") && errors[0].contains(why),
+            "{settings}: {errors:#?}"
+        );
+
+        let (_, warnings) = ingest(&init);
+        assert!(warnings.iter().any(|w| w.contains(&format!("`{key}:`"))), "{settings} off :sidekiq: {warnings:#?}");
+    }
+}
+
+/// The pool's settings, `driver:`, `write_timeout:` and `logger:` change
+/// nothing here: each is a warning saying why, and never an error.
+#[test]
+fn settings_that_change_nothing_here_are_warnings() {
+    for (settings, key, why) in [
+        ("size: 10", "size", "no connection pool"),
+        ("pool_timeout: 5", "pool_timeout", "no connection pool"),
+        ("driver: :hiredis", "driver", "spinel-redis"),
+        ("write_timeout: 2", "write_timeout", "no write timeout"),
+        ("logger: Rails.logger", "logger", "boot line"),
+    ] {
+        let diags = on_sidekiq(&redis(settings));
+        assert!(diags.iter().all(|(error, _)| !error), "{settings}: {diags:#?}");
+        assert!(
+            diags.iter().any(|(_, m)| m.contains(&format!("`{key}:`")) && m.contains("is ignored") && m.contains(why)),
+            "{settings}: {diags:#?}"
+        );
+    }
 }
 
 #[test]

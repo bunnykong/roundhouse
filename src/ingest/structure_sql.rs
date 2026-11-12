@@ -412,6 +412,7 @@ fn parse_column_def(
         generated_int4_compatible,
         array: false,
         array_stored: false,
+        unset_until_assigned: false,
     }))
 }
 

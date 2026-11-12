@@ -494,6 +494,7 @@ pub(super) fn ingest_model_with_enum_constants(
         parent,
         parent_span,
         sti_subclass_names: Vec::new(),
+        mixin_sends: Vec::new(),
         select_aliases: Vec::new(),
         i18n: Default::default(),
         table: TableRef(Symbol::from(table_name)),
@@ -604,6 +605,23 @@ pub(super) fn ingest_model_body_items(
                 }
                 Err(err) => Err(err),
             };
+        }
+        if call.receiver().is_none()
+            && let Some(source) = validations::validates_of_as_validates(&call, file)
+        {
+            let parsed = super::prism::parse_silent(source.as_bytes());
+            let program = parsed.node();
+            if parsed.errors().next().is_none()
+                && let Some(stmt) = program.as_program_node().and_then(|p| p.statements().body().iter().next())
+            {
+                let mut items = ingest_model_body_items(&stmt, owner, file, leading_comments, class_attr_defaults, class_consts)?;
+                for item in &mut items {
+                    if let ModelBodyItem::Validation { span: at, .. } = item {
+                        *at = span;
+                    }
+                }
+                return Ok(items);
+            }
         }
         if call.receiver().is_none() {
             let name = constant_id_str(&call.name()).to_string();

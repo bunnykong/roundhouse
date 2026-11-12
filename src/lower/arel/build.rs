@@ -667,6 +667,7 @@ fn value_type_for(col_type: &ColumnType) -> ValueType {
         | ColumnType::BigInt
         | ColumnType::Reference { .. } => ValueType::Int,
         ColumnType::Boolean => ValueType::Bool,
+        ColumnType::Binary => ValueType::Binary,
         _ => ValueType::Str,
     }
 }
@@ -704,6 +705,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                     Column {
                         name: Symbol::from("article_id"),
@@ -718,6 +720,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                     Column {
                         name: Symbol::from("body"),
@@ -732,6 +735,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                 ],
                 indexes: vec![],
@@ -742,7 +746,7 @@ mod tests {
                 primary_key_columns: Vec::new(),
             },
         );
-        let schema = Schema { tables };
+        let schema = Schema { tables, ..Default::default() };
 
         let mut registry = HashMap::default();
         let mut comment_info = ClassInfo::default();

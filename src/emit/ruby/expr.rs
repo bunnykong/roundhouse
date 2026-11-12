@@ -385,6 +385,15 @@ fn emit_node(n: &ExprNode) -> String {
             let brace = block.as_ref().is_some_and(|b| {
                 matches!(&*b.node, ExprNode::Lambda { block_style: crate::expr::BlockStyle::Brace, .. })
             });
+            // `self.[](key, &blk)` (Hashie's `method_missing`): the bracket form takes no block, so a call with one is
+            // written as the method call it is.
+            if let (Some(r), Some(b)) = (recv.as_ref(), block.as_ref())
+                && method.as_str() == "[]"
+            {
+                let args_s: Vec<String> = args.iter().map(emit_arg).collect();
+                let base = format!("{}.[]({})", emit_postfix_recv(r), args_s.join(", "));
+                return emit_do_block(&base, b);
+            }
             let base = emit_send_base(recv.as_ref(), method, args, *parenthesized || (brace && !args.is_empty()));
             match block {
                 None => base,
@@ -1790,7 +1799,7 @@ pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
         // lobsters' `Rails.cache.fetch(key, &block)` forward returned
         // the Proc, poisoning `@comments` to Proc under spinel and
         // silently mis-caching on CRuby. Re-attach as a `&` argument.
-        let fwd = emit_expr(block);
+        let fwd = emit_arg(block);
         return if let Some(stripped) = base.strip_suffix(')') {
             if stripped.ends_with('(') {
                 format!("{stripped}&{fwd})")

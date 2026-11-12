@@ -271,13 +271,12 @@ end
     );
 }
 
-/// DECLINED: a delegated name this class calls with ARGUMENTS. Rails
-/// forwards them with `*args, &block`, which the strict targets do not
-/// lower, and a zero-arg forwarder for a method that takes two is an
-/// arity error standing in for a NameError. campfire's
-/// `Messages::AttachmentPresentation` is exactly this shape.
+/// A delegated name this class calls with ARGUMENTS, the same count at
+/// every call: Rails forwards them (`def link_to(...) = context.link_to(...)`),
+/// and the forwarder takes that many positionals, which every target lowers.
+/// campfire's `Messages::AttachmentPresentation` is this shape.
 #[test]
-fn a_delegation_called_with_arguments_is_left_alone() {
+fn a_delegation_called_with_one_argument_count_forwards_that_many() {
     let out = emit(
         r#"class Filter
   attr_reader :context
@@ -290,7 +289,8 @@ fn a_delegation_called_with_arguments_is_left_alone() {
 end
 "#,
     );
-    assert!(!out.contains("def link_to"), "got:\n{out}");
+    assert!(out.contains("def link_to(__delegate_arg0, __delegate_arg1)"), "got:\n{out}");
+    assert!(out.contains("context.link_to(__delegate_arg0, __delegate_arg1)"), "got:\n{out}");
 }
 
 #[test]

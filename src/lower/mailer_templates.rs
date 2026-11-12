@@ -39,6 +39,12 @@ use crate::ty::Ty;
 use super::view_to_library::{ViewArgs, ViewKey};
 
 pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
+    apply_mailer_templates_for(app, crate::build_target::BuildTarget::Ruby)
+}
+
+pub fn apply_mailer_templates_for(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    // Not on a strict target: `default_params` and `_prefixes` read the ruby family's ActionMailer runtime.
+    let ruby_family = target.has_runtime_relation();
     let mut diags = Vec::new();
     let mailers = super::mailer_class_side::mailer_names(app);
     if mailers.is_empty() {
@@ -76,6 +82,42 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
         }
         let chain = ancestry(&class, &parents, &mailers);
         let (defaults, layout) = class_settings(&chain, &calls, &mut diags);
+        // Rails' `default_params`, which a mailer's own code may read (Devise's `mailer_sender`): ActionMailer's merged
+        // with the chain's `default` entries.
+        if ruby_family && !defaults.is_empty() && !lc.methods.iter().any(|m| m.name.as_str() == "default_params" && m.receiver == crate::dialect::MethodReceiver::Instance) {
+            lc.methods.push(default_params_method(&lc.name, &defaults));
+        }
+        // Not left for a strict target to omit silently: its runtime carries no ActionMailer to answer them.
+        if !ruby_family {
+            for name in ["default_params", "_prefixes"] {
+                if lc.methods.iter().any(|m| m.name.as_str() == name && m.receiver == crate::dialect::MethodReceiver::Instance) {
+                    continue;
+                }
+                for m in lc.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+                    fn find(e: &Expr, name: &str, at: &mut Vec<crate::span::Span>) {
+                        if let ExprNode::Send { recv: None, method, .. } = &*e.node
+                            && method.as_str() == name
+                        {
+                            at.push(e.span);
+                        }
+                        e.node.for_each_child(&mut |c| find(c, name, at));
+                    }
+                    let mut at = Vec::new();
+                    find(&m.body, name, &mut at);
+                    for span in at {
+                        diags.push(Diagnostic::unsupported(span, None, "mailer reflection", format!("`{name}` reads ActionMailer's own state, which this target's runtime does not carry")));
+                    }
+                }
+            }
+        }
+        // `_prefixes`, the directories a lookup of the mailer's templates searches (Devise's `template_paths`): each
+        // mailer of its chain, nearest first, as `AbstractController::ViewPaths` lists their `mailer_name`s.
+        if ruby_family && !lc.methods.iter().any(|m| m.name.as_str() == "_prefixes" && m.receiver == crate::dialect::MethodReceiver::Instance) {
+            let span = crate::span::Span::synthetic();
+            let elements = chain.iter().map(|c| str_lit(span, &view_dir(c))).collect();
+            let body = Expr::new(span, ExprNode::Array { elements, style: Default::default() });
+            lc.methods.push(synthesized(&lc.name, "_prefixes", body));
+        }
         let layout = layout.unwrap_or_else(|| implied_layout(&chain, &has_view));
         let dir = view_dir(&class);
         let module = crate::naming::camelize_path(&dir);
@@ -493,6 +535,46 @@ fn ancestry(class: &str, parents: &HashMap<String, Option<String>>, mailers: &BT
         current = parent.clone();
     }
     out
+}
+
+fn default_params_method(owner: &crate::ident::ClassId, defaults: &[(Expr, Expr)]) -> crate::dialect::MethodDef {
+    let span = crate::span::Span::synthetic();
+    let base = Expr::new(span, ExprNode::Const { path: vec![crate::ident::Symbol::from("ActionMailer"), crate::ident::Symbol::from("Base")] });
+    let base = send(Some(base), "base_default_params", vec![], span);
+    // Not the call a Proc default became (`ingest::mailer_defaults`): Rails' `default_params` holds the Proc, which runs only where `mail` or the reader asks it.
+    let entries = defaults
+        .iter()
+        .map(|(k, v)| match &*v.node {
+            ExprNode::Send { recv: None, method, .. } if method.as_str().starts_with("__mailer_default_") => {
+                let name = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Sym { value: method.clone() } });
+                (k.clone(), send(Some(send(None, "method", vec![name], span)), "to_proc", vec![], span))
+            }
+            _ => (k.clone(), v.clone()),
+        })
+        .collect();
+    let hash = Expr::new(span, ExprNode::Hash { entries, kwargs: false });
+    synthesized(owner, "default_params", send(Some(base), "merge", vec![hash], span))
+}
+
+fn synthesized(owner: &crate::ident::ClassId, name: &str, body: Expr) -> crate::dialect::MethodDef {
+    let span = crate::span::Span::synthetic();
+    crate::dialect::MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: span,
+        name: crate::ident::Symbol::from(name),
+        receiver: crate::dialect::MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: None,
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
 }
 
 /// `default k: v` entries (a nearer class's key wins) and the nearest

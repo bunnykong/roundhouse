@@ -228,6 +228,12 @@ module ActionDispatch
       @session = value
     end
 
+    # Rails' `Request#reset_session` (Warden's `reset_session!` on sign-out): the session emptied in place, so what
+    # holds it sees it empty too.
+    def reset_session
+      session.clear
+    end
+
     # Whether the dispatcher should leave the session cookie alone this
     # response (Rails: the session middleware skips its commit).
     def session_skip?
@@ -287,7 +293,13 @@ module ActionDispatch
     def self.for_env(env)
       found = env["roundhouse.request"]
       return found if found.is_a?(ActionDispatch::Request)
-      ActionDispatch::Request.new
+      # Not a request of its own env: what it is asked for and writes (its cookie jar) is the env's, as Rails' is.
+      request = ActionDispatch::Request.new
+      request.env = env
+      # The session the dispatcher restored into the env, so a reset here is the one it persists.
+      restored = env["rack.session"]
+      request.session = restored if restored.is_a?(ActionDispatch::Session)
+      request
     end
 
     # Rails' HTTP_METHOD_LOOKUP: the verb as a Symbol, `M-SEARCH` as `:m_search`.

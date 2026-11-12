@@ -39,8 +39,8 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
 }
 
 /// Ingest a Rails schema while validating generated expressions for an
-/// explicit DDL source dialect. Application ingestion continues to call
-/// [`ingest_schema`] and therefore retains the Portable default.
+/// explicit DDL source dialect. Application ingestion passes the one its
+/// `config/database.yml` settles, never Postgres; [`ingest_schema`] is Portable.
 pub fn ingest_schema_with_generated_expression_dialect(
     source: &[u8],
     file: &str,
@@ -146,7 +146,7 @@ pub fn ingest_migration(source: &[u8], file: &str, schema: &mut Schema) -> Inges
 }
 
 /// Fold one migration using an explicit generated-expression grammar.
-/// The default [`ingest_migration`] remains Portable for application ingest.
+/// Application ingest passes its schema's; [`ingest_migration`] is Portable.
 pub fn ingest_migration_with_generated_expression_dialect(
     source: &[u8],
     file: &str,
@@ -743,7 +743,8 @@ fn apply_table_verb(
             if let Some(table) = arg_name(0).and_then(|n| schema.tables.get_mut(&Symbol::from(n))) {
                 if verb == "add_check_constraint" {
                     let check = check_constraint(&args[1..], file, table.name.as_str())?;
-                    if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect) {
+                    if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect)
+                        && !crate::emit::shared::schema_sql::sqlite_check_expression(&check.expression, table, dialect) {
                         return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) });
                     }
                     table.check_constraints.push(check);
@@ -1671,6 +1672,7 @@ fn table_from_create_table(
                 generated_int4_compatible: None,
                 array: false,
                 array_stored: false,
+                unset_until_assigned: false,
             }),
             Some(t) => column_with_type(t, id_name.clone(), &opts, &table_name, file),
         };
@@ -1697,8 +1699,8 @@ fn table_from_create_table(
                     if let Some(call) = stmt.as_call_node() {
                         let call_name = constant_id_str(&call.name()).to_string();
                         if matches!(call_name.as_str(), "index" | "check_constraint") {
-                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, n.location().start_offset())))
-                                .filter(|(s, _)| call_name == "check_constraint" || s.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_'))
+                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, n.location().start_offset(), call_name == "check_constraint")))
+                                .filter(|(s, _, check)| *check || s.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_'))
                             {
                                 sql_locations.push(value);
                             }
@@ -1720,7 +1722,7 @@ fn table_from_create_table(
                                 Ok(Some(idx)) => {
                                     if idx.expression.is_some() {
                                         if let Some(value) = kwarg_value(call_arguments(&call).iter().skip(1), "where") {
-                                            if let Some(sql) = string_value(&value) { sql_locations.push((sql, value.location().start_offset())); }
+                                            if let Some(sql) = string_value(&value) { sql_locations.push((sql, value.location().start_offset(), false)); }
                                         }
                                     }
                                     indexes.push(idx);
@@ -1779,13 +1781,18 @@ fn table_from_create_table(
             idx.columns.iter().all(|name| table.columns.iter().any(|col| col.name == *name))
         });
     }
-    for (expression, offset) in sql_locations {
+    for (expression, offset, check) in sql_locations {
         if !crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect)
+            && !(check && crate::emit::shared::schema_sql::sqlite_check_expression(&expression, &table, dialect))
         {
             let line = super::sources::line_at(file, offset).unwrap_or(1);
             gaps.push(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported schema expression on {table_name}: {expression}") });
-            table.check_constraints.retain(|c| c.expression != expression);
-            table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str()));
+            // Only the rejected kind goes: SQLite may accept a CHECK whose text an index can't use.
+            if check {
+                table.check_constraints.retain(|c| c.expression != expression);
+            } else {
+                table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str()));
+            }
         }
     }
     Some((Symbol::from(table_name), table))
@@ -1829,6 +1836,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             generated_int4_compatible: None,
             array: false,
             array_stored: false,
+            unset_until_assigned: false,
         })
         .collect();
     Some((
@@ -1943,6 +1951,7 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
             generated_int4_compatible: None,
             array,
             array_stored: false,
+            unset_until_assigned: false,
         });
     }
     columns
@@ -2020,6 +2029,7 @@ fn timestamp_columns_with(nullable: bool) -> [Column; 2] {
         generated_int4_compatible: None,
         array: false,
         array_stored: false,
+        unset_until_assigned: false,
     };
     [col("created_at"), col("updated_at")]
 }
@@ -2041,6 +2051,7 @@ fn reference_column(name: &str) -> Column {
         generated_int4_compatible: None,
         array: false,
         array_stored: false,
+        unset_until_assigned: false,
     }
 }
 
@@ -2495,6 +2506,7 @@ fn column_with_type(
         generated_int4_compatible,
         array: opts.array,
         array_stored: false,
+        unset_until_assigned: false,
     })
 }
 

@@ -18,6 +18,11 @@ use crate::ident::{Symbol, TableRef};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
     pub tables: IndexMap<Symbol, Table>,
+    /// The grammar application ingest read this schema's CHECKs under,
+    /// which records whose SQL their text is. `Portable` when nothing
+    /// says: every schema built or ingested outside an application.
+    #[serde(default, skip_serializing_if = "generated::GeneratedExpressionDialect::is_portable")]
+    pub expression_dialect: generated::GeneratedExpressionDialect,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -111,6 +116,13 @@ pub struct Column {
     /// other target reads the element, as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub array_stored: bool,
+    /// A NOT NULL number column a strict target's lowering holds nilable
+    /// (`nullable` set on its copy of the schema), because Rails reads it
+    /// as nil until it is assigned and a presence validation rejects that
+    /// (`lower::validations::hold_unset_presence_columns`). Its public
+    /// reader still answers the column's own type. Lowering-only.
+    #[serde(skip)]
+    pub unset_until_assigned: bool,
 }
 
 impl Column {

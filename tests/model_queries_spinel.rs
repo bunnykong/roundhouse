@@ -19,7 +19,7 @@ fn widgets() -> emit_and_run::Overlay {
         .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.integer \"score\"\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.integer \"score\"\n  end\nend\n",
         )
 }
 

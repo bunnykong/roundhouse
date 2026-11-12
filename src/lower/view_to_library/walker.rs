@@ -1885,6 +1885,16 @@ pub(super) fn classify_template_helper<'a>(
 /// before the html_escape wrap, matching the convention every
 /// emitter would otherwise have to repeat.
 pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
+    // `link_to "Back", :back` by any route a link takes: `:back` is Rails' `url_for(:back)`, the referrer.
+    if let ExprNode::Send { recv: None, method, args, block, parenthesized } = &*e.node
+        && method.as_str() == "link_to"
+        && args.get(1).is_some_and(|a| matches!(&*a.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "back"))
+    {
+        let mut args = args.clone();
+        args[1] = super::view_helpers_call("back_url", Vec::new());
+        let swapped = Expr { node: Box::new(ExprNode::Send { recv: None, method: method.clone(), args, block: block.clone(), parenthesized: *parenthesized }), ..e.clone() };
+        return rewrite_helpers_in_expr(&swapped, ctx);
+    }
     // `x.presence` in a view's output (`<%= r[:title].presence || t(...) %>`):
     // ActiveSupport's Object#presence, which only the CRuby overlay can
     // reopen onto every value. `lower::blank` grounds it in app bodies but

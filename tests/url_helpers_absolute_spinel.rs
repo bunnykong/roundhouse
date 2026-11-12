@@ -21,7 +21,7 @@ fn url_helpers_only_path_and_port_under_spinel() {
         )
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define(version: 1) do\n  create_table :widgets do |t|\n    t.string :name\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :widgets do |t|\n    t.string :name\n  end\nend\n",
         )
         .write(
             "app/models/widget.rb",

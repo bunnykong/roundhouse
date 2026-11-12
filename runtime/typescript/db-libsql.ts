@@ -203,6 +203,25 @@ function escape_bool_opt(b: unknown): string {
   return b === null || b === undefined ? "NULL" : escape_bool(b);
 }
 
+// `t.binary` columns: the text methods. A JavaScript string carries no
+// encoding to tell bytes by, and no value here reaches the column as
+// bytes (`Digest::BLAKE3` is not emitted for this target).
+function column_binary(stmtId: number, i: number): string {
+  return column_text(stmtId, i);
+}
+
+function column_binary_opt(stmtId: number, i: number): string | null {
+  return column_text_opt(stmtId, i);
+}
+
+function escape_binary(s: unknown): string {
+  return escape_string(s);
+}
+
+function escape_binary_opt(s: unknown): string {
+  return escape_string_opt(s);
+}
+
 // Suppress an unused-import warning when InValue isn't referenced
 // directly anywhere in this file (libsql types it via `args: InValue[]`
 // inside execute; we don't bind params, only inline-compose SQL).
@@ -238,6 +257,10 @@ export const Db = {
   escape_int_opt,
   escape_float_opt,
   escape_bool_opt,
+  column_binary,
+  column_binary_opt,
+  escape_binary,
+  escape_binary_opt,
 };
 
 export type DbModule = typeof Db;

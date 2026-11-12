@@ -155,6 +155,10 @@ fn emit_bind_calls(stmt: &Symbol, binds: &[Bind], read_id: usize) -> Vec<Expr> {
             ValueType::IntOpt => "bind_int_opt",
             ValueType::StrOpt => "bind_text_opt",
             ValueType::BoolOpt => "bind_bool_opt",
+            // The binders that run (the ruby family's) pick the storage
+            // class from the value's encoding, as for text.
+            ValueType::Binary => "bind_text",
+            ValueType::BinaryOpt => "bind_text_opt",
             ValueType::FloatOpt => unreachable!("unserialized float in bind path"),
         };
         let position = if shaped {
@@ -1219,6 +1223,19 @@ fn push_predicate_segments(
             segments.push(lit_str(format!("{} = ", crate::naming::sql_ident(col.column.as_str()))));
             push_value_segment(segments, val, param, binds);
         }
+        Predicate::NullSafeEq(col, val) => {
+            segments.push(lit_str(format!("{} {} ", crate::naming::sql_ident(col.column.as_str()), Dialect::current().null_safe_eq())));
+            push_value_segment(segments, val, param, binds);
+        }
+        Predicate::NotEq(col, val) => {
+            segments.push(lit_str(format!("{} != ", crate::naming::sql_ident(col.column.as_str()))));
+            push_value_segment(segments, val, param, binds);
+        }
+        Predicate::LowerEq(col, val) => {
+            segments.push(lit_str(format!("LOWER({}) = LOWER(", crate::naming::sql_ident(col.column.as_str()))));
+            push_value_segment(segments, val, param, binds);
+            segments.push(lit_str(")".to_string()));
+        }
         Predicate::And(l, r) => {
             push_predicate_segments(segments, l, param, binds, read_id);
             segments.push(lit_str(" AND ".to_string()));
@@ -1277,6 +1294,8 @@ fn escape_value(db: &ClassId, val: &Value) -> Expr {
                 ValueType::StrOpt => "escape_string_opt",
                 ValueType::FloatOpt => "escape_float_opt",
                 ValueType::BoolOpt => "escape_bool_opt",
+                ValueType::Binary => "escape_binary",
+                ValueType::BinaryOpt => "escape_binary_opt",
             };
             db_call(db, method, vec![expr.clone()])
         }
@@ -1507,6 +1526,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                     Column {
                         name: Symbol::from("title"),
@@ -1521,6 +1541,7 @@ mod tests {
                         generated_int4_compatible: None,
                         array: false,
                         array_stored: false,
+                        unset_until_assigned: false,
                     },
                 ],
                 indexes: vec![],
@@ -1531,7 +1552,7 @@ mod tests {
                 primary_key_columns: Vec::new(),
             },
         );
-        (Schema { tables }, ClassId(Symbol::from("Article")))
+        (Schema { tables, ..Default::default() }, ClassId(Symbol::from("Article")))
     }
 
     fn id_col() -> ColRef {

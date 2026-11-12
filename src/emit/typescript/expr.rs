@@ -254,6 +254,20 @@ fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<Shape> {
     method_shape(id.0.as_str(), method, false)
 }
 
+/// The model a singular finder on it answers (`Slot.find(id)`), whose
+/// result this emit casts to it (the self-type narrowing in the Send
+/// emit) where analysis left the call's type open.
+fn narrowed_record_class(recv: &Expr) -> Option<String> {
+    let ExprNode::Send { recv: Some(on), method, .. } = &*recv.node else { return None };
+    let ExprNode::Const { path } = &*on.node else { return None };
+    let stripped = method.as_str().trim_end_matches('!');
+    if !matches!(stripped, "find" | "find_by" | "last" | "create" | "first") {
+        return None;
+    }
+    let class = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    descends_from_active_record(&class).then_some(class)
+}
+
 /// The shape of the class method `method` of the class `class`, found
 /// on it or its nearest ancestor that declares it.
 fn class_method_shape(class: &str, method: &str) -> Option<Shape> {
@@ -4291,7 +4305,8 @@ fn js_send_inner(
                 Some((class, true)) => class_method_shape(class, method),
                 Some((class, false)) => instance_method_shape(r.ty.as_ref(), method)
                     .or_else(|| method_shape(class, method, false)),
-                None => instance_method_shape(r.ty.as_ref(), method),
+                None => instance_method_shape(r.ty.as_ref(), method)
+                    .or_else(|| narrowed_record_class(r).and_then(|class| method_shape(&class, method, false))),
             };
             let is_declared_method =
                 !is_const_recv && matches!(shape, Some((crate::dialect::AccessorKind::Method, _, true)));

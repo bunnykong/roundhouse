@@ -38,7 +38,7 @@ pub fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write(
             "db/schema.rb",
-            r#"ActiveRecord::Schema.define do
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
   create_table "widgets", force: :cascade do |t|
     t.string "name"
     t.integer "size"

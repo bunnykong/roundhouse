@@ -3135,6 +3135,14 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                                 && c.arguments().is_some_and(|a| a.arguments().iter().all(|x| x.as_symbol_node().is_some()))
                         })
                     });
+                // `(class << hash; self; end)`: the body answers the singleton class and defines nothing, which is
+                // `hash.singleton_class` (Hashie's `IndifferentAccess.inject!`).
+                if let [only] = stmts.as_slice()
+                    && only.as_self_node().is_some()
+                {
+                    let owner = ingest_expr(&sc.expression(), file)?;
+                    return Ok(Expr::new(span, ExprNode::Send { recv: Some(owner), method: Symbol::from("singleton_class"), args: Vec::new(), block: None, parenthesized: false }));
+                }
                 if attrs {
                     let owner = ingest_expr(&sc.expression(), file)?;
                     let singleton = Expr::new(span, ExprNode::Send { recv: Some(owner), method: Symbol::from("singleton_class"), args: Vec::new(), block: None, parenthesized: false });

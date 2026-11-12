@@ -690,7 +690,7 @@ fn derived_autoload(stmt: &ruby_prism::Node<'_>) -> Option<String> {
 
 /// `require "x"` / `require_relative "x"` of a string literal, as
 /// `(feature, relative)`.
-fn literal_require(call: &ruby_prism::CallNode<'_>) -> Option<(String, bool)> {
+pub(super) fn literal_require(call: &ruby_prism::CallNode<'_>) -> Option<(String, bool)> {
     let name = constant_id_str(&call.name());
     if call.receiver().is_some() || call.block().is_some() || !matches!(name, "require" | "require_relative") {
         return None;
@@ -792,7 +792,7 @@ fn declares_inside(stmt: &ruby_prism::Node<'_>) -> bool {
 /// The literal `require "x"` features a file runs as it loads: at its
 /// top level and in its class and module bodies (not in a method). For
 /// an app file, whose requires of a gem's files load that gem at boot.
-pub(super) fn literal_requires(source: &[u8], file: &str) -> Vec<String> {
+pub(super) fn literal_requires(source: &[u8], _file: &str) -> Vec<String> {
     fn walk(statements: &[ruby_prism::Node<'_>], out: &mut Vec<String>) {
         for stmt in statements {
             if let Some((feature, false)) = stmt.as_call_node().and_then(|c| literal_require(&c)) {
@@ -809,7 +809,7 @@ pub(super) fn literal_requires(source: &[u8], file: &str) -> Vec<String> {
             }
         }
     }
-    let result = super::prism::parse(source, file);
+    let result = super::prism::parse_silent(source);
     let root = result.node();
     let Some(program) = root.as_program_node() else { return Vec::new() };
     let statements: Vec<ruby_prism::Node<'_>> = program.statements().body().iter().collect();
@@ -821,6 +821,13 @@ pub(super) fn literal_requires(source: &[u8], file: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::is_zeitwerk;
+
+    #[test]
+    fn literal_requires_does_not_repeat_parse_diagnostics() {
+        let (features, diagnostics) = super::super::prism::scope(|| super::literal_requires(b"require \"stringio\"\n)\n", "broken.rb"));
+        assert_eq!(features, ["stringio"]);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
 
     fn setup_statements(source: &str) -> Vec<bool> {
         let parsed = super::super::prism::parse_silent(source.as_bytes());

@@ -202,6 +202,11 @@ module Rails
     Application.new
   end
 
+  # Rails' `Rails.configuration`, the application's config.
+  def self.configuration
+    Rails.application.config
+  end
+
   # `Rails.env.production?` etc. — a plain object answering the known
   # environment predicates (no `method_missing`, no `String` subclass).
   # Rails' is ActiveSupport::EnvironmentInquirer (activesupport 8.1.4
@@ -677,7 +682,7 @@ module Rails
     # unset, drops the meta tag — the same page Rails renders without
     # credentials configured.
     def credentials
-      {}
+      Credentials.new
     end
 
     # The Rack env defaults every request starts from
@@ -798,6 +803,85 @@ module Rails
     end
   end
 
+  # `Rails.application.credentials` with nothing configured: Rails' `EncryptedConfiguration`, whose every key reads
+  # nil (`credentials.secret_key_base`, `credentials[:vapid]`, `credentials.dig(:vapid, :public_key)`), and whose
+  # `fetch` of a key it does not hold answers its block, else its default, else raises, as a Hash's does.
+  class Credentials
+    def secret_key_base
+      nil
+    end
+
+    def [](key)
+      nil
+    end
+
+    def dig(*keys)
+      nil
+    end
+
+    def fetch(key, *default, &block)
+      return block.call(key) unless block.nil?
+      raise KeyError, "key not found: #{key.inspect}" if default.empty?
+      default[0]
+    end
+
+    def key?(key)
+      false
+    end
+
+    def has_key?(key)
+      false
+    end
+
+    def include?(key)
+      false
+    end
+
+    def keys
+      []
+    end
+
+    def values
+      []
+    end
+
+    def to_h
+      {}
+    end
+
+    def config
+      {}
+    end
+
+    def merge(other)
+      other
+    end
+
+    def each
+      self
+    end
+
+    def empty?
+      true
+    end
+
+    def any?
+      false
+    end
+
+    def present?
+      false
+    end
+
+    def blank?
+      true
+    end
+
+    def nil?
+      false
+    end
+  end
+
   class AssetConfig
     def prefix
       "/assets"
@@ -820,6 +904,12 @@ module Rails
 
     def action_controller
       @action_controller
+    end
+
+    # `config.session_options`, what `config.session_store` was given: the cookie's name alone, as ingest lifts no
+    # other option (`path:`, `domain:`, `secure:` are not read, and a cookie a gem scopes by them takes none).
+    def session_options
+      { key: Rails.application.session_cookie_key }
     end
 
     # `Rails.application.config.filter_parameters` read at run time. The

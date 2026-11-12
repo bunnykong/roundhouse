@@ -51,6 +51,7 @@ use super::{fn_sig, ty_of_column};
 
 mod exists;
 use exists::{synth_adapter_any, synth_adapter_exists_by_id};
+pub(super) mod uniqueness;
 
 pub(super) fn push_adapter_methods(
     methods: &mut Vec<MethodDef>,
@@ -1437,6 +1438,9 @@ fn value_type_for_column(col: &crate::schema::Column) -> ValueType {
         return ValueType::StrOpt;
     }
     let nullable = (col.nullable || col.persisted_computed_default().is_some()) && !col.primary_key;
+    if col.col_type == crate::schema::ColumnType::Binary {
+        return if nullable { ValueType::BinaryOpt } else { ValueType::Binary };
+    }
     match ty_of_column(&col.col_type) {
         Ty::Int => {
             if nullable {

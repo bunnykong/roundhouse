@@ -1491,7 +1491,7 @@ fn ingest_route_stmts<'pr>(
         }
 
         if !route_options_kept(&call, &method) {
-            route_refusal(&call.as_node(), file, cx, "route defaults", "only literal `format` and segment defaults reach the table");
+            route_refusal(&call.as_node(), file, cx, "route defaults", "this route option or defaults form is not modeled");
         }
         // Per-entry recovery: one `mount`/`use_doorkeeper` must not
         // zero the whole table. Survey mode records the gap and keeps
@@ -1527,10 +1527,21 @@ fn empty_splat_value(value: &Node<'_>) -> bool {
     value.as_nil_node().is_some() || value.as_hash_node().is_some_and(|h| h.elements().iter().all(|item| empty_route_splat(&item)))
 }
 
+fn route_default_literal(node: &Node<'_>) -> Option<crate::expr::Literal> {
+    use crate::expr::Literal;
+    if let Some(value) = string_value(node) { return Some(Literal::Str { value }); }
+    if let Some(value) = symbol_value(node) { return Some(Literal::Sym { value: Symbol::from(value) }); }
+    if let Some(value) = super::util::integer_value(node) { return Some(Literal::Int { value }); }
+    if let Some(value) = bool_value(node) { return Some(Literal::Bool { value }); }
+    node.as_nil_node().map(|_| Literal::Nil)
+}
+
 /// Literal `defaults:` the table keeps (scope ones are checked per route), and no option the ingesters skip.
 fn route_options_kept(call: &ruby_prism::CallNode<'_>, method: &str) -> bool {
-    let default_kept = |default: Node<'_>| empty_route_splat(&default) || default.as_assoc_node().is_some_and(|pair| symbol_or_string_value(&pair.value()).is_some()
-        && symbol_value(&pair.key()).is_some_and(|key| method == "scope" || (key == "format" && http_method_from(method).is_some())));
+    let default_kept = |default: Node<'_>| empty_route_splat(&default) || default.as_assoc_node().is_some_and(|pair| symbol_value(&pair.key()).is_some_and(|key|
+        if http_method_from(method).is_some() && matches!(key.as_str(), "controller" | "action") { false } else
+        if method == "scope" || key == "format" { symbol_or_string_value(&pair.value()).is_some() && (method == "scope" || http_method_from(method).is_some()) }
+        else { http_method_from(method).is_some() && route_default_literal(&pair.value()).is_some() }));
     let literal_format = |value: Node<'_>| symbol_or_string_value(&value).is_some() || bool_value(&value).is_some()
         || value.as_nil_node().is_some() || value.as_regular_expression_node().is_some();
     let (mut defaults_seen, mut path_seen, mut format_seen) = (false, false, false);
@@ -3869,6 +3880,7 @@ fn ingest_explicit_route(
     let mut action_kwarg: Option<String> = None;
     let mut controller_kwarg: Option<String> = None;
     let mut defaults_format: Option<String> = None;
+    let mut request_defaults = IndexMap::new();
     // The INLINE spelling of `member do … end` / `collection do … end`.
     // Rails accepts both, and campfire writes `delete :clear, on:
     // :collection`; only the block form was recognized, so the route was
@@ -4000,10 +4012,11 @@ fn ingest_explicit_route(
                     "defaults" => {
                         if let Some(defaults) = value.as_hash_node() {
                             for entry in defaults.elements().iter() {
-                                if let Some(pair) = entry.as_assoc_node()
-                                    && symbol_value(&pair.key()).as_deref() == Some("format")
-                                {
-                                    defaults_format = rname(&pair.value());
+                                if let Some(pair) = entry.as_assoc_node() && let Some(key) = symbol_value(&pair.key()) {
+                                    if key == "format" { defaults_format = rname(&pair.value()); }
+                                    else if let Some(value) = route_default_literal(&pair.value()) {
+                                        request_defaults.insert(Symbol::from(key), (value, super::util::node_span(&entry, file)));
+                                    }
                                 }
                             }
                         }
@@ -4097,7 +4110,7 @@ fn ingest_explicit_route(
         } else {
             redirect_sink::push(&path, location, status)
         };
-        return Ok(Some(RouteSpec::Explicit {
+        return Ok(Some(RouteSpec::Explicit { defaults: request_defaults,
             method,
             path,
             controller: ClassId(Symbol::from(REDIRECT_CONTROLLER)),
@@ -4126,7 +4139,7 @@ fn ingest_explicit_route(
         }
         let Some(path) = path else { return Ok(None) };
         refuse_unmodeled_endpoint(call, file, cx, &method, &path, kind);
-        return Ok(Some(RouteSpec::Explicit {
+        return Ok(Some(RouteSpec::Explicit { defaults: request_defaults,
             method,
             path,
             controller: ClassId(Symbol::from(UNMODELED_ENDPOINT_CONTROLLER)),
@@ -4188,7 +4201,7 @@ fn ingest_explicit_route(
                         (MODULE_CONTROLLER.to_string(), action)
                     }
                 };
-                return Ok(Some(RouteSpec::Explicit {
+                return Ok(Some(RouteSpec::Explicit { defaults: request_defaults,
                     method,
                     path: p,
                     controller: ClassId(Symbol::from(controller)),
@@ -4221,7 +4234,7 @@ fn ingest_explicit_route(
         }
     };
 
-    Ok(Some(RouteSpec::Explicit {
+    Ok(Some(RouteSpec::Explicit { defaults: request_defaults,
         method,
         path: path.unwrap_or_default(),
         controller: ClassId(Symbol::from(controller_class_name(&controller))),
@@ -4300,7 +4313,7 @@ fn ingest_root_route(
         } else {
             redirect_sink::push("/", location, status)
         };
-        return Ok(Some(RouteSpec::Explicit {
+        return Ok(Some(RouteSpec::Explicit { defaults: IndexMap::new(),
             method: HttpMethod::Get,
             path: "/".to_string(),
             controller: ClassId(Symbol::from(REDIRECT_CONTROLLER)),
@@ -4319,7 +4332,7 @@ fn ingest_root_route(
             // no controller of its own, so Rails takes the scope's module
             // (`search#new`), as for a bare verb.
             (Some(action), None) => {
-                return Ok(Some(RouteSpec::Explicit {
+                return Ok(Some(RouteSpec::Explicit { defaults: IndexMap::new(),
                     method: HttpMethod::Get,
                     path: "/".to_string(),
                     controller: ClassId(Symbol::from(MODULE_CONTROLLER)),
@@ -4338,7 +4351,7 @@ fn ingest_root_route(
         // Rails still names it `root`, so the helper is kept (see
         // [`UNMODELED_ENDPOINT_CONTROLLER`]).
         refuse_unmodeled_endpoint(call, file, cx, &HttpMethod::Get, "/", kind);
-        return Ok(Some(RouteSpec::Explicit {
+        return Ok(Some(RouteSpec::Explicit { defaults: IndexMap::new(),
             method: HttpMethod::Get,
             path: "/".to_string(),
             controller: ClassId(Symbol::from(UNMODELED_ENDPOINT_CONTROLLER)),

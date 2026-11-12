@@ -215,6 +215,18 @@ pub enum Predicate {
     /// Ruby-family runtime equality: select `= value` or `IS NULL` from
     /// the value, preserving SQLite partial-index and join optimizations.
     NullableEq(ColRef, Value),
+    /// `col IS value` (`IS NOT DISTINCT FROM` on PostgreSQL): equality
+    /// that matches a nil value to NULL, in one SQL shape. The strict
+    /// targets' uniqueness probe compares a nilable slot this way, as
+    /// Rails' `where(col: nil)` would select `IS NULL`.
+    NullSafeEq(ColRef, Value),
+    /// `col != value`. Uniqueness excludes the record being validated by
+    /// its primary key, as Rails' `UniquenessValidator` does.
+    NotEq(ColRef, Value),
+    /// `LOWER(col) = LOWER(value)`: `uniqueness: { case_sensitive: false }`,
+    /// as Rails compares a String. A nilable value pairs it with
+    /// `NullSafeEq` under `Or`, since `LOWER(NULL)` matches nothing.
+    LowerEq(ColRef, Value),
     And(Box<Predicate>, Box<Predicate>),
     Or(Box<Predicate>, Box<Predicate>),
 }
@@ -270,13 +282,19 @@ pub enum ValueType {
     StrOpt,
     FloatOpt,
     BoolOpt,
+    /// A `t.binary` column: `Db.escape_binary(_opt)`. Its own variant
+    /// because a target whose strings carry no encoding (Rust holds
+    /// bytes one char per byte) cannot tell bytes from text by the
+    /// value; the ruby family's shims answer it as they answer text.
+    Binary,
+    BinaryOpt,
 }
 
 impl ValueType {
     /// True for the nullable variants. Optional binds and inline escapes
     /// both preserve nil as SQL NULL.
     pub fn is_nullable(self) -> bool {
-        matches!(self, ValueType::IntOpt | ValueType::StrOpt | ValueType::FloatOpt | ValueType::BoolOpt)
+        matches!(self, ValueType::IntOpt | ValueType::StrOpt | ValueType::FloatOpt | ValueType::BoolOpt | ValueType::BinaryOpt)
     }
 }
 

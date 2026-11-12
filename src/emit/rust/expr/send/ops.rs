@@ -83,6 +83,21 @@ pub(super) fn try_stdlib_class_method(
                     emit_expr(&args[0])
                 ));
             }
+            // The digest gem's BLAKE3 over the `blake3` crate (declared
+            // in Cargo.toml when a body calls it). The input is hashed
+            // as its UTF-8 bytes, as Ruby hashes a UTF-8 String; the raw
+            // `digest` is bytes, held one char per byte as
+            // `Db::column_binary` holds a `t.binary` value.
+            ("BLAKE3", "digest" | "hexdigest" | "base64digest", 1) if is_digest_blake3(path) => {
+                let hash = format!("blake3::hash(({}).as_bytes())", emit_expr(&args[0]));
+                return Some(match method {
+                    "digest" => format!("{hash}.as_bytes().iter().map(|&b| b as char).collect::<String>()"),
+                    "hexdigest" => format!("{hash}.to_hex().to_string()"),
+                    _ => format!(
+                        "{{ use base64::Engine; base64::engine::general_purpose::STANDARD.encode({hash}.as_bytes()) }}"
+                    ),
+                });
+            }
             _ => {}
         }
     }
@@ -112,6 +127,12 @@ pub(super) fn try_stdlib_class_method(
         }
     }
     None
+}
+
+/// `Digest::BLAKE3` or `::Digest::BLAKE3`.
+fn is_digest_blake3(path: &[crate::ident::Symbol]) -> bool {
+    let named: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+    named == ["Digest", "BLAKE3"]
 }
 
 /// True when `e` is a Time-valued receiver for the `.utc`/`.iso8601`/…
@@ -199,6 +220,24 @@ pub(super) fn try_binary_operator(
         if is_str_lit(r) && is_nilable_str(&args[0]) {
             let rhs = super::super::wrap_if_needs_parens(&args[0], emit_expr(&args[0]));
             return Some(format!("Some({}) {method} {rhs}.as_deref()", emit_expr(r)));
+        }
+        // The same against any String value (`assert_equal digest,
+        // record.nullable_column`): borrowed, so neither side moves. The
+        // nilable side only as a reader call (`record.column`), which is
+        // `Option<String>` here; an element of a `String?` array is a
+        // bare `String` in this target.
+        let is_str = |e: &Expr| matches!(e.ty.as_ref(), Some(crate::ty::Ty::Str));
+        let is_nilable_reader = |e: &Expr| {
+            is_nilable_str(e)
+                && matches!(&*e.node, ExprNode::Send { recv: Some(_), args, block: None, .. } if args.is_empty())
+        };
+        if is_nilable_reader(r) && is_str(&args[0]) {
+            let lhs = super::super::wrap_if_needs_parens(r, emit_expr(r));
+            return Some(format!("{lhs}.as_deref() {method} Some(&*({}))", emit_expr(&args[0])));
+        }
+        if is_str(r) && is_nilable_reader(&args[0]) {
+            let rhs = super::super::wrap_if_needs_parens(&args[0], emit_expr(&args[0]));
+            return Some(format!("Some(&*({})) {method} {rhs}.as_deref()", emit_expr(r)));
         }
     }
     // Int / Int and Int % Int floor in Ruby; Rust's operators truncate.

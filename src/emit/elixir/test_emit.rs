@@ -50,8 +50,10 @@ pub(super) fn emit_test_files(app: &App) -> Vec<EmittedFile> {
     if !app.fixtures.is_empty() {
         let lowered = crate::lower::lower_fixtures(app);
         out.push(emit_fixtures_helper(&lowered, app));
+        let held = crate::lower::validations::held_unset_columns(&app.models, &app.schema);
         for f in &lowered.fixtures {
-            out.push(emit_fixture(f, &crate::lower::fixture_to_library::temporal_columns(app, &f.class)));
+            let held: Vec<Symbol> = held.iter().filter(|(class, _)| *class == f.class).map(|(_, col)| col.clone()).collect();
+            out.push(emit_fixture(f, &crate::lower::fixture_to_library::temporal_columns(app, &f.class), &held));
         }
     }
 
@@ -84,8 +86,10 @@ fn known_models(app: &App) -> Vec<Symbol> {
 /// per fixture set. Mirrors `src/emit/elixir/fixture.rs`, retargeted to
 /// `*` and the model's dual-return `save` (`{record, _} = …`); the
 /// saved record carries its assigned id, so `register` uses `record.id`
-/// rather than `Roundhouse.Db.last_insert_rowid()`.
-fn emit_fixture(lowered: &crate::lower::LoweredFixture, temporal: &crate::det::HashMap<Symbol, bool>) -> EmittedFile {
+/// rather than `Roundhouse.Db.last_insert_rowid()`. A column `held` unset
+/// until assigned (`validations::held_unset_columns`) is the struct's
+/// `<col>_raw` key.
+fn emit_fixture(lowered: &crate::lower::LoweredFixture, temporal: &crate::det::HashMap<Symbol, bool>, held: &[Symbol]) -> EmittedFile {
     let fixture_name = lowered.name.as_str();
     let class_name = lowered.class.0.as_str();
     let ns = camelize(fixture_name);
@@ -100,6 +104,9 @@ fn emit_fixture(lowered: &crate::lower::LoweredFixture, temporal: &crate::det::H
         let mut field_lines: Vec<String> = Vec::new();
         for field in &record.fields {
             let mut col = field.column.to_string();
+            if held.contains(&field.column) {
+                col.push_str("_raw");
+            }
             let val = match &field.value {
                 // Not `<col>:`: the struct keeps a date or datetime as its stored text, under `<col>_raw`.
                 crate::lower::LoweredFixtureValue::Literal { raw, .. }
@@ -129,15 +136,22 @@ fn emit_fixture(lowered: &crate::lower::LoweredFixture, temporal: &crate::det::H
             };
             field_lines.push(format!("      {col}: {val}"));
         }
-        writeln!(s, "    record = %{class_name}{{").unwrap();
-        for (idx, line) in field_lines.iter().enumerate() {
-            if idx < field_lines.len() - 1 {
-                writeln!(s, "{line},").unwrap();
-            } else {
-                writeln!(s, "{line}").unwrap();
+        // An update of `new()`'s record, not a bare `%Class{…}`: it starts
+        // from the constructor's values (an `id` of 0, as the record's
+        // own uniqueness probe compares, rather than the struct's nil).
+        if field_lines.is_empty() {
+            writeln!(s, "    record = {class_name}.new()").unwrap();
+        } else {
+            writeln!(s, "    record = %{{{class_name}.new() |").unwrap();
+            for (idx, line) in field_lines.iter().enumerate() {
+                if idx < field_lines.len() - 1 {
+                    writeln!(s, "{line},").unwrap();
+                } else {
+                    writeln!(s, "{line}").unwrap();
+                }
             }
+            writeln!(s, "    }}").unwrap();
         }
-        writeln!(s, "    }}").unwrap();
         writeln!(s, "    {{record, ok}} = {class_name}.save(record)").unwrap();
         writeln!(
             s,
@@ -799,6 +813,28 @@ fn emit_model_test_send(
         }
     }
 
+    // `assert_predicate rec, :m?` / `refute_predicate rec, :m?` → the
+    // model's `m?(rec)`; `valid?` is dual-return, `{record, ok}`, and a
+    // local receiver is rebound to the validated record, so a later
+    // `errors` read sees what the check set.
+    if recv.is_none()
+        && matches!(method, "assert_predicate" | "refute_predicate")
+        && args.len() == 2
+        && let ExprNode::Lit { value: Literal::Sym { value: pred } } = &*args[1].node
+        && let Some(module) = receiver_module(&args[0], ctx)
+    {
+        let verb = if method == "assert_predicate" { "assert" } else { "refute" };
+        return if pred.as_str() == "valid?" {
+            let bound = match &*args[0].node {
+                ExprNode::Var { .. } => args_s[0].clone(),
+                _ => "_record".to_string(),
+            };
+            format!("{{{bound}, ok}} = {module}.valid?({})\n{verb} ok", args_s[0])
+        } else {
+            format!("{verb} {module}.{}({})", pred.as_str(), args_s[0])
+        };
+    }
+
     // Assertion macros → ExUnit assert/refute. `assert_not <save>` /
     // `assert <save>` destructure the model's dual-return save.
     if recv.is_none() {
@@ -827,28 +863,50 @@ fn emit_model_test_send(
         }
     }
 
-    // `Class.new(hash)` → `%Class{ k: v, … }` struct literal (bare class
-    // name resolves to `%Class{}` via the alias).
-    if let Some(r) = recv {
-        if method == "new" && args.len() == 1 {
-            if let ExprNode::Const { path } = &*r.node {
-                if let Some(class) = path.last() {
-                    if ctx.known_models.iter().any(|s| s == class) {
-                        if let ExprNode::Hash { entries, .. } = &*args[0].node {
-                            let pairs: Vec<String> = entries
-                                .iter()
-                                .filter_map(|(k, v)| match &*k.node {
-                                    ExprNode::Lit { value: Literal::Sym { value: f } } => {
-                                        Some(format!("{}: {}", f.as_str(), emit_model_test_expr(v, ctx)))
-                                    }
-                                    _ => None,
-                                })
-                                .collect();
-                            return format!("%{}{{{}}}", class, pairs.join(", "));
-                        }
-                    }
-                }
-            }
+    // `Class.new(hash)` → the model's `new(attrs)`, which writes each
+    // value through its column's slot.
+    if let Some(r) = recv
+        && method == "new"
+        && args.len() == 1
+        && let ExprNode::Const { path } = &*r.node
+        && let Some(class) = path.last()
+        && ctx.known_models.iter().any(|s| s == class)
+        && matches!(&*args[0].node, ExprNode::Hash { .. })
+    {
+        return format!("{class}.new({})", args_s[0]);
+    }
+
+    // A record's writer → its module's `set_<col>`, rebinding the local:
+    // `slot.position = 4` → `slot = Slot.set_position(slot, 4)`.
+    if let Some(r) = recv
+        && let ExprNode::Var { name, .. } = &*r.node
+        && args.len() == 1
+        && let Some(col) = method.strip_suffix('=')
+        && !matches!(method, "==" | "!=" | "<=" | ">=" | "===" | "[]=")
+        && let Some(module) = receiver_module(r, ctx)
+    {
+        return format!("{name} = {module}.set_{col}({name}, {})", args_s[0]);
+    }
+
+    // A reader the struct has no key for → its module's function: a
+    // column held unset until assigned (`<col>_raw`), or a method the
+    // model defines (`Slot.next_position(slot)`).
+    if let Some(r) = recv
+        && args.is_empty()
+        && !matches!(&*r.node, ExprNode::Const { .. })
+        && let Some(module) = receiver_module(r, ctx)
+        && let Some(model) = ctx.app.models.iter().find(|m| m.name.0.as_str().rsplit("::").next() == Some(module.as_str()))
+    {
+        let held = crate::lower::validations::held_unset_columns(&ctx.app.models, &ctx.app.schema)
+            .iter()
+            .any(|(class, col)| *class == model.name && col.as_str() == method);
+        let defined = model.methods().any(|d| {
+            matches!(d.receiver, crate::dialect::MethodReceiver::Instance) && d.name.as_str() == method
+        });
+        // `save!` and the like: the runtime's, on every model module.
+        let runtime = matches!(method, "save!" | "save");
+        if held || defined || runtime {
+            return format!("{module}.{method}({})", emit_model_test_expr(r, ctx));
         }
     }
 
@@ -937,6 +995,26 @@ fn emit_block_body(e: &Expr, ctx: ExTestCtx) -> String {
 /// Module name for an instance call's receiver — fixture var names follow
 /// the snake-cased class name (`article` → `Article`, aliased to
 /// `Article`).
+/// The model module a test receiver is a record of: its type, the model
+/// its local is named after (`slot`), or the class a finder or `new`
+/// is called on (`Slot.find(id)`).
+fn receiver_module(recv: &Expr, ctx: ExTestCtx) -> Option<String> {
+    let name = match (&recv.ty, &*recv.node) {
+        (Some(crate::ty::Ty::Class { id, .. }), _) => id.0.as_str().rsplit("::").next()?.to_string(),
+        (_, ExprNode::Var { name, .. }) => camelize(name.as_str()),
+        (_, ExprNode::Send { recv: Some(c), method, .. })
+            if matches!(method.as_str(), "new" | "find" | "find_by" | "create" | "create!" | "first" | "last") =>
+        {
+            match &*c.node {
+                ExprNode::Const { path } => path.last()?.to_string(),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    ctx.known_models.iter().any(|s| s.as_str() == name).then_some(name)
+}
+
 fn camelize_recv(recv: &Expr) -> String {
     match &*recv.node {
         ExprNode::Var { name, .. } => camelize(name.as_str()),

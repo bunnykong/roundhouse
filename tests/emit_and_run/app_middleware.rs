@@ -83,3 +83,66 @@ fn reading_the_middleware_registers_no_source_after_the_snapshot() {
         assert!(stack.contains(stacked), "{target:?}: {stack}");
     }
 }
+
+// Not served over HTTP: as in rack_attack.rs, the emitted adapter runs on CRuby over a stand-in server.
+#[test]
+fn the_spinel_adapter_keeps_the_routes_cookies_when_the_middleware_copies_the_headers() {
+    let (tree, errors) =
+        with_application_lines(emit_and_run::real_blog(), "    config.middleware.use ProbeUse\n").emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let adapter = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb"))
+        .expect("gem_middleware.rb")
+        .replace("ProbeUse.new(App.new)", "Copy.new(App.new)");
+    let script = format!(
+        r#"{adapter}
+module Tep
+  def self.str_hash = {{}}
+end
+module ActionDispatch
+  class Session
+  end
+  module Routing
+    class RouteSet
+      def self.finalize_app! = nil
+    end
+  end
+end
+Res = Struct.new(:status, :headers, :body, :file_path, :streaming, :set_cookies, :header_fields)
+Req = Struct.new(:verb, :path, :raw_query, :remote_host, :http_version, :req_headers, :raw_body, :listener_transport)
+ReqObj = Struct.new(:request_id, :env, :session)
+module Main
+  def self.dispatch_request(req, res, _obj)
+    res.status = 200
+    res.headers["x-routes"] = req.path
+    res.body = +"routes body"
+    res.set_cookies << "a=1"
+  end
+end
+class Copy
+  def initialize(app)
+    @app = app
+  end
+  def call(env)
+    status, headers, body = @app.call(env)
+    case env["PATH_INFO"]
+    when "/own" then [status, headers.merge("set-cookie" => "own=1"), body]
+    else [status, headers.dup, body]
+    end
+  end
+end
+def run(path)
+  res = Res.new(0, {{}}, +"", +"", false, [], [])
+  GemMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, "", "tcp"), res, ReqObj.new("id", {{}}, {{}}))
+  res
+end
+res = run("/copy")
+raise "copy: #{{res.to_h}}" unless res.set_cookies == ["a=1"] && res.headers == {{ "x-routes" => "/copy" }}
+res = run("/own")
+raise "own: #{{res.to_h}}" unless res.set_cookies == ["own=1", "a=1"] && res.headers == {{ "x-routes" => "/own" }}
+puts "cookies passed"
+"#
+    );
+    let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("cookies passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}

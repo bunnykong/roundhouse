@@ -172,7 +172,8 @@ fn render_class(
         render_data_factory(&mut s, lc, name.as_str(), value, &body_pad, factory);
     }
 
-    for m in &lc.methods {
+    for (index, m) in lc.methods.iter().enumerate() {
+        if lc.data_define().is_some() && lc.methods[index + 1..].iter().any(|later| later.name == m.name && later.receiver == m.receiver) { continue; }
         let line = render_method(m, &segments);
         let visibility = if lc.data_define().is_some() && m.visibility != MethodVisibility::Public { "private " } else { "" };
         writeln!(s, "{body_pad}{visibility}{line}").unwrap();

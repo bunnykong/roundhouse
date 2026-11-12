@@ -1,6 +1,6 @@
 # frozen_string_literal: true
-# `Rack::Utils.q_values`, `Rack::Utils.select_best_encoding`,
-# `Rack::Utils.unescape_path` and `Rack::Utils::HTTP_STATUS_CODES`, ported from rack 3.2
+# `Rack::Utils.q_values`, `Rack::Utils.select_best_encoding`, `Rack::Utils.unescape_path`,
+# `Rack::Utils.escape`, `Rack::Utils.secure_compare` and `Rack::Utils::HTTP_STATUS_CODES`, ported from rack 3.2
 # (lib/rack/utils.rb) for the trees that have no rack gem to load. The
 # ruby family swaps this file for `require "rack/utils"` (see
 # `project::ruby_runtime_files`), so the gem's own code runs there —
@@ -177,6 +177,40 @@ module Rack
         end
       end
       out.force_encoding("UTF-8")
+    end
+
+    # Rack's `escape`, `URI.encode_www_form_component`: ASCII letters, digits and `*-._` as written, a space as `+`,
+    # every other byte as `%XX` (OmniAuth's failure redirect's `message=`).
+    def self.escape(s)
+      out = +""
+      text = s.to_s
+      i = 0
+      n = text.bytesize
+      while i < n
+        b = text.getbyte(i)
+        if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 42 || b == 45 || b == 46 || b == 95
+          out << b.chr
+        elsif b == 32
+          out << "+"
+        else
+          out << format("%%%02X", b)
+        end
+        i += 1
+      end
+      out
+    end
+
+    # Rack's `secure_compare`: equal Strings by every byte, in time that does not depend on where they differ.
+    def self.secure_compare(a, b)
+      return false unless a.bytesize == b.bytesize
+      diff = 0
+      i = 0
+      n = a.bytesize
+      while i < n
+        diff |= a.getbyte(i) ^ b.getbyte(i)
+        i += 1
+      end
+      diff == 0
     end
 
     # The value of one hex digit's byte, or -1 for any other byte.

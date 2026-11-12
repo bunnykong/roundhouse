@@ -279,7 +279,7 @@ fn reflective_index_and_attribute_reads_match_rails() {
     );
 }
 
-const REVIEW_SCHEMA: &str = r#"ActiveRecord::Schema.define do
+const REVIEW_SCHEMA: &str = r#"ActiveRecord::Schema[8.1].define(version: 1) do
   create_table :probe_records do |t|
     t.string :name
     t.integer :number

@@ -1,4 +1,4 @@
-ActiveRecord::Schema.define do
+ActiveRecord::Schema[8.1].define(version: 1) do
   create_table "users" do |t|
     t.string "name"
   end

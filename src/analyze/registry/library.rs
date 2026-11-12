@@ -221,6 +221,34 @@ pub(in crate::analyze) fn register(
             }
             false
         };
+        // `default_params`, from the runtime's own signature: a mailer's code reads it (Devise's `mailer_sender`), and
+        // its values are never a Proc here, a Proc `default` being a generated method's call by now.
+        {
+            const RBS: &str = include_str!("../../../runtime/ruby/action_mailer.rbs");
+            if let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) {
+                let id = ClassId(Symbol::from("ActionMailer::Base"));
+                if let Some(methods) = parsed.get(&id) {
+                    let cls = classes.entry(id).or_default();
+                    for (m, ty) in methods.iter().filter(|(m, _)| m.as_str() == "default_params") {
+                        cls.instance_methods.entry(m.clone()).or_insert_with(|| ty.clone());
+                    }
+                    // The mails `deliveries` holds: the runtime's `Message`, read as its signature says.
+                    let message = ClassId(Symbol::from("ActionMailer::Message"));
+                    if let Some(message_methods) = parsed.get(&message).cloned() {
+                        let mc = classes.entry(message).or_default();
+                        for (m, ty) in message_methods {
+                            mc.instance_methods.entry(m).or_insert(ty);
+                        }
+                    }
+                    let id = ClassId(Symbol::from("ActionMailer::Base"));
+                    let cls = classes.entry(id).or_default();
+                    // Not left unknown now that the class is: its class side is the runtime's too.
+                    for (m, ty) in methods.iter().filter(|(m, _)| matches!(m.as_str(), "deliveries" | "base_default_params" | "default")) {
+                        cls.class_methods.entry(m.clone()).or_insert_with(|| ty.clone());
+                    }
+                }
+            }
+        }
         let delivery_ty = Ty::Class {
             id: ClassId(Symbol::from("ActionMailer::MessageDelivery")),
             args: vec![].into(),

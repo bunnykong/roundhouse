@@ -62,6 +62,21 @@ def git_repository():
             os.chdir(previous)
 
 
+class UntypedKeyConversionCoverage(unittest.TestCase):
+    def test_key_conversion_lowering_and_helpers_run_the_native_suite(self):
+        for path in [
+            "src/lower/symbolize_keys.rs",
+            "src/lower/config_reader.rs",
+            "src/lower/mod.rs",
+            "runtime/ruby/active_support_ext.rb",
+            "tests/untyped_key_conversion.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("untyped_key_conversion", plan["spinel_tests"])
+
+
 class EncryptsRefusalCoverage(unittest.TestCase):
     def test_model_encryption_refusal_runs_in_the_unit_floor(self):
         # These are CLI emission checks; they do not require native compilation.
@@ -74,6 +89,15 @@ class EncryptsRefusalCoverage(unittest.TestCase):
                 plan = ci.select([path])
                 self.assertIn("unit", plan["jobs"])
                 self.assertIn("build-roundhouse", plan["jobs"])
+
+
+class KernelMethodShadowingCoverage(unittest.TestCase):
+    def test_bare_call_lookup_keeps_its_native_signature_contract(self):
+        for path in ["src/analyze/mod.rs", "src/analyze/body/mod.rs", "src/analyze/body/send.rs", "tests/kernel_method_shadowing.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("kernel_method_shadowing", plan["spinel_tests"])
 
 
 class PublicationBoundary(unittest.TestCase):
@@ -818,6 +842,27 @@ class Routing(unittest.TestCase):
         self.assertEqual(plan["smoke"], ["ruby", "jruby"])
         self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
 
+    def test_route_defaults_select_the_native_contract(self):
+        for path in [
+            "src/ingest/routes.rs", "src/lower/routes.rs", "src/lower/routes_to_library/mod.rs", "src/dialect.rs",
+            "src/build_target.rs", "src/lower/route_guards.rs", "src/project.rs", "runtime/ruby/action_dispatch/router.rb",
+            "runtime/ruby/action_dispatch/router.rbs", "runtime/spinel/scaffold/main.rb", "runtime/spinel/test/test_helper.rb", "runtime/spinel/test/test_helper.rbs",
+            "tests/emit_and_run/route_request_defaults.rs", "tests/support/route_request_defaults/oracle.rb",
+            "tests/support/route_request_defaults/routes.rb", "tests/support/route_request_defaults.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                # The framework suite keeps the native params test; spinel-toolchain runs the HTTP server test.
+                self.assertIn("route_request_defaults", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel-toolchain", plan["jobs"])
+
+    def test_route_defaults_http_test_runs_in_the_toolchain_lane(self):
+        plan = ci.select(["tests/spinel_toolchain/route_request_defaults.rs"])
+        self.assertIn("spinel-toolchain", plan["jobs"])
+        # Not a framework-suite binary: spinel-framework lacks the jemalloc `spin build` links.
+        self.assertNotIn("route_request_defaults", plan["spinel_tests"])
+
     def test_focused_tests_select_only_themselves(self):
         for binary in ci.SPINEL_TESTS:
             with self.subTest(binary=binary):
@@ -851,7 +896,14 @@ class Routing(unittest.TestCase):
     def test_file_level_data_records_select_the_native_toolchain_lane(self):
         for path in [
             "src/analyze/data.rs",
+            "src/analyze/mod.rs",
             "src/ingest/library_class.rs",
+            "src/ingest/app.rs",
+            "src/ingest/file_program.rs",
+            "src/ingest/mod.rs",
+            "src/ingest/visibility.rs",
+            "src/emit/ruby/library.rs",
+            "src/emit/ruby/rbs.rs",
             "tests/data_factory_constants.rs",
             "tests/support/data_record_siblings.rs",
             "tests/emit_and_run/data_record_siblings.rs",
@@ -861,6 +913,8 @@ class Routing(unittest.TestCase):
                 plan = ci.select([path])
                 self.assertIn("unit", plan["jobs"])
                 self.assertIn("spinel-toolchain", plan["jobs"])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("data_record_composition", plan["spinel_tests"])
         # This is a toolchain test, not a framework-suite binary.
         self.assertNotIn("data_record_siblings", ci.SPINEL_TESTS)
 
@@ -902,7 +956,7 @@ class Routing(unittest.TestCase):
         # must too when that file is the only change.
         self.assertEqual(
             ci.select(["src/emit/ruby/library.rs"])["spinel_tests"],
-            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints", "qualified_constant_rbs"],
+            ["data_record_composition", *ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints", "qualified_constant_rbs"],
         )
         self.assertEqual(
             ci.select(["runtime/spinel/db.rb"])["spinel_tests"],
@@ -1061,6 +1115,7 @@ class Routing(unittest.TestCase):
     def test_schema_constraints_owns_ddl_and_index_consumers(self):
         for path in [
             "tests/schema_constraints.rs", "tests/support/schema_constraints_schema.rb",
+            "tests/support/schema_constraints_predicates.rs", "src/ingest/app.rs", "src/ingest/database_yml.rs",
             "tests/support/schema_constraints_contract.rb", "src/schema.rs", "src/ingest/schema.rs",
             "src/schema/generated.rs", "tests/support/emit_and_run.rs",
             "src/emit/shared/schema_sql.rs", "src/lower/model_to_library/schema.rs", "src/lower/scope_chain.rs",

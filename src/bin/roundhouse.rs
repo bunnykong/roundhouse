@@ -437,7 +437,7 @@ fn transpile(
                      constructs as a punch list and keep going"
                 );
             }
-            return Err(format!("ingest {}: {e}", input.display()));
+            return Err(format!("ingest {}: {}", input.display(), roundhouse::ingest::render_error(&e)));
         }
     };
     // An ActiveRecord class outside app/models (a migration helper's own

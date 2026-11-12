@@ -15,6 +15,9 @@
 //! Unprovable name sets must leave the `send` untouched and go on the
 //! residue ledger.
 
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
+
 use roundhouse::App;
 use roundhouse::analyze::Analyzer;
 use roundhouse::diagnostic::Diagnostic;
@@ -318,4 +321,282 @@ fn a_trailing_name_two_classes_share_counts_no_call_site() {
         !out.contains("when :first"),
         "an ambiguous trailing name must not resolve to either class:\n{out}"
     );
+}
+
+/// solid_queue 1.7.0's `Job::Executable#execution`: the name is built
+/// around the element parameter of a `reduce` over a literal list, so it
+/// is one of the names the list spells. The module defines none of them
+/// (its includer's `has_one`s do), so the receiver's methods prove nothing
+/// here; the list does.
+const REDUCE_SOURCE: &str = r##"
+module Executable
+  def execution
+    %w[ ready claimed failed ].reduce(nil) { |acc, status| acc || public_send("#{status}_execution") }
+  end
+end
+"##;
+
+/// A host for the module: the readers record that they ran, and one is
+/// private, which `public_send` refuses as Ruby does.
+const REDUCE_HOST: &str = r##"
+class Host
+  include Executable
+  CALLS = []
+
+  def initialize(ready, claimed)
+    @ready = ready
+    @claimed = claimed
+  end
+
+  def ready_execution
+    CALLS << :ready
+    @ready
+  end
+
+  def claimed_execution
+    CALLS << :claimed
+    @claimed
+  end
+
+  private
+
+  def failed_execution
+    CALLS << :failed
+    :failed
+  end
+end
+
+[[:r, :c], [nil, :c], [nil, nil]].each do |ready, claimed|
+  Host::CALLS.clear
+  result = begin
+    Host.new(ready, claimed).execution.inspect
+  rescue NoMethodError => e
+    "NoMethodError #{e.name}"
+  end
+  puts "#{result} #{Host::CALLS.inspect}"
+end
+"##;
+
+/// The program's output on CRuby, or None (reported as a missing
+/// prerequisite) when no `ruby` is on PATH. A run that fails still fails.
+fn cruby(source: &str) -> Option<String> {
+    let Ok(out) = std::process::Command::new("ruby").args(["-e", source]).output() else {
+        prerequisite::missing("ruby is not on PATH");
+        return None;
+    };
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[test]
+fn a_name_built_from_a_reduce_blocks_literal_list_rewrites_to_case_dispatch() {
+    // `inject` is `reduce`; `:"…"` is the String's Symbol, and its arms are Symbols.
+    for (iterator, symbol) in [("reduce", false), ("inject", false), ("reduce", true)] {
+        let mut source = REDUCE_SOURCE.replace("reduce", iterator);
+        if symbol {
+            source = source.replace("public_send(\"#{status}_execution\")", "public_send(:\"#{status}_execution\")");
+        }
+        let (out, diags) = ground_and_emit(&source);
+        for name in ["ready_execution", "claimed_execution", "failed_execution"] {
+            let literal = if symbol { format!(":{name}") } else { format!("\"{name}\"") };
+            assert!(out.contains(&format!("when {literal}")), "{iterator}: arm for {name} missing:\n{out}");
+            // Each arm is the same send by the literal name, so visibility and a missing method answer as before.
+            assert!(out.contains(&format!("public_send({literal})")), "{iterator}: send of {name} missing:\n{out}");
+        }
+        assert!(!out.contains("public_send(\"#{") && !out.contains("public_send(:\"#{"), "{iterator}: the built name survived:\n{out}");
+        assert!(diags.is_empty(), "{iterator}: grounded sites must not ledger residue: {diags:?}");
+        // The emitted module answers as the source does, in the same order, stopping at the first reader that answers.
+        let Some(want) = cruby(&format!("{source}{REDUCE_HOST}")) else { return };
+        assert_eq!(want, ":r [:ready]\n:c [:ready, :claimed]\nNoMethodError failed_execution [:ready, :claimed]\n");
+        let Some(got) = cruby(&format!("{out}\n{REDUCE_HOST}")) else { return };
+        assert_eq!(got, want, "{iterator}:\n{out}");
+    }
+}
+
+/// The `define_method` loop solid_queue writes beside it: unrolled, each
+/// body's name is the literal the loop's element spells.
+#[test]
+fn a_name_built_in_an_unrolled_define_method_block_is_the_literal_it_spells() {
+    let (out, diags) = ground_and_emit(
+        r##"
+module Executable
+  %w[ ready claimed ].each do |status|
+    define_method("#{status}?") { public_send("#{status}_execution").nil? }
+    define_method("#{status}_name") { public_send(:"#{status}_label") }
+  end
+
+  def finished?
+    false
+  end
+end
+"##,
+    );
+    for call in [
+        "public_send(\"ready_execution\")",
+        "public_send(\"claimed_execution\")",
+        "public_send(:ready_label)",
+        "public_send(:claimed_label)",
+    ] {
+        assert!(out.contains(call), "{call} missing:\n{out}");
+    }
+    assert!(!out.contains("#{"), "a built name survived:\n{out}");
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// The walk a list-local source ends with, and the host it runs in on
+/// CRuby: each `*_execution` answers its status.
+const LIST_WALK: &str = "statuses.map { |status| public_send(\"#{status}_execution\") }";
+const LIST_HOST: &str = "\nclass Host\n  include Executable\n\n  def ready_execution = :ready\n  def claimed_execution = :claimed\n  def failed_execution = :failed\nend\n";
+
+/// A list held in a local is a proof only while nothing else can reach
+/// the list, or a String element to change in place: otherwise the walk
+/// over the local keeps its built name. Each source calls
+/// `failed_execution` on CRuby, a name its literal never spells.
+#[test]
+fn a_list_local_that_escapes_stays_dynamic() {
+    let run = "p Host.new.execution";
+    let later = "host = Host.new\nhost.execution << :failed\np host.instance_variable_get(:@later).call";
+    for (label, method, driver) in [
+        ("another local", "def execution\n    statuses = %w[ ready claimed ]\n    other = statuses\n    other << \"failed\"\n    WALK\n  end", run),
+        ("an instance variable", "def execution\n    statuses = %w[ ready claimed ]\n    @kept = statuses\n    @kept.first.replace(\"failed\")\n    WALK\n  end", run),
+        ("an Array element", "def execution\n    statuses = %w[ ready claimed ]\n    box = [statuses]\n    box.first << \"failed\"\n    WALK\n  end", run),
+        ("the list `each` returns", "def execution\n    statuses = %i[ ready claimed ]\n    other = statuses.each { |status| status }\n    other << :failed\n    WALK\n  end", run),
+        ("the list `push` returns", "def execution\n    statuses = %i[ ready ]\n    other = statuses.push(:claimed)\n    other << :failed\n    WALK\n  end", run),
+        ("the list the method returns, walked later by a block", "def execution\n    statuses = %i[ ready claimed ]\n    @later = -> { WALK }\n    statuses.each { |status| status }\n  end", later),
+        ("a walk without a block", "def execution\n    statuses = %w[ ready claimed ]\n    walker = statuses.map\n    walker.each { |status| status.replace(\"failed\") }\n    WALK\n  end", run),
+        ("an element another walk stores", "def execution\n    statuses = %w[ ready claimed ]\n    statuses.each { |status| @kept = status }\n    @kept.replace(\"failed\")\n    WALK\n  end", run),
+        ("an element a `map` result shares", "def execution\n    statuses = %w[ ready claimed ]\n    kept = statuses.map { |status| status }\n    kept.last.replace(\"failed\")\n    WALK\n  end", run),
+        ("the only element, changed by another walk", "def execution\n    statuses = %w[ ready ]\n    statuses.each { |status| status.replace(\"failed\") }\n    WALK\n  end", run),
+        ("a list bound again by `+=`", "def execution\n    statuses = %w[ ready claimed ]\n    statuses += %w[ failed ]\n    WALK\n  end", run),
+        ("a block parameter of the same name", "def execution\n    statuses = %w[ ready claimed ]\n    [%w[ failed ]].flat_map { |statuses| WALK }\n  end", run),
+        ("a parameter the body binds on one path only", "def execution(statuses = %w[ failed ], reset: false)\n    statuses = %w[ ready claimed ] if reset\n    WALK\n  end", run),
+    ] {
+        let source = format!("module Executable\n  {}\nend\n", method.replace("WALK", LIST_WALK));
+        let (out, diags) = ground_and_emit(&source);
+        assert!(out.contains("public_send(\"#{status}_execution\")"), "{label}: the send must survive untouched:\n{out}");
+        assert!(!out.contains("when ") && !out.contains("public_send(\"ready_execution\")"), "{label}: rewritten without a proof:\n{out}");
+        assert_eq!(diags.len(), 1, "{label}: expected one residue entry: {diags:?}");
+        if let Some(ran) = cruby(&format!("{source}{LIST_HOST}{driver}\n")) {
+            assert!(ran.contains(":failed"), "{label}: the source calls failed_execution:\n{ran}");
+        }
+    }
+}
+
+/// A block inside a walk keeps the String element it reads and runs after
+/// the walk. When the method hands the list back, its caller can change
+/// that element, so the kept block's name is not one the literal spells.
+/// That holds for a list local that `each` returns, with a lambda or a
+/// `proc`, for one another walk keeps from and `<<` returns, and for a
+/// literal's `each`. Each source calls `failed_execution` on CRuby.
+#[test]
+fn a_string_element_a_block_keeps_stays_dynamic_when_the_list_is_handed_back() {
+    let later = "host = Host.new\nhost.prepare.first.replace(\"failed\")\np host.instance_variable_get(:@run).call";
+    let send = "public_send(\"#{status}_execution\")";
+    for (label, method) in [
+        ("a lambda, and `each` returns the list", "statuses = %w[ ready ]\n    statuses.each { |status| @run = -> { SEND } }"),
+        ("a `proc`, and `each` returns the list", "statuses = %w[ ready ]\n    statuses.each { |status| @run = proc { SEND } }"),
+        ("another walk keeps it, and `<<` returns the list", "statuses = %w[ ready ]\n    statuses.map { |status| @run = -> { SEND } }\n    statuses << \"claimed\""),
+        ("a literal's `each`", "%w[ ready ].each { |status| @run = -> { SEND } }"),
+    ] {
+        let source = format!("module Executable\n  def prepare\n    {}\n  end\nend\n", method.replace("SEND", send));
+        let (out, diags) = ground_and_emit(&source);
+        assert!(out.contains(send), "{label}: the send must survive untouched:\n{out}");
+        assert!(!out.contains("when ") && !out.contains("public_send(\"ready_execution\")"), "{label}: rewritten without a proof:\n{out}");
+        assert_eq!(diags.len(), 1, "{label}: expected one residue entry: {diags:?}");
+        if let Some(ran) = cruby(&format!("{source}{LIST_HOST}{later}\n")) {
+            assert_eq!(ran, ":failed\n", "{label}: the source calls failed_execution");
+        }
+    }
+}
+
+/// A list nothing else can change still proves its names: a Symbol list
+/// whose element another walk stores, as a Symbol cannot change; a String
+/// list another walk reads only as an interpolated piece; a walk the method
+/// ends with, whose list no block reads; a Symbol element a block keeps in
+/// a list handed back; and a String element a block keeps in a list the
+/// method does not hand back. The emitted module answers as the source does.
+#[test]
+fn a_list_local_nothing_else_can_change_still_proves_its_names() {
+    let run = "p Host.new.execution";
+    let keep = "statuses.each { |status| @run = -> { public_send(\"#{status}_execution\") } }";
+    for (label, method, driver, expected) in [
+        ("a stored Symbol element", "statuses = %i[ ready claimed ]\n    statuses.each { |status| @kept = status }\n    WALK", run, "[:ready, :claimed]\n"),
+        ("a String element read only in interpolation", "statuses = %w[ ready claimed ]\n    statuses.each { |status| @seen = \"#{status} seen\" }\n    WALK", run, "[:ready, :claimed]\n"),
+        (
+            "a walk the method ends with",
+            "statuses = %w[ ready claimed ]\n    @calls = []\n    statuses.each { |status| @calls << public_send(\"#{status}_execution\") }",
+            "host = Host.new\np host.execution\np host.instance_variable_get(:@calls)",
+            "[\"ready\", \"claimed\"]\n[:ready, :claimed]\n",
+        ),
+        (
+            "a Symbol element a block keeps, in a list handed back",
+            "statuses = %i[ ready claimed ]\n    KEEP",
+            "host = Host.new\nlist = host.execution\nlist << :failed\np [list, host.instance_variable_get(:@run).call]",
+            "[[:ready, :claimed, :failed], :claimed]\n",
+        ),
+        ("a String element a block keeps, in a list not handed back", "statuses = %w[ ready claimed ]\n    KEEP\n    @run.call", run, ":claimed\n"),
+    ] {
+        let source = format!("module Executable\n  def execution\n    {}\n  end\nend\n", method.replace("WALK", LIST_WALK).replace("KEEP", keep));
+        let (out, diags) = ground_and_emit(&source);
+        for name in ["ready_execution", "claimed_execution"] {
+            assert!(out.contains(&format!("public_send(\"{name}\")")), "{label}: send of {name} missing:\n{out}");
+        }
+        assert!(!out.contains("public_send(\"#{"), "{label}: the built name survived:\n{out}");
+        assert!(diags.is_empty(), "{label}: {diags:?}");
+        let Some(want) = cruby(&format!("{source}{LIST_HOST}{driver}\n")) else { return };
+        assert_eq!(want, expected, "{label}");
+        let Some(got) = cruby(&format!("{out}\n{LIST_HOST}{driver}\n")) else { return };
+        assert_eq!(got, want, "{label}:\n{out}");
+    }
+}
+
+/// Without a finite proof the name stays built, and the site joins the
+/// residue ledger: a list that is not a literal, an element parameter
+/// the block rebinds or changes in place, or one an inner block's own
+/// parameter shadows.
+#[test]
+fn a_built_name_without_a_finite_proof_stays_dynamic() {
+    for (label, body, call) in [
+        (
+            "a list that is not a literal",
+            "def execution(statuses)\n    statuses.reduce(nil) { |acc, status| acc || public_send(\"#{status}_execution\") }\n  end",
+            "public_send(\"#{status}_execution\")",
+        ),
+        (
+            "a reassigned element parameter",
+            "def execution\n    %w[ ready claimed ].reduce(nil) do |acc, status|\n      status = status.upcase\n      acc || public_send(\"#{status}_execution\")\n    end\n  end",
+            "public_send(\"#{status}_execution\")",
+        ),
+        (
+            "an element parameter assigned to in a nested block",
+            "def execution\n    %w[ ready claimed ].reduce(nil) do |acc, status|\n      [1].each { status += \"x\" }\n      acc || public_send(\"#{status}_execution\")\n    end\n  end",
+            "public_send(\"#{status}_execution\")",
+        ),
+        (
+            "an element String changed in place",
+            "def execution\n    %w[ ready claimed ].reduce(nil) do |acc, status|\n      status << \"x\"\n      acc || public_send(\"#{status}_execution\")\n    end\n  end",
+            "public_send(\"#{status}_execution\")",
+        ),
+        (
+            "a rest parameter of the same name in an inner element block",
+            "def execution\n    %w[ ready claimed ].each do |status|\n      [[1]].each { |value, *status| public_send(\"#{status}_execution\") }\n    end\n  end",
+            "public_send(\"#{status}_execution\")",
+        ),
+        (
+            "a rest parameter of the same name in an inner block that binds no element",
+            "def execution\n    %w[ ready claimed ].each do |status|\n      tap { |value, *status| public_send(\"#{status}_execution\") }\n    end\n  end",
+            "public_send(\"#{status}_execution\")",
+        ),
+        (
+            "a reassigned each parameter",
+            "def execution\n    [:ready, :claimed].each do |status|\n      status = :failed\n      send(status)\n    end\n  end",
+            "send(status)",
+        ),
+    ] {
+        let (out, diags) = ground_and_emit(&format!("module Executable\n  {body}\nend\n"));
+        assert!(out.contains(call), "{label}: the send must survive untouched:\n{out}");
+        assert!(!out.contains("when "), "{label}: rewritten without a proof:\n{out}");
+        assert_eq!(diags.len(), 1, "{label}: expected one residue entry: {diags:?}");
+        assert!(diags[0].to_string().contains("not statically enumerable"), "{label}: {}", diags[0]);
+    }
 }

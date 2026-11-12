@@ -3,6 +3,17 @@ mod prerequisite;
 use super::data_record_siblings_contract as contract;
 
 #[test]
+fn data_composition_keeps_members_initializers_and_methods() {
+    for (source, assertions, expected) in contract::COMPOSITION_CASES {
+        for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+            let run = super::emit_and_run::real_blog().write(path, source).run_ruby(assertions);
+            run.assert_passes();
+            assert_eq!(run.stdout, *expected, "{path}: {}", run.stderr);
+        }
+    }
+}
+
+#[test]
 fn a_bodyless_nested_data_factory_keeps_its_lexical_binding() {
     for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
         let run = super::emit_and_run::real_blog().write(path, contract::BODYLESS_SOURCE)
@@ -39,6 +50,9 @@ fn a_data_record_beside_a_module_preserves_its_methods_and_signatures() {
 
 #[test]
 fn the_data_record_contract_matches_an_initialized_rails_oracle() {
+    for (source, assertions, expected) in std::iter::once((contract::SOURCE, contract::ASSERTIONS, contract::EXPECTED))
+        .chain(contract::COMPOSITION_CASES.iter().copied())
+    {
     let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/rails_oracle.rb");
     let script = format!(r#"require {helper:?}
 unless RailsOracle.available?("railties")
@@ -56,12 +70,13 @@ end
 RecordOracle.initialize!
 {source}
 {assertions}
-"#, source = contract::SOURCE, assertions = contract::ASSERTIONS);
+"#);
     let output = std::process::Command::new("ruby").args(["-e", &script]).output().expect("Rails oracle");
     if output.status.code() == Some(77) {
         prerequisite::missing(String::from_utf8_lossy(&output.stderr).trim());
         return;
     }
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), contract::EXPECTED);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    }
 }

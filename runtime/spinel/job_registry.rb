@@ -26,9 +26,12 @@
 #
 # `sidekiq?` says whether the app is on `queue_adapter :sidekiq` with a
 # payload job, so the tree pushes jobs to Redis (`runtime/sidekiq_push.rb`)
-# and carries a real Redis client. `sidekiq_redis_url` and
-# `sidekiq_redis_password` are the app's `Sidekiq.configure_client`
-# settings, `""` for one it doesn't give.
+# and carries a real Redis client. `sidekiq_redis_url`,
+# `sidekiq_redis_password` and `sidekiq_redis_username` are the app's
+# `Sidekiq.configure_client` settings, `""` for one it doesn't give;
+# `sidekiq_redis_db` is -1 for none, the timeouts carry Sidekiq's
+# 3-second default, and `sidekiq_redis_reconnect_delays` is the seconds
+# to wait before each retry, Sidekiq's one immediate retry by default.
 #
 # Dispatch is a `case` over the class name, never `constantize`, for
 # the reason the locator gives: a class computed from a wire string is
@@ -73,6 +76,26 @@ module JobRegistry
 
   def self.sidekiq_redis_password
     ""
+  end
+
+  def self.sidekiq_redis_username
+    ""
+  end
+
+  def self.sidekiq_redis_db
+    -1
+  end
+
+  def self.sidekiq_redis_connect_timeout
+    3.0
+  end
+
+  def self.sidekiq_redis_read_timeout
+    3.0
+  end
+
+  def self.sidekiq_redis_reconnect_delays
+    "0.0"
   end
 
   def self.sidekiq_worker_concurrency

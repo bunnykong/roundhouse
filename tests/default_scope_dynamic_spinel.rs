@@ -15,7 +15,7 @@ fn app() -> emit_and_run::Overlay {
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"accounts\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"projects\", force: :cascade do |t|\n    t.integer \"account_id\"\n    t.string \"name\"\n  end\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"project_id\"\n    t.string \"body\"\n  end\n  create_table \"gizmos\", force: :cascade do |t|\n    t.integer \"rank\"\n    t.string \"name\"\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"accounts\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"projects\", force: :cascade do |t|\n    t.integer \"account_id\"\n    t.string \"name\"\n  end\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"project_id\"\n    t.string \"body\"\n  end\n  create_table \"gizmos\", force: :cascade do |t|\n    t.integer \"rank\"\n    t.string \"name\"\n  end\nend\n",
         )
         .write("app/models/current.rb", "class Current < ActiveSupport::CurrentAttributes\n  attribute :account #: Account\n  attribute :rank #: Integer\nend\n")
         .write("app/models/account.rb", "class Account < ApplicationRecord\n  has_many :projects\nend\n")

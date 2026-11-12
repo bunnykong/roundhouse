@@ -1209,7 +1209,7 @@ fn gradual(ty: Option<&Ty>) -> bool {
     }
 }
 
-fn is_unknown_ty(ty: Option<&Ty>) -> bool {
+pub(crate) fn is_unknown_ty(ty: Option<&Ty>) -> bool {
     match ty {
         None => true,
         Some(Ty::Var { .. }) => true,
@@ -1266,7 +1266,7 @@ pub struct UnknownReceiverSend {
 /// True when `method` is registered on the receiver's class (either
 /// side), walking parents and includes. A registered method that returns
 /// `Ty::Var` still counts as resolved for the unknown-receiver ledger.
-fn method_registered_on(
+pub(crate) fn method_registered_on(
     classes: &HashMap<ClassId, ClassInfo>,
     ty: Option<&Ty>,
     method: &Symbol,

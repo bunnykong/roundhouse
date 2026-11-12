@@ -16,55 +16,77 @@
 # every push. Two threads that race to connect each open one; the first
 # installed is kept and the other closed.
 #
-# One reconnect: on a connection error the connection is dropped, a new
-# one opened, and the push sent once more, as redis-client's
-# `reconnect_attempts: 1` does for Sidekiq. That covers the first
-# connect too: a push that can't connect tries once more before it
-# raises, as redis-client's `ensure_connected` does. Like Sidekiq, the
-# retry can duplicate a job whose first LPUSH reached Redis before the
-# socket died. A command error is not retried.
+# Reconnects: on a connection error the connection is dropped, a new one
+# opened, and the push sent again, once per delay in the app's
+# `reconnect_attempts:` (`SidekiqPush.reconnect_delays`), waiting that
+# long first, as redis-client's `ensure_connected` does. Sidekiq's
+# default is one retry without a wait. That covers the first connect
+# too: a push that can't connect tries again before it raises. Like
+# Sidekiq, a retry can duplicate a job whose first LPUSH reached Redis
+# before the socket died. A command error is not retried. On ruby and
+# jruby, redis-rb also retries once inside a command, as it does for
+# any client that doesn't pass `reconnect_attempts:` to it.
 #
-# Connect and read timeouts, at redis-client's 1 s defaults that Sidekiq
-# runs with: a Redis that stops answering costs a request one second
-# (two, with the reconnect) instead of hanging it. Running out raises
+# Connect and read timeouts from the app's `timeout:`, `connect_timeout:`
+# and `read_timeout:`, or the 3 seconds Sidekiq passes when it gives
+# none: a Redis that stops answering costs a request that long (per
+# attempt) instead of hanging it. Running out raises
 # `Redis::CannotConnectError` or `Redis::TimeoutError`, both
-# `BaseConnectionError`s, so a timed-out read takes the reconnect above.
+# `BaseConnectionError`s, so a timed-out read takes the reconnects above.
+#
+# `username:` and `db:` go to `Redis.new` beside `password:`, and each
+# overrides the URL's, as on redis-client. One the app leaves out isn't
+# passed at all, so the URL's stands.
 require "redis"
 
 module SidekiqRedis
-  CONNECT_TIMEOUT = 1.0
-  READ_TIMEOUT = 1.0
   CONN = []
   CONN_PID = [0]
   LOCK = Mutex.new
 
-  # `used` holds the connection the first attempt got, if it got one:
-  # a connect that fails leaves nothing to discard.
+  # Each attempt's `used` holds the connection it got, if it got one: a
+  # connect that fails leaves nothing to discard. After the last delay
+  # the connection error is raised.
   def self.push(url, queue, json)
-    used = []
-    begin
-      conn = acquire(url)
-      used.push(conn)
-      LOCK.synchronize { send_push(conn, queue, json) }
-    rescue Redis::BaseConnectionError
-      discard(used[0]) if used.length > 0
-      conn = acquire(url)
-      LOCK.synchronize { send_push(conn, queue, json) }
+    delays = SidekiqPush.reconnect_delays
+    tries = 0
+    while true
+      used = []
+      begin
+        conn = acquire(url)
+        used.push(conn)
+        LOCK.synchronize { send_push(conn, queue, json) }
+        return nil
+      rescue Redis::BaseConnectionError => e
+        discard(used[0]) if used.length > 0
+        raise e if tries >= delays.length
+        wait_to_reconnect(delays[tries])
+        tries += 1
+      end
     end
-    nil
   end
 
   def self.schedule(url, at, json)
-    used = []
-    begin
-      conn = acquire(url)
-      used.push(conn)
-      LOCK.synchronize { conn.zadd("schedule", at, json) }
-    rescue Redis::BaseConnectionError
-      discard(used[0]) if used.length > 0
-      conn = acquire(url)
-      LOCK.synchronize { conn.zadd("schedule", at, json) }
+    delays = SidekiqPush.reconnect_delays
+    tries = 0
+    while true
+      used = []
+      begin
+        conn = acquire(url)
+        used.push(conn)
+        LOCK.synchronize { conn.zadd("schedule", at, json) }
+        return nil
+      rescue Redis::BaseConnectionError => e
+        discard(used[0]) if used.length > 0
+        raise e if tries >= delays.length
+        wait_to_reconnect(delays[tries])
+        tries += 1
+      end
     end
+  end
+
+  def self.wait_to_reconnect(seconds)
+    sleep(seconds) if seconds > 0.0
     nil
   end
 
@@ -88,21 +110,63 @@ module SidekiqRedis
     held[0]
   end
 
-  # A new connection, connected and authenticated here, outside LOCK:
-  # redis-rb connects at its first command, so the PING makes that
-  # happen now rather than inside LOCK at the first push (spinel-redis
-  # connects in its constructor already). A `configure_client`
-  # `password:` overrides the URL's, as the explicit option does on both
-  # clients.
+  # A new connection to the app's `configure_client` Redis. Its
+  # `password:`, `username:` or `db:` overrides the URL's, as the
+  # explicit option does on both clients; one the app doesn't give is
+  # left out, so the URL's stands.
   def self.open(url, password)
-    conn = password == "" ? Redis.new(url: url, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT) : Redis.new(url: url, password: password, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT)
+    connect(url, given(SidekiqPush.username), given(password), SidekiqPush.db, SidekiqPush.connect_timeout, SidekiqPush.read_timeout)
+  end
+
+  # Action Cable's connection to config/cable.yml's Redis
+  # (runtime/redis_cable.rb): none of the Sidekiq settings, and the
+  # 1-second timeouts redis-rb gives Action Cable's Redis adapter.
+  def self.open_cable(url)
+    connect(url, nil, nil, -1, 1.0, 1.0)
+  end
+
+  # Connected and authenticated here, outside LOCK: redis-rb connects at
+  # its first command, so the PING makes that happen now rather than
+  # inside LOCK at the first push (spinel-redis connects in its
+  # constructor already). `db` is -1 for none. A `db:` the app gives is
+  # SELECTed in place of the PING: spinel-redis reads `db: 0` as none
+  # and keeps the URL's database, where redis-client selects 0. On
+  # redis-client the SELECT repeats its own, and `db:` still goes to
+  # `Redis.new` so a reconnect inside redis-rb selects it again.
+  def self.connect(url, user, pass, db, connect_timeout, read_timeout)
+    conn = client(url, user, pass, db, connect_timeout, read_timeout)
     begin
-      conn.ping
+      if db < 0
+        conn.ping
+      else
+        conn.select(db)
+      end
     rescue StandardError => e
       close_quietly(conn)
       raise e
     end
     conn
+  end
+
+  # `Redis.new` with only the settings given: a nil `username:` or
+  # `password:` would not leave the URL's, because redis-client before
+  # 0.17 replaces the URL's with it.
+  def self.client(url, user, pass, db, connect_timeout, read_timeout)
+    if db < 0
+      if user.nil?
+        return pass.nil? ? Redis.new(url: url, connect_timeout: connect_timeout, read_timeout: read_timeout) : Redis.new(url: url, password: pass, connect_timeout: connect_timeout, read_timeout: read_timeout)
+      end
+      return pass.nil? ? Redis.new(url: url, username: user, connect_timeout: connect_timeout, read_timeout: read_timeout) : Redis.new(url: url, username: user, password: pass, connect_timeout: connect_timeout, read_timeout: read_timeout)
+    end
+    if user.nil?
+      return pass.nil? ? Redis.new(url: url, db: db, connect_timeout: connect_timeout, read_timeout: read_timeout) : Redis.new(url: url, password: pass, db: db, connect_timeout: connect_timeout, read_timeout: read_timeout)
+    end
+    pass.nil? ? Redis.new(url: url, username: user, db: db, connect_timeout: connect_timeout, read_timeout: read_timeout) : Redis.new(url: url, username: user, password: pass, db: db, connect_timeout: connect_timeout, read_timeout: read_timeout)
+  end
+
+  # A setting the app gave, or nil for `""` (one it didn't).
+  def self.given(value)
+    value == "" ? nil : value
   end
 
   # Under LOCK: the connection as a zero- or one-element Array, after
@@ -143,8 +207,8 @@ module SidekiqRedis
   #
   # The worker holds its own connections, one per processor thread and
   # one for control, so these take the connection rather than sharing
-  # CONN. A blocking BRPOP's read deadline is its own timeout plus
-  # READ_TIMEOUT on both clients, as redis-rb sets it.
+  # CONN. A blocking BRPOP's read deadline is its own timeout plus the
+  # read timeout on both clients, as redis-rb sets it.
 
   def self.worker_open(url)
     open(url, SidekiqPush.password)

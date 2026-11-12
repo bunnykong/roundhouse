@@ -16,6 +16,187 @@ fn review_record(source: &str, path: &str, reopen: Option<(&str, &str)>) -> roun
 }
 
 #[test]
+fn file_data_composition_strictly_emits() {
+    for source in [
+        "require \"stringio\"\nArtifact = Data.define(:digest)\n",
+        "require('set')\nrequire 'digest/sha2'\nArtifact = Data.define(:digest)\n",
+        "Artifact = Data.define(:digest)\nclass Artifact; def label = digest; end\n",
+    ] {
+        for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+            let mut app = review_record(source, path, None);
+            let diagnostics = errors(&mut app);
+            assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+            let files = roundhouse::emit::ruby::emit_library(&app);
+            let ruby = &files.iter().find(|f| f.path.to_string_lossy().ends_with("artifact.rb")).unwrap().content;
+            assert_eq!(ruby.matches("Data.define").count(), 1, "{ruby}");
+        }
+    }
+}
+
+#[test]
+fn inherited_data_constructor_visibility_is_refused_at_the_call() {
+    for names in [":new", ":[]", ":allocate", ":new, :[]", ":new, :allocate", ":[], :allocate",
+        ":new, :new, :[]", ":new, :[], :allocate, :allocate", "'new', '[]', 'allocate'",
+        ":new, :[], :allocate", ":new, :allocate, :[]", ":[], :new, :allocate",
+        ":[], :allocate, :new", ":allocate, :new, :[]", ":allocate, :[], :new"] {
+        let source = format!("Artifact = Data.define(:digest) do\n  private_class_method {names}\nend\n");
+        for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+            assert_review_refusal(&source, path, "requires an already defined local method",
+                Some(source.find("private_class_method").unwrap()));
+        }
+    }
+}
+
+#[test]
+fn data_constructor_visibility_before_a_definition_is_refused_at_the_marker() {
+    for (marker, later) in [
+        ("private_class_method :new", "def self.new(digest:) = digest"),
+        ("private_class_method :new", "def new = digest"),
+    ] {
+        let source = format!("Artifact = Data.define(:digest) do\n  {marker}\n  {later}\nend\n");
+        for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+            let at = source.find(marker).unwrap();
+            assert_review_refusal(&source, path, "requires an already defined local method", Some(at));
+        }
+    }
+}
+
+#[test]
+fn data_constructor_visibility_in_a_singleton_block_is_refused_at_the_marker() {
+    for later in ["", "def self.new(digest:) = digest"] {
+        let source = format!("Artifact = Data.define(:digest) do\n  class << self; private :new; end\n  {later}\nend\n");
+        for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+            assert_review_refusal(&source, path, "requires an already defined local method",
+                Some(source.find("private :new").unwrap()));
+        }
+    }
+}
+
+#[test]
+fn private_data_constructors_refuse_subclasses_toggles_and_reopenings_at_the_call() {
+    let parent = "Artifact = Data.define(:digest) do\n  def self.build(digest) = new(digest:)\n  private_class_method :new, :[], :allocate\nend\n";
+    for suffix in [
+        "class Child < Artifact; def self.make(digest) = new(digest:); end\n",
+        "class Child < Artifact; DEFAULT = new(digest: 'default'); end\n",
+        "class Child < Artifact; def self.make(digest) = new(digest:); end\nx = Child.make('a'); p x; p x.with(digest: 'b').class\n",
+        "class Artifact; def label = 'L:' + digest; end\n",
+    ] {
+        let source = format!("{parent}{suffix}");
+        assert_review_refusal(&source, "lib/artifact.rb", "requires an already defined local method",
+            Some(source.find("private_class_method").unwrap()));
+    }
+    for marker in ["public_class_method :new", "public_class_method :[]",
+        "public_class_method :new, :[], :allocate"] {
+        let source = parent.replace("end\n", &format!("  {marker}\nend\n"));
+        assert_review_refusal(&source, "lib/artifact.rb", "requires an already defined local method",
+            Some(source.find("private_class_method").unwrap()));
+    }
+    for work in ["def self.make(digest) = new(digest:)", "DEFAULT = new(digest: 'default')"] {
+        let source = format!("module Shop; end\nShop::Artifact = Data.define(:digest) do\n  private_class_method :new, :[], :allocate\nend\nmodule Shop\n  class Child < Artifact\n    {work}\n  end\nend\n");
+        assert_review_refusal(&source, "lib/artifact.rb", "requires an already defined local method",
+            Some(source.find("private_class_method").unwrap()));
+    }
+}
+
+#[test]
+fn data_reopenings_refuse_block_load_time_calls() {
+    for work in ["FIRST = new(digest: 'x').label", "FIRST = [new(digest: 'x').label]",
+        "FIRST = {value: new(digest: 'x').label}", "FIRST = ('x'.freeze)",
+        "@first = new(digest: 'x').label", "puts new(digest: 'x').label"] {
+        let source = format!("Artifact = Data.define(:digest) do\n  def label = 'block'\n  {work}\nend\nclass Artifact\n  def label = 'reopen'\nend\n");
+        for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+            assert_review_refusal(&source, path, "Data.define reopening with load-time", None);
+        }
+    }
+}
+
+fn assert_review_refusal(source: &str, path: &str, shape: &str, marker: Option<usize>) {
+    let tree = [(PathBuf::from(path), source.as_bytes().to_vec())].into_iter().collect();
+    match roundhouse::ingest::ingest_app_from_tree(tree) {
+        Ok(mut app) => {
+            let diagnostics = errors(&mut app);
+            assert!(diagnostics.iter().any(|d| !d.span.is_synthetic() && d.message.contains(shape)
+                && marker.is_none_or(|at| d.span.start as usize == at)), "{source}: {diagnostics:?}");
+        }
+        Err(err) => {
+            let roundhouse::ingest::IngestError::Unsupported { file, message } = &err else {
+                panic!("{source}: expected an unsupported construct, got {err:?}");
+            };
+            assert_eq!(file, path);
+            assert!(message.contains(shape), "{source}: {message}");
+            if let Some(at) = marker {
+                let line = source[..at].bytes().filter(|&c| c == b'\n').count() + 1;
+                let rendered = roundhouse::ingest::render_error(&err);
+                assert!(rendered.contains(&format!("{path}:{line}:")), "{rendered}");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_unlocated_ingest_error_keeps_its_existing_rendering() {
+    let err = roundhouse::ingest::IngestError::Unsupported {
+        file: "unregistered.rb".into(), message: "no recorded site".into(),
+    };
+    assert_eq!(roundhouse::ingest::render_error(&err), err.to_string());
+}
+
+#[test]
+fn data_reopenings_refuse_non_method_block_statements_at_the_statement() {
+    for work in [
+        "VALUE = 1 if true", "VALUE = 1", "value = 1", "@value = 1",
+        "if true; VALUE = 1; end", "unless false; VALUE = 1; end",
+        "if true; def hidden = digest; end", "puts 'loaded'", "private private(:label)",
+        "def Artifact.extra = 1", "private_class_method def Artifact.extra = 1",
+    ] {
+        let source = format!("Artifact = Data.define(:digest) do\n  def label = digest.to_s\n  {work}\nend\nclass Artifact\n  def value = VALUE\nend\n");
+        for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+            assert_review_refusal(&source, path, "Data.define reopening with load-time",
+                Some(source.find(work).unwrap()));
+        }
+    }
+}
+
+#[test]
+fn a_data_block_without_a_reopening_keeps_its_existing_constants() {
+    let source = "Artifact = Data.define(:digest) do\n  VALUE = 1\n  def label = digest.to_s\nend\n";
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        let mut app = review_record(source, path, None);
+        assert!(errors(&mut app).is_empty());
+        let record = app.library_classes.iter().find(|c| c.name.0.as_str() == "Artifact").unwrap();
+        assert!(record.constants.iter().any(|(name, _)| name.as_str() == "VALUE"));
+    }
+}
+
+#[test]
+fn private_data_constructors_do_not_allow_unproven_inherited_methods() {
+    for marker in ["private_class_method :missing", "private :new", "private_class_method ENV.fetch('NAME')",
+        "class << self; private :new; end"] {
+        let source = format!("Artifact = Data.define(:digest) do\n {marker}\nend");
+        let mut app = review_record(&source, "lib/artifact.rb", None);
+        assert!(!errors(&mut app).is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn file_data_admission_does_not_accept_arbitrary_calls_or_replace_an_earlier_class() {
+    for source in [
+        "require ENV.fetch('FEATURE')\nArtifact = Data.define(:digest)",
+        "require 'not_a_standard_library'\nArtifact = Data.define(:digest)",
+        "Kernel.require 'stringio'\nArtifact = Data.define(:digest)",
+        "puts 'side effect'\nArtifact = Data.define(:digest)",
+        "class Artifact; def label = 'old'; end\nArtifact = Data.define(:digest)",
+        "Artifact = Data.define(:digest)\nArtifact = Data.define(:other)",
+        "Artifact = Data.define(:digest)\nclass Artifact; VALUE = 'inside'; end",
+        "Artifact = Data.define(:digest) do; def label = 'before'; end\nmodule Observer; VALUE = Artifact.new('x').label; end\nclass Artifact; def label = 'after'; end",
+    ] {
+        let mut app = review_record(source, "lib/artifact.rb", None);
+        let diagnostics = errors(&mut app);
+        assert!(diagnostics.iter().any(|d| !d.span.is_synthetic()), "{source}: {diagnostics:?}");
+    }
+}
+
+#[test]
 fn review_data_nested_bodyless_factory_keeps_emitting() {
     let source = "Artifact = Data.define(:digest) do\n  Inner = Data.define(:value)\n  def label = digest\nend\nmodule Builder; def self.make = Artifact.new(\"abc\"); end\n";
     for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
@@ -64,6 +245,94 @@ fn review_record_signature(source: &str, path: &str) -> String {
     roundhouse::emit::ruby::emit_library(&app).into_iter()
         .find(|file| file.path.to_string_lossy().ends_with("artifact.rbs"))
         .expect("Artifact signature").content
+}
+
+#[test]
+fn data_reopening_return_uses_the_last_definition_on_each_receiver() {
+    for (first, last, expected) in [("'old'", "digest", "untyped"), ("digest", "'last'", "String")] {
+        for receiver in ["", "self."] {
+            let member = if receiver.is_empty() { "digest" } else { "new(digest: 1).digest" };
+            let first = if first == "digest" { member } else { first };
+            let last = if last == "digest" { member } else { last };
+            let source = format!("Artifact = Data.define(:digest) do\n  def {receiver}label = {first}\nend\nclass Artifact\n  def {receiver}label = {last}\nend\n");
+            for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+                let rbs = review_record_signature(&source, path);
+                assert!(rbs.contains(&format!("def {receiver}label: () -> {expected}")), "{rbs}");
+                assert_eq!(rbs.matches(&format!("def {receiver}label:")).count(), 1, "{rbs}");
+            }
+        }
+    }
+    let source = "Artifact = Data.define(:digest) do\n  def label = digest\nend\nclass Artifact\n  def self.label = 'class'\nend\n";
+    let rbs = review_record_signature(source, "lib/artifact.rb");
+    assert!(rbs.contains("def label: () -> untyped") && rbs.contains("def self.label: () -> String"), "{rbs}");
+}
+
+#[test]
+fn an_untyped_override_of_a_generated_data_method_is_untyped() {
+    for (head, tail) in [(" do\n  def with = digest\nend\n", ""), ("\n", "class Artifact\n  def with = digest\nend\n"),
+                         (" do\n  def self.new(digest:) = digest\nend\n", ""), ("\n", "class Artifact\n  def self.new(digest:) = digest\nend\n")] {
+        let source = format!("Artifact = Data.define(:digest){head}{tail}");
+        let receiver = if source.contains("self.new") { "self.new" } else { "with" };
+        for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+            let rbs = review_record_signature(&source, path);
+            let line = rbs.lines().find(|line| line.contains(&format!("def {receiver}:"))).unwrap_or_else(|| panic!("{rbs}"));
+            assert!(line.ends_with("-> untyped"), "{source}\n{rbs}");
+        }
+    }
+}
+
+#[test]
+fn data_reopening_parameters_use_the_last_definition() {
+    let source = "Artifact = Data.define(:digest) do\n  def label(name) = name\nend\nclass Artifact\n  def label(name:) = name\nend\nmodule Builder; def self.make = Artifact.new(digest: \"a\").label(name: \"abc\"); end\n";
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        let rbs = review_record_signature(source, path);
+        assert!(rbs.contains("def label: (name: String) -> String"), "{rbs}");
+    }
+}
+
+/// A load-time statement between two definitions sees the first, which ingest does not keep.
+#[test]
+fn a_statement_between_two_definitions_of_a_data_method_is_refused() {
+    for (receiver, call) in [("self.", "capture"), ("", "new(digest: 1).capture")] {
+        let source = format!("Artifact = Data.define(:digest) do\n  def {receiver}capture = \"old\"\n  CAPTURED = {call}\n  def {receiver}capture = 1\nend\n");
+        for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+            assert_review_refusal(&source, path, "between two definitions", source.find("CAPTURED"));
+        }
+    }
+    let source = "Artifact = Data.define(:digest) do\n  CAPTURED = 1\n  def capture = \"old\"\n  def capture = 1\nend\n";
+    let mut app = review_record(source, "lib/artifact.rb", None);
+    assert!(errors(&mut app).is_empty());
+}
+
+/// A replaced definition never runs, so neither its block use nor its calls reach analysis.
+#[test]
+fn a_replaced_data_definition_reaches_no_caller_or_callee() {
+    let source = "module Sink\n  def self.take(value) = value\nend\nArtifact = Data.define(:digest) do\n  def pick = yield\n  def feed = Sink.take(\"old\")\nend\nclass Artifact\n  def pick = 1\n  def feed = Sink.take(1)\nend\nmodule Builder\n  def self.make = Artifact.new(digest: \"a\").pick { \"text\" }\nend\n";
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        let mut app = review_record(source, path, None);
+        assert!(errors(&mut app).is_empty());
+        let methods: Vec<_> = app.library_classes.iter().filter(|class| class.name.0.as_str() == "Artifact")
+            .flat_map(|class| &class.methods).map(|method| method.name.as_str()).collect();
+        assert_eq!(methods, ["pick", "feed"], "{path}");
+        let rbs: String = roundhouse::emit::ruby::emit_library(&app).into_iter()
+            .filter(|file| file.path.extension().is_some_and(|ext| ext == "rbs")).map(|file| file.content).collect();
+        assert!(rbs.contains("def self.make: () -> Integer"), "{rbs}");
+        assert!(rbs.contains("def self.take: (Integer value) -> Integer"), "{rbs}");
+    }
+}
+
+#[test]
+fn data_reopening_keeps_a_declared_return_signature() {
+    let source = "Artifact = Data.define(:digest) do\n  def label = 'old'\nend\nclass Artifact\n  def label = digest\nend\n";
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        let mut app = review_record(source, path, None);
+        app.rbs_signatures = roundhouse::rbs::parse_app_signatures(
+            "class Artifact\n  def label: () -> Integer\nend\n").unwrap();
+        assert!(errors(&mut app).is_empty());
+        let rbs = roundhouse::emit::ruby::emit_library(&app).into_iter()
+            .find(|file| file.path.to_string_lossy().ends_with("artifact.rbs")).unwrap().content;
+        assert!(rbs.contains("def label: () -> Integer"), "{rbs}");
+    }
 }
 
 #[test]
@@ -1024,10 +1293,9 @@ fn unsupported_file_level_data_blocks_keep_source_located_refusals() {
 }
 
 #[test]
-fn file_level_data_redefinitions_are_refused_in_either_order() {
+fn file_level_data_replacements_are_refused() {
     let record = "Artifact = Data.define(:digest) do; def label = digest; end";
     for source in [
-        format!("{record}\nclass Artifact; def extra = 1; end"),
         format!("class Artifact; def extra = 1; end\n{record}"),
         format!("{record}\nArtifact = Data.define(:size)"),
     ] {

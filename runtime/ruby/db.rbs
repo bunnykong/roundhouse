@@ -81,6 +81,14 @@ module Db
   def self.escape_int_opt: (Integer?) -> String
   def self.escape_float_opt: (Float?) -> String
   def self.escape_bool_opt: (bool?) -> String
+  # `t.binary` columns. The ruby family's shims tell bytes from text by
+  # the value's encoding and answer these as their text methods; Rust,
+  # whose strings carry none, holds bytes one char per byte and writes
+  # them as a hex BLOB literal.
+  def self.escape_binary: (String) -> String
+  def self.escape_binary_opt: (String?) -> String
+  def self.column_binary: (Integer, Integer) -> String
+  def self.column_binary_opt: (Integer, Integer) -> String?
   # Per-thread `ActiveRecord::Base.transaction` nesting depth
   # (connection.rb): 0 outside any open transaction, incremented by a
   # joining nested call. A typed accessor instead of a raw

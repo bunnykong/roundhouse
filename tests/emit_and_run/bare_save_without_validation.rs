@@ -41,3 +41,28 @@ fn a_bare_save_outside_a_model_is_left_alone() {
     run.assert_passes();
     assert!(run.stdout.contains("service save passed"), "{}", run.stdout);
 }
+
+/// A computed `validate:` skips validation only for `false` itself, as Rails' `perform_validations` reads
+/// `options[:validate] == false`: `nil` validates, and `validate: true` is the plain save.
+#[test]
+fn a_computed_validate_skips_validation_only_for_false() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/comment.rb",
+            "  validates :commenter, presence: true\n",
+            "  validates :commenter, presence: true\n\n  def blank_out(flag)\n    self.commenter = \"\"\n    save(validate: flag)\n  end\n\n  def checked_save\n    save(validate: true)\n  end\n",
+        )
+        .run_ruby(
+            r#"
+a = Article.create!(title: "Computed", body: "A body long enough for validation.")
+c = Comment.create!(article: a, commenter: "x", body: "kept")
+raise "nil skipped" unless c.blank_out(nil) == false
+raise "true skipped" unless Comment.find(c.id).blank_out(true) == false
+raise "false validated" unless Comment.find(c.id).blank_out(false) == true
+raise "plain #{Comment.find(c.id).checked_save.inspect}" unless Comment.find(c.id).checked_save == false
+puts "computed validate passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("computed validate passed"), "{}", run.stdout);
+}

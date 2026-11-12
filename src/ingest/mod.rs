@@ -16,6 +16,7 @@
 //! cross-cutting Prism AST helpers live in [`util`].
 
 mod alba;
+mod built_send;
 mod conditional_permit;
 pub(crate) mod unreachable_views;
 mod view_paths;
@@ -101,6 +102,9 @@ pub mod jbuilder;
 pub mod library_class;
 mod file_program;
 pub(crate) use file_program::{normalize_source, resolve_gem_require};
+pub(crate) fn source_gems_mount() -> &'static str {
+    source_gems::MOUNT
+}
 mod glob_autoload;
 pub mod channel_callbacks;
 mod active_model_attributes;
@@ -123,6 +127,7 @@ pub(crate) mod inherited_alias;
 mod class_macros;
 mod configured_superclass;
 mod gem_hooks;
+pub(crate) use gem_hooks::method_missing_readers;
 mod gem_routes;
 mod column_accessors;
 mod model_macros;
@@ -217,6 +222,16 @@ impl std::fmt::Display for IngestError {
 }
 
 impl std::error::Error for IngestError {}
+
+/// Render the current failure before another ingest replaces its noted source site.
+pub fn render_error(err: &IngestError) -> String {
+    if let IngestError::Unsupported { file, message } = err
+        && let Some((start, _)) = error_site::of(err)
+        && let Some(line) = sources::line_at(file, start) {
+        return format!("unsupported construct in {file}:{line}: {message}");
+    }
+    err.to_string()
+}
 
 impl From<std::io::Error> for IngestError {
     fn from(e: std::io::Error) -> Self {

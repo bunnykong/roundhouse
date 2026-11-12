@@ -198,6 +198,56 @@ module SidekiqPush
     JobRegistry.sidekiq_redis_password
   end
 
+  # The app's `configure_client` `username:`, `""` for none (the URL's
+  # own user, if any, then stands).
+  def self.username
+    JobRegistry.sidekiq_redis_username
+  end
+
+  # The app's `configure_client` `db:`, -1 for none (the URL's database
+  # then stands).
+  def self.db
+    JobRegistry.sidekiq_redis_db
+  end
+
+  # The connect and read timeouts, in seconds: the app's `timeout:`,
+  # `connect_timeout:` and `read_timeout:`, or Sidekiq's 3.
+  def self.connect_timeout
+    JobRegistry.sidekiq_redis_connect_timeout
+  end
+
+  def self.read_timeout
+    JobRegistry.sidekiq_redis_read_timeout
+  end
+
+  # The seconds to wait before each retry after a connection error, from
+  # the app's `reconnect_attempts:`, or Sidekiq's one immediate retry.
+  def self.reconnect_delays
+    delays = []
+    JobRegistry.sidekiq_redis_reconnect_delays.split(" ").each do |word|
+      delays.push(word.to_f)
+    end
+    delays
+  end
+
+  # A `db:` read from the environment: its Integer, or -1 when the
+  # variable is unset or empty, so the URL's database stands as it does
+  # for redis-client's nil `db:`. Anything else raises, as redis-client's
+  # `Integer(db)` does.
+  def self.db_setting(value)
+    if value == ""
+      return -1
+    end
+    i = 0
+    while i < value.length
+      if !"0123456789".include?(value[i])
+        raise ArgumentError.new("db: must be an Integer, got: \"" + value + "\" (Sidekiq.configure_client's Redis setting)")
+      end
+      i += 1
+    end
+    value.to_i
+  end
+
   # A `configure_client` setting read from the environment, for the
   # registry's generated `sidekiq_redis_url` and `_password`:
   # `ENV["NAME"]`, `""` when unset.

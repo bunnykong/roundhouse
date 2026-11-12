@@ -6,6 +6,9 @@ use crate::span::Span;
 use crate::ty::Ty;
 
 pub fn apply_indifferent_access_lowering(app: &mut App) {
+    for method in app.library_classes.iter_mut().flat_map(|c| c.methods.iter_mut()).chain(app.models.iter_mut().flat_map(|m| m.methods_mut())) {
+        keyed_like_indifferent(method);
+    }
     let app_defines = app_defines_conversion(app);
     let mut lower = |body: &mut Expr| lower(body, app_defines);
     super::for_each_hook_body(app, &mut lower);
@@ -276,4 +279,36 @@ fn retype(expr: &mut Expr) {
     if let Some(ty) = expr.ty.as_ref().filter(|t| indifferent::mentions(t)) {
         expr.ty = Some(indifferent::plain(ty));
     }
+}
+
+/// A parameter both a Symbol-keyed Hash and an indifferent one reach (Devise's `ParameterFilter#filter`, passed
+/// `{ confirmation_token: t }` and a request's params): the body's reads and writes are lowered to String keys, so a
+/// Symbol-keyed one is converted as the method is entered.
+// Not the arguments at each call: a call outside the analyzed bodies (a gem's, a test's) would pass its Hash unconverted.
+fn keyed_like_indifferent(method: &mut crate::dialect::MethodDef) {
+    let Some(Ty::Fn { params, .. }) = &method.signature else { return };
+    let mixed = |ty: &Ty| {
+        let leaves = leaves(ty);
+        leaves.iter().any(|v| matches!(v, Ty::Hash { key, .. } if matches!(**key, Ty::Sym)))
+            && leaves.iter().any(|v| indifferent::value_of(v).is_some())
+    };
+    let names: Vec<Symbol> = params
+        .iter()
+        .filter(|p| matches!(p.kind, crate::ty::ParamKind::Required | crate::ty::ParamKind::Optional) && mixed(&p.ty))
+        .map(|p| p.name.clone())
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    let span = method.body.span;
+    let mut exprs: Vec<Expr> = Vec::new();
+    for name in names {
+        let id = crate::ident::VarId(0);
+        let read = Expr::new(span, ExprNode::Var { id, name: name.clone() });
+        let converted = support_call(span, "indifferent_param", vec![read]);
+        exprs.push(Expr::new(span, ExprNode::Assign { target: crate::expr::LValue::Var { id, name }, value: converted }));
+    }
+    let body = std::mem::replace(&mut method.body, Expr::new(span, ExprNode::Seq { exprs: Vec::new() }));
+    exprs.push(body);
+    method.body = Expr::new(span, ExprNode::Seq { exprs });
 }

@@ -7,7 +7,10 @@
 //! scheduled set through Sidekiq's public API (`Sidekiq::Queue`,
 //! `Sidekiq::ScheduledSet`), as a Sidekiq process would see them.
 //! `tests/sidekiq_push.rs` holds the bytes against Sidekiq's own; this
-//! gate proves the clients deliver them and Sidekiq accepts them.
+//! gate proves the clients deliver them and Sidekiq accepts them. The
+//! driver gets the scratch database as `configure_client`'s `db:`, not in
+//! its URL, so the reader finds the pushes only if `db:` reaches the
+//! client.
 //!
 //!   SIDEKIQ_LIVE_REDIS_URL=redis://127.0.0.1:6379/15 \
 //!   SPINEL_REDIS_DIR=/path/to/spinel-redis \
@@ -70,6 +73,20 @@ fn ruby(dir: &Path, url: &str, args: &[&str]) -> String {
     run(Command::new("ruby").args(args).env("REDIS_URL", url).env_remove("REDIS_PROVIDER").current_dir(dir))
 }
 
+/// The driver's environment: the scratch URL without its `/N` database,
+/// and N as `SIDEKIQ_LIVE_DB`, which the driver's registry passes as
+/// `configure_client`'s `db:`. A URL that names no database is passed as
+/// it is, with no `db:`.
+fn driver_env(url: &str) -> [(&'static str, String); 2] {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    match rest.rsplit_once('/') {
+        Some((authority, db)) if !db.is_empty() && db.bytes().all(|b| b.is_ascii_digit()) => {
+            [("REDIS_URL", format!("{scheme}://{authority}")), ("SIDEKIQ_LIVE_DB", db.to_string())]
+        }
+        _ => [("REDIS_URL", url.to_string()), ("SIDEKIQ_LIVE_DB", String::new())],
+    }
+}
+
 /// Run the reader's checks over what a push left, and require every one.
 fn assert_sidekiq_reads(dir: &Path, url: &str) {
     let out = ruby(dir, url, &["reader.rb", "check"]);
@@ -85,7 +102,7 @@ fn cruby_pushes_through_redis_rb_reach_sidekiq() {
     let url = required_env("SIDEKIQ_LIVE_REDIS_URL", "a scratch Redis database");
     let dir = scratch("roundhouse-sidekiq-live-cruby");
     ruby(&dir, &url, &["reader.rb", "flush"]);
-    let out = ruby(&dir, &url, &["driver.rb"]);
+    let out = run(Command::new("ruby").arg("driver.rb").envs(driver_env(&url)).env_remove("REDIS_PROVIDER").current_dir(&dir));
     assert!(out.contains("pushed to "), "{out}");
     assert_sidekiq_reads(&dir, &url);
 }
@@ -103,7 +120,7 @@ fn spinel_pushes_through_spinel_redis_reach_sidekiq() {
     let out = run(Command::new("timeout")
         .arg("120")
         .arg(dir.join("driver"))
-        .env("REDIS_URL", &url)
+        .envs(driver_env(&url))
         .env_remove("REDIS_PROVIDER")
         .current_dir(&dir));
     assert!(out.contains("pushed to "), "{out}");

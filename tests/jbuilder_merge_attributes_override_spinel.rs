@@ -20,7 +20,7 @@ fn a_pair_over_a_merged_attribute_under_spinel() {
         )
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define(version: 1) do\n  create_table :widgets do |t|\n    t.string :name\n    t.integer :price\n    t.integer :kind, default: 0\n    t.integer :hits, default: 0\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :widgets do |t|\n    t.string :name\n    t.integer :price\n    t.integer :kind, default: 0\n    t.integer :hits, default: 0\n  end\nend\n",
         )
         .write(
             "app/models/widget.rb",

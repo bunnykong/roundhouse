@@ -1467,6 +1467,69 @@ module Db
     s.nil? ? "NULL" : escape_string(s)
   end
 
+  # `t.binary` columns (the lowerer's `ValueType::Binary`), which are
+  # `bytea` here. A value is written in bytea's hex input format,
+  # `'\x…'` (standard_conforming_strings, on since PostgreSQL 9.1, keeps
+  # the backslash literal), so a NUL or a byte that is not UTF-8 reaches
+  # the column intact. The text result format renders bytea the same
+  # way, so a read decodes the `\x` hex back to the bytes.
+  def self.escape_binary(s)
+    "'\\x" + s.to_s.unpack1("H*") + "'"
+  end
+
+  def self.escape_binary_opt(s)
+    s.nil? ? "NULL" : escape_binary(s)
+  end
+
+  def self.column_binary(stmt, i)
+    v = column_binary_opt(stmt, i)
+    return "" if v.nil?
+    v
+  end
+
+  def self.column_binary_opt(stmt, i)
+    v = Db.cell(stmt, i)
+    return nil if v.nil?
+    Db.bytea_decode(v)
+  end
+
+  # A bytea cell in the text result format, to the bytes it spells, as
+  # an ASCII-8BIT string (what Rails reads a bytea as). The server writes
+  # `\x` + hex pairs by default, and bytea's older escape format (`\\`
+  # for a backslash, `\ooo` octal for a non-printable byte, everything
+  # else as itself) when `bytea_output` is set to `escape`.
+  def self.bytea_decode(s)
+    out = "".dup
+    n = s.bytesize
+    if s.start_with?("\\x")
+      i = 2
+      while i + 1 < n
+        out = out + (PgUrl.hex(s.getbyte(i)) * 16 + PgUrl.hex(s.getbyte(i + 1))).chr
+        i += 2
+      end
+      return out.force_encoding("ASCII-8BIT")
+    end
+    i = 0
+    while i < n
+      b = s.getbyte(i)
+      if b == 92 && i + 1 < n && s.getbyte(i + 1) == 92
+        out = out + 92.chr
+        i += 2
+      elsif b == 92 && i + 3 < n && Db.octal_digit?(s.getbyte(i + 1)) && Db.octal_digit?(s.getbyte(i + 2)) && Db.octal_digit?(s.getbyte(i + 3))
+        out = out + (((s.getbyte(i + 1) - 48) * 64) + ((s.getbyte(i + 2) - 48) * 8) + (s.getbyte(i + 3) - 48)).chr
+        i += 4
+      else
+        out = out + b.chr
+        i += 1
+      end
+    end
+    out.force_encoding("ASCII-8BIT")
+  end
+
+  def self.octal_digit?(b)
+    b >= 48 && b <= 55
+  end
+
   def self.escape_int_opt(n)
     n.nil? ? "NULL" : escape_int(n)
   end

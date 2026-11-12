@@ -111,6 +111,7 @@ module ActionDispatch
     def session_options: () -> Hash[Symbol, bool]
     def session: () -> Session
     def session=: (Session) -> Session
+    def reset_session: () -> ActionDispatch::Session
     def session_skip?: () -> bool
     def user_agent=: (String) -> String
     def params: () -> Hash[String, Roundhouse::ParamValue]

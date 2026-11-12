@@ -52,6 +52,7 @@ pub(super) fn carry(app: &mut App) {
         walk.file(&next);
     }
     let (taken, left) = (walk.taken, walk.left);
+    app.gem_loaded_files.extend(walk.seen);
     app.gem_load_statements.extend(taken.iter().map(|e| e.span));
     app.boot_program.splice(0..0, taken);
     app.gem_route_gaps.extend(left.into_iter().map(|span| {

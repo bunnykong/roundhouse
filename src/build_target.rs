@@ -261,6 +261,10 @@ impl BuildTarget {
         matches!(self, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
     }
 
+    pub fn applies_route_defaults(self) -> bool {
+        matches!(self, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
+    }
+
     /// Whether the router asks a guarded route's request constraints (`lower::route_guards`)
     /// once its path matches; elsewhere those routes are refused. `Blog` is the Rails source, which Rails routes.
     pub fn asks_route_guards(self) -> bool {

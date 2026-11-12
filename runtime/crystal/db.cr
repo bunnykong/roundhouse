@@ -252,6 +252,31 @@ module Roundhouse
       s.nil? ? "NULL" : escape_string(s)
     end
 
+    # `t.binary` columns. Crystal's String is UTF-8 with no encoding to
+    # tell bytes by (`Digest::BLAKE3` is not emitted for this target), so
+    # a value is its UTF-8 bytes. One holding a NUL is written as an
+    # `X'…'` blob literal, since a NUL inside a quoted literal ends the
+    # SQL text; anything else is the text literal.
+    def self.escape_binary(s : String) : String
+      return escape_string(s) unless s.includes?('\0')
+      "X'" + s.to_slice.hexstring + "'"
+    end
+
+    def self.escape_binary_opt(s : String?) : String
+      s.nil? ? "NULL" : escape_binary(s)
+    end
+
+    # A BLOB cell reads back as `Bytes`; `to_s` would render the slice,
+    # so it is decoded as the UTF-8 it was written from.
+    def self.column_binary(stmt_id : Int64, i : Int64) : String
+      column_binary_opt(stmt_id, i) || ""
+    end
+
+    def self.column_binary_opt(stmt_id : Int64, i : Int64) : String?
+      v = @@statements[stmt_id].current.not_nil![i]
+      v.is_a?(Bytes) ? String.new(v) : column_text_opt(stmt_id, i)
+    end
+
     def self.escape_int_opt(n : Int?) : String
       n.nil? ? "NULL" : escape_int(n)
     end

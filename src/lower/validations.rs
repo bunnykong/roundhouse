@@ -186,6 +186,8 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
         // Not a `Check`: the emitted `validate` body is
         // `inline_acceptance_check`.
         ValidationRule::Acceptance { .. } => {}
+        // Not a `Check`: the emitted `validate` body is `inline_confirmation_check`.
+        ValidationRule::Confirmation { .. } => {}
         // Not a `Check`: the set is read on the record when it validates
         // (`inline_set_call_check`).
         ValidationRule::InclusionCall { .. } | ValidationRule::ExclusionCall { .. } => {}
@@ -279,51 +281,40 @@ fn lit_to_inclusion_value(lit: &crate::expr::Literal) -> Option<InclusionValue> 
 
 /// `validates :attr, presence:` on a NOT NULL number column with no
 /// default. Rails reads such an attribute as nil until it is assigned,
-/// so the check rejects a record that never set it. A strict target
-/// holds the column as a plain number that `new` starts at 0, which is
-/// never blank, so the check cannot fire and the record saves a 0 Rails
-/// would have refused. Reported once per validation, as
-/// `uniqueness_gaps_for_target` does, so the emit does not claim it.
+/// so the check rejects a record that never set it. Every target holds
+/// an integer one unset until assigned (`hold_unset_presence_columns`);
+/// any other (`presence_reads_unset` but not `unset_presence_column`) it
+/// holds as a plain number that `new` starts at 0, which is never blank,
+/// so the check cannot fire and the record saves a 0 Rails would have
+/// refused. Those are reported once per validation, as
+/// `uniqueness_gaps_for_target` does, so the emit does not claim them.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn presence_gaps_for_target(
     app: &crate::App,
     target: crate::build_target::BuildTarget,
 ) -> Vec<crate::diagnostic::Diagnostic> {
-    use crate::schema::ColumnType;
-    if target.has_runtime_relation() {
-        return Vec::new();
-    }
     let mut out = Vec::new();
+    let held = hold_unset_presence_columns(&app.models, &app.schema);
     for model in &app.models {
         let Some(table) = app.schema.tables.get(&model.table.0) else { continue };
+        let held_table = held.tables.get(&model.table.0);
         for item in &model.body {
             let crate::dialect::ModelBodyItem::Validation { validation, .. } = item else { continue };
             if !validation.rules.iter().any(|r| matches!(r, ValidationRule::Presence)) {
                 continue;
             }
             let Some(column) = table.columns.iter().find(|c| c.name == validation.attribute) else { continue };
-            let numeric = matches!(
-                column.col_type,
-                ColumnType::Integer
-                    | ColumnType::BigInt
-                    | ColumnType::Float
-                    | ColumnType::Decimal { .. }
-                    | ColumnType::Reference { .. }
-            );
-            if !numeric
-                || column.nullable
-                || column.primary_key
-                || column.default.is_some()
-                || column.default_expression.is_some()
-                || column.generated.is_some()
-            {
+            let is_held = held_table
+                .and_then(|t| t.columns.iter().find(|c| c.name == column.name))
+                .is_some_and(|c| c.unset_until_assigned);
+            if !presence_reads_unset(model, column) || is_held {
                 continue;
             }
             let mut d = crate::diagnostic::Diagnostic::unsupported(
                 item.span(),
                 Some(Symbol::from(target.as_str())),
                 format!("validates :{}, presence:", validation.attribute.as_str()),
-                "this target holds the NOT NULL column as a number that starts at 0, which is never blank, so a record that never assigned it passes the check and saves 0 where Rails rejects it",
+                "this target holds the NOT NULL column as a number that starts at 0, which is never blank, so a record that never assigned it passes the check and saves 0 where Rails rejects it; only a scalar integer column whose reader and writer are the column's own (not an enum, a `normalizes` attribute or one `numericality:` also checks), held so by every model its table backs, starts unset",
             );
             d.severity = crate::diagnostic::Severity::Warning;
             out.push(d);
@@ -366,4 +357,228 @@ pub fn acceptance_gaps_for_target(
         }
     }
     out
+}
+
+/// `validates :attr, presence:` on a NOT NULL number column with no
+/// default. Rails reads such an attribute as nil until it is assigned,
+/// so the check rejects a record that never set it, where a strict
+/// target's number field starts at 0.
+fn presence_reads_unset(model: &crate::dialect::Model, column: &crate::schema::Column) -> bool {
+    use crate::schema::ColumnType;
+    let numeric = matches!(
+        column.col_type,
+        ColumnType::Integer | ColumnType::BigInt | ColumnType::Float | ColumnType::Decimal { .. } | ColumnType::Reference { .. }
+    );
+    numeric
+        && !column.nullable
+        && !column.primary_key
+        && column.default.is_none()
+        && column.default_expression.is_none()
+        && column.generated.is_none()
+        && model.validations().any(|v| v.attribute == column.name && v.rules.iter().any(|r| matches!(r, ValidationRule::Presence)))
+}
+
+/// The `presence_reads_unset` columns this model's lowering can hold
+/// unset until assigned: a scalar integer (a float, a decimal, a
+/// `t.references` column or an array stays the reported gap) that
+/// the model leaves alone (`touches_column`).
+fn unset_presence_column(model: &crate::dialect::Model, column: &crate::schema::Column) -> bool {
+    use crate::schema::ColumnType;
+    matches!(column.col_type, ColumnType::Integer | ColumnType::BigInt)
+        && !column.array
+        && !column.array_stored
+        && presence_reads_unset(model, column)
+        && !touches_column(model, column)
+}
+
+/// Whether the model itself does something with the column a held slot
+/// would change: writes or reads it (Rails' `new(attrs)` runs that
+/// writer, which takes the column's type), declares it an enum or a
+/// `normalizes` attribute (whose writer converts the value), or checks
+/// it with `numericality:` (the ruby family's check reads the raw input
+/// the held writer's cast replaces), or compound-assigns its ivar.
+fn touches_column(model: &crate::dialect::Model, column: &crate::schema::Column) -> bool {
+    crate::lower::model_to_library::model_defines_writer(model, &column.name)
+        || crate::lower::model_to_library::model_defines_instance_method(model, &column.name)
+        || model.enums.contains_key(&column.name)
+        || names_in_normalizes(model, &column.name)
+        || compound_assigns_ivar(model, &column.name)
+        || model.validations().any(|v| {
+            v.attribute == column.name && v.rules.iter().any(|r| matches!(r, ValidationRule::Numericality { .. }))
+        })
+}
+
+/// Whether an instance method of the model compound-assigns `@attr`
+/// (`@attr ||= v`, `@attr += 1`). The held column has no `@attr` slot, and
+/// those keep their own read-then-write order, which the reader and writer
+/// rewrite (`read_held_columns_through_readers`) does not model.
+fn compound_assigns_ivar(model: &crate::dialect::Model, attr: &crate::ident::Symbol) -> bool {
+    use crate::expr::{Expr, ExprNode, LValue};
+    fn found(e: &Expr, attr: &crate::ident::Symbol) -> bool {
+        if matches!(&*e.node, ExprNode::OpAssign { target: LValue::Ivar { name }, .. } if name == attr) {
+            return true;
+        }
+        let mut hit = false;
+        e.node.for_each_child(&mut |c| hit = hit || found(c, attr));
+        hit
+    }
+    model.body.iter().any(|item| {
+        matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+            if method.receiver == crate::dialect::MethodReceiver::Instance && found(&method.body, attr))
+    })
+}
+
+/// Whether any `normalizes` call in the model body names `attr`, whether
+/// or not `normalizes::normalizations` can reproduce it.
+fn names_in_normalizes(model: &crate::dialect::Model, attr: &crate::ident::Symbol) -> bool {
+    use crate::expr::{ExprNode, Literal};
+    model.body.iter().any(|item| {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return false };
+        method.as_str() == "normalizes"
+            && args.iter().any(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { value } } if value == attr))
+    })
+}
+
+/// Whether `model` holds `column` unset: it, or the STI ancestor it
+/// inherits its validations from, checks it as `unset_presence_column`
+/// asks, and neither it nor any ancestor on the way `touches_column`.
+fn holds_through_hierarchy(models: &[crate::dialect::Model], model: &crate::dialect::Model, column: &crate::schema::Column) -> bool {
+    let mut current = model;
+    let mut seen = 0;
+    loop {
+        if touches_column(current, column) {
+            return false;
+        }
+        if unset_presence_column(current, column) {
+            return true;
+        }
+        let Some(name) = current.parent.as_ref() else { return false };
+        let Some(ancestor) = models.iter().find(|m| m.name == *name) else { return false };
+        if ancestor.table != model.table {
+            return false;
+        }
+        seen += 1;
+        if seen > models.len() {
+            return false;
+        }
+        current = ancestor;
+    }
+}
+
+/// Each target's lowering holds each `unset_presence_column` nilable,
+/// on its own copy of the schema: the record starts with nil there, as
+/// Rails' does, the presence check sees it, and every storage path
+/// (INSERT, hydration, `attributes`, `[]`) is the nullable column's. The
+/// column keeps NOT NULL in the database, and its public reader keeps
+/// the column's type (`unset_until_assigned`).
+///
+/// The schema is shared, so a column is held only where every model its
+/// table backs holds it (an STI subclass through the ancestor it
+/// inherits the check from), and only where no column already has its
+/// `<col>_raw` storage name.
+pub fn hold_unset_presence_columns(models: &[crate::dialect::Model], schema: &crate::schema::Schema) -> crate::schema::Schema {
+    let mut out = schema.clone();
+    for (name, table) in out.tables.iter_mut() {
+        let backing: Vec<&crate::dialect::Model> = models.iter().filter(|m| m.table.0 == *name).collect();
+        if backing.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = table.columns.iter().map(|c| c.name.as_str().to_string()).collect();
+        for column in table.columns.iter_mut() {
+            let storage = format!("{}_raw", column.name.as_str());
+            if names.contains(&storage) {
+                continue;
+            }
+            if backing.iter().any(|m| unset_presence_column(m, column))
+                && backing.iter().all(|m| holds_through_hierarchy(models, m, column))
+            {
+                column.nullable = true;
+                column.unset_until_assigned = true;
+            }
+        }
+    }
+    out
+}
+
+/// `(model, column)` for each column `hold_unset_presence_columns` holds,
+/// on every model its table backs. An emitter that writes a column's
+/// field by name (Go's struct literals and fixture loaders) writes these
+/// through their nilable `<col>_raw` slot.
+pub fn held_unset_columns(models: &[crate::dialect::Model], schema: &crate::schema::Schema) -> Vec<(crate::ident::ClassId, crate::ident::Symbol)> {
+    let held = hold_unset_presence_columns(models, schema);
+    let mut out = Vec::new();
+    for model in models {
+        let Some(table) = held.tables.get(&model.table.0) else { continue };
+        for column in table.columns.iter().filter(|c| c.unset_until_assigned) {
+            out.push((model.name.clone(), column.name.clone()));
+        }
+    }
+    out
+}
+
+/// The columns a strict target's `uniqueness:` query compares: the
+/// validated attribute's (a non-polymorphic `belongs_to` reads its
+/// foreign key, as Rails' `bind_attribute` resolves it), then each
+/// `scope:` entry's (a `belongs_to` its foreign key, and its type column
+/// when polymorphic). `None` where a column is not a plain scalar slot
+/// the query can compare as stored: absent from the table, temporal,
+/// JSON, an enum, an array, a float or decimal, or read through a reader
+/// of the model's own; a polymorphic attribute; or a table without a
+/// key to exclude the record by. Those stay
+/// the reported gap (`relation_residue::uniqueness_gaps_for_target`),
+/// which asks this same question.
+pub fn strict_uniqueness_columns(
+    model: &crate::dialect::Model,
+    table: &crate::schema::Table,
+    attr: &Symbol,
+    scope: &[Symbol],
+) -> Option<(Symbol, Vec<Symbol>)> {
+    use crate::dialect::Association;
+    let belongs_to = |name: &Symbol| {
+        model.associations().find_map(|a| match a {
+            Association::BelongsTo { name: n, foreign_key, polymorphic, .. } if n == name => Some((foreign_key.clone(), *polymorphic)),
+            _ => None,
+        })
+    };
+    let column = match belongs_to(attr) {
+        Some((_, true)) => return None,
+        Some((foreign_key, false)) => foreign_key,
+        None => attr.clone(),
+    };
+    let mut scoped = Vec::new();
+    for name in scope {
+        match belongs_to(name) {
+            Some((foreign_key, polymorphic)) => {
+                scoped.push(foreign_key);
+                if polymorphic {
+                    scoped.push(Symbol::from(format!("{}_type", name.as_str()).as_str()));
+                }
+            }
+            None => scoped.push(name.clone()),
+        }
+    }
+    // Compared as stored, so not a column the model reads through a
+    // reader of its own (Rails validates what that answers), nor a float
+    // or decimal (no probe escape takes one).
+    let plain = |name: &Symbol| {
+        table.columns.iter().find(|c| c.name == *name).is_some_and(|c| {
+            let slot = crate::lower::column_slot::ColumnSlot::classify(c, model);
+            !slot.is_temporal()
+                && !slot.is_json()
+                && !c.array
+                && !model.enums.contains_key(&c.name)
+                && !matches!(c.col_type, crate::schema::ColumnType::Float | crate::schema::ColumnType::Decimal { .. })
+                && !crate::lower::model_to_library::model_defines_instance_method(model, &c.name)
+        })
+    };
+    // The probe excludes the record by its key (as `push_validate_method`
+    // resolves it), so a keyless table has none to exclude it by.
+    let primary_key = model
+        .primary_key
+        .clone()
+        .or_else(|| table.columns.iter().find(|c| c.primary_key && c.name.as_str() != "id").map(|c| c.name.clone()))
+        .unwrap_or_else(|| Symbol::from("id"));
+    let keyed = table.columns.iter().any(|c| c.name == primary_key);
+    (keyed && plain(&column) && scoped.iter().all(plain)).then_some((column, scoped))
 }

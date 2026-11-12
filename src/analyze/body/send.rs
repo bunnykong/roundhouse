@@ -1212,7 +1212,7 @@ impl<'a> BodyTyper<'a> {
 
     /// Does `of` or an ancestor define `method` class-side (a scope, a
     /// `def self.…`, a runtime-declared class method)?
-    fn class_side_defines(&self, of: &ClassId, method: &Symbol) -> bool {
+    pub(super) fn class_side_defines(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {
             let Some(id) = current else { return false };
@@ -2029,6 +2029,12 @@ impl<'a> BodyTyper<'a> {
                 }
                 // Class-side defs stay a fallback: a value typed as an instance may still be a class object (`@klass = Post`).
                 let instance_side = instance_receiver && self.defines_instance_method(id, method);
+                // A Kernel-named singleton in an ancestor precedes the instance
+                // fallback too; a class object cannot call the child's instance method.
+                let kernel_class_side = !instance_receiver
+                    && matches!(method.as_str(), "require" | "require_relative" | "load" | "autoload"
+                        | "puts" | "print" | "warn" | "format" | "sprintf" | "`")
+                    && self.class_side_defines(id, method);
                 let mut current_id: Option<&ClassId> = Some(id);
                 let mut depth = 0usize;
                 // Set when the chain reaches a *named* superclass we don't
@@ -2237,7 +2243,7 @@ impl<'a> BodyTyper<'a> {
                         }
                         return unwrap_fn_ret(&subst(ty));
                     }
-                    if !class_dynamic_finder && let Some(ty) = cls.instance_methods.get(method) {
+                    if !kernel_class_side && !class_dynamic_finder && let Some(ty) = cls.instance_methods.get(method) {
                         if !controller_writer || instance_receiver {
                             return unwrap_fn_ret(&subst(ty));
                         }
@@ -2248,7 +2254,7 @@ impl<'a> BodyTyper<'a> {
                     // Checked after the class's own methods, before the
                     // parent — Ruby's ancestor order puts an included
                     // module between the class and its superclass.
-                    for module_id in cls.includes.iter().filter(|_| !class_dynamic_finder) {
+                    for module_id in cls.includes.iter().filter(|_| !kernel_class_side && !class_dynamic_finder) {
                         if controller_writer && !instance_receiver {
                             continue;
                         }
@@ -2262,10 +2268,18 @@ impl<'a> BodyTyper<'a> {
                     // instance sends; applying them here would type an
                     // undefined class-side call from an RBS instance sig.
                     if method_missing_ty.is_none() {
-                        method_missing_ty = cls
-                            .class_methods
-                            .get(&Symbol::from("method_missing"))
-                            .cloned();
+                        let missing = Symbol::from("method_missing");
+                        method_missing_ty = if instance_receiver {
+                            // An instance send that no method answers goes to the instance-side `method_missing` (hashie's
+                            // Mash, which OmniAuth's AuthHash answers `provider` with).
+                            // The latest include first, as Ruby looks it up; `self` the receiving class.
+                            // Not a module's singleton `method_missing`, which answers calls on the module, not on its includers.
+                            cls.instance_methods.get(&missing).cloned().or_else(|| {
+                                cls.includes.iter().rev().find_map(|m| self.instance_method_in_module(m, &missing))
+                            }).map(|ty| subst(&ty))
+                        } else {
+                            cls.class_methods.get(&missing).cloned()
+                        };
                     }
                     current_id = cls.parent.as_ref();
                 }
@@ -2526,6 +2540,19 @@ impl<'a> BodyTyper<'a> {
                 // likely inherited from that gem, so treat it as a gradual
                 // escape rather than an "unknown method" error. Reached only
                 // after the precise builtins above have had their say.
+                // A key the gem documents for its `method_missing` class answers what it holds (OmniAuth's `auth.info`),
+                // ahead of the gradual answers below.
+                if instance_receiver && method_missing_ty.is_some() {
+                    let mut walk = Some(id.clone());
+                    for _ in 0..32 {
+                        let Some(c) = walk.take() else { break };
+                        let Some(info) = self.classes().get(&c) else { break };
+                        if let Some(ty) = info.missing_readers.get(method) {
+                            return ty.clone();
+                        }
+                        walk = info.parent.clone();
+                    }
+                }
                 if unknown_named_ancestor {
                     return Ty::Untyped;
                 }
@@ -2922,7 +2949,8 @@ impl<'a> BodyTyper<'a> {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    let r = self.dispatch_on(Some(v), method, block_ret, args, instance_receiver);
+                    let r = self.dispatch_on(Some(v), method, block_ret, args,
+                        instance_receiver && super::instance_shaped(v));
                     if !matches!(r, Ty::Var { .. }) {
                         resolved.push(r);
                     }
@@ -3048,6 +3076,24 @@ impl<'a> BodyTyper<'a> {
             if let Some(ty) = m.instance_methods.get(method) {
                 return Some(unwrap_fn_ret(ty));
             }
+            stack.extend(m.includes.iter().cloned());
+        }
+        None
+    }
+
+    /// [`Self::lookup_in_module`] on the instance side alone.
+    pub(super) fn instance_method_in_module(&self, module_id: &ClassId, method: &Symbol) -> Option<Ty> {
+        let mut stack = vec![module_id.clone()];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(m) = self.classes().get(&id) else { continue };
+            if let Some(ty) = m.instance_methods.get(method) {
+                return Some(unwrap_fn_ret(ty));
+            }
+            // In declaration order: the stack pops the latest include first, as Ruby looks it up.
             stack.extend(m.includes.iter().cloned());
         }
         None

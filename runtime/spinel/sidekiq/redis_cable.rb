@@ -95,7 +95,7 @@ module RedisCable
     pid = Process.pid
     held = LOCK.synchronize { current(pid) }
     if held.length == 0
-      fresh = SidekiqRedis.open(url, "")
+      fresh = SidekiqRedis.open_cable(url)
       held = LOCK.synchronize { install(pid, fresh) }
     end
     held[0]

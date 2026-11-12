@@ -193,11 +193,13 @@ end
 "#)
 }
 
-/// Tests the generated `cargo test` passes. The rest are the gaps the
-/// target reports instead (`presence:` on a NOT NULL number,
-/// `uniqueness:`), listed so a fix that closes one moves it here.
+/// Tests the generated `cargo test` passes: all of them, the presence
+/// checks on NOT NULL numbers and the scoped uniqueness ones included.
 pub const PASSING: &[&str] = &[
     "shelf::test_a_complete_shelf_is_valid",
+    "shelf::test_requires_an_aisle",
+    "shelf::test_requires_a_position",
+    "shelf::test_position_is_unique_within_an_aisle",
     "shelf::test_the_same_position_in_another_aisle_is_fine",
     "shelf::test_labelled_finds_by_label",
     "shelf::test_labelled_returns_nil_for_an_unknown_label",
@@ -206,6 +208,8 @@ pub const PASSING: &[&str] = &[
     "shelf::test_destroy_answers_the_destroyed_shelf",
     "shelf::test_destroying_a_shelf_destroys_its_items",
     "item::test_requires_a_name",
+    "item::test_requires_a_weight",
+    "item::test_name_is_unique_on_a_shelf",
     "item::test_belongs_to_a_shelf",
     "item::test_the_same_name_on_another_shelf_is_fine",
     "item::test_a_helper_s_default_fills_in_after_a_positional_hash",

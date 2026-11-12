@@ -13,7 +13,7 @@ fn a_bare_new_runs_after_initialize_once_on_spinel() {
     emit_and_run::empty_app()
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"widgets\" do |t|\n    t.string \"name\"\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\" do |t|\n    t.string \"name\"\n  end\nend\n",
         )
         .write(
             "app/models/application_record.rb",
