@@ -206,6 +206,10 @@ mod class_side_default;
 mod hash_write_through_reader_contract;
 #[path = "spinel_toolchain/hash_write_through_reader.rs"]
 mod hash_write_through_reader;
+#[path = "support/app_class_registry.rs"]
+mod app_class_registry_contract;
+#[path = "spinel_toolchain/app_class_registry.rs"]
+mod app_class_registry;
 #[path = "spinel_toolchain/action_text_sanitize.rs"]
 mod action_text_sanitize;
 #[path = "support/campfire_caches.rs"]

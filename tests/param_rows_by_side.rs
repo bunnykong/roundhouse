@@ -66,15 +66,9 @@ fn the_instance_method_keeps_its_own_callers_types() {
         "get",
         MethodReceiver::Instance,
     );
-    let unknown = || Ty::Var { var: roundhouse::ident::TyVar(0) };
     assert_eq!(params[0], Ty::Str);
-    assert_eq!(
-        params[1],
-        Ty::Hash {
-            key: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Str, unknown()].into() }),
-            value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, unknown()].into() }),
-        }
-    );
+    // Not joined with the `{}` default: the one caller passes the Hash.
+    assert_eq!(params[1], Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) });
 }
 
 /// A constant receiver reaches the class side when both sides define the

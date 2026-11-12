@@ -4241,9 +4241,12 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
             indent(out, depth);
             out.push_str(&format!("if {init}{cond_s} {{\n"));
             emit_return_at(&then_ctx, then_branch, out, depth + 1);
-            // Skip the else clause when it's an implicit nil — the
-            // `return X if cond` shape doesn't want a `nil` else.
-            if !is_nil_lit(else_branch) {
+            // Skip the else clause when it's an implicit nil in a void
+            // method — the `return X if cond` shape doesn't want a `nil`
+            // else. A value method still answers Ruby's nil when the
+            // condition fails (`c ? x : nil`), or Go reports a missing
+            // return.
+            if !is_nil_lit(else_branch) || !ctx.void_method {
                 indent(out, depth);
                 out.push_str("} else {\n");
                 let else_ctx = ctx.enter_scope();

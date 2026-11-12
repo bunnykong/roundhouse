@@ -153,6 +153,7 @@ pub(super) fn splice_load_hook_extended_calls(app: &mut App) {
     if provided.is_empty() {
         return;
     }
+    let resolved = resolve_hook_constants(app);
     let mut spliced_names = Vec::new();
     for model in &mut app.models {
         loop {
@@ -168,7 +169,7 @@ pub(super) fn splice_load_hook_extended_calls(app: &mut App) {
             }
             for mut method in missing {
                 spliced_names.push(method.name.clone());
-                hook_constants(&mut method.body, &app.load_hook_constants);
+                hook_constants(&mut method.body, &resolved);
                 method.receiver = MethodReceiver::Class;
                 method.enclosing_class = Some(model.name.0.clone());
                 model.body.push(ModelBodyItem::Method { method, leading_comments: Vec::new(), leading_blank_line: false });
@@ -176,6 +177,33 @@ pub(super) fn splice_load_hook_extended_calls(app: &mut App) {
         }
     }
     app.spliced_class_methods.extend(spliced_names);
+}
+
+// A bare path names what Ruby's lexical lookup finds from the hook's nesting outward (`Vendor::Adapter` ahead of
+// `::Adapter` inside `module Vendor`), among the classes the program defines.
+fn resolve_hook_constants(app: &App) -> Vec<(Symbol, Vec<Symbol>)> {
+    let known: HashSet<String> = app
+        .library_classes
+        .iter()
+        .map(|lc| lc.name.0.to_string())
+        .chain(app.models.iter().map(|m| m.name.0.to_string()))
+        .collect();
+    app.load_hook_constants
+        .iter()
+        .map(|(name, path, scope)| {
+            let rooted = path.first().is_some_and(|p| p.as_str().is_empty());
+            let bare: Vec<Symbol> = path.iter().filter(|p| !p.as_str().is_empty()).cloned().collect();
+            let found = (!rooted)
+                .then(|| {
+                    scope.iter().rev().find_map(|entry| {
+                        let text = std::iter::once(entry.as_str()).chain(bare.iter().map(|s| s.as_str())).collect::<Vec<_>>().join("::");
+                        known.contains(&text).then(|| text.split("::").map(Symbol::from).collect::<Vec<_>>())
+                    })
+                })
+                .flatten();
+            (name.clone(), found.unwrap_or(bare))
+        })
+        .collect()
 }
 
 // Not `self::X` left to the model: the constant is ActiveRecord::Base's, written by the same `on_load` block, and the
@@ -188,7 +216,9 @@ fn hook_constants(e: &mut Expr, constants: &[(Symbol, Vec<Symbol>)]) {
         && let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node
         && let Some((_, path)) = constants.iter().find(|(n, _)| n == value)
     {
-        let mut c = Expr::new(e.span, ExprNode::Const { path: path.clone() });
+        // Rooted: read from the module the hook extends, a bare path resolves under it first.
+        let rooted = std::iter::once(Symbol::from("")).chain(path.iter().filter(|p| !p.as_str().is_empty()).cloned()).collect();
+        let mut c = Expr::new(e.span, ExprNode::Const { path: rooted });
         c.decisions |= crate::expr::GENERATED_CONST_REF;
         *e = c;
         return;

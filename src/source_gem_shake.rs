@@ -344,6 +344,9 @@ struct Gems<'a> {
     /// The gem classes whose file requires a gem the app does not have (orm_adapter's `data_mapper.rb`:
     /// `require 'dm-core'`): Ruby raises LoadError there, so they never exist.
     unloadable: HashSet<String>,
+    /// A model's methods copied from a gem module, by `(model, class side, name)`: walked as the model's own when a
+    /// call reaches it, which no root does for a body whose spans are the gem's.
+    model_copies: HashMap<(String, bool, String), Vec<&'a crate::dialect::MethodDef>>,
 }
 
 impl<'a> Gems<'a> {
@@ -394,7 +397,13 @@ impl<'a> Gems<'a> {
         }
         let app_classes = Self::app_classes_of(app);
         let unloadable = unloadable_classes(app, &names);
-        let mut gems = Gems { names, entries, defined, owners, sinks, app_mixins: HashSet::default(), app_classes, unloadable };
+        let mut model_copies: HashMap<(String, bool, String), Vec<&'a crate::dialect::MethodDef>> = HashMap::default();
+        for model in &app.models {
+            for m in model.methods().filter(|m| !m.body.span.is_synthetic() && mounted(app, m.body.span.file)) {
+                model_copies.entry((model.name.0.to_string(), m.receiver == MethodReceiver::Class, m.name.to_string())).or_default().push(m);
+            }
+        }
+        let mut gems = Gems { names, entries, defined, owners, sinks, app_mixins: HashSet::default(), app_classes, unloadable, model_copies };
         gems.app_mixins = gems.mixed_into_the_app(app);
         Some(gems)
     }
@@ -805,7 +814,9 @@ impl<'a> Gems<'a> {
                     return true;
                 }
                 let Some(original) = self.lookup(&name, side, m.name.as_str()) else { return true };
-                let keep = !self.names.contains(&original.0) || reached.methods.contains(&original);
+                let keep = !self.names.contains(&original.0)
+                    || reached.methods.contains(&original)
+                    || reached.methods.contains(&(name.clone(), side, m.name.to_string()));
                 copies_dropped += usize::from(!keep);
                 keep
             });
@@ -860,7 +871,14 @@ impl Walk<'_, '_> {
             } else if let Some(call) = self.new_calls.pop() {
                 self.answer_call(call);
             } else if let Some(key) = self.new_methods.pop() {
-                if self.gems.names.contains(&key.0) {
+                if let Some(copies) = self.gems.model_copies.get(&key) {
+                    let mut s = Scan::new(Some((key.0.as_str(), key.1, key.2.as_str())), Some(self.gems));
+                    for m in copies {
+                        s.method(m);
+                    }
+                    let (calls, consts) = (s.calls, s.consts);
+                    self.found(calls, consts);
+                } else if self.gems.names.contains(&key.0) {
                     let (calls, consts) = self.gems.method_body(&key);
                     self.found(calls, consts);
                 }
@@ -923,6 +941,9 @@ impl Walk<'_, '_> {
     }
 
     fn answer(&mut self, c: &str, side: bool, method: &str) {
+        if self.gems.model_copies.contains_key(&(c.to_string(), side, method.to_string())) {
+            self.method((c.to_string(), side, method.to_string()));
+        }
         if let Some(owner) = self.owner(c, side, method) {
             self.method((owner, side, method.to_string()));
         } else if let Some(key) = side.then(|| self.gems.lookup(c, side, method)).flatten() {
@@ -1824,7 +1845,7 @@ fn unloadable_classes(app: &App, names: &HashSet<String>) -> HashSet<String> {
             let gem = gem.as_str();
             gem == root || gem.replace('-', "_") == root || gem.replace('-', "") == root || gem.starts_with(&format!("{root}-")) || gem.starts_with(&format!("{root}_"))
         });
-        crate::project::is_framework_feature(feature)
+        crate::gems::is_framework_feature(feature)
             || gem_named
             || stdlib(root)
             || stdlib(feature)

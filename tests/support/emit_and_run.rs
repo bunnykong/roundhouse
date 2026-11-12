@@ -480,6 +480,18 @@ impl Overlay {
         diags.into_iter().filter(|d| d.severity == Severity::Warning).map(|d| d.message).collect()
     }
 
+    /// The warnings emitting the overlaid app for `target` reports — the
+    /// `target_files` diagnostics an error-only `emit` drops.
+    pub fn emit_warnings(self, target: BuildTarget) -> Vec<Diagnostic> {
+        let (scratch, source) = self.materialize();
+        let (app, _) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
+        let mut app = app.expect("ingest the overlaid fixture");
+        roundhouse::session::analyze_and_lower_for(&mut app, target);
+        let (_files, diags) = roundhouse::emit::diagnostics::scope(|| roundhouse::project::target_files(&app, &source, target));
+        let _ = std::fs::remove_dir_all(&scratch);
+        diags.into_iter().filter(|d| d.severity == Severity::Warning).collect()
+    }
+
     fn emit_app_tree(self, target: BuildTarget) -> (PathBuf, roundhouse::App, Vec<Diagnostic>) {
         self.emit_app_tree_with_lowering(target, true)
     }

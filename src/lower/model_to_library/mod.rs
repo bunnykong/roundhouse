@@ -1240,6 +1240,11 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         if name == "primary_abstract_class" {
             continue;
         }
+        // `self.abstract_class = true|false` — the older spelling of the
+        // same marker, read in order by `markers::is_abstract_class`.
+        if name == "abstract_class=" && self::markers::is_literal_abstract_class_write(expr) {
+            continue;
+        }
         // `include Notifications` — a model concern, spliced by the
         // analyzer (`model_includes` + `concern_model_items`) into the
         // includer's registry and lowered with its methods; nothing is

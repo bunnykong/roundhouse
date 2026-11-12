@@ -2410,6 +2410,21 @@ pub(super) fn wrap_return(e: &Expr) -> String {
                 indent(&with_nonnull_scope(&else_nn, || wrap_return(else_branch)))
             )
         }
+        // A value method's tail `c ? x : nil` (or `x if c`): Swift's `if`
+        // expression needs both arms, so the taken arm returns and Ruby's
+        // missing arm is the `return nil` after it.
+        ExprNode::If { cond, then_branch, else_branch }
+            if is_empty_branch(else_branch)
+                && !is_empty_branch(then_branch)
+                && RETURNS_VALUE.with(|r| *r.borrow()) =>
+        {
+            let then_nn = props_proven_nonnull(cond);
+            let c = emit_expr(cond);
+            format!(
+                "if {c} {{\n{}\n}}\nreturn nil",
+                indent(&with_nonnull_scope(&then_nn, || wrap_return(then_branch)))
+            )
+        }
         // Not the assignment alone: Ruby's assignment answers the value, and a value method must return it
         ExprNode::Assign { target: LValue::Var { id, name }, value } => {
             // Not the local read back: a branch that proved it non-nil would

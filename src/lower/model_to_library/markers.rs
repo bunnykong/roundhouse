@@ -268,15 +268,37 @@ pub(super) fn push_dom_record_key_method(methods: &mut Vec<MethodDef>, model: &M
 /// Primary abstract bases omit instance-shaped synthesis, unless a later
 /// literal marker makes them concrete. Intermediate abstract bases still
 /// emit methods for their concrete children to inherit.
+///
+/// A primary base is one marked `primary_abstract_class`, or an abstract
+/// class directly under `ActiveRecord::Base` — `self.abstract_class =
+/// true` on `ApplicationRecord`, the spelling Rails generated before 7.0
+/// and still accepts. Either way it has no table and no `id`, so a
+/// synthesized `to_param` reading `@id` has nothing to read.
 fn is_primary_abstract_class(model: &Model) -> bool {
-    model.body.iter().any(|item| {
+    let marked_primary = model.body.iter().any(|item| {
         if let ModelBodyItem::Unknown { expr, .. } = item {
             if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
                 return args.is_empty() && method.as_str() == "primary_abstract_class";
             }
         }
         false
-    }) && is_abstract_class(model)
+    });
+    let under_base = model
+        .parent
+        .as_ref()
+        .is_some_and(|p| matches!(p.0.as_str(), "ActiveRecord::Base" | "::ActiveRecord::Base"));
+    (marked_primary || under_base) && is_abstract_class(model)
+}
+
+/// `self.abstract_class = true` or `= false`: a literal write
+/// [`is_abstract_class`] reads.
+pub(super) fn is_literal_abstract_class_write(expr: &crate::expr::Expr) -> bool {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
+        return false;
+    };
+    matches!(&*recv.node, ExprNode::SelfRef)
+        && method.as_str() == "abstract_class="
+        && matches!(args.as_slice(), [arg] if matches!(&*arg.node, ExprNode::Lit { value: Literal::Bool { .. } }))
 }
 
 /// Literal abstract markers take effect in declaration order. Admission

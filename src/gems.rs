@@ -996,6 +996,21 @@ pub(crate) fn is_core_constant(written: &[&str]) -> bool {
     }
 }
 
+/// A feature of the Rails frameworks (`active_support/core_ext/…`,
+/// `rails`): the runtime ports are the framework in an emitted tree, and
+/// no such file is on its load path.
+pub(crate) fn is_framework_feature(feature: &str) -> bool {
+    let root = feature.split('/').next().unwrap_or(feature);
+    matches!(
+        root,
+        "rails" | "railties" | "active_support" | "activesupport" | "active_record" | "activerecord" | "arel"
+            | "active_model" | "activemodel" | "active_job" | "activejob" | "action_pack" | "actionpack"
+            | "action_controller" | "action_dispatch" | "abstract_controller" | "action_view" | "actionview"
+            | "action_mailer" | "actionmailer" | "action_cable" | "actioncable" | "action_text" | "actiontext"
+            | "active_storage" | "activestorage" | "action_mailbox" | "actionmailbox"
+    )
+}
+
 pub fn fate_of(name: &str) -> GemFate {
     if PRELOADED.iter().any(|(feature, _, _)| *feature == name) {
         return GemFate::Stdlib;

@@ -435,9 +435,10 @@ pub struct App {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub load_hook_extended_macros: Vec<ClassId>,
     /// Constants written on ActiveRecord::Base inside `ActiveSupport.on_load(:active_record)` (`self::X = Const`,
-    /// orm_adapter's `self::OrmAdapter = ::OrmAdapter::ActiveRecord`): the name and the constant path it holds.
+    /// orm_adapter's `self::OrmAdapter = ::OrmAdapter::ActiveRecord`): the name, the constant path it holds as written
+    /// (a leading empty segment when rooted), and the hook's lexical nesting outermost first, one full name per header.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub load_hook_constants: Vec<(Symbol, Vec<Symbol>)>,
+    pub load_hook_constants: Vec<(Symbol, Vec<Symbol>, Vec<Symbol>)>,
     /// Class methods a model took from a module only it extends
     /// (`ingest::extend_splice`), by name.
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]

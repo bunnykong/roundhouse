@@ -3827,10 +3827,13 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model, runtime_relat
 /// and for a mapping whose stored values are not all integers (nothing
 /// in the corpus writes one, and a guess would write the wrong cell). A
 /// NULLABLE column keeps its nil through `nil_guarded`.
+///
+/// The label reaches the runtime through an explicit `to_s` send, as the
+/// setter's does, not a `Cast`: the ruby family emits a `Cast` as a
+/// narrowing hint, a no-op on a value with no stamped type, and a Symbol
+/// label (`new(status: :archived)`) then reached the runtime unconverted.
 fn enum_label_cast(model: &Model, col: &Column, raw: Expr) -> Option<Expr> {
-    let text = Expr::new(Span::synthetic(), ExprNode::Cast { value: raw.clone(), target_ty: Ty::Str });
-    let call = enum_int_call(model, col, with_ty(text, Ty::Str))?;
-    Some(nil_guarded(col, raw, call))
+    enum_setter_value(model, col, raw)
 }
 
 /// The setter's twin of [`enum_label_cast`]: `record.status = "archived"` reaches the column through `status=`.

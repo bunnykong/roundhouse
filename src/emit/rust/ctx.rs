@@ -182,6 +182,12 @@ pub struct EmitCtx {
     /// emits as `Self`. Set by `with_class_method_scope`.
     pub in_class_method: Cell<bool>,
 
+    /// True while `library::emit_module` renders a method as a free
+    /// `pub fn` with no `impl` around it, so a sibling call
+    /// (`self.helper` / bare `helper`) is written through the module
+    /// (`self::helper`), not `Self::`. Set by `with_free_function_scope`.
+    pub in_free_function: Cell<bool>,
+
     /// True at expression positions whose value flows out of the
     /// enclosing function as the return value: top-level body emit,
     /// tail of a `Seq`, value of a `Return`. Reset when entering

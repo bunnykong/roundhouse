@@ -104,19 +104,46 @@ pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[So
     // its declaration, naming the use: a gap in the using file would claim
     // that file's own findings.
     let mut used: HashMap<ClassId, String> = HashMap::default();
+    // The `SerializableResource.new(x, serializer: S).as_json` sites the
+    // visit let through, per serializer, with the first one's place.
+    let mut resource_sites: HashMap<ClassId, (usize, String)> = HashMap::default();
     let known: HashSet<String> = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
     for source in sources {
         if !selected.iter().any(|id| source.text.contains(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()))) {
             continue;
         }
         let parsed = super::prism::parse_silent(source.text.as_bytes());
-        let mut uses = OtherUses { selected: &selected, known: &known, nesting: Vec::new(), found: HashMap::default() };
+        let mut uses = OtherUses {
+            selected: &selected,
+            known: &known,
+            nesting: Vec::new(),
+            found: HashMap::default(),
+            resources: Vec::new(),
+        };
         ruby_prism::Visit::visit(&mut uses, &parsed.node());
-        for (id, offset) in uses.found {
+        let place = |offset: usize| {
             let (line, _) = source.line_col(offset as u32);
             let path = source.path.as_str();
             let path = path.find("/app/").map(|i| &path[i + 1..]).unwrap_or(path);
-            used.entry(id).or_insert_with(|| format!("{path}:{line}"));
+            format!("{path}:{line}")
+        };
+        for (id, offset) in uses.found {
+            used.entry(id).or_insert_with(|| place(offset));
+        }
+        for (id, offset) in uses.resources {
+            let entry = resource_sites.entry(id).or_insert_with(|| (0, place(offset)));
+            entry.0 += 1;
+        }
+    }
+    // A site the visit let through is the rewrite's only if the rewrite
+    // reaches it: one in a body it doesn't walk would still call the
+    // gem's class once S is lowered. Fewer sites in the walked bodies than
+    // in the source is a use.
+    let mut reached: HashMap<String, usize> = HashMap::default();
+    for_each_rewritten_body(app, &mut |body| count_resources(body, &mut reached));
+    for (id, (count, at)) in resource_sites {
+        if reached.get(id.0.as_str()).copied().unwrap_or(0) < count {
+            used.entry(id).or_insert(at);
         }
     }
     for source in sources {
@@ -206,6 +233,7 @@ pub(super) fn lower_active_model_serializers(app: &mut crate::App, sources: &[So
             rewrite_renders(&mut action.body, &lowered);
         }
     }
+    for_each_rewritten_body(app, &mut |body| rewrite_resources(body, &lowered));
     Ok(())
 }
 
@@ -514,6 +542,89 @@ fn rewrite_renders(expr: &mut Expr, lowered: &HashSet<String>) {
     entries.retain(|(k, _)| !matches!(name(k).as_deref(), Some("serializer" | "each_serializer")));
 }
 
+/// The gem's resource class: `SerializableResource.new(x, serializer: S)`.
+const RESOURCE: [&str; 2] = ["ActiveModelSerializers", "SerializableResource"];
+
+/// `ActiveModelSerializers::SerializableResource.new(x, serializer: S).as_json`,
+/// `serializer:` its only option and `as_json` given nothing: S's name
+/// without a leading `::` (the lowered class's), S as written, and x.
+fn resource_as_json(expr: &Expr) -> Option<(String, &Expr, &Expr)> {
+    let ExprNode::Send { recv: Some(resource), method, args, block: None, .. } = &*expr.node else { return None };
+    if method.as_str() != "as_json" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Send { recv: Some(class), method, args, block: None, .. } = &*resource.node else { return None };
+    let ExprNode::Const { path } = &*class.node else { return None };
+    let written: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+    if method.as_str() != "new" || written != RESOURCE {
+        return None;
+    }
+    let [value, options] = args.as_slice() else { return None };
+    let ExprNode::Hash { entries, kwargs: true } = &*options.node else { return None };
+    let [(key, serializer)] = entries.as_slice() else { return None };
+    let ExprNode::Lit { value: Literal::Sym { value: key } } = &*key.node else { return None };
+    let ExprNode::Const { path } = &*serializer.node else { return None };
+    if key.as_str() != "serializer" {
+        return None;
+    }
+    Some((path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"), serializer, value))
+}
+
+/// The resource reads in `expr`, per serializer as written.
+fn count_resources(expr: &mut Expr, out: &mut HashMap<String, usize>) {
+    expr.node.for_each_child_mut(&mut |c| count_resources(c, out));
+    if let Some((class, _, _)) = resource_as_json(expr) {
+        *out.entry(class).or_default() += 1;
+    }
+}
+
+/// `SerializableResource.new(x, serializer: S).as_json` →
+/// `S.new(x).serializable_hash`, for a lowered S. Under the attributes
+/// adapter the gem's `as_json` is the serializer's `serializable_hash`
+/// (active_model_serializers 0.10.16: the same Hash, values as read).
+fn rewrite_resources(expr: &mut Expr, lowered: &HashSet<String>) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_resources(c, lowered));
+    let Some((class, serializer, value)) = resource_as_json(expr) else { return };
+    if !lowered.contains(&class) {
+        return;
+    }
+    // S as written, a leading `::` kept: inside `module Api`,
+    // `::ArticleSerializer` is the top-level class, not `Api::ArticleSerializer`.
+    let ExprNode::Const { path } = &*serializer.node else { return };
+    let class_expr = Expr::new(Span::synthetic(), ExprNode::Const { path: path.clone() });
+    let value = value.clone();
+    let span = expr.span;
+    let send = |recv: Expr, m: &str, args: Vec<Expr>| {
+        Expr::new(span, ExprNode::Send { recv: Some(recv), method: Symbol::from(m), args, block: None, parenthesized: true })
+    };
+    *expr = send(send(class_expr, "new", vec![value]), "serializable_hash", vec![]);
+}
+
+/// The bodies the resource rewrite walks: controller actions and class
+/// methods, model methods, and library class methods. A resource
+/// anywhere else stays a use of the gem's class.
+fn for_each_rewritten_body(app: &mut crate::App, f: &mut dyn FnMut(&mut Expr)) {
+    for controller in &mut app.controllers {
+        for item in &mut controller.body {
+            match item {
+                crate::dialect::ControllerBodyItem::Action { action, .. } => f(&mut action.body),
+                crate::dialect::ControllerBodyItem::ClassMethod { method, .. } => f(&mut method.body),
+                _ => {}
+            }
+        }
+    }
+    for model in &mut app.models {
+        for method in model.methods_mut() {
+            f(&mut method.body);
+        }
+    }
+    for class in &mut app.library_classes {
+        for method in &mut class.methods {
+            f(&mut method.body);
+        }
+    }
+}
+
 /// What an ActiveModel::Serializer instance answers from the gem rather
 /// than from the app: its scope (and the conventional names a
 /// `serialization_scope` gives it), the adapter-facing API, and the
@@ -581,6 +692,9 @@ struct OtherUses<'a> {
     /// innermost last (Ruby's `Module.nesting`, reversed).
     nesting: Vec<String>,
     found: HashMap<ClassId, usize>,
+    /// Each `SerializableResource.new(x, serializer: S).as_json` let
+    /// through, with its offset: a use unless the rewrite reaches it.
+    resources: Vec<(ClassId, usize)>,
 }
 
 impl OtherUses<'_> {
@@ -670,6 +784,19 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
         }
     }
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        // `SerializableResource.new(x, serializer: S).as_json`, S written
+        // by its full name and its only option: the resource rewrite's
+        // (`rewrite_resources`). Only x is read.
+        if let Some((value, serializer)) = resource_as_json_call(node) {
+            if self.rewritten(&serializer) {
+                let path = super::util::constant_path_of(&serializer).unwrap_or_default();
+                for id in self.named(&path, is_rooted(&serializer)) {
+                    self.resources.push((id, node.location().start_offset()));
+                }
+                self.visit(&value);
+                return;
+            }
+        }
         // `render json: x, serializer: S`, S written by its full name: not
         // another use. A render the rewrite takes calls the lowered class;
         // one with another option is already the reported residue. S
@@ -706,6 +833,39 @@ impl<'pr> ruby_prism::Visit<'pr> for OtherUses<'_> {
             ruby_prism::visit_constant_path_node(self, node);
         }
     }
+}
+
+/// The source form of [`resource_as_json`]: the `new`'s first argument
+/// and the `serializer:` value, for `.as_json` with nothing given, no
+/// block and no safe navigation.
+fn resource_as_json_call<'pr>(
+    node: &ruby_prism::CallNode<'pr>,
+) -> Option<(ruby_prism::Node<'pr>, ruby_prism::Node<'pr>)> {
+    if constant_id_str(&node.name()) != "as_json"
+        || node.arguments().is_some()
+        || node.block().is_some()
+        || node.is_safe_navigation()
+    {
+        return None;
+    }
+    let resource = node.receiver()?.as_call_node()?;
+    if constant_id_str(&resource.name()) != "new" || resource.block().is_some() || resource.is_safe_navigation() {
+        return None;
+    }
+    let class = super::util::constant_path_of(&resource.receiver()?)?;
+    if class != RESOURCE {
+        return None;
+    }
+    let mut args = resource.arguments()?.arguments().iter();
+    let (Some(value), Some(options), None) = (args.next(), args.next(), args.next()) else { return None };
+    let options = options.as_keyword_hash_node()?;
+    let entries: Vec<_> = options.elements().iter().collect();
+    let [entry] = entries.as_slice() else { return None };
+    let assoc = entry.as_assoc_node()?;
+    if super::util::symbol_value(&assoc.key()).as_deref() != Some("serializer") {
+        return None;
+    }
+    Some((value, assoc.value()))
 }
 
 /// Whether a constant path is written from the top level (`::A::B`): its

@@ -826,6 +826,76 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 before = if has_before_destroy { "self.before_destroy(); " } else { "" },
                 after = after_destroy_commit,
             );
+            // The class and instance methods every other target inherits
+            // from the transpiled `ActiveRecord::Base` (`create!`,
+            // `valid?`, `destroy!`, `find_by`) — Rust models do not
+            // inherit it, so a test or class method calling one failed to
+            // compile (E0599). Each is skipped where the model already
+            // defines the name, so a lowered or hand-written one wins.
+            let shim_extras = {
+                let name = rust_struct_name(lc.name.0.as_str());
+                let mut extras = String::new();
+                if !has_method("create!") {
+                    extras.push_str(&format!(
+                        "pub fn create_bang<K: ToString, V: Into<serde_json::Value>>(attrs: std::collections::HashMap<K, V>) -> {name} {{ let mut m = Self::new(attrs.into_iter().map(|(k, v)| (k.to_string(), v.into())).collect()); m.save_bang() }}\n"
+                    ));
+                }
+                // Rails' `valid?`: clear, run the validations, answer
+                // whether none failed — `save`'s first half.
+                if !has_method("valid?") {
+                    extras.push_str(&format!(
+                        "pub fn valid_pred(&mut self) -> bool {{\ncrate::errors_ext::validation_errors_clear();\n{validate_call}crate::errors_ext::validation_errors_is_empty()\n}}\n"
+                    ));
+                }
+                // No abort channel on the strict targets, so the bang
+                // form is `destroy` (as `ActiveRecord::Base#destroy!`),
+                // answering the record as `save_bang` does.
+                if !has_method("destroy!") {
+                    extras.push_str("pub fn destroy_bang(&mut self) -> Self { self.destroy(); self.clone() }\n");
+                }
+                // `find_by(col: value, …)`: equality per condition (`IS
+                // NULL` for nil), ANDed, first row. The keys are the
+                // source's literal attribute names; values are quoted
+                // through `Db`, never spliced.
+                if !has_method("find_by") {
+                    extras.push_str(&format!(
+                        "pub fn find_by<K: AsRef<str>, V: Into<serde_json::Value>>(conditions: std::collections::HashMap<K, V>) -> Option<{name}> {{\n\
+                         let mut clauses: Vec<String> = conditions.into_iter().map(|(k, v)| {{\n\
+                         let column = format!(\"\\\"{{}}\\\".\\\"{{}}\\\"\", Self::table_name(), k.as_ref().replace('\"', \"\"));\n\
+                         match v.into() {{\n\
+                         serde_json::Value::Null => format!(\"{{column}} IS NULL\"),\n\
+                         serde_json::Value::Bool(b) => format!(\"{{column}} = {{}}\", crate::db::Db::escape_bool(b)),\n\
+                         serde_json::Value::Number(n) => format!(\"{{column}} = {{n}}\"),\n\
+                         serde_json::Value::String(text) => format!(\"{{column}} = {{}}\", crate::db::Db::escape_string(&text)),\n\
+                         other => format!(\"{{column}} = {{}}\", crate::db::Db::escape_string(&other.to_string())),\n\
+                         }}\n\
+                         }}).collect();\n\
+                         clauses.sort();\n\
+                         let filter = if clauses.is_empty() {{ String::new() }} else {{ format!(\" WHERE {{}}\", clauses.join(\" AND \")) }};\n\
+                         Self::_hydrate_all(&format!(\"SELECT {{}} FROM \\\"{{}}\\\"{{}} LIMIT 1\", Self::_columns_sql(), Self::table_name(), filter)).into_iter().next()\n\
+                         }}\n"
+                    ));
+                }
+                extras
+            };
+            // Active Record equality: the same model and the same saved
+            // id (a new record equals no other). Ruby's identity half
+            // (`super`, so a new record equals itself) has no Rust
+            // counterpart: the emitted operands are clones, so an
+            // address compare never sees the same record twice.
+            // `assert_equal record, other.association` and
+            // `other.association == record` compare against the reader's
+            // Option, in either order.
+            let shim_eq = if has_method("==") {
+                String::new()
+            } else {
+                let name = rust_struct_name(lc.name.0.as_str());
+                format!(
+                    "impl PartialEq for {name} {{ fn eq(&self, other: &Self) -> bool {{ self.id != 0 && self.id == other.id }} }}\n\
+                     impl PartialEq<Option<{name}>> for {name} {{ fn eq(&self, other: &Option<{name}>) -> bool {{ other.as_ref().is_some_and(|o| self == o) }} }}\n\
+                     impl PartialEq<{name}> for Option<{name}> {{ fn eq(&self, other: &{name}) -> bool {{ self.as_ref().is_some_and(|s| s == other) }} }}\n"
+                )
+            };
             let ar_shim = if needs_ar_shim {
                 // `destroy` and `exists` are paired in:
                 //   - Article#dependent_destroy: `c.destroy()` over the
@@ -927,7 +997,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn attribute_previously_was(&self, name: &str) -> serde_json::Value {{ let _ = name; serde_json::Value::Null }}\n\
                         pub fn _note_hydrated(&self) {{}}\n\
                         pub fn create(attrs: std::collections::HashMap<String, serde_json::Value>) -> {name} {{ let mut m = Self::new(attrs); m.save(); m }}\n\
-                    }}\n",
+                        {shim_extras}}}\n{shim_eq}",
                     // The struct, not the class: `impl Admin::Note` names no type.
                     name = rust_struct_name(lc.name.0.as_str()),
                     destroy_body = destroy_body,
@@ -935,6 +1005,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     after_update_commit = after_update_commit,
                     validate_call = validate_call,
                     fill_timestamps_call = fill_timestamps_call,
+                    shim_extras = shim_extras,
+                    shim_eq = shim_eq,
                 )
             } else {
                 String::new()
@@ -1490,6 +1562,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // runs. The stubs cost nothing when the real ones were emitted:
     // this only fills a gap, last-write-wins dedupe below is untouched.
     if files.iter().any(|f| f.path.starts_with("src/tests")) {
+        // With a schema, `setup()` still has a database to bring up: an
+        // app whose tests build their own records (`Model.create!` in
+        // the body, no `test/fixtures/`) otherwise runs every query
+        // against a connection with no tables. Same entry point as the
+        // fixture-carrying form, with no fixtures to load.
+        let has_schema = files.iter().any(|f| f.path == PathBuf::from("src/schema_sql.rs"));
+        if has_schema && !files.iter().any(|f| f.path == PathBuf::from("src/fixtures/mod.rs")) {
+            files.push(emit_fixtures_mod_rs(&[]));
+        }
         let mut stub = |path: &str, content: &str| {
             if !files.iter().any(|f| f.path == PathBuf::from(path)) {
                 files.push(EmittedFile {
@@ -1500,14 +1581,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         };
         stub("src/models/mod.rs", "// Generated by Roundhouse (rust2). No models in this app.\n");
         stub("src/views/mod.rs", "// Generated by Roundhouse (rust2). No views in this app.\n");
-        // A no-op `setup()`: with no fixtures there is no schema to
+        // A no-op `setup()`: with no schema there is no database to
         // create and nothing to load, but the call site is emitted
         // unconditionally, so the function has to exist.
         stub(
             "src/fixtures/mod.rs",
             "// Generated by Roundhouse (rust2). No fixtures in this app.\n\
              \n/// Per-test entry point. No-op here — this app declares no\n\
-             /// fixtures, so there is no schema to create and nothing to load.\n\
+             /// schema, so there is no database to create and nothing to load.\n\
              pub fn setup() {}\n",
         );
     }

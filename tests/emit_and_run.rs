@@ -25,6 +25,8 @@ mod controller_content_type_writer;
 mod time_change_usec_contract;
 #[path = "emit_and_run/time_change_usec.rs"]
 mod time_change_usec;
+#[path = "emit_and_run/controller_constant_rooting.rs"]
+mod controller_constant_rooting;
 #[path = "emit_and_run/rate_limits.rs"]
 mod rate_limits;
 #[path = "emit_and_run/config_for.rs"]
@@ -424,6 +426,10 @@ mod class_side_default;
 mod hash_write_through_reader_contract;
 #[path = "emit_and_run/hash_write_through_reader.rs"]
 mod hash_write_through_reader;
+#[path = "support/app_class_registry.rs"]
+mod app_class_registry_contract;
+#[path = "emit_and_run/app_class_registry.rs"]
+mod app_class_registry;
 #[path = "emit_and_run/helper_anonymous_rest.rs"]
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
@@ -22160,3 +22166,9 @@ mod form_for_record;
 mod library_concern_included_include_contract;
 #[path = "emit_and_run/library_concern_included_include.rs"]
 mod library_concern_included_include;
+#[path = "emit_and_run/param_default_constant_rooting.rs"]
+mod param_default_constant_rooting;
+#[path = "emit_and_run/compiled_rooted_constants.rs"]
+mod compiled_rooted_constants;
+#[path = "emit_and_run/serializable_resource_as_json.rs"]
+mod serializable_resource_as_json;

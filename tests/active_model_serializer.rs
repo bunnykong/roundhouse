@@ -263,3 +263,67 @@ fn a_rooted_serializer_name_resolves_at_the_top_level() {
         assert!(class.methods.iter().any(|m| m.name.as_str() == "as_json_str"), "{name} isn't lowered: {gaps:?}");
     }
 }
+
+/// `ActiveModelSerializers::SerializableResource.new(x, serializer: S).as_json`
+/// outside a render: with the attributes adapter the gem answers
+/// `S.new(x).serializable_hash` (active_model_serializers 0.10.16), so the
+/// call becomes that and S is lowered, as for `render json:`.
+#[test]
+fn a_serializable_resource_read_with_as_json_is_rewritten() {
+    let card = "class ArticleCard\n  def initialize(article)\n    @article = article\n  end\n\n  def as_json\n    ActiveModelSerializers::SerializableResource.new(@article, serializer: ArticleSerializer).as_json\n  end\nend\n";
+    let mut files = tree(SERIALIZER, CONTROLLER);
+    files.insert(PathBuf::from("app/models/article_card.rb"), card.as_bytes().to_vec());
+    let mut app = ingest_app_from_tree(files).expect("ingest");
+    let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "ArticleSerializer").expect("class");
+    assert!(class.methods.iter().any(|m| m.name.as_str() == "as_json_str"), "not lowered");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::project::target_files(&app, std::path::Path::new("fixtures/tiny-blog"), roundhouse::project::BuildTarget::Ruby)
+        .expect("emit");
+    let card = files.iter().find(|(p, _)| p.ends_with("article_card.rb")).map(|(_, c)| c.clone()).expect("card");
+    assert!(card.contains("ArticleSerializer.new(@article).serializable_hash"), "{card}");
+    assert!(!card.contains("SerializableResource"), "{card}");
+}
+
+/// The forms the rewrite leaves to the gem stay a use of its class:
+/// `to_json`, another option, a resource kept in a local, and a
+/// serializer written by a shorter name than its own.
+#[test]
+fn a_serializable_resource_the_rewrite_leaves_is_refused() {
+    let resource = "ActiveModelSerializers::SerializableResource.new(@article, serializer: ArticleSerializer";
+    for (body, needle) in [
+        (format!("{resource}).to_json"), "article_card.rb:7"),
+        (format!("{resource}, scope: nil).as_json"), "article_card.rb:7"),
+        (format!("{resource}, adapter: :json).as_json"), "article_card.rb:7"),
+        (format!("resource = {resource})\n    resource.as_json"), "article_card.rb:7"),
+        (format!("{resource}).as_json(include: [])"), "article_card.rb:7"),
+    ] {
+        let card = format!("class ArticleCard\n  def initialize(article)\n    @article = article\n  end\n\n  def as_json\n    {body}\n  end\nend\n");
+        let mut files = tree(SERIALIZER, CONTROLLER);
+        files.insert(PathBuf::from("app/models/article_card.rb"), card.into_bytes());
+        survey::activate();
+        let result = ingest_app_from_tree(files);
+        let gaps = survey::drain();
+        let app = result.expect("survey ingest recovers");
+        assert!(
+            gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. }
+                if message.contains(&format!("used at app/models/{needle} other than through `render json:`")))),
+            "{body}: {gaps:?}"
+        );
+        let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "ArticleSerializer").expect("class");
+        assert!(class.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "lowered: {body}");
+    }
+    let api = "module Api\n  class ArticleSerializer < ActiveModel::Serializer\n    attributes :id\n  end\n\n  class ArticleCard\n    def initialize(article)\n      @article = article\n    end\n\n    def as_json\n      ActiveModelSerializers::SerializableResource.new(@article, serializer: ArticleSerializer).as_json\n    end\n  end\nend\n";
+    let mut files = tree(SERIALIZER, CONTROLLER);
+    files.insert(PathBuf::from("app/models/api/article_card.rb"), api.as_bytes().to_vec());
+    survey::activate();
+    let result = ingest_app_from_tree(files);
+    let gaps = survey::drain();
+    let app = result.expect("survey ingest recovers");
+    assert!(
+        gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. }
+            if message.contains("used at app/models/api/article_card.rb:12 other than through `render json:`"))),
+        "{gaps:?}"
+    );
+    let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "Api::ArticleSerializer").expect("class");
+    assert!(class.methods.iter().all(|m| m.name.as_str() != "as_json_str"), "lowered");
+}

@@ -1331,6 +1331,34 @@ pub(super) fn emit_return_value(e: &Expr) -> String {
     emit_expr(e)
 }
 
+/// A value method's tail `If`, as the `return`ed Kotlin `if` expression.
+/// Ruby's missing (nil) arm is Kotlin's `null` — an `if` used as a value
+/// needs its `else` — and a `{}`/`[]` literal arm drops its type
+/// arguments so the declared return type drives inference, as a bare
+/// return-position literal does (`c ? { k: true } : {}` would otherwise
+/// type one arm `<String, Any?>` against a `<String, Boolean>` return).
+pub(super) fn emit_if_return_value(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
+    let c = emit_expr(cond);
+    let (mut then_nn, mut else_nn) = (Vec::new(), Vec::new());
+    guarded_nonnull(cond, &mut then_nn, &mut else_nn);
+    let then = with_nonnull(&then_nn, || indent(&emit_value_arm(then_branch)));
+    let els = if is_empty_branch(else_branch) {
+        indent("null")
+    } else {
+        with_nonnull(&else_nn, || indent(&emit_value_arm(else_branch)))
+    };
+    format!("if ({c}) {{\n{then}\n}} else {{\n{els}\n}}")
+}
+
+fn emit_value_arm(e: &Expr) -> String {
+    match &*e.node {
+        ExprNode::Hash { entries, .. } if entries.is_empty() => "mutableMapOf()".to_string(),
+        ExprNode::Array { elements, .. } if elements.is_empty() => "mutableListOf()".to_string(),
+        ExprNode::If { cond, then_branch, else_branch } => emit_if_return_value(cond, then_branch, else_branch),
+        _ => emit_return_value(e),
+    }
+}
+
 fn emit_array(elements: &[Expr], e: &Expr) -> String {
     if elements.is_empty() {
         // Use the annotated element type when present, else Any?.

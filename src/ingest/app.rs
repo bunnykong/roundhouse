@@ -3277,6 +3277,10 @@ end
     refuse_unread_concern_filters(&app)?;
     drop_modelled_included_hooks(&mut app);
     splice_concerns_into_controllers(&mut app);
+    // After the splice: a concern's filter reads the key as the controller's own body does.
+    if every_primary_key_is_id(&app) {
+        crate::lower::for_each_hook_body(&mut app, &mut read_primary_key_sends);
+    }
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
     // After the splice: a macro has to resolve against the concern's
@@ -5354,6 +5358,48 @@ fn answers_callback_macro(app: &App, name: &crate::ident::ClassId) -> bool {
         cur = parts.iter().find_map(|lc| lc.parent.clone()).or_else(|| model.and_then(|m| m.parent.clone()));
     }
     false
+}
+
+/// `record.send(record.class.primary_key)` (orm_adapter's `conditions_to_fields`) where every model's key is `id`:
+/// `record.id`, the same method the send names, an override of `id` included.
+// Not `record[key]`: that reads the column past a reader the model overrides.
+fn read_primary_key_sends(body: &mut crate::expr::Expr) {
+    use crate::expr::ExprNode;
+    body.node.for_each_child_mut(&mut read_primary_key_sends);
+    if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *body.node
+        && matches!(method.as_str(), "send" | "public_send" | "__send__")
+        && matches!(&*recv.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)
+        && let [name] = args.as_slice()
+        && let ExprNode::Send { recv: Some(class), method: key, args: key_args, block: None, .. } = &*name.node
+        && key.as_str() == "primary_key"
+        && key_args.is_empty()
+        // Only the record's own class's key: another class's (`KeySource.primary_key`) names any column.
+        && matches!(&*class.node, ExprNode::Send { recv: Some(of), method, args, block: None, .. }
+            if method.as_str() == "class" && args.is_empty() && same_read(of, recv))
+    {
+        *method = crate::ident::Symbol::from("id");
+        args.clear();
+    }
+}
+
+fn same_read(a: &crate::expr::Expr, b: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    match (&*a.node, &*b.node) {
+        (ExprNode::Var { name: x, .. }, ExprNode::Var { name: y, .. }) | (ExprNode::Ivar { name: x }, ExprNode::Ivar { name: y }) => x == y,
+        (ExprNode::SelfRef, ExprNode::SelfRef) => true,
+        _ => false,
+    }
+}
+
+fn every_primary_key_is_id(app: &App) -> bool {
+    // Nor where a class of the app answers `primary_key` itself: the send then names whatever that method answers.
+    let own_primary_key = app.library_classes.iter().flat_map(|c| c.methods.iter()).any(|m| m.name.as_str() == "primary_key")
+        || app.models.iter().any(|m| m.methods().any(|d| d.name.as_str() == "primary_key"));
+    !own_primary_key
+        && app.models.iter().all(|m| m.primary_key.as_ref().is_none_or(|k| k.as_str() == "id"))
+        && app.schema.tables.values().all(|t| {
+            t.primary_key_columns.is_empty() && t.columns.iter().filter(|c| c.primary_key).all(|c| c.name.as_str() == "id")
+        })
 }
 
 /// A modelled hook has nothing left to do at load, and the emitted

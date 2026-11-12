@@ -118,9 +118,9 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
                 // body = ""` declared as `&str` collides with the
                 // `String`-typed field at the Self literal site.
                 let annot = field_let_annotation(name.as_str());
-                return format!("let mut {name}{annot} = {rhs_coerced}");
+                return format!("let mut {}{annot} = {rhs_coerced}", crate::emit::rust::expr::util::escape_rust_keyword(name.as_str()));
             }
-            format!("self.{name} = {rhs_coerced}")
+            format!("self.{} = {rhs_coerced}", crate::emit::rust::expr::util::escape_rust_keyword(name.as_str()))
         }
         LValue::Attr { recv, name } => {
             // `self.x = ...` inside a module-singleton class method

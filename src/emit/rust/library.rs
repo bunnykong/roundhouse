@@ -29,11 +29,62 @@ use crate::ty::Ty;
 /// Apply the same `str_color` pass here so Module-mode methods
 /// (router.rb, view_helpers.rb's free functions, etc.) get the
 /// same ownership annotations before emit.
+/// Rust has no default arguments, so a sibling call that leaves a
+/// trailing parameter to its default (`make_record` for `def
+/// make_record(size: 1)`, a test helper the tests call bare) gets the
+/// source's default written in. Only literal defaults are copied — a
+/// computed default could read other parameters — and only onto calls
+/// whose arguments are all positional (a braced `{}` is one); a trailing keyword hash is
+/// matched to its parameters by name later, in send dispatch.
+fn pad_sibling_defaults(methods: &mut [MethodDef]) {
+    use crate::expr::{Expr, ExprNode};
+    let defaults: crate::det::HashMap<crate::ident::Symbol, Vec<Option<Expr>>> = methods
+        .iter()
+        .map(|m| {
+            let ds = m
+                .params
+                .iter()
+                .filter(|p| !p.rest && !p.forwarding && !p.name.as_str().is_empty())
+                .map(|p| {
+                    p.default.clone().filter(|d| {
+                        super::expr::util::render_param_default_literal(d).is_some()
+                    })
+                })
+                .collect();
+            (m.name.clone(), ds)
+        })
+        .collect();
+    fn walk(e: &mut Expr, defaults: &crate::det::HashMap<crate::ident::Symbol, Vec<Option<Expr>>>) {
+        e.node.for_each_child_mut(&mut |c| walk(c, defaults));
+        if let ExprNode::Send { recv, method, args, block: None, .. } = &mut *e.node {
+            let self_call = match recv {
+                None => true,
+                Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+            };
+            if !self_call || args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { kwargs: true, .. })) {
+                return;
+            }
+            let Some(ds) = defaults.get(method) else { return };
+            if args.len() >= ds.len() {
+                return;
+            }
+            let missing = &ds[args.len()..];
+            if missing.iter().all(Option::is_some) {
+                args.extend(missing.iter().flatten().cloned());
+            }
+        }
+    }
+    for m in methods.iter_mut() {
+        walk(&mut m.body, &defaults);
+    }
+}
+
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     if methods.is_empty() {
         return Ok(String::new());
     }
     let mut colored: Vec<MethodDef> = methods.to_vec();
+    pad_sibling_defaults(&mut colored);
     let registry = crate::emit::rust::decide::str_color::build_registry_from_methods(&colored);
     for m in colored.iter_mut() {
         crate::emit::rust::decide::str_color::color_method(m, &registry);
@@ -67,7 +118,10 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
             writeln!(out).unwrap();
         }
         first = false;
-        out.push_str(&emit_module_method(m)?);
+        // A free function: a sibling call is written through the module
+        // (`self::name`), not `Self::` (library mode, below, wraps the
+        // same method in an `impl`).
+        out.push_str(&super::expr::with_free_function_scope(|| emit_module_method(m))?);
     }
     Ok(out)
 }
@@ -207,7 +261,7 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // still work alongside; Rust disambiguates field vs method
     // by trailing parens at the call site.
     for (fname, ty) in &ivars {
-        writeln!(out, "    pub {fname}: {},", rust_ty(ty)).unwrap();
+        writeln!(out, "    pub {}: {},", crate::emit::rust::expr::util::escape_rust_keyword(fname), rust_ty(ty)).unwrap();
     }
     out.push_str("}\n\n");
 

@@ -22,7 +22,7 @@ use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
 
 use super::expr::{
-    begin_method, emit_expr, hoisted_decls, register_method_param_tys, register_method_params,
+    begin_method, emit_expr, emit_if_return_value, hoisted_decls, register_method_param_tys, register_method_params,
     set_current_class, set_instance_prop_types, set_instance_props, set_param_names,
     set_return_label, set_returns_unit,
 };
@@ -974,6 +974,9 @@ fn wrap_return(e: &Expr) -> String {
         // non-issue for a return value.
         ExprNode::Hash { .. } => {
             return format!("return {}", super::expr::emit_return_value(e));
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            return format!("return {}", emit_if_return_value(cond, then_branch, else_branch));
         }
         _ => {}
     }

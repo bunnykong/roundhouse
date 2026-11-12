@@ -277,6 +277,61 @@ fn lit_to_inclusion_value(lit: &crate::expr::Literal) -> Option<InclusionValue> 
     }
 }
 
+/// `validates :attr, presence:` on a NOT NULL number column with no
+/// default. Rails reads such an attribute as nil until it is assigned,
+/// so the check rejects a record that never set it. A strict target
+/// holds the column as a plain number that `new` starts at 0, which is
+/// never blank, so the check cannot fire and the record saves a 0 Rails
+/// would have refused. Reported once per validation, as
+/// `uniqueness_gaps_for_target` does, so the emit does not claim it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn presence_gaps_for_target(
+    app: &crate::App,
+    target: crate::build_target::BuildTarget,
+) -> Vec<crate::diagnostic::Diagnostic> {
+    use crate::schema::ColumnType;
+    if target.has_runtime_relation() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for model in &app.models {
+        let Some(table) = app.schema.tables.get(&model.table.0) else { continue };
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Validation { validation, .. } = item else { continue };
+            if !validation.rules.iter().any(|r| matches!(r, ValidationRule::Presence)) {
+                continue;
+            }
+            let Some(column) = table.columns.iter().find(|c| c.name == validation.attribute) else { continue };
+            let numeric = matches!(
+                column.col_type,
+                ColumnType::Integer
+                    | ColumnType::BigInt
+                    | ColumnType::Float
+                    | ColumnType::Decimal { .. }
+                    | ColumnType::Reference { .. }
+            );
+            if !numeric
+                || column.nullable
+                || column.primary_key
+                || column.default.is_some()
+                || column.default_expression.is_some()
+                || column.generated.is_some()
+            {
+                continue;
+            }
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                item.span(),
+                Some(Symbol::from(target.as_str())),
+                format!("validates :{}, presence:", validation.attribute.as_str()),
+                "this target holds the NOT NULL column as a number that starts at 0, which is never blank, so a record that never assigned it passes the check and saves 0 where Rails rejects it",
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            out.push(d);
+        }
+    }
+    out
+}
+
 /// `validates :attr, acceptance:` on an `attribute :attr, :boolean` is
 /// lowered only on the targets whose writer keeps Rails' nil (the ruby
 /// family, `BuildTarget::has_runtime_relation`). A strict target's field

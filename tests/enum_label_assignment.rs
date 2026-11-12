@@ -80,9 +80,9 @@ fn the_enum_columns_writers_map_the_label() {
     for (site, needle) in [
         (
             "update",
-            "self.role = ActiveRecord.enum_int((attrs[:role]).to_s,",
+            "self.role = ActiveRecord.enum_int(attrs[:role].to_s,",
         ),
-        ("[]=", "@role = ActiveRecord.enum_int((value).to_s,"),
+        ("[]=", "@role = ActiveRecord.enum_int(value.to_s,"),
     ] {
         assert!(
             src.contains(needle),
@@ -117,7 +117,7 @@ fn initialize_stores_the_default_and_maps_explicit_input() {
     assert!(src.contains("@role = 0"), "raw schema default:\n{src}");
     let line = line_containing(&src, "self.role = ActiveRecord.enum_int");
     assert!(
-        line.contains("(attrs[:role]).to_s") && line.ends_with("if attrs.key?(:role)"),
+        line.contains("(attrs[:role].to_s") && line.ends_with("if attrs.key?(:role)"),
         "only explicit input must pass through the mapping:\n{line}"
     );
 }

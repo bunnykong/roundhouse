@@ -71,7 +71,7 @@ pub(super) fn ingest_on_load_reopens(source: &[u8], file: &str, app: &mut App) {
     let root = result.node();
     let src = String::from_utf8_lossy(source);
     let Some(prog) = root.as_program_node() else { return };
-    for stmt in load_time_statements(&prog) {
+    for (stmt, scope) in load_time_statements(&prog) {
         let Some(call) = stmt.as_call_node() else { continue };
         if constant_id_str(&call.name()) != "on_load" {
             continue;
@@ -97,9 +97,10 @@ pub(super) fn ingest_on_load_reopens(source: &[u8], file: &str, app: &mut App) {
                     && let Some(value) = constant_path_of(&write.value())
                 {
                     let name = Symbol::from(String::from_utf8_lossy(write.target().name().map(|n| n.as_slice()).unwrap_or_default()).into_owned());
-                    let path: Vec<Symbol> = value.iter().filter(|s| !s.is_empty()).map(|s| Symbol::from(s.as_str())).collect();
-                    if !app.load_hook_constants.iter().any(|(n, _)| *n == name) {
-                        app.load_hook_constants.push((name, path));
+                    let path: Vec<Symbol> = value.iter().map(|s| Symbol::from(s.as_str())).collect();
+                    let scope: Vec<Symbol> = scope.iter().map(|s| Symbol::from(s.as_str())).collect();
+                    if !app.load_hook_constants.iter().any(|(n, _, _)| *n == name) {
+                        app.load_hook_constants.push((name, path, scope));
                     }
                     continue;
                 }
@@ -648,21 +649,36 @@ fn extended_modules(call: &ruby_prism::CallNode<'_>) -> Vec<ClassId> {
     paths.unwrap_or_default()
 }
 
-fn load_time_statements<'pr>(prog: &ruby_prism::ProgramNode<'pr>) -> Vec<Node<'pr>> {
+fn load_time_statements<'pr>(prog: &ruby_prism::ProgramNode<'pr>) -> Vec<(Node<'pr>, Vec<String>)> {
     fn railtie(class: &ruby_prism::ClassNode<'_>) -> bool {
         class.superclass().and_then(|sup| constant_path_of(&sup)).is_some_and(|path| {
             let path: Vec<&str> = path.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
             matches!(path.as_slice(), ["Rails", "Railtie"] | ["Rails", "Engine"])
         })
     }
-    fn walk<'pr>(stmts: Vec<Node<'pr>>, out: &mut Vec<Node<'pr>>, in_railtie: bool) {
+    fn walk<'pr>(stmts: Vec<Node<'pr>>, out: &mut Vec<(Node<'pr>, Vec<String>)>, in_railtie: bool, scope: &[String]) {
+        // One entry per header, as `Module.nesting` has it: `class Vendor::Railtie` nests in `Vendor::Railtie` alone.
+        let inner = |path: Option<Vec<String>>| {
+            let path = path.unwrap_or_default();
+            let rooted = path.first().is_some_and(|p| p.is_empty());
+            let written = path.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+            let full = match scope.last() {
+                Some(outer) if !rooted => format!("{outer}::{written}"),
+                _ => written,
+            };
+            let mut s = scope.to_vec();
+            s.push(full);
+            s
+        };
         for stmt in stmts {
             if let Some(module) = stmt.as_module_node() {
-                walk(module.body().map(flatten_statements).unwrap_or_default(), out, false);
+                let scope = inner(constant_path_of(&module.constant_path()));
+                walk(module.body().map(flatten_statements).unwrap_or_default(), out, false, &scope);
                 continue;
             }
             if let Some(class) = stmt.as_class_node() {
-                walk(class.body().map(flatten_statements).unwrap_or_default(), out, railtie(&class));
+                let scope = inner(constant_path_of(&class.constant_path()));
+                walk(class.body().map(flatten_statements).unwrap_or_default(), out, railtie(&class), &scope);
                 continue;
             }
             if in_railtie
@@ -671,13 +687,13 @@ fn load_time_statements<'pr>(prog: &ruby_prism::ProgramNode<'pr>) -> Vec<Node<'p
                 && constant_id_str(&call.name()) == "initializer"
                 && let Some(body) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body())
             {
-                out.extend(flatten_statements(body));
+                out.extend(flatten_statements(body).into_iter().map(|s| (s, scope.to_vec())));
                 continue;
             }
-            out.push(stmt);
+            out.push((stmt, scope.to_vec()));
         }
     }
     let mut out = Vec::new();
-    walk(prog.statements().body().iter().collect(), &mut out, false);
+    walk(prog.statements().body().iter().collect(), &mut out, false, &[]);
     out
 }

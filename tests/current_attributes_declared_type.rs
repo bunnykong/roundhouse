@@ -110,7 +110,9 @@ fn the_declared_type_stays_nilable_so_presence_is_asked() {
     let current = emitted(&app, "app/models/workspace/account/current.rb");
     assert!(current.contains("def tenant=(value)"), "{current}");
     let controller = emitted(&app, "app/controllers/workspace/account/app_controller.rb");
-    assert!(controller.contains("if Workspace::Account::Current.tenant"), "{controller}");
+    // The controller is nested, so `Current` is `Workspace::Account::Current`;
+    // the emit roots it (`::Workspace::...`), the same constant.
+    assert!(controller.contains("if ::Workspace::Account::Current.tenant"), "{controller}");
 }
 
 /// One comment types every name the call lists; none is left untyped.

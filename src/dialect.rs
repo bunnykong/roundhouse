@@ -2411,6 +2411,11 @@ pub struct TestModule {
     /// app/models/ and doesn't redefine classes).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inner_classes: Vec<LibraryClass>,
+    /// The `inner_classes` declared inside the test class's own body,
+    /// by name. The rest are top-level classes: a helper class declared
+    /// beside the test class in its file, or a carried module's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body_classes: Vec<ClassId>,
     /// Non-test, non-setup instance methods on the test class —
     /// helper methods like `setup_adapter_with_stub_row(id)` that
     /// the test methods invoke. Captured here so the lowerer can

@@ -3,7 +3,7 @@
 //! ||= Class.new(Base)` never assigns (`lower::bool_fold`); the parameter
 //! stays a class, of no one identity, so `strategy.method_defined?
 //! (:authenticate!)` and `strategy.ancestors` ask whichever class it is.
-//! Only a gem's method: an app method's tests may leave the argument out.
+//! A test that leaves the argument out keeps the default (`test_call_arities`).
 //! Two callers pass two classes, so the parameter is one of several classes,
 //! which Spinel answers `method_defined?` and `include?` on.
 

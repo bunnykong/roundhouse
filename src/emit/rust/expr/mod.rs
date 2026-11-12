@@ -447,6 +447,7 @@ pub(super) fn render_self_literal() -> String {
     if fields.is_empty() {
         "Self {}".to_string()
     } else {
+        let fields: Vec<String> = fields.iter().map(|f| crate::emit::rust::expr::util::escape_rust_keyword(f)).collect();
         format!("Self {{ {} }}", fields.join(", "))
     }
 }
@@ -618,6 +619,23 @@ where
     let prev = ctx.in_class_method.replace(true);
     let r = f();
     ctx.in_class_method.set(prev);
+    r
+}
+
+pub(super) fn in_free_function() -> bool {
+    current_emit_ctx()
+        .map(|ctx| ctx.in_free_function.get())
+        .unwrap_or(false)
+}
+
+pub(super) fn with_free_function_scope<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let ctx = current_emit_ctx().expect("with_free_function_scope called outside with_emit_ctx");
+    let prev = ctx.in_free_function.replace(true);
+    let r = f();
+    ctx.in_free_function.set(prev);
     r
 }
 
@@ -896,8 +914,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                     "{slot}.lock().unwrap().clone().unwrap_or_default()"
                 );
             }
+            let name = crate::emit::rust::expr::util::escape_rust_keyword(name.as_str());
             if in_constructor() {
-                name.as_str().to_string()
+                name
             } else if in_return_tail()
                 && matches!(e.ty.as_ref(), Some(t) if !is_copy_ty(t))
             {

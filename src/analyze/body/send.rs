@@ -1251,13 +1251,37 @@ impl<'a> BodyTyper<'a> {
                     && !EXCEPTION_METHODS.contains(&method.as_str());
             };
             // Not settled past a module the program does not define, or a `method_missing`: either may answer it.
-            if cls.instance_methods.contains_key(method)
+            // Nor an open class: a gem the program does not model may define the method on it.
+            // Nor one the source defines whose signature is not harvested yet.
+            if cls.open
+                || cls.instance_methods.contains_key(method)
+                || cls.source_instance_methods.contains(method)
                 || cls.instance_methods.contains_key(&Symbol::from("method_missing"))
                 || cls.instance_methods.contains_key(&Symbol::from("respond_to_missing?"))
-                || cls.includes.iter().any(|m| self.classes().get(m).is_none() || self.lookup_in_module(m, method).is_some())
+                || cls.includes.iter().any(|m| {
+                    self.classes().get(m).is_none()
+                        || self.lookup_in_module(m, method).is_some()
+                        // A module's `method_missing` answers for its includer too.
+                        || self.lookup_in_module(m, &Symbol::from("method_missing")).is_some()
+                        || self.lookup_in_module(m, &Symbol::from("respond_to_missing?")).is_some()
+                })
             {
                 return false;
             }
+            current = cls.parent.clone();
+        }
+        false
+    }
+
+    /// Whether `of`'s chain ends at `Object`, whose `try` (Active Support's) answers nil for a method it lacks.
+    pub(super) fn reaches_object(&self, of: &ClassId) -> bool {
+        let mut current = Some(of.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return true };
+            if id.0.as_str().trim_start_matches("::") == "BasicObject" {
+                return false;
+            }
+            let Some(cls) = self.classes().get(&id) else { return id.0.as_str().trim_start_matches("::") == "Object" };
             current = cls.parent.clone();
         }
         false
@@ -1575,6 +1599,14 @@ impl<'a> BodyTyper<'a> {
                     id: id.clone(),
                     args: args.clone(),
                 },
+                // Not the bare Class for a union of classes: each is its own class's (Devise's `resource.class.model_name` over two mappings' models).
+                // Nor a union of class objects (`flag ? User : Admin`), whose `.class` is `Class` itself.
+                Some(Ty::Union { variants })
+                    if !variants.is_empty()
+                        && variants.iter().all(|v| matches!(v, Ty::Class { id, .. } if id.0.as_str() != "Class" && !self.defines_instance_method(id, &Symbol::from("class")))) =>
+                {
+                    Ty::Union { variants: variants.clone() }
+                }
                 _ => Ty::Class {
                     id: ClassId(Symbol::from("Class")),
                     args: vec![].into(),

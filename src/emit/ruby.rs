@@ -587,6 +587,10 @@ fn emit_lowered_controllers_with_param_binds(app: &App, param_binds: bool) -> Ve
     // params) can only be called where those ivars live. No-op for
     // apps without an emitted Layouts/application view.
     library::apply_layout_lowering(&mut lcs, app);
+    // A compact `class Gadget::WidgetsController` is emitted nested
+    // (`module Gadget; class WidgetsController`), which would put
+    // `Gadget::Util` in a bare `Util`'s scope; Ruby reads `::Util`.
+    library::apply_constant_rooting(&mut lcs, app, library::RootingScope::AppAndRuntime);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 
@@ -638,6 +642,8 @@ fn lowered_controller_lcs_with_layout_and_param_binds(app: &App, param_binds: bo
     library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
+    // Same rooting as the spinel-shape controllers above.
+    library::apply_constant_rooting(&mut lcs, app, library::RootingScope::AppAndRuntime);
     lcs
 }
 

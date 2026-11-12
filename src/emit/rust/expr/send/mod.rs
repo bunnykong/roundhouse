@@ -77,7 +77,7 @@ pub(super) fn emit_send(
             if let ExprNode::Const { path } = &*r.node {
                 if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
                     let arg = match &*args[0].node {
-                        ExprNode::Ivar { name } => format!("&self.{}", name.as_str()),
+                        ExprNode::Ivar { name } => format!("&self.{}", crate::emit::rust::expr::util::escape_rust_keyword(name.as_str())),
                         _ => format!("&({})", emit_expr(&args[0])),
                     };
                     return format!("crate::rh_datetime::parse_db_time({arg})");
@@ -346,10 +346,12 @@ pub(super) fn emit_send(
                 }
             }
         }
-        if coerced.is_empty() {
-            return format!("Self::{rewritten_method}()");
-        }
-        return format!("Self::{rewritten_method}({})", coerced.join(", "));
+        // A module-mode method is a free function: there is no `Self`
+        // to dispatch through, and its siblings are reached through the
+        // module — `self::name`, which a parameter or local of the same
+        // name cannot shadow, as it would a bare `name(…)`.
+        let path = if super::in_free_function() { "self::" } else { "Self::" };
+        return format!("{path}{rewritten_method}({})", coerced.join(", "));
     }
     // Callee-back-propagation for two recv shapes:
     //
