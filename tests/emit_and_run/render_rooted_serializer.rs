@@ -70,3 +70,31 @@ fn a_rooted_render_serializer_renders_through_its_writer_on_python() {
         assert!(render.contains(".as_json_str()") && !render.contains("JsonRender.encode"), "{}", renders.join("\n"));
     }
 }
+
+/// [`app`] with `index` over `Article.all`: TypeScript refuses
+/// the dynamic `order` chain, which is not what these tests are about.
+fn app_over_all() -> emit_and_run::Overlay {
+    app().edit("app/controllers/api/articles_controller.rb", "Article.order(:id)", "Article.all")
+}
+
+/// Where `text` names `ArticleSerializer` with a bare leading `.` (no
+/// namespace before it): what a rooted constant joined into a path
+/// prints when its empty top-level segment is kept.
+fn leading_dots(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|l| {
+            l.match_indices(".ArticleSerializer")
+                .any(|(i, _)| !l[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'))
+        })
+        .collect()
+}
+
+/// TypeScript drops the root of `::ArticleSerializer` (`lower::rooted_constants`):
+/// no render names it with a bare leading `.`.
+#[test]
+fn a_rooted_render_serializer_has_no_leading_dot_on_typescript() {
+    let (emitted, errors) = app_over_all().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/api::articles_controller.ts")).unwrap();
+    assert!(leading_dots(&controller).is_empty(), "{}", leading_dots(&controller).join("\n"));
+}
