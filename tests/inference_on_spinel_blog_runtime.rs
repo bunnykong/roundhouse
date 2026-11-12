@@ -567,7 +567,14 @@ fn untyped_subexpressions_baseline() {
     // `clear_attribute_change` no longer reads `attributes` directly (-3).
     // These are vars on this RBS-less probe; connection.rbs types them for
     // the RBS-paired gate.
-    const CEILING: usize = 1238;
+    // MEASURED 1276 on 2026-11-12 (main 2df7ba939: 1238): the `where` casts
+    // of an enum column, `ActiveRecord.enum_where_int` (+20) and
+    // `enum_where_str` (+17) in active_record/relation.rb, read the where
+    // value, the mapping's label and value lists and the nil label, which
+    // no runtime call site types (a model's generated `_enum_where_value`
+    // calls them); +1 on the module's own residual. relation.rbs types them
+    // for the RBS-paired gate, which stays at main's count.
+    const CEILING: usize = 1276;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

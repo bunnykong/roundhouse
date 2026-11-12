@@ -3971,6 +3971,19 @@ fn push_enum_where_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &
         );
         body = with_ty(Expr::new(Span::synthetic(), ExprNode::If { cond: is_col, then_branch: cast, else_branch: body }), stored_ty.clone());
     }
+    // `stored = <the column's cast>; stored`: the method ends in a read
+    // of its typed result, not in the chain's trailing `nil`.
+    let stored = Symbol::from("stored");
+    let body = seq(vec![
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign { target: LValue::Var { id: VarId(0), name: stored.clone() }, value: body },
+            ),
+            stored_ty.clone(),
+        ),
+        with_ty(var_ref(stored), stored_ty.clone()),
+    ]);
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,

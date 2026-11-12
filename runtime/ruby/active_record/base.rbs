@@ -64,8 +64,6 @@ module ActiveRecord
   def self.enum_str_or_nil: (String text, Array[String] labels, Array[String] values, String attr) -> String?
   def self.enum_label_str: (String value, Array[String] labels, Array[String] values) -> String?
   def self.enum_label: (Integer value, Array[String] labels, Array[Integer] values) -> String?
-  def self.enum_where_int: (Integer | Float | bool | Symbol | String | nil value, Array[String] labels, Array[Integer] values, String nil_label) -> Integer?
-  def self.enum_where_str: (Integer | Float | bool | Symbol | String | nil value, Array[String] labels, Array[String] values, String nil_label) -> String?
 
   # First index in ascending `sorted` whose value is >= `value` (binary
   # search) — the `includes(:assoc)` distribute's run lookup; see `base.rb`.

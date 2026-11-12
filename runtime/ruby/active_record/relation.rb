@@ -3,6 +3,74 @@
 require_relative "../inflector"
 
 module ActiveRecord
+  # The `where` casts of an enum column live beside the Relation that
+  # calls them (through a model's generated `_enum_where_value`), not in
+  # base.rb: the strict runtimes translate base.rb and have no runtime
+  # Relation, so they never cast a `where` value at run time.
+
+  # A `where` value on an Integer enum column, cast as Rails' enum type
+  # serializes one (activerecord 8.1.4): a label, Symbol or String, is
+  # its stored value, an Integer passes, and anything else casts as the
+  # Integer column would: a numeric String or a Float is its Integer,
+  # `true`/`false` are 1/0, and a label no mapping names is nil, which
+  # the predicate writes as `IS NULL`. `nil_label` is the mapping's `nil`
+  # entry's label (`unknown: nil`), "" when it has none. Unlike the
+  # writer's `enum_int` this does not raise: Rails' `where` doesn't.
+  def self.enum_where_int(value, labels, values, nil_label)
+    result = nil
+    if value.is_a?(Integer)
+      result = value
+    elsif value.is_a?(Float)
+      result = value.to_i
+    elsif value == true
+      result = 1
+    elsif value == false
+      result = 0
+    elsif value.is_a?(Symbol) || value.is_a?(String)
+      text = value.to_s
+      found = nil_label != "" && text == nil_label
+      i = 0
+      while !found && i < labels.length
+        if labels[i] == text
+          result = values[i]
+          found = true
+        end
+        i += 1
+      end
+      result = text.to_i if !found && value.is_a?(String) && text.match?(/\A\s*[+-]?\d/)
+    end
+    result
+  end
+
+  # `enum_where_int` for a String-valued mapping: a label is its stored
+  # value, and anything else binds as Rails' String column type
+  # serializes it: a Symbol or a number is its text, `true`/`false` are
+  # "t"/"f".
+  def self.enum_where_str(value, labels, values, nil_label)
+    result = nil
+    if value.is_a?(Symbol) || value.is_a?(String)
+      text = value.to_s
+      result = text
+      found = nil_label != "" && text == nil_label
+      result = nil if found
+      i = 0
+      while !found && i < labels.length
+        if labels[i] == text
+          result = values[i]
+          found = true
+        end
+        i += 1
+      end
+    elsif value == true
+      result = "t"
+    elsif value == false
+      result = "f"
+    elsif value.is_a?(Integer) || value.is_a?(Float)
+      result = value.to_s
+    end
+    result
+  end
+
   # A lazy, chainable query builder — the metaprogramming-free analog of
   # ActiveRecord::Relation. Lowered model code drives it: `scope`s become
   # class methods that take/return a Relation, associations return one,

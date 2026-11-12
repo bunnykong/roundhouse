@@ -1,4 +1,8 @@
 module ActiveRecord
+  # `where` casts of an enum column; see `relation.rb`.
+  def self.enum_where_int: (Integer | Float | bool | Symbol | String | nil value, Array[String] labels, Array[Integer] values, String nil_label) -> Integer?
+  def self.enum_where_str: (Integer | Float | bool | Symbol | String | nil value, Array[String] labels, Array[String] values, String nil_label) -> String?
+
   # Lazy chainable query builder. Chain methods answer a new Relation
   # and leave the receiver unchanged; terminals execute and return
   # rows / scalars. Loaded records are `Base` as an interim (same as
