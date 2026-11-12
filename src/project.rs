@@ -12672,10 +12672,39 @@ fn names_constant(src: &str, konst: &str) -> bool {
     if !src.contains(konst) {
         return false;
     }
+    // A reference a `defined?(Name)` guard covers is not a use: the code
+    // is written to run without the library (runtime/ruby/active_support_ext.rb's
+    // `defined?(::Singleton) && value.is_a?(::Singleton)`), so it must not
+    // pull the library into every program. Covered: the guard's own
+    // argument and whatever follows it on its line (`&&`'s right side, a
+    // ternary), a line ending in a modifier `if defined?(Name)`, and the
+    // body of an `if`/`elsif` whose condition has the guard, up to the
+    // next line at the `if`'s indentation (`else` is not covered).
+    let guards = [format!("defined?({konst})"), format!("defined?(::{konst})")];
+    let guard_at = |line: &str| guards.iter().filter_map(|g| line.find(g.as_str())).min();
+    let mut guarded_body: Option<usize> = None;
     src.lines().any(|line| {
         if line.trim_start().starts_with('#') {
             return false;
         }
+        let indent = line.len() - line.trim_start().len();
+        if let Some(outer) = guarded_body {
+            if line.trim().is_empty() || indent > outer {
+                return false;
+            }
+            guarded_body = None;
+        }
+        let guard = guard_at(line);
+        if let Some(g) = guard {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("if ") || trimmed.starts_with("elsif ") {
+                guarded_body = Some(indent);
+            } else if line[..g].trim_end().ends_with(" if") {
+                return false;
+            }
+        }
+        // Up to the guard; past it, the line is covered.
+        let line = &line[..guard.unwrap_or(line.len())];
         // SUPERCLASS position — `class ApplicationPlatform <
         // PlatformAgent`. The only place a used constant stands at end
         // of line with no trailing `.`/`(`/`::` to prove it is a use
