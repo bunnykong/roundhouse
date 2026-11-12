@@ -3398,17 +3398,20 @@ module ActiveRecord
     end
 
     # An Array on an enum column, cast element by element as Rails'
-    # `ArrayHandler` does: nil and Range elements keep their own arms,
-    # and of several other values the ones that cast to nil (a label no
-    # mapping names) leave the `IN` list. When all of them do, Rails
-    # writes `IN (NULL)`, which matches no row, negated or not. A lone
-    # value is a scalar condition, so an unknown one is `IS NULL`.
+    # `ArrayHandler` does: a record is its id, nil and Range elements
+    # keep their own arms, and of several other values the ones that
+    # cast to nil (a label no mapping names) leave the `IN` list. When
+    # all of them do, Rails writes `IN (NULL)`, which matches no row,
+    # negated or not. A lone value is a scalar condition, so an unknown
+    # one is `IS NULL`.
     def enum_list_predicate(col, qcol, val)
       cast = []
       stored = []
       val.each do |x|
         if x.nil? || x.is_a?(Range)
           cast << x
+        elsif x.is_a?(Base)
+          stored << @model._enum_where_value(col, x._primary_key_value)
         else
           stored << @model._enum_where_value(col, x)
         end

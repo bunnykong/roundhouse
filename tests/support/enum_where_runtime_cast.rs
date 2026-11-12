@@ -76,5 +76,8 @@ unknown = [Widget.with_status(:bogus), Widget.without_status("bogus"), Widget.wi
            Widget.with_status([:archived, "bogus"]), Widget.without_status([:archived, "bogus"]),
            Widget.with_status([nil, :draft])]
 raise "enum where unknown: #{unknown.inspect}" unless unknown == [1, 2, 1, 1, 1, 2]
+# A record in the list is its id, cast as any other element: Widget "b"
+# has id 2, which no row's status holds.
+raise "enum where record" unless Widget.with_status([Widget.find_by(name: "b")]) == 0
 puts "enum where cast OK"
 "#;
