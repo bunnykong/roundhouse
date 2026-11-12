@@ -1623,7 +1623,7 @@ fn build_methods_with_finder_inputs(
         let writable_fields =
             permitted_fields.map(|fields| writable_permit_fields(model, Some(table), fields));
         let permitted_fields = writable_fields.as_deref();
-        push_schema_methods(&mut methods, model, models, table, &through_joins, runtime_relation);
+        push_schema_methods(&mut methods, model, models, table, &through_joins, runtime_relation, schema.expression_dialect);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See

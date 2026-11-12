@@ -448,3 +448,34 @@ fn a_refused_column_change_leaves_the_table_as_it_was() {
     assert!(error.contains("unsupported CHECK expression on exports"), "{error}");
     assert_eq!(schema.tables[&roundhouse::Symbol::from("exports")], before);
 }
+
+/// A plain unique index's `where:` reaches SQLite DDL only when SQLite
+/// evaluates it as the app's database does; otherwise the SQLite index is
+/// unique over every row, as for a predicate SQLite can't read. With
+/// `... AND 'true'` it would cover no row at all. A SQLite app's predicate
+/// is its own.
+#[test]
+fn partial_unique_index_predicates_reach_sqlite_only_when_evaluated_alike() {
+    let migration = |predicate: &str| format!(
+        "class CreateExports < ActiveRecord::Migration[8.1]\n  def change\n    create_table :exports do |t|\n      t.string :status\n      t.string :email\n    end\n    add_index :exports, :email, unique: true, name: \"exports_email\", where: {predicate:?}\n  end\nend\n"
+    );
+    let path = "db/migrate/20260101000000_create_exports.rb";
+    for (predicate, databases) in [
+        ("status = 'pending' AND 'true'", vec![Some(POSTGRES), None]),
+        ("(status, email) IS NOT NULL", vec![Some(POSTGRES), None]),
+        ("lower(status) = status", vec![Some(POSTGRES)]),
+    ] {
+        let source = migration(predicate);
+        for database in databases {
+            let mut files = vec![(path, source.as_str())];
+            files.extend(database.map(|d| ("config/database.yml", d)));
+            let (schema, _, ddl) = ingest(&files).unwrap_or_else(|error| panic!("{predicate} {database:?}: {error}"));
+            assert_eq!(schema.tables[&roundhouse::Symbol::from("exports")].indexes[0].predicate.as_deref(), Some(predicate), "kept for the app's own database");
+            assert!(ddl.contains("CREATE UNIQUE INDEX IF NOT EXISTS exports_email ON exports (email)") && !ddl.contains(predicate), "{predicate} {database:?}: {ddl}");
+        }
+        let (_, _, ddl) = ingest(&[(path, &source), ("config/database.yml", SQLITE)]).unwrap();
+        assert!(ddl.contains(&format!("ON exports (email) WHERE {predicate}")), "SQLite: {ddl}");
+    }
+    let (_, _, ddl) = ingest(&[(path, &migration("status = 'pending'")), ("config/database.yml", POSTGRES)]).unwrap();
+    assert!(ddl.contains("ON exports (email) WHERE status = 'pending'"), "{ddl}");
+}

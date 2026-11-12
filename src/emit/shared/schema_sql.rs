@@ -124,16 +124,17 @@ impl Dialect {
     ///   covers, and a Postgres dump often spells it in syntax SQLite
     ///   cannot parse (Mastodon's `(state = ANY (ARRAY[2, 3]))`).
     /// - One SQLite can't be trusted to run as written (see
-    ///   [`sqlite_reads_alike`]). That unique index covers every row, as
-    ///   it did before predicates were kept, and
-    ///   `project::report_sqlite_index_predicates` names it.
+    ///   [`sqlite_reads_predicate_alike`], for the app's database
+    ///   `source`). That unique index covers every row, as it did before
+    ///   predicates were kept, and `project::report_sqlite_index_predicates`
+    ///   names it.
     ///
     /// The `insert_all` guard and the upsert conflict target read the
     /// same answer, so all three agree on which rows are constrained.
-    pub fn index_predicate<'a>(self, table: &Table, idx: &'a Index) -> Option<&'a str> {
+    pub fn index_predicate<'a>(self, table: &Table, idx: &'a Index, source: crate::schema::generated::GeneratedExpressionDialect) -> Option<&'a str> {
         let predicate = idx.predicate.as_deref()?;
         match self {
-            Dialect::Sqlite if !idx.unique || !sqlite_reads_alike(predicate, table) => None,
+            Dialect::Sqlite if !idx.unique || !sqlite_reads_predicate_alike(predicate, table, source) => None,
             _ => Some(predicate),
         }
     }
@@ -365,7 +366,7 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
                 _ => String::new(),
             };
             let predicate = dialect
-                .index_predicate(table, idx)
+                .index_predicate(table, idx, schema.expression_dialect)
                 .map(|p| format!(" WHERE {p}"))
                 .unwrap_or_default();
             out.push(format!(
@@ -500,6 +501,15 @@ pub fn render_schema_sql(schema: &Schema) -> String {
 /// in Postgres, and `status = '01'` is true in SQLite).
 pub(crate) fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
     sqlite_expression(predicate, Some(table))
+}
+
+/// [`sqlite_reads_alike`] for an index's `where:` from an app whose
+/// database is `source`: one that may not be SQLite also needs SQLite to
+/// evaluate it as that database does ([`sqlite_evaluates_alike`]), as its
+/// CHECKs do. A SQLite app's predicate is its own.
+pub(crate) fn sqlite_reads_predicate_alike(predicate: &str, table: &Table, source: crate::schema::generated::GeneratedExpressionDialect) -> bool {
+    use crate::schema::generated::GeneratedExpressionDialect::{Portable, Sqlite};
+    sqlite_reads_alike(predicate, table) && (source == Sqlite || sqlite_evaluates_alike(predicate, table, source != Portable))
 }
 
 /// A CHECK as Rails' PostgreSQL dump writes it (`pg_get_constraintdef`),

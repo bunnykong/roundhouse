@@ -2301,7 +2301,7 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
             let Some(predicate) = index.predicate.as_deref() else { continue };
             if !index.unique
                 || crate::emit::shared::schema_sql::Dialect::Sqlite
-                    .index_predicate(table, index)
+                    .index_predicate(table, index, app.schema.expression_dialect)
                     .is_some()
             {
                 continue;

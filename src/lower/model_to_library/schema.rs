@@ -156,7 +156,7 @@ fn rails_type_name(col: &crate::schema::ColumnType) -> &'static str {
 }
 
 /// `def self.schema_column_types; { id: :integer, title: :string, ... }; end`
-fn push_schema_column_types(methods: &mut Vec<MethodDef>, owner: &ClassId, table: &Table) {
+fn push_schema_column_types(methods: &mut Vec<MethodDef>, owner: &ClassId, table: &Table, source: crate::schema::generated::GeneratedExpressionDialect) {
     // Not String values: a per-model Hash of String literals is shared text Spinel's String analysis refuses `Arel.sql` over
     let ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Sym) };
     let body = with_ty(
@@ -199,6 +199,7 @@ pub(super) fn push_schema_methods(
     table: &Table,
     through_joins: &super::associations::ThroughJoins,
     runtime_relation: super::RuntimeRelation,
+    source: crate::schema::generated::GeneratedExpressionDialect,
 ) {
     let owner = &model.name;
 
@@ -507,7 +508,7 @@ pub(super) fn push_schema_methods(
             continue;
         }
         let predicate = crate::emit::shared::schema_sql::Dialect::current()
-            .index_predicate(table, i)
+            .index_predicate(table, i, source)
             .map(str::to_string);
         targets.push((cols, predicate));
     }
@@ -619,7 +620,7 @@ pub(super) fn push_schema_methods(
     // Schema column-name lists. Time vs date stay separate so JSON can
     // apply ISO8601-with-offset vs calendar-only without sniffing values.
     push_schema_symbol_list(methods, owner, "schema_columns", table, |_| true);
-    push_schema_column_types(methods, owner, table);
+    push_schema_column_types(methods, owner, table, source);
     let json_coder = crate::lower::serialize::json_serialize_columns(model);
     if table.columns.iter().any(|c| json_coder.contains(&c.name)) {
         push_schema_symbol_list(methods, owner, "schema_json_coder_columns", table, |c| json_coder.contains(&c.name));
