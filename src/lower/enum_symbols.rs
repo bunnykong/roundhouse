@@ -433,11 +433,13 @@ fn rewrite_value(
 ) {
     if let ExprNode::Array { elements, style } = &mut *value.node {
         let mut all_int = !elements.is_empty();
+        let mut all_str = !elements.is_empty();
         let mut any = false;
         for el in elements.iter_mut() {
             let rewrote = rewrite_label(el, mapping, strings);
             any |= rewrote.is_some();
-            all_int &= rewrote.is_some_and(|l| matches!(l, Literal::Int { .. }));
+            all_int &= rewrote.as_ref().is_some_and(|l| matches!(l, Literal::Int { .. }));
+            all_str &= rewrote.is_some_and(|l| matches!(l, Literal::Str { .. }));
         }
         // `%i[active banned]` holds stored values now, which `%i[0 2]`
         // would render as the Symbols `:"0"` and `:"2"`: the brackets
@@ -446,12 +448,17 @@ fn rewrite_value(
             *style = crate::expr::ArrayStyle::Brackets;
         }
         // The container's own type follows its elements: an `Array[Sym]`
-        // stamped at ingest, left standing over Int elements, is the kind
+        // stamped at ingest, left standing over Int (or String) elements, is the kind
         // of disagreement a strict target reads as the element type.
-        if all_int {
-            value.ty = Some(crate::ty::Ty::Array {
-                elem: std::sync::Arc::new(crate::ty::Ty::Int),
-            });
+        let elem = if all_int {
+            Some(crate::ty::Ty::Int)
+        } else if all_str {
+            Some(crate::ty::Ty::Str)
+        } else {
+            None
+        };
+        if let Some(elem) = elem {
+            value.ty = Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(elem) });
         }
         return;
     }
