@@ -434,3 +434,17 @@ fn conditions_sqlite_evaluates_otherwise_are_not_kept_for_other_databases() {
         }
     }
 }
+
+/// A column change an unconfigured app refuses, because a condition on the
+/// column would no longer read alike, leaves the table as it was: its
+/// CHECKs, its indexes and the column.
+#[test]
+fn a_refused_column_change_leaves_the_table_as_it_was() {
+    use roundhouse::ingest::{ingest_migration, ingest_schema};
+    let mut schema = ingest_schema(b"ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"exports\" do |t|\n    t.string \"status\"\n    t.string \"kind\"\n    t.check_constraint \"kind <> ''\", name: \"kind_set\"\n    t.check_constraint \"status <> 'admin'\", name: \"not_admin\"\n    t.index \"lower(kind)\", name: \"exports_kind\", where: \"kind IS NOT NULL\"\n  end\nend\n", "db/schema.rb").unwrap();
+    let before = schema.tables[&roundhouse::Symbol::from("exports")].clone();
+    let migration = b"class CollateStatus < ActiveRecord::Migration[8.1]\n  def change\n    change_column :exports, :status, :string, collation: \"case_insensitive\"\n  end\nend\n";
+    let error = ingest_migration(migration, "db/migrate/20260102000000_collate_status.rb", &mut schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported CHECK expression on exports"), "{error}");
+    assert_eq!(schema.tables[&roundhouse::Symbol::from("exports")], before);
+}

@@ -532,9 +532,18 @@ fn apply_table_verb(
         }
         "add_column" | "change_column" => {
             if let (Some(t), Some(c), Some(ty)) = (arg_name(0), arg_name(1), arg_name(2)) {
+                // An unconfigured app refuses a change its conditions no longer
+                // read alike under; the table stays as it was, as when the
+                // column itself is refused.
+                let before = (dialect == GeneratedExpressionDialect::Portable).then(|| schema.tables.get(&Symbol::from(t.as_str())).cloned()).flatten();
                 fold_column(verb, &t, c, &ty, &args[3..], file, schema, dialect)?;
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
-                    read_conditions_again(table, dialect, file, node_span(&args[1]))?;
+                    if let Err(refusal) = read_conditions_again(table, dialect, file, node_span(&args[1])) {
+                        if let Some(before) = before {
+                            *table = before;
+                        }
+                        return Err(refusal);
+                    }
                 }
             }
         }
@@ -1867,7 +1876,8 @@ fn carry_check(dialect: GeneratedExpressionDialect, expression: &str, table: &Ta
 /// other CHECK or expression index's `where:` must still read alike
 /// ([`schema_condition_supported`](crate::emit::shared::schema_sql::schema_condition_supported)).
 /// One that no longer does is left out with the warning, or refused, as
-/// when it was added. A SQLite app's text is SQLite's own.
+/// when it was added; the caller then restores the table. A SQLite app's
+/// text is SQLite's own.
 fn read_conditions_again(table: &mut Table, dialect: GeneratedExpressionDialect, file: &str, span: (usize, usize)) -> IngestResult<()> {
     use crate::emit::shared::schema_sql::schema_condition_supported;
     if !matches!(dialect, GeneratedExpressionDialect::Portable | GeneratedExpressionDialect::OtherDatabase) {
