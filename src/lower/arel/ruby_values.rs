@@ -12,16 +12,17 @@ use super::ir::{ArelOp, Predicate, Value, ValueType};
 /// query keeps such a label through the lowering on the Ruby-family
 /// targets (`lower::enum_symbols`), where the runtime relation casts it;
 /// a `where` folded to SQL here never reaches that cast, so the fold
-/// casts it instead, once: a label is its stored value, and anything
-/// else is bound as written, as Rails' enum type serializes.
+/// casts it instead, once: a label is its stored value (`None` for the
+/// label of a `nil` entry, which is `IS NULL`), and anything else is
+/// bound as written, as Rails' enum type serializes.
 #[derive(Default)]
 pub(crate) struct StringEnums(
-    crate::det::HashMap<crate::ident::ClassId, crate::det::HashMap<Symbol, Vec<(String, String)>>>,
+    crate::det::HashMap<crate::ident::ClassId, crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>>,
 );
 
 impl StringEnums {
     pub(crate) fn of_models(models: &[crate::dialect::Model]) -> Self {
-        let mut out: crate::det::HashMap<_, crate::det::HashMap<Symbol, Vec<(String, String)>>> = Default::default();
+        let mut out: crate::det::HashMap<_, crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>> = Default::default();
         for model in models {
             for (column, mapping) in &model.enums {
                 let stored: Vec<&Literal> = mapping.iter().map(|(_, v)| v).filter(|v| !matches!(v, Literal::Nil)).collect();
@@ -31,7 +32,8 @@ impl StringEnums {
                 let pairs = mapping
                     .iter()
                     .filter_map(|(label, v)| match v {
-                        Literal::Str { value } => Some((label.clone(), value.clone())),
+                        Literal::Str { value } => Some((label.clone(), Some(value.clone()))),
+                        Literal::Nil => Some((label.clone(), None)),
                         _ => None,
                     })
                     .collect();
@@ -41,14 +43,14 @@ impl StringEnums {
         StringEnums(out)
     }
 
-    pub(super) fn of(&self, owner: &crate::ident::ClassId) -> Option<&crate::det::HashMap<Symbol, Vec<(String, String)>>> {
+    pub(super) fn of(&self, owner: &crate::ident::ClassId) -> Option<&crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>> {
         self.0.get(owner)
     }
 }
 
-type OwnerEnums<'a> = Option<&'a crate::det::HashMap<Symbol, Vec<(String, String)>>>;
+type OwnerEnums<'a> = Option<&'a crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>>;
 /// The owner's table, whose columns alone the owner's enums name, and those enums.
-type ColumnEnums<'a> = Option<(&'a crate::ident::TableRef, &'a crate::det::HashMap<Symbol, Vec<(String, String)>>)>;
+type ColumnEnums<'a> = Option<(&'a crate::ident::TableRef, &'a crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>)>;
 
 pub(super) fn normalize(op: &mut ArelOp, schema: &Schema, enums: OwnerEnums<'_>) {
     if let ArelOp::Select(select) = op {
@@ -64,13 +66,17 @@ fn normalize_predicate(predicate: &mut Predicate, schema: &Schema, enums: Column
             normalize_predicate(left, schema, enums);
             normalize_predicate(right, schema, enums);
         }
-        Predicate::Eq(col, Value::LiteralStr(text)) => {
+        Predicate::Eq(col, value @ Value::LiteralStr(_)) => {
+            let Value::LiteralStr(text) = &*value else { unreachable!() };
             if let Some((_, stored)) = enums
                 .filter(|(table, _)| **table == col.table)
                 .and_then(|(_, columns)| columns.get(&col.column))
                 .and_then(|pairs| pairs.iter().find(|(label, _)| label == text))
             {
-                *text = stored.clone();
+                *value = match stored {
+                    Some(stored) => Value::LiteralStr(stored.clone()),
+                    None => Value::LiteralNull,
+                };
             }
         }
         Predicate::Eq(col, Value::Runtime { expr, ty }) => {

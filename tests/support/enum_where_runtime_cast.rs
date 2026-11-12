@@ -21,6 +21,10 @@ const SCHEMA: &str = "ActiveRecord::Schema.define do
     t.string \"name\"
     t.string \"status\"
   end
+  create_table \"items\", force: :cascade do |t|
+    t.string \"name\"
+    t.string \"state\"
+  end
 end
 ";
 
@@ -98,12 +102,24 @@ const TICKET: &str = "class Ticket < ApplicationRecord
 end
 ";
 
+// A String-valued mapping with a `nil` entry: its label is `IS NULL` in
+// a `where`, folded to SQL or not, as Rails' enum type serializes it.
+const ITEM: &str = "class Item < ApplicationRecord
+  enum :state, { unknown: nil, live: \"on\" }
+
+  def self.literal_counts
+    [where(state: :unknown).count, where(state: \"unknown\").count, where(state: :live).count]
+  end
+end
+";
+
 pub fn overlay() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write("db/schema.rb", SCHEMA)
         .write("app/models/widget.rb", WIDGET)
         .write("app/models/ticket.rb", TICKET)
+        .write("app/models/item.rb", ITEM)
 }
 
 pub const ASSERTIONS: &str = r#"Widget.create!(name: "a", status: :draft, rank: 1)
@@ -141,5 +157,9 @@ raise "string enum literal write: #{written.inspect}" unless written == "queued"
 # `:queued` is written as "sent".
 merged = Ticket.merged_update_all_count
 raise "string enum merged update_all: #{merged.inspect}" unless merged == 1
+Item.create!(name: "n")
+Item.create!(name: "l", state: :live)
+items = Item.literal_counts
+raise "nil enum label where: #{items.inspect}" unless items == [1, 1, 1]
 puts "enum where cast OK"
 "#;
