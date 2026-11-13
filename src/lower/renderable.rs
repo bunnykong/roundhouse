@@ -26,6 +26,13 @@ pub fn renders_itself(app: &App, class: &ClassId) -> bool {
             pending.extend(lc.parent.iter().map(|p| p.0.as_str().to_string()));
             pending.extend(lc.includes.iter().map(|i| i.0.as_str().to_string()));
         }
+        // Not library classes alone: a model that answers `render_in` renders itself before Rails reads its partial path.
+        for model in app.models.iter().filter(|m| m.name.0.as_str() == name) {
+            if model.methods().any(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() == "render_in") {
+                return true;
+            }
+            pending.extend(model.parent.iter().map(|p| p.0.as_str().to_string()));
+        }
     }
     false
 }

@@ -498,10 +498,11 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting, rails: Op
     } else { src
         .lines()
         .map(|line| line.split('#').next().unwrap_or(""))
-        // Not a longer name the setting's spells the start of (`config.eager_load_paths` beside `eager_load`).
+        // Not a longer name the setting's spells part of (`config.eager_load_paths`, `config.rake_eager_load` beside `eager_load`).
         .map(|code| {
+            let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
             code.match_indices(path_text.as_str())
-                .filter(|(at, m)| !code[at + m.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|(at, m)| !code[at + m.len()..].starts_with(word) && !code[..*at].ends_with(word))
                 .count()
         })
         .sum() };

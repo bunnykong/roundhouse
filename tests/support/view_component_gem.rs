@@ -2,7 +2,8 @@
 //! `render_in`, and the component's sidecar template, compiled into its `call` when the app is read, writes the markup
 //! view_component 3.23.2 renders for it on Rails 7.2.2.1 (maybe's versions): `render?`, a component method, an ivar and
 //! a view helper; and with a block, its `content` and its `renders_one` / `renders_many` slots (a lambda's among
-//! them, whose `html_safe` markup is not escaped again), escaped as Rails does.
+//! them, whose `html_safe` markup is not escaped again, and a block's markup, which Rails captures safe), escaped as
+//! Rails does.
 
 #[path = "prerequisite.rs"]
 mod prerequisite;
@@ -46,7 +47,7 @@ pub const SCRIPT: &str = r#"io = +""
 Views::Articles.index_into(io, Article.all, nil, nil)
 expected = "<p class=\"greeting\">Hello, BLOG! (0 articles)</p>"
 raise "component:\n#{io}" unless io.include?(expected)
-card = "<div class=\"card card-warm\">\n  <h2>Title &lt;b&gt;</h2>\n  <ul><li>one</li><li>two</li></ul>\n  <div class=\"body\">\n  Body text\n</div>\n  <small>fine <print></small>\n</div>"
+card = "<div class=\"card card-warm\">\n  <h2>Title &lt;b&gt;</h2>\n  <ul><li>one</li><li>two</li><li><b>three</b></li></ul>\n  <div class=\"body\">\n  Body text\n</div>\n  <small>fine <print></small>\n</div>"
 raise "card:\n#{io}" unless io.include?(card)
 puts "view_component passed"
 "#;
@@ -74,7 +75,7 @@ pub fn app() -> Option<emit_and_run::Overlay> {
         .edit(
             "app/views/articles/index.html.erb",
             "<% content_for :title, \"Articles\" %>\n",
-            "<% content_for :title, \"Articles\" %>\n<%= render(GreetingComponent.new(name: \"blog\", count: @articles.size)) %>\n<%= render(CardComponent.new(tone: \"warm\")) do |card| %>\n  <% card.with_header { \"Title <b>\" } %>\n  <% card.with_item { \"one\" } %>\n  <% card.with_item { \"two\" } %>\n  <% card.with_footer(note: \"fine <print>\") %>\n  Body text\n<% end %>\n",
+            "<% content_for :title, \"Articles\" %>\n<%= render(GreetingComponent.new(name: \"blog\", count: @articles.size)) %>\n<%= render(CardComponent.new(tone: \"warm\")) do |card| %>\n  <% card.with_header { \"Title <b>\" } %>\n  <% card.with_item { \"one\" } %>\n  <% card.with_item { \"two\" } %>\n  <% card.with_item do %><b>three</b><% end %>\n  <% card.with_footer(note: \"fine <print>\") %>\n  Body text\n<% end %>\n",
         );
     for (name, version) in GEMS {
         let gem = installed(name, version)?;

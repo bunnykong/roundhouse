@@ -583,10 +583,17 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 return vec![stmt.clone()];
             }
             let cap = next_capture_name(&ctx.accumulator);
-            let cap_ctx = ViewCtx { accumulator: cap.clone(), ..ctx.clone() };
+            let cap_ctx = ViewCtx {
+                accumulator: cap.clone(),
+                ..ctx.with_locals(params.iter().chain(extra_params.iter().map(|p| &p.name)).map(|p| p.as_str().to_string()))
+            };
             let mut cap_stmts = vec![assign_accumulator_string_new(&cap)];
             cap_stmts.extend(walk_body(body, &cap_ctx));
-            cap_stmts.push(accumulator_result_ref(&cap));
+            // Not a plain String: Rails' `capture` answers the block's markup safe, and the slot escapes one that is not.
+            cap_stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send { recv: Some(accumulator_result_ref(&cap)), method: Symbol::from("html_safe"), args: Vec::new(), block: None, parenthesized: false },
+            ));
             let new_block = Expr::new(
                 block.span,
                 ExprNode::Lambda {

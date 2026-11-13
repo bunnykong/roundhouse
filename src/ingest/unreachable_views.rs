@@ -205,18 +205,36 @@ fn names_template(lit: &str, template: &str) -> bool {
 fn render_literals_outside_controllers(app: &App, unrouted: &HashSet<String>) -> Vec<String> {
     // Not a concern's method spliced into a gem controller no route dispatches to (view_component's
     // `PreviewActions#index`): it runs only as that controller's action, which never runs.
-    let unrouted_actions: HashSet<crate::span::Span> = app
-        .controllers
-        .iter()
-        .filter(|c| unrouted.contains(c.name.0.as_str()))
-        .flat_map(|c| c.actions().map(|a| a.body.span))
-        .filter(|span| !span.is_synthetic())
-        .collect();
+    // Nor one any class that runs also takes: a routed controller's copy, a model's, or the module's own includer.
+    let spans_of = |live: bool| -> HashSet<crate::span::Span> {
+        app.controllers
+            .iter()
+            .filter(|c| unrouted.contains(c.name.0.as_str()) != live)
+            .flat_map(|c| c.actions().map(|a| a.body.span))
+            .filter(|span| !span.is_synthetic())
+            .collect()
+    };
+    let unrouted_actions = spans_of(false);
+    let live_actions = spans_of(true);
+    let model_spans: HashSet<crate::span::Span> = app.models.iter().flat_map(|m| m.methods().map(|m| m.body.span)).collect();
+    let included = |lc: &crate::dialect::LibraryClass| {
+        app.library_classes.iter().any(|c| c.includes.iter().any(|i| i.0.as_str().trim_start_matches("::") == lc.name.0.as_str()))
+    };
     let mut out = Vec::new();
     let mut collect = |e: &Expr| visit_renders(e, &mut |lits, _| out.extend(lits.iter().cloned()));
     for lc in &app.library_classes {
-        for m in lc.methods.iter().filter(|m| !unrouted_actions.contains(&m.body.span)) {
+        let module_included = included(lc);
+        let runs_nowhere = |span: &crate::span::Span| {
+            unrouted_actions.contains(span) && !live_actions.contains(span) && !model_spans.contains(span) && !module_included
+        };
+        for m in lc.methods.iter().filter(|m| !runs_nowhere(&m.body.span)) {
             collect(&m.body);
+        }
+    }
+    // A controller that runs may render another directory's template (`render "vendor/pages/detail"`).
+    for c in app.controllers.iter().filter(|c| !unrouted.contains(c.name.0.as_str())) {
+        for a in c.actions() {
+            collect(&a.body);
         }
     }
     for v in &app.views {

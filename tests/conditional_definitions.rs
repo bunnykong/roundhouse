@@ -345,13 +345,14 @@ end
 }
 
 /// Spinel compiles a load-time `if` around `def`s, but not one whose name a builtin or another def also answers
-/// (`to_s`, or a method the parent defines): only that one is reported on its tree.
+/// (`to_s`, or a method the parent defines): only that one is reported on its tree. Two separate conditionals of one
+/// name (`tone`) compile, the later branch that ran answering, as Ruby does.
 #[test]
 fn spinel_reports_only_a_conditional_def_another_method_answers() {
     let (_emitted, errors) = emit_and_run::empty_app()
         .write(
             "lib/greeter.rb",
-            "class GreeterBase\n  def shout = \"base\"\nend\n\nclass Greeter < GreeterBase\n  if Rails.env.production?\n    def mode = \"production\"\n  else\n    def mode = \"other\"\n  end\n\n  if Rails.env.test?\n    def to_s = \"test\"\n  end\n\n  unless Rails.env.development?\n    def shout = \"loud\"\n  end\nend\n",
+            "class GreeterBase\n  def shout = \"base\"\nend\n\nclass Greeter < GreeterBase\n  if Rails.env.production?\n    def mode = \"production\"\n  else\n    def mode = \"other\"\n  end\n\n  if Rails.env.test?\n    def to_s = \"test\"\n  end\n\n  unless Rails.env.development?\n    def shout = \"loud\"\n  end\n\n  if Rails.env.production?\n    def tone = \"a\"\n  end\n\n  if Rails.env.test?\n    def tone = \"b\"\n  end\nend\n",
         )
         .emit(roundhouse::project::BuildTarget::Spinel);
     let refused: Vec<_> = errors.iter().filter(|e| e.contains("conditional_definition")).collect();

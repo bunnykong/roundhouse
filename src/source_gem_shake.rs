@@ -2053,7 +2053,7 @@ pub(crate) fn compiled_on_the_ruby_family(app: &App) -> crate::det::HashSet<Stri
             items.iter().any(|item| match item {
                 crate::app::ProgramItem::Require { feature, relative: false, .. } => matches!(
                     feature.split('/').next(),
-                    Some("rails" | "action_view" | "action_controller" | "action_dispatch" | "active_model" | "active_record" | "action_mailer" | "active_job")
+                    Some("rails" | "action_view" | "action_controller" | "action_dispatch" | "active_model" | "active_record" | "action_mailer" | "active_job" | "action_text" | "active_storage")
                 ),
                 crate::app::ProgramItem::Branch { then_items, else_items, .. } => requires(then_items) || requires(else_items),
                 _ => false,
