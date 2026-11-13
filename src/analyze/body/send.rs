@@ -489,7 +489,12 @@ impl<'a> BodyTyper<'a> {
             // not model) must not cost the app its own builder methods.
             if let Some(name) = params.first() {
                 let model = Self::form_model_ty(method, args);
-                let builder = Self::form_builder_id(args);
+                // simple_form's own builder, which its `simple_form_for` passes `form_for` (`options[:builder] ||=
+                // SimpleForm::FormBuilder`), when the gem's source is the app's.
+                let builder = Self::form_builder_id(args).or_else(|| {
+                    let own = ClassId(Symbol::from("SimpleForm::FormBuilder"));
+                    (method.as_str() == "simple_form_for" && self.classes().contains_key(&own)).then_some(own)
+                });
                 if model.is_some() || builder.is_some() {
                     let id = builder.unwrap_or_else(|| {
                         ClassId(Symbol::from("ActionView::Helpers::FormBuilder"))
@@ -1212,7 +1217,7 @@ impl<'a> BodyTyper<'a> {
 
     /// Does `of` or an ancestor define `method` class-side (a scope, a
     /// `def self.…`, a runtime-declared class method)?
-    fn class_side_defines(&self, of: &ClassId, method: &Symbol) -> bool {
+    pub(super) fn class_side_defines(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {
             let Some(id) = current else { return false };
@@ -1251,13 +1256,37 @@ impl<'a> BodyTyper<'a> {
                     && !EXCEPTION_METHODS.contains(&method.as_str());
             };
             // Not settled past a module the program does not define, or a `method_missing`: either may answer it.
-            if cls.instance_methods.contains_key(method)
+            // Nor an open class: a gem the program does not model may define the method on it.
+            // Nor one the source defines whose signature is not harvested yet.
+            if cls.open
+                || cls.instance_methods.contains_key(method)
+                || cls.source_instance_methods.contains(method)
                 || cls.instance_methods.contains_key(&Symbol::from("method_missing"))
                 || cls.instance_methods.contains_key(&Symbol::from("respond_to_missing?"))
-                || cls.includes.iter().any(|m| self.classes().get(m).is_none() || self.lookup_in_module(m, method).is_some())
+                || cls.includes.iter().any(|m| {
+                    self.classes().get(m).is_none()
+                        || self.lookup_in_module(m, method).is_some()
+                        // A module's `method_missing` answers for its includer too.
+                        || self.lookup_in_module(m, &Symbol::from("method_missing")).is_some()
+                        || self.lookup_in_module(m, &Symbol::from("respond_to_missing?")).is_some()
+                })
             {
                 return false;
             }
+            current = cls.parent.clone();
+        }
+        false
+    }
+
+    /// Whether `of`'s chain ends at `Object`, whose `try` (Active Support's) answers nil for a method it lacks.
+    pub(super) fn reaches_object(&self, of: &ClassId) -> bool {
+        let mut current = Some(of.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return true };
+            if id.0.as_str().trim_start_matches("::") == "BasicObject" {
+                return false;
+            }
+            let Some(cls) = self.classes().get(&id) else { return id.0.as_str().trim_start_matches("::") == "Object" };
             current = cls.parent.clone();
         }
         false
@@ -1575,6 +1604,14 @@ impl<'a> BodyTyper<'a> {
                     id: id.clone(),
                     args: args.clone(),
                 },
+                // Not the bare Class for a union of classes: each is its own class's (Devise's `resource.class.model_name` over two mappings' models).
+                // Nor a union of class objects (`flag ? User : Admin`), whose `.class` is `Class` itself.
+                Some(Ty::Union { variants })
+                    if !variants.is_empty()
+                        && variants.iter().all(|v| matches!(v, Ty::Class { id, .. } if id.0.as_str() != "Class" && !self.defines_instance_method(id, &Symbol::from("class")))) =>
+                {
+                    Ty::Union { variants: variants.clone() }
+                }
                 _ => Ty::Class {
                     id: ClassId(Symbol::from("Class")),
                     args: vec![].into(),
@@ -1958,6 +1995,20 @@ impl<'a> BodyTyper<'a> {
                         elem: std::sync::Arc::new(Ty::Class { id: id.clone(), args: vec![].into() }),
                     };
                 }
+                // TLS writers belong to an HTTP instance, unless the app owns a class-side override.
+                if !instance_receiver && matches!(method.as_str(), "verify_mode=" | "verify_hostname=" | "cert_store=")
+                {
+                    let mut owner = Some(id);
+                    for _ in 0..32 {
+                        let Some(current) = owner else { break };
+                        let Some(info) = self.classes().get(current) else { break };
+                        if info.class_methods.contains_key(method)
+                            || info.class_method_extensions.iter().any(|m| self.declares_instance_method(m, method))
+                        { break; }
+                        if current.0.as_str() == "Net::HTTP" { return unknown(); }
+                        owner = info.parent.as_ref();
+                    }
+                }
                 // A model's class-side relation builder that no class in
                 // the chain defines (`Widget.includes(:gadget)`,
                 // `Widget.order(:id)`). The analyzer's registry seeds the
@@ -1983,6 +2034,12 @@ impl<'a> BodyTyper<'a> {
                 }
                 // Class-side defs stay a fallback: a value typed as an instance may still be a class object (`@klass = Post`).
                 let instance_side = instance_receiver && self.defines_instance_method(id, method);
+                // A Kernel-named singleton in an ancestor precedes the instance
+                // fallback too; a class object cannot call the child's instance method.
+                let kernel_class_side = !instance_receiver
+                    && matches!(method.as_str(), "require" | "require_relative" | "load" | "autoload"
+                        | "puts" | "print" | "warn" | "format" | "sprintf" | "`")
+                    && self.class_side_defines(id, method);
                 let mut current_id: Option<&ClassId> = Some(id);
                 let mut depth = 0usize;
                 // Set when the chain reaches a *named* superclass we don't
@@ -2191,7 +2248,7 @@ impl<'a> BodyTyper<'a> {
                         }
                         return unwrap_fn_ret(&subst(ty));
                     }
-                    if !class_dynamic_finder && let Some(ty) = cls.instance_methods.get(method) {
+                    if !kernel_class_side && !class_dynamic_finder && let Some(ty) = cls.instance_methods.get(method) {
                         if !controller_writer || instance_receiver {
                             return unwrap_fn_ret(&subst(ty));
                         }
@@ -2202,7 +2259,7 @@ impl<'a> BodyTyper<'a> {
                     // Checked after the class's own methods, before the
                     // parent — Ruby's ancestor order puts an included
                     // module between the class and its superclass.
-                    for module_id in cls.includes.iter().filter(|_| !class_dynamic_finder) {
+                    for module_id in cls.includes.iter().filter(|_| !kernel_class_side && !class_dynamic_finder) {
                         if controller_writer && !instance_receiver {
                             continue;
                         }
@@ -2216,10 +2273,18 @@ impl<'a> BodyTyper<'a> {
                     // instance sends; applying them here would type an
                     // undefined class-side call from an RBS instance sig.
                     if method_missing_ty.is_none() {
-                        method_missing_ty = cls
-                            .class_methods
-                            .get(&Symbol::from("method_missing"))
-                            .cloned();
+                        let missing = Symbol::from("method_missing");
+                        method_missing_ty = if instance_receiver {
+                            // An instance send that no method answers goes to the instance-side `method_missing` (hashie's
+                            // Mash, which OmniAuth's AuthHash answers `provider` with).
+                            // The latest include first, as Ruby looks it up; `self` the receiving class.
+                            // Not a module's singleton `method_missing`, which answers calls on the module, not on its includers.
+                            cls.instance_methods.get(&missing).cloned().or_else(|| {
+                                cls.includes.iter().rev().find_map(|m| self.instance_method_in_module(m, &missing))
+                            }).map(|ty| subst(&ty))
+                        } else {
+                            cls.class_methods.get(&missing).cloned()
+                        };
                     }
                     current_id = cls.parent.as_ref();
                 }
@@ -2480,6 +2545,19 @@ impl<'a> BodyTyper<'a> {
                 // likely inherited from that gem, so treat it as a gradual
                 // escape rather than an "unknown method" error. Reached only
                 // after the precise builtins above have had their say.
+                // A key the gem documents for its `method_missing` class answers what it holds (OmniAuth's `auth.info`),
+                // ahead of the gradual answers below.
+                if instance_receiver && method_missing_ty.is_some() {
+                    let mut walk = Some(id.clone());
+                    for _ in 0..32 {
+                        let Some(c) = walk.take() else { break };
+                        let Some(info) = self.classes().get(&c) else { break };
+                        if let Some(ty) = info.missing_readers.get(method) {
+                            return ty.clone();
+                        }
+                        walk = info.parent.clone();
+                    }
+                }
                 if unknown_named_ancestor {
                     return Ty::Untyped;
                 }
@@ -2876,7 +2954,8 @@ impl<'a> BodyTyper<'a> {
                     if matches!(v, Ty::Nil | Ty::Var { .. }) {
                         continue;
                     }
-                    let r = self.dispatch_on(Some(v), method, block_ret, args, instance_receiver);
+                    let r = self.dispatch_on(Some(v), method, block_ret, args,
+                        instance_receiver && super::instance_shaped(v));
                     if !matches!(r, Ty::Var { .. }) {
                         resolved.push(r);
                     }
@@ -3002,6 +3081,24 @@ impl<'a> BodyTyper<'a> {
             if let Some(ty) = m.instance_methods.get(method) {
                 return Some(unwrap_fn_ret(ty));
             }
+            stack.extend(m.includes.iter().cloned());
+        }
+        None
+    }
+
+    /// [`Self::lookup_in_module`] on the instance side alone.
+    pub(super) fn instance_method_in_module(&self, module_id: &ClassId, method: &Symbol) -> Option<Ty> {
+        let mut stack = vec![module_id.clone()];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(m) = self.classes().get(&id) else { continue };
+            if let Some(ty) = m.instance_methods.get(method) {
+                return Some(unwrap_fn_ret(ty));
+            }
+            // In declaration order: the stack pops the latest include first, as Ruby looks it up.
             stack.extend(m.includes.iter().cloned());
         }
         None

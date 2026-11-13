@@ -2747,6 +2747,106 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel, &jobs));
 }
 
+/// `Digest::BLAKE3` is the digest gem's from 3.3.0 (Ruby 4.0 bundles
+/// 3.2.1, without it). The CRuby tree declares the gem
+/// (`apply_digest_gem`) and the Rust target hashes over the `blake3`
+/// crate; spinel's `packages/digest`, JRuby's digest and every other
+/// target's runtime have no BLAKE3, so a call there is refused rather
+/// than emitted against a class that is not there.
+fn report_digest_blake3(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Rust) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+            && let crate::expr::ExprNode::Const { path } = &*recv.node
+            && path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Digest", "BLAKE3"])
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target.as_str(),
+                "Digest::BLAKE3",
+                format!("Digest::BLAKE3.{method} is only available on CRuby (the digest gem, 3.3.0 or later) and Rust"),
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    // Test bodies too (the walk includes them): a model test that
+    // builds a digest is where the call usually is.
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
+/// A constant read in a test file that analysis could not resolve, on a
+/// strict target. Its emitted test names it all the same, as an undeclared
+/// type, so the build refuses it the way it refuses one in app code. The
+/// Ruby family is exempt: there the name resolves at run time against
+/// whatever is loaded (`TCPServer` from socket, a gem's
+/// `Rack::Test::UploadedFile`, the emitted test_helper's `SchemaSetup`),
+/// which the registry does not model for test files. A class a test file
+/// declares itself (`inner_classes`) is emitted with it, so it is not
+/// unknown either. Only the constant: the test files' other diagnostics
+/// are not part of the contract yet.
+fn report_test_unknown_constants(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        return;
+    }
+    use crate::diagnostic::DiagnosticKind;
+    use crate::expr::{Expr, ExprNode};
+    let declared: crate::det::HashSet<String> = app
+        .test_modules
+        .iter()
+        .flat_map(|m| m.inner_classes.iter())
+        .flat_map(|c| {
+            // The class by its full name and its last segment (as the
+            // test reads it), and each constant it defines under either.
+            let full = c.name.0.as_str().to_string();
+            let last = full.rsplit("::").next().unwrap_or_default().to_string();
+            let constants: Vec<String> = c
+                .constants
+                .iter()
+                .flat_map(|(name, _)| [format!("{full}::{}", name.as_str()), format!("{last}::{}", name.as_str())])
+                .collect();
+            [full, last].into_iter().chain(constants)
+        })
+        .collect();
+    let walk = |expr: &Expr| {
+        fn visit(expr: &Expr, target: BuildTarget, declared: &crate::det::HashSet<String>) {
+            if let Some(DiagnosticKind::Unsupported { construct, detail, .. }) = &expr.diagnostic()
+                && construct.as_str() == "constant"
+                && let ExprNode::Const { path } = &*expr.node
+            {
+                let segments: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                // The exact path only: a declared `Known` does not
+                // declare `Known::Missing`.
+                if !declared.contains(&segments.join("::")) {
+                    emit::diagnostics::report_unsupported(expr.span, target.as_str(), "constant", detail.clone());
+                }
+            }
+            expr.node.for_each_child(&mut |child| visit(child, target, declared));
+        }
+        visit(expr, target, &declared)
+    };
+    for module in &app.test_modules {
+        for test in &module.tests {
+            walk(&test.body);
+        }
+        if let Some(setup) = &module.setup {
+            walk(setup);
+        }
+        let methods = module.helpers.iter().chain(module.inner_classes.iter().flat_map(|c| c.methods.iter()));
+        for method in methods {
+            walk(&method.body);
+            for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                walk(default);
+            }
+        }
+        for (_, value) in &module.constants {
+            walk(value);
+        }
+    }
+}
+
 /// An ancestor controller's method reading an ivar only a descendant
 /// writes: analysis types it from the descendants (Phase B″), which the
 /// ruby family runs as written, but a strict target's ancestor has no
@@ -3390,6 +3490,9 @@ fn target_files_inner(
                 expr.decisions &= !(crate::expr::REPLAYED_CLASS_BODY | crate::expr::INHERITED_CLASS_BODY);
             }
         });
+        // On this copy, before any later pass or emitter reads a constant,
+        // so no target without a `::` to print sees a rooted one.
+        crate::lower::rooted_constants::unroot_for_target(&mut trimmed, target);
         without_inherited_replay = trimmed;
         &without_inherited_replay
     } else { app };
@@ -3441,6 +3544,14 @@ fn target_files_inner(
         Some(trimmed) => {
             without_ruby_family_gems = trimmed;
             &without_ruby_family_gems
+        }
+        None => app,
+    };
+    let without_gem_marks;
+    let app = match crate::lower::html_safe::lower_for_target(app, target) {
+        Some(lowered) => {
+            without_gem_marks = lowered;
+            &without_gem_marks
         }
         None => app,
     };
@@ -3554,7 +3665,15 @@ fn target_files_inner(
     for d in crate::lower::validations::acceptance_gaps_for_target(app, target) {
         emit::diagnostics::push(d);
     }
+    // `presence:` on a NOT NULL number with no default, which a strict
+    // target's zero-started field cannot see as unset.
+    for d in crate::lower::validations::presence_gaps_for_target(app, target) {
+        emit::diagnostics::push(d);
+    }
     for d in crate::lower::relation_residue::default_scope_gaps_for_target(app, target) {
+        emit::diagnostics::push(d);
+    }
+    for d in crate::lower::route_guards::route_default_gaps_for_target(app, target) {
         emit::diagnostics::push(d);
     }
     for d in crate::lower::route_guards::route_guard_gaps_for_target(app, target) {
@@ -3570,6 +3689,8 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_digest_blake3(app, target);
+    report_test_unknown_constants(app, target);
     report_boot_program(app, target);
     report_uri_reader_sends(app, target);
     report_descendant_ivar_reads(app, target);
@@ -4076,6 +4197,9 @@ fn with_sidekiq_readme(mut files: Vec<(String, String)>, target: BuildTarget, ap
         "### Jobs on Sidekiq\n\
          The app is on `queue_adapter :sidekiq`, so `perform_later` pushes each job \
          to the Redis its `Sidekiq.configure_client` names, in Sidekiq 8's format. \
+         Its `url:`, `password:`, `username:`, `db:`, timeouts (3 seconds unless it \
+         sets them) and `reconnect_attempts:` are honored; TLS and Sentinel are not \
+         supported. \
          Run them with the same build in a second process (or with a Ruby Sidekiq \
          process on the Rails app):\n\
          ```sh\n\
@@ -5023,7 +5147,7 @@ fn ruby_family_runtime_files(
     let sidekiq_client = if sidekiq {
         let client = crate::runtime_files::read_to_string(SIDEKIQ_REDIS_CLIENT)?;
         const AT_LOAD: &str = "require \"redis\"\n";
-        const OPEN: &str = "    conn = password == \"\" ? Redis.new(url: url, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT) : Redis.new(url: url, password: password, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT)\n";
+        const OPEN: &str = "    conn = client(url, user, pass, db, connect_timeout, read_timeout)\n";
         if !client.contains(AT_LOAD) || !client.contains(OPEN) {
             return Err(format!("{SIDEKIQ_REDIS_CLIENT}: the require or the connect line moved"));
         }
@@ -5422,7 +5546,7 @@ fn ruby_family_runtime_files(
     )?;
     // The middleware the app's gems' Railties `use`, outermost first, as Rails stacks them.
     if !app.gem_middlewares.is_empty() {
-        let stacked = stack_middlewares(&app.gem_middlewares, &app.gem_middleware_blocks, "app");
+        let stacked = stack_middlewares(&app.gem_middlewares, &app.gem_middleware_blocks, &app.gem_middleware_args, "app");
         let body = format!(
             "# frozen_string_literal: true\n# The Rack middleware the app's gems put on Rails' stack from their\n# Railties (`App::gem_middlewares`), outermost first.\nmodule GemMiddleware\n  def self.wrap(app)\n    stack = {stacked}\n    # Rails finalizes the routes once the stack is built (a gem's `RouteSet#finalize!`).\n    ActionDispatch::Routing::RouteSet.finalize_app!\n    stack\n  end\n\n  # The test harness's request through the stack (Rails' integration tests run it), the block at its bottom.\n  def self.around(env, &inner)\n    wrap(inner).call(env)\n  end\n\n  # `Controller.action(name)`'s endpoint (runtime/action_controller_endpoint.rb), over the env it is called with.\n  def self.endpoint(controller, action, env)\n    Main.run_endpoint(controller, action, env)\n  end\nend\n"
         );
@@ -5511,6 +5635,12 @@ fn ruby_family_runtime_files(
     }
     apply_conditional_declarations(&mut files, app);
     apply_file_programs(&mut files, app);
+    // After every pass that writes app code into a file: the boot
+    // program (an initializer may be the only caller) and the file
+    // programs (a top-level statement may be).
+    if flavor == RubyFlavor::CRuby {
+        apply_digest_gem(&mut files);
+    }
     drop_solid_queue_standin(app, &mut files);
     Ok(files)
 }
@@ -5582,6 +5712,52 @@ fn apply_conditional_declarations(files: &mut Vec<(String, String)>, app: &App) 
 /// loads (`App::boot_gem_entries`). A program nothing reaches from those is
 /// listed in `UNREACHED_PROGRAMS` and not loaded, as Ruby loads no gem
 /// file that nothing requires.
+/// A `require` a gem's method runs (OmniAuth's `KeyStore.override_logging` requires `hashie/version`), of a file the tree
+/// carries: its program, as a carried file's top-level require loads it (`program` answers its anchor where the tree
+/// writes programs), or `false` for a file of declarations alone, which the tree has loaded, as Ruby answers a feature
+/// already loaded.
+// Not left as written: the tree has no load path where the gem's files are, and Spinel resolves the feature as it builds.
+fn rewrite_carried_requires(files: &mut [(String, String)], app: &App, program: impl Fn(&str) -> Option<String>) {
+    let known: crate::det::HashSet<String> = app.sources.iter().map(|f| normalize_source(&f.path)).collect();
+    // Not a program that only declares and opens namespaces: loading it again is loading its declarations.
+    let with_program: crate::det::HashSet<String> = app
+        .file_programs
+        .iter()
+        .filter(|p| p.items.iter().any(|item| !matches!(item, crate::app::ProgramItem::Declared(_) | crate::app::ProgramItem::Opened(_))))
+        .map(|p| normalize_source(&p.source))
+        .collect();
+    for (path, content) in files.iter_mut() {
+        if !path.starts_with("app/models/") || path.starts_with("app/models/roundhouse_files/") || !path.ends_with(".rb") || !content.contains("require \"") {
+            continue;
+        }
+        let mut changed = false;
+        let lines: Vec<String> = content
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                let Some(feature) = trimmed.strip_prefix("require \"").and_then(|rest| rest.strip_suffix('"')).filter(|f| !f.contains('"') && !f.contains('#')) else {
+                    return line.to_string();
+                };
+                let indent = &line[..line.len() - trimmed.len()];
+                let Some(target) = resolve_gem_require(&known, "", feature, false).filter(|t| known.contains(t)) else { return line.to_string() };
+                let replaced = if with_program.contains(&target) {
+                    match program(&target) {
+                        Some(anchor) => format!("{indent}RoundhouseAutoload.require_gem_file({anchor:?})"),
+                        None => return line.to_string(),
+                    }
+                } else {
+                    format!("{indent}false")
+                };
+                changed = true;
+                replaced
+            })
+            .collect();
+        if changed {
+            *content = lines.join("\n") + "\n";
+        }
+    }
+}
+
 fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
     use std::fmt::Write;
     if app.file_programs.is_empty() {
@@ -5604,6 +5780,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         .filter_map(|(p, _)| p.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")).map(str::to_string))
         .collect();
     let resolve = |from: &str, feature: &str, relative: bool| resolve_gem_require(&known, from, feature, relative);
+    rewrite_carried_requires(files, app, |target| programs.get(target).map(|_| anchor_of(target)));
     let site = |span: crate::span::Span| -> String {
         let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) else {
             return "(unknown)".to_string();
@@ -5646,6 +5823,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         // Ruby's autoload when the file raises.
         let header = std::mem::take(&mut out);
         let mut loaded: crate::det::HashSet<String> = Default::default();
+        let mut opened: crate::det::HashSet<String> = Default::default();
         let mut steps = Vec::new();
         program_steps(&program.items, 0, &mut steps);
         for (depth, step) in steps {
@@ -5666,6 +5844,24 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                     for name in names {
                         let anchor = crate::emit::ruby::library_file_anchor(name.0.as_str(), app);
                         if emitted.contains(&anchor) && loaded.insert(anchor.clone()) {
+                            // A module in a namespace the file opens, defined ahead of its declaration file: an autoload
+                            // registered on the namespace at run time (Devise's `add_module`) loads this program while that
+                            // file is loading, and the circular require would leave the constant undefined.
+                            if let Some((owner, leaf)) = name.0.as_str().rsplit_once("::")
+                                && opened.contains(owner)
+                                && app.library_classes.iter().any(|c| c.name == *name && c.is_module)
+                            {
+                                let segments: Vec<&str> = owner.split("::").collect();
+                                let mut open: Vec<String> = (0..segments.len())
+                                    .map(|i| {
+                                        let path = segments[..=i].join("::");
+                                        let class = app.library_classes.iter().any(|c| c.name.0.as_str() == path && !c.is_module);
+                                        format!("{} {}", if class { "class" } else { "module" }, segments[i])
+                                    })
+                                    .collect();
+                                open.push(format!("module {leaf}"));
+                                writeln!(out, "{}; {}", open.join("; "), vec!["end"; open.len()].join("; ")).unwrap();
+                            }
                             writeln!(out, "require RoundhouseAutoload.path({anchor:?})").unwrap();
                         }
                     }
@@ -5703,7 +5899,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                             report_program_error(*span, "file_require_not_carried", &message);
                             writeln!(out, "$stderr.puts {message:?}").unwrap();
                         }
-                        _ if is_framework_feature(feature) => {
+                        _ if crate::gems::is_framework_feature(feature) => {
                             writeln!(out, "# {}: `require {feature:?}` is a Rails feature this tree's runtime ports answer; not required", site(*span)).unwrap();
                         }
                         _ => {
@@ -5713,6 +5909,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                 }
                 crate::app::ProgramItem::Opened(chains) => {
                     for chain in chains {
+                        opened.insert(chain.iter().map(|(segment, _)| segment.as_str()).collect::<Vec<_>>().join("::"));
                         let open: Vec<String> =
                             chain.iter().map(|(segment, is_class)| format!("{} {segment}", if *is_class { "class" } else { "module" })).collect();
                         writeln!(out, "{}; {}", open.join("; "), vec!["end"; chain.len()].join("; ")).unwrap();
@@ -5724,7 +5921,17 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                     Some(target) if programs.contains_key(&target) => {
                         edges.entry(from.clone()).or_default().push(target.clone());
                         // Not left to its declaration: a namespace that holds nothing the program reaches is not in the tree (`source_gem_shake`), and the autoload is still registered on it.
-                        if owner != "Object" && !app.library_classes.iter().any(|c| c.name.0.as_str() == owner) {
+                        // Nor to one this program declares later (a module's autoloads come ahead of its body).
+                        let declared_later = !loaded.contains(&crate::emit::ruby::library_file_anchor(owner, app))
+                            && owner.split("::").scan(String::new(), |path, segment| {
+                                if !path.is_empty() {
+                                    path.push_str("::");
+                                }
+                                path.push_str(segment);
+                                Some(path.clone())
+                            })
+                            .all(|path| !app.library_classes.iter().any(|c| c.name.0.as_str() == path && !c.is_module));
+                        if owner != "Object" && (declared_later || !app.library_classes.iter().any(|c| c.name.0.as_str() == owner)) {
                             let segments: Vec<&str> = owner.split("::").collect();
                             let open: Vec<String> = (0..segments.len())
                                 .map(|i| {
@@ -5737,7 +5944,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                         }
                         writeln!(out, "{owner}.autoload(:{name}, RoundhouseAutoload.path({:?}))", anchor_of(&target)).unwrap();
                     }
-                    _ if is_framework_feature(feature) => {
+                    _ if crate::gems::is_framework_feature(feature) => {
                         writeln!(out, "# {}: `autoload :{name}, {feature:?}` is a Rails feature this tree's runtime ports answer", site(*span)).unwrap();
                     }
                     _ => {
@@ -6094,23 +6301,6 @@ fn all_program_items(items: &[crate::app::ProgramItem]) -> Vec<&crate::app::Prog
         }
     }
     out
-}
-
-/// A path with `.` and `..` segments folded, as a require resolves it.
-
-/// A feature of the Rails frameworks (`active_support/core_ext/…`,
-/// `rails`): the runtime ports are the framework in an emitted tree, and
-/// no such file is on its load path.
-pub(crate) fn is_framework_feature(feature: &str) -> bool {
-    let root = feature.split('/').next().unwrap_or(feature);
-    matches!(
-        root,
-        "rails" | "railties" | "active_support" | "activesupport" | "active_record" | "activerecord" | "arel"
-            | "active_model" | "activemodel" | "active_job" | "activejob" | "action_pack" | "actionpack"
-            | "action_controller" | "action_dispatch" | "abstract_controller" | "action_view" | "actionview"
-            | "action_mailer" | "actionmailer" | "action_cable" | "actioncable" | "action_text" | "actiontext"
-            | "active_storage" | "activestorage" | "action_mailbox" | "actionmailbox"
-    )
 }
 
 /// An error diagnostic for a program item the tree does not carry.
@@ -7253,6 +7443,37 @@ fn redis_setting_source(setting: Option<&crate::app::RedisSetting>) -> String {
     }
 }
 
+/// A Float as a Ruby literal: `3.0`, `0.25`.
+fn ruby_float(v: f64) -> String {
+    if v.fract() == 0.0 { format!("{v:.1}") } else { format!("{v}") }
+}
+
+/// `JobRegistry`'s connection settings past the URL and password: the
+/// `configure_client` `username:` (`""` for none) and `db:` (-1 for none,
+/// so the URL's database stands; a variable is checked by
+/// `SidekiqPush.db_setting` when the push first connects), the connect and
+/// read timeouts with Sidekiq's defaults filled in, and the reconnect
+/// delays as one String of seconds, `""` for no retry.
+fn redis_connection_source(config: &crate::app::SidekiqRedisConfig) -> String {
+    use crate::app::RedisSetting;
+    use crate::emit::ruby::expr::ruby_str_literal;
+    let db = match &config.db {
+        None => "-1".to_string(),
+        Some(RedisSetting::Literal(digits)) => digits.clone(),
+        Some(setting) => format!("SidekiqPush.db_setting({})", redis_setting_source(Some(setting))),
+    };
+    let delays: Vec<String> = config.effective_reconnect_delays().into_iter().map(ruby_float).collect();
+    let method = |name: &str, body: String| format!("\n  def self.{name}\n    {body}\n  end\n");
+    [
+        method("sidekiq_redis_username", redis_setting_source(config.username.as_ref())),
+        method("sidekiq_redis_db", db),
+        method("sidekiq_redis_connect_timeout", ruby_float(config.effective_connect_timeout())),
+        method("sidekiq_redis_read_timeout", ruby_float(config.effective_read_timeout())),
+        method("sidekiq_redis_reconnect_delays", ruby_str_literal(&delays.join(" "))),
+    ]
+    .concat()
+}
+
 /// `JobRegistry`'s `config/sidekiq.yml` defaults for the worker:
 /// concurrency 0 and timeout -1 when the file gives none, and the queues
 /// as one String of `name` or `name,weight` words, `""` for none. The
@@ -7321,9 +7542,10 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
         "  def self.sidekiq?\n    false\n  end\n".to_string()
     };
     let redis = format!(
-        "\n  def self.sidekiq_redis_url\n    {}\n  end\n\n  def self.sidekiq_redis_password\n    {}\n  end\n{}",
+        "\n  def self.sidekiq_redis_url\n    {}\n  end\n\n  def self.sidekiq_redis_password\n    {}\n  end\n{}{}",
         redis_setting_source(app.sidekiq_redis.url.as_ref()),
         redis_setting_source(app.sidekiq_redis.password.as_ref()),
+        redis_connection_source(&app.sidekiq_redis),
         worker_defaults_source(&app.sidekiq_worker),
     );
     let redis = format!("{redis}{}", cable_redis_source(app));
@@ -9987,16 +10209,19 @@ fn drop_solid_queue_standin(app: &App, files: &mut Vec<(String, String)>) {
 /// `use` middleware (`App::gem_middlewares`): the request as a Rack env,
 /// through the stack, with the routes at the bottom.
 /// `A.new(B.new(app) { |config| … })`: outermost first, each with the block its `use` passed.
-fn stack_middlewares(classes: &[String], blocks: &crate::det::HashMap<String, String>, app: &str) -> String {
-    classes.iter().rev().fold(app.to_string(), |inner, class| match blocks.get(class) {
-        Some(block) => format!("{class}.new({inner}) {block}"),
-        None => format!("{class}.new({inner})"),
+fn stack_middlewares(classes: &[String], blocks: &crate::det::HashMap<String, String>, args: &crate::det::HashMap<String, String>, app: &str) -> String {
+    classes.iter().rev().fold(app.to_string(), |inner, class| {
+        let given = args.get(class).map_or(String::new(), |a| format!(", {a}"));
+        match blocks.get(class) {
+            Some(block) => format!("{class}.new({inner}{given}) {block}"),
+            None => format!("{class}.new({inner}{given})"),
+        }
     })
 }
 
-fn spinel_gem_middleware(classes: &[String], blocks: &crate::det::HashMap<String, String>) -> String {
-    let stacked = stack_middlewares(classes, blocks, "App.new");
-    let around = stack_middlewares(classes, blocks, "Inner.new(inner)");
+fn spinel_gem_middleware(classes: &[String], blocks: &crate::det::HashMap<String, String>, args: &crate::det::HashMap<String, String>) -> String {
+    let stacked = stack_middlewares(classes, blocks, args, "App.new");
+    let around = stack_middlewares(classes, blocks, args, "Inner.new(inner)");
     format!(
         r#"# frozen_string_literal: true
 # The Rack middleware the app's gems put on Rails' stack from their
@@ -10127,7 +10352,8 @@ module GemMiddleware
 
   def self.replace_headers(res, headers)
     res.headers = Tep.str_hash
-    res.set_cookies.pop while res.set_cookies.length > 0
+    # Not cleared with the headers: Rails' Cookies middleware sits outside this stack and writes the controller's cookies after the middleware's own.
+    routes_cookie_count = res.set_cookies.length
     res.header_fields.pop while res.header_fields.length > 0
     headers.each do |name, value|
       key = name.to_s
@@ -10138,6 +10364,10 @@ module GemMiddleware
       else
         res.headers[key] = values.join(", ")
       end
+    end
+    while routes_cookie_count > 0
+      res.set_cookies << res.set_cookies.shift
+      routes_cookie_count -= 1
     end
   end
 
@@ -10193,7 +10423,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
 
     crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files)?;
     if !app.gem_middlewares.is_empty() {
-        let body = spinel_gem_middleware(&app.gem_middlewares, &app.gem_middleware_blocks);
+        let body = spinel_gem_middleware(&app.gem_middlewares, &app.gem_middleware_blocks, &app.gem_middleware_args);
         for (path, content) in files.iter_mut() {
             if path == "runtime/gem_middleware.rb" {
                 *content = body.clone();
@@ -10619,6 +10849,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         "action_view_number_helper_mixin",
         "active_support_ext",
         "active_model_validator",
+        "active_model_name",
         // `Rails.event` / `Rails.error`: the reporters, ParameterFilter and
         // ExecutionContext. rails.rb requires it, so it ships beside rails.
         "active_support_reporters",
@@ -10838,6 +11069,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     }
     // A PATH gem's own data, beside its compiled code.
     carry_path_gem_data(fixture, &mut files)?;
+    carry_source_gem_data(app, fixture, &mut files)?;
     // `test/fixtures/files` — `file_fixture_path`, which `file_fixture`,
     // `fixture_file_upload` and an `ActiveStorage::FixtureSet.blob`
     // fixture row read. The same blind spot again: the binary files
@@ -10920,6 +11152,8 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_pagination_demand(&mut files)?;
     apply_pagy_demand(&mut files, app)?;
     apply_pay_demand(&mut files, app)?;
+    // Not a program's anchor: this tree writes no gem file programs.
+    rewrite_carried_requires(&mut files, app, |_| None);
     drop_solid_queue_standin(app, &mut files);
     Ok((files, test_stems))
 }
@@ -11797,6 +12031,34 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>, app: &App) -> Res
         }
     }
     apply_git_gem_load_paths(files, &needed, app.gem_lock.as_ref())
+}
+
+/// `Digest::BLAKE3` is the digest gem's from 3.3.0; the digest Ruby 4.0
+/// bundles is 3.2.1, which has no BLAKE3. A tree whose own code names
+/// it declares the version that does (`report_digest_blake3` keeps the
+/// constant off the targets with no BLAKE3 at all). Every emitted Ruby
+/// file is the app's (app/, lib/, config/ with the initializers the boot
+/// program writes, test/, boot.rb) except the framework runtime and the
+/// emitted test helper.
+fn apply_digest_gem(files: &mut Vec<(String, String)>) {
+    const DECLARATION: &str = "gem \"digest\", \">= 3.3.0\"";
+    let demanded = files.iter().any(|(p, c)| {
+        !p.starts_with("runtime/")
+            && p != "test/test_helper.rb"
+            && p.ends_with(".rb")
+            && c.contains("Digest::BLAKE3")
+    });
+    if !demanded {
+        return;
+    }
+    let Some((_, gemfile)) = files.iter_mut().find(|(p, _)| p == "Gemfile") else { return };
+    if gemfile.contains(DECLARATION) {
+        return;
+    }
+    ensure_runtime_gem_declaration(gemfile, "digest", DECLARATION);
+    // The scaffold lock may pin an older digest; `bundle install`
+    // resolves the edited Gemfile fresh.
+    files.retain(|(p, _)| p != "Gemfile.lock");
 }
 
 /// Activate the locked Git checkouts before any guarded native requires.
@@ -14207,6 +14469,46 @@ fn carry_path_gem_data(fixture: &Path, out: &mut Vec<(String, String)>) -> Resul
     Ok(())
 }
 
+/// The text files under the `lib/` of each gem compiled from source, other than its Ruby, at the gem's mount
+/// (`ingest::source_gems::MOUNT`): a gem reads them by a path from its own file (omniauth's
+/// `File.read(File.expand_path('../form.css', __FILE__))`), which the emitted `__FILE__` names under that mount.
+// Not the ruby family's: CRuby loads the installed gem, which reads its own copy.
+fn carry_source_gem_data(app: &App, fixture: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
+    let Some(lock) = app.gem_lock.as_ref() else { return Ok(()) };
+    let vfs = crate::vfs::FsVfs;
+    let roots = crate::i18n::gems::gem_roots(&vfs, fixture);
+    let secret = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        ["secret", "credential", "password", "token"].iter().any(|w| lower.contains(w))
+            || [".key", ".pem", ".p12", ".env"].iter().any(|ext| lower.ends_with(ext))
+    };
+    for name in &lock.source {
+        let Some(version) = lock.version_of(name) else { continue };
+        let Some(installed) = crate::i18n::gems::installed_gem(&vfs, &roots, name, version) else { continue };
+        let lib = installed.join("lib");
+        if !lib.is_dir() {
+            continue;
+        }
+        let prefix = format!("{}/{name}-{version}/lib/", crate::ingest::source_gems_mount());
+        let mut found = Vec::new();
+        walk_dir_into_skipping(&lib, &prefix, &["node_modules", "tmp", "log", "coverage"], &mut found)?;
+        found.retain(|(rel, _)| {
+            let file = rel.rsplit('/').next().unwrap_or(rel);
+            // Not a file reached through a symlink: its target may lie outside the gem.
+            let linked = {
+                let mut at = lib.clone();
+                rel.strip_prefix(&prefix).unwrap_or(rel).split('/').any(|part| {
+                    at.push(part);
+                    fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink())
+                })
+            };
+            !linked && !rel.ends_with(".rb") && !rel.ends_with(".rbs") && !secret(file)
+        });
+        out.extend(found);
+    }
+    Ok(())
+}
+
 /// [`walk_dir_into`] with the directory names to skip given explicitly.
 fn walk_dir_into_skipping(
     src: &Path,
@@ -15346,7 +15648,7 @@ mod tests {
             .collect::<Vec<_>>()
         };
         let mut app = App::new();
-        app.routes.entries.push(crate::dialect::RouteSpec::Explicit {
+        app.routes.entries.push(crate::dialect::RouteSpec::Explicit { defaults: indexmap::IndexMap::new(),
             method: crate::dialect::HttpMethod::Get,
             path: "/widgets".to_string(),
             controller: crate::ident::ClassId(crate::ident::Symbol::from("WidgetsController")),
@@ -15386,7 +15688,7 @@ mod tests {
     #[test]
     fn controller_paths_land_only_in_the_routes_file() {
         let mut app = App::new();
-        app.routes.entries.push(crate::dialect::RouteSpec::Explicit {
+        app.routes.entries.push(crate::dialect::RouteSpec::Explicit { defaults: indexmap::IndexMap::new(),
             method: crate::dialect::HttpMethod::Get,
             path: "/admin/posts".to_string(),
             controller: crate::ident::ClassId(crate::ident::Symbol::from("Admin::PostsController")),

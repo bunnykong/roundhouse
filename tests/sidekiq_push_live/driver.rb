@@ -48,11 +48,18 @@ require_relative "sidekiq_redis"
 require_relative "sidekiq_push"
 require_relative "job_registry"
 
-# The app's `Sidekiq.configure_client` `url: ENV["REDIS_URL"]`, as the
-# registry generates it: the push has no environment fallback of its own.
+# The app's `Sidekiq.configure_client` `url: ENV["REDIS_URL"], db:
+# ENV["SIDEKIQ_LIVE_DB"]`, as the registry generates it: the push has no
+# environment fallback of its own. The test passes the database as
+# `db:`, off the URL, so the pushes reach the reader's database only if
+# `db:` reaches the client.
 module JobRegistry
   def self.sidekiq_redis_url
     SidekiqPush.setting("REDIS_URL")
+  end
+
+  def self.sidekiq_redis_db
+    SidekiqPush.db_setting(SidekiqPush.setting("SIDEKIQ_LIVE_DB"))
   end
 end
 

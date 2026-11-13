@@ -1,8 +1,6 @@
-//! A route table cannot carry a request default it has no slot for, or a guard
-//! that Rails decides when the routes file runs. Emission refuses each at its
-//! source line instead of dropping it, and keeps what the table does carry: a
-//! literal `format` default, a scope default that fills a required segment of
-//! every route under it, and the arm a literal guard selects.
+//! Literal verb defaults reach Ruby-family requests; unsupported default forms
+//! and draw-time guards still refuse at their source. Format defaults and scope
+//! defaults supplying required segments keep their existing behavior.
 //!
 //! Rails 8.1.4 is the oracle (`rails_controls_agree`): an initialized app with
 //! `load_defaults 8.1`, activated through `RailsOracle`.
@@ -62,20 +60,17 @@ fn kept(app: &App) {
 }
 
 #[test]
-fn the_reported_routes_are_refused_at_both_lines() {
+fn the_reported_routes_stop_only_at_the_draw_time_guard() {
     let app = drawn("  get \"/items\", to: \"catalog#show\", defaults: { kind: \"fixed\" }\n  get \"/guarded\", to: \"catalog#show\" if Feature.enabled?");
-    refused(&app, "route defaults", "config/routes.rb:2:");
     refused(&app, "conditional routes", "config/routes.rb:3:");
-    assert_eq!(app.routes.diagnostics.len(), 2, "{:#?}", diagnostics(&app));
+    assert_eq!(app.routes.diagnostics.len(), 1, "{:#?}", diagnostics(&app));
 }
 
 #[test]
 fn defaults_the_table_has_no_slot_for_are_refused() {
     for (body, line) in [
-        ("get '/catalog', to: 'catalog#show', defaults: { kind: 'fixed' }", 2),
-        ("get '/catalog' => 'catalog#show', :defaults => { kind: 'fixed' }", 2),
-        ("match '/catalog', to: 'catalog#show', via: :get, defaults: { kind: 'fixed' }", 2),
-        ("get '/catalog', to: 'catalog#show', defaults: { format: :json, kind: 'fixed' }", 2),
+        ("get '/catalog', to: 'catalog#show', defaults: { controller: :other }", 2),
+        ("get '/catalog', to: 'catalog#show', defaults: { action: :other }", 2),
         ("get '/catalog', to: 'catalog#show', defaults: { format: nil }", 2),
         ("get '/catalog', to: 'catalog#show', defaults: { format: 1 }", 2),
         ("get '/catalog', to: 'catalog#show', defaults: { 'format' => 'json' }", 2),
@@ -84,7 +79,6 @@ fn defaults_the_table_has_no_slot_for_are_refused() {
         ("resources :catalog, only: [:show], defaults: { kind: 'fixed' }", 2),
         ("resource :catalog, only: [:show], controller: 'catalog', defaults: { format: :json }", 2),
         ("namespace :admin, defaults: { format: :json } do\nend", 2),
-        ("with_options defaults: { kind: 'fixed' } do\n  get '/catalog', to: 'catalog#show'\nend", 3),
         ("scope defaults: { user_id: 1 } do\nend", 2),
         ("concern :catalog do |options|\n  scope defaults: { kind: options[:kind] } do\n  end\nend\nconcerns :catalog, kind: 'fixed'", 3),
         ("concern :catalog do |options|\n  options[:format] = :html\n  get '/catalog', to: 'catalog#show', defaults: { format: options[:format] }\nend\nconcerns :catalog, format: :json", 4),
@@ -286,7 +280,7 @@ fn an_inactive_root_leaves_route_table_root_out() {
 
 /// Strict emission stops on the reported routes on each target family.
 #[test]
-fn strict_emission_stops_with_both_locations() {
+fn strict_emission_stops_only_at_the_guard_location() {
     let root = scratch::dir("route-refusals");
     let app = root.join("app");
     for (path, source) in [
@@ -308,7 +302,7 @@ fn strict_emission_stops_with_both_locations() {
             .expect("run roundhouse");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{target}: {stderr}");
-        for expected in ["config/routes.rb:2:3: error[unsupported]: route defaults", "config/routes.rb:3:3: error[unsupported]: conditional routes"] {
+        for expected in ["config/routes.rb:3:3: error[unsupported]: conditional routes"] {
             assert!(stderr.contains(expected), "{target}: missing {expected:?} in {stderr}");
         }
     }
@@ -332,8 +326,7 @@ fn a_loaded_file_checks_guarded_draws_beside_its_top_level_draw() {
 
 #[test]
 fn self_qualified_routes_keep_the_same_refusal_boundary() {
-    refused(&drawn("self.get '/catalog', to: 'catalog#show', defaults: { kind: 'fixed' }"),
-        "route defaults", "config/routes.rb:2:");
+    kept(&drawn("self.get '/catalog', to: 'catalog#show', defaults: { kind: 'fixed' }"));
     refused(&drawn("self.get '/catalog', to: 'catalog#show' if Feature.enabled?"),
         "conditional routes", "config/routes.rb:2:");
     let app = drawn("self.get '/catalog', to: 'catalog#show'");
@@ -519,6 +512,8 @@ check("route default", reported.recognize_path("/items")[:kind], "fixed")
 check("false guard", reported.routes.map {{ |r| r.path.spec.to_s }}.grep(%r{{guarded}}), [])
 check("scope default", draw(%q{{scope defaults: {{ kind: "fixed" }} do get "/catalog", to: "catalog#show" end}}).recognize_path("/catalog")[:kind], "fixed")
 check("root format", draw(%q{{scope defaults: {{ format: :json }} do root to: "catalog#show" end}}).recognize_path("/")[:format], :json)
+check("reserved controller", draw(%q{{get '/catalog', to: 'catalog#show', defaults: {{ controller: :other }}}}).recognize_path('/catalog')[:controller], 'catalog')
+check("reserved action", draw(%q{{get '/catalog', to: 'catalog#show', defaults: {{ action: :other }}}}).recognize_path('/catalog')[:action], 'show')
 check("symbol format", draw(%q{{get "/catalog", to: "catalog#show", defaults: {{ format: :json }}}}).recognize_path("/catalog")[:format], :json)
 check("regex scope", draw(%q{{scope ':shop', shop: /\\d+/ do get '/catalog', to: 'catalog#show' end}}).recognize_path('/7/catalog')[:shop], '7')
 check("literal guard", draw(%q{{get "/a", to: "catalog#show" if false
@@ -542,4 +537,47 @@ puts "Rails agrees"
         return;
     }
     assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("Rails agrees"), "{stderr}");
+}
+
+#[test]
+fn literal_verb_defaults_are_kept_for_the_ruby_family() {
+    kept(&drawn("with_options defaults: { kind: 'fixed' } do\n  get '/catalog', to: 'catalog#show'\nend"));
+    let app = drawn("get '/literal', to: 'catalog#show', defaults: { text: 'fixed', symbol: :staff, number: 1, yes: true, no: false, absent: nil }");
+    kept(&app);
+    for target in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
+        target_files(&app, Path::new("."), target).expect("emit");
+    }
+}
+
+#[test]
+fn request_defaults_are_refused_at_the_pair_for_other_targets() {
+    let app = drawn("get '/literal', to: 'catalog#show', defaults: { kind: 'fixed' }");
+    for &target in BuildTarget::ALL.iter().chain([BuildTarget::Roda].iter()) {
+        let gaps = roundhouse::lower::route_guards::route_default_gaps_for_target(&app, target);
+        if target.applies_route_defaults() { assert!(gaps.is_empty(), "{target:?}"); }
+        else {
+            assert_eq!(gaps.len(), 1, "{target:?}: {gaps:?}");
+            let text = gaps[0].render(&app.sources);
+            assert!(text.starts_with("config/routes.rb:2:49:"), "{target:?}: {text}");
+            assert!(text.contains(target.as_str()) && text.contains("kind"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn computed_or_unscoped_defaults_still_refuse() {
+    for value in ["1.5", "[]", "{}", "VALUE", "value", "\"#{value}\""] {
+        refused(&drawn(&format!("get '/catalog', to: 'catalog#show', defaults: {{ kind: {value} }}")), "route defaults", "config/routes.rb:2:");
+    }
+}
+
+#[test]
+fn false_and_nil_do_not_supply_required_helper_segments() {
+    for value in ["false", "nil"] {
+        let app = drawn(&format!("scope '/:number', defaults: {{ number: 'outer' }} do\n  get '/catalog', to: 'catalog#show', defaults: {{ number: {value} }}\nend"));
+        kept(&app);
+        let flat = roundhouse::lower::routes::flatten_routes_for_helpers(&app);
+        assert!(flat[0].param_defaults.is_empty(), "{value}: {:?}", flat[0].param_defaults);
+        assert!(flat[0].request_defaults.is_empty());
+    }
 }

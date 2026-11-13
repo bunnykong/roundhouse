@@ -234,9 +234,9 @@ fn ingests_tables_columns_indexes_fk_and_pk() {
 
     // Foreign key.
     let fk = widgets.foreign_keys.first().expect("one foreign key");
-    assert_eq!(fk.from_column.as_str(), "company_id");
+    assert_eq!(fk.from_columns[0].as_str(), "company_id");
     assert_eq!(fk.to_table.0.as_str(), "companies");
-    assert_eq!(fk.to_column.as_str(), "id");
+    assert_eq!(fk.to_columns[0].as_str(), "id");
     assert!(matches!(fk.on_delete, roundhouse::schema::ReferentialAction::Cascade));
 
     // Ledgered gaps: the dropped tstzrange column and the unmodeled view.
@@ -330,6 +330,33 @@ ALTER TABLE ONLY public.assignments
     assert_eq!(assignments.primary_key_columns, [Symbol::from("project_id"), Symbol::from("user_id")]);
     assert!(!messages.iter().any(|m| m.contains("primary key dropped")), "a composite key is kept, not ledgered: {messages:?}");
     assert!(messages.iter().any(|m| m.contains("foreign key dropped") && m.contains("composite")), "{messages:?}");
+}
+
+#[test]
+fn foreign_key_timing_follows_postgres() {
+    use roundhouse::emit::shared::schema_sql::{Dialect, render_schema_statements_for};
+    use roundhouse::schema::Deferrable::{Deferred, Immediate};
+    // The timing PostgreSQL 18 records for each clause. pg_dump spells a
+    // deferrable key only the first two ways.
+    let cases = [
+        ("deferred", "ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED", Some(Deferred)),
+        ("bare", "DEFERRABLE", Some(Immediate)),
+        ("immediate", "DEFERRABLE INITIALLY IMMEDIATE", Some(Immediate)),
+        ("implied", "INITIALLY DEFERRED", Some(Deferred)),
+        ("never", "NOT DEFERRABLE", None),
+        ("plain", "", None),
+    ];
+    let mut sql = String::from("CREATE TABLE public.parents (\n    id bigint NOT NULL\n);\n\nALTER TABLE ONLY public.parents\n    ADD CONSTRAINT parents_pkey PRIMARY KEY (id);\n");
+    for (name, clause, _) in cases {
+        sql.push_str(&format!("\nCREATE TABLE public.{name}_children (\n    parent_id bigint\n);\n\nALTER TABLE ONLY public.{name}_children\n    ADD CONSTRAINT fk_{name} FOREIGN KEY (parent_id) REFERENCES public.parents(id) {clause};\n"));
+    }
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").unwrap();
+    for (name, _, timing) in cases {
+        assert_eq!(schema.tables[&Symbol::from(format!("{name}_children"))].foreign_keys[0].deferrable, timing, "{name}");
+    }
+    let ddl = render_schema_statements_for(&schema, Dialect::Sqlite).unwrap();
+    let deferred = ddl.iter().find(|s| s.starts_with("CREATE TABLE IF NOT EXISTS deferred_children ")).unwrap();
+    assert!(deferred.contains("ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED"), "{deferred}");
 }
 
 #[test]

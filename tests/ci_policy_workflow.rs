@@ -907,7 +907,9 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
         // The suites run side by side, so in any order.
         let mut ran: Vec<String> = fs::read_to_string(log).unwrap().lines().map(String::from).collect();
         ran.sort();
-        let mut expected: Vec<&str> = expected_log.lines().collect();
+        // Not one run per suite: each first runs to record its shareable Spinel cases (`RH_SPINEL_BUNDLE_COLLECT`).
+        let collected: Vec<String> = expected_log.lines().map(|l| l.replace(" --nocapture", "")).collect();
+        let mut expected: Vec<&str> = expected_log.lines().chain(collected.iter().map(String::as_str)).collect();
         expected.sort();
         assert_eq!(ran, expected, "{result:?}");
     }
@@ -981,6 +983,88 @@ fn framework_loop_stops_a_slow_suite_and_compiles_at_its_opt_level() {
             "{recorded}"
         );
     }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn framework_loop_runs_a_suite_beside_the_build_of_its_shared_cases() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = scratch::dir(&format!("framework-bundle-{unique}"));
+    let executable = |path: &std::path::Path, body: &str| {
+        fs::write(path, body).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    executable(
+        &root.join("cargo"),
+        concat!(
+            "#!/bin/sh\n",
+            "prev=\n",
+            "for a in \"$@\"; do\n",
+            "  if [ \"$prev\" = --test ]; then\n",
+            "    printf '{\"reason\":\"compiler-artifact\",\"target\":{\"name\":\"%s\",\"kind\":[\"test\"]},\"executable\":\"%s/%s\"}\\n' \"$a\" \"$STUBS\" \"$a\"\n",
+            "  fi\n",
+            "  prev=$a\n",
+            "done\n",
+        ),
+    );
+    let stubs = root.join("stubs");
+    fs::create_dir(&stubs).unwrap();
+    executable(
+        &stubs.join("shared"),
+        concat!(
+            "#!/bin/sh\n",
+            "if [ -n \"$RH_SPINEL_BUNDLE_COLLECT\" ]; then echo '{\"test\":\"shared::case\"}' > \"$RH_SPINEL_BUNDLE_COLLECT/k.json\"; exit 101; fi\n",
+            "echo shared-started >> \"$RUN_LOG\"\n",
+            "until [ -e \"$RH_SPINEL_BUNDLE/finished\" ]; do sleep 0.1; done\n",
+            "printf 'shared %s bundle=%s\\n' \"$*\" \"$RH_SPINEL_BUNDLE\" >> \"$RUN_LOG\"\n",
+        ),
+    );
+    executable(&stubs.join("alone"), "#!/bin/sh\n[ -n \"$RH_SPINEL_BUNDLE_COLLECT\" ] || printf 'alone %s\\n' \"$*\" >> \"$RUN_LOG\"\n");
+    executable(
+        &stubs.join("spinel_bundle"),
+        concat!(
+            "#!/bin/sh\n",
+            "echo '[\"k\"]' > \"$RH_SPINEL_BUNDLE_OUT/pending.json\"\n",
+            "i=0; until grep -q shared-started \"$RUN_LOG\" 2> /dev/null || [ $i -gt 100 ]; do i=$((i+1)); sleep 0.1; done\n",
+            "printf 'spinel_bundle %s cases=%s\\n' \"$*\" \"$(ls \"$RH_SPINEL_BUNDLE_COLLECT\")\" >> \"$RUN_LOG\"\n",
+            "echo '{\"shared::case\": 40}' > \"$RH_SPINEL_BUNDLE_OUT/seconds.json\"\n",
+        ),
+    );
+    let log = root.join("run.log");
+    let timings = root.join("timings.jsonl");
+    let result = Command::new("bash")
+        .args(["-e", "-o", "pipefail", "-c", "scripts/ci-spinel-framework.sh"])
+        .env("TESTS", "shared alone")
+        .env("RUN_LOG", &log)
+        .env("STUBS", &stubs)
+        .env("RUNNER_TEMP", &root)
+        .env("CI_SPINEL_TIMINGS_OUT", &timings)
+        .env("PATH", format!("{}:{}", root.display(), std::env::var("PATH").unwrap()))
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    let ran = fs::read_to_string(&log).unwrap();
+    let bundle = ran.lines().position(|l| l == "spinel_bundle --ignored --exact spinel_bundle_build --nocapture cases=k.json");
+    let shared = ran.lines().position(|l| {
+        l == format!("shared --ignored --nocapture bundle={}/spinel-framework/bundles", root.display())
+    });
+    let started = ran.lines().position(|l| l == "shared-started");
+    assert!(started.is_some() && bundle.is_some() && shared.is_some() && started < bundle && bundle < shared, "{ran}");
+    assert!(ran.lines().any(|l| l == "alone --ignored --nocapture"), "{ran}");
+    let recorded = fs::read_to_string(&timings).unwrap();
+    let seconds = recorded
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|r| r["name"] == "shared")
+        .map(|r| r["seconds"].as_u64().unwrap());
+    assert!(seconds.is_some_and(|s| s >= 40), "the shared build is charged to its suite: {recorded}");
     fs::remove_dir_all(root).unwrap();
 }
 

@@ -118,6 +118,28 @@ class ActionControllerCookiesTest < Minitest::Test
     assert jar.flag_secure?(:session_token)
   end
 
+  # Rails' JSON cookie serializer gives back what was written, not its `to_s`: Devise's remember cookie is
+  # `[[id], salt, at]`, and Rails 8's authentication generator signs an Integer session id.
+  def test_signed_reads_back_the_written_value_not_its_text
+    jar = ActionController::CookieJar.new({})
+    jar.signed[:remember] = { value: [[7], "salt", "1.5"], expires: Time.utc(2030, 1, 2, 3, 4, 5) }
+    jar.signed[:session_id] = 42
+    assert_equal [[7], "salt", "1.5"], jar.signed[:remember]
+    assert_equal 42, jar.signed[:session_id]
+    assert_equal "Wed, 02 Jan 2030 03:04:05 GMT", jar.flag_expires(:remember)
+  end
+
+  # A removal goes out expired, unlike a write of "": Devise's sign-out deletes the remember cookie this way.
+  def test_a_delete_is_told_from_an_empty_write
+    jar = ActionController::CookieJar.new({ "remember" => "x" })
+    jar.delete(:remember, { path: "/" })
+    jar[:blank] = ""
+    assert jar.deleted?(:remember)
+    refute jar.deleted?(:blank)
+    jar[:remember] = "again"
+    refute jar.deleted?(:remember)
+  end
+
   # ── permanence ───────────────────────────────────────────────
   # `permanent` was the identity until 2026-10-06, so every "permanent"
   # cookie went out without Expires and died with the browser session:

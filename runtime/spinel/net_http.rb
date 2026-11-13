@@ -52,9 +52,8 @@
 #
 # Last definition wins under spinel, and a redefined method sees the
 # class's other methods and ivars — `transport_request` below is the
-# package's `#request` body re-stated over `connect`/`begin_transport`
-# (also defined below) and `write_request`/`read_response`, which this
-# file leaves alone.
+# package's `#request` body re-stated over the package's `connect`,
+# `begin_transport` below and `write_request`/`read_response`.
 require "net/http"
 require_relative "http_stub"
 require_relative "tcp_socket_stub"
@@ -268,8 +267,8 @@ module Net
     # records a connection's stage there and its pool reads it back to
     # tell a dead idle connection from a push the service may have
     # (`lower::known_super_forwarding` gives its `(...)` overrides these
-    # signatures). Both are defined here rather than relied on from the
-    # package, which names them only from matz/spinel#8361 on.
+    # signatures). The package's connect also owns TLS verification and
+    # the handshake deadline (Spinel af56d9db7 or later).
     def transport_request(req)
       connect if @socket.nil?
       begin_transport(req)
@@ -294,22 +293,6 @@ module Net
 
     def keep_alive_timeout=(seconds)
       @keep_alive_timeout = seconds
-    end
-
-    def connect
-      @socket = connect_with_timeout
-      if @use_ssl
-        begin
-          tls = OpenSSL::SSL::SSLSocket.new(@socket)
-        rescue NameError
-          raise "net/http: an https request needs the openssl package (require \"openssl\")"
-        end
-        tls.hostname = @address
-        tls.connect
-        @tls = tls
-      end
-      @fresh = true
-      nil
     end
 
     # Connects again unless the socket was opened for this request: every

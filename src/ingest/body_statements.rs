@@ -58,6 +58,10 @@ const MODULE_METHODS: &[&str] = &[
     "undef_method",
     "instance_variable_set",
     "delegate",
+    // A marker naming a method an ancestor or an alias written back gives the class (Hashie's `private :_regular_reader`).
+    "private",
+    "public",
+    "protected",
 ];
 
 /// Calls whose block is the body of a method they define, which runs

@@ -857,6 +857,13 @@ module ActionView
     # Methods that delete keys dup first.
     EMPTY_HTML_OPTS = {}.freeze
 
+    # Rails' `url_for(:back)` (`link_to "Back", :back`): a step back in the history, what Rails answers for a request
+    # with no referrer. A strict target's view has no request in scope (see `url_for_path`); the ruby family reopens
+    # it in `view_helpers_ext.rb` over the request's referrer.
+    def self.back_url
+      "javascript:history.back()"
+    end
+
     def self.link_to(text, href, opts = EMPTY_HTML_OPTS)
       # `opts.to_h` is a no-op on Ruby Hash and NamedTuple→Hash on
       # Crystal. Do not gate `opts.is_a?(Hash)`: Rust emit maps that

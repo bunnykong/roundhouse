@@ -576,6 +576,7 @@ module Main
     controller.params = params
     controller.path_parameters = matched.path_params
     Main.nest_upload_parts(controller.params, req.upload_parts) if req.upload_parts.length > 0
+    RouteTable.route_defaults(matched.defaults, params, matched.path_params)
     # Typed request object + per-request context statics. Helpers are
     # module functions with no controller in scope; the emit rewrites
     # their bare `request` reads to `ActionController::Current.request`
@@ -639,6 +640,7 @@ module Main
     # normalizes keys so Symbol-constant indexing (`cookies[:tag_filters]`)
     # resolves. Same shared ActionController::CookieJar the CRuby overlay uses.
     controller.cookies = ActionController::CookieJar.new(req.cookies)
+    controller.cookies = controller.request.adopt_cookie_jar(controller.cookies)
     # Inbound flash: each message rides its own SIGNED cookie
     # (flash_<key>; runtime/signed_cookies.rb) — one that
     # does not verify reads as no message, so a client cannot make the
@@ -809,6 +811,7 @@ module Main
       # `cookies.permanent` — without it the cookie ends with the browser.
       exp = jar.flag_expires(cname)
       copts["Expires"] = exp if exp.length > 0
+      copts["Max-Age"] = "0" if jar.deleted?(cname)
       res.set_cookie(cname, out_cookies[cname], copts)
       ci += 1
     end
@@ -825,6 +828,7 @@ module Main
     ActionController::Current.controller = controller
     controller.assign_http_session(request_obj.session)
     controller.cookies = ActionController::CookieJar.new(req.cookies)
+    controller.cookies = controller.request.adopt_cookie_jar(controller.cookies)
     inbound_flash = ActionDispatch::Flash.new
     req.cookies.each do |cname, cvalue|
       if cname.start_with?("flash_")

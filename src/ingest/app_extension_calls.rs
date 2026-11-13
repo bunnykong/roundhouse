@@ -133,7 +133,11 @@ pub(super) fn mark(app: &mut App) {
                 _ => None,
             });
             let replays = own_call || through_own_reader || on_app_class.is_some();
-            if replays && !hook && block.is_none() && !expr.span.is_synthetic() {
+            // A block only to the class's own class method (OmniAuth's `uid do … end`, spliced from the Strategy's
+            // ClassMethods), which takes it as Ruby hands it over.
+            // Nor a block reading a local of the class body, which the replayed call no longer stands beside.
+            let block_ok = block.as_ref().is_none_or(|b| own_call && direct.contains(method.as_str()) && reads_no_local(b) && args.iter().all(reads_no_local));
+            if replays && !hook && block_ok && !expr.span.is_synthetic() {
                 let local_new = own_call && !direct.contains(method.as_str());
                 if local_new && (mixed_body || args.iter().any(|a| !literal_argument(a))
                     || redefined.contains(&owner) || parents.get(&owner).and_then(|p| dispatching.get(p)).is_some_and(|m| m.contains(method.as_str()))
@@ -348,6 +352,8 @@ fn reads_no_local(expr: &crate::expr::Expr) -> bool {
 fn reads_only(expr: &crate::expr::Expr, bound: &mut Vec<crate::ident::Symbol>) -> bool {
     match &*expr.node {
         ExprNode::Var { name, .. } => return bound.contains(name),
+        // `x += 1` reads `x` too, which the target alone does not show.
+        ExprNode::OpAssign { target: crate::expr::LValue::Var { name, .. }, .. } if !bound.contains(name) => return false,
         // Not left to `for_each_child`, which does not enter a `defined?` operand.
         ExprNode::Defined { operand } => return reads_only(operand, bound),
         ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {

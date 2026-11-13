@@ -126,6 +126,10 @@ fn rewrite_method(body: &mut Expr, params: Vec<Symbol>) {
     if params.is_empty() {
         return;
     }
+    // Not split under a bare `super`: it passes the parameter's current value, which a fresh local would leave behind.
+    if has_zsuper(body) {
+        return;
+    }
     let param_set: HashSet<Symbol> = params.into_iter().collect();
     let mut unsafe_params = HashSet::default();
     collect_unsafe_writes(body, &param_set, &mut unsafe_params, false);
@@ -281,6 +285,15 @@ fn collect_unsafe_writes(
                 .for_each_child(&mut |c| collect_unsafe_writes(c, params, out, in_unsafe_scope));
         }
     }
+}
+
+fn has_zsuper(expr: &Expr) -> bool {
+    if matches!(&*expr.node, ExprNode::Super { args: None }) {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| found = found || has_zsuper(c));
+    found
 }
 
 fn is_join_if(expr: &Expr, params: &HashSet<Symbol>) -> bool {

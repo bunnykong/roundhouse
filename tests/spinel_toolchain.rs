@@ -186,6 +186,10 @@ mod multipart_file_parts;
 mod default_format_dispatch;
 #[path = "spinel_toolchain/route_default_format.rs"]
 mod route_default_format;
+#[path = "support/route_request_defaults.rs"]
+mod route_request_defaults_contract;
+#[path = "spinel_toolchain/route_request_defaults.rs"]
+mod route_request_defaults;
 #[path = "support/json_params.rs"]
 mod json_params_contract;
 #[path = "spinel_toolchain/json_params.rs"]
@@ -206,6 +210,10 @@ mod class_side_default;
 mod hash_write_through_reader_contract;
 #[path = "spinel_toolchain/hash_write_through_reader.rs"]
 mod hash_write_through_reader;
+#[path = "support/app_class_registry.rs"]
+mod app_class_registry_contract;
+#[path = "spinel_toolchain/app_class_registry.rs"]
+mod app_class_registry;
 #[path = "spinel_toolchain/action_text_sanitize.rs"]
 mod action_text_sanitize;
 #[path = "support/campfire_caches.rs"]
@@ -312,6 +320,14 @@ mod mutable_literals;
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]
 mod auto_source_gem;
+#[path = "support/gem_method_require.rs"]
+mod gem_method_require_contract;
+#[path = "spinel_toolchain/gem_method_require.rs"]
+mod gem_method_require;
+#[path = "support/block_arg_conditional.rs"]
+mod block_arg_conditional_contract;
+#[path = "spinel_toolchain/block_arg_conditional.rs"]
+mod block_arg_conditional;
 #[path = "support/untyped_calendar.rs"]
 mod untyped_calendar_contract;
 #[path = "spinel_toolchain/untyped_calendar.rs"]

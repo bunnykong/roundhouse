@@ -224,9 +224,24 @@ module ActionMailer
       nil
     end
 
+    # ActionMailer's own defaults (`ActionMailer::Base.default_params`); a mailer with `default` entries answers them
+    # merged over these (`lower::mailer_templates`).
+    def self.base_default_params
+      { mime_version: "1.0", charset: "UTF-8", content_type: "text/plain", parts_order: ["text/plain", "text/enriched", "text/html"] }
+    end
+
+    def default_params
+      ActionMailer::Base.base_default_params
+    end
+
     # The :test-style delivery log. Lazy-init on first read (top-level
     # assignment at require time is a load-order trap under AOT).
     def self.deliveries
+      ActionMailer::Base.__deliveries
+    end
+
+    # Not each mailer's own: Rails' test delivery log is one, which every mailer's `deliveries` answers.
+    def self.__deliveries
       @deliveries ||= []
     end
 

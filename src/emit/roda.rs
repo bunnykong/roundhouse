@@ -60,7 +60,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files: Vec<EmittedFile> = Vec::new();
     files.push(file("Gemfile", GEMFILE));
     files.push(file("config.ru", CONFIG_RU));
-    files.push(file("db.rb", DB_RB));
+    // Sequel's SQLite connection makes LIKE case-sensitive unless told not
+    // to; Rails' leaves SQLite's default. A SQLite application's LIKE, its
+    // CHECKs included, keeps Rails' reading. Any other app's file is unchanged.
+    let sqlite = app.schema.expression_dialect == crate::schema::generated::GeneratedExpressionDialect::Sqlite;
+    files.push(file("db.rb", &if sqlite { DB_RB.replacen("__dir__)))", "__dir__)), case_sensitive_like: false)", 1) } else { DB_RB.to_string() }));
     files.extend(emit_migrations(app));
     files.extend(emit_models(app));
     files.push(emit_app_rb(app));
@@ -144,11 +148,12 @@ fn migration_for(app: &App, table: &Table) -> String {
     let fk_cols: Vec<&str> = table
         .foreign_keys
         .iter()
-        .map(|fk| fk.from_column.as_str())
+        .filter(|fk| fk.from_columns.len() == 1)
+        .map(|fk| fk.from_columns[0].as_str())
         .collect();
     let mut lines: Vec<String> = Vec::new();
     for col in &table.columns {
-        if col.primary_key {
+        if col.primary_key && table.primary_key_columns.is_empty() {
             lines.push(format!("      primary_key :{}", col.name));
             continue;
         }
@@ -156,9 +161,20 @@ fn migration_for(app: &App, table: &Table) -> String {
             let fk = table
                 .foreign_keys
                 .iter()
-                .find(|fk| fk.from_column == col.name)
+                .find(|fk| fk.from_columns.as_slice() == std::slice::from_ref(&col.name))
                 .unwrap();
             let mut l = format!("      foreign_key :{}, :{}", col.name, fk.to_table);
+            // Without `key:`, Sequel references the target's primary key, so
+            // `key:` is left out only when that key is exactly `id`.
+            let target_key_is_id = app.schema.tables.get(&fk.to_table.0).is_some_and(|t| if t.primary_key_columns.is_empty() {
+                t.columns.iter().filter(|c| c.primary_key).map(|c| c.name.as_str()).eq(["id"])
+            } else {
+                t.primary_key_columns.iter().map(|c| c.as_str()).eq(["id"])
+            });
+            if !target_key_is_id || fk.to_columns.len() != 1 || fk.to_columns[0].as_str() != "id" {
+                l.push_str(&format!(", key: [{}]", fk.to_columns.iter().map(|c| crate::emit::ruby::expr::ruby_sym_literal(c.as_str())).collect::<Vec<_>>().join(", ")));
+            }
+            if let Some(timing) = fk.deferrable { l.push_str(&format!(", deferrable: :{}", if timing == crate::schema::Deferrable::Deferred { "deferred" } else { "immediate" })); }
             if !col.nullable {
                 l.push_str(", null: false");
             }
@@ -177,6 +193,22 @@ fn migration_for(app: &App, table: &Table) -> String {
             l.push_str(&format!(", default: Sequel.lit({})", crate::emit::ruby::expr::ruby_str_literal(sql)));
         }
         lines.push(l);
+    }
+    let list = |keys: &[crate::Symbol]| keys.iter().map(|c| crate::emit::ruby::expr::ruby_sym_literal(c.as_str())).collect::<Vec<_>>().join(", ");
+    if !table.primary_key_columns.is_empty() {
+        // Identifier expressions keep Sequel from imposing NOT NULL on SQLite's
+        // composite key columns. PostgreSQL enforces its own PK nullability.
+        let keys = table.primary_key_columns.iter().map(|c| format!("Sequel.identifier({})", crate::emit::ruby::expr::ruby_sym_literal(c.as_str()))).collect::<Vec<_>>().join(", ");
+        lines.push(format!("      primary_key [{keys}]"));
+    }
+    for fk in table.foreign_keys.iter().filter(|fk| fk.from_columns.len() > 1) {
+        let mut line = format!("      foreign_key [{}], {}, key: [{}]", list(&fk.from_columns), crate::emit::ruby::expr::ruby_sym_literal(fk.to_table.0.as_str()), list(&fk.to_columns));
+        if let Some(timing) = fk.deferrable { line.push_str(&format!(", deferrable: :{}", if timing == crate::schema::Deferrable::Deferred { "deferred" } else { "immediate" })); }
+        for (key, action) in [("on_delete", &fk.on_delete), ("on_update", &fk.on_update)] {
+            let action = match action { crate::schema::ReferentialAction::Cascade => "cascade", crate::schema::ReferentialAction::SetNull => "set_null", crate::schema::ReferentialAction::Restrict => "restrict", crate::schema::ReferentialAction::SetDefault => "set_default", _ => continue };
+            line.push_str(&format!(", {key}: :{action}"));
+        }
+        lines.push(line);
     }
     for idx in &table.indexes {
         // The FK line above doesn't auto-index; keep the schema's
@@ -2204,7 +2236,7 @@ mod tests {
             .split('/')
             .filter_map(|s| s.strip_prefix(':').map(|p| p.to_string()))
             .collect();
-        FlatRoute {
+        FlatRoute { request_defaults: Vec::new(),
             method,
             source_path: path.to_string(),
             path: path.to_string(),

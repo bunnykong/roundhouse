@@ -74,9 +74,11 @@ pub(super) fn external_class_method_param_tys(
         ("Db", "column_int") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_float") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_text") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "column_binary") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_bool") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "finalize") => Some(vec![Ty::Int]),
         ("Db", "escape_string") => Some(vec![Ty::Str]),
+        ("Db", "escape_binary") => Some(vec![Ty::Str]),
         ("Db", "escape_int") => Some(vec![Ty::Int]),
         ("Db", "escape_bool") => Some(vec![Ty::Bool]),
         // Nullable-column seam: nil renders the SQL keyword NULL. The
@@ -85,8 +87,9 @@ pub(super) fn external_class_method_param_tys(
         ("Db", "column_int_opt") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_float_opt") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_text_opt") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "column_binary_opt") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_bool_opt") => Some(vec![Ty::Int, Ty::Int]),
-        ("Db", "escape_string_opt") => {
+        ("Db", "escape_string_opt" | "escape_binary_opt") => {
             Some(vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }])
         }
         ("Db", "escape_int_opt") => Some(vec![Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }]),

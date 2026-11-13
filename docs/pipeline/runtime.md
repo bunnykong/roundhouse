@@ -478,6 +478,55 @@ string column, at the one site that already knows the type — and it
 changes what every reader sees, so it is a change to make deliberately
 rather than as a side effect.
 
+### A `t.binary` column is bytes in a String, through its own Db pair
+
+A binary column reads through `Db.column_binary` (`_opt` when nullable)
+and writes through `Db.escape_binary`, and the Arel and adapter lowerings
+type its values `ValueType::Binary`. A digest such as
+`Digest::BLAKE3.digest(content)` is the usual tenant, and it can hold a
+NUL byte, which no quoted SQL literal carries.
+
+**Why a pair of its own.** In the Ruby family a String carries its
+encoding, so the SQLite shims' `escape_string` already writes an `X'…'`
+literal for a value that holds a NUL or is non-ASCII BINARY, and they
+alias the binary pair to the text pair. Rust's `String` is UTF-8 with no
+encoding tag. There the pair is real: a binary value is held one char
+per byte (U+0000–U+00FF), `escape_binary` writes `X'…'` for any NUL or
+high byte, and `column_binary` reads a BLOB back the same way. `find_by`
+on a binary column escapes through the same method, so a lookup by
+digest matches the bytes the INSERT stored. Spinel binds parameters, so
+`Binary` binds through `bind_text`.
+
+The other shims treat a value as its UTF-8 bytes (none of them emits
+`Digest::BLAKE3`). Crystal, C#, Elixir, Go, Kotlin and Python write
+`X'…'` when the value holds a NUL, since a NUL inside a quoted literal
+ends the SQL text (Python's sqlite3 refuses it outright), and the text
+literal otherwise. Go and Elixir, whose strings can hold bytes that are
+not UTF-8, also write `X'…'` for those, and Python for the surrogate
+escapes its reader decodes them to. Crystal, C# and Python decode a BLOB
+cell, which their drivers hand back as bytes, as UTF-8. On PostgreSQL
+(`db_pg.rb`) the column is `bytea`: `escape_binary` writes bytea's hex
+input format, `'\x…'`, and `column_binary` decodes the text result
+format, hex or (under `bytea_output = escape`) the escape format, into
+an ASCII-8BIT string, as Rails reads it.
+
+**Known gaps.**
+- **JRuby** reads a binary column through JDBC `getString`, which
+  decodes the BLOB as UTF-8, so bytes that are not valid UTF-8 (most
+  digests) do not round-trip. Writes are correct (`X'…'`).
+- **Rust `Digest::BLAKE3`** hashes its argument's UTF-8 bytes. A value
+  read back from a binary column is one char per byte, so one holding a
+  byte at or above 0x80 hashes differently from CRuby, which hashes the
+  raw bytes. Hashing text, the usual case and what the pinned test
+  exercises, agrees.
+
+**`Digest::BLAKE3`** is typed in the stdlib registry next to MD5/SHA1/
+SHA256, and it exists only where a runtime has it: CRuby, from the digest
+gem 3.3.0 or later (an emitted Gemfile that uses it declares the gem), and
+Rust, from the `blake3` crate (declared in Cargo.toml only when a body
+calls it). Every other target refuses the call with an error
+(`project.rs::report_digest_blake3`). Pinned by `tests/binary_digest.rs`.
+
 ### An absent UNSIGNED cookie reads as `""`, not `nil`
 
 `cookies[:missing]` answers `""`; Rails answers `nil`.
@@ -1800,7 +1849,7 @@ broadcast had already gone out. `scripts/campfire-cable-walk` splices
 header. What this runtime does not have is the third option Rails
 actually uses: enqueue now, run elsewhere, later.
 
-### Queued jobs are serialized payloads, durable only under `:sidekiq`
+### Queued jobs are serialized payloads
 
 On the ruby, jruby and spinel lanes, a served app's `perform_later`
 queues an ActiveJob-format JSON payload: the `job.serialize` hash of
@@ -1831,7 +1880,7 @@ evaluate, at run time) gets no wrapper, and each call to its
 
 **What is still missing.**
 
-- **Durability, unless the app is on Sidekiq.** By default the payloads
+- **Durability requires a durable adapter.** By default the payloads
   sit in a process-local Array. Nothing is retried (`retry_on` is
   inert), nothing is scheduled (`set(wait:)` is dropped), and nothing
   survives a restart. An app whose `ApplicationJob` sets
@@ -1840,11 +1889,26 @@ evaluate, at run time) gets no wrapper, and each call to its
   envelope (`runtime/spinel/sidekiq_push.rb`, `sidekiq_redis.rb`):
   `SADD queues` and `LPUSH queue:<name>`, or `ZADD schedule` for a
   literal `set(wait:)` or `set(wait_until:)` that lands in the future.
-  Redis comes from `Sidekiq.configure_client`'s `url:` and `password:`
-  only: an app on `:sidekiq` without a `url:` there is an error, with
-  no fallback to `REDIS_PROVIDER`, `REDIS_URL` or localhost. The connection is one per
-  process, with 1-second connect and read timeouts, and a refused or
-  dropped connection, the first one included, is retried once. A job
+  Redis comes from `Sidekiq.configure_client`'s `config.redis = { … }`:
+  an app on `:sidekiq` without a `url:` there is an error, with no
+  fallback to `REDIS_PROVIDER`, `REDIS_URL` or localhost. `password:`,
+  `username:` and `db:` override the URL's (each a String literal,
+  `ENV["NAME"]` or `ENV.fetch("NAME"[, "default"])`, `db:` an Integer
+  literal too). `timeout:` (or `network_timeout:`), `connect_timeout:`
+  and `read_timeout:` are literal seconds, 3 when the app gives none, as
+  Sidekiq passes it. `reconnect_attempts:` is an Integer or an Array of
+  delays, as redis-client reads it: a refused or dropped connection, the
+  first one included, is retried that many times, once without a wait
+  when the app gives none (or `false`, which Sidekiq's `||= 1` keeps).
+  On ruby and jruby redis-rb also retries once inside a command. The
+  connection is one per process. A key that would connect somewhere, or
+  some way, the app didn't ask for is an error on `:sidekiq`: TLS
+  (`ssl:`, `ssl_params:`), Sentinel (`sentinels:`, `role:`, `name:`),
+  `id:` (spinel-redis sends no `CLIENT SETNAME`; `id: nil` is fine),
+  `path:`, `host:`, `port:`, `namespace:`, `nodes:`, `protocol: 2`, and
+  a value of an honored key in a form ingest doesn't read. The pool's
+  `size:`, `pool_timeout:` and `pool_name:`, `driver:`, `write_timeout:`
+  and `logger:` change nothing here and are warnings. A job
   held for COMMIT is dropped when an `after_commit` callback raises, as
   Rails drops it, and the caller sees the callback's error. A non-literal `set(...)` is an error
   under `:sidekiq`, and `set(priority:)` is dropped with a warning.
@@ -1852,7 +1916,14 @@ evaluate, at run time) gets no wrapper, and each call to its
   (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
   job carries `"retry":true`, or the job's literal `sidekiq_options`
   (`retry`, `retry_queue`, `retry_for`, `dead`), where Sidekiq writes
-  them. TLS (`rediss://`) and per-job adapters are still missing.
+  them. TLS (`rediss://`) and per-job durable adapters are still missing.
+  A literal Symbol or String `inline`/`test` setter on the exact job class
+  selects immediate/held dispatch, including that class's reopenings.
+  This exemption does not resolve inherited, constant, computed or runtime
+  adapter changes. It models dispatch, not Rails' inline/test serialization:
+  an Object argument can still execute/be held where Rails raises SerializationError.
+  An app carrying Solid Queue's record models uses its SQL runner:
+  payloads go to `solid_queue_jobs`, and the drain claims those records.
 - **The worker role has no heartbeat.** The same build runs the pushed
   jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
   a Sidekiq 8.1 server process with BasicFetch
@@ -1903,7 +1974,16 @@ evaluate, at run time) gets no wrapper, and each call to its
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
   `ResticJob`, `WalCheckpointJob` and `MastodonSyncListJob` are the
-  corpus cases.
+  corpus cases. Under `:sidekiq` or Solid Queue's SQL runner, this is
+  an error instead: a closure cannot reach the durable store. It names
+  the job and unsupported payload at the enqueue call or a literal
+  recurring task's class declaration. Under SQL-backed Solid Queue an
+  unused enqueue wrapper, including a `perform_now`-only job, needs no
+  durable payload. Sidekiq still refuses it at the job declaration.
+  Omitted default arguments and mixed primitive types at one argument
+  position are also refused: the existing payload writer cannot encode
+  those shapes, although Rails can. The in-process adapter keeps its
+  closure behavior. No new serializers are supplied here.
 - **One queue in process.** `queue_name` is recorded, but every entry
   drains in arrival order. Under `:sidekiq` it names the Redis queue.
 - **The test adapter keeps closures.** `assert_enqueued_with` still

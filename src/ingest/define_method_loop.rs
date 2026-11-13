@@ -9,7 +9,9 @@
 //! their values. The key is the literal it is. The Hash value is read
 //! back as `CONST.fetch(key)`, the object the closure captured, so its
 //! identity and frozenness are Ruby's; the literal has the key, so `fetch`
-//! answers what `[]` would, without the nil `[]` could.
+//! answers what `[]` would, without the nil `[]` could. A send whose
+//! name the key then spells (`public_send("#{status}_execution")`) names
+//! that literal.
 //!
 //! What the substitution cannot keep is left alone: a loop it does not
 //! recognize stays the statement it was. Refused shapes: a constant
@@ -583,6 +585,7 @@ fn unroll_with(
         for (key, name) in keys.iter().zip(names) {
             let mut body = body.clone();
             substitute(&mut body, &plan, key);
+            fold_send_names(&mut body);
             out.push(MethodDef {
                 name_span,
                 name: Symbol::from(name.as_str()),
@@ -608,7 +611,14 @@ fn unroll_with(
 /// `"on_#{"finish"}"` once the key is in place: the String it spells, as a macro reads a literal name.
 fn fold_literal_interpolation(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut fold_literal_interpolation);
-    let ExprNode::StringInterp { parts } = &*expr.node else { return };
+    if let Some(text) = literal_interpolation(expr) {
+        *expr.node = ExprNode::Lit { value: Literal::Str { value: text } };
+    }
+}
+
+/// The text of an interpolation whose every piece is a literal.
+fn literal_interpolation(expr: &Expr) -> Option<String> {
+    let ExprNode::StringInterp { parts } = &*expr.node else { return None };
     let mut text = String::new();
     for part in parts {
         match part {
@@ -616,11 +626,34 @@ fn fold_literal_interpolation(expr: &mut Expr) {
             crate::expr::InterpPart::Expr { expr } => match &*expr.node {
                 ExprNode::Lit { value: Literal::Str { value } } => text.push_str(value),
                 ExprNode::Lit { value: Literal::Sym { value } } => text.push_str(value.as_str()),
-                _ => return,
+                _ => return None,
             },
         }
     }
-    *expr.node = ExprNode::Lit { value: Literal::Str { value: text } };
+    Some(text)
+}
+
+/// `public_send("#{"ready"}_execution")` once the key is in place (solid_queue's
+/// `Job::Executable`): the send names the literal it spells, `:"…"` a Symbol.
+/// Only a send's name: a String the body keeps is a new one at each call,
+/// which a literal in its place is not.
+fn fold_send_names(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut fold_send_names);
+    let ExprNode::Send { method, args, .. } = &mut *expr.node else { return };
+    if !matches!(method.as_str(), "send" | "public_send" | "__send__") {
+        return;
+    }
+    let Some(name) = args.first_mut() else { return };
+    let folded = match &*name.node {
+        ExprNode::StringInterp { .. } => literal_interpolation(name).map(|value| Literal::Str { value }),
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. } if method.as_str() == "to_sym" && args.is_empty() => {
+            literal_interpolation(recv).map(|value| Literal::Sym { value: Symbol::from(value.as_str()) })
+        }
+        _ => None,
+    };
+    if let Some(value) = folded {
+        *name.node = ExprNode::Lit { value };
+    }
 }
 
 /// Each read of a loop parameter becomes the element's key, or for the

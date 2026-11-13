@@ -78,6 +78,11 @@ module ActionDispatch
       @env["rack.session"] = value
     end
 
+    # Rails' `Request#reset_session`, as the twin's.
+    def reset_session
+      session.clear
+    end
+
     # `request.headers["Accept-Encoding"]` — the shared
     # `ActionDispatch::Http::Headers` over this request's env.
     def headers

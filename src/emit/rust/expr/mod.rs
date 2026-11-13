@@ -622,6 +622,23 @@ where
     r
 }
 
+pub(super) fn in_free_function() -> bool {
+    current_emit_ctx()
+        .map(|ctx| ctx.in_free_function.get())
+        .unwrap_or(false)
+}
+
+pub(super) fn with_free_function_scope<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let ctx = current_emit_ctx().expect("with_free_function_scope called outside with_emit_ctx");
+    let prev = ctx.in_free_function.replace(true);
+    let r = f();
+    ctx.in_free_function.set(prev);
+    r
+}
+
 pub(super) fn current_return_ty() -> Option<crate::ty::Ty> {
     current_emit_ctx().and_then(|ctx| ctx.current_return_ty.borrow().clone())
 }

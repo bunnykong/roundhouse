@@ -85,6 +85,7 @@ pub struct FlatRoute {
     /// detail: campfire calls `user_profile_url` with no argument at
     /// all, and the helper's own signature is what has to allow it.
     pub param_defaults: Vec<(String, (String, crate::span::Span))>, // every enclosing default, with its source
+    pub request_defaults: Vec<(String, crate::expr::Literal, crate::span::Span)>,
     pub int_params: Vec<String>,
     /// Non-digit `constraints:` regexes, as `(param, regex_source)` for
     /// the params this route captures. The regex-free runtime router
@@ -636,6 +637,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             }
         }
         RouteSpec::Explicit {
+            defaults,
             method,
             path,
             controller,
@@ -756,6 +758,21 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     ),
                 }
             };
+            let required = path_ordered_params(variants.last().unwrap(), &base_params);
+            let mut param_defaults = ctx.param_defaults.clone();
+            let mut request_defaults = Vec::new();
+            for (key, (value, span)) in defaults {
+                if required.iter().any(|name| name == key.as_str()) {
+                    param_defaults.retain(|(name, _)| name != key.as_str());
+                    if matches!(value, crate::expr::Literal::Nil | crate::expr::Literal::Bool { value: false }) { continue; }
+                    let text = match value {
+                        crate::expr::Literal::Str { value } => value.clone(), crate::expr::Literal::Sym { value } => value.as_str().to_string(),
+                        crate::expr::Literal::Int { value } => value.to_string(), crate::expr::Literal::Bool { value } => value.to_string(),
+                        _ => String::new(),
+                    };
+                    param_defaults.push((key.as_str().to_string(), (text, *span)));
+                } else { request_defaults.push((key.as_str().to_string(), value.clone(), *span)); }
+            }
             // Only the canonical variant carries the helper name; the
             // shorter alternates would otherwise register a duplicate
             // helper for the same controller#action.
@@ -826,7 +843,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     format: forced_format.clone().or_else(|| ctx.default_format()),
                     required_params,
                     required_path: if i == 0 { required_path.clone() } else { None },
-                    param_defaults: ctx.param_defaults.clone(),
+                    param_defaults: param_defaults.clone(),
+                    request_defaults: request_defaults.clone(),
                     path_params: params,
                     int_params,
                     constraints,
@@ -895,6 +913,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     action: Symbol::from(action_name.clone()),
                     as_name: if ctx.helpers_enabled { helper.clone() } else { String::new() },
                     required_params,
+                    request_defaults: Vec::new(),
                     param_defaults: ctx.param_defaults.clone(),
                     path_params,
                     named,
@@ -1152,6 +1171,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                             as_name: if ctx.helpers_enabled { as_name.clone() } else { String::new() },
                             required_params,
                             required_path: if i == 0 { required_path.clone() } else { None },
+                            request_defaults: Vec::new(),
                             param_defaults: ctx.param_defaults.clone(),
                             path_params: vparams.clone(),
                             named: named && *primary && i == 0,

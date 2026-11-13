@@ -27,7 +27,7 @@ if [ -n "$opt" ] && real=$(command -v spinel); then
 fi
 
 args=()
-for suite in $TESTS; do args+=(--test "$suite"); done
+for suite in $TESTS spinel_bundle; do args+=(--test "$suite"); done
 cargo test --no-run --message-format=json "${args[@]}" > "$tmp/build.json" || exit 1
 exe() {
   python3 - "$tmp/build.json" "$1" <<'PY'
@@ -64,14 +64,24 @@ run_suite() {
   left=$(( deadline - $(date +%s) ))
   : > "$tmp/logs/$suite.log"
   if [ "$left" -gt 0 ]; then
-    python3 scripts/ci-plan.py timed --kind framework --name "$suite" -- \
+    python3 scripts/ci-plan.py timed --kind framework --name "$suite" --charge-cases "$tmp/collect/$suite" -- \
       timeout -k 15 "$left" "$bin" --ignored --nocapture $(filter "$suite") > "$tmp/logs/$suite.log" 2>&1
     status=$?
   fi
   report_suite "$suite" "$status"
   return "$status"
 }
-export -f exe filter report_suite run_suite
+# Not run for real: a test that compiles outside run_spinel fails at once here instead of building in its own process.
+collect_suite() {
+  local suite=$1 left
+  # Not up to the deadline: recording takes seconds, and a suite that does not stop must leave the budget to the runs.
+  left=$(( budget / 20 < 30 ? budget / 20 : 30 ))
+  [ "$left" -gt 0 ] || return 0
+  mkdir -p "$tmp/collect/$suite"
+  RH_SPINEL_BUNDLE_COLLECT="$tmp/collect/$suite" PATH="$tmp/nospinel:$PATH" \
+    timeout -k 5 "$left" "$(exe "$suite")" --ignored $(filter "$suite") > /dev/null 2>&1 || true
+}
+export -f exe filter report_suite run_suite collect_suite
 export tmp budget deadline
 
 start=$(date +%s)
@@ -93,7 +103,36 @@ serial=()
 for suite in $ordered; do
   case "$suite" in spinel_pg_db) serial+=("$suite") ;; *) parallel+=("$suite") ;; esac
 done
-printf '%s\n' "${parallel[@]}" | xargs -P "$(nproc)" -I{} bash -c 'run_suite {}' || status=1
+# The cases one Spinel build can share (tests/support/emit_and_run.rs `bundle`), as spinel-toolchain shares them.
+mkdir -p "$tmp/nospinel" "$tmp/collect-all"
+printf '#!/bin/sh\nexit 1\n' > "$tmp/nospinel/spinel"
+cp "$tmp/nospinel/spinel" "$tmp/nospinel/spin"
+chmod +x "$tmp/nospinel/spinel" "$tmp/nospinel/spin"
+printf '%s\n' "${parallel[@]}" | xargs -P "$(( $(nproc) * 2 ))" -I{} bash -c 'collect_suite {}'
+cp "$tmp"/collect/*/*.json "$tmp/collect-all/" 2> /dev/null || true
+sharing=0
+for suite in "${parallel[@]}"; do
+  if compgen -G "$tmp/collect/$suite/*.json" > /dev/null; then sharing=$(( sharing + 1 )); fi
+done
+echo "collected $(ls "$tmp/collect-all" | wc -l) cases from $sharing suites in $(( $(date +%s) - start ))s"
+export RH_SPINEL_BUNDLE="$tmp/bundles"
+mkdir -p "$RH_SPINEL_BUNDLE"
+if [ "$sharing" -gt 0 ]; then
+  (
+    RH_SPINEL_BUNDLE_COLLECT="$tmp/collect-all" RH_SPINEL_BUNDLE_OUT="$RH_SPINEL_BUNDLE" \
+      timeout -k 15 "$(( deadline - $(date +%s) > 1 ? deadline - $(date +%s) : 1 ))" "$(exe spinel_bundle)" --ignored --exact spinel_bundle_build --nocapture \
+      > "$tmp/logs/spinel_bundle.log" 2>&1
+    # Not left to spinel_bundle_build: stopped or panicking, it never marks itself, and its suites' cases would wait on it.
+    touch "$RH_SPINEL_BUNDLE/finished"
+    grep '^spinel bundle' "$tmp/logs/spinel_bundle.log" || true
+    echo "bundled in $(( $(date +%s) - start ))s"
+  ) &
+  builder=$!
+  # Not before the build ends: each case waits only on its own group, so the suites start once the groups are named.
+  until [ -e "$RH_SPINEL_BUNDLE/pending.json" ] || ! kill -0 "$builder" 2> /dev/null; do sleep 1; done
+fi
+printf '%s\n' "${parallel[@]}" | { grep . || true; } | xargs -r -P "$(nproc)" -I{} bash -c 'run_suite {}' || status=1
+[ -z "${builder:-}" ] || wait "$builder"
 for suite in "${serial[@]}"; do run_suite "$suite" || status=1; done
 echo "finished in $(( $(date +%s) - start ))s"
 exit "$status"

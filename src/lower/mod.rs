@@ -23,6 +23,7 @@ pub mod array_columns;
 pub mod associations;
 pub mod association_new;
 pub mod blank;
+pub mod respond_to;
 pub mod broadcast_calls;
 pub mod module_mixins;
 pub mod broadcasts;
@@ -125,6 +126,11 @@ pub mod presence_in;
 pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
 pub mod save_without_validation;
+pub mod defined_ivar_read;
+pub mod method_missing_calls;
+pub mod dynamic_try;
+pub mod primary_key_send;
+mod core_instance_methods;
 pub mod route_param_recall;
 pub mod expect_string_key;
 pub mod defined_ivar_memo;
@@ -193,6 +199,7 @@ pub mod ruby_family_gems;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod gem_refusal;
 pub mod constantize;
+pub mod rooted_constants;
 pub mod params_residue;
 pub mod params_permit;
 pub mod normalizes;
@@ -714,6 +721,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `record.slice(:a, :b)` on a typed model → a Hash of its typed
     // readers. Reads the analyzer's receiver types; nothing keys on it.
     ("record_slice", &[]),
+    // `record.send(record.class.primary_key)` -> `record.id` on an analyzer-typed record, before the dynamic
+    // send would reach send_static_dispatch's residue.
+    ("primary_key_send", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
@@ -764,6 +774,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // chain that stays dynamic — and on a relation-less target that is
     // now an error (issue #76), not a suppressed warning.
     ("relation_residue", &["duration", "group_count"]),
+    // `assert_respond_to` / `refute_respond_to` / `respond_to?(:sym)` in
+    // the test tree, answered from the analyzer's registry for a target
+    // with no runtime method table (`respond_to.rs`).
+    ("respond_to", &[]),
 ];
 
 /// True iff `POST_ANALYZE_PASS_ORDER` is a valid topological order —
@@ -887,6 +901,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
         fused::apply_fused_independent_rewrites(app);
     });
     save_without_validation::apply_bare_model_saves(app);
+    defined_ivar_read::apply_defined_ivar_read_lowering(app);
     ran!("pathname_ctor");
     ran!("array_ordinal");
     ran!("save_without_validation");
@@ -949,6 +964,8 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("try_guard");
     record_snapshot::apply_record_snapshot_lowering(app);
     ran!("record_snapshot");
+    method_missing_calls::apply_method_missing_calls(app, registry, target);
+    dynamic_try::apply_dynamic_try(app, target);
     diags.extend(where_range_split::apply_where_range_split(app, target));
     ran!("where_range_split");
     for_each_hook_body(app, &mut |body| {
@@ -1009,7 +1026,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("inquiry");
     has_one_builder::apply_has_one_builder_lowering(app);
     ran!("has_one_builder");
-    config_reader::apply_config_reader_lowering(app);
+    config_reader::apply_config_reader_lowering_for(app, target);
     ran!("config_reader");
     ran!("symbolize_keys");
     enum_mapping_keys::apply_enum_mapping_keys(app);
@@ -1097,7 +1114,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("current_set");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
-    diags.extend(mailer_templates::apply_mailer_templates(app));
+    diags.extend(mailer_templates::apply_mailer_templates_for(app, target));
     ran!("mailer_templates");
     diags.extend(job_class_side::apply_job_class_side(app));
     ran!("job_class_side");
@@ -1107,6 +1124,8 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("module_mattr_storage");
     diags.extend(record_slice::apply_record_slice_lowering(app, registry));
     ran!("record_slice");
+    primary_key_send::apply_primary_key_send(app);
+    ran!("primary_key_send");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
         send_dispatch::apply_send_static_dispatch(app, registry)
     }));
@@ -1135,6 +1154,8 @@ pub(crate) fn apply_post_analyze_lowerings_for(
         relation_residue::apply_relation_residue_ledger(app, registry)
     }));
     ran!("relation_residue");
+    respond_to::apply(app, registry, target);
+    ran!("respond_to");
     #[cfg(debug_assertions)]
     debug_assert_eq!(
         executed,
@@ -1596,24 +1617,39 @@ macro_rules! forwarding_roots {
     ($app:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
         for view in & $($mutable)? $app.views { $f(& $($mutable)? view.body); }
         for tm in & $($mutable)? $app.test_modules {
-            if let Some(setup) = tm.setup.$option() { $f(setup); }
-            for test in & $($mutable)? tm.tests { $f(& $($mutable)? test.body); }
-            for (_, value) in & $($mutable)? tm.constants { $f(value); }
-            for method in & $($mutable)? tm.helpers {
+            test_module_roots!(tm, $f, $iter, $option $(, $mutable)?);
+        }
+    }
+}
+
+// Every emit-bound body of one test module: its setup, tests, constants,
+// helpers (and their defaults), and its own classes' methods (and
+// defaults), constants, class-body calls and class-level ivars.
+macro_rules! test_module_roots {
+    ($tm:ident, $f:ident, $iter:ident, $option:ident $(, $mutable:tt)?) => {
+        if let Some(setup) = $tm.setup.$option() { $f(setup); }
+        for test in & $($mutable)? $tm.tests { $f(& $($mutable)? test.body); }
+        for (_, value) in & $($mutable)? $tm.constants { $f(value); }
+        for method in & $($mutable)? $tm.helpers {
+            $f(& $($mutable)? method.body);
+            for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
+        }
+        for class in & $($mutable)? $tm.inner_classes {
+            for method in & $($mutable)? class.methods {
                 $f(& $($mutable)? method.body);
                 for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
             }
-            for class in & $($mutable)? tm.inner_classes {
-                for method in & $($mutable)? class.methods {
-                    $f(& $($mutable)? method.body);
-                    for default in method.params.$iter().filter_map(|p| p.default.$option()) { $f(default); }
-                }
-                for (_, value) in & $($mutable)? class.constants { $f(value); }
-                for call in & $($mutable)? class.unknown_calls { $f(call); }
-                for initializer in & $($mutable)? class.class_ivar_initializers { $f(initializer); }
-            }
+            for (_, value) in & $($mutable)? class.constants { $f(value); }
+            for call in & $($mutable)? class.unknown_calls { $f(call); }
+            for initializer in & $($mutable)? class.class_ivar_initializers { $f(initializer); }
         }
     }
+}
+
+/// Every emit-bound body of one test module, the part of
+/// [`for_each_forwarding_body`] that walks it.
+pub(crate) fn for_each_test_module_body(tm: &mut crate::dialect::TestModule, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+    test_module_roots!(tm, f, iter_mut, as_mut, mut);
 }
 
 pub(crate) fn for_each_forwarding_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {

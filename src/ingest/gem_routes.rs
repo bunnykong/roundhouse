@@ -103,6 +103,7 @@ pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path
     write_mapping_helpers(app);
     super::configured_superclass::expand_boot_base_mixins(app);
     super::gem_hooks::devise_mapping_types(app);
+    super::gem_hooks::devise_sanitized_params(app);
     if !failed {
         consume_installs(app);
     }
@@ -222,6 +223,9 @@ fn write_devise_url_helpers(app: &mut App, draws: DeviseDraws) {
     super::gem_hooks::unroll_warden_serializers(app, &named);
     super::gem_hooks::fold_devise_view_scope(app, &named);
     super::gem_hooks::fold_devise_failure_route(app, &named);
+    super::gem_hooks::fold_devise_unnamed_router(app);
+    super::gem_hooks::fold_devise_time_inflector(app);
+    super::gem_hooks::fold_devise_module_probes(app);
     super::gem_hooks::devise_warden_compat(app);
     let scope_defined_by_program = app.library_classes.iter().filter(|c| c.name.0.as_str() != "ActionDispatch::Routing::Mapper").any(|c| c.methods.iter().any(|m| m.name.as_str() == "devise_scope"))
         || app.models.iter().any(|m| m.methods().any(|d| d.name.as_str() == "devise_scope"));

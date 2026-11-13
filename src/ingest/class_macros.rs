@@ -312,6 +312,14 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             .collect();
         let redefined = table.contains_key(&Symbol::from("define_method")) || table.contains_key(&Symbol::from("define_singleton_method"));
         let own: HashSet<(Symbol, MethodReceiver)> = lc.methods.iter().map(|m| (m.name.clone(), m.receiver)).collect();
+        // The class's own class methods that define nothing (OmniAuth's `KeyStore.override_logging`): a call of one runs
+        // as the class loads, where one that defines methods and cannot expand is reported.
+        let own_plain: HashSet<Symbol> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Class && !defines_methods(&m.body))
+            .map(|m| m.name.clone())
+            .collect();
         let prefix = slot_prefix(lc.name.0.as_str());
         let included: Vec<String> = lineage
             .iter()
@@ -407,7 +415,12 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
                     *expanded.entry(method.clone()).or_default() += 1;
                 }
                 // An extended module's method the call reaches is left to the replay it had before: `extend` and the calls after it run as the class loads.
-                Err(_) if from_module.contains(method) => {
+                // So is the class's own that defines nothing (OmniAuth's `KeyStore.override_logging`, which `require`s), which Ruby runs as the class loads.
+                // And the class's own that runs a load-time call the expansion cannot (`require`): Ruby runs it, as the replay does.
+                Err(why) if from_module.contains(method)
+                    || own_plain.contains(method)
+                    || (own.contains(&(method.clone(), MethodReceiver::Class)) && why.as_str() == "it calls `require`") =>
+                {
                     consumed.remove(&index);
                     failed.insert(method.clone());
                 }
@@ -454,11 +467,14 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
     // instance method's own receiverless `precedence`. What is left is a call by name the expansion did
     // not consume — `Base.precedence(…)`, a class method's `precedence(…)`, or `:precedence` handed to `send`.
     // A receiver counts when it is a class that has the macro (it or an ancestor defines it), not `Rails.root`.
+    // Not a class whose class method of the name defines nothing: another method that shares it (OmniAuth's
+    // `Strategy::ClassMethods#default_options`, a reader, beside rack-protection's `Base.default_options` macro).
+    let defines = defines_methods;
     let owners = |name: &Symbol| -> HashSet<String> {
         let defining: Vec<&ClassId> = app
             .library_classes
             .iter()
-            .filter(|lc| lc.methods.iter().any(|m| m.receiver == MethodReceiver::Class && &m.name == name))
+            .filter(|lc| lc.methods.iter().any(|m| m.receiver == MethodReceiver::Class && &m.name == name && defines(&m.body)))
             .map(|lc| &lc.name)
             .collect();
         app.library_classes
@@ -521,9 +537,12 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
                     class_side_mentions(&m.body, &HashMap::from_iter([(name, only.clone())]), false, &mut counted);
                     *own.entry(name.clone()).or_default() += counted.get(name).copied().unwrap_or(0);
                 }
+                // Not a bare call in another class's class method: there `self` is that class, which owns no such macro.
+                let here: HashMap<&Symbol, HashSet<String>> =
+                    names.iter().filter(|(_, owners)| owners.contains(lc.name.0.as_str())).map(|(n, o)| (*n, o.clone())).collect();
                 let (mut inside, mut outside) = (HashMap::default(), HashMap::default());
-                class_side_mentions(&m.body, &names, true, &mut inside);
-                class_side_mentions(&m.body, &names, false, &mut outside);
+                class_side_mentions(&m.body, &here, true, &mut inside);
+                class_side_mentions(&m.body, &here, false, &mut outside);
                 for (name, n) in inside {
                     if name != m.name {
                         *class_side.entry(name.clone()).or_default() += n - outside.get(&name).copied().unwrap_or(0);
@@ -539,8 +558,9 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             .collect()
     };
     if !spent.is_empty() {
+        // Not another class's method of the name, which defines nothing (OmniAuth's `default_options` reader).
         for lc in app.library_classes.iter_mut().filter(|lc| !lc.is_module) {
-            lc.methods.retain(|m| !(m.receiver == MethodReceiver::Class && spent.contains(&m.name)));
+            lc.methods.retain(|m| !(m.receiver == MethodReceiver::Class && spent.contains(&m.name) && defines(&m.body)));
         }
     }
     // An extended module's macro (doorkeeper's `Option#option`), by the same IR count over the classes that extend it.
@@ -979,7 +999,7 @@ fn replay_text(source: &str, owner: &ClassId, defaults: &mut indexmap::IndexMap<
 }
 
 // A replayed statement's span points into a fragment the constant resolver never indexed, so its constants are read as written
-fn mark_constants(item: &mut ModelBodyItem) {
+pub(super) fn mark_constants(item: &mut ModelBodyItem) {
     fn mark(e: &mut Expr) {
         if matches!(&*e.node, ExprNode::Const { .. }) {
             e.decisions |= crate::expr::GENERATED_CONST_REF;
@@ -2751,4 +2771,11 @@ mod tests {
         let plain = class_method_table(&app, &named, &[ClassId(Symbol::from("Plain"))]);
         assert_eq!(plain.len(), 2, "a reopened class's methods merge: {:?}", plain.keys().collect::<Vec<_>>());
     }
+}
+
+fn defines_methods(e: &Expr) -> bool {
+    let mut found = matches!(&*e.node, ExprNode::Send { method, .. }
+        if matches!(method.as_str(), "define_method" | "define_singleton_method" | "class_eval" | "module_eval" | "attr_accessor" | "attr_reader" | "attr_writer" | "alias_method"));
+    e.node.for_each_child(&mut |c| found = found || defines_methods(c));
+    found
 }

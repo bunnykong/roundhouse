@@ -39,13 +39,14 @@ fn normalize_predicate(predicate: &mut Predicate, schema: &Schema) {
                     ValueType::Str | ValueType::StrOpt => ValueType::StrOpt,
                     ValueType::Bool | ValueType::BoolOpt => ValueType::BoolOpt,
                     ValueType::FloatOpt => ValueType::FloatOpt,
+                    ValueType::Binary | ValueType::BinaryOpt => ValueType::BinaryOpt,
                 };
                 if nullable_column {
                     *predicate = Predicate::NullableEq(col.clone(), Value::Runtime { expr: expr.clone(), ty: *ty });
                 }
             }
         }
-        Predicate::Eq(_, _) | Predicate::NullableEq(_, _) => {}
+        Predicate::Eq(_, _) | Predicate::NullableEq(_, _) | Predicate::NullSafeEq(_, _) | Predicate::NotEq(_, _) | Predicate::LowerEq(_, _) => {}
     }
 }
 

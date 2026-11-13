@@ -38,6 +38,7 @@ fn tiny_blog_round_trips() {
                     generated_int4_compatible: None,
                     array: false,
                     array_stored: false,
+                    unset_until_assigned: false,
                 },
                 Column {
                     name: Symbol::from("title"),
@@ -52,6 +53,7 @@ fn tiny_blog_round_trips() {
                     generated_int4_compatible: None,
                     array: false,
                     array_stored: false,
+                    unset_until_assigned: false,
                 },
             ],
             indexes: vec![],
@@ -62,7 +64,7 @@ fn tiny_blog_round_trips() {
             primary_key_columns: Vec::new(),
         },
     );
-    let schema = Schema { tables };
+    let schema = Schema { tables, ..Default::default() };
 
     let mut attrs = IndexMap::new();
     attrs.insert(Symbol::from("id"), Ty::Int);
@@ -81,6 +83,7 @@ fn tiny_blog_round_trips() {
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        mixin_sends: Vec::new(),
         select_aliases: Vec::new(),
         i18n: Default::default(),
         span: Span::synthetic(),
@@ -130,7 +133,7 @@ fn tiny_blog_round_trips() {
     };
 
     let routes = RouteTable {
-        entries: vec![roundhouse::RouteSpec::Explicit {
+        entries: vec![roundhouse::RouteSpec::Explicit { defaults: indexmap::IndexMap::new(),
             method: HttpMethod::Get,
             path: "/posts".into(),
             controller: ClassId(Symbol::from("PostsController")),
@@ -168,6 +171,7 @@ fn tiny_blog_round_trips() {
         gem_package_settings: Vec::new(),
         auto_source_gems: Vec::new(),
         gem_load_statements: Vec::new(),
+        gem_loaded_files: Default::default(),
         initializer_response_headers: Vec::new(),
         collection_cache_store: None,
         app_requires: Vec::new(),
@@ -189,6 +193,7 @@ fn tiny_blog_round_trips() {
         boot_program: Vec::new(),
         boot_gem_constants: Vec::new(),
         gem_middlewares: Vec::new(),
+        gem_middleware_args: Default::default(),
         gem_middleware_blocks: Default::default(),
         rack_env_writes: Default::default(),
         gem_middleware_refusals: Vec::new(),

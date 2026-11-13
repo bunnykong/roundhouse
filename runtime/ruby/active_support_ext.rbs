@@ -70,6 +70,18 @@ module ActiveSupport
       def initialize: (?String message) -> void
     end
   end
+  class KeyGenerator
+    @secret: String
+    @iterations: Integer
+    def initialize: (String secret, ?Hash[Symbol, untyped] options) -> void
+    def generate_key: (String salt, ?Integer key_size) -> String
+  end
+  class CachingKeyGenerator
+    @key_generator: KeyGenerator
+    @cache_keys: Hash[String, String]
+    def initialize: (KeyGenerator key_generator) -> void
+    def generate_key: (String salt, ?Integer key_size) -> String
+  end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
   def self.excluding: [A] (Array[A] list, *A elements) -> Array[A]
   # `untyped list`, as `sole`'s: an `Array[String]` argument does not link against `Array[untyped]` on Spinel.
@@ -88,6 +100,7 @@ module ActiveSupport
   def self.deep_stringify_keys: (Hash[untyped, untyped] hash) -> Hash[String, untyped]
   def self.deep_stringify_keys_value: (untyped value) -> untyped
   def self.indifferent: (untyped hash) -> Hash[untyped, untyped]
+  def self.indifferent_param: (untyped hash) -> untyped
   def self.indifferent_value: (untyped value, bool in_place) -> untyped
   def self.indifferent_key: (untyped key) -> untyped
   def self.indifferent_keys: (Array[untyped] keys) -> Array[untyped]

@@ -72,7 +72,11 @@ pub(crate) fn emit_go_fixtures(app: &App) -> EmittedFile {
                     writeln!(s, "\t\tr.{} = {raw:?}", go_field_name(&format!("{}_raw", field.column.as_str()))).unwrap();
                     continue;
                 }
-                let col = go_field_name(field.column.as_str());
+                let held = super::held_column_field(app, class_name, field.column.as_str());
+                let col = match &held {
+                    Some((field, _)) => field.clone(),
+                    None => go_field_name(field.column.as_str()),
+                };
                 let val = match &field.value {
                     crate::lower::LoweredFixtureValue::Literal { ty, raw } => {
                         go_literal_for(raw, ty)
@@ -100,11 +104,11 @@ pub(crate) fn emit_go_fixtures(app: &App) -> EmittedFile {
                 // A nullable column's field is a Go pointer; fixture
                 // values are plain literals, so route them through the
                 // null-preserving converter.
-                let val = match super::opt_converter_for(
+                let val = match held.map(|(_, conv)| conv).or_else(|| super::opt_converter_for(
                     &nullable_columns,
                     &class_name,
                     field.column.as_str(),
-                ) {
+                )) {
                     Some(conv) => format!("{conv}({val})"),
                     None => val,
                 };

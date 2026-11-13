@@ -43,5 +43,24 @@ module ActiveRecord
     def _equality_key?
       persisted? || destroyed? || !(id.nil? || id == 0 || id == "")
     end
+  
+    # Rails' `errors[attribute]` asked with a name the lowering does not see (`object.errors[attribute_name]` in a
+    # gem's builder): the accumulator answers it from the details, an Integer index as the Array it is.
+    class ErrorMessages < Array
+      def initialize(record, messages)
+        super(messages)
+        @record = record
+      end
+
+      def [](*args)
+        key = args.first
+        args.size == 1 && (key.is_a?(Symbol) || key.is_a?(String)) ? @record.error_messages_for(key.to_s) : super
+      end
+    end
+
+    def errors
+      @errors = ErrorMessages.new(self, @errors) if @errors.instance_of?(Array)
+      @errors
+    end
   end
 end

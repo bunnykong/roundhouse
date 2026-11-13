@@ -35,6 +35,8 @@ pub(super) struct Facts {
     devise_models: HashMap<String, Vec<String>>,
     /// The options each model's `devise` calls pass (`unlock_strategy: :time`), which set that model's own config; `*` when one cannot be named.
     devise_configured: HashMap<String, HashSet<String>>,
+    /// The `omniauth_providers: [:a, :b]` a model's own `devise` call writes as a literal.
+    devise_providers: HashMap<String, Vec<String>>,
 }
 
 impl Facts {
@@ -66,7 +68,39 @@ impl Facts {
                 }
             }
         }
-        Facts { devise_models: devise_modules(&parents, &calls), devise_configured }
+        let mut devise_providers: HashMap<String, Vec<String>> = HashMap::default();
+        for (class, args) in &calls {
+            for arg in args.iter() {
+                let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+                for (key, value) in entries {
+                    let ExprNode::Lit { value: Literal::Sym { value: k } } = &*key.node else { continue };
+                    if k.as_str() != "omniauth_providers" {
+                        continue;
+                    }
+                    // A later `omniauth_providers` replaces an earlier one, as the class attribute does; one not a
+                    // literal list leaves nothing known.
+                    let names: Option<Vec<String>> = match &*value.node {
+                        ExprNode::Array { elements, .. } => elements
+                            .iter()
+                            .map(|e| match &*e.node {
+                                ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => None,
+                    };
+                    match names {
+                        Some(names) => {
+                            devise_providers.insert(class.to_string(), names);
+                        }
+                        None => {
+                            devise_providers.remove(&class.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Facts { devise_models: devise_modules(&parents, &calls), devise_configured, devise_providers }
     }
 
     /// Whether `class`'s own `devise` calls set `option`, which then is not Devise's.
@@ -187,6 +221,25 @@ pub(super) fn omits_statement_on_failure(known: &HashSet<String>, statement: &Ex
 /// Devise's mapping, as its controllers reach it: `request.env["devise.mapping"]`, which the `devise_scope`
 /// constraint writes (`Devise.mappings[scope]`), is a `Devise::Mapping`, and its `to` is the class one of the
 /// app's `devise` models is: Devise reads the mapping's class name back as a constant (`Devise::Getter`).
+/// `Devise::ParameterSanitizer#sanitize(action)` answers the request's permitted `ActionController::Parameters`, as
+/// Rails' `permit` does: its branches (`permissions.call(...)`, `permit_keys`) type nothing the analysis can follow,
+/// and what reads it (`update_with_password(params)`'s `params[:password]`, `params.delete(:current_password)`) reads
+/// Parameters, indifferently.
+pub(super) fn devise_sanitized_params(app: &mut App) {
+    let owner = crate::ident::ClassId(crate::ident::Symbol::from("Devise::ParameterSanitizer"));
+    if !app.library_classes.iter().any(|c| c.name == owner && c.methods.iter().any(|m| m.name.as_str() == "sanitize")) {
+        return;
+    }
+    let parameters = crate::ty::Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("ActionController::Parameters")), args: vec![].into() };
+    let sig = crate::ty::Ty::Fn {
+        params: vec![crate::ty::Param { name: crate::ident::Symbol::from("action"), ty: std::sync::Arc::new(crate::ty::Ty::Sym), kind: crate::ty::ParamKind::Required }].into(),
+        block: None,
+        ret: std::sync::Arc::new(parameters),
+        effects: crate::effect::EffectSet::default(),
+    };
+    app.rbs_signatures.entry(owner).or_default().entry(crate::ident::Symbol::from("sanitize")).or_insert(sig);
+}
+
 pub(super) fn devise_mapping_types(app: &mut App) {
     if !app.library_classes.iter().any(|c| c.name.0.as_str() == "Devise::Mapping") {
         return;
@@ -316,9 +369,12 @@ pub(super) fn unroll_warden_serializers(app: &mut App, mappings: &[(String, Stri
 /// `warden_config.serialize_into_session(…) { … }` and `serialize_from_session` dropped from a body, as statements.
 /// A Devise view's `resource_name` (and `scope_name`) is `devise_mapping.name`, the mapping the request's route set:
 /// where the app has one mapping, every request a Devise controller serves has that one, so the view's form spells
-/// its name (`form_for(resource, as: resource_name, …)`, whose field prefix is lowered from a literal).
+/// its name (`form_for(resource, as: resource_name, …)`, whose field prefix is lowered from a literal). With more,
+/// the view is a `case resource_name` over the mappings, each arm the view with that mapping's name spelled.
 pub(super) fn fold_devise_view_scope(app: &mut App, mappings: &[(String, String)]) {
-    let [(name, _)] = mappings else { return };
+    if mappings.is_empty() {
+        return;
+    }
     let app_defines = |m: &str, span: crate::span::Span| {
         matches!(m, "resource_name" | "scope_name") && !super::sources::path_of(span.file).is_some_and(|p| super::absence_guards::is_source_gem_path(&p))
     };
@@ -328,9 +384,70 @@ pub(super) fn fold_devise_view_scope(app: &mut App, mappings: &[(String, String)
     {
         return;
     }
-    for view in app.views.iter_mut() {
-        fold_scope_reads(&mut view.body, name);
+    // Devise's own controllers read it the same way (`send("current_#{resource_name}")`): every request they serve
+    // carries the one mapping.
+    if let [(name, _)] = mappings {
+        for c in app.controllers.iter_mut().filter(|c| c.name.0.as_str().starts_with("Devise")) {
+            for a in c.actions_mut() {
+                fold_scope_reads(&mut a.body, name);
+            }
+        }
     }
+    for view in app.views.iter_mut() {
+        if let [(name, _)] = mappings {
+            fold_scope_reads(&mut view.body, name);
+            continue;
+        }
+        // Not an app's own view, which may read the name only in a branch a request without a mapping never takes: the case would read it first.
+        if !devise_rendered(view.name.as_str(), mappings) || !reads_scope(&view.body) {
+            continue;
+        }
+        let span = view.body.span;
+        let mut arms: Vec<crate::expr::Arm> = mappings
+            .iter()
+            .map(|(name, _)| {
+                let mut body = view.body.clone();
+                fold_scope_reads(&mut body, name);
+                crate::expr::Arm {
+                    pattern: crate::expr::Pattern::Lit { value: Literal::Sym { value: crate::ident::Symbol::from(name.as_str()) } },
+                    guard: None,
+                    body,
+                }
+            })
+            .collect();
+        // Not a raise for a name no mapping has: every request a Devise controller serves carries one of them.
+        if let Some(last) = arms.last_mut() {
+            last.pattern = crate::expr::Pattern::Wildcard;
+        }
+        let scrutinee = Expr::new(span, ExprNode::Send { recv: None, method: crate::ident::Symbol::from("resource_name"), args: Vec::new(), block: None, parenthesized: false });
+        view.body = Expr::new(span, ExprNode::Case { scrutinee, arms });
+    }
+}
+
+/// A view only Devise's controllers render: its own `devise/…`, or a scoped one (`config.scoped_views`) under a
+/// mapping's plural, in one of Devise's controllers' directories (`users/sessions/new`).
+fn devise_rendered(view: &str, mappings: &[(String, String)]) -> bool {
+    const CONTROLLERS: &[&str] = &["sessions", "registrations", "passwords", "confirmations", "unlocks", "omniauth_callbacks", "shared", "mailer"];
+    // Not a mailer's view: a mailer has no request mapping for the case to read.
+    if view.split('/').any(|dir| dir == "mailer") {
+        return false;
+    }
+    if view.starts_with("devise/") {
+        return true;
+    }
+    mappings.iter().any(|(name, _)| {
+        let plural = crate::naming::pluralize(name);
+        view.strip_prefix(&format!("{plural}/"))
+            .and_then(|rest| rest.split('/').next())
+            .is_some_and(|dir| CONTROLLERS.contains(&dir))
+    })
+}
+
+fn reads_scope(e: &Expr) -> bool {
+    let mut found = matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+        if args.is_empty() && matches!(method.as_str(), "resource_name" | "scope_name"));
+    e.node.for_each_child(&mut |c| found |= reads_scope(c));
+    found
 }
 
 /// Devise's FailureApp names the route it sends a visitor to as `route(scope)`, `:"new_#{scope}_session_url"`, and
@@ -340,18 +457,194 @@ pub(super) fn fold_devise_view_scope(app: &mut App, mappings: &[(String, String)
 /// The router it asks is `send(router_name)`, `Devise.available_router_name` (`router_name || :main_app`) where the
 /// mapping names none: `main_app` while the app sets no `config.router_name`.
 pub(super) fn fold_devise_failure_route(app: &mut App, mappings: &[(String, String)]) {
-    let [(name, _)] = mappings else { return };
-    let literal = format!("new_{name}_session_url");
+    if mappings.is_empty() {
+        return;
+    }
     let router_named = app.boot_program.iter().any(|e| sends(e, "router_name="));
     for lc in app.library_classes.iter_mut().filter(|c| c.name.0.as_str() == "Devise::FailureApp") {
         if !lc.methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() == "route") {
             continue;
         }
         for m in lc.methods.iter_mut().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() != "route") {
-            fold_route_local(&mut m.body, &literal);
+            match mappings {
+                [(name, _)] => fold_route_local(&mut m.body, &format!("new_{name}_session_url")),
+                _ => spread_route_local(&mut m.body, mappings),
+            }
             if !router_named {
                 fold_router_send(&mut m.body);
             }
+        }
+    }
+}
+
+/// `router_name ? send(router_name) : self` (Devise's `after_inactive_sign_up_path_for`, `signed_in_root_path`) and
+/// `send(Devise.available_router_name)`, where the app names no router: a mapping's `router_name` is then nil, and
+/// the available one `main_app`. An emitted program sends no name it learns at run time.
+pub(super) fn fold_devise_unnamed_router(app: &mut App) {
+    if app.boot_program.iter().any(|e| sends(e, "router_name=")) {
+        return;
+    }
+    fn fold(e: &mut Expr) {
+        e.node.for_each_child_mut(&mut |c| fold(c));
+        if let ExprNode::If { cond, then_branch, else_branch } = &*e.node
+            && matches!(&*cond.node, ExprNode::Var { name, .. } if name.as_str() == "router_name")
+            && matches!(&*then_branch.node, ExprNode::Send { recv: None, method, args, .. }
+                if method.as_str() == "send" && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Var { name, .. } if name.as_str() == "router_name")))
+        {
+            *e = else_branch.clone();
+            return;
+        }
+        if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*e.node
+            && method.as_str() == "send"
+            && let [arg] = args.as_slice()
+            && matches!(&*arg.node, ExprNode::Send { recv: Some(r), method, args, .. }
+                if method.as_str() == "available_router_name" && args.is_empty()
+                    && matches!(&*r.node, ExprNode::Const { path } if path.iter().filter(|p| !p.as_str().is_empty()).map(|p| p.as_str()).eq(["Devise"])))
+        {
+            *e.node = ExprNode::Send { recv: None, method: crate::ident::Symbol::from("main_app"), args: Vec::new(), block: None, parenthesized: false };
+        }
+    }
+    for lc in app.library_classes.iter_mut().filter(|c| c.name.0.as_str().starts_with("Devise")) {
+        for m in &mut lc.methods {
+            fold(&mut m.body);
+        }
+    }
+    for c in app.controllers.iter_mut().filter(|c| c.name.0.as_str().starts_with("Devise")) {
+        for a in c.actions_mut() {
+            fold(&mut a.body);
+        }
+    }
+}
+
+/// The strategy a Devise OmniAuth provider's config stacks (`Devise::OmniAuth::Config#strategy_class`), as Devise finds
+/// it: its `strategy_class:` option, else the strategy whose name ends with the camelized strategy name or whose
+/// `option :name` is it (`find_strategy` over `OmniAuth.strategies`, the classes `OmniAuth::Strategy` was included in,
+/// in load order), else `OmniAuth::Strategies::<Provider>`.
+// Not evaluated: `OmniAuth.strategies` is filled by the module's `included` hook as each gem file loads, which the
+// evaluation of the boot does not run. Nor `OmniAuth.config.camelizations` read: a strategy gem's `add_camelization`
+// (omniauth-github's `GitHub`) is not, so its provider is found by the strategy's `option :name` alone.
+pub(super) fn devise_strategy_class(app: &App, class: &str, ivars: &HashMap<String, Val>) -> Option<String> {
+    if class.trim_start_matches("::") != "Devise::OmniAuth::Config" {
+        return None;
+    }
+    if let Some(Val::Class(c)) = ivars.get("strategy_class") {
+        return Some(c.trim_start_matches("::").to_string());
+    }
+    let text = |v: Option<&Val>| match v {
+        Some(Val::Sym(s) | Val::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let name = text(ivars.get("strategy_name"))?;
+    let provider = text(ivars.get("provider"))?;
+    let camelize = |word: &str| -> String {
+        word.split('/')
+            .map(|part| part.split('_').map(|w| {
+                let mut c = w.chars();
+                c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+            }).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("::")
+    };
+    let wanted = camelize(&name);
+    let named = |c: &crate::dialect::LibraryClass| {
+        c.unknown_calls.iter().any(|call| matches!(&*call.node, ExprNode::Send { recv: None, method, args, .. }
+            if method.as_str() == "option" && matches!(args.as_slice(), [k, v]
+                if matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "name")
+                && (matches!(&*v.node, ExprNode::Lit { value: Literal::Str { value } } if *value == name)
+                    || matches!(&*v.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)))))
+    };
+    let found = app
+        .library_classes
+        .iter()
+        .filter(|c| c.includes.iter().any(|i| i.0.as_str().trim_start_matches("::") == "OmniAuth::Strategy"))
+        .find(|c| c.name.0.as_str().ends_with(&wanted) || named(c));
+    if let Some(c) = found {
+        return Some(c.name.0.as_str().to_string());
+    }
+    let autoloaded = format!("OmniAuth::Strategies::{}", camelize(&provider));
+    app.library_classes.iter().any(|c| c.name.0.as_str() == autoloaded).then_some(autoloaded)
+}
+
+/// `resource.respond_to?(:remember_me)` in Devise's own code (`Controllers::Rememberable#remember_me_is_active?`, which
+/// the `:timeoutable` hook asks): Devise asks whether the model has a module by a method the module gives it, and its
+/// resource is a model, so the answer is whether every Devise model has that module, or none does.
+// Not left to the call: its receiver is not typed, so the gem shake keeps every method of that name the program
+// defines (the Proxy's own `remember_me`), whose body calls the module's class methods no model defines.
+pub(super) fn fold_devise_module_probes(app: &mut App) {
+    let facts = Facts::of(app);
+    if facts.devise_models.is_empty() {
+        return;
+    }
+    let module_of: HashMap<String, String> = app
+        .library_classes
+        .iter()
+        .filter_map(|c| c.name.0.as_str().strip_prefix("Devise::Models::").filter(|m| !m.contains("::")).map(|m| (c, m)))
+        .flat_map(|(c, m)| {
+            let module = crate::naming::snake_case(m);
+            c.methods.iter().filter(|d| d.receiver == crate::dialect::MethodReceiver::Instance).map(move |d| (d.name.as_str().to_string(), module.clone()))
+        })
+        .collect();
+    let answer = |method: &str| -> Option<bool> {
+        let module = module_of.get(method)?;
+        let has = facts.devise_models.values().filter(|mods| mods.iter().any(|m| m == module)).count();
+        if has == 0 {
+            Some(false)
+        } else if has == facts.devise_models.len() {
+            Some(true)
+        } else {
+            None
+        }
+    };
+    fn fold(e: &mut Expr, answer: &dyn Fn(&str) -> Option<bool>) {
+        e.node.for_each_child_mut(&mut |c| fold(c, answer));
+        if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node
+            && method.as_str() == "respond_to?"
+            && matches!(&*r.node, ExprNode::Var { name, .. } if matches!(name.as_str(), "resource" | "record"))
+            && let [arg] = args.as_slice()
+            && let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node
+            && let Some(known) = answer(value.as_str())
+        {
+            *e.node = ExprNode::Lit { value: Literal::Bool { value: known } };
+        }
+    }
+    for lc in app.library_classes.iter_mut().filter(|c| c.name.0.as_str().starts_with("Devise::")) {
+        for m in &mut lc.methods {
+            fold(&mut m.body, &answer);
+        }
+    }
+}
+
+/// A statement a routing method runs that the evaluation passes over, whose write the boot has to make as Rails' route
+/// load did: Devise's `set_omniauth_path_prefix!(path_prefix)` sets `OmniAuth.config.path_prefix`, where each provider's
+/// strategy answers its request and callback paths. The receiver's text and the method; the arguments are the call's.
+pub(super) fn route_side_effect(known: &HashSet<String>, caller: Option<(&str, &str)>, statement: &Expr) -> Option<(&'static str, &'static str)> {
+    (known.contains("Devise")
+        && caller == Some(("ActionDispatch::Routing::Mapper", "devise_omniauth_callback"))
+        && matches!(&*statement.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "set_omniauth_path_prefix!" && args.len() == 1))
+        .then_some(("OmniAuth.config", "path_prefix="))
+}
+
+/// `Devise::TimeInflector.time_ago_in_words(t)` (`:confirmable`'s expiry message): the class only hands the call to an
+/// instance that includes `ActionView::Helpers::DateHelper`, whose method the runtime carries as the view helper's.
+// Not through the class: its `delegate` sits in `class << self` and forwards arguments, which the delegate expansion's
+// zero-argument instance forwarders cannot spell.
+pub(super) fn fold_devise_time_inflector(app: &mut App) {
+    fn fold(e: &mut Expr) {
+        e.node.for_each_child_mut(&mut |c| fold(c));
+        if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *e.node
+            && method.as_str() == "time_ago_in_words"
+            && args.len() == 1
+            && matches!(&*r.node, ExprNode::Const { path } if path.iter().filter(|p| !p.as_str().is_empty()).map(|p| p.as_str()).eq(["Devise", "TimeInflector"]))
+        {
+            let span = r.span;
+            let mut helpers = Expr::new(span, ExprNode::Const { path: vec![crate::ident::Symbol::from("ActionView"), crate::ident::Symbol::from("ViewHelpers")] });
+            helpers.decisions |= crate::expr::GENERATED_CONST_REF;
+            *r = helpers;
+        }
+    }
+    for lc in app.library_classes.iter_mut().filter(|c| c.name.0.as_str().starts_with("Devise")) {
+        for m in &mut lc.methods {
+            fold(&mut m.body);
         }
     }
 }
@@ -386,6 +679,47 @@ fn fold_route_local(body: &mut Expr, literal: &str) {
     collect_route_locals(body, &mut locals, &mut writes);
     locals.retain(|l| writes.iter().filter(|w| *w == l).count() == 1);
     replace_route_reads(body, &locals, literal);
+}
+
+// With more mappings, each call handed the route local (`context.respond_to?(route)`, `context.send(route, opts)`) is a
+// `case scope` over them, the name each arm's: the scope is one of the mappings', as `Devise.mappings[scope]` holds.
+fn spread_route_local(body: &mut Expr, mappings: &[(String, String)]) {
+    let mut locals: Vec<crate::ident::Symbol> = Vec::new();
+    let mut writes: Vec<crate::ident::Symbol> = Vec::new();
+    collect_route_locals(body, &mut locals, &mut writes);
+    locals.retain(|l| writes.iter().filter(|w| *w == l).count() == 1);
+    if locals.is_empty() {
+        return;
+    }
+    spread_calls(body, &locals, mappings);
+}
+
+fn spread_calls(e: &mut Expr, locals: &[crate::ident::Symbol], mappings: &[(String, String)]) {
+    let hands_route = matches!(&*e.node, ExprNode::Send { args, .. }
+        if args.iter().any(|a| matches!(&*a.node, ExprNode::Var { name, .. } if locals.contains(name))));
+    if hands_route {
+        let span = e.span;
+        let mut arms: Vec<crate::expr::Arm> = mappings
+            .iter()
+            .map(|(name, _)| {
+                let mut call = e.clone();
+                replace_route_reads(&mut call, locals, &format!("new_{name}_session_url"));
+                crate::expr::Arm {
+                    pattern: crate::expr::Pattern::Lit { value: Literal::Sym { value: crate::ident::Symbol::from(name.as_str()) } },
+                    guard: None,
+                    body: call,
+                }
+            })
+            .collect();
+        // Not a raise for another scope: `Devise.mappings[scope]` has already raised for one no mapping has.
+        if let Some(last) = arms.last_mut() {
+            last.pattern = crate::expr::Pattern::Wildcard;
+        }
+        let scrutinee = Expr::new(span, ExprNode::Send { recv: None, method: crate::ident::Symbol::from("scope"), args: Vec::new(), block: None, parenthesized: false });
+        *e = Expr::new(span, ExprNode::Case { scrutinee, arms });
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| spread_calls(c, locals, mappings));
 }
 
 fn collect_route_locals(e: &Expr, locals: &mut Vec<crate::ident::Symbol>, writes: &mut Vec<crate::ident::Symbol>) {
@@ -480,7 +814,20 @@ fn includes_module(body: &Expr) -> Option<String> {
 /// and every Rails the compiler takes (7.0 on) is past 5.1.
 pub(super) fn module_answer(facts: &Facts, class: &str, method: &str, argv: &[Val]) -> Option<Val> {
     match (class.trim_start_matches("::"), method, argv) {
-        ("Devise::Orm", "active_record?" | "active_record_51?", [Val::Class(model)]) if facts.devise_models.contains_key(model.trim_start_matches("::")) => Some(Val::Bool(true)),
+        (module, method, [Val::Class(model)]) if asks_of_the_model(module, method) && facts.devise_models.contains_key(model.trim_start_matches("::")) => Some(Val::Bool(true)),
+        _ => None,
+    }
+}
+
+/// The module predicates [`module_answer`] answers of a model.
+pub(super) fn asks_of_the_model(module: &str, method: &str) -> bool {
+    matches!((module.trim_start_matches("::"), method), ("Devise::Orm", "active_record?" | "active_record_51?"))
+}
+
+/// [`module_answer`] for a concern's `included do` guard (`if Devise::Orm.active_record?(self)`), asked of the includer.
+pub(super) fn includer_answer(facts: &Facts, module: &str, method: &str, includer: &str) -> Option<bool> {
+    match module_answer(facts, module, method, &[Val::Class(includer.to_string())])? {
+        Val::Bool(answer) => Some(answer),
         _ => None,
     }
 }
@@ -496,6 +843,10 @@ pub(super) fn class_answer(facts: &Facts, class: &str, method: &str, argv: &[Val
     match (method, argv) {
         // `Devise::Models::Omniauthable::ClassMethods`: the model's providers are Devise's (`config.omniauth :github`) unless its own `devise` call names them.
         ("omniauth_providers", []) if modules.iter().any(|m| m == "omniauthable") && !facts.sets_option(class, "omniauth_providers") => config("omniauth_providers").map(Ok),
+        // Its own call's list, where it writes one.
+        ("omniauth_providers", []) if modules.iter().any(|m| m == "omniauthable") && facts.devise_providers.contains_key(class) => {
+            Some(Ok(Val::Array(facts.devise_providers[class].iter().cloned().map(Val::Sym).collect())))
+        }
         // `Devise::Models::Lockable::ClassMethods`: the model's `unlock_strategy` is Devise's unless its own `devise` call sets one.
         ("unlock_strategy_enabled?", [Val::Sym(strategy)]) if modules.iter().any(|m| m == "lockable") && !facts.sets_option(class, "unlock_strategy") => {
             let Val::Sym(set) = config("unlock_strategy")? else { return None };
@@ -564,6 +915,14 @@ pub(super) fn confined_writes(
     writer: &dyn Fn(&str) -> Option<Result<String, ()>>,
     yields_other: &dyn Fn(&str) -> bool,
 ) -> Option<HashSet<(String, bool, String)>> {
+    // `set_omniauth_path_prefix!(path_prefix)` in Devise's OmniAuth routes: it checks or sets OmniAuth's `config.path_prefix` (a
+    // `Singleton` whose defaults build a logger and an AuthHash), and nothing the routes read.
+    if known.contains("Devise")
+        && caller == Some(("ActionDispatch::Routing::Mapper", "devise_omniauth_callback"))
+        && matches!(&*statement.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "set_omniauth_path_prefix!")
+    {
+        return Some(HashSet::from_iter([("OmniAuth::Configuration".to_string(), false, "path_prefix".to_string())]));
+    }
     // `Devise.setup do |config| … end` (`yield self`): what it runs configures Devise. An app's `if ENV[…]` around a setting leaves that setting unsure.
     let is_devise = |p: &[crate::ident::Symbol]| p.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Devise"]);
     let mut devise = devise.clone();
@@ -849,6 +1208,34 @@ pub(super) fn devise_url_helpers_source(facts: &DeviseUrlFacts, routes: &HashMap
             ));
         }
     }
+    // `Devise::OmniAuth::UrlHelpers`, which Devise's engine includes once a provider is configured: the mapping's
+    // `"#{scope}_#{provider}_omniauth_authorize_path"` (and `_callback_`), one arm per provider route drawn.
+    for kind in ["authorize", "callback"] {
+        let mut arms = String::new();
+        for m in &facts.mappings {
+            let prefix = format!("{}_", m.name);
+            let suffix = format!("_omniauth_{kind}_path");
+            let mut providers: Vec<&str> = routes
+                .iter()
+                .filter(|(name, segments)| **segments == 0 && name.starts_with(&prefix) && name.ends_with(&suffix))
+                .map(|(name, _)| &name[prefix.len()..name.len() - suffix.len()])
+                .filter(|p| !p.is_empty())
+                .collect();
+            providers.sort_unstable();
+            for provider in providers {
+                arms.push_str(&format!(
+                    "  return RouteHelpers.devise_path_with(RouteHelpers.{}{provider}{suffix}, params) if scope == :{} && provider.to_s == \"{provider}\"\n",
+                    prefix, m.name
+                ));
+            }
+        }
+        if arms.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "def self.omniauth_{kind}_path(resource_or_scope, provider, params = nil)\n  scope = RouteHelpers.devise_scope_of(resource_or_scope)\n{arms}  raise NoMethodError, \"undefined method '#{{scope}}_#{{provider}}_omniauth_{kind}_path'\"\nend\n\n"
+        ));
+    }
     out
 }
 
@@ -872,4 +1259,24 @@ mod tests {
 fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
     e.node.for_each_child(&mut |c| visit(c, f));
+}
+
+/// The keys a gem's `method_missing` class documents, read as attributes (`auth.info.email`), and what each holds:
+/// OmniAuth's Auth Hash Schema (`OmniAuth::AuthHash`, whose `regular_writer` makes `info` an InfoHash, and hashie's
+/// `convert_value` makes a nested Hash the class itself). `Some` for a value that may be nil; the `?` and `=` forms follow.
+// Not inferred from the writes: `auth.info = info` stores a Hash that the writer converts, which the analysis does not follow.
+pub(crate) fn method_missing_readers() -> &'static [(&'static str, &'static [(&'static str, &'static str)])] {
+    &[
+        (
+            "OmniAuth::AuthHash",
+            &[("provider", "String"), ("uid", "String"), ("info", "OmniAuth::AuthHash::InfoHash"), ("credentials", "OmniAuth::AuthHash?"), ("extra", "OmniAuth::AuthHash?")],
+        ),
+        (
+            "OmniAuth::AuthHash::InfoHash",
+            &[
+                ("email", "String?"), ("nickname", "String?"), ("first_name", "String?"), ("last_name", "String?"),
+                ("location", "String?"), ("description", "String?"), ("image", "String?"), ("phone", "String?"),
+            ],
+        ),
+    ]
 }

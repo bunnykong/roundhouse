@@ -601,9 +601,17 @@ jobs:
           gem install --no-document --ignore-dependencies warden -v 1.2.9
           gem install --no-document --ignore-dependencies orm_adapter -v 0.5.0
           gem install --no-document --ignore-dependencies responders -v 3.1.1
+          # simple_form, compiled from source (tests/emit_and_run/simple_form.rs).
+          gem install --no-document --ignore-dependencies simple_form -v 5.4.1
+          # OmniAuth for devise's :omniauthable, installed as the Ruby family loads it (tests/emit_and_run/devise.rs).
+          gem install --no-document --ignore-dependencies omniauth -v 2.1.4
+          gem install --no-document --ignore-dependencies hashie -v 5.1.0
+          gem install --no-document --ignore-dependencies rack-protection -v 4.2.1
           # Gem extensions whose finders the native controls run (tests/finder_ownership_and_form_keys.rs).
           gem install --no-document friendly_id -v 5.5.1
           gem install --no-document sorbet-runtime -v 0.5.11934
+          # Digest::BLAKE3, which the digest Ruby bundles (3.2.1) lacks (tests/binary_digest.rs).
+          gem install --no-document digest -v 3.3.0
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8
         with:
@@ -975,7 +983,7 @@ jobs:
     # Advisory unless ci:spinel focus hardens CORE (+ this suite).
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-framework') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
-    # The plan balances the selected suites over up to four shards by their
+    # The plan balances the selected suites over up to five shards by their
     # recorded durations; each shard reports its own output key, as
     # spinel-toolchain's do.
     strategy:
@@ -987,6 +995,7 @@ jobs:
       shard-1: ${{ steps.result.outputs.shard-1 }}
       shard-2: ${{ steps.result.outputs.shard-2 }}
       shard-3: ${{ steps.result.outputs.shard-3 }}
+      shard-4: ${{ steps.result.outputs.shard-4 }}
     runs-on: ubuntu-latest
     # 30m: upstream's shards take 11-14m, but a fork's runners take about
     # 1.7x that (a 20m bound cut a passing shard 2 there, fork run
@@ -1030,6 +1039,9 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - name: Install Solid Queue model sources for its durable-job contract
+        if: ${{ contains(matrix.tests, 'solid_queue_durability') }}
+        run: gem install --no-document --ignore-dependencies solid_queue -v "$(sed -n 's/^    solid_queue (\(.*\))$/\1/p' fixtures/real-blog/Gemfile.lock)"
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -1766,7 +1778,7 @@ jobs:
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
   #
-  # Compile once (this producer), then four shards only restore binaries
+  # Compile once (this producer), then the shards only restore binaries
   # and run — same path contract as unit-build (CARGO_BIN_EXE_roundhouse
   # and the test binary path are compile-time absolute).
   spinel-toolchain-build:
@@ -1814,22 +1826,23 @@ jobs:
     # hardens the CORE lane (spinel-advisory=false).
     needs: [generate-fixture, spinel-build, spinel-toolchain-build, spinel-toolchain-plan, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.spinel-toolchain-build.outputs.artifact-id != '' && needs.spinel-toolchain-plan.outputs.artifact-id != '' }}
-    # Four shards, balanced by `ci-plan.py toolchain-shard` on recorded
+    # Five shards, balanced by `ci-plan.py toolchain-shard` on recorded
     # seconds: a new test lands on the lightest shard instead of growing a
     # hand-kept catch-all one (two such shards reached 25 of 25 minutes).
     # Not every-third-by-name: three tests take two to three times the rest,
     # and two of them shared the slowest shard. Each shard reports its own
-    # output key (ci-plan.py requires all four), since a matrix's shared
+    # output key (ci-plan.py requires all five), since a matrix's shared
     # output would let one shard's success hide another's failure.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4]
     outputs:
       shard-0: ${{ steps.result.outputs.shard-0 }}
       shard-1: ${{ steps.result.outputs.shard-1 }}
       shard-2: ${{ steps.result.outputs.shard-2 }}
       shard-3: ${{ steps.result.outputs.shard-3 }}
+      shard-4: ${{ steps.result.outputs.shard-4 }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -1841,6 +1854,9 @@ jobs:
       # Full validation compiles each inside the whole blog's boot instead.
       ROUNDHOUSE_SPINEL_SLIM: ${{ inputs.full && '0' || '1' }}
     steps:
+      # Not left to timeout-minutes: a job stopped there uploads no seconds, so the planner kept the shard as it was. Not earlier than a minute before it: shards that used to pass near 24 minutes would fail.
+      - name: Set this shard's deadline
+        run: echo "CI_SPINEL_DEADLINE=$(( $(date +%s) + 1440 ))" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
       # No setup-rust: the producer archive restores the test binaries.
       - uses: actions/download-artifact@v8
@@ -1935,8 +1951,9 @@ jobs:
               print(("later " if t in units else "now ") + t)' "$RUNNER_TEMP/bundle-plan/bundle-plan.json" > "$RUNNER_TEMP/split.txt"
           sed -n 's/^now //p' "$RUNNER_TEMP/split.txt" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact &
           alone=$!
-          RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" RH_SPINEL_BUNDLE_OUT="$RUNNER_TEMP/spinel-bundles" \
-            "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_build --nocapture || true
+          left=$(( CI_SPINEL_DEADLINE - $(date +%s) ))
+          [ "$left" -le 0 ] || RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" RH_SPINEL_BUNDLE_OUT="$RUNNER_TEMP/spinel-bundles" \
+            timeout "$left" "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_build --nocapture || true
           echo "bundled in $(( $(date +%s) - start ))s"
           status=0
           sed -n 's/^later //p' "$RUNNER_TEMP/split.txt" | RH_SPINEL_BUNDLE="$RUNNER_TEMP/spinel-bundles" \
@@ -1955,8 +1972,9 @@ jobs:
           test -x "$TINY_API_BIN"
           python3 scripts/ci-plan.py timed --kind toolchain --name tiny_api -- \
             "$TINY_API_BIN" --ignored --nocapture spinel_gate_
+      # Not !cancelled(), as in spinel-framework: a shard past its limit reads as cancelled, and its finished tests' seconds still count.
       - name: Upload recorded test seconds
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: spinel-timings-toolchain-${{ matrix.shard }}
@@ -2276,6 +2294,17 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/rust_toolchain-real_blog_rescue_from_runs.json" \
             --select rust_toolchain::real_blog_rescue_from_runs
+      - name: cargo test --test rust_record_tests record_tests_app_cargo_test_passes_what_it_lowers
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/rust_record_tests-record_tests_app_cargo_test_passes_what_it_lowers.json" \
+            --select rust_record_tests::record_tests_app_cargo_test_passes_what_it_lowers
       - name: cargo test --test emit_and_run render json writer on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
         env:
@@ -2287,6 +2316,17 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_rust.json" \
             --select emit_and_run::render_json_record_writer_runs_on_rust
+      - name: cargo test --test validation_gaps on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/validation_gaps-validation_gaps_runs_on_rust.json" \
+            --select validation_gaps::validation_gaps_runs_on_rust
       - name: cargo test --test framework_tests_rust (green subset)
         id: inflector
         if: ${{ !cancelled() && matrix.target == 'rust' }}
@@ -2385,6 +2425,14 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_crystal.json" \
             --select emit_and_run::render_json_record_writer_runs_on_crystal
+      - name: cargo test --test validation_gaps on crystal
+        if: ${{ !cancelled() && matrix.target == 'crystal' }}
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/validation_gaps-validation_gaps_runs_on_crystal.json" \
+            --select validation_gaps::validation_gaps_runs_on_crystal
       - name: cargo test --test framework_tests_kotlin
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
         run: |
@@ -2401,6 +2449,14 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_kotlin.json" \
             --select emit_and_run::render_json_record_writer_runs_on_kotlin
+      - name: cargo test --test validation_gaps on kotlin
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/validation_gaps-validation_gaps_runs_on_kotlin.json" \
+            --select validation_gaps::validation_gaps_runs_on_kotlin
       - name: cargo test --test kotlin_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
         run: |
@@ -2441,6 +2497,14 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_swift.json" \
             --select emit_and_run::render_json_record_writer_runs_on_swift
+      - name: cargo test --test validation_gaps on swift
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/validation_gaps-validation_gaps_runs_on_swift.json" \
+            --select validation_gaps::validation_gaps_runs_on_swift
       - name: cargo test --test swift_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: |
@@ -2497,6 +2561,14 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_typescript.json" \
             --select emit_and_run::render_json_record_writer_runs_on_typescript
+      - name: cargo test --test validation_gaps on typescript
+        if: ${{ !cancelled() && matrix.target == 'typescript' }}
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/validation_gaps-validation_gaps_runs_on_typescript.json" \
+            --select validation_gaps::validation_gaps_runs_on_typescript
       - name: cargo test --test framework_tests_typescript -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: |
@@ -2521,6 +2593,14 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_elixir.json" \
             --select emit_and_run::render_json_record_writer_runs_on_elixir
+      - name: cargo test --test validation_gaps on elixir
+        if: ${{ !cancelled() && matrix.target == 'elixir' }}
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/validation_gaps-validation_gaps_runs_on_elixir.json" \
+            --select validation_gaps::validation_gaps_runs_on_elixir
       - name: cargo test --test emit_and_run implicit self on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
         env:
@@ -2602,6 +2682,14 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_go.json" \
             --select emit_and_run::render_json_record_writer_runs_on_go
+      - name: cargo test --test validation_gaps on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/validation_gaps-validation_gaps_runs_on_go.json" \
+            --select validation_gaps::validation_gaps_runs_on_go
       - name: cargo test --test emit_and_run render json writer on python
         if: ${{ !cancelled() && matrix.target == 'python' }}
         run: |
@@ -2610,6 +2698,14 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_python.json" \
             --select emit_and_run::render_json_record_writer_runs_on_python
+      - name: cargo test --test validation_gaps on python
+        if: ${{ !cancelled() && matrix.target == 'python' }}
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/validation_gaps-validation_gaps_runs_on_python.json" \
+            --select validation_gaps::validation_gaps_runs_on_python
       - name: cargo test --test emit_and_run route format on python
         if: ${{ !cancelled() && matrix.target == 'python' }}
         run: |
@@ -2650,6 +2746,18 @@ jobs:
             --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
             --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_csharp.json" \
             --select emit_and_run::render_json_record_writer_runs_on_csharp
+      - name: cargo test --test validation_gaps on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        env:
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+          DOTNET_NOLOGO: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/validation_gaps-validation_gaps_runs_on_csharp.json" \
+            --select validation_gaps::validation_gaps_runs_on_csharp
       - name: scripts/compare ${{ matrix.target }}
         if: ${{ !cancelled() }}
         env:
@@ -3588,7 +3696,7 @@ jobs:
   # publish *current emit* even when per-target toolchain/compare jobs
   # fail (broken emit is exactly what's interesting to investigate).
   #
-  # So build-site gates on the fixture, plus wasm for full site builds. It does
+  # So build-site gates on the fixture alone; assemble-site adds the wasm. It does
   # not gate on unit / toolchain-* / compare-* — a flaky elixir CI run
   # or a known-broken target shouldn't stall the archive workflow, and
   # the archive itself is available via the workflow-run artifact even
@@ -3602,8 +3710,9 @@ jobs:
   build-site:
     # Publish blog archives before waiting for the independent Campfire
     # inputs. assemble-site adds those to the same bytes before deployment.
-    needs: [generate-fixture, build-wasm, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-site') && needs.generate-fixture.result == 'success' && (needs.plan.outputs.site != 'true' || needs.build-wasm.result == 'success') }}
+    # Not on build-wasm: every smoke waits for this job, and a PR's archives need no compiler wasm.
+    needs: [generate-fixture, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-site') && needs.generate-fixture.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -3616,13 +3725,6 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
-      # The compiler wasm, built fresh from source by the parallel build-wasm
-      # job (no committed binary). Lands in _site/lib/ for /playground/+/studio/.
-      - uses: actions/download-artifact@v8
-        if: needs.plan.outputs.site == 'true'
-        with:
-          name: roundhouse-wasm
-          path: wasm-artifact
       # Compile the static asset graph once and inject it into every emit
       # archive's static/assets/ (via ROUNDHOUSE_ASSETS_DIR) so the published
       # archives are self-contained — no build step required by a downloader.
@@ -3729,8 +3831,8 @@ jobs:
       # /playground/ = edit Ruby → emitted code, any target; /studio/ = edit
       # Ruby → run the emitted TS blog live (rung D). fixture.json is regenerated
       # from the just-built real-blog so it tracks create-blog. The compiler wasm
-      # is built fresh from source by the parallel build-wasm job and pulled in
-      # as an artifact (NOT committed) — see wasm/vendor/ruby-rbs-sys/README.md
+      # is built fresh from source by the parallel build-wasm job and added by
+      # assemble-site (NOT committed) — see wasm/vendor/ruby-rbs-sys/README.md
       # and the "Publishing to Pages" section of docs/archive/browser-demo-plan.md. Pure
       # static files (no npm/vite, no COOP/COEP), so they serve straight off Pages.
       - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio, _site/fractal)
@@ -3739,7 +3841,6 @@ jobs:
           set -euo pipefail
           # Shared with the site-only publisher, including each browser entrypoint.
           python3 scripts/ci-site.py browser-assets --root _site
-          cp wasm-artifact/roundhouse_wasm.wasm _site/lib/
           # Fresh seed app from the just-generated real-blog fixture (→ lib).
           (cd wasm/browser-spike && node gen-fixture.mjs)
           cp wasm/browser-spike/fixture.json _site/lib/fixture.json
@@ -4170,8 +4271,8 @@ jobs:
     # for triage, but a failed compact floor still prevents Pages deploy.
     # A missing summary degrades to a skipped render and warning here;
     # assembly does not override the separate publication guards.
-    needs: [build-site, campfire-conformance, campfire-archive-build, archive-results, plan]
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.archive-results.result == 'success' }}
+    needs: [build-site, build-wasm, campfire-conformance, campfire-archive-build, archive-results, plan]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.build-wasm.result == 'success' && needs.archive-results.result == 'success' }}
     # actions: read lets Progress list this workflow's runs on main (its CI trend);
     # the scheduled caller already grants it.
     permissions:
@@ -4193,6 +4294,14 @@ jobs:
           path: site-base
       - name: Restore the site
         run: mkdir -p _site && tar -xf site-base/artifact.tar -C _site
+      # The compiler wasm, built fresh from source by the parallel build-wasm
+      # job (no committed binary). Lands in _site/lib/ for /playground/+/studio/.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-wasm
+          path: wasm-artifact
+      - name: Add the compiler wasm to the site
+        run: cp wasm-artifact/roundhouse_wasm.wasm _site/lib/
       - name: Attach archive outcomes alongside the immutable downloads
         uses: actions/download-artifact@v8
         with:

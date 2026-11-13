@@ -65,7 +65,7 @@ fn a_spinel_tree_on_sidekiq_gets_spinel_redis() {
     assert!(
         client.contains("require \"redis\"")
             && client.contains(
-                "Redis.new(url: url, connect_timeout: CONNECT_TIMEOUT, read_timeout: READ_TIMEOUT)"
+                "Redis.new(url: url, username: user, password: pass, db: db, connect_timeout: connect_timeout, read_timeout: read_timeout)"
             ),
         "{client}"
     );
@@ -312,6 +312,63 @@ fn sidekiq_yml_sets_the_worker_defaults() {
     assert!(run.stdout.contains("sidekiq.yml passed"), "{}", run.stdout);
     let registry = read(&run.emitted, "runtime/job_registry.rb");
     assert!(registry.contains("  def self.sidekiq_worker_queues\n    \"critical default,2\"\n  end\n"), "{registry}");
+}
+
+const REDIS_CONNECTION: &str = "Sidekiq.configure_client do |config|\n  config.redis = {\n    url: ENV.fetch(\"REDIS_URL\", \"redis://localhost:6379/0\"),\n    username: ENV[\"REDIS_USER\"],\n    db: ENV.fetch(\"REDIS_DB\", \"4\"),\n    timeout: 5,\n    read_timeout: 1.5,\n    reconnect_attempts: [0.25, 1],\n    size: 10\n  }\nend\n";
+
+const REDIS_CONNECTION_SCRIPT: &str = r#"ENV["REDIS_USER"] = "jobs"
+raise "username #{SidekiqPush.username.inspect}" unless SidekiqPush.username == "jobs"
+raise "db #{SidekiqPush.db.inspect}" unless SidekiqPush.db == 4
+ENV["REDIS_DB"] = "7"
+raise "db from the environment #{SidekiqPush.db.inspect}" unless SidekiqPush.db == 7
+ENV["REDIS_DB"] = "seven"
+begin
+  SidekiqPush.db
+  raise "a db: that isn't an Integer was read"
+rescue ArgumentError => e
+  raise e.message unless e.message.include?("db: must be an Integer")
+end
+raise "timeouts" unless [SidekiqPush.connect_timeout, SidekiqPush.read_timeout] == [5.0, 1.5]
+raise "delays #{SidekiqPush.reconnect_delays.inspect}" unless SidekiqPush.reconnect_delays == [0.25, 1.0]
+raise "an unset db" unless SidekiqPush.db_setting("") == -1
+puts "redis connection passed"
+"#;
+
+/// The app's `configure_client` connection settings reach the emitted
+/// registry and `SidekiqPush`: `username:` and `db:` read from the
+/// environment when the push first needs them (a `db:` that isn't an
+/// Integer raising, as redis-client's does), `timeout:` the default for
+/// `connect_timeout:`, and `reconnect_attempts:`' delays. `size:` is a
+/// warning, not an error.
+#[test]
+fn configure_client_connection_settings_reach_the_push() {
+    let run = on_sidekiq().write("config/initializers/sidekiq.rb", REDIS_CONNECTION).run_ruby(REDIS_CONNECTION_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("redis connection passed"), "{}", run.stdout);
+    let registry = read(&run.emitted, "runtime/job_registry.rb");
+    for method in [
+        "  def self.sidekiq_redis_username\n    SidekiqPush.setting(\"REDIS_USER\")\n  end\n",
+        "  def self.sidekiq_redis_db\n    SidekiqPush.db_setting(SidekiqPush.setting_or(\"REDIS_DB\", \"4\"))\n  end\n",
+        "  def self.sidekiq_redis_connect_timeout\n    5.0\n  end\n",
+        "  def self.sidekiq_redis_read_timeout\n    1.5\n  end\n",
+        "  def self.sidekiq_redis_reconnect_delays\n    \"0.25 1.0\"\n  end\n",
+    ] {
+        assert!(registry.contains(method), "{method}\n{registry}");
+    }
+
+    // Sidekiq's defaults for an app that sets only url:.
+    let (emitted, errors) = on_sidekiq().emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let registry = read(&emitted, "runtime/job_registry.rb");
+    for method in [
+        "  def self.sidekiq_redis_username\n    \"\"\n  end\n",
+        "  def self.sidekiq_redis_db\n    -1\n  end\n",
+        "  def self.sidekiq_redis_connect_timeout\n    3.0\n  end\n",
+        "  def self.sidekiq_redis_read_timeout\n    3.0\n  end\n",
+        "  def self.sidekiq_redis_reconnect_delays\n    \"0.0\"\n  end\n",
+    ] {
+        assert!(registry.contains(method), "{method}\n{registry}");
+    }
 }
 
 const CABLE_REDIS: &str = "production:\n  adapter: redis\n  url: <%= ENV.fetch(\"REDIS_URL\") { \"redis://localhost:6379/1\" } %>\n  channel_prefix: depot_production\n";

@@ -168,6 +168,17 @@ object Db {
     fun escapeIntOpt(n: Long?): String = n?.toString() ?: "NULL"
     fun escapeFloatOpt(f: Double?): String = f?.toString() ?: "NULL"
     fun escapeBoolOpt(b: Boolean?): String = if (b == null) "NULL" else if (b) "1" else "0"
+    // `t.binary` columns: a value is its UTF-8 bytes (`Digest::BLAKE3` is
+    // not emitted for this target). One holding a NUL is written as an
+    // `X'…'` blob literal, since a NUL inside a quoted literal ends the
+    // SQL text; anything else is the text literal. getString decodes a
+    // BLOB cell as UTF-8, so the read side is the text methods.
+    fun escapeBinary(s: String): String =
+        if (!s.contains('\u0000')) escapeString(s)
+        else "X'" + s.toByteArray(Charsets.UTF_8).joinToString("") { "%02X".format(it) } + "'"
+    fun escapeBinaryOpt(s: String?): String = if (s == null) "NULL" else escapeBinary(s)
+    fun columnBinary(stmtId: Long, i: Long): String = columnText(stmtId, i)
+    fun columnBinaryOpt(stmtId: Long, i: Long): String? = columnTextOpt(stmtId, i)
     // `IN (...)` list for a preload query: comma-joined integer ids.
     fun escapeIntList(ids: MutableList<Long>): String = ids.joinToString(", ") { it.toString() }
 }

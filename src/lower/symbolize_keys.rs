@@ -25,6 +25,18 @@
 //! Receiver effects are not a concern the way they are in
 //! `lower::blank`: the receiver is used exactly once, in the same
 //! position, so evaluation order and count are unchanged.
+//!
+//! A receiver with no static type (`def self.read(saved) = { note:
+//! nil }.merge(saved.symbolize_keys)`) may be a Hash or a value with
+//! its own `symbolize_keys`, so its call is guarded rather than
+//! replaced: `::Hash === saved && saved.instance_of?(::Hash) ?
+//! ActiveSupport.symbolize_keys(saved) : saved.symbolize_keys`. A plain Hash takes
+//! the shared helper; any other value keeps the call as written, so a
+//! class's own method still answers and nil still raises
+//! NoMethodError. Only a local or instance variable qualifies, since
+//! the guard reads the receiver twice. `stringify_keys` follows the
+//! same rule. Only the Ruby family and Spinel ship the helpers, so
+//! only their lowering adds the guard.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode};
@@ -40,7 +52,15 @@ pub fn apply_symbolize_keys_grounding(app: &mut App) {
 
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
-    rewrite_node(expr);
+    rewrite_node(expr, true);
+}
+
+/// Whether the untyped guard applies: only the targets that ship the
+/// helpers it calls (`runtime/ruby/active_support_ext.rb`). Elsewhere the
+/// call stays as written.
+pub(crate) fn guards_untyped_keys(target: crate::build_target::BuildTarget) -> bool {
+    use crate::build_target::BuildTarget;
+    matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
 }
 
 /// The request's params (`params` / `@params`): a String-keyed Hash in
@@ -106,7 +126,110 @@ fn is_escape_false(e: &Expr) -> bool {
     }
 }
 
-pub(crate) fn rewrite_node(expr: &mut Expr) {
+/// No static type answers for the value: unknown, or unknown or nil (an
+/// instance variable read before any write is nil).
+fn is_open(ty: Option<&Ty>) -> bool {
+    match ty {
+        None | Some(Ty::Untyped | Ty::Var { .. }) => true,
+        Some(Ty::Union { variants }) => {
+            variants.iter().all(|v| matches!(v, Ty::Untyped | Ty::Var { .. } | Ty::Nil))
+                && variants.iter().any(|v| *v != Ty::Nil)
+        }
+        _ => false,
+    }
+}
+
+/// `r.symbolize_keys` / `r.stringify_keys` on a variable no static type
+/// answers for: `::Hash === r && r.instance_of?(::Hash) ?
+/// ActiveSupport.<method>(r) : <the call as written>`. `instance_of?`,
+/// not `is_a?`: a Hash subclass (such as an indifferent hash) defines its
+/// own conversion, so only a plain Hash is known to answer with
+/// ActiveSupport's. `::Hash ===` asks first, from the class side, so a
+/// BasicObject with its own method (no `instance_of?`) reaches its call.
+/// The root keeps a class's own `Hash` constant out of the check.
+fn guard_untyped_conversion(expr: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    let key = match method.as_str() {
+        "symbolize_keys" => Ty::Sym,
+        "stringify_keys" => Ty::Str,
+        _ => return None,
+    };
+    if !args.is_empty()
+        || !is_open(r.ty.as_ref())
+        || !matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. })
+    {
+        return None;
+    }
+    let span = expr.span;
+    let hash = || {
+        Expr::new(
+            span,
+            ExprNode::Const { path: vec![crate::ident::Symbol::from(""), crate::ident::Symbol::from("Hash")] },
+        )
+    };
+    let mut is_hash = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(hash()),
+            method: crate::ident::Symbol::from("==="),
+            args: vec![r.clone()],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    is_hash.ty = Some(Ty::Bool);
+    let mut exactly = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(r.clone()),
+            method: crate::ident::Symbol::from("instance_of?"),
+            args: vec![hash()],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    exactly.ty = Some(Ty::Bool);
+    let mut is_plain_hash = Expr::new(
+        span,
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: Default::default(),
+            left: is_hash,
+            right: exactly,
+        },
+    );
+    is_plain_hash.ty = Some(Ty::Bool);
+    let mut converted = active_support_call(span, method.as_str(), r.clone());
+    converted.ty = Some(Ty::Hash { key: std::sync::Arc::new(key), value: std::sync::Arc::new(Ty::Untyped) });
+    let mut original = expr.clone();
+    original.leading_blank_line = false;
+    // The splat belongs to the argument position the guard takes over
+    // (`rewrite_node`), not to the fallback call inside it.
+    original.decisions &= !crate::expr::ERASED_KEYWORD_SPLAT;
+    let mut guarded = Expr::new(
+        span,
+        ExprNode::If { cond: is_plain_hash, then_branch: converted, else_branch: original },
+    );
+    guarded.ty = expr.ty.clone();
+    guarded.leading_blank_line = expr.leading_blank_line;
+    Some(guarded)
+}
+
+pub(crate) fn rewrite_node(expr: &mut Expr, untyped_guard: bool) {
+    // A `**h.symbolize_keys` argument that `lower::forwarding` made
+    // positional is marked on the node in argument position, and the
+    // Ruby emitter writes the `**` back from that mark. Whatever replaces
+    // the call takes the position, so it takes the mark: a keyword-only
+    // callee reached through `public_send` or an untyped receiver
+    // otherwise gets one positional Hash.
+    let splat = expr.decisions & crate::expr::ERASED_KEYWORD_SPLAT;
+    if untyped_guard && let Some(mut guarded) = guard_untyped_conversion(expr) {
+        guarded.decisions |= splat;
+        *expr = guarded;
+        return;
+    }
     let replacement = match &mut *expr.node {
         // Rails' `ActiveSupport::JSON.encode(value, escape: false)`: the
         // document without the HTML-entity escaping, for text that is
@@ -350,7 +473,8 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         }
         _ => None,
     };
-    if let Some(r) = replacement {
+    if let Some(mut r) = replacement {
+        r.decisions |= splat;
         *expr = r;
     }
 }
@@ -422,7 +546,7 @@ mod as_json_tests {
                 parenthesized: false,
             },
         );
-        rewrite_node(&mut call);
+        rewrite_node(&mut call, true);
         call
     }
 

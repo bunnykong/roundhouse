@@ -351,7 +351,13 @@ pub(super) fn try_recv_typed_method(
             // str_color's Hash-recv coloring doesn't fire and the args
             // arrive un-coerced. Append `.to_string()` per arg whose
             // K/V slot is String-shaped. Idempotent for already-String.
-            let recv_hash_kv = recv_var_back_propagated_hash_kv(r);
+            let recv_hash_kv = recv_var_back_propagated_hash_kv(r).or_else(|| match &*r.node {
+                ExprNode::Ivar { name } => match ivar_field_ty(name.as_str()).as_ref().map(peel_nil) {
+                    Some(crate::ty::Ty::Hash { key, value }) => Some((key.as_ref().clone(), value.as_ref().clone())),
+                    _ => None,
+                },
+                _ => None,
+            });
             let is_hash_recv =
                 matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
                     || recv_hash_kv.is_some();

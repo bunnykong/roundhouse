@@ -22,8 +22,9 @@ module ActionDispatch
       def globbed: () -> bool
       def lead: () -> String
       def guard: () -> Integer
+      def defaults: () -> Integer
 
-      def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format, ?String int_params, ?String seg_constraints, ?Integer guard) -> void
+      def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format, ?String int_params, ?String seg_constraints, ?Integer guard, ?Integer defaults) -> void
     end
 
     # Successful match result: the resolved controller + action symbols
@@ -35,8 +36,9 @@ module ActionDispatch
       def req_format: () -> Symbol?
       def index: () -> Integer
       def guard: () -> Integer
+      def defaults: () -> Integer
 
-      def initialize: (Symbol controller, Symbol action, Hash[String, String] path_params, ?Symbol? req_format, ?Integer index, ?Integer guard) -> void
+      def initialize: (Symbol controller, Symbol action, Hash[String, String] path_params, ?Symbol? req_format, ?Integer index, ?Integer guard, ?Integer defaults) -> void
     end
 
     # Match a request against the route table. Returns a MatchResult

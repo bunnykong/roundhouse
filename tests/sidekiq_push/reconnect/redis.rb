@@ -9,6 +9,10 @@ class Redis
 
   PLAN = []
   LOG = []
+  # The options of the last `Redis.new`.
+  OPTIONS = [{}]
+  # Each database SELECTed.
+  SELECTED = []
 
   def self.step(what)
     LOG.push(what)
@@ -19,7 +23,8 @@ class Redis
     end
   end
 
-  def initialize(**_options)
+  def initialize(**options)
+    OPTIONS[0] = options
     Redis.step("connect")
     @closed = false
   end
@@ -27,6 +32,12 @@ class Redis
   def ping
     Redis.step("ping")
     "PONG"
+  end
+
+  def select(db)
+    Redis.step("select")
+    SELECTED.push(db)
+    "OK"
   end
 
   def pipelined

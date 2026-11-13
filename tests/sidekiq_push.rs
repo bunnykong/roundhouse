@@ -214,8 +214,11 @@ fn pushes_match_sidekiq() {
 
 /// The real connection (`runtime/spinel/sidekiq/sidekiq_redis.rb`) over
 /// a scripted stand-in for the redis gem: a connection error, the
-/// first connect's included, takes one reconnect, and a command error
-/// none.
+/// first connect's included, takes one reconnect by default, or as many
+/// as the app's `reconnect_attempts:` gives, each after its delay; a
+/// command error takes none. `Redis.new` gets the app's `username:`,
+/// `password:`, `db:` and timeouts, and none of the first three that it
+/// doesn't give; a `db:` it gives is also SELECTed.
 #[test]
 fn a_connection_error_takes_one_reconnect() {
     let base = option_env!("CARGO_TARGET_TMPDIR")

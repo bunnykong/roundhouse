@@ -101,6 +101,8 @@ pub(super) fn drop(app: &mut App, dir: &Path) {
     // An association names its class by a symbol (`has_one :recurring_execution`): the class it resolved to is named all the same.
     let mut targets_by_file: HashMap<String, Vec<String>> = HashMap::default();
     let mut live_targets: HashSet<String> = HashSet::default();
+    // Not only what a source spells: a model macro includes the modules it builds the names of (devise's `const_get(m.to_s.classify)`).
+    live_targets.extend(app.macro_includes.iter().map(|(_, m)| m.0.to_string()));
     for model in &app.models {
         let targets: Vec<String> = model.associations().flat_map(association_targets).collect();
         match model_file(model).and_then(path_of).filter(|p| candidates.contains_key(p)) {

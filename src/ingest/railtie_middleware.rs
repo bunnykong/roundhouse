@@ -27,7 +27,7 @@ use crate::vfs::Vfs;
 use super::prism_api::PrismLocation;
 use super::util::{
     class_name_path, constant_id_str, constant_path_is_rooted, constant_path_of, find_all_classes_with_nesting,
-    find_all_module_declarations_with_scope, flatten_statements, module_name_path,
+    find_all_module_declarations_with_scope, flatten_statements, module_name_path, walk_calls,
 };
 
 /// A `use(K)` as written, before `K` is resolved where the Railtie's body names it.
@@ -45,6 +45,13 @@ struct Use {
     at_load: bool,
 }
 
+pub(super) struct MiddlewareLoop {
+    pub collection: Expr,
+    pub statement: Option<Expr>,
+    pub app_param: String,
+    pub refusal: Diagnostic,
+}
+
 /// What the app's gems put on its stack, outermost first.
 pub(super) struct Stack {
     pub classes: Vec<String>,
@@ -52,12 +59,15 @@ pub(super) struct Stack {
     pub blocks: crate::det::HashMap<String, String>,
     /// The Rack env keys a stacked middleware's `call(env)` writes, and the class it writes there.
     pub env_writes: crate::det::HashMap<String, String>,
+    /// What each class writes into the env, for a class stacked later (a loop's, `fold_middleware_loops`).
+    pub env_writes_by_class: crate::det::HashMap<String, crate::det::HashMap<String, String>>,
     /// Where each stacked `config.middleware.use` of the app's `config/application.rb` starts.
     pub application_taken: Vec<u32>,
     pub diags: Vec<Diagnostic>,
     /// An initializer's loop that inserts a middleware per element (`Devise.omniauth_configs.each do … use … end`): the
-    /// collection, and the refusal that stands unless the app's settings leave it empty.
-    pub loops: Vec<(Expr, Diagnostic)>,
+    /// collection, the loop as written with the initializer's `app` parameter, and the refusal that stands unless the
+    /// app's settings leave it empty or the loop unrolls.
+    pub loops: Vec<MiddlewareLoop>,
 }
 
 pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -> Stack {
@@ -185,48 +195,168 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
     }
     let blocks = out.iter().filter_map(|(class, _, _, block, _)| block.clone().map(|b| (class.clone(), b))).collect();
     let classes: Vec<String> = out.into_iter().map(|(class, _, _, _, _)| class).collect();
-    let env_writes = env_writes(vfs, &every_lib_file, &classes, &every_gem_defines);
-    Stack { classes, blocks, env_writes, application_taken, diags, loops }
+    let env_writes_by_class = env_writes_by_class(vfs, &every_lib_file, &every_gem_defines);
+    let mut env_writes = crate::det::HashMap::default();
+    stacked_env_writes(&env_writes_by_class, &classes, &mut env_writes);
+    Stack { classes, blocks, env_writes, env_writes_by_class, application_taken, diags, loops }
 }
 
-/// `env["warden"] = Proxy.new(env, self)`: a top-level statement of a stacked class's `call(env)`,
-/// writing a literal key with a constructed class, which is then in the env below it on every request.
-fn env_writes<V: Vfs + ?Sized>(vfs: &V, files: &[PathBuf], stacked: &[String], defined: &HashSet<String>) -> crate::det::HashMap<String, String> {
-    let mut out = crate::det::HashMap::default();
+/// `env["warden"] = Proxy.new(env, self)`: a stacked class writing a literal key with a constructed class, which is
+/// then in the env below it on every request. The write may be in any of its methods or of the modules it includes
+/// (OmniAuth::Strategy's `callback_phase`), on the `call(env)` parameter, `@env` or the `env` reader, and the value
+/// may be a method of theirs that answers the construction (`env['omniauth.auth'] = auth_hash`, whose last
+/// expression is `AuthHash.new(...).tap { ... }`).
+// A key written with two different classes is left untyped: which one the request holds is the run time's.
+fn env_writes_by_class<V: Vfs + ?Sized>(vfs: &V, files: &[PathBuf], defined: &HashSet<String>) -> crate::det::HashMap<String, crate::det::HashMap<String, String>> {
+    #[derive(Default)]
+    struct Owner {
+        includes: Vec<String>,
+        writes: Vec<(String, Built)>,
+        answers: crate::det::HashMap<String, String>,
+    }
+    enum Built {
+        Class(String),
+        Method(String),
+    }
+    let built = |value: &Node<'_>, lexical: &[String]| -> Option<String> {
+        let mut value = value.as_call_node()?;
+        if constant_id_str(&value.name()) == "tap" && value.arguments().is_none() {
+            value = value.receiver()?.as_call_node()?;
+        }
+        if constant_id_str(&value.name()) != "new" {
+            return None;
+        }
+        let receiver = value.receiver()?;
+        let path = constant_path_of(&receiver)?;
+        let rooted = receiver.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p));
+        resolve(&Use { path, rooted, lexical: lexical.to_vec(), span: Span::default(), ordered: false, block: None, at_load: false }, defined)
+    };
+    let read_owner = |body: Node<'_>, lexical: &[String]| -> Owner {
+        let mut owner = Owner::default();
+        for stmt in flatten_statements(body) {
+            if let Some(include) = stmt.as_call_node().filter(|c| constant_id_str(&c.name()) == "include" && c.receiver().is_none()) {
+                for arg in include.arguments().map(|a| a.arguments().iter().collect::<Vec<_>>()).unwrap_or_default() {
+                    let Some(path) = constant_path_of(&arg) else { continue };
+                    let rooted = arg.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p));
+                    let u = Use { path, rooted, lexical: lexical.to_vec(), span: Span::default(), ordered: false, block: None, at_load: false };
+                    owner.includes.extend(resolve(&u, defined));
+                }
+                continue;
+            }
+            let Some(def) = stmt.as_def_node().filter(|d| d.receiver().is_none()) else { continue };
+            let Some(body) = def.body() else { continue };
+            // Only `call(env)`'s parameter is Rack's env; another method's first parameter is whatever it is passed.
+            let param = matches!(constant_id_str(&def.name()), "call" | "_call")
+                .then(|| def.parameters().and_then(|p| p.requireds().iter().next()).and_then(|p| p.as_required_parameter_node().map(|r| constant_id_str(&r.name()).to_string())))
+                .flatten();
+            let statements = flatten_statements(body);
+            if let Some(class) = statements.last().and_then(|last| built(last, lexical)) {
+                owner.answers.insert(constant_id_str(&def.name()).to_string(), class);
+            }
+            for stmt in &statements {
+                walk_calls(stmt, &mut |call| {
+                    if constant_id_str(&call.name()) != "[]=" {
+                        return;
+                    }
+                    let on_env = call.receiver().is_some_and(|r| {
+                        r.as_local_variable_read_node().is_some_and(|v| param.as_deref() == Some(constant_id_str(&v.name())))
+                            || r.as_instance_variable_read_node().is_some_and(|v| constant_id_str(&v.name()) == "@env")
+                            || r.as_call_node().is_some_and(|c| constant_id_str(&c.name()) == "env" && c.receiver().is_none() && c.arguments().is_none())
+                    });
+                    let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                    let ([key, value], true) = (args.as_slice(), on_env) else { return };
+                    let Some(key) = key.as_string_node().map(|k| String::from_utf8_lossy(k.unescaped()).into_owned()) else { return };
+                    if let Some(class) = built(value, lexical) {
+                        owner.writes.push((key, Built::Class(class)));
+                    } else if let Some(m) = value.as_call_node().filter(|c| c.receiver().is_none() && c.arguments().is_none() && c.block().is_none()) {
+                        owner.writes.push((key, Built::Method(constant_id_str(&m.name()).to_string())));
+                    }
+                });
+            }
+        }
+        owner
+    };
+    let mut owners: crate::det::HashMap<String, Owner> = crate::det::HashMap::default();
     for file in files {
         let Ok(bytes) = vfs.read(file) else { continue };
         let parsed = super::prism::parse_silent(&bytes);
         let root = parsed.node();
         for (scope, nesting, class) in find_all_classes_with_nesting(&root) {
             let own = scope.iter().cloned().chain(class_name_path(&class).unwrap_or_default()).collect::<Vec<_>>().join("::");
-            if !stacked.contains(&own) {
-                continue;
-            }
             let lexical: Vec<String> = std::iter::once(own.clone()).chain(nesting).collect();
             let Some(body) = class.body() else { continue };
-            for stmt in flatten_statements(body) {
-                let Some(def) = stmt.as_def_node().filter(|d| constant_id_str(&d.name()) == "call" && d.receiver().is_none()) else { continue };
-                let param = def.parameters().and_then(|p| p.requireds().iter().next()).and_then(|p| p.as_required_parameter_node().map(|r| constant_id_str(&r.name()).to_string()));
-                let (Some(param), Some(body)) = (param, def.body()) else { continue };
-                for write in flatten_statements(body) {
-                    let Some(call) = write.as_call_node().filter(|c| constant_id_str(&c.name()) == "[]=") else { continue };
-                    let on_env = call.receiver().and_then(|r| r.as_local_variable_read_node()).is_some_and(|r| constant_id_str(&r.name()) == param);
-                    let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
-                    let ([key, value], true) = (args.as_slice(), on_env) else { continue };
-                    let Some(key) = key.as_string_node().map(|k| String::from_utf8_lossy(k.unescaped()).into_owned()) else { continue };
-                    let Some(built) = value.as_call_node().filter(|c| constant_id_str(&c.name()) == "new") else { continue };
-                    let Some(receiver) = built.receiver() else { continue };
-                    let Some(path) = constant_path_of(&receiver) else { continue };
-                    let rooted = receiver.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p));
-                    let u = Use { path, rooted, lexical: lexical.clone(), span: Span::default(), ordered: false, block: None, at_load: false };
-                    if let Some(class) = resolve(&u, defined) {
-                        out.insert(key, class);
+            let read = read_owner(body, &lexical);
+            let entry = owners.entry(own).or_default();
+            entry.includes.extend(read.includes);
+            entry.writes.extend(read.writes);
+            entry.answers.extend(read.answers);
+        }
+        for (scope, module) in find_all_module_declarations_with_scope(&root) {
+            let path: Vec<String> = scope.iter().cloned().chain(module_name_path(&module).unwrap_or_default()).collect();
+            let own = path.join("::");
+            // Nested `module A; module B` declarations, as gems write them: each enclosing name is in the nesting.
+            let lexical: Vec<String> = (1..=path.len()).rev().map(|end| path[..end].join("::")).collect();
+            let Some(body) = module.body() else { continue };
+            let read = read_owner(body, &lexical);
+            let entry = owners.entry(own).or_default();
+            entry.includes.extend(read.includes);
+            entry.writes.extend(read.writes);
+            entry.answers.extend(read.answers);
+        }
+    }
+    let mut by_class = crate::det::HashMap::default();
+    let classes: Vec<String> = owners.keys().cloned().collect();
+    for class in &classes {
+        let mut out: crate::det::HashMap<String, String> = crate::det::HashMap::default();
+        let mut conflicting: HashSet<String> = HashSet::default();
+        let mut chain = vec![class.clone()];
+        let mut i = 0;
+        while i < chain.len() && chain.len() < 32 {
+            let more: Vec<String> = owners.get(&chain[i]).map(|o| o.includes.clone()).unwrap_or_default();
+            chain.extend(more.into_iter().filter(|m| !chain.contains(m)).collect::<Vec<_>>());
+            i += 1;
+        }
+        let answer = |m: &str| chain.iter().find_map(|o| owners.get(o).and_then(|o| o.answers.get(m)).cloned());
+        for owner in chain.iter().filter_map(|o| owners.get(o)) {
+            for (key, value) in &owner.writes {
+                let class = match value {
+                    Built::Class(c) => Some(c.clone()),
+                    Built::Method(m) => answer(m),
+                };
+                let Some(class) = class else { continue };
+                match out.get(key) {
+                    Some(seen) if seen != &class => {
+                        conflicting.insert(key.clone());
+                    }
+                    _ => {
+                        out.insert(key.clone(), class);
                     }
                 }
             }
         }
+        out.retain(|k, _| !conflicting.contains(k));
+        if !out.is_empty() {
+            by_class.insert(class.clone(), out);
+        }
     }
-    out
+    by_class
+}
+
+/// The env keys the stacked classes write, a key two of them write with different classes marked by an empty class.
+// Not removed here: a later fold over another class would write the key again as if no conflict had been seen.
+pub(super) fn stacked_env_writes(by_class: &crate::det::HashMap<String, crate::det::HashMap<String, String>>, stacked: &[String], into: &mut crate::det::HashMap<String, String>) {
+    for class in stacked {
+        for (key, value) in by_class.get(class).into_iter().flatten() {
+            match into.get(key) {
+                Some(seen) if seen != value => {
+                    into.insert(key.clone(), String::new());
+                }
+                _ => {
+                    into.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
 }
 
 /// The app's own `config.middleware.use K` (with or without a block) in its `Rails::Application` body.
@@ -573,7 +703,7 @@ fn read_initializer(
     lexical: &[String],
     uses: &mut Vec<Use>,
     diags: &mut Vec<Diagnostic>,
-    loops: &mut Vec<(Expr, Diagnostic)>,
+    loops: &mut Vec<MiddlewareLoop>,
 ) {
     let Some(call) = stmt.as_call_node() else { return };
     if constant_id_str(&call.name()) != "initializer" || call.receiver().is_some() {
@@ -622,7 +752,12 @@ fn read_initializer(
                     !statements[..at].iter().any(|before| String::from_utf8_lossy(before.location().as_slice()).contains(root.as_str()))
                 });
                 match collection.and_then(|(c, _)| super::expr::ingest_expr(&c, path).ok()) {
-                    Some(collection) => loops.push((collection, refusal)),
+                    Some(collection) => loops.push(MiddlewareLoop {
+                        collection,
+                        statement: super::expr::ingest_expr(&inner, path).ok(),
+                        app_param: app.clone(),
+                        refusal,
+                    }),
                     None => diags.push(refusal),
                 }
             }

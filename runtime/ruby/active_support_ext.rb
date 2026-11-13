@@ -43,6 +43,8 @@ require_relative "active_support_number_helper"
 #
 # Other objects use Rails' optional `empty?` protocol. Their `to_s`
 # says nothing about blankness and may even return nil.
+require_relative "json_builder"
+
 module ActiveSupport
   # `ActiveSupport::JSON` — Rails' JSON coder over the json library.
   #
@@ -557,6 +559,42 @@ module ActiveSupport
     end
   end
 
+  # Rails' PBKDF2 key derivation (`ActiveSupport::KeyGenerator`): `secret` stretched with each salt it is asked for,
+  # 2**16 iterations by default, by the SHA256 digest a `load_defaults 7.0` app sets as its `hash_digest_class`.
+  # Not SHA1, an older app's: the digest primitives this runtime carries derive by SHA256 only.
+  class KeyGenerator
+    def initialize(secret, options = {})
+      digest = options[:hash_digest_class]
+      # Not a SHA256 key under another digest's name: it would never match the keys that digest derived.
+      raise ArgumentError, "hash_digest_class #{digest} is not supported; keys derive by SHA256" unless digest.nil? || digest.to_s.end_with?("SHA256")
+      @secret = secret
+      iterations = options[:iterations]
+      @iterations = iterations.nil? ? 65536 : iterations.to_i
+    end
+
+    def generate_key(salt, key_size = 64)
+      MessageDigest.pbkdf2_sha256(@secret, salt, @iterations, key_size)
+    end
+  end
+
+  # `ActiveSupport::CachingKeyGenerator`: each salt and size derived once, as the stretch is the slow part.
+  class CachingKeyGenerator
+    def initialize(key_generator)
+      @key_generator = key_generator
+      @cache_keys = {}
+    end
+
+    def generate_key(salt, key_size = 64)
+      cache_key = "#{salt}|#{key_size}"
+      key = @cache_keys[cache_key]
+      if key.nil?
+        key = @key_generator.generate_key(salt, key_size)
+        @cache_keys[cache_key] = key
+      end
+      key
+    end
+  end
+
   # `list.index_by { |x| key }` — the collection as a Hash keyed by the
   # block's value, last write winning on duplicates (Rails' contract).
   #
@@ -831,6 +869,16 @@ module ActiveSupport
     return out if hash.nil?
     hash.each { |key, item| out[ActiveSupport.indifferent_key(key)] = ActiveSupport.indifferent_value(item, false) }
     out
+  end
+
+  # A Hash a parameter takes where an indifferent one reaches it too: one keyed by Symbol converted, one keyed by String
+  # kept, as the caller's indifferent hash is the one Rails writes in place.
+  def self.indifferent_param(hash)
+    return hash if hash.nil?
+    # Not a value of another class a union lets in (a String): only a Hash has keys to convert.
+    return hash unless hash.is_a?(Hash)
+    return hash if hash.keys.all? { |key| key.is_a?(String) }
+    ActiveSupport.indifferent(hash)
   end
 
   # Not a copy for every Array: Rails converts one written by `[]=` in place, unless it is frozen.

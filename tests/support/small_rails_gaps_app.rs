@@ -13,7 +13,7 @@
 
 use super::emit_and_run;
 
-const SCHEMA: &str = r#"ActiveRecord::Schema.define do
+const SCHEMA: &str = r#"ActiveRecord::Schema[8.1].define(version: 1) do
   create_table "members", force: :cascade do |t|
     t.string "name"
     t.bigint "tag_ids", array: true

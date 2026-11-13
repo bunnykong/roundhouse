@@ -1554,6 +1554,19 @@ impl Replayer<'_> {
                 return None;
             }
         }
+        // The application handed on as an argument (Devise's `SecretKeyFinder.new(app)`) is `Rails.application`; one
+        // read as a receiver stays refused, as boot does not model what the app answers.
+        let mut expr = expr;
+        if let Some(app) = &self.app
+            && let ExprNode::Send { args, .. } = &mut *expr.node
+        {
+            for arg in args.iter_mut() {
+                if matches!(&*arg.node, ExprNode::Var { name, .. } if name.as_str() == app) {
+                    let rails = Expr::new(arg.span, ExprNode::Const { path: vec![Symbol::from("Rails")] });
+                    *arg = Expr::new(arg.span, ExprNode::Send { recv: Some(rails), method: Symbol::from("application"), args: Vec::new(), block: None, parenthesized: false });
+                }
+            }
+        }
         let mut ok = true;
         expr.node.for_each_child_mut(&mut |child| {
             if ok {

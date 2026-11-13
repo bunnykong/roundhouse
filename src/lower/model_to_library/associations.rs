@@ -213,12 +213,19 @@ fn refuse_scoped_through_source(
     true
 }
 
+/// Whether `foreign_key` is a column held unset for its presence check
+/// (`validations::hold_unset_presence_columns`).
+fn held_key(table: Option<&crate::schema::Table>, foreign_key: &Symbol) -> bool {
+    table.is_some_and(|t| t.columns.iter().any(|c| c.name == *foreign_key && c.unset_until_assigned))
+}
+
 pub(super) fn push_association_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
     models: &[Model],
     through_joins: &ThroughJoins,
     runtime_relation: super::RuntimeRelation,
+    table: Option<&crate::schema::Table>,
 ) {
     // The ruby family's belongs_to writer stores nil for a nil value, as
     // Rails does. A strict target's key field is its column's non-nil
@@ -460,6 +467,7 @@ pub(super) fn push_association_methods(
                         &assoc_pk,
                         sentinel,
                         keeps_nil,
+                        held_key(table, foreign_key),
                     ));
                 }
             }
@@ -505,7 +513,10 @@ pub(super) fn push_association_methods(
                         .iter()
                         .any(|m| m.name == writer_name && m.receiver == MethodReceiver::Instance)
                 {
-                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, &assoc_pk, sentinel, keeps_nil));
+                    // A key held unset for its presence check has a nilable
+                    // slot on every target, so nil unsets it there too.
+                    let held = held_key(table, foreign_key);
+                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, &assoc_pk, sentinel, keeps_nil || held));
                 }
                 push_singular_loaded_reader(methods, model, owner, name);
             }
@@ -1969,6 +1980,7 @@ fn synth_polymorphic_writer(
     assoc_pk: &Symbol,
     sentinel: Expr,
     keeps_nil: bool,
+    key_held: bool,
 ) -> MethodDef {
     // def notifiable=(value)
     //   if value.nil?
@@ -2032,8 +2044,12 @@ fn synth_polymorphic_writer(
         ExprNode::If {
             cond: nil_check,
             // Rails clears both columns to nil; the ruby family does too.
+            // A key held unset for its presence check has a nilable slot
+            // on every target, so nil unsets it there too.
             then_branch: if keeps_nil {
                 seq(vec![assign(foreign_key, nil_lit()), assign(&type_col, nil_lit())])
+            } else if key_held {
+                seq(vec![assign(foreign_key, nil_lit()), assign(&type_col, lit_str(""))])
             } else {
                 seq(vec![assign(foreign_key, sentinel), assign(&type_col, lit_str(""))])
             },
@@ -2809,4 +2825,47 @@ pub(super) fn push_dependent_destroy(
             mutates_self: false,
             block_param: None,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The nil branch's assignments, as `(ivar, is_nil)`.
+    fn nil_branch(method: &MethodDef) -> Vec<(String, bool)> {
+        let ExprNode::If { then_branch, .. } = &*method.body.node else { panic!("{:?}", method.body) };
+        let ExprNode::Seq { exprs } = &*then_branch.node else { panic!("{then_branch:?}") };
+        exprs
+            .iter()
+            .map(|e| match &*e.node {
+                ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+                    (name.as_str().to_string(), matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }))
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// A strict target's polymorphic writer stores the key's sentinel for
+    /// nil, but nil for a key held unset (its slot is nilable), leaving
+    /// the type column its `""`.
+    #[test]
+    fn a_held_polymorphic_key_is_unset_by_nil() {
+        let writer = |key_held| {
+            synth_polymorphic_writer(
+                &ClassId(Symbol::from("Note")),
+                &Symbol::from("subject"),
+                &[ClassId(Symbol::from("Post"))],
+                &Symbol::from("subject_id"),
+                &Symbol::from("subject_type"),
+                &Symbol::from("id"),
+                lit_int(0),
+                false,
+                key_held,
+            )
+        };
+        let s = |n: &str, nil| (n.to_string(), nil);
+        assert_eq!(nil_branch(&writer(false)), vec![s("subject_id", false), s("subject_type", false)]);
+        assert_eq!(nil_branch(&writer(true)), vec![s("subject_id", true), s("subject_type", false)]);
+    }
 }

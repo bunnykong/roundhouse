@@ -164,6 +164,34 @@ fn application_job_overrides_the_config_files() {
     );
 }
 
+/// A job's own literal inline/test adapter is honored for that job, so it
+/// isn't warned about; a job that inherits it isn't honored, so ingest
+/// warns about the heir. A heir that sets its own adapter isn't warned.
+#[test]
+fn an_inherited_inline_adapter_is_warned_about_for_the_heir() {
+    let app = application("    config.active_job.queue_adapter = :solid_queue\n");
+    let base = job("ApplicationJob", "ActiveJob::Base", "");
+    let inline_base = job("InlineBaseJob", "ApplicationJob", "  self.queue_adapter = :inline\n");
+    let heir = job("PayloadJob", "InlineBaseJob", "  def perform(value)\n  end\n");
+    let (_, diags) = ingest(&[
+        ("config/application.rb", &app),
+        ("app/jobs/application_job.rb", &base),
+        ("app/jobs/inline_base_job.rb", &inline_base),
+        ("app/jobs/payload_job.rb", &heir),
+    ]);
+    let warned: Vec<_> = diags.iter().filter(|d| d.message.contains("PayloadJob inherits it")).collect();
+    assert_eq!(warned.len(), 1, "{diags:#?}");
+
+    let own = job("PayloadJob", "InlineBaseJob", "  self.queue_adapter = :inline\n\n  def perform(value)\n  end\n");
+    let (_, diags) = ingest(&[
+        ("config/application.rb", &app),
+        ("app/jobs/application_job.rb", &base),
+        ("app/jobs/inline_base_job.rb", &inline_base),
+        ("app/jobs/payload_job.rb", &own),
+    ]);
+    assert!(!diags.iter().any(|d| d.message.contains("inherits it") || d.message.contains("is not honored yet")), "{diags:#?}");
+}
+
 #[test]
 fn a_single_job_s_adapter_is_warned_about_and_not_honored() {
     let app = application("    config.active_job.queue_adapter = :sidekiq\n");

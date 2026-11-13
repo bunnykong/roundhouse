@@ -156,3 +156,20 @@ fn selection_does_not_duplicate_primary_schema_gaps() {
             .contains("column dropped: solid_queue_jobs.schedule")
     );
 }
+
+/// Queue selection reads the primary schema as the application's ingest
+/// does: a SQLite CHECK there does not hide the queue's tables.
+#[test]
+fn a_sqlite_check_in_the_schema_does_not_hide_queue_tables() {
+    let items = "create_table :items do |t|; t.text :code; t.check_constraint \"code GLOB '[A-Z]*'\", name: 'chk_items'; end\n";
+    let jobs = "create_table :solid_queue_jobs do |t|; t.text :arguments; t.check_constraint \"arguments GLOB '{*'\"; end\n";
+    let sqlite = "test:\n  adapter: sqlite3\n  database: storage/test.sqlite3\n";
+    let both = format!("{items}{jobs}");
+    let database = ("config/database.yml", sqlite);
+    assert!(has_job(&app(&[("db/schema.rb", both.as_str()), database])), "primary schema");
+    {
+        let app = app(&[("db/schema.rb", items), ("db/queue_schema.rb", jobs), database]);
+        assert!(has_job(&app), "queue schema");
+        assert_eq!(app.schema.tables[&roundhouse::Symbol::from("solid_queue_jobs")].check_constraints.len(), 1);
+    }
+}

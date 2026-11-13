@@ -21,8 +21,8 @@
 //! `RecordInvalid` (nothing validated), and the runtime's
 //! `save_after_validation` has no abortable callbacks to turn into
 //! `RecordNotSaved`. A `validate: true` — Rails' default, written out —
-//! is left as the plain call it means. Any other kwarg is not this
-//! pass's to read.
+//! is the plain call it means, and a computed value picks between the
+//! two at run time. Any other kwarg is not this pass's to read.
 //!
 //! Shape-directed, not type-directed: `save(validate: false)` names no
 //! method but ActiveRecord's, so the receiver's type adds nothing the
@@ -56,6 +56,52 @@ pub fn apply_bare_model_saves(app: &mut App) {
             rewrite_bare(&mut method.body);
         }
     }
+    // A module only models include, defining no `save` of its own (Devise's `Recoverable`): its bare `save` is the
+    // model's, as Ruby looks it up on the includer.
+    let mut included: crate::det::HashSet<crate::ident::ClassId> = crate::det::HashSet::default();
+    for model in &app.models {
+        if model.methods().any(|m| matches!(m.name.as_str(), "save" | "save!")) {
+            continue;
+        }
+        let mut pending = crate::analyze::model_includes(model);
+        while let Some(id) = pending.pop() {
+            if included.insert(id.clone()) {
+                pending.extend(app.library_classes.iter().filter(|c| c.name == id).flat_map(|c| c.includes.iter().cloned()));
+            }
+        }
+    }
+    let saving_models: crate::det::HashSet<crate::ident::ClassId> = app
+        .models
+        .iter()
+        .filter(|m| m.methods().any(|d| matches!(d.name.as_str(), "save" | "save!")))
+        .map(|m| m.name.clone())
+        .collect();
+    // Through every module those include as well: a module reached from a saving model is that model's too.
+    let mut elsewhere: crate::det::HashSet<crate::ident::ClassId> = crate::det::HashSet::default();
+    let mut pending: Vec<crate::ident::ClassId> = app
+        .library_classes
+        .iter()
+        .filter(|c| !c.is_module)
+        .flat_map(|c| c.includes.iter().cloned())
+        .chain(app.models.iter().filter(|m| saving_models.contains(&m.name)).flat_map(crate::analyze::model_includes))
+        .collect();
+    while let Some(id) = pending.pop() {
+        if elsewhere.insert(id.clone()) {
+            pending.extend(app.library_classes.iter().filter(|c| c.name == id).flat_map(|c| c.includes.iter().cloned()));
+        }
+    }
+    for lc in app.library_classes.iter_mut() {
+        if !lc.is_module
+            || !included.contains(&lc.name)
+            || elsewhere.contains(&lc.name)
+            || lc.methods.iter().any(|m| matches!(m.name.as_str(), "save" | "save!"))
+        {
+            continue;
+        }
+        for method in lc.methods.iter_mut().filter(|m| matches!(m.receiver, crate::dialect::MethodReceiver::Instance)) {
+            rewrite_bare(&mut method.body);
+        }
+    }
 }
 
 fn rewrite_bare(expr: &mut Expr) {
@@ -72,7 +118,8 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
 }
 
 fn rewrite_kwarg(expr: &mut Expr) {
-    let ExprNode::Send { method, args, block: None, .. } = &mut *expr.node else {
+    let span = expr.span;
+    let ExprNode::Send { recv, method, args, block: None, .. } = &mut *expr.node else {
         return;
     };
     if !matches!(method.as_str(), "save" | "save!") {
@@ -83,10 +130,39 @@ fn rewrite_kwarg(expr: &mut Expr) {
     let [(k, v)] = entries.as_slice() else { return };
     let key_is_validate = matches!(&*k.node,
         ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "validate");
-    let value_is_false = matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: false } });
-    if !(key_is_validate && value_is_false) {
+    if !key_is_validate {
         return;
     }
-    *method = Symbol::from("save_after_validation");
-    args.clear();
+    match &*v.node {
+        ExprNode::Lit { value: Literal::Bool { value: false } } => {
+            *method = Symbol::from("save_after_validation");
+            args.clear();
+        }
+        ExprNode::Lit { value: Literal::Bool { value: true } } => args.clear(),
+        // Not for a receiver the branches would evaluate twice; Rails skips validation only for `false` itself (`options[:validate] == false`), not for nil.
+        _ if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)) => {
+            let value = v.clone();
+            // Not the receiver read after the value: Ruby takes it first, so a value that rebinds it saves the one it had.
+            let plain_value = matches!(&*value.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Lit { .. } | ExprNode::SelfRef);
+            let held = recv.as_ref().filter(|r| !plain_value && !matches!(&*r.node, ExprNode::SelfRef)).map(|r| {
+                let local = Symbol::from(format!("__rh_save_{}", span.start));
+                let bind = Expr::new(span, ExprNode::Assign { target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: local.clone() }, value: r.clone() });
+                (bind, Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: local }))
+            });
+            let receiver = held.as_ref().map(|(_, read)| read.clone()).or_else(|| recv.clone());
+            let call = |name: &str| {
+                Expr::new(span, ExprNode::Send { recv: receiver.clone(), method: Symbol::from(name), args: Vec::new(), block: None, parenthesized: true })
+            };
+            let skipped = call("save_after_validation");
+            let validated = call(method.as_str());
+            let falsy = Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: false } });
+            let cond = Expr::new(span, ExprNode::Send { recv: Some(value), method: Symbol::from("=="), args: vec![falsy], block: None, parenthesized: true });
+            let branch = Expr::new(span, ExprNode::If { cond, then_branch: skipped, else_branch: validated });
+            *expr = match held {
+                Some((bind, _)) => Expr::new(span, ExprNode::Seq { exprs: vec![bind, branch] }),
+                None => branch,
+            };
+        }
+        _ => {}
+    }
 }

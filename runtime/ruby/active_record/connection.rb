@@ -1129,14 +1129,28 @@ module ActiveRecord
     # `Model.update_counters(id, col: delta, …)` — atomic column
     # increments (`col = col + delta`) on one row, skipping validations
     # and callbacks. Returns the affected-row count.
+    # Not `col + delta`: a NULL counter would stay NULL, where Rails' `COALESCE` starts it at 0.
     def self.update_counters(id, counters)
       parts = []
       counters.each do |col, delta|
-        parts.push("#{col} = #{col} + #{delta.to_i}")
+        parts.push("#{col} = COALESCE(#{col}, 0) + #{delta.to_i}")
       end
-      sql = "UPDATE #{table_name} SET #{parts.join(", ")} WHERE id = #{ActiveRecord.adapter.escape_value(id)}"
+      key = ActiveRecord.adapter.quote_column_name(primary_key.to_s)
+      sql = "UPDATE #{table_name} SET #{parts.join(", ")} WHERE #{key} = #{ActiveRecord.adapter.escape_value(id)}"
       ActiveRecord.adapter.execute_ddl(sql)
       ActiveRecord.adapter.changes
+    end
+
+    # `Model.increment_counter(:col, id, by: n)` / `decrement_counter`: Rails' `update_counters(id, col => ±n)`.
+    # Not with `touch:`, which also writes timestamps this one does not.
+    def self.increment_counter(counter_name, id, by: 1, touch: nil)
+      raise NotImplementedError, "increment_counter's touch: is not supported" unless touch.nil?
+      update_counters(id, { counter_name.to_sym => by })
+    end
+
+    def self.decrement_counter(counter_name, id, by: 1, touch: nil)
+      raise NotImplementedError, "decrement_counter's touch: is not supported" unless touch.nil?
+      update_counters(id, { counter_name.to_sym => -by })
     end
 
     # `Model.upsert(attrs, …)` — INSERT that folds into an UPDATE when it
@@ -1522,16 +1536,22 @@ module ActiveRecord
     # lowered call sites (`lower::first_or_create`) inline the statement
     # forms; these answer the rest (a receiverless call inside a class
     # method, an `||` operand).
+    # Not `&block` handed on: the find-or-create lowering takes only a block attached at the call, and a block
+    # parameter is untyped where `yield` takes the RBS block's type.
     def self.find_or_initialize_by(conditions)
-      ActiveRecord::Relation.new(self).find_or_initialize_by(conditions.to_h)
+      ActiveRecord::Relation.new(self).find_or_initialize_by(conditions.to_h) { |record| yield record if block_given? }
     end
 
+    # Not `&block` handed on: the find-or-create lowering takes only a block attached at the call, and a block
+    # parameter is untyped where `yield` takes the RBS block's type.
     def self.find_or_create_by(conditions)
-      ActiveRecord::Relation.new(self).find_or_create_by(conditions.to_h)
+      ActiveRecord::Relation.new(self).find_or_create_by(conditions.to_h) { |record| yield record if block_given? }
     end
 
+    # Not `&block` handed on: the find-or-create lowering takes only a block attached at the call, and a block
+    # parameter is untyped where `yield` takes the RBS block's type.
     def self.find_or_create_by!(conditions)
-      ActiveRecord::Relation.new(self).find_or_create_by!(conditions.to_h)
+      ActiveRecord::Relation.new(self).find_or_create_by!(conditions.to_h) { |record| yield record if block_given? }
     end
 
     def self.create_or_find_by(conditions)

@@ -1494,9 +1494,16 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                         params.iter().chain(extra_params.iter().map(|p| &p.name)).map(|p| p.as_str().to_string()),
                     )
                 };
+                // A helper a gem mixes into the view (`simple_form_for`): Rails' method, on a view context, whose block's
+                // capture is the template's markup, a safe buffer.
+                let on_view_context = recv.is_none() && ctx.view_context_helpers.contains(method.as_str());
                 let mut cap_stmts = vec![assign_accumulator_string_new(cap)];
                 cap_stmts.extend(walk_body(body, &cap_ctx));
-                cap_stmts.push(accumulator_result_ref(cap));
+                cap_stmts.push(if on_view_context {
+                    Expr::new(Span::synthetic(), ExprNode::Send { recv: Some(accumulator_result_ref(cap)), method: Symbol::from("html_safe"), args: Vec::new(), block: None, parenthesized: false })
+                } else {
+                    accumulator_result_ref(cap)
+                });
                 let new_block = Expr::new(
                     block.span,
                     ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
@@ -1506,10 +1513,17 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                         block_style: *block_style,
                     },
                 );
+                let view_context = Expr::new(Span::synthetic(), ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("Base")] })),
+                    method: Symbol::from("new"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                });
                 let rebuilt = Expr::new(
                     inner.span,
                     ExprNode::Send {
-                        recv: recv.as_ref().map(|r| rewrite_helpers_in_expr(r, ctx)),
+                        recv: if on_view_context { Some(view_context) } else { recv.as_ref().map(|r| rewrite_helpers_in_expr(r, ctx)) },
                         method: method.clone(),
                         args: sa.iter().map(|a| rewrite_helpers_in_expr(a, ctx)).collect(),
                         block: Some(new_block),
@@ -1885,6 +1899,16 @@ pub(super) fn classify_template_helper<'a>(
 /// before the html_escape wrap, matching the convention every
 /// emitter would otherwise have to repeat.
 pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
+    // `link_to "Back", :back` by any route a link takes: `:back` is Rails' `url_for(:back)`, the referrer.
+    if let ExprNode::Send { recv: None, method, args, block, parenthesized } = &*e.node
+        && method.as_str() == "link_to"
+        && args.get(1).is_some_and(|a| matches!(&*a.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "back"))
+    {
+        let mut args = args.clone();
+        args[1] = super::view_helpers_call("back_url", Vec::new());
+        let swapped = Expr { node: Box::new(ExprNode::Send { recv: None, method: method.clone(), args, block: block.clone(), parenthesized: *parenthesized }), ..e.clone() };
+        return rewrite_helpers_in_expr(&swapped, ctx);
+    }
     // `x.presence` in a view's output (`<%= r[:title].presence || t(...) %>`):
     // ActiveSupport's Object#presence, which only the CRuby overlay can
     // reopen onto every value. `lower::blank` grounds it in app bodies but
@@ -2433,6 +2457,7 @@ mod tests {
             store_readers: Default::default(),
             route_helper_names: Default::default(),
             app_helper_names: Default::default(),
+            view_context_helpers: Default::default(),
             direct_route_helpers: Default::default(),
             i18n: Default::default(),
             route_helper_arity: Default::default(),

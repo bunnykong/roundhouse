@@ -24,6 +24,12 @@ module SidekiqPush
   def self.url: () -> String
   def self.resolve_url: () -> String
   def self.password: () -> String
+  def self.username: () -> String
+  def self.db: () -> Integer
+  def self.connect_timeout: () -> Float
+  def self.read_timeout: () -> Float
+  def self.reconnect_delays: () -> Array[Float]
+  def self.db_setting: (String value) -> Integer
   def self.setting: (String name) -> String
   def self.setting_or: (String name, String default) -> String
   def self.required_setting: (String name) -> String

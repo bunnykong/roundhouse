@@ -36,7 +36,7 @@ fn app() -> emit_and_run::Overlay {
         )
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.timestamps\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.timestamps\n  end\nend\n",
         )
         .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
         .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")

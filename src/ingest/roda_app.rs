@@ -45,7 +45,7 @@ use super::app::{read_erb_files, read_rb_files};
 use super::controller::infer_render_template;
 use super::expr::{ingest_expr, ingest_ruby_program};
 use super::model::ingest_method;
-use super::sequel_migration::ingest_sequel_migration;
+use super::sequel_migration::{ingest_sequel_migration, settle_absent_targets};
 use super::sequel_model::{hash_kwargs, ingest_sequel_model, normalize_sequel_expr, sym_lit};
 use super::util::{constant_id_str, constant_path_of, find_first_class, flatten_statements};
 use super::view::ingest_template;
@@ -84,6 +84,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
                 &mut app.schema,
             ))?;
         }
+        unwrap_or_record(settle_absent_targets(&mut app.schema, &migrate_dir.display().to_string()))?;
     }
 
     // db.rb — connection + model-wide behavior. One setting is
@@ -136,6 +137,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         class_attr_defaults: indexmap::IndexMap::new(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        mixin_sends: Vec::new(),
         select_aliases: Vec::new(),
         i18n: Default::default(),
     });
@@ -858,7 +860,7 @@ impl<'f> RouteWalker<'f> {
                     constraints.insert(Symbol::from(name.as_str()), "\\d+".to_string());
                 }
             }
-            entries.push(RouteSpec::Explicit {
+            entries.push(RouteSpec::Explicit { defaults: indexmap::IndexMap::new(),
                 method: leaf.method.clone(),
                 path: path_of(&leaf.segs),
                 controller,

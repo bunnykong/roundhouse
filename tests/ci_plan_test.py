@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -62,6 +63,21 @@ def git_repository():
             os.chdir(previous)
 
 
+class UntypedKeyConversionCoverage(unittest.TestCase):
+    def test_key_conversion_lowering_and_helpers_run_the_native_suite(self):
+        for path in [
+            "src/lower/symbolize_keys.rs",
+            "src/lower/config_reader.rs",
+            "src/lower/mod.rs",
+            "runtime/ruby/active_support_ext.rb",
+            "tests/untyped_key_conversion.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("untyped_key_conversion", plan["spinel_tests"])
+
+
 class EncryptsRefusalCoverage(unittest.TestCase):
     def test_model_encryption_refusal_runs_in_the_unit_floor(self):
         # These are CLI emission checks; they do not require native compilation.
@@ -74,6 +90,15 @@ class EncryptsRefusalCoverage(unittest.TestCase):
                 plan = ci.select([path])
                 self.assertIn("unit", plan["jobs"])
                 self.assertIn("build-roundhouse", plan["jobs"])
+
+
+class KernelMethodShadowingCoverage(unittest.TestCase):
+    def test_bare_call_lookup_keeps_its_native_signature_contract(self):
+        for path in ["src/analyze/mod.rs", "src/analyze/body/mod.rs", "src/analyze/body/send.rs", "tests/kernel_method_shadowing.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("kernel_method_shadowing", plan["spinel_tests"])
 
 
 class PublicationBoundary(unittest.TestCase):
@@ -344,6 +369,21 @@ class Routing(unittest.TestCase):
         self.assertFalse(
             any("campfire" in job for job in plan["jobs"] if job not in ci.BASE)
         )
+
+    def test_solid_queue_durability_inputs_select_the_native_contract(self):
+        for path in [
+            "src/ingest/app.rs",
+            "src/lower/job_payload.rs",
+            "src/lower/job_class_side.rs",
+            "runtime/spinel/solid_queue_runner.rb",
+            "tests/support/solid_queue_worker.rs",
+            "tests/solid_queue_durability.rs",
+            "tests/solid_queue_durability/oracle.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("solid_queue_durability", plan["spinel_tests"])
+                self.assertIn("unit", plan["jobs"])
 
     def test_solid_queue_schema_selection_keeps_its_ruby_execution_coverage(self):
         for path in [
@@ -818,6 +858,27 @@ class Routing(unittest.TestCase):
         self.assertEqual(plan["smoke"], ["ruby", "jruby"])
         self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
 
+    def test_route_defaults_select_the_native_contract(self):
+        for path in [
+            "src/ingest/routes.rs", "src/lower/routes.rs", "src/lower/routes_to_library/mod.rs", "src/dialect.rs",
+            "src/build_target.rs", "src/lower/route_guards.rs", "src/project.rs", "runtime/ruby/action_dispatch/router.rb",
+            "runtime/ruby/action_dispatch/router.rbs", "runtime/spinel/scaffold/main.rb", "runtime/spinel/test/test_helper.rb", "runtime/spinel/test/test_helper.rbs",
+            "tests/emit_and_run/route_request_defaults.rs", "tests/support/route_request_defaults/oracle.rb",
+            "tests/support/route_request_defaults/routes.rb", "tests/support/route_request_defaults.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                # The framework suite keeps the native params test; spinel-toolchain runs the HTTP server test.
+                self.assertIn("route_request_defaults", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel-toolchain", plan["jobs"])
+
+    def test_route_defaults_http_test_runs_in_the_toolchain_lane(self):
+        plan = ci.select(["tests/spinel_toolchain/route_request_defaults.rs"])
+        self.assertIn("spinel-toolchain", plan["jobs"])
+        # Not a framework-suite binary: spinel-framework lacks the jemalloc `spin build` links.
+        self.assertNotIn("route_request_defaults", plan["spinel_tests"])
+
     def test_focused_tests_select_only_themselves(self):
         for binary in ci.SPINEL_TESTS:
             with self.subTest(binary=binary):
@@ -851,7 +912,14 @@ class Routing(unittest.TestCase):
     def test_file_level_data_records_select_the_native_toolchain_lane(self):
         for path in [
             "src/analyze/data.rs",
+            "src/analyze/mod.rs",
             "src/ingest/library_class.rs",
+            "src/ingest/app.rs",
+            "src/ingest/file_program.rs",
+            "src/ingest/mod.rs",
+            "src/ingest/visibility.rs",
+            "src/emit/ruby/library.rs",
+            "src/emit/ruby/rbs.rs",
             "tests/data_factory_constants.rs",
             "tests/support/data_record_siblings.rs",
             "tests/emit_and_run/data_record_siblings.rs",
@@ -861,6 +929,8 @@ class Routing(unittest.TestCase):
                 plan = ci.select([path])
                 self.assertIn("unit", plan["jobs"])
                 self.assertIn("spinel-toolchain", plan["jobs"])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("data_record_composition", plan["spinel_tests"])
         # This is a toolchain test, not a framework-suite binary.
         self.assertNotIn("data_record_siblings", ci.SPINEL_TESTS)
 
@@ -902,7 +972,7 @@ class Routing(unittest.TestCase):
         # must too when that file is the only change.
         self.assertEqual(
             ci.select(["src/emit/ruby/library.rs"])["spinel_tests"],
-            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints", "qualified_constant_rbs"],
+            ["data_record_composition", *ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints", "qualified_constant_rbs"],
         )
         self.assertEqual(
             ci.select(["runtime/spinel/db.rb"])["spinel_tests"],
@@ -1061,6 +1131,7 @@ class Routing(unittest.TestCase):
     def test_schema_constraints_owns_ddl_and_index_consumers(self):
         for path in [
             "tests/schema_constraints.rs", "tests/support/schema_constraints_schema.rb",
+            "tests/support/schema_constraints_predicates.rs", "src/ingest/app.rs", "src/ingest/database_yml.rs",
             "tests/support/schema_constraints_contract.rb", "src/schema.rs", "src/ingest/schema.rs",
             "src/schema/generated.rs", "tests/support/emit_and_run.rs",
             "src/emit/shared/schema_sql.rs", "src/lower/model_to_library/schema.rs", "src/lower/scope_chain.rs",
@@ -1090,6 +1161,25 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 plan = ci.select([path])
                 self.assertIn("schema_default_expressions", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
+    def test_schema_keys_owns_declarations_and_consumers(self):
+        for path in [
+            "tests/schema_keys.rs", "tests/support/schema_keys_schema.rb", "tests/support/schema_keys_contract.rb",
+            "tests/support/schema_keys_implicit.rb", "tests/support/schema_keys_implicit_contract.rb",
+            "src/schema.rs", "src/ingest/schema.rs", "src/emit/shared/schema_sql.rs", "src/emit/roda.rs",
+            "src/ingest/sequel_model.rs", "src/analyze/graphql.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_keys", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
+    def test_schema_key_readers_select_the_native_contract(self):
+        for path in ["src/ingest/sequel_migration.rs", "src/ingest/structure_sql.rs", "src/ingest/roda_app.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_keys", plan["spinel_tests"])
                 self.assertIn("spinel-framework", plan["jobs"])
 
     def test_jdbc_probes_select_the_existing_comparison_without_archives(self):
@@ -1148,7 +1238,6 @@ class Routing(unittest.TestCase):
             "runtime/spinel/param_builder.rb": "spinel_param_builder",
             "runtime/spinel/multipart.rb": "spinel_param_builder",
             "runtime/spinel/active_support_date_parsing.rb": "date_columns_spinel",
-            "runtime/spinel/net_http.rb": "spinel_net_http_start",
             "runtime/spinel/http_stub.rb": "spinel_net_http_start",
             "runtime/spinel/http_stub.rbs": "spinel_net_http_start",
             "runtime/spinel/tcp_socket_stub.rb": "spinel_net_http_start",
@@ -1160,6 +1249,23 @@ class Routing(unittest.TestCase):
         for path, binary in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["spinel_tests"], [binary])
+
+    def test_http_tls_inputs_select_the_native_contract(self):
+        for path in [
+            "runtime/spinel/net_http.rb",
+            "src/analyze/registry/stdlib.rs",
+            "src/analyze/body/send.rs",
+            "tests/net_http_tls.rs",
+            "tests/net_http_tls/client.rb",
+            "tests/net_http_tls/driver.rb",
+            "tests/net_http_tls/check.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("net_http_tls", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+        self.assertIn("spinel_net_http_start", ci.select(["runtime/spinel/net_http.rb"])["spinel_tests"])
 
     def test_sqlite_date_quote_inputs_select_the_native_regression(self):
         for path in [
@@ -1513,6 +1619,7 @@ class Results(unittest.TestCase):
                         "shard-1": "success",
                         "shard-2": "success",
                         "shard-3": "success",
+                        "shard-4": "success",
                     },
                 }
                 for j in plan["jobs"]
@@ -1620,11 +1727,11 @@ class Results(unittest.TestCase):
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
     def test_each_spinel_toolchain_shard_must_actually_pass_for_completion(self):
-        # The suite is a four-shard matrix; each shard writes its own output
+        # The suite is a five-shard matrix; each shard writes its own output
         # key, so one shard's success cannot stand in for the other's.
         plan = ci.select([], spinel_lane=True)
         self.assertIn("spinel-toolchain", plan["jobs"])
-        for shard in ["shard-0", "shard-1", "shard-2", "shard-3"]:
+        for shard in ["shard-0", "shard-1", "shard-2", "shard-3", "shard-4"]:
             for status in ["failure", "cancelled", "", None]:
                 with self.subTest(shard=shard, status=status):
                     needs = self.needs(plan)
@@ -1637,8 +1744,8 @@ class Results(unittest.TestCase):
 
     def test_each_spinel_framework_shard_must_actually_pass_for_completion(self):
         plan = ci.select([], spinel_lane=True)
-        self.assertEqual(len(plan["spinel_framework_shards"]), 4)
-        for shard in ["shard-0", "shard-1", "shard-2", "shard-3"]:
+        self.assertEqual(len(plan["spinel_framework_shards"]), 5)
+        for shard in ["shard-0", "shard-1", "shard-2", "shard-3", "shard-4"]:
             for status in ["failure", "cancelled", "", None]:
                 with self.subTest(shard=shard, status=status):
                     needs = self.needs(plan)
@@ -1693,7 +1800,7 @@ class Results(unittest.TestCase):
             ci.SPINEL_TOOLCHAIN_SECONDS["real_blog_spinel_tests_pass"],
         )
         tests = [f"t{i:02}" for i in range(12)]
-        shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(4)]
+        shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(ci.SPINEL_TOOLCHAIN_SHARDS)]
         self.assertEqual(sorted(t for s in shards for t in s), tests)
         self.assertIn(["t00"], shards)
         alone = [s for s in ci.spinel_framework_shards(ci.SPINEL_TESTS, timings=timings) if "spinel_pg_db" in s["tests"]]
@@ -1717,7 +1824,8 @@ class Results(unittest.TestCase):
 
         def plan(recorded):
             timings = {"toolchain": {**heavy, **{t: recorded for t in bundled}}}
-            shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(4)]
+            # Not the live shard count: the half-of-bundled bound below is drawn for four shards beside these three heavy tests.
+            shards = [ci.spinel_toolchain_shard(tests, k, count=4, timings=timings) for k in range(4)]
             self.assertEqual(sorted(t for s in shards for t in s), tests)
             loads = [sum(true_cost[t] for t in s) for s in shards]
             loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
@@ -1754,6 +1862,41 @@ class Results(unittest.TestCase):
                     )
                     records = [json.loads(line) for line in out.read_text().splitlines()]
                     self.assertEqual({r["name"]: r["seconds"] for r in records}, expected)
+
+    def test_run_tests_stops_at_the_deadline_with_the_tests_children_and_records_a_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "records.jsonl"
+            env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": str(out), "CI_SPINEL_DEADLINE": str(int(time.time()) + 2)}
+            start = time.monotonic()
+            run = subprocess.run(
+                ["python3", spec.origin, "run-tests", "--kind", "toolchain", "--parallel", "1",
+                 "--", "sh", "-c", "sleep 60 & wait", "sh"],
+                input="slow\nlate\n", capture_output=True, text=True, env=env,
+            )
+            # Not a PID check on the sleep: killed, it can stay a zombie; its end shows as the pipes it holds closing.
+            self.assertLess(time.monotonic() - start, 30, run)
+            self.assertEqual(run.returncode, 1, run)
+            self.assertIn("::error::slow stopped at this shard's deadline", run.stdout)
+            self.assertIn("::error::late not started: past this shard's deadline", run.stdout)
+            records = [json.loads(line) for line in out.read_text().splitlines()]
+            self.assertEqual([(r["name"], r.get("timed_out")) for r in records], [("slow", True)])
+
+    def test_timed_charges_a_suite_the_bundle_seconds_written_while_it_ran(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, bundle, cases = Path(tmp) / "records.jsonl", Path(tmp) / "bundle", Path(tmp) / "cases"
+            bundle.mkdir()
+            cases.mkdir()
+            (cases / "k1.json").write_text('{"test": "suite::a"}')
+            (cases / "k2.json").write_text('{"test": "suite::a"}')
+            (cases / "k3.json").write_text("not json")
+            env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": str(out), "RH_SPINEL_BUNDLE": str(bundle)}
+            seconds = '{"suite::a": 40, "other::b": 99}'
+            subprocess.run(
+                ["python3", spec.origin, "timed", "--kind", "framework", "--name", "suite", "--charge-cases", str(cases),
+                 "--", "sh", "-c", f"echo '{seconds}' > {bundle}/seconds.json"],
+                env=env, check=True,
+            )
+            self.assertEqual([json.loads(line)["seconds"] for line in out.read_text().splitlines()], [40])
 
     def test_merge_averages_passing_records_into_the_last_seconds(self):
         merged = ci.merge_timings(
@@ -1832,7 +1975,7 @@ class Results(unittest.TestCase):
 
     def test_spinel_framework_shards_cover_each_selected_suite_once(self):
         shards = ci.spinel_framework_shards(ci.SPINEL_TESTS)
-        self.assertEqual([s["shard"] for s in shards], [0, 1, 2, 3])
+        self.assertEqual([s["shard"] for s in shards], [0, 1, 2, 3, 4])
         self.assertEqual(
             sorted(t for s in shards for t in s["tests"]), sorted(ci.SPINEL_TESTS)
         )

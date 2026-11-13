@@ -175,6 +175,10 @@ pub const SINGLETON_CONSTANT_REF: u64 = 1 << 29;
 /// The mark stays when lowering spells `Pathname(x)` as `Pathname.new(x)`.
 pub const KERNEL_CONVERSION: u64 = 1 << 30;
 
+/// Analysis dispatched this receiverless Kernel-named send (`puts`, `load`, …)
+/// to its own class's method on that side: no target maps it to a builtin.
+pub const APP_KERNEL_NAME: u64 = 1 << 59;
+
 /// On the body of a method `ingest::inherited_alias::resolve` copied
 /// from an ancestor for an `alias` of it: the Ruby family writes the
 /// captured `alias_method` back instead, and drops the copy.

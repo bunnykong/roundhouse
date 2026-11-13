@@ -61,7 +61,15 @@ pub(super) fn splice_included_extends(app: &mut App) {
             Extend::Itself => None,
         }))
         .collect();
-    let snapshot = app.library_classes.clone();
+    // Only the modules the splice reads back: the hooks and the modules they extend with, in declaration order so
+    // `find` takes the same first match. A copy of every class was a deep clone of the whole library.
+    let hook_names: HashSet<&ClassId> = hooks.iter().map(|(id, _)| id).collect();
+    let snapshot: Vec<LibraryClass> = app
+        .library_classes
+        .iter()
+        .filter(|c| hook_extended.contains(&c.name) || hook_names.contains(&c.name))
+        .cloned()
+        .collect();
     let mut spliced = Vec::new();
     let mut expanded_hooks: HashSet<ClassId> = HashSet::default();
     let mut extended: HashSet<ClassId> = HashSet::default();

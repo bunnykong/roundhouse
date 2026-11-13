@@ -13,7 +13,7 @@ fn app() -> emit_and_run::Overlay {
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"shelves\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"gadgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"archived\", default: false, null: false\n    t.integer \"shelf_id\"\n  end\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"gadget_id\"\n    t.string \"body\"\n  end\n  create_table \"badges\", force: :cascade do |t|\n    t.string \"kind\"\n  end\nend\n",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"shelves\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"gadgets\", force: :cascade do |t|\n    t.string \"name\"\n    t.boolean \"archived\", default: false, null: false\n    t.integer \"shelf_id\"\n  end\n  create_table \"notes\", force: :cascade do |t|\n    t.integer \"gadget_id\"\n    t.string \"body\"\n  end\n  create_table \"badges\", force: :cascade do |t|\n    t.string \"kind\"\n  end\nend\n",
         )
         .write(
             "app/models/shelf.rb",

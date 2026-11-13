@@ -58,15 +58,51 @@ fn attribute_macro_refusals(app: &App) -> Vec<Diagnostic> {
 /// each such call is refused here — as is an expanded field given an
 /// option its Rails `render` rewrites and the lowering would pass
 /// through as a plain attribute.
+fn descends_from_form_builder(app: &App, id: &crate::ident::ClassId) -> bool {
+    let mut current = id.clone();
+    for _ in 0..32 {
+        let Some(parent) = app.library_classes.iter().filter(|c| c.name == current).find_map(|c| c.parent.clone()) else { return false };
+        if parent.0.as_str().trim_start_matches("::") == "ActionView::Helpers::FormBuilder" {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
 fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     fn visit(app: &App, expr: &Expr, out: &mut Vec<Diagnostic>) {
+        // A builder class of the app's or a gem's own (`builder: MoneyFormBuilder`): a method the lowering does not
+        // expand runs on Rails' builder at request time, which the Ruby family's overlay carries and no other tree.
+        if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node
+            && !expr.span.is_synthetic()
+            && let Some(Ty::Class { id, .. }) = &r.ty
+            && id.0.as_str() != "ActionView::Helpers::FormBuilder"
+            && descends_from_form_builder(app, id)
+            && method.as_str() != "object"
+            && crate::lower::classify_form_builder_method(method.as_str()).is_none()
+        {
+            out.push(Diagnostic::unsupported(
+                expr.span,
+                None,
+                "custom form builder method",
+                format!("`form.{}` is {}'s own method, which runs on Rails' FormBuilder at request time, carried by the Ruby family's runtime only", method.as_str(), id.0.as_str()),
+            ));
+        }
         if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
             && !expr.span.is_synthetic()
-            && matches!(&r.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionView::Helpers::FormBuilder")
+            && let Some(Ty::Class { id, .. }) = &r.ty
+            // A builder subclass's stock fields are expanded as the base's; its own methods are reported above.
+            && (id.0.as_str() == "ActionView::Helpers::FormBuilder" || descends_from_form_builder(app, id))
             && !FORM_BUILDER_HANDLED_ELSEWHERE.contains(&method.as_str())
         {
+            let base = id.0.as_str() == "ActionView::Helpers::FormBuilder";
             let m = method.as_str();
             if crate::lower::classify_form_builder_method(m).is_none() {
+                if !base {
+                    expr.node.for_each_child(&mut |child| visit(app, child, out));
+                    return;
+                }
                 out.push(Diagnostic::unsupported(
                     expr.span,
                     None,
@@ -1209,7 +1245,7 @@ fn gradual(ty: Option<&Ty>) -> bool {
     }
 }
 
-fn is_unknown_ty(ty: Option<&Ty>) -> bool {
+pub(crate) fn is_unknown_ty(ty: Option<&Ty>) -> bool {
     match ty {
         None => true,
         Some(Ty::Var { .. }) => true,
@@ -1266,7 +1302,7 @@ pub struct UnknownReceiverSend {
 /// True when `method` is registered on the receiver's class (either
 /// side), walking parents and includes. A registered method that returns
 /// `Ty::Var` still counts as resolved for the unknown-receiver ledger.
-fn method_registered_on(
+pub(crate) fn method_registered_on(
     classes: &HashMap<ClassId, ClassInfo>,
     ty: Option<&Ty>,
     method: &Symbol,

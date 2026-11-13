@@ -209,6 +209,14 @@ mod mutable_literals;
 mod auto_source_gem_contract;
 #[path = "emit_and_run/auto_source_gem.rs"]
 mod auto_source_gem;
+#[path = "support/gem_method_require.rs"]
+mod gem_method_require_contract;
+#[path = "emit_and_run/gem_method_require.rs"]
+mod gem_method_require;
+#[path = "support/block_arg_conditional.rs"]
+mod block_arg_conditional_contract;
+#[path = "emit_and_run/block_arg_conditional.rs"]
+mod block_arg_conditional;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]
@@ -343,6 +351,8 @@ mod representable;
 mod active_model_serializer_app;
 #[path = "emit_and_run/active_model_serializer.rs"]
 mod active_model_serializer;
+#[path = "emit_and_run/serializer_scope.rs"]
+mod serializer_scope;
 #[path = "emit_and_run/instance_extend.rs"]
 mod instance_extend;
 
@@ -428,6 +438,10 @@ mod class_side_default;
 mod hash_write_through_reader_contract;
 #[path = "emit_and_run/hash_write_through_reader.rs"]
 mod hash_write_through_reader;
+#[path = "support/app_class_registry.rs"]
+mod app_class_registry_contract;
+#[path = "emit_and_run/app_class_registry.rs"]
+mod app_class_registry;
 #[path = "emit_and_run/helper_anonymous_rest.rs"]
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
@@ -580,6 +594,10 @@ mod format_allow_nil_blank;
 mod format_value_to_s;
 #[path = "emit_and_run/validates_acceptance.rs"]
 mod validates_acceptance;
+#[path = "emit_and_run/validates_of_confirmation.rs"]
+mod validates_of_confirmation;
+#[path = "emit_and_run/respond_to_fold.rs"]
+mod respond_to_fold;
 #[path = "emit_and_run/attribute_api_boolean_cast.rs"]
 mod attribute_api_boolean_cast;
 #[path = "emit_and_run/hash_fetch_one_arg.rs"]
@@ -21138,6 +21156,8 @@ mod devise;
 mod warden;
 #[path = "emit_and_run/class_eval_string_macro.rs"]
 mod class_eval_string_macro;
+#[path = "emit_and_run/primary_key_send.rs"]
+mod primary_key_send;
 #[path = "emit_and_run/send_built_name.rs"]
 mod send_built_name;
 #[path = "emit_and_run/app_middleware.rs"]
@@ -22142,6 +22162,12 @@ mod deprecation;
 mod loaded_begin;
 #[path = "emit_and_run/class_eval_definer_call.rs"]
 mod class_eval_definer_call;
+#[path = "emit_and_run/custom_form_builder.rs"]
+mod custom_form_builder;
+#[path = "emit_and_run/simple_form.rs"]
+mod simple_form;
+#[path = "emit_and_run/classvar_block_initializers.rs"]
+mod classvar_block_initializers;
 #[path = "emit_and_run/model_mixin_macro.rs"]
 mod model_mixin_macro;
 #[path = "emit_and_run/controller_append_callbacks.rs"]
@@ -22166,3 +22192,7 @@ mod library_concern_included_include_contract;
 mod library_concern_included_include;
 #[path = "emit_and_run/param_default_constant_rooting.rs"]
 mod param_default_constant_rooting;
+#[path = "emit_and_run/compiled_rooted_constants.rs"]
+mod compiled_rooted_constants;
+#[path = "emit_and_run/serializable_resource_as_json.rs"]
+mod serializable_resource_as_json;

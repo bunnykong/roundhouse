@@ -303,6 +303,12 @@ export const Db = {
   escape_int_opt: escapeIntOpt,
   escape_float_opt: escapeFloatOpt,
   escape_bool_opt: escapeBoolOpt,
+  // `t.binary` columns: the text methods. A JavaScript string carries no
+  // encoding to tell bytes by.
+  column_binary: columnText,
+  column_binary_opt: columnTextOpt,
+  escape_binary: escapeString,
+  escape_binary_opt: escapeStringOpt,
 };
 
 export type DbModule = typeof Db;

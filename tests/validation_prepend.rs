@@ -6,7 +6,7 @@ mod emit_and_run;
 
 const BASE: &str =
     "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n";
-const SCHEMA: &str = r#"ActiveRecord::Schema.define do
+const SCHEMA: &str = r#"ActiveRecord::Schema[8.1].define(version: 1) do
   create_table :items, force: true do |t|
     t.string :name
     t.string :code
@@ -520,7 +520,7 @@ fn registration_order_identity_ownership_and_truthiness_run_natively() {
     ];
     let own = |source: &str, n: usize| source.replace("Item", &format!("Item{n}"));
     // The app-owned batch `validate`'s own check is case 0; the table's cases follow it.
-    let mut tables = String::from("ActiveRecord::Schema.define do\n");
+    let mut tables = String::from("ActiveRecord::Schema[8.1].define(version: 1) do\n");
     for n in 0..=cases.len() {
         tables.push_str(&format!(
             "  create_table :item{n}s, force: true do |t|\n    t.string :name\n    t.string :code\n    t.string :type\n    t.boolean :enabled\n  end\n"

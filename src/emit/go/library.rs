@@ -1017,7 +1017,7 @@ pub(super) fn sanitize_method_name(name: &str) -> String {
 /// `sanitize_method_name` (`[]` → `op_get`, lowercase) — the index/
 /// operator peepholes in expr.rs invoke these via Go index syntax,
 /// not method-call, so the casing doesn't have to match.
-fn pascalize_instance_method_name(name: &str) -> String {
+pub(super) fn pascalize_instance_method_name(name: &str) -> String {
     // Operator-shape names route through sanitize_method_name (`[]`
     // → `op_get`, `[]=` → `op_set`, ...) then pascalize via
     // `go_method_name` (`op_get` → `OpGet`). The call-site emit for

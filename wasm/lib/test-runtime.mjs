@@ -177,6 +177,11 @@ function escape_float_opt(f) {
   return Number.isFinite(p) ? String(p) : "0.0";
 }
 function escape_bool_opt(b) { return b == null ? "NULL" : escape_bool(b); }
+// t.binary columns: the text methods, as runtime/typescript/db.ts has them.
+function column_binary(stmtId, i) { return column_text(stmtId, i); }
+function column_binary_opt(stmtId, i) { return column_text_opt(stmtId, i); }
+function escape_binary(s) { return escape_string(s); }
+function escape_binary_opt(s) { return escape_string_opt(s); }
 
 export const Db = {
   configure, install, close, exec, prepare, is_step,
@@ -185,6 +190,7 @@ export const Db = {
   last_insert_rowid, changes,
   escape_string, escape_int, escape_int_list, escape_bool,
   escape_string_opt, escape_int_opt, escape_float_opt, escape_bool_opt,
+  column_binary, column_binary_opt, escape_binary, escape_binary_opt,
 };
 `;
 

@@ -330,6 +330,8 @@ fn file_of_class(c: &LibraryClass) -> Option<FileId> {
 /// The gems' classes and the class graph reach walks; none of it changes as reach grows.
 struct Gems<'a> {
     names: HashSet<String>,
+    /// Every constant the program writes, as written: a module only these name is a value no call of unknown receiver holds.
+    written_consts: HashSet<String>,
     entries: HashMap<String, Vec<&'a LibraryClass>>,
     /// `(owner, class side, method)` for every method a class defines.
     defined: HashSet<(&'a str, bool, &'a str)>,
@@ -344,6 +346,9 @@ struct Gems<'a> {
     /// The gem classes whose file requires a gem the app does not have (orm_adapter's `data_mapper.rb`:
     /// `require 'dm-core'`): Ruby raises LoadError there, so they never exist.
     unloadable: HashSet<String>,
+    /// A model's methods copied from a gem module, by `(model, class side, name)`: walked as the model's own when a
+    /// call reaches it, which no root does for a body whose spans are the gem's.
+    model_copies: HashMap<(String, bool, String), Vec<&'a crate::dialect::MethodDef>>,
 }
 
 impl<'a> Gems<'a> {
@@ -394,7 +399,26 @@ impl<'a> Gems<'a> {
         }
         let app_classes = Self::app_classes_of(app);
         let unloadable = unloadable_classes(app, &names);
-        let mut gems = Gems { names, entries, defined, owners, sinks, app_mixins: HashSet::default(), app_classes, unloadable };
+        let mut model_copies: HashMap<(String, bool, String), Vec<&'a crate::dialect::MethodDef>> = HashMap::default();
+        for model in &app.models {
+            for m in model.methods().filter(|m| !m.body.span.is_synthetic() && mounted(app, m.body.span.file)) {
+                model_copies.entry((model.name.0.to_string(), m.receiver == MethodReceiver::Class, m.name.to_string())).or_default().push(m);
+            }
+        }
+        let mut written_consts: HashSet<String> = HashSet::default();
+        fn consts_in(e: &crate::expr::Expr, out: &mut HashSet<String>) {
+            if let ExprNode::Const { path } = &*e.node {
+                out.insert(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::"));
+            }
+            e.node.for_each_child(&mut |c| consts_in(c, out));
+        }
+        for c in &app.library_classes {
+            for e in c.methods.iter().map(|m| &m.body).chain(c.unknown_calls.iter()).chain(c.constants.iter().map(|(_, v)| v)).chain(c.class_ivar_initializers.iter()) {
+                consts_in(e, &mut written_consts);
+            }
+        }
+        crate::lower::for_each_emit_body_ref(app, &mut |e| consts_in(e, &mut written_consts));
+        let mut gems = Gems { names, written_consts, entries, defined, owners, sinks, app_mixins: HashSet::default(), app_classes, unloadable, model_copies };
         gems.app_mixins = gems.mixed_into_the_app(app);
         Some(gems)
     }
@@ -636,6 +660,29 @@ impl<'a> Gems<'a> {
                 s.body(e, &[]);
             }
         });
+        // What a gem's file runs as it loads (`app.file_programs`, the boot's): Devise's `OmniAuth.config.on_failure =
+        // proc { … Devise::Mapping.find_by_path!(…) … }` calls into the gem when a provider fails.
+        fn program_bodies<'e>(items: &'e [crate::app::ProgramItem], out: &mut Vec<&'e crate::expr::Expr>) {
+            for item in items {
+                match item {
+                    crate::app::ProgramItem::Statement(e) => out.push(e),
+                    crate::app::ProgramItem::Branch { condition, then_items, else_items, .. } => {
+                        out.push(condition);
+                        program_bodies(then_items, out);
+                        program_bodies(else_items, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut loaded = Vec::new();
+        // Not every program: a file nothing loads (Devise's `strategies/rememberable`, which only the model module requires) runs none of it.
+        for program in app.file_programs.iter().filter(|p| app.gem_loaded_files.contains(&crate::ingest::normalize_source(&p.source))) {
+            program_bodies(&program.items, &mut loaded);
+        }
+        for e in loaded {
+            s.body(e, &[]);
+        }
         let (mut calls, mut consts) = (s.calls, s.consts);
         let mut live = Vec::new();
         for c in app.library_classes.iter().filter(|c| !self.is_gem(c)) {
@@ -659,6 +706,11 @@ impl<'a> Gems<'a> {
                 }
             }
         }
+        // A template runs as a method of `ActionView::Base`: what a gem mixes into it (`on_load(:action_view) { include
+        // SimpleForm::ActionViewExtensions::FormHelper }`) answers the template's receiverless calls.
+        if !app.views.is_empty() && app.library_classes.iter().any(|c| c.name.0.as_str() == "ActionView::Base") {
+            consts.push((None, "ActionView::Base".to_string()));
+        }
         // Not only the app's code: the stack builds each middleware (`Warden::Manager.new(app) { … }`) and calls it.
         for class in &app.gem_middlewares {
             consts.push((None, class.clone()));
@@ -668,7 +720,7 @@ impl<'a> Gems<'a> {
             calls.push((Target::Any, "finalize!".to_string()));
         }
         // Not parsed: the block is Ruby source, so every name called on something in it is reached on any receiver.
-        for block in app.gem_middleware_blocks.values() {
+        for block in app.gem_middleware_blocks.values().chain(app.gem_middleware_args.values()) {
             for name in called_names(block) {
                 calls.push((Target::Any, format!("{BLOCK}{name}")));
                 // Not parsed, so what it passes is not known either.
@@ -805,7 +857,9 @@ impl<'a> Gems<'a> {
                     return true;
                 }
                 let Some(original) = self.lookup(&name, side, m.name.as_str()) else { return true };
-                let keep = !self.names.contains(&original.0) || reached.methods.contains(&original);
+                let keep = !self.names.contains(&original.0)
+                    || reached.methods.contains(&original)
+                    || reached.methods.contains(&(name.clone(), side, m.name.to_string()));
                 copies_dropped += usize::from(!keep);
                 keep
             });
@@ -860,7 +914,14 @@ impl Walk<'_, '_> {
             } else if let Some(call) = self.new_calls.pop() {
                 self.answer_call(call);
             } else if let Some(key) = self.new_methods.pop() {
-                if self.gems.names.contains(&key.0) {
+                if let Some(copies) = self.gems.model_copies.get(&key) {
+                    let mut s = Scan::new(Some((key.0.as_str(), key.1, key.2.as_str())), Some(self.gems));
+                    for m in copies {
+                        s.method(m);
+                    }
+                    let (calls, consts) = (s.calls, s.consts);
+                    self.found(calls, consts);
+                } else if self.gems.names.contains(&key.0) {
                     let (calls, consts) = self.gems.method_body(&key);
                     self.found(calls, consts);
                 }
@@ -901,6 +962,11 @@ impl Walk<'_, '_> {
         }
     }
 
+    fn unnamed_module(&self, name: &str) -> bool {
+        let is_module = self.gems.entries.get(name).is_some_and(|e| !e.is_empty() && e.iter().all(|c| c.is_module));
+        is_module && !self.gems.written_consts.iter().any(|written| written == name || name.ends_with(&format!("::{written}")))
+    }
+
     fn found(&mut self, calls: Vec<Call>, consts: Vec<Const>) {
         for call in calls {
             self.call(call);
@@ -923,6 +989,9 @@ impl Walk<'_, '_> {
     }
 
     fn answer(&mut self, c: &str, side: bool, method: &str) {
+        if self.gems.model_copies.contains_key(&(c.to_string(), side, method.to_string())) {
+            self.method((c.to_string(), side, method.to_string()));
+        }
         if let Some(owner) = self.owner(c, side, method) {
             self.method((owner, side, method.to_string()));
         } else if let Some(key) = side.then(|| self.gems.lookup(c, side, method)).flatten() {
@@ -940,7 +1009,7 @@ impl Walk<'_, '_> {
         for a in ancestors.iter() {
             for entry in gems.entries.get(a.as_str()).into_iter().flatten() {
                 for m in &entry.methods {
-                    if self.any.contains(m.name.as_str()) {
+                    if self.any.contains(m.name.as_str()) && !(m.receiver == MethodReceiver::Class && self.unnamed_module(&d)) {
                         self.answer(&d, m.receiver == MethodReceiver::Class, m.name.as_str());
                     }
                 }
@@ -1032,6 +1101,12 @@ impl Walk<'_, '_> {
                 }
                 for d in receivers {
                     for side in [false, true] {
+                        // Not a module's own class-side method a constant of it never reaches: a module is no other
+                        // object's class, so a receiver of unknown type answers it only as the module itself, a value the
+                        // program reads somewhere (rack-protection's `Rack::Protection.new`, which nothing names).
+                        if side && self.unnamed_module(&d) {
+                            continue;
+                        }
                         self.answer(&d, side, &method);
                     }
                 }
@@ -1824,7 +1899,7 @@ fn unloadable_classes(app: &App, names: &HashSet<String>) -> HashSet<String> {
             let gem = gem.as_str();
             gem == root || gem.replace('-', "_") == root || gem.replace('-', "") == root || gem.starts_with(&format!("{root}-")) || gem.starts_with(&format!("{root}_"))
         });
-        crate::project::is_framework_feature(feature)
+        crate::gems::is_framework_feature(feature)
             || gem_named
             || stdlib(root)
             || stdlib(feature)
@@ -1869,11 +1944,13 @@ pub(crate) fn shakes_source_gems(app: &App, target: crate::build_target::BuildTa
 pub(crate) fn compiled_on_the_ruby_family(app: &App) -> crate::det::HashSet<String> {
     let Some(lock) = app.gem_lock.as_ref() else { return Default::default() };
     let deps = |gem: &str| lock.spec_deps.get(gem).cloned().unwrap_or_default();
+    // Not railties alone: a gem on Rails' view or model stack (simple_form's `require 'action_view'`) would load the
+    // real framework beside the runtime's own `ActionView`/`ActiveModel`, which the emitted tree is instead.
     let needs_railties = |gem: &str| {
         let mut seen: crate::det::HashSet<String> = Default::default();
         let mut stack = vec![gem.to_string()];
         while let Some(g) = stack.pop() {
-            if g == "railties" {
+            if matches!(g.as_str(), "railties" | "actionpack" | "actionview" | "activemodel" | "activerecord" | "actionmailer" | "activejob" | "actiontext" | "activestorage") {
                 return true;
             }
             if seen.insert(g.clone()) {

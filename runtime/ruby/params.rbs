@@ -30,6 +30,7 @@ module Params
   def self.scalar_list_provided: (Hash[String, Roundhouse::ParamValue], String) -> bool
   def self.nested_provided: (Hash[String, Roundhouse::ParamValue], String, Array[String], String) -> bool
   def self.indifferent_read: (Hash[untyped, untyped]?, untyped) -> untyped
+  def self.indifferent_delete: (Hash[untyped, untyped]?, untyped) -> untyped
   def self.permitted_names: (Hash[String, Roundhouse::ParamValue], Array[untyped]) -> Hash[String, Roundhouse::ParamValue]
   def self.allowed_scalars: (Hash[String, Roundhouse::ParamValue], Array[String]) -> Hash[String, Roundhouse::ParamValue]
   def self.numbered: (Hash[String, Roundhouse::ParamValue]) -> bool

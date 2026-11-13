@@ -14,6 +14,11 @@ module ActionDispatch
     def alert=: (untyped value) -> untyped
     def notice_was: () -> untyped
     def alert_was: () -> untyped
+    def keep: (?(String | Symbol)? key) -> untyped
+    def keep_all: () -> Flash
+    def discard: (?(String | Symbol)? key) -> untyped
+    def discard_all: () -> Flash
+    def discard_key: (String k) -> String
     def []: (String | Symbol key) -> untyped
     def []=: (String | Symbol key, untyped value) -> untyped
     def fetch: (String | Symbol key, ?untyped default) -> untyped

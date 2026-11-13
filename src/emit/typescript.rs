@@ -115,6 +115,7 @@ mod expr;
 pub(crate) use expr::{array_method_handled, numeric_method_handled, string_method_handled};
 pub mod js_ast;
 mod library;
+pub(crate) use library::nested_class_root;
 mod naming;
 mod package;
 pub mod printer;
