@@ -102,6 +102,11 @@ fn contract_cases_adding_routes_share_a_build_and_a_rewritten_route_does_not() {
     case("kinds", "  get \"kinds\" => \"kinds#index\"\n  resources :articles do", "app/controllers/kinds_controller.rb");
     case("json", "  get \"article_json/:id\" => \"article_json#show\"\n  resources :articles do", "app/controllers/article_json_controller.rb");
     case("rewritten", "  resources :articles, only: [:index] do", "app/controllers/other_controller.rb");
+    let v = serde_json::json!({
+        "key": "inline", "test": "inline", "base": base.to_str().unwrap(), "flags": [], "script": "",
+        "edits": [{"replace": "config/routes.rb", "find": "  resources :articles", "with": "  resources :articles, only: [:show]"}],
+    });
+    std::fs::write(collected.join("inline.json"), v.to_string()).unwrap();
     let out = dir.join("plan.json");
     emit_and_run::bundle::plan(&collected, &out);
     let units: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();

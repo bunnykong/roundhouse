@@ -1106,8 +1106,14 @@ pub mod bundle {
 
     const ROUTES: &str = "config/routes.rb";
 
+    // Not any prefix or suffix match: `resources :articles` made `resources :articles, only: [:index]` rewrites the route.
     fn inserts_route(path: &str, find: &str, replace: &str) -> bool {
-        path == ROUTES && (replace.starts_with(find) || replace.ends_with(find))
+        path == ROUTES
+            && match (replace.strip_prefix(find), replace.strip_suffix(find)) {
+                (Some(after), _) if find.ends_with('\n') || after.starts_with('\n') => true,
+                (_, Some(before)) => before.ends_with('\n'),
+                _ => false,
+            }
     }
 
     // `base_edits` but apart on added methods: a server that fails shared is not built again alone, and two cases adding one name both compose.
