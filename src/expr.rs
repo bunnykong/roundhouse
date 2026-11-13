@@ -419,10 +419,15 @@ fn deserialize_cold<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Box
 
 // A field that grows `Expr` grows every tree about fourfold (see
 // `ExprCold`). Put rare data in `ExprCold` instead of raising these.
+// Every node is one `ExprNode` allocation, and jemalloc rounds it up to
+// a size class: 296 bytes take the 320 class, past 320 a node takes 384
+// (392 took 448). `Ty` sits inline in `Expr::ty`.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<Expr>() <= 120);
+const _: () = assert!(std::mem::size_of::<Expr>() <= 88);
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<ExprNode>() <= 392);
+const _: () = assert!(std::mem::size_of::<ExprNode>() <= 296);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<crate::ty::Ty>() <= 40);
 
 fn is_zero_u64(v: &u64) -> bool {
     *v == 0

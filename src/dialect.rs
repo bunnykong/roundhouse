@@ -1514,7 +1514,7 @@ pub struct LibraryFunction {
 }
 
 fn is_pure_effects(e: &crate::effect::EffectSet) -> bool {
-    e.effects.is_empty()
+    e.is_pure()
 }
 
 // Controllers -----------------------------------------------------------

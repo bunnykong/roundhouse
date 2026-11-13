@@ -654,7 +654,7 @@ fn cmp_ty(a: &Ty, b: &Ty) -> std::cmp::Ordering {
                 (Some(x), Some(y)) => cmp_ty(x, y),
             })
             .then_with(|| cmp_ty(rx, ry))
-            .then_with(|| ex.effects.cmp(&ey.effects)),
+            .then_with(|| ex.cmp(ey)),
         (Ty::Var { var: x }, Ty::Var { var: y }) => x.cmp(y),
         _ => Ordering::Equal,
     })

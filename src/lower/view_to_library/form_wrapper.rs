@@ -278,7 +278,7 @@ fn inspect_argument(
         | ExprNode::StringInterp { .. } => {}
         _ => return false,
     }
-    effects.effects.extend(e.effects.effects.iter().cloned());
+    effects.extend(e.effects.effects().iter().cloned());
     let mut valid = true;
     e.node.for_each_child(&mut |child| {
         valid &= inspect_argument(child, own_names, reads, needs_owner, effects);

@@ -118,7 +118,7 @@ impl super::Analyzer {
     pub(super) fn collect_effects(&self, expr: &mut Expr, ctx: &Ctx) -> EffectSet {
         let mut set = BTreeSet::new();
         self.visit_effects(expr, ctx, &mut set);
-        EffectSet { effects: set }
+        EffectSet::from(set)
     }
 
     /// Walk a typed expression tree computing each node's *local* effects
@@ -344,7 +344,7 @@ impl super::Analyzer {
         // (two-pass before_action seeding), and each pass computes local
         // effects from scratch against the current typed tree.
         out.extend(local.iter().cloned());
-        expr.effects = EffectSet { effects: local };
+        expr.effects = EffectSet::from(local);
     }
 
     /// Visit every `Expr` embedded in a `MatchPattern` — a `Value`'s

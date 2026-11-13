@@ -2173,7 +2173,7 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
             applies,
             skipped_by: skipped_by.map(|c| c.0.as_str().to_string()),
             assigns: render_assigns(&rf.assigns),
-            effects: rf.effects.effects.iter().map(render_effect).collect(),
+            effects: rf.effects.effects().iter().map(render_effect).collect(),
             n_plus_one,
         }));
     }
@@ -2198,7 +2198,7 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
                 (
                     f,
                     l,
-                    a.effects.effects.iter().map(render_effect).collect(),
+                    a.effects.effects().iter().map(render_effect).collect(),
                     render_assigns(&ivars),
                 )
             }
