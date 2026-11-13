@@ -565,7 +565,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
 
     let permitted_fields = self::params::permitted_field_tys(&params_specs);
 
-    let string_enums = if ruby_read_values { crate::lower::arel::StringEnums::of_models(models) } else { Default::default() };
+    let string_enums = match schema {
+        Some(schema) if ruby_read_values => crate::lower::arel::StringEnums::of_models(models, schema),
+        _ => Default::default(),
+    };
     let mut out = Vec::new();
     // Params classes a kept `update(<params object>)` reads `to_attrs`
     // of (`typed_update::hand_update_the_attrs`).

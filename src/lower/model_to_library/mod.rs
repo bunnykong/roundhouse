@@ -427,7 +427,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     let unset_schema = crate::lower::validations::hold_unset_presence_columns(models, schema);
     let schema = &unset_schema;
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
-    let string_enums = if ruby_read_values { crate::lower::arel::StringEnums::of_models(models) } else { Default::default() };
+    let string_enums = if ruby_read_values { crate::lower::arel::StringEnums::of_models(models, schema) } else { Default::default() };
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::default();
     let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {

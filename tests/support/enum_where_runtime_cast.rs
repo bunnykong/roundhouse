@@ -94,6 +94,11 @@ const TICKET: &str = "class Ticket < ApplicationRecord
     find(record.id).status
   end
 
+  def self.status_count(value)
+    @filter = value.to_s
+    where(status: @filter).count
+  end
+
   def self.merged_update_all_count
     record = create!(name: \"m\", status: :sent)
     where(id: record.id).update_all({}.merge(status: :queued))
@@ -109,6 +114,11 @@ const ITEM: &str = "class Item < ApplicationRecord
 
   def self.literal_counts
     [where(state: :unknown).count, where(state: \"unknown\").count, where(state: :live).count]
+  end
+
+  def self.state_count(value)
+    @filter = value.to_s
+    where(state: @filter).count
   end
 end
 ";
@@ -149,6 +159,11 @@ tickets = Ticket.literal_names
 raise "string enum where literal: #{tickets.inspect}" unless tickets == ["q", "s", "q", "s", "q", "s", "s"]
 runtime = [Ticket.with_status(:queued), Ticket.with_status("sent"), Ticket.with_status([:queued]), Ticket.with_status(["sent"])]
 raise "string enum where runtime: #{runtime.inspect}" unless runtime == ["q", "s", "q", "s"]
+# A value known only at runtime in a `where` folded to SQL is cast as
+# well: a label is its stored value, and a stored value or an unknown
+# text is bound as written.
+folded = [Ticket.status_count("queued"), Ticket.status_count("sent"), Ticket.status_count("done"), Ticket.status_count("bogus")]
+raise "string enum folded runtime where: #{folded.inspect}" unless folded == [1, 1, 1, 0]
 # A literal label is assigned through the writer's one cast as well: it
 # stores "sent", which reads back as `queued`.
 written = Ticket.literal_write_reads
@@ -161,5 +176,7 @@ Item.create!(name: "n")
 Item.create!(name: "l", state: :live)
 items = Item.literal_counts
 raise "nil enum label where: #{items.inspect}" unless items == [1, 1, 1]
+folded_items = [Item.state_count("unknown"), Item.state_count("live"), Item.state_count("on")]
+raise "nil enum label folded runtime where: #{folded_items.inspect}" unless folded_items == [1, 1, 1]
 puts "enum where cast OK"
 "#;

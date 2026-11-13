@@ -4154,6 +4154,36 @@ fn push_enum_where_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &
     });
 }
 
+/// The cast `_enum_where_value` applies to a String-valued enum
+/// column, around `value`: `ActiveRecord.enum_where_str(value,
+/// STATUS_ENUM_LABELS, STATUS_ENUM_VALUES, "<nil label>")`, a label's
+/// stored value (nil for the `nil` entry's) and anything else as given.
+/// A `where` folded to SQL on the Ruby-family targets
+/// (`arel::ruby_values`) casts a value known only at runtime with it,
+/// since no runtime relation sees that value. `None` for any other
+/// mapping.
+pub(crate) fn enum_where_str_cast(model: &Model, col: &Column, value: Expr) -> Option<Expr> {
+    let (_, _, value_ty) = enum_arrays(model, col)?;
+    if value_ty != Ty::Str {
+        return None;
+    }
+    let (labels, values, _) = enum_array_refs(model, col, &value_ty);
+    let nil_label = enum_nil_label(model, col).unwrap_or_default();
+    Some(with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
+                method: Symbol::from("enum_where_str"),
+                args: vec![value, labels, values, with_ty(lit_str(nil_label), Ty::Str)],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
+    ))
+}
+
 /// What `normalizes` on an enum hands its lambda: the label, as Rails'
 /// enum type casts before the normalizer runs (activerecord 8.1.4). A
 /// blank or nil is nil, and a value no mapping names raises, before the

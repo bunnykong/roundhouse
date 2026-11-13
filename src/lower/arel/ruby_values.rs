@@ -14,16 +14,38 @@ use super::ir::{ArelOp, Predicate, Value, ValueType};
 /// a `where` folded to SQL here never reaches that cast, so the fold
 /// casts it instead, once: a label is its stored value (`None` for the
 /// label of a `nil` entry, which is `IS NULL`), and anything else is
-/// bound as written, as Rails' enum type serializes.
+/// bound as written, as Rails' enum type serializes. A literal is cast
+/// here; a value known only at runtime is bound through the model's
+/// `enum_where_str` cast (`StringEnum::cast`).
 #[derive(Default)]
-pub(crate) struct StringEnums(
-    crate::det::HashMap<crate::ident::ClassId, crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>>,
-);
+pub(crate) struct StringEnums(crate::det::HashMap<crate::ident::ClassId, Columns>);
+
+type Columns = crate::det::HashMap<Symbol, StringEnum>;
+
+pub(crate) struct StringEnum {
+    pairs: Vec<(String, Option<String>)>,
+    /// `ActiveRecord.enum_where_str(nil, LABELS, VALUES, "<nil label>")`,
+    /// whose first argument a runtime value replaces; `None` where the
+    /// model's table has no such column, so no constants were generated.
+    cast: Option<Expr>,
+}
+
+impl StringEnum {
+    /// The runtime cast around `value`.
+    fn cast(&self, value: Expr) -> Option<Expr> {
+        let mut cast = self.cast.clone()?;
+        if let ExprNode::Send { args, .. } = &mut *cast.node {
+            args[0] = value;
+        }
+        Some(cast)
+    }
+}
 
 impl StringEnums {
-    pub(crate) fn of_models(models: &[crate::dialect::Model]) -> Self {
-        let mut out: crate::det::HashMap<_, crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>> = Default::default();
+    pub(crate) fn of_models(models: &[crate::dialect::Model], schema: &Schema) -> Self {
+        let mut out: crate::det::HashMap<_, Columns> = Default::default();
         for model in models {
+            let table = schema.tables.get(&model.table.0);
             for (column, mapping) in &model.enums {
                 let stored: Vec<&Literal> = mapping.iter().map(|(_, v)| v).filter(|v| !matches!(v, Literal::Nil)).collect();
                 if stored.is_empty() || !stored.iter().all(|v| matches!(v, Literal::Str { .. })) {
@@ -37,20 +59,24 @@ impl StringEnums {
                         _ => None,
                     })
                     .collect();
-                out.entry(model.name.clone()).or_default().insert(column.clone(), pairs);
+                let placeholder = Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
+                let cast = table
+                    .and_then(|t| t.columns.iter().find(|c| c.name == *column))
+                    .and_then(|col| crate::lower::model_to_library::schema::enum_where_str_cast(model, col, placeholder));
+                out.entry(model.name.clone()).or_default().insert(column.clone(), StringEnum { pairs, cast });
             }
         }
         StringEnums(out)
     }
 
-    pub(super) fn of(&self, owner: &crate::ident::ClassId) -> Option<&crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>> {
+    pub(super) fn of(&self, owner: &crate::ident::ClassId) -> Option<&Columns> {
         self.0.get(owner)
     }
 }
 
-type OwnerEnums<'a> = Option<&'a crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>>;
+type OwnerEnums<'a> = Option<&'a Columns>;
 /// The owner's table, whose columns alone the owner's enums name, and those enums.
-type ColumnEnums<'a> = Option<(&'a crate::ident::TableRef, &'a crate::det::HashMap<Symbol, Vec<(String, Option<String>)>>)>;
+type ColumnEnums<'a> = Option<(&'a crate::ident::TableRef, &'a Columns)>;
 
 pub(super) fn normalize(op: &mut ArelOp, schema: &Schema, enums: OwnerEnums<'_>) {
     if let ArelOp::Select(select) = op {
@@ -71,13 +97,26 @@ fn normalize_predicate(predicate: &mut Predicate, schema: &Schema, enums: Column
             if let Some((_, stored)) = enums
                 .filter(|(table, _)| **table == col.table)
                 .and_then(|(_, columns)| columns.get(&col.column))
-                .and_then(|pairs| pairs.iter().find(|(label, _)| label == text))
+                .and_then(|column| column.pairs.iter().find(|(label, _)| label == text))
             {
                 *value = match stored {
                     Some(stored) => Value::LiteralStr(stored.clone()),
                     None => Value::LiteralNull,
                 };
             }
+        }
+        Predicate::Eq(col, Value::Runtime { expr, .. })
+            if enums
+                .filter(|(table, _)| **table == col.table)
+                .and_then(|(_, columns)| columns.get(&col.column))
+                .is_some_and(|column| column.cast.is_some()) =>
+        {
+            // A runtime value on a String enum column: the model's cast
+            // answers its stored value, or nil for the `nil` entry's
+            // label, which the nullable form binds as `IS NULL`.
+            let column = enums.and_then(|(_, columns)| columns.get(&col.column)).expect("guarded");
+            let cast = column.cast(expr.clone()).expect("guarded");
+            *predicate = Predicate::NullableEq(col.clone(), Value::Runtime { expr: cast, ty: ValueType::StrOpt });
         }
         Predicate::Eq(col, Value::Runtime { expr, ty }) => {
             let column = schema.tables.get(&col.table.0)
