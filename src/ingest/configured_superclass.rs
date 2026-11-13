@@ -2021,6 +2021,13 @@ impl<'a> Eval<'a> {
                 };
                 match &*body.node {
                     ExprNode::Ivar { name } => Some(Slot::Ivar(holder, name.as_str().to_string())),
+                    // A mattr's instance copy (`def mapping = Routes.mapping`): the module's value it reads.
+                    // Not in the caller's frame: the reader's constant is looked up from where the reader is defined.
+                    ExprNode::Send { recv: Some(owner), args, block: None, .. } if args.is_empty() && matches!(&*owner.node, ExprNode::Const { .. }) => {
+                        let body = body.clone();
+                        let mut reader = Frame { this: holder, locals: HashMap::default(), block: None, scope: Some(scope) };
+                        self.held_by(&body, &mut reader)
+                    }
                     _ => None,
                 }
             }

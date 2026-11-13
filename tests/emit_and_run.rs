@@ -22172,6 +22172,12 @@ mod custom_form_builder;
 mod simple_form;
 #[path = "emit_and_run/classvar_block_initializers.rs"]
 mod classvar_block_initializers;
+#[path = "emit_and_run/concern_class_settings.rs"]
+mod concern_class_settings;
+#[path = "emit_and_run/load_time_constants.rs"]
+mod load_time_constants;
+#[path = "emit_and_run/doorkeeper.rs"]
+mod doorkeeper;
 #[path = "emit_and_run/model_mixin_macro.rs"]
 mod model_mixin_macro;
 #[path = "emit_and_run/controller_append_callbacks.rs"]

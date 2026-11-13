@@ -176,31 +176,30 @@ pub(super) fn build<V: Vfs + ?Sized>(
 
 /// The statements of `Mod.setup do |config| … end`, the ledger's to take, with `config` read as `Mod`, where the
 /// app's `Mod.setup` is `yield self`. A `require` among them stays out: the gem's files are loaded already.
-/// A `setup` that does more before it yields (simple_form's `@@configured = true`) is called as written, the block
-/// with it, when the ledger takes each statement of the block.
+/// A `setup` or `configure` that does more than yield itself (simple_form's `@@configured = true` before its yield,
+/// Doorkeeper's `configure` building its Config from the block) is called as written, the block with it, when the
+/// ledger takes each statement of the block.
 fn yielded_self_setup(node: &ruby_prism::Node<'_>, app: &App, file: &str, wanted: &[(String, u32)]) -> Option<(Vec<u32>, Vec<crate::expr::Expr>)> {
     use crate::expr::{Expr, ExprNode};
     let call = node.as_call_node()?;
-    if call.name().as_slice() != b"setup" || call.arguments().is_some() {
+    let method = call.name();
+    let method = String::from_utf8_lossy(method.as_slice()).into_owned();
+    if !matches!(method.as_str(), "setup" | "configure") || call.arguments().is_some() {
         return None;
     }
     let path = super::util::constant_path_of(&call.receiver()?)?;
     let name = path.join("::");
     let yields_self = |e: &Expr| matches!(&*e.node, ExprNode::Yield { args } if matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::SelfRef)));
-    // `Some(true)`: the body is the yield alone; `Some(false)`: statements come before it.
+    // `Some(true)`: the body is the yield alone; `Some(false)`: it does more (simple_form's `@@configured = true`
+    // before its yield, Doorkeeper's `configure` building its Config from the block), so it is called as written.
     let shape = app.library_classes.iter().filter(|c| c.name.0.as_str() == name).flat_map(|c| c.methods.iter()).find_map(|m| {
-        if m.receiver != MethodReceiver::Class || m.name.as_str() != "setup" || !m.params.is_empty() {
+        if m.receiver != MethodReceiver::Class || m.name.as_str() != method || !m.params.is_empty() {
             return None;
         }
-        match &*m.body.node {
-            ExprNode::Seq { exprs } => match exprs.as_slice() {
-                [e] if yields_self(e) => Some(true),
-                [_, .., last] if yields_self(last) => Some(false),
-                _ => None,
-            },
-            _ if yields_self(&m.body) => Some(true),
-            _ => None,
-        }
+        Some(match &*m.body.node {
+            ExprNode::Seq { exprs } => matches!(exprs.as_slice(), [e] if yields_self(e)),
+            _ => yields_self(&m.body),
+        })
     })?;
     let block = call.block()?.as_block_node()?;
     if !shape {

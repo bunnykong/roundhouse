@@ -252,7 +252,7 @@ pub(super) fn carry(app: &mut App, dir: &Path) -> super::boot_program::Taken {
     let replays = STATE.with(|s| s.borrow().replays.clone());
     let phase = |p: Phase| replays.iter().filter(move |r| r.phase == p).flat_map(|r| r.statements.clone());
     let mut before: Vec<Expr> = phase(Phase::BeforeInitialize).chain(phase(Phase::Initializer)).collect();
-    before.retain(|statement| !carry_boot_mixin(app, statement));
+    before.retain(|statement| !carry_boot_mixin(app, statement) && !extends_the_route_dsl(app, statement));
     let after: Vec<Expr> = phase(Phase::AfterInitialize).collect();
     statements.extend(before);
     app.boot_program.splice(0..0, statements);
@@ -1670,6 +1670,141 @@ fn is_app_module_name(expr: &Expr, app: &str) -> bool {
         }
     }
     names == ["name", "module_parent", "class"]
+}
+
+/// `Doorkeeper::Rails::Routes.install!`, a gem class method that mixes its helpers into Rails' route DSL
+/// (`ActionDispatch::Routing::Mapper.include Doorkeeper::Rails::Routes::Helper`): the route table drew those helpers'
+/// routes at transpile time (`gem_routes`), so there is nothing left for it to do at boot.
+fn extends_the_route_dsl(app: &App, statement: &Expr) -> bool {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*statement.node else { return false };
+    let ExprNode::Const { path } = &*recv.node else { return false };
+    if !args.is_empty() {
+        return false;
+    }
+    let owner = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+    let mapper = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["ActionDispatch", "Routing", "Mapper"]))
+    };
+    // Not a body that also does anything else, which dropping the call would drop too. Its other statements may only run
+    // more of the same over a registry (Doorkeeper's `registered_routes.each(&:install!)`, its extensions' routers).
+    fn only_mixes_in<'a>(app: &'a App, body: &'a Expr, mapper: &dyn Fn(&Expr) -> bool, seen: &mut Vec<*const Expr>) -> bool {
+        let statements: &[Expr] = match &*body.node {
+            ExprNode::Seq { exprs } => exprs,
+            _ => std::slice::from_ref(body),
+        };
+        !statements.is_empty()
+            && statements.iter().all(|e| match &*e.node {
+                // Not with a module a call makes (`include(register_helper)`), or a block it is handed (`&record_boot`),
+                // which may do more than answer it.
+                ExprNode::Send { recv: Some(r), method, args, block: None, .. } if mapper(r) => match method.as_str() {
+                    "include" | "prepend" => !args.is_empty() && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. })),
+                    // Not any send: only one that names the mixin itself (`send(:include, Helper)`).
+                    "send" | "__send__" => match args.split_first() {
+                        Some((first, modules)) => {
+                            matches!(&*first.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if matches!(value.as_str(), "include" | "prepend"))
+                                && !modules.is_empty()
+                                && modules.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. }))
+                        }
+                        None => false,
+                    },
+                    _ => false,
+                },
+                ExprNode::Send { recv: Some(_), method, args, block: None, .. } if method.as_str() == "each" && args.is_empty() => false,
+                ExprNode::Send { recv: Some(registry), method, args, block: Some(block), .. } if method.as_str() == "each" && args.is_empty() => {
+                    // Not over a receiver that may do more than answer the registry it holds.
+                    if !reads_a_registry(app, registry) {
+                        return false;
+                    }
+                    let Some(name) = symbol_to_proc(block) else { return false };
+                    // Each definition of the name is read, the outer one too; only one already being read counts as
+                    // proven, as a cycle.
+                    app.library_classes.iter().flat_map(|c| c.methods.iter()).filter(|m| m.name.as_str() == name).all(|m| {
+                        let at: *const Expr = &m.body;
+                        if seen.contains(&at) {
+                            return true;
+                        }
+                        seen.push(at);
+                        m.params.is_empty() && only_mixes_in(app, &m.body, mapper, seen)
+                    })
+                }
+                _ => false,
+            })
+    }
+    // Every definition of the name, not one: a later `def` of it is the one Ruby runs.
+    let definitions: Vec<_> = app
+        .library_classes
+        .iter()
+        .filter(|c| c.name.0.as_str() == owner)
+        .flat_map(|c| c.methods.iter())
+        .filter(|m| m.receiver == crate::dialect::MethodReceiver::Class && m.name == *method)
+        .collect();
+    // Not one with parameters: a default runs with the call (`def self.install!(marker = setup)`).
+    if definitions.iter().any(|m| !m.params.is_empty()) {
+        return false;
+    }
+    !definitions.is_empty() && definitions.iter().all(|m| only_mixes_in(app, &m.body, &mapper, &mut vec![&m.body as *const Expr]))
+}
+
+/// Whether `recv` only reads a registry an instance variable holds: a reader whose every definition answers `@x`, or
+/// `@x ||= <a new collection>`, maybe under a lock's `synchronize` (Doorkeeper's `registered_routes`).
+fn reads_a_registry(app: &App, recv: &Expr) -> bool {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*recv.node else { return false };
+    if !args.is_empty() {
+        return false;
+    }
+    // Not any literal or constructor: an element (`[register_router]`) or a collection class of the gem's may do more.
+    fn fresh(value: &Expr) -> bool {
+        match &*value.node {
+            ExprNode::Array { elements, .. } => elements.is_empty(),
+            ExprNode::Hash { entries, .. } => entries.is_empty(),
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. } => {
+                method.as_str() == "new"
+                    && args.is_empty()
+                    && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).eq(["Set"])
+                        || path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).eq(["Array"])
+                        || path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).eq(["Hash"]))
+            }
+            _ => false,
+        }
+    }
+    fn only_reads(e: &Expr) -> bool {
+        let e = match &*e.node {
+            ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+            _ => e,
+        };
+        match &*e.node {
+            ExprNode::Ivar { .. } => true,
+            ExprNode::OpAssign { target: crate::expr::LValue::Ivar { .. }, value, .. } => fresh(value),
+            ExprNode::Send { recv: Some(lock), method, args, block: Some(block), .. }
+                if method.as_str() == "synchronize" && args.is_empty() && matches!(&*lock.node, ExprNode::Const { .. }) =>
+            {
+                // Not a block with parameters: a default runs before the read.
+                matches!(&*block.node, ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }
+                    if params.is_empty() && extra_params.is_empty() && only_reads(body))
+            }
+            _ => false,
+        }
+    }
+    let readers: Vec<_> = app.library_classes.iter().flat_map(|c| c.methods.iter()).filter(|m| m.name == *method).collect();
+    !readers.is_empty() && readers.iter().all(|m| m.params.is_empty() && only_reads(&m.body))
+}
+
+/// `m` of a `&:m` block, which ingest writes as `{ |x| x.m }`.
+fn symbol_to_proc(block: &Expr) -> Option<&str> {
+    // Not a block with more parameters than the one: an optional one's default runs on every element.
+    let ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. } = &*block.node else { return None };
+    if !extra_params.is_empty() {
+        return None;
+    }
+    let [param] = params.as_slice() else { return None };
+    match &*body.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if args.is_empty() && matches!(&*r.node, ExprNode::Var { name, .. } if name == param) =>
+        {
+            Some(method.as_str())
+        }
+        _ => None,
+    }
 }
 
 /// `initializer "name" do |app| … end`: the block's app parameter and statements.

@@ -580,7 +580,9 @@ fn untyped_subexpressions_baseline() {
     // for the RBS-paired gate, which stays at main's count.
     // MEASURED 1280 on 2026-11-12 (merging main e5e647a77, 1242, into this
     // branch's 1276): the two notes above add up, +4 and +38.
-    const CEILING: usize = 1280;
+    // MEASURED 1284 on 2026-11-13 (doorkeeper, on main's 1280): `Base.columns` and `Column`'s `null` argument in
+    // active_record/connection.rb (+4), vars on this RBS-less probe; connection.rbs types them for the RBS-paired gate.
+    const CEILING: usize = 1284;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

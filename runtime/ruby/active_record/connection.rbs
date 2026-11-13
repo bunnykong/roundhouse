@@ -52,9 +52,11 @@ module ActiveRecord
   class Column
     @name: String
     @sql_type: String
+    @null: bool
     def name: () -> String
     def sql_type: () -> String
-    def initialize: (String name, String sql_type) -> void
+    def null: () -> bool
+    def initialize: (String name, String sql_type, ?bool null) -> void
     def limit: () -> Integer?
   end
 
@@ -105,6 +107,7 @@ module ActiveRecord
   class Base
     def self.table_exists?: () -> bool
     def self.column_names: () -> Array[String]
+    def self.columns: () -> Array[Column]
     def self.lock: (?(bool | String)? locking) -> Relation
     def readonly?: () -> bool
     def readonly!: () -> Base

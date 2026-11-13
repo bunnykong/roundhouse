@@ -6,6 +6,11 @@ module Rack
     def self.unescape_path: (String s) -> String
     def self.path_hex_value: (Integer b) -> Integer
     def self.escape: (untyped s) -> String
+    def self.unescape: (String s) -> String
+    def self.parse_query: (String? qs) -> Hash[String, (String | Array[String?])?]
+    def self.query_lists: () -> Hash[String, Array[String?]]
+    def self.build_query: (Hash[String | Symbol, (String | Array[String?])?] params) -> String
+    def self.query_pair: (String | Symbol k, (String | Array[String?])? v) -> String
     def self.secure_compare: (String a, String b) -> bool
   end
 end

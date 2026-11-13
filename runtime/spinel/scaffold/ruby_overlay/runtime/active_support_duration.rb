@@ -61,6 +61,10 @@ module ActiveSupport
 
     def to_i = @seconds.to_i
     def to_f = @seconds.to_f
+    # Rails' Duration hands Numeric's rounding to its value (Doorkeeper's `Duration.seconds(expires).round(0)`).
+    def round(*args, **kwargs) = @seconds.round(*args, **kwargs)
+    def floor(*args, **kwargs) = @seconds.floor(*args, **kwargs)
+    def ceil(*args, **kwargs) = @seconds.ceil(*args, **kwargs)
     # Numeric predicates (Rails delegates them to the value; net/http
     # asks `zero?` of a timeout).
     def zero? = @seconds.zero?

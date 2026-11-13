@@ -1566,6 +1566,30 @@ impl<'a> BodyTyper<'a> {
             return ty;
         }
         if matches!(method.as_str(), "try" | "try!") {
+            // A core value answers its own method too (Doorkeeper's `options.try(:dup)` on a Hash): `try` lowers to the
+            // direct call (`lower::try_guard`), which a typeless `try` left to fail its dispatch check.
+            let nilable = recv_ty.is_some_and(|t| t.clone().strip_nil() != *t);
+            let named = match args.first().map(|a| &*a.node) {
+                Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => Some(value.clone()),
+                Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => Some(Symbol::from(value.as_str())),
+                _ => None,
+            };
+            // Only the name alone, and one that takes no block: an argument or a block changes what a core method
+            // answers (`first(2)`, `fetch { }`), and an iterator's blockless form is an Enumerator (`map`).
+            let alone = args.len() == 1
+                && block_ret.is_none()
+                && named.as_ref().is_some_and(|m| {
+                    matches!(m.as_str(), "dup" | "clone" | "freeze" | "to_s" | "to_a" | "to_h" | "size" | "length" | "empty?" | "first" | "last" | "keys" | "values" | "compact")
+                });
+            let core = match (recv_ty.map(|t| t.clone().strip_nil()), &named) {
+                (Some(Ty::Hash { key, value }), Some(m)) if alone => Some(hash_method(m, &key, &value, None, &[])),
+                (Some(Ty::Array { elem }), Some(m)) if alone => Some(array_method(m, &elem, None)),
+                (Some(Ty::Str), Some(m)) if alone => Some(str_method(m)),
+                _ => None,
+            };
+            if let Some(ty) = core.filter(|t| !matches!(t, Ty::Untyped) && !t.is_open()) {
+                return if nilable { union_of(ty, Ty::Nil) } else { ty };
+            }
             // A nullable receiver (`@user.try(:username)` with `@user:
             // User?`) answers the same: `nil.try` is nil, already in the
             // union below.
