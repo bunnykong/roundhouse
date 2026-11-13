@@ -413,6 +413,7 @@ fn parse_column_def(
         array: false,
         array_stored: false,
         unset_until_assigned: false,
+        collated: top_level_words(modifiers).iter().any(|(_, word)| word == "COLLATE"),
     }))
 }
 

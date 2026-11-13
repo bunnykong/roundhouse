@@ -225,7 +225,7 @@ fn migration_for(app: &App, table: &Table) -> String {
         };
         let unique = if idx.unique { ", unique: true" } else { "" };
         let name = idx.expression.as_ref().map(|_| format!(", name: {}", ruby_str(idx.name.as_str()))).unwrap_or_default();
-        let predicate = idx.predicate.as_ref().filter(|sql| crate::emit::shared::schema_sql::sqlite_reads_alike(sql, table)).map(|sql| format!(", where: Sequel.lit({})", ruby_str(sql))).unwrap_or_default();
+        let predicate = idx.predicate.as_ref().filter(|sql| crate::emit::shared::schema_sql::sqlite_reads_predicate_alike(sql, table, app.schema.expression_dialect)).map(|sql| format!(", where: Sequel.lit({})", ruby_str(sql))).unwrap_or_default();
         lines.push(format!("      index {cols}{unique}{name}{predicate}"));
     }
     for check in &table.check_constraints {
