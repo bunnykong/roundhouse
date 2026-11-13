@@ -1746,9 +1746,9 @@ def main():
             "compare": plan["compare"],
             "spinel-tests": plan["spinel_tests"],
             "spinel-framework-shards": plan["spinel_framework_shards"],
+            # Not the two wall kinds alone: each toolchain shard plans from this, on its CPU seconds where recorded.
             "spinel-timings": {
-                "framework": timings.get("framework", {}),
-                "toolchain": timings.get("toolchain", {}),
+                kind: timings.get(kind, {}) for kind in SPINEL_TIMING_STORED if kind in SPINEL_TIMING_KINDS or timings.get(kind)
             },
             "smoke": plan["smoke"],
             "smoke-extra": plan["smoke_extra"],

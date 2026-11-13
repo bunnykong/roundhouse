@@ -631,6 +631,15 @@ class Routing(unittest.TestCase):
                 self.assertEqual(ci.main(), 0)
             return output.call_args.args[0]
 
+    def test_the_plan_hands_the_shards_their_cpu_seconds(self):
+        main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
+        changed = {"return_value": (["README.md"], None)}
+        recorded = {"toolchain": {"a": 300}, "toolchain_cpu": {"a": 900}, "framework": {"b": 40}}
+        outputs = self.run_planner({"before": "0" * 40}, {**main, "CI_SPINEL_TIMINGS": json.dumps(recorded)}, changed)
+        self.assertEqual(outputs["spinel-timings"], recorded)
+        outputs = self.run_planner({"before": "0" * 40}, {**main, "CI_SPINEL_TIMINGS": json.dumps({"toolchain": {"a": 300}})}, changed)
+        self.assertEqual(outputs["spinel-timings"], {"framework": {}, "toolchain": {"a": 300}})
+
     def test_full_input_on_main_still_selects_every_sdk(self):
         with tempfile.TemporaryDirectory() as directory:
             event = Path(directory) / "event.json"
