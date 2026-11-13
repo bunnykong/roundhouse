@@ -14863,6 +14863,63 @@ mod tests {
         }
     }
 
+    /// A guard covers only code that runs after it held: a negated or
+    /// disjunctive condition, the other arm of an `||` or a ternary, and the
+    /// next argument still use the name. `&&`/`and` joins (an unrelated `!=`
+    /// arm too) and an `&&` after an `||` (which binds tighter) still cover.
+    #[test]
+    fn names_constant_counts_what_a_defined_guard_does_not_cover() {
+        let used = [
+            "if defined?(::Singleton) || enabled\n  Singleton.name\nend\n",
+            "if !defined?(Singleton)\n  Singleton.name\nend\n",
+            "if not defined?(Singleton)\n  Singleton.name\nend\n",
+            "if defined?(Singleton) or enabled\n  Singleton.name\nend\n",
+            "if x\n  1\nelsif enabled || defined?(Singleton)\n  Singleton.name\nend\n",
+            "if defined?(Singleton).nil?\n  Singleton.name\nend\n",
+            "Singleton.name if defined?(Singleton) || enabled\n",
+            "Singleton.name if !defined?(Singleton)\n",
+            "Singleton.name; a if defined?(Singleton)\n",
+            "x = defined?(Singleton) || Singleton.name\n",
+            "x = !defined?(Singleton) && Singleton.name\n",
+            "x = defined?(Singleton) ? 1 : Singleton.name\n",
+            "x = defined?(Singleton) && a ? 1 : Singleton.name\n",
+            "x = a || defined?(Singleton) and Singleton.name\n",
+            "x = (defined?(Singleton) && 1) || Singleton.name\n",
+            "foo(defined?(Singleton) && 1, Singleton.name)\n",
+        ];
+        for src in used {
+            assert!(names_constant(src, "Singleton"), "{src:?}");
+        }
+        let guarded = [
+            "if defined?(Singleton) && Singleton.respond_to?(:x)\n  Singleton.name\nend\n",
+            "if defined?(Singleton) && kind != :plain\n  Singleton.name\nend\n",
+            "if defined?(Singleton) and ready\n  Singleton.name\nend\n",
+            "if (defined?(::Singleton) && x.valid?)\n  Singleton.name\nend\n",
+            "Singleton.name if defined?(Singleton) && kind != :plain\n",
+            "x = a || defined?(Singleton) && Singleton.name\n",
+            "x = !a && defined?(Singleton) && Singleton.name\n",
+        ];
+        for src in guarded {
+            assert!(!names_constant(src, "Singleton"), "{src:?}");
+        }
+    }
+
+    /// `defined?(Name)` in a string or a comment guards nothing: the code
+    /// after it, on its line or in the block below, still uses the name.
+    #[test]
+    fn names_constant_reads_a_guard_only_in_code() {
+        let used = [
+            "if description == \"defined?(Singleton)\"\n  Singleton.name\nend\n",
+            "if ready # defined?(Singleton)\n  Singleton.name\nend\n",
+            "x = \"defined?(Singleton)\"; Singleton.name\n",
+            "x = 'defined?(::Singleton) && '; Singleton.name\n",
+        ];
+        for src in used {
+            assert!(names_constant(src, "Singleton"), "{src:?}");
+        }
+        assert!(!names_constant("if description == \"x\" && defined?(Singleton)\n  Singleton.name\nend\n", "Singleton"));
+    }
+
     /// A rooted `::Name` names the top-level constant, and so does a value
     /// use; `Outer::Name` does not.
     #[test]
