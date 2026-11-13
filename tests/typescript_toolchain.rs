@@ -85,6 +85,8 @@ mod i18n_locales_app;
 mod record_slice_app;
 #[path = "support/namespaced_serializer.rs"]
 mod namespaced_serializer;
+#[path = "support/param_default_import.rs"]
+mod param_default_import;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -330,6 +332,17 @@ fn real_blog_namespaced_controller_beside_its_joined_name_tsc_passes() {
         .emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
     assert_tsc_passes("real-blog with Mod::MailsController and ModMailsController", &emitted);
+}
+
+/// A constructor default naming another app class
+/// (`opts = Options.new`): the default is emitted, and its class must be
+/// imported (TS2304).
+#[test]
+#[ignore]
+fn real_blog_param_default_import_tsc_passes() {
+    let (emitted, errors) = param_default_import::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_tsc_passes("real-blog with a constructor default naming an app class", &emitted);
 }
 
 /// Diagnostic test: emit transpiled_blog and dump tsc errors so we
