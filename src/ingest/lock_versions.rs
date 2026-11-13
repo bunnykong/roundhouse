@@ -39,6 +39,30 @@ pub(super) fn fold_lock_versions(app: &mut App) {
     for view in &mut app.views {
         fold(&mut view.body, &lock);
     }
+    // And a gem file's branch on the version (view_component's `require … if Rails.version.to_f >= 6.1`).
+    fn fold_items(items: &mut [crate::app::ProgramItem], lock: &Lockfile) {
+        for item in items {
+            if let crate::app::ProgramItem::Branch { condition, then_items, else_items, .. } = item {
+                fold(condition, lock);
+                fold_items(then_items, lock);
+                fold_items(else_items, lock);
+            }
+        }
+    }
+    for program in &mut app.file_programs {
+        fold_items(&mut program.items, &lock);
+    }
+    // A boot statement now settled on its version (an engine initializer's `next if Rails.version.to_f >= 6.1`,
+    // replayed as `if … then nil else … end`): only the branch that runs.
+    for stmt in &mut app.boot_program {
+        if let ExprNode::If { cond, then_branch, .. } = &*stmt.node
+            && super::engine_config::folds_true(cond)
+        {
+            let then_branch = then_branch.clone();
+            *stmt = then_branch;
+        }
+    }
+    app.boot_program.retain(|stmt| !matches!(&*stmt.node, ExprNode::Lit { value: Literal::Nil }));
 }
 
 fn fold(e: &mut Expr, lock: &Lockfile) {

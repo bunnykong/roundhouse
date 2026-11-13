@@ -77,7 +77,8 @@ pub(super) struct Setting {
 
 impl Setting {
     fn path(&self) -> String {
-        format!("{}.{}", self.section, self.key)
+        // A top-level setting (`config.eager_load`) has no section.
+        if self.section.is_empty() { self.key.to_string() } else { format!("{}.{}", self.section, self.key) }
     }
 }
 
@@ -125,12 +126,17 @@ pub(super) fn assignment<'pr>(node: &Node<'pr>, setting: &Setting) -> Option<Nod
     if constant_id_str(&call.name()).strip_suffix('=') != Some(setting.key) {
         return None;
     }
-    let section = call.receiver()?;
-    let section = section.as_call_node()?;
-    if constant_id_str(&section.name()) != setting.section || section.arguments().is_some() {
-        return None;
-    }
-    let config_node = section.receiver()?;
+    let receiver = call.receiver()?;
+    // A top-level setting's receiver is `config` itself.
+    let config_node = if setting.section.is_empty() {
+        receiver
+    } else {
+        let section = receiver.as_call_node()?;
+        if constant_id_str(&section.name()) != setting.section || section.arguments().is_some() {
+            return None;
+        }
+        section.receiver()?
+    };
     let config = config_node.as_call_node()?;
     if constant_id_str(&config.name()) != "config" || config.arguments().is_some() {
         return None;
@@ -492,7 +498,12 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting, rails: Op
     } else { src
         .lines()
         .map(|line| line.split('#').next().unwrap_or(""))
-        .map(|code| code.matches(path_text.as_str()).count())
+        // Not a longer name the setting's spells the start of (`config.eager_load_paths` beside `eager_load`).
+        .map(|code| {
+            code.match_indices(path_text.as_str())
+                .filter(|(at, m)| !code[at + m.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+                .count()
+        })
         .sum() };
     let refused = if mentioned > count(&found) {
         Some(format!(

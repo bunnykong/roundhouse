@@ -68,7 +68,7 @@ pub(super) fn mark(app: &mut App) {
         .into_iter()
         .map(|r| (r.controller.0.as_str().to_string(), r.action.as_str().to_string()))
         .collect();
-    let named_anywhere = render_literals_outside_controllers(app);
+    let named_anywhere = render_literals_outside_controllers(app, &unrouted);
 
     let mut unreachable: Vec<usize> = Vec::new();
     for (i, view) in app.views.iter().enumerate() {
@@ -119,7 +119,8 @@ fn rooted_in_rails(controller: &Controller, by_name: &HashMap<&str, &Controller>
     for _ in 0..32 {
         let Some(parent) = current.parent.as_ref() else { return false };
         let name = parent.0.as_str().trim_start_matches("::");
-        if matches!(name, "ActionController::Base" | "ActionController::API") {
+        // Not Rails' bases alone: `Rails::ApplicationController` is Rails' own subclass of `ActionController::Base` (view_component's preview controller's).
+        if matches!(name, "ActionController::Base" | "ActionController::API" | "Rails::ApplicationController") {
             return true;
         }
         let Some(next) = by_name.get(name) else { return false };
@@ -201,11 +202,20 @@ fn names_template(lit: &str, template: &str) -> bool {
     lit.trim_start_matches('/') == template
 }
 
-fn render_literals_outside_controllers(app: &App) -> Vec<String> {
+fn render_literals_outside_controllers(app: &App, unrouted: &HashSet<String>) -> Vec<String> {
+    // Not a concern's method spliced into a gem controller no route dispatches to (view_component's
+    // `PreviewActions#index`): it runs only as that controller's action, which never runs.
+    let unrouted_actions: HashSet<crate::span::Span> = app
+        .controllers
+        .iter()
+        .filter(|c| unrouted.contains(c.name.0.as_str()))
+        .flat_map(|c| c.actions().map(|a| a.body.span))
+        .filter(|span| !span.is_synthetic())
+        .collect();
     let mut out = Vec::new();
     let mut collect = |e: &Expr| visit_renders(e, &mut |lits, _| out.extend(lits.iter().cloned()));
     for lc in &app.library_classes {
-        for m in &lc.methods {
+        for m in lc.methods.iter().filter(|m| !unrouted_actions.contains(&m.body.span)) {
             collect(&m.body);
         }
     }

@@ -72,11 +72,20 @@ const PAGE_CACHE_DIRECTORY: Setting = Setting {
     read: page_cache_directory,
 };
 
+// Not only `true` / `false`: the generated test.rb writes `config.eager_load = ENV["CI"].present?`, read when the app boots.
+fn eager_load(value: &Node<'_>, src: &str) -> Result<String, String> {
+    Ok(format!("!!({})", text(value, src)))
+}
+
+/// `config.eager_load`, which a gem reads at boot (view_component compiles every component's templates up front when
+/// it is set). Rails' own default, left unset, is false.
+const EAGER_LOAD: Setting = Setting { section: "", key: "eager_load", method: "eager_load", default: "false", read: eager_load };
+
 /// Ruby source for the reopen's overrides, one method per setting the app
 /// assigns anywhere; None when it assigns neither.
 pub(super) fn synthesize<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Option<String>> {
     let mut src = String::new();
-    for setting in [&PERFORM_CACHING, &PAGE_CACHE_DIRECTORY] {
+    for setting in [&PERFORM_CACHING, &PAGE_CACHE_DIRECTORY, &EAGER_LOAD] {
         if let Some(method) = synthesize_setting(vfs, dir, setting)? {
             src.push_str(&method);
         }
