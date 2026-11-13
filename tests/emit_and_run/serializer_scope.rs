@@ -332,17 +332,17 @@ fn a_renders_other_options_run_before_the_scope_is_read() {
 /// The bindings the option order needs are the rewrite's own: a local
 /// the action already has, whatever its name, keeps its value. Rails
 /// renders this with status 202 and the controller's `current_user` as
-/// the scope; the action's `__ams_json` and `__ams_scope` are its own
+/// the scope; the action's `ams_json` and `ams_scope` are its own
 /// locals, which the generated bindings must not take over.
 fn locals_app() -> emit_and_run::Overlay {
     app().write(
         "app/controllers/locals_json_controller.rb",
         r#"class LocalsJsonController < ApplicationController
   def show
-    __ams_json = :accepted
-    __ams_scope = "local"
-    render json: item, serializer: ScopeOnlySerializer, status: __ams_json
-    @after = [__ams_json, __ams_scope]
+    ams_json = :accepted
+    ams_scope = "local"
+    render json: item, serializer: ScopeOnlySerializer, status: ams_json
+    @after = [ams_json, ams_scope]
   end
 
   private

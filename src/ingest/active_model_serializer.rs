@@ -638,7 +638,7 @@ fn rewrite_renders_in(expr: &mut Expr, scope_of: &dyn Fn(&str) -> Option<Option<
                 if chosen(&entries[i].0) || !runs(&entries[i].1) {
                     continue;
                 }
-                let temp = fresh(&format!("__ams_{}", name(&entries[i].0).unwrap_or_default()), taken);
+                let temp = fresh(&format!("ams_{}", name(&entries[i].0).unwrap_or_default()), taken);
                 if i == json {
                     bindings.push(bound(&temp, value));
                     value = var(&temp);
@@ -647,7 +647,7 @@ fn rewrite_renders_in(expr: &mut Expr, scope_of: &dyn Fn(&str) -> Option<Option<
                     entries[i].1 = var(&temp);
                 }
             }
-            let temp = fresh("__ams_scope", taken);
+            let temp = fresh("ams_scope", taken);
             bindings.push(bound(&temp, scope));
             Some(var(&temp))
         }
@@ -662,7 +662,7 @@ fn rewrite_renders_in(expr: &mut Expr, scope_of: &dyn Fn(&str) -> Option<Option<
         send(Some(send(Some(class_expr()), "new", args, None)), "serializable_hash", vec![], None)
     };
     let rendered = if collection {
-        let item = Symbol::from(fresh("__ams_item", taken).as_str());
+        let item = Symbol::from(fresh("ams_item", taken).as_str());
         let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: item.clone() });
         let block = Expr::new(
             span,

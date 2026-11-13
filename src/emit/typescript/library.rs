@@ -672,7 +672,12 @@ pub(super) fn emit_class_file_full(
 /// its own named `importer::too_big.ts` left `Importer.TooBig` undefined.
 pub(crate) fn nested_class_root(lc: &LibraryClass) -> Option<&str> {
     let name = lc.name.0.as_str();
-    if lc.is_module || lc.origin.is_some() || !name.contains("::") {
+    // A serializer the app wrote (`module Api; class ArticleSerializer <
+    // ActiveModel::Serializer`) has an origin only because ingest expanded
+    // it: it is still the app's class, read as `Api.ArticleSerializer`.
+    let app_written =
+        matches!(lc.origin, None | Some(crate::dialect::LibraryClassOrigin::ActiveModelSerializer { .. }));
+    if lc.is_module || !app_written || !name.contains("::") {
         return None;
     }
     name.split("::").next()
@@ -886,6 +891,15 @@ const RUNTIME_SRC_IMPORTS: &[(&str, &str)] = &[
     ("ParamValue", "param_value"),
 ];
 
+/// The class references in a method's parameter defaults.
+fn collect_param_default_refs(m: &crate::dialect::MethodDef, refs: &mut BTreeSet<String>) {
+    for p in &m.params {
+        if let Some(default) = &p.default {
+            collect_class_refs(default, refs);
+        }
+    }
+}
+
 /// Compute the import block for a class: scan method bodies for Const
 /// references, partition into juntos-provided names vs sibling models /
 /// library_classes vs unknown (skipped). Also imports the parent class
@@ -906,6 +920,10 @@ fn collect_imports_with_companions(
     let mut refs: BTreeSet<String> = BTreeSet::new();
     for m in &lc.methods {
         collect_class_refs(&m.body, &mut refs);
+        // A parameter's default is emitted too (`opts: any = new
+        // Options()`, a keyword's in its destructuring), so the classes it
+        // names are imported like the body's.
+        collect_param_default_refs(m, &mut refs);
         // Also harvest class references from the method's signature
         // (param types + return type). View functions like
         // `function article(article: Article): string` mention
@@ -954,6 +972,7 @@ fn collect_imports_with_companions(
     for companion in companions {
         for m in &companion.methods {
             collect_class_refs(&m.body, &mut refs);
+            collect_param_default_refs(m, &mut refs);
             if let Some(sig) = &m.signature {
                 collect_ty_class_refs(sig, &mut refs);
             }
