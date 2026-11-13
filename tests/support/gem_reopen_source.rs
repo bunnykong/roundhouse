@@ -59,10 +59,12 @@ pub const ARTICLE_BOX: &str = r##"class ArticleBox
 end
 "##;
 
-/// The app's use of the class a constant-only reopen extends.
+/// The app's use of the class a constant-only reopen extends. It names
+/// `Shelf::Box` alone: a constant path under it (`Shelf::Box::LIMIT`) is
+/// not a name the app declares, and brought the gem in already.
 pub const BOX_LIMITS: &str = r##"class BoxLimits
   def self.describe
-    [Shelf::Box.kind, Shelf::Box::LIMIT, Shelf::Box.new.tag]
+    [Shelf::Box.kind, Shelf::Box.new.tag]
   end
 end
 "##;
@@ -72,8 +74,8 @@ raise "describe #{got.inspect}" unless got == "box / app box / local"
 puts "reopen passed"
 "##;
 
-pub const EXTRAS_ASSERTIONS: &str = r##"got = BoxLimits.describe
-raise "extras #{got.inspect}" unless got == ["box", 3, "tagged"]
+pub const EXTRAS_ASSERTIONS: &str = r##"got = BoxLimits.describe + [Shelf::Box::LIMIT]
+raise "extras #{got.inspect}" unless got == ["box", "tagged", 3]
 puts "extras passed"
 "##;
 
