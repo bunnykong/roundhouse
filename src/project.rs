@@ -6029,6 +6029,11 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
          \x20     # An autoload whose file is loading: listed, but not defined\n\
          \x20     # (`autoload?` answers nil while its feature loads).\n\
          \x20     next unless scope.is_a?(Module) && scope.constants(false).include?(name.to_sym) && !scope.const_defined?(name, false)\n\
+         \x20     # Not where the constant's own declarations ran the autoload (Doorkeeper's `autoload :Client` then `class\n\
+         \x20     # Client` in a file another program loads): that `class` reopens it once this returns, and Ruby raises for\n\
+         \x20     # a constant gone meanwhile.\n\
+         \x20     declared = \"/#{cpath.gsub(\"::\", \"/\").gsub(/([A-Z\\d]+)([A-Z][a-z])/, '\\1_\\2').gsub(/([a-z\\d])([A-Z])/, '\\1_\\2').downcase}.rb\"\n\
+         \x20     next if caller_locations.any? { |at| at.path.to_s.end_with?(declared) }\n\
          \x20     scope.send(:remove_const, name)\n\
          \x20     removed << [scope, name]\n\
          \x20   end\n\
@@ -6110,6 +6115,10 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                 continue;
             }
             let dir = rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            // Not the program this file's own declarations load from: it is the one loading it, and requiring it again
+            // is a no-op that leaves a class its constants name undefined (Doorkeeper's `ADAPTERS_MAPPING` of the
+            // generator classes its own source file declares above it).
+            let own = through(rel);
             let mut changed = false;
             let lines: Vec<String> = content
                 .lines()
@@ -6118,7 +6127,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
                         .strip_prefix("require_relative \"")
                         .and_then(|l| l.strip_suffix('"'))
                         .map(|r| normalize_source(&format!("{dir}/{r}")));
-                    match target.as_deref().and_then(through) {
+                    match target.as_deref().and_then(through).filter(|program| own.as_ref() != Some(program)) {
                         Some(program) => {
                             changed = true;
                             format!("RoundhouseAutoload.require_gem_file({program:?})")
