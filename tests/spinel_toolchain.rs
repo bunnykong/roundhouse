@@ -308,6 +308,10 @@ mod stdlib_scan_zlib;
 mod stdlib_rexml_include_contract;
 #[path = "spinel_toolchain/stdlib_rexml_include.rs"]
 mod stdlib_rexml_include;
+#[path = "support/gem_reopen_source.rs"]
+mod gem_reopen_source_contract;
+#[path = "spinel_toolchain/gem_reopen_source.rs"]
+mod gem_reopen_source;
 #[path = "support/stdlib_singleton.rs"]
 mod stdlib_singleton_contract;
 #[path = "spinel_toolchain/stdlib_singleton.rs"]
