@@ -1802,7 +1802,8 @@ impl<'a> BodyTyper<'a> {
                         let id = class.as_ref().clone();
                         if self.classes().contains_key(&id) || *runtime {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
-                            if *runtime && crate::gems::preloaded_constant(id.0.as_str()) {
+                            let rooted = self.const_resolver.as_ref().is_some_and(|resolver| resolver.rooted(expr_span, path));
+                            if rooted || (*runtime && crate::gems::preloaded_constant(id.0.as_str())) {
                                 // Object:: and Object aliases name this same preloaded
                                 // namespace. Its resolved name lets BUNDLED load the package.
                                 *path = std::iter::once(Symbol::from(""))
@@ -2396,12 +2397,12 @@ impl<'a> BodyTyper<'a> {
                     Some(seeds) => seeds.fn_params(params),
                     None => Vec::new(),
                 };
-                Ty::Fn {
+                Ty::Fn(Box::new(crate::ty::FnTy {
                     params: fn_params.into(),
                     block: None,
                     ret: std::sync::Arc::new(body_ty),
                     effects: crate::effect::EffectSet::pure(),
-                }
+                }))
             }
 
             // `method(:name)` / `recv.method(:name)`. Unlike `&:sym`
@@ -3473,7 +3474,7 @@ impl<'a> BodyTyper<'a> {
                     && (matches!(dispatched, Ty::Var { .. })
                         || (matches!(dispatched, Ty::Untyped) && !self.app_defines(ctx.self_ty.as_ref(), method)))
                 {
-                    if let Some(block_ty @ Ty::Fn { .. }) = block
+                    if let Some(block_ty @ Ty::Fn(_)) = block
                         .as_ref()
                         .filter(|b| matches!(&*b.node, ExprNode::Lambda { .. }))
                         .and_then(|b| b.ty.clone())
@@ -5900,7 +5901,7 @@ mod tests {
                 *m = Symbol::from(method);
             }
             let ty = BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &Ctx::default());
-            assert!(matches!(&ty, Ty::Fn { ret, .. } if **ret == Ty::Str), "{method}: {ty:?}");
+            assert!(matches!(&ty, Ty::Fn(fn_ty) if *fn_ty.ret == Ty::Str), "{method}: {ty:?}");
         }
         // An app method of the name (inherited here) answers instead.
         let owner = ClassId(Symbol::from("Owner"));
@@ -5918,7 +5919,7 @@ mod tests {
         assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), Ty::Int);
         // `proc(&blk)` and `proc(arg)` are not the literal-block form.
         let mut expr = send(None, "proc", vec![nil_lit()]);
-        assert!(!matches!(BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &Ctx::default()), Ty::Fn { .. }));
+        assert!(!matches!(BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &Ctx::default()), Ty::Fn(_)));
     }
 
     #[test]
@@ -7620,10 +7621,10 @@ mod tests {
             Ty::Date,
             Ty::Tuple { elems: vec![Ty::Int].into() },
             Ty::Record { row: Row::default() },
-            Ty::Fn {
+            Ty::Fn(Box::new(crate::ty::FnTy {
                 params: Vec::new().into(), block: None, ret: std::sync::Arc::new(Ty::Str),
                 effects: crate::effect::EffectSet::pure(),
-            },
+            })),
         ];
         for left in values {
             assert!(never_falsy(&left), "{left:?} must short-circuit `||`");
@@ -7637,10 +7638,10 @@ mod tests {
             Ty::Date,
             Ty::Tuple { elems: vec![Ty::Int].into() },
             Ty::Record { row: Row::default() },
-            Ty::Fn {
+            Ty::Fn(Box::new(crate::ty::FnTy {
                 params: Vec::new().into(), block: None, ret: std::sync::Arc::new(Ty::Str),
                 effects: crate::effect::EffectSet::pure(),
-            },
+            })),
         ] {
             let left = Ty::Union { variants: vec![truthy, Ty::Nil].into() };
             assert!(!never_falsy(&left), "{left:?} must not always short-circuit `||`");
@@ -8094,7 +8095,7 @@ fn never_falsy(ty: &Ty) -> bool {
         | Ty::Record { .. }
         | Ty::Relation { .. }
         | Ty::Class { .. }
-        | Ty::Fn { .. } => true,
+        | Ty::Fn(_) => true,
         // `Bool` is the whole point of the exclusion — it is the one
         // scalar that carries `false`.
         Ty::Union { variants } => variants.iter().all(never_falsy),

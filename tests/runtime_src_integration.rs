@@ -635,8 +635,8 @@ fn every_runtime_method_body_is_fully_typed() {
                     // (`each_row`'s `row`). Dispatch answers the `Fn`'s
                     // return either way.
                     let ret_ty = match ty {
-                        Ty::Fn { block: Some(_), .. } => ty,
-                        Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
+                        Ty::Fn(fn_ty) if fn_ty.block.is_some() => Ty::Fn(fn_ty),
+                        Ty::Fn(fn_ty) => std::sync::Arc::unwrap_or_clone(fn_ty.ret),
                         other => other,
                     };
                     (name, ret_ty)
@@ -836,7 +836,7 @@ fn every_runtime_method_body_concretely_typed() {
             let entry = class_registry.entry(short_id(&class_id)).or_default();
             for (name, ty) in methods {
                 let ret_ty = match ty {
-                    Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
+                    Ty::Fn(fn_ty) => std::sync::Arc::unwrap_or_clone(fn_ty.ret),
                     other => other,
                 };
                 entry.instance_methods.insert(name, ret_ty);
@@ -1336,6 +1336,10 @@ fn every_runtime_method_body_concretely_typed() {
     // value that is Rails' Parameters or a typed params object; Rack::Utils.escape takes what OmniAuth's failure
     // redirect hands it; increment/decrement_counter read their options. Raise to 986, preserving the two-site
     // headroom.
+    // MEASURED 985 on integer query casts (main 6b6dab7e2: 981): Relation's
+    // integer_list_predicate reads the elements of a hash condition's
+    // untyped Array (+4 in active_record/relation.rb); its typed helpers
+    // add none. Within the ceiling, which is unchanged.
     const CEILING: usize = 986;
     assert!(
         total_gradual <= CEILING,

@@ -200,7 +200,7 @@ fn body_reads(
         return;
     }
     let held = match info.instance_methods.get(reader) {
-        Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+        Some(Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
         Some(t) => t.clone(),
         None => return,
     };

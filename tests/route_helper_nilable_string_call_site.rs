@@ -13,7 +13,7 @@
 
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::lower::lower_routes_to_library_functions;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 const SCHEMA: &str = "ActiveRecord::Schema.define(version: 1) do\n  \
     create_table :notes do |t|\n    t.string :route_param\n  end\n  \
@@ -51,7 +51,8 @@ fn helper_params(name: &str) -> Vec<roundhouse::ty::Param> {
         .unwrap_or_else(|| panic!("helper {name} not generated"))
         .signature
         .expect("helper signature");
-    let Ty::Fn { params, .. } = sig else { panic!("helper signature is not Ty::Fn") };
+    let Ty::Fn(fn_ty) = sig else { panic!("helper signature is not Ty::Fn") };
+    let FnTy { params, .. } = *fn_ty;
     params.to_vec()
 }
 
@@ -169,7 +170,8 @@ fn a_nilable_string_in_a_direct_helpers_route_for_retypes_the_segment() {
         .expect("strike_path not generated")
         .signature
         .expect("helper signature");
-    let Ty::Fn { params, .. } = sig else { panic!("not Ty::Fn") };
+    let Ty::Fn(fn_ty) = sig else { panic!("not Ty::Fn") };
+    let FnTy { params, .. } = *fn_ty;
     assert_eq!(params[0].name.as_str(), "id");
     assert!(matches!(*params[0].ty, Ty::Str), "got {:?}", params[0].ty);
 }

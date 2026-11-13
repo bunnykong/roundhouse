@@ -52,9 +52,11 @@ module ActiveRecord
   class Column
     @name: String
     @sql_type: String
+    @null: bool
     def name: () -> String
     def sql_type: () -> String
-    def initialize: (String name, String sql_type) -> void
+    def null: () -> bool
+    def initialize: (String name, String sql_type, ?bool null) -> void
     def limit: () -> Integer?
   end
 
@@ -105,6 +107,7 @@ module ActiveRecord
   class Base
     def self.table_exists?: () -> bool
     def self.column_names: () -> Array[String]
+    def self.columns: () -> Array[Column]
     def self.lock: (?(bool | String)? locking) -> Relation
     def readonly?: () -> bool
     def readonly!: () -> Base
@@ -120,6 +123,7 @@ module ActiveRecord
     def _attributes_snapshot: () -> Hash[String, untyped]
     def attribute_in_database: (Symbol | String name) -> untyped
     def self.schema_column_types: () -> Hash[Symbol, Symbol]
+    def self.schema_integer_query_limits: () -> Hash[Symbol, Integer]
     def self.schema_json_coder_columns: () -> Array[Symbol]
     def self.type_for_attribute: (String | Symbol name) -> ActiveRecord::Type::Value
     def self.default_scoped: () -> Relation

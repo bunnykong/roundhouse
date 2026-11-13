@@ -117,7 +117,7 @@ fn rewrite(expr: &mut Expr, models: &ModelColumns) {
         }
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
             for body in std::iter::once(body).chain(rescues.iter_mut().map(|r| &mut r.body))
-                .chain(else_branch.iter_mut()).chain(ensure.iter_mut()) {
+                .chain(else_branch.as_deref_mut()).chain(ensure.as_deref_mut()) {
                 wrap(body);
             }
         }

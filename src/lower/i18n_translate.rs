@@ -1258,7 +1258,7 @@ fn with_locale(e: &Expr) -> Option<Expr> {
     let body = Expr { ty: body_ty.clone(), ..Expr::new(span, ExprNode::Seq { exprs: vec![save, body] }) };
     Some(Expr {
         ty: body_ty,
-        ..Expr::new(span, ExprNode::BeginRescue { body, rescues: Vec::new(), else_branch: None, ensure: Some(leave), implicit: false })
+        ..Expr::new(span, ExprNode::BeginRescue { body, rescues: Vec::new(), else_branch: None, ensure: Some(Box::new(leave)), implicit: false })
     })
 }
 

@@ -12,7 +12,7 @@ use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::VarId;
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
@@ -234,7 +234,7 @@ fn ingest_test_class(
                         body: blocks,
                         rescues: Vec::new(),
                         else_branch: None,
-                        ensure: Some(fallback_super),
+                        ensure: Some(Box::new(fallback_super)),
                         implicit: false,
                     },
                 );
@@ -251,7 +251,7 @@ fn ingest_test_class(
                             ),
                             rescues: Vec::new(),
                             else_branch: None,
-                            ensure: Some(blocks_then_super),
+                            ensure: Some(Box::new(blocks_then_super)),
                             implicit: true,
                         },
                     ),
@@ -270,7 +270,7 @@ fn ingest_test_class(
                         body: blocks,
                         rescues: Vec::new(),
                         else_branch: None,
-                        ensure: Some(super_call()),
+                        ensure: Some(Box::new(super_call())),
                         implicit: true,
                     },
                 ),
@@ -365,12 +365,12 @@ fn transactional_tests_method(stmt: &Node) -> Option<MethodDef> {
         block_param: None,
         name_span: Span::synthetic(),
         body,
-        signature: Some(Ty::Fn {
+        signature: Some(Ty::Fn(Box::new(FnTy {
             params: Vec::new().into(),
             block: None,
             ret: std::sync::Arc::new(Ty::Bool),
             effects: EffectSet::pure(),
-        }),
+        }))),
         effects: EffectSet::pure(),
         enclosing_class: None,
         kind: AccessorKind::Method,

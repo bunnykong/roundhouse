@@ -23,7 +23,7 @@ use crate::det::{HashMap, HashSet};
 
 use crate::app::App;
 use crate::ident::{ClassId, Symbol};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 use crate::gem_boundary::RUBY_CORE;
 
 use super::super::body::ClassInfo;
@@ -238,15 +238,18 @@ fn prune_ty(ty: &Ty, resolve: &dyn Fn(&ClassId) -> Option<ClassId>) -> Ty {
         Ty::Union { variants } => {
             Ty::Union { variants: variants.iter().map(|t| prune_ty(t, resolve)).collect() }
         }
-        Ty::Fn { params, block, ret, effects } => Ty::Fn {
-            params: params
-                .iter()
-                .map(|p| crate::ty::Param { name: p.name.clone(), ty: prune_ty(&p.ty, resolve).into(), kind: p.kind.clone() })
-                .collect(),
-            block: block.as_ref().map(|b| std::sync::Arc::new(prune_ty(b, resolve))),
-            ret: std::sync::Arc::new(prune_ty(ret, resolve)),
-            effects: effects.clone(),
-        },
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, block, ret, effects } = &**fn_ty;
+            Ty::Fn(Box::new(FnTy {
+                params: params
+                    .iter()
+                    .map(|p| crate::ty::Param { name: p.name.clone(), ty: prune_ty(&p.ty, resolve).into(), kind: p.kind.clone() })
+                    .collect(),
+                block: block.as_ref().map(|b| std::sync::Arc::new(prune_ty(b, resolve))),
+                ret: std::sync::Arc::new(prune_ty(ret, resolve)),
+                effects: effects.clone(),
+            }))
+        }
         other => other.clone(),
     }
 }

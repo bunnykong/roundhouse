@@ -1162,7 +1162,7 @@ fn wrapper_vars(wrapper: &crate::dialect::MethodDef, lead: usize) -> (Vec<Expr>,
                 ExprNode::Var { id: crate::ident::VarId(i as u32), name: p.name.clone() },
             );
             v.ty = match &wrapper.signature {
-                Some(Ty::Fn { params, .. }) => params.get(i).map(|tp| (*tp.ty).clone()),
+                Some(Ty::Fn(fn_ty)) => fn_ty.params.get(i).map(|tp| (*tp.ty).clone()),
                 _ => None,
             };
             v

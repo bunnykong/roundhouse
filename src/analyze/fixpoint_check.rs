@@ -68,7 +68,7 @@ use crate::diagnostic::DiagnosticKind;
 use crate::dialect::{Filter, MethodDef};
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::typing_mode::{TypingMode, UnifyScope};
 use super::{Analyzer, FixpointRounds, LoopEnd};
@@ -195,7 +195,8 @@ pub(super) fn type_hash(t: &Ty) -> u64 {
             }
         }
         Ty::Relation { of } => of.0.as_str().hash(&mut h),
-        Ty::Fn { params, block, ret, effects } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, block, ret, effects } = &**fn_ty;
             for p in params.iter() {
                 p.name.as_str().hash(&mut h);
                 format!("{:?}", p.kind).hash(&mut h);
@@ -361,7 +362,8 @@ fn holds_untyped(t: &Ty) -> bool {
         Ty::Union { variants } => variants.iter().any(holds_untyped),
         Ty::Record { row } => row.fields.values().any(holds_untyped),
         Ty::Class { args, .. } => args.iter().any(holds_untyped),
-        Ty::Fn { params, block, ret, .. } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, block, ret, .. } = &**fn_ty;
             params.iter().any(|p| holds_untyped(&p.ty))
                 || block.as_deref().is_some_and(holds_untyped)
                 || holds_untyped(ret)

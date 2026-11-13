@@ -200,6 +200,77 @@ module Rack
       out
     end
 
+    # Rack's `unescape`, `URI.decode_www_form_component`: `+` as a space, `%XX` as its byte, the bytes read as UTF-8.
+    def self.unescape(s)
+      out = +""
+      i = 0
+      n = s.bytesize
+      while i < n
+        b = s.getbyte(i)
+        if b == 37
+          hi = i + 2 < n ? path_hex_value(s.getbyte(i + 1)) : -1
+          lo = i + 2 < n ? path_hex_value(s.getbyte(i + 2)) : -1
+          # Not Rack::QueryParser::InvalidParameterError: no tree carries the parser; it is this ArgumentError's subclass.
+          raise ArgumentError, "invalid %-encoding (#{s})" if hi < 0 || lo < 0
+          out << (hi * 16 + lo).chr
+          i += 3
+        elsif b == 43
+          out << " "
+          i += 1
+        else
+          out << b.chr
+          i += 1
+        end
+      end
+      out.force_encoding("UTF-8")
+    end
+
+    # Rack's `parse_query`: pairs split at `&` (and the spaces after it), a key given again collects its values in
+    # an Array, and a key without `=` maps to nil.
+    def self.parse_query(qs)
+      params = {}
+      return params if qs.nil? || qs.empty?
+      raise RangeError, "total query size exceeds limit (4194304)" if qs.bytesize > 4194304
+      pairs = qs.split(/& */n, 4097)
+      raise RangeError, "total number of query parameters (#{pairs.size + pairs.last.count("&")}) exceeds limit (4096)" if pairs.size > 4096
+      # Not one Hash of mixed values read back as it fills: each key's values listed first, in the order Rack meets them.
+      keys = []
+      values = query_lists
+      pairs.each do |pair|
+        next if pair.empty?
+        parts = pair.split("=", 2)
+        key = unescape(parts[0])
+        value = parts.length > 1 ? unescape(parts[1]) : nil
+        list = values[key]
+        if list.nil?
+          keys << key
+          values[key] = [value]
+        elsif list.length == 1 && list[0].nil?
+          # Rack's `if cur = params[k]`: a key held as nil is set again, not collected.
+          list[0] = value
+        else
+          list << value
+        end
+      end
+      keys.each { |key| params[key] = values[key].length == 1 ? values[key][0] : values[key] }
+      params
+    end
+
+    # Not a bare `{}`: its values are read before any write could say their type.
+    def self.query_lists
+      {}
+    end
+
+    # Rack's `build_query`: each pair escaped, an Array value as one pair per element, a nil value as the key alone.
+    def self.build_query(params)
+      params.map { |k, v| query_pair(k, v) }.join("&")
+    end
+
+    def self.query_pair(k, v)
+      return v.map { |x| query_pair(k, x) }.join("&") if v.class == Array
+      v.nil? ? escape(k) : "#{escape(k)}=#{escape(v)}"
+    end
+
     # Rack's `secure_compare`: equal Strings by every byte, in time that does not depend on where they differ.
     def self.secure_compare(a, b)
       return false unless a.bytesize == b.bytesize

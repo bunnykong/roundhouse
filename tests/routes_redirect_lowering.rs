@@ -120,7 +120,8 @@ fn routing_redirect_host_policy_keeps_the_base_string_signature() {
             .find(|method| method.name.as_str() == name)
             .unwrap_or_else(|| panic!("lowered {name}"));
         match method.signature.as_ref() {
-            Some(roundhouse::ty::Ty::Fn { params, ret, .. }) => {
+            Some(roundhouse::ty::Ty::Fn(fn_ty)) => {
+                let roundhouse::ty::FnTy { params, ret, .. } = &**fn_ty;
                 assert!(
                     matches!(params.first().map(|param| param.ty.as_ref()), Some(roundhouse::ty::Ty::Str)),
                     "{name} {params:?}"

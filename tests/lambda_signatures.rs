@@ -121,7 +121,8 @@ fn a_local_lambda_call_types_its_parameters_from_the_call() {
     assert!(bad.is_empty(), "{bad:#?}");
     let body = app.models.iter().flat_map(|m| m.methods()).find(|m| m.name.as_str() == "plain_lambda").expect("method").body.clone();
     match lambda_fn_ty(&body) {
-        Some(roundhouse::ty::Ty::Fn { params, ret, .. }) => {
+        Some(roundhouse::ty::Ty::Fn(fn_ty)) => {
+            let roundhouse::ty::FnTy { params, ret, .. } = *fn_ty;
             assert_eq!(params.len(), 1, "{params:?}");
             assert_eq!(*params[0].ty, roundhouse::ty::Ty::Int);
             assert_eq!(*ret, roundhouse::ty::Ty::Int);
@@ -188,7 +189,8 @@ fn a_lambda_call_inside_another_lambda_seeds_both() {
     let tys = lambda_fn_tys(&body);
     assert_eq!(tys.len(), 2, "{tys:?}");
     for ty in tys {
-        let roundhouse::ty::Ty::Fn { params, ret, .. } = ty else { panic!("{ty:?}") };
+        let roundhouse::ty::Ty::Fn(fn_ty) = ty else { panic!("{ty:?}") };
+        let roundhouse::ty::FnTy { params, ret, .. } = *fn_ty;
         assert_eq!(params.len(), 1);
         assert_eq!(*params[0].ty, roundhouse::ty::Ty::Int);
         assert_eq!(*ret, roundhouse::ty::Ty::Int);
@@ -264,7 +266,7 @@ fn an_if_reassignment_joins_the_lambda_with_the_write() {
     assert_eq!(variants.len(), 2, "{ty:?}");
     assert!(variants.contains(&roundhouse::ty::Ty::Int), "{ty:?}");
     assert!(
-        variants.iter().any(|v| matches!(v, roundhouse::ty::Ty::Fn { .. })),
+        variants.iter().any(|v| matches!(v, roundhouse::ty::Ty::Fn(_))),
         "{ty:?}"
     );
     assert!(

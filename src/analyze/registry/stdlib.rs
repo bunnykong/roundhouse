@@ -414,6 +414,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             sanitize.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
     }
+    // Kernel's module functions called on the module itself (Doorkeeper's `::Kernel.warn <<~WARNING`).
+    register_stdlib_class(classes, "Kernel", &[
+        ("warn", Ty::Nil), ("puts", Ty::Nil), ("print", Ty::Nil), ("format", Ty::Str), ("sprintf", Ty::Str),
+    ], &[]);
+    classes.entry(ClassId(Symbol::from("Kernel"))).or_default().is_module = true;
     register_stdlib_class(classes, "Math", &[
         ("sqrt", Ty::Float), ("cbrt", Ty::Float), ("log", Ty::Float),
         ("log2", Ty::Float), ("log10", Ty::Float), ("exp", Ty::Float),

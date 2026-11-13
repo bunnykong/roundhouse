@@ -13,7 +13,7 @@
 //! `T | Nil` union prefers the nullable shorthand `T?`.
 #![allow(dead_code)]
 
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 pub fn kotlin_ty(t: &Ty) -> String {
     match t {
@@ -86,7 +86,8 @@ pub fn kotlin_ty(t: &Ty) -> String {
         Ty::Record { .. } => "MutableMap<String, Any?>".to_string(),
 
         // Function type → Kotlin lambda type `(P1, P2) -> R`.
-        Ty::Fn { params, ret, .. } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, ret, .. } = &**fn_ty;
             let ps: Vec<String> = params.iter().map(|p| kotlin_ty(&p.ty)).collect();
             format!("({}) -> {}", ps.join(", "), kotlin_ty(ret))
         }
@@ -163,7 +164,8 @@ pub fn has_untyped(t: &Ty) -> bool {
         Ty::Tuple { elems } => elems.iter().any(has_untyped),
         Ty::Union { variants } => variants.iter().any(has_untyped),
         Ty::Class { args, .. } => args.iter().any(has_untyped),
-        Ty::Fn { params, ret, .. } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, ret, .. } = &**fn_ty;
             params.iter().any(|p| has_untyped(&p.ty)) || has_untyped(ret)
         }
         _ => false,

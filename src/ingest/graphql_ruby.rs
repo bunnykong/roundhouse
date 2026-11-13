@@ -53,7 +53,7 @@ use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 mod field_class;
 
@@ -434,12 +434,12 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         let index = by_name[class];
         for method in &mut app.library_classes[index].methods {
             if method.name == *force {
-                method.signature = Some(Ty::Fn {
+                method.signature = Some(Ty::Fn(Box::new(FnTy {
                     params: Vec::new().into(),
                     block: None,
                     ret: std::sync::Arc::new(Ty::Untyped),
                     effects: EffectSet::pure(),
-                });
+                })));
             }
         }
         signatures.push((class.clone(), force.clone(), Ty::Untyped));
@@ -485,12 +485,12 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         }
         table.insert(
             name.clone(),
-            Ty::Fn {
+            Ty::Fn(Box::new(FnTy {
                 params: params.into(),
                 block: None,
                 ret: std::sync::Arc::new(ret),
                 effects: EffectSet::pure(),
-            },
+            })),
         );
         declared.push((class, name));
     }

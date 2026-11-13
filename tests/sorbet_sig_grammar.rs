@@ -7,7 +7,7 @@
 
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::sorbet_sig::ingest_sorbet_signatures;
-use roundhouse::ty::{ParamKind, Ty};
+use roundhouse::ty::{FnTy, ParamKind, Ty};
 
 /// The signature of `m` in the one class of `source`.
 fn read(sig: &str, def: &str) -> Ty {
@@ -24,7 +24,8 @@ fn class(id: &str) -> Ty {
 }
 
 fn signature(ty: &Ty) -> (Vec<Ty>, Ty) {
-    let Ty::Fn { params, ret, .. } = ty else { panic!("{ty:?}") };
+    let Ty::Fn(fn_ty) = ty else { panic!("{ty:?}") };
+    let FnTy { params, ret, .. } = &**fn_ty;
     (params.iter().map(|p| (*p.ty).clone()).collect(), (**ret).clone())
 }
 
@@ -81,7 +82,8 @@ fn shapes_tuples_and_parentheses() {
 #[test]
 fn bind_on_a_sig_is_not_a_type() {
     let ty = read("sig { bind(Cart).params(a: Integer).void }", "def m(a); end");
-    let Ty::Fn { params, .. } = &ty else { panic!() };
+    let Ty::Fn(fn_ty) = &ty else { panic!() };
+    let FnTy { params, .. } = &**fn_ty;
     assert_eq!(params[0].kind, ParamKind::Required);
 }
 
@@ -95,20 +97,24 @@ fn a_proc_type_is_a_callable_and_a_block_parameter_is_the_methods_block() {
         "sig { params(shop_id: Integer, blk: T.proc.params(shop: Cart, n: Integer).bind(Cart).returns(String)).returns(String) }",
         "def m(shop_id, &blk); end",
     );
-    let Ty::Fn { params, block, ret, .. } = &ty else { panic!() };
+    let Ty::Fn(fn_ty) = &ty else { panic!() };
+    let FnTy { params, block, ret, .. } = &**fn_ty;
     assert_eq!(**ret, Ty::Str);
     assert_eq!(params[0].ty, Ty::Int.into());
     assert_eq!(params[1].kind, ParamKind::Block);
-    let Ty::Fn { params: block_params, ret: block_ret, .. } = &*params[1].ty else {
+    let Ty::Fn(fn_ty) = &*params[1].ty else {
         panic!("{:?}", params[1].ty)
     };
+    let FnTy { params: block_params, ret: block_ret, .. } = &**fn_ty;
     assert_eq!(block_params.iter().map(|p| (*p.ty).clone()).collect::<Vec<_>>(), vec![class("Cart"), Ty::Int]);
     assert_eq!(**block_ret, Ty::Str);
     assert_eq!(block.as_deref(), Some(&*params[1].ty));
 
     let ty = read("sig { params(blk: T.nilable(T.proc.void)).void }", "def m(&blk); end");
-    let Ty::Fn { params, block, .. } = &ty else { panic!() };
-    let Ty::Fn { ret, .. } = &*params[0].ty else { panic!("{:?}", params[0].ty) };
+    let Ty::Fn(fn_ty) = &ty else { panic!() };
+    let FnTy { params, block, .. } = &**fn_ty;
+    let Ty::Fn(fn_ty) = &*params[0].ty else { panic!("{:?}", params[0].ty) };
+    let FnTy { ret, .. } = &**fn_ty;
     assert_eq!(**ret, Ty::Nil);
     assert!(block.is_some());
 }
@@ -117,6 +123,7 @@ fn a_proc_type_is_a_callable_and_a_block_parameter_is_the_methods_block() {
 fn a_proc_type_as_an_ordinary_parameter() {
     let ty = read("sig { params(callback: T.proc.returns(Integer)).void }", "def m(callback); end");
     let (params, _) = signature(&ty);
-    let Ty::Fn { ret, .. } = &params[0] else { panic!("{:?}", params[0]) };
+    let Ty::Fn(fn_ty) = &params[0] else { panic!("{:?}", params[0]) };
+    let FnTy { ret, .. } = &**fn_ty;
     assert_eq!(**ret, Ty::Int);
 }

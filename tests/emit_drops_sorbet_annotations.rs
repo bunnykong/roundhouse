@@ -107,7 +107,7 @@ fn what_the_annotations_declared_is_kept_where_it_belongs() {
         .cloned()
         .expect("the sig was read before it was dropped");
     match signature {
-        Ty::Fn { ret, .. } => assert_eq!(*ret, Ty::Str),
+        Ty::Fn(fn_ty) => assert_eq!(*fn_ty.ret, Ty::Str),
         other => panic!("expected a function type, got {other:?}"),
     }
 }

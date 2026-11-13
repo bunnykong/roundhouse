@@ -64,7 +64,7 @@ fn param(app: &roundhouse::App, action: &str) -> Option<Ty> {
     let mailer = app.library_classes.iter().find(|c| c.name.0.as_str() == "PostMailer").expect("mailer");
     let def = mailer.methods.iter().find(|m| m.name.as_str() == action).expect("action");
     match &def.signature {
-        Some(Ty::Fn { params, .. }) => params.first().map(|p| (*p.ty).clone()),
+        Some(Ty::Fn(fn_ty)) => fn_ty.params.first().map(|p| (*p.ty).clone()),
         _ => None,
     }
 }

@@ -3,14 +3,15 @@
 //! type variable, `A & B` and literal types.
 
 use roundhouse::ident::{ClassId, Symbol};
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 /// The one method `m` of `class C`, as `(param types, return type)`.
 fn read(signature: &str) -> (Vec<Ty>, Ty) {
     let source = format!("class C\n  def m: {signature}\nend\n");
     let sigs = roundhouse::rbs::parse_signatures(&source)
         .unwrap_or_else(|e| panic!("`{signature}` should read: {e}"));
-    let Ty::Fn { params, ret, .. } = &sigs.methods[0].1 else { panic!() };
+    let Ty::Fn(fn_ty) = &sigs.methods[0].1 else { panic!() };
+    let FnTy { params, ret, .. } = &**fn_ty;
     (params.iter().map(|p| (*p.ty).clone()).collect(), (**ret).clone())
 }
 

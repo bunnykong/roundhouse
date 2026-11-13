@@ -31,7 +31,7 @@ use crate::effect::EffectSet;
 use crate::gem_boundary::{GemBoundary, GemClass};
 use crate::gems::{fate_of, GemFate, Lockfile};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::{Param, ParamKind, Ty};
+use crate::ty::{FnTy, Param, ParamKind, Ty};
 use crate::vfs::Vfs;
 
 use super::sorbet_sig::{
@@ -368,25 +368,25 @@ impl Reader<'_> {
 }
 
 fn untyped_fn() -> Ty {
-    Ty::Fn {
+    Ty::Fn(Box::new(FnTy {
         params: vec![Param { name: Symbol::new("args"), ty: Ty::Untyped.into(), kind: ParamKind::Rest }].into(),
         block: None,
         ret: std::sync::Arc::new(Ty::Untyped),
         effects: EffectSet::pure(),
-    }
+    }))
 }
 
 fn reader_fn(ret: Ty) -> Ty {
-    Ty::Fn { params: Vec::new().into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }
+    Ty::Fn(Box::new(FnTy { params: Vec::new().into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }))
 }
 
 fn writer_fn(ty: Ty) -> Ty {
-    Ty::Fn {
+    Ty::Fn(Box::new(FnTy {
         params: vec![Param { name: Symbol::new("value"), ty: ty.clone().into(), kind: ParamKind::Required }].into(),
         block: None,
         ret: std::sync::Arc::new(ty),
         effects: EffectSet::pure(),
-    }
+    }))
 }
 
 /// The links of a `sig { ... }` chain, outermost first.
@@ -474,5 +474,5 @@ fn lenient_signature(
         // anything rather than assert an arity.
         None => vec![Param { name: Symbol::new("args"), ty: Ty::Untyped.into(), kind: ParamKind::Rest }],
     };
-    Ty::Fn { params: params.into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }
+    Ty::Fn(Box::new(FnTy { params: params.into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }))
 }

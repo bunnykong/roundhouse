@@ -254,7 +254,7 @@ fn the_form_is_never_silently_dropped() {
 #[test]
 fn owner_bridges_keep_required_typed_parameters_and_source_spans() {
     use roundhouse::dialect::{MethodReceiver, MethodVisibility};
-    use roundhouse::ty::{ParamKind, Ty};
+    use roundhouse::ty::{FnTy, ParamKind, Ty};
     let mut app = app_with_helper("", r#"module ThingsHelper
   def thing_form_with(model, suffix = "!", &)
     form_with model: model, url: thing_path(model), data: { label: own_data(model, suffix), count: Thing.count }, &
@@ -273,7 +273,8 @@ end
     assert!(!bridge.has_anonymous_block, "the generated bridge is blockless");
     assert!(bridge.unsupported_formals.is_none());
     assert!(!bridge.body.span.is_synthetic());
-    let Some(Ty::Fn { params, block, ret, .. }) = &bridge.signature else { panic!("typed bridge") };
+    let Some(Ty::Fn(fn_ty)) = &bridge.signature else { panic!("typed bridge") };
+    let FnTy { params, block, ret, .. } = &**fn_ty;
     assert!(params.iter().all(|p| p.kind == ParamKind::Required));
     assert_eq!(params[1].ty, Ty::Str.into());
     assert_eq!(bridge.body.ty.as_ref(), Some(ret.as_ref()));

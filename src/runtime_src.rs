@@ -18,7 +18,7 @@ use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol};
 use crate::rbs::parse_signatures;
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 const VIRTUAL_FILE: &str = "<runtime>";
 
@@ -570,7 +570,8 @@ pub fn parse_library_with_rbs(
                     class_name, m.name
                 )
             })?;
-            if let Ty::Fn { params, .. } = &sig {
+            if let Ty::Fn(fn_ty) = &sig {
+                let FnTy { params, .. } = &**fn_ty;
                 let rbs_arity = params
                     .iter()
                     .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
@@ -670,8 +671,8 @@ pub fn parse_library_with_rbs(
                          ivars: &crate::det::HashMap<Symbol, Ty>|
          -> crate::analyze::Ctx {
             let mut ctx = crate::analyze::Ctx::default();
-            if let Some(Ty::Fn { params, .. }) = &m.signature {
-                for (param, p) in m.params.iter().zip(params.iter()) {
+            if let Some(Ty::Fn(fn_ty)) = &m.signature {
+                for (param, p) in m.params.iter().zip(fn_ty.params.iter()) {
                     ctx.local_bindings.insert(param.name.clone(), (*p.ty).clone());
                 }
             }
@@ -713,7 +714,8 @@ pub fn parse_library_with_rbs(
         // initializer's inferred shape.
         if let Some(info) = class_registry.get(&lc.name) {
             for (m_name, sig) in &info.instance_methods {
-                if let Ty::Fn { params, ret, .. } = sig {
+                if let Ty::Fn(fn_ty) = sig {
+                    let FnTy { params, ret, .. } = &**fn_ty;
                     if params.is_empty() {
                         flow_ivars.insert(m_name.clone(), (**ret).clone());
                     }
@@ -875,7 +877,7 @@ fn typing_classes_with_local_block_contracts(
             MethodReceiver::Instance => &mut info.instance_methods,
             MethodReceiver::Class => &mut info.class_methods,
         };
-        if matches!(sig, Ty::Fn { block: Some(_), .. }) {
+        if matches!(sig, Ty::Fn(fn_ty) if fn_ty.block.is_some()) {
             table.insert(m.name.clone(), sig.clone());
         } else {
             table.entry(m.name.clone()).or_insert_with(|| sig.clone());
@@ -954,7 +956,8 @@ pub fn parse_methods_with_rbs_in_ctx(
             ty
         };
 
-        if let Ty::Fn { params, .. } = &ty {
+        if let Ty::Fn(fn_ty) = &ty {
+            let FnTy { params, .. } = &**fn_ty;
             // RBS injects a synthetic Block-kind param into Ty::Fn
             // when the signature declares `{ ... } -> T`. Ruby's flat
             // param list collects an `&block` only when explicitly
@@ -1039,14 +1042,14 @@ pub fn parse_methods_with_rbs_in_ctx(
      -> crate::analyze::Ctx {
         let mut ctx = crate::analyze::Ctx::default();
         ctx.class_side = m.receiver == MethodReceiver::Class;
-        if let Some(Ty::Fn { params, .. }) = &m.signature {
-            for (param, p) in m.params.iter().zip(params.iter()) {
+        if let Some(Ty::Fn(fn_ty)) = &m.signature {
+            for (param, p) in m.params.iter().zip(fn_ty.params.iter()) {
                 ctx.local_bindings.insert(param.name.clone(), (*p.ty).clone());
             }
             // `def subscribe(subscriber, &block)`: the captured block is
             // the signature's block, which `m.params` does not carry.
             if let Some(block_param) = &m.block_param {
-                if let Some(p) = params.iter().find(|p| matches!(p.kind, crate::ty::ParamKind::Block)) {
+                if let Some(p) = fn_ty.params.iter().find(|p| matches!(p.kind, crate::ty::ParamKind::Block)) {
                     ctx.local_bindings.insert(block_param.name.clone(), (*p.ty).clone());
                 }
             }
@@ -1095,7 +1098,8 @@ pub fn parse_methods_with_rbs_in_ctx(
 /// `{}` / `[]` tail before body-typing. See
 /// [`crate::analyze::stamp_expected_on_empty_return_tail`].
 fn stamp_sig_return_on_empty_tail(m: &mut MethodDef) {
-    if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+    if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+        let FnTy { ret, .. } = &**fn_ty;
         crate::analyze::stamp_expected_on_empty_return_tail(&mut m.body, ret);
     }
 }
@@ -1354,7 +1358,8 @@ fn reclassify_abstract_attributes(methods: &mut [MethodDef]) {
             if m.name == name {
                 let enclosing = m.enclosing_class.as_ref().map(|s| s.as_str().to_string());
                 let sig = m.signature.take();
-                if let Some(Ty::Fn { ret, .. }) = &sig {
+                if let Some(Ty::Fn(fn_ty)) = &sig {
+                    let FnTy { ret, .. } = &**fn_ty;
                     zero = zero_literal(ret);
                 }
                 *m = synthesize_reader(name.as_str(), enclosing.as_deref());
@@ -2009,9 +2014,10 @@ mod tests {
         assert_eq!(m.name.as_str(), "pluralize");
 
         let sig = m.signature.as_ref().expect("signature attached");
-        let Ty::Fn { params, ret, .. } = sig else {
+        let Ty::Fn(fn_ty) = sig else {
             panic!("expected Ty::Fn, got {sig:?}");
         };
+        let FnTy { params, ret, .. } = &**fn_ty;
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].ty, Ty::Int.into());
         assert_eq!(params[1].ty, Ty::Str.into());
@@ -2078,8 +2084,8 @@ mod tests {
         // And each has its own signature.
         let b_sig = methods[0].signature.as_ref().unwrap();
         let a_sig = methods[1].signature.as_ref().unwrap();
-        assert!(matches!(b_sig, Ty::Fn { ret, .. } if **ret == Ty::Int));
-        assert!(matches!(a_sig, Ty::Fn { ret, .. } if **ret == Ty::Str));
+        assert!(matches!(b_sig, Ty::Fn(fn_ty) if *fn_ty.ret == Ty::Int));
+        assert!(matches!(a_sig, Ty::Fn(fn_ty) if *fn_ty.ret == Ty::Str));
     }
 
     #[test]

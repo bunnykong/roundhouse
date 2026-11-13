@@ -150,7 +150,7 @@ fn analyze(files: &[(&str, &str)]) -> Analyzed {
         for (method, ty) in &info.instance_methods {
             let key = (id.0.as_str().to_string(), method.as_str().to_string());
             let ret = match ty {
-                Ty::Fn { ret, .. } => (**ret).clone(),
+                Ty::Fn(fn_ty) => (*fn_ty.ret).clone(),
                 other => other.clone(),
             };
             returns.insert(key.clone(), ret);

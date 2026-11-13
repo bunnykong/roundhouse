@@ -260,18 +260,19 @@ module ActiveRecord
       columns = {}
       Connection.shared.select_rows("PRAGMA table_info(#{Connection.shared.quote(table.to_s)})").each do |row|
         name = row[1].to_s
-        columns[name] = Column.new(name, row[2].to_s)
+        columns[name] = Column.new(name, row[2].to_s, row[3].to_i == 0)
       end
       columns
     end
   end
 
   class Column
-    attr_reader :name, :sql_type
+    attr_reader :name, :sql_type, :null
 
-    def initialize(name, sql_type)
+    def initialize(name, sql_type, null = true)
       @name = name
       @sql_type = sql_type
+      @null = null
     end
 
     # `varchar(255)` declares 255; a bare type (sqlite's `text`) none, as Rails reads it.
@@ -505,6 +506,11 @@ module ActiveRecord
       Connection.shared.select_rows("PRAGMA table_info(#{Connection.shared.quote(table_name)})").map { |row| row[1].to_s }
     end
 
+    # Rails' `columns`: each of the table's columns, with whether it may be null (Doorkeeper's `secret_required?`).
+    def self.columns
+      SchemaCache.new.columns_hash(table_name).values
+    end
+
     # Rails' read-only records: one a `readonly` relation loaded, or one
     # `readonly!` marked, raises ReadOnlyRecord on save, destroy,
     # `update_column(s)` or `touch`.
@@ -591,6 +597,13 @@ module ActiveRecord
     end
 
     def self.schema_column_types
+      {}
+    end
+
+    # The byte width (4 or 8) each plain integer column range-checks a
+    # query value against, as Rails' integer type does
+    # (Relation#integer_query_limit). Schema-generated models list theirs.
+    def self.schema_integer_query_limits
       {}
     end
 

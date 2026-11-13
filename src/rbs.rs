@@ -15,7 +15,7 @@ use ruby_rbs::node::{Node, parse};
 
 use crate::effect::EffectSet;
 use crate::ident::{ClassId, Symbol};
-use crate::ty::{Param, ParamKind, Ty};
+use crate::ty::{FnTy, Param, ParamKind, Ty};
 
 /// Signatures extracted from an RBS source.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -494,12 +494,12 @@ fn method_signature_ty(
         if let Node::FunctionType(block_fn_type) = block_node.type_() {
             let (block_params, block_ret) =
                 parse_function_type_to_fn(&block_fn_type, &method_name, ctx)?;
-            Some(Ty::Fn {
+            Some(Ty::Fn(Box::new(FnTy {
                 params: block_params.into(),
                 block: None,
                 ret: std::sync::Arc::new(block_ret),
                 effects: EffectSet::pure(),
-            })
+            })))
         } else {
             // Untyped or proc-typed block — keep the placeholder for
             // backward compatibility with code paths that only checked
@@ -517,12 +517,12 @@ fn method_signature_ty(
         });
     }
 
-    Ok(Ty::Fn {
+    Ok(Ty::Fn(Box::new(FnTy {
         params: params.into(),
         block: block_ty.map(std::sync::Arc::new),
         ret: std::sync::Arc::new(ret),
         effects: EffectSet::pure(),
-    })
+    })))
 }
 
 /// Parse a single RBS `FunctionType` into `(params, ret)`. Shared
@@ -936,12 +936,12 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
                 return Err("proc-type payload is not a FunctionType".to_string());
             };
             let (params, ret) = parse_function_type_to_fn(&fn_type, "(proc)", ctx)?;
-            Ok(Ty::Fn {
+            Ok(Ty::Fn(Box::new(FnTy {
                 params: params.into(),
                 block: None,
                 ret: std::sync::Arc::new(ret),
                 effects: EffectSet::default(),
-            })
+            })))
         }
         // `instance` — an instance of the class that RECEIVED the
         // call, which is exactly what a base class cannot name about
@@ -1272,7 +1272,7 @@ pub fn print_ty(ty: &Ty) -> String {
         Ty::SelfInstance => "instance".to_string(),
         // Value-position function types would need RBS proc syntax,
         // which the parse direction rejects — degrade.
-        Ty::Fn { .. } => "untyped".to_string(),
+        Ty::Fn(_) => "untyped".to_string(),
         Ty::Var { .. } | Ty::Untyped => "untyped".to_string(),
         _ => "untyped".to_string(),
     }
@@ -1292,7 +1292,8 @@ fn print_ty_grouped(ty: &Ty) -> String {
 /// `None` when `fn_ty` isn't a `Ty::Fn` — there is nothing honest to
 /// print for a bare value type without fabricating an arity.
 pub fn print_method_signature(name: &str, fn_ty: &Ty) -> Option<String> {
-    let Ty::Fn { params, block, ret, .. } = fn_ty else { return None };
+    let Ty::Fn(fn_ty) = fn_ty else { return None };
+    let FnTy { params, block, ret, .. } = &**fn_ty;
     // RBS parameter-list order: required, optional, *rest, keywords,
     // **rest-keywords. Params arrive in that order from the parse
     // direction; re-bucket here so synthesized Fns print canonically
@@ -1335,7 +1336,8 @@ pub fn print_method_signature(name: &str, fn_ty: &Ty) -> Option<String> {
         parts.push(format!("**{}{}", value, named(p)));
     }
     let block_part = match block.as_deref() {
-        Some(Ty::Fn { params: bp, ret: br, .. }) => {
+        Some(Ty::Fn(fn_ty)) => {
+            let FnTy { params: bp, ret: br, .. } = &**fn_ty;
             let inner: Vec<String> = bp.iter().map(|p| print_ty_grouped(&p.ty)).collect();
             format!(" {{ ({}) -> {} }}", inner.join(", "), print_ty_grouped(br))
         }
@@ -1397,7 +1399,8 @@ mod tests {
     }
 
     fn fn_parts(ty: Ty) -> (Vec<Param>, Ty) {
-        if let Ty::Fn { params, ret, .. } = ty {
+        if let Ty::Fn(fn_ty) = ty {
+            let FnTy { params, ret, .. } = *fn_ty;
             (params.to_vec(), std::sync::Arc::unwrap_or_clone(ret))
         } else {
             panic!("expected Ty::Fn, got {ty:?}");
@@ -1620,9 +1623,10 @@ mod tests {
     #[test]
     fn effects_default_to_pure() {
         let src = "module M\n  def f: () -> void\nend\n";
-        let Ty::Fn { effects, .. } = parse_one(src) else {
+        let Ty::Fn(fn_ty) = parse_one(src) else {
             panic!("expected Ty::Fn");
         };
+        let FnTy { effects, .. } = *fn_ty;
         assert!(effects.is_pure());
     }
 
@@ -1765,9 +1769,10 @@ end
         let out = parse_app_signatures(src).expect("parses");
         let methods = &out[&ClassId(Symbol::from("Article"))];
         let ty = &methods[&Symbol::from("full_name")];
-        let Ty::Fn { ret, .. } = ty else {
+        let Ty::Fn(fn_ty) = ty else {
             panic!("expected Ty::Fn, got {ty:?}");
         };
+        let FnTy { ret, .. } = &**fn_ty;
         assert_eq!(**ret, Ty::Str);
     }
 
@@ -1800,7 +1805,8 @@ end
     ) -> Option<String> {
         let methods = out.get(&ClassId(Symbol::from(class_path)))?;
         let ty = methods.get(&Symbol::from(method))?;
-        let Ty::Fn { ret, .. } = ty else { return None };
+        let Ty::Fn(fn_ty) = ty else { return None };
+        let FnTy { ret, .. } = &**fn_ty;
         match &**ret {
             Ty::Class { id, .. } => Some(id.0.as_str().to_string()),
             Ty::Array { elem } => match &**elem {
@@ -1846,7 +1852,8 @@ end
         let out = parse_app_signatures(src).expect("parses");
         let methods = out.get(&ClassId(Symbol::from("ActiveRecord::Base"))).expect("Base methods");
         let ty = &methods[&Symbol::from("from_record")];
-        let Ty::Fn { params, .. } = ty else { panic!("expected Ty::Fn") };
+        let Ty::Fn(fn_ty) = ty else { panic!("expected Ty::Fn") };
+        let FnTy { params, .. } = &**fn_ty;
         match &*params[0].ty {
             Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "ActiveRecord::Base"),
             other => panic!("expected Class(ActiveRecord::Base), got {other:?}"),
@@ -1984,7 +1991,8 @@ end
         let out = parse_app_signatures(src).expect("parses");
         let methods = out.get(&ClassId(Symbol::from("ActiveRecord::Base"))).expect("Base methods");
         let ty = &methods[&Symbol::from("find_by")];
-        let Ty::Fn { ret, .. } = ty else { panic!("expected Ty::Fn") };
+        let Ty::Fn(fn_ty) = ty else { panic!("expected Ty::Fn") };
+        let FnTy { ret, .. } = &**fn_ty;
         let Ty::Union { variants } = &**ret else {
             panic!("expected Union, got {ret:?}");
         };
@@ -2050,7 +2058,7 @@ end
     // ── printer round-trips ──────────────────────────────────────────
 
     fn fn_ty(params: Vec<Param>, ret: Ty) -> Ty {
-        Ty::Fn { params: params.into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }
+        Ty::Fn(Box::new(FnTy { params: params.into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }))
     }
 
     fn req(name: &str, ty: Ty) -> Param {

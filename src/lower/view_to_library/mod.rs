@@ -749,7 +749,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         sl.iter().filter(|p| form_binding.is_none_or(|b| p.name.as_str() != b.form_local)).cloned().collect::<Vec<Param>>()
     });
     if let Some(sl) = strict_without_form.as_ref().filter(|sl| is_partial && !sl.is_empty()) {
-        use crate::ty::{Param as TyParam, ParamKind, Ty};
+        use crate::ty::{FnTy, Param as TyParam, ParamKind, Ty};
         // The record is a positional param, so a reserved-word name
         // (`for:`) goes through `safe_local`, as its reads do. The
         // keyword locals keep their names: callers pass them by name.
@@ -852,12 +852,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
                 nullable.insert(tp.name.as_str().to_string());
             }
         }
-        signature = Some(Ty::Fn {
+        signature = Some(Ty::Fn(Box::new(FnTy {
             params: sig_params.into(),
             block: None,
             ret: std::sync::Arc::new(Ty::Str),
             effects: crate::effect::EffectSet::default(),
-        });
+        })));
         locals = std::iter::once(record_name.clone())
             .chain(closure.iter().cloned())
             .chain(kw_locals.iter().map(|p| p.name.as_str().to_string()))
@@ -1150,7 +1150,7 @@ pub fn insert_db_stub(
     classes: &mut crate::det::HashMap<ClassId, crate::analyze::ClassInfo>,
 ) {
     use crate::lower::typing::fn_sig;
-    use crate::ty::Ty;
+    use crate::ty::{FnTy, Ty};
 
     // Db — primitive surface the per-model `_adapter_*` Level-3
     // emit calls into. Backend-agnostic (sqlite via cruby gem here,
@@ -1420,12 +1420,12 @@ pub fn insert_db_stub(
         fn_sig(
             vec![],
             Ty::Array {
-                elem: std::sync::Arc::new(Ty::Fn {
+                elem: std::sync::Arc::new(Ty::Fn(Box::new(FnTy {
                     params: vec![].into(),
                     block: None,
                     ret: std::sync::Arc::new(Ty::Nil),
                     effects: crate::effect::EffectSet::default(),
-                }),
+                }))),
             },
         ),
     );
@@ -1579,7 +1579,7 @@ pub(crate) fn insert_framework_stubs(
 ) {
     use crate::dialect::AccessorKind;
     use crate::lower::typing::{fn_sig, fn_sig_with_block};
-    use crate::ty::Ty;
+    use crate::ty::{FnTy, Ty};
 
     // Helper: tag every method on a ClassInfo as `Method` (the
     // default for framework calls — every helper, route generator,
@@ -1911,7 +1911,7 @@ pub(crate) fn insert_framework_stubs(
     // normalize_trailing_kwargs leaves the call's `kwargs: true` flag
     // alone (preserves the bare named-args call shape across targets).
     let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
-    let bc_sig = Ty::Fn {
+    let bc_sig = Ty::Fn(Box::new(FnTy {
         params: vec![crate::ty::Param {
             name: Symbol::from("opts"),
             ty: opts_ty.into(),
@@ -1920,7 +1920,7 @@ pub(crate) fn insert_framework_stubs(
         block: None,
         ret: std::sync::Arc::new(Ty::Nil),
         effects: crate::effect::EffectSet::pure(),
-    };
+    }));
     for name in ["prepend", "replace", "remove", "append"] {
         bc.class_methods.insert(Symbol::from(name), bc_sig.clone());
     }
@@ -2187,7 +2187,8 @@ fn type_method_body(method: &mut MethodDef) {
     insert_framework_stubs(&mut classes);
     let typer = crate::analyze::BodyTyper::new(&classes);
     let mut ctx = crate::analyze::Ctx::default();
-    if let Some(crate::ty::Ty::Fn { params, .. }) = &method.signature {
+    if let Some(crate::ty::Ty::Fn(fn_ty)) = &method.signature {
+        let crate::ty::FnTy { params, .. } = &**fn_ty;
         for (param, sig) in method.params.iter().zip(params.iter()) {
             ctx.local_bindings.insert(param.name.clone(), (*sig.ty).clone());
         }
@@ -2214,7 +2215,7 @@ pub(crate) fn build_view_signature(
     extra_params: &[String],
     known_models: &[String],
 ) -> Option<crate::ty::Ty> {
-    use crate::ty::{Param as TyParam, ParamKind, Ty};
+    use crate::ty::{FnTy, Param as TyParam, ParamKind, Ty};
 
     if arg_name.is_empty() && extra_params.is_empty() {
         return None;
@@ -2271,12 +2272,12 @@ pub(crate) fn build_view_signature(
         });
     }
 
-    Some(Ty::Fn {
+    Some(Ty::Fn(Box::new(FnTy {
         params: sig_params.into(),
         block: None,
         ret: std::sync::Arc::new(Ty::Str),
         effects: crate::effect::EffectSet::default(),
-    })
+    })))
 }
 
 /// The argument contract an action view expects from its controller: the
@@ -4468,7 +4469,7 @@ pub(crate) fn build_view_signature_from(
     typed: &[(String, crate::ty::Ty)],
     extra_params: &[String],
 ) -> Option<crate::ty::Ty> {
-    use crate::ty::{Param as TyParam, ParamKind, Ty};
+    use crate::ty::{FnTy, Param as TyParam, ParamKind, Ty};
     if typed.is_empty() && extra_params.is_empty() {
         return None;
     }
@@ -4487,12 +4488,12 @@ pub(crate) fn build_view_signature_from(
             kind: ParamKind::Optional,
         });
     }
-    Some(Ty::Fn {
+    Some(Ty::Fn(Box::new(FnTy {
         params: sig_params.into(),
         block: None,
         ret: std::sync::Arc::new(Ty::Str),
         effects: crate::effect::EffectSet::default(),
-    })
+    })))
 }
 
 pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, known_models: &[String]) -> String {

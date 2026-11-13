@@ -2458,7 +2458,9 @@ module ActiveRecord
       sql = if id.is_a?(Hash)
         hash_conditions(id)
       else
-        "#{@table}.#{@model.primary_key} = #{bind_literal(id)}"
+        # Rails' `where(primary_key => id)`: the key casts as a hash
+        # condition's value does.
+        column_predicate(@model.primary_key.to_s, id)
       end
       push_where(sql) unless sql.empty?
       begin
@@ -3434,8 +3436,113 @@ module ActiveRecord
         stored = @model._enum_where_value(col, val)
         stored.nil? ? "#{qcol} IS NULL" : "#{qcol} = #{bind_literal(stored)}"
       else
+        limit = integer_query_limit(col)
+        return integer_value_predicate(qcol, val, limit) if limit > 0
         "#{qcol} = #{bind_literal(column_bound_value(col, val))}"
       end
+    end
+
+    # ---- integer query values -----------------------------------------
+    #
+    # Rails casts a hash condition's value through the column's type
+    # before it writes SQL (ActiveModel::Type::Integer#serialize, and
+    # #serializable? for its range). Sent as given, a String reaches the
+    # database: SQLite compares it loosely, and PostgreSQL rejects it
+    # (`id = 'abc'` is SQLSTATE 22P02, `'99999999999999999999'` 22003).
+    # For a plain integer column, then, as Rails:
+    #
+    #   "12", "12abc", " +12"   12, the String's to_i
+    #   "abc", "", "_1"         `= NULL`: Rails binds nil, so the
+    #                           condition and its negation match no row
+    #   outside the column's    `1=0`, which `where.not` negates to
+    #   limit bytes             every row, NULLs included
+    #   true, false, 7.9        1, 0, 7
+    #
+    # The width is the model's emitted `schema_integer_query_limits`:
+    # an enum, `attribute` or `normalizes` declaration has its own cast,
+    # so its column is not there and keeps the path below.
+    def integer_query_limit(col)
+      table_name = @model.table_name.to_s
+      prefix = "#{table_name}."
+      name = col.start_with?(prefix) ? col[prefix.length, col.length].to_s : col
+      return 0 if name.include?(".")
+      limit = @model.schema_integer_query_limits[name.to_sym]
+      limit.nil? ? 0 : limit
+    end
+
+    # One value's condition: Rails' Equality node, whose visitor writes
+    # `1=0` for a value it cannot bind.
+    def integer_value_predicate(qcol, val, limit)
+      return "#{qcol} = NULL" if integer_query_null?(val)
+      cast = integer_query_cast(val, limit)
+      cast.valid ? "#{qcol} = #{bind_literal(cast.value)}" : "1=0"
+    end
+
+    # A value Rails' integer type serializes as nil: a String with no
+    # number at its start (Helpers::Numeric's `/\A\s*[+-]?\d/`), a
+    # NaN or infinite Float, or a Symbol, whose `to_i` raises and is
+    # rescued to nil (Integer#cast_value; no Float here is below
+    # infinity).
+    def integer_query_null?(val)
+      return true if val.is_a?(Symbol)
+      if val.is_a?(String)
+        i = ActiveRecord::IntegerKeyCast.number_start(val)
+        sign = val[i, 1].to_s
+        i += 1 if sign == "+" || sign == "-"
+        return ActiveRecord::IntegerKeyCast.digit_value(val[i, 1].to_s) < 0
+      end
+      val.is_a?(Float) && !(val.abs < Float::INFINITY)
+    end
+
+    # A numeric value cast and range-checked: Rails' `value.to_i` (a
+    # String's decimal prefix, a Float truncated, a Time's epoch
+    # seconds), valid only within
+    # the column's `limit` bytes, 4 or 8. IntegerKeyCast already holds a
+    # value to 8 bytes without converting text that overflows them.
+    def integer_query_cast(val, limit)
+      return ActiveRecord::IntegerKeyCast.new(false, 0) if val.is_a?(Symbol)
+      return ActiveRecord::IntegerKeyCast.new(true, 1) if val == true
+      return ActiveRecord::IntegerKeyCast.new(true, 0) if val == false
+      # A Time is its epoch seconds (Rails' `to_i`), not its text's year.
+      cast = val.is_a?(Time) ? ActiveRecord::IntegerKeyCast.parse(val.to_i) : ActiveRecord::IntegerKeyCast.parse(val)
+      return cast unless cast.valid && limit == 4
+      return ActiveRecord::IntegerKeyCast.new(false, 0) if cast.value >= 2147483648 || cast.value < -2147483648
+      cast
+    end
+
+    # Rails' ArrayHandler: several values are a HomogeneousIn, which
+    # drops each value it cannot bind and writes `IN (NULL)` when none is
+    # left; a nil is `IS NULL` and each Range its own arm, all ORed. One
+    # value is an Equality, so out of range it is `1=0`, which differs
+    # from `IN (NULL)` under `where.not`.
+    def integer_list_predicate(qcol, vals, limit)
+      scalars = []
+      ranges = []
+      has_nil = false
+      vals.each do |x|
+        if x.nil?
+          has_nil = true
+        elsif x.is_a?(Range)
+          ranges << range_predicate(qcol, x)
+        else
+          scalars << x
+        end
+      end
+      kept = []
+      scalars.each do |x|
+        cast = integer_query_cast(x, limit)
+        kept << cast.value if cast.valid
+      end
+      arms = []
+      if scalars.length == 1 && kept.empty? && !integer_query_null?(scalars[0])
+        arms << "1=0"
+      elsif scalars.length > 0
+        arms << "#{qcol} IN (#{kept.empty? ? "NULL" : escape_list(kept)})"
+      end
+      arms << "#{qcol} IS NULL" if has_nil
+      ranges.each { |r| arms << r }
+      return arms[0] if arms.length == 1
+      "(#{arms.join(" OR ")})"
     end
 
     # Record elements read their id — Rails' IN-of-records form
@@ -3445,8 +3552,11 @@ module ActiveRecord
     # `mark_null!` from `none` / lasting positive `where` only.
     def list_predicate(col, qcol, val)
       ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
+      limit = integer_query_limit(col)
       if ids.empty?
         "1=0"
+      elsif limit > 0
+        integer_list_predicate(qcol, ids, limit)
       elsif ids.any? { |x| x.nil? || x.is_a?(Range) }
         array_with_ranges_predicate(qcol, ids)
       else

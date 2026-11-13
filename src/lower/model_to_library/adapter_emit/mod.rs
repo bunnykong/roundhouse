@@ -608,7 +608,7 @@ fn hydrate_generated_after_insert(
             body: read_row,
             rescues: vec![],
             else_branch: None,
-            ensure: Some(arel_db_call(&db, "finalize", vec![var_ref(&stmt)])),
+            ensure: Some(Box::new(arel_db_call(&db, "finalize", vec![var_ref(&stmt)]))),
             implicit: false,
         },
     );

@@ -366,8 +366,8 @@ where
                         body: map_expr(&r.body, f),
                     })
                     .collect(),
-                else_branch: else_branch.as_ref().map(|e| map_expr(e, f)),
-                ensure: ensure.as_ref().map(|e| map_expr(e, f)),
+                else_branch: else_branch.as_ref().map(|e| Box::new(map_expr(e, f))),
+                ensure: ensure.as_ref().map(|e| Box::new(map_expr(e, f))),
                 implicit: *implicit,
             }
         }

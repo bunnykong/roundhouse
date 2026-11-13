@@ -55,7 +55,7 @@ fn library_ret(app: &roundhouse::App, class: &str, method: &str) -> Ty {
         .find(|m| m.name == Symbol::new(method))
         .unwrap_or_else(|| panic!("{class}#{method} exists"));
     match m.signature.clone().expect("inference wrote a signature") {
-        Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
+        Ty::Fn(fn_ty) => std::sync::Arc::unwrap_or_clone(fn_ty.ret),
         other => panic!("not a Fn: {other:?}"),
     }
 }

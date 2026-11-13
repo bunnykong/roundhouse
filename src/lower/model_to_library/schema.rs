@@ -8,7 +8,7 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::lower::column_slot::{self, ColumnSlot};
 use crate::schema::{Column, Table};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::row::row_class_id;
 use super::{
@@ -185,6 +185,100 @@ fn push_schema_column_types(methods: &mut Vec<MethodDef>, owner: &ClassId, table
         signature: Some(fn_sig(vec![], ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
+/// The columns whose query values an `attribute` or `normalizes`
+/// declaration in the model's body casts, by name. `None` when a
+/// declaration's name is not a literal: it could be any column.
+fn query_decorated_columns(model: &Model) -> Option<crate::det::HashSet<Symbol>> {
+    fn name(expr: &Expr, out: &mut Option<crate::det::HashSet<Symbol>>) {
+        let value = match &*expr.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+            ExprNode::Lit { value: Literal::Str { value } } => Symbol::from(value.as_str()),
+            _ => {
+                *out = None;
+                return;
+            }
+        };
+        if let Some(out) = out {
+            out.insert(value);
+        }
+    }
+    fn visit(expr: &Expr, out: &mut Option<crate::det::HashSet<Symbol>>) {
+        if out.is_none() {
+            return;
+        }
+        if let ExprNode::Send { method, args, .. } = &*expr.node {
+            match method.as_str() {
+                "attribute" => match args.first() {
+                    Some(arg) => name(arg, out),
+                    None => *out = None,
+                },
+                "normalizes" => {
+                    for arg in args.iter().take_while(|arg| !matches!(&*arg.node, ExprNode::Hash { .. } | ExprNode::KeywordSplat { .. })) {
+                        name(arg, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    let mut out = Some(crate::det::HashSet::default());
+    for item in &model.body {
+        if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
+            visit(expr, &mut out);
+        }
+    }
+    out
+}
+
+/// `def self.schema_integer_query_limits; { id: 8, number: 4 }; end`: the
+/// byte width Rails' integer type range-checks a query value against
+/// (ActiveModel::Type::Integer's `limit`), for each plain integer column
+/// (Relation#integer_query_limit). On PostgreSQL that is the column's
+/// own, `integer` 4 and `bigint` 8; Rails' SQLite integer is 8 bytes
+/// (`SQLite3Integer#_limit`). An enum, `attribute` or `normalizes`
+/// column casts through its declaration instead, so it is left out, and
+/// a declaration that names its column at runtime leaves every one out.
+/// So is a `t.references` column: ingest keeps its logical name, not the
+/// `<name>_id` a query names, and drops an explicit `type:` (`:uuid`,
+/// `:string`), so its storage type is not known. A dumped schema writes
+/// the key as `t.bigint "<name>_id"`, which is listed.
+fn push_schema_integer_query_limits(methods: &mut Vec<MethodDef>, model: &Model, table: &Table) {
+    use crate::schema::ColumnType;
+    let postgres = crate::emit::shared::schema_sql::Dialect::current() == crate::emit::shared::schema_sql::Dialect::Postgres;
+    let decorated = query_decorated_columns(model);
+    let entries = table
+        .columns
+        .iter()
+        .filter(|c| !c.array && !model.enums.contains_key(&c.name))
+        .filter(|c| decorated.as_ref().is_some_and(|names| !names.contains(&c.name)))
+        .filter_map(|c| match c.col_type {
+            ColumnType::Integer if postgres => Some((c, 4)),
+            ColumnType::Integer | ColumnType::BigInt => Some((c, 8)),
+            _ => None,
+        })
+        .map(|(c, limit)| (lit_sym(c.name.clone()), lit_int(limit)))
+        .collect();
+    let ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) };
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("schema_integer_query_limits"),
+        receiver: MethodReceiver::Class,
+        params: Vec::new(),
+        body: with_ty(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false }), ty.clone()),
+        signature: Some(fn_sig(vec![], ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
@@ -622,6 +716,9 @@ pub(super) fn push_schema_methods(
     // apply ISO8601-with-offset vs calendar-only without sniffing values.
     push_schema_symbol_list(methods, owner, "schema_columns", table, |_| true);
     push_schema_column_types(methods, owner, table, source);
+    if runtime_relation == super::RuntimeRelation::Present {
+        push_schema_integer_query_limits(methods, model, table);
+    }
     let json_coder = crate::lower::serialize::json_serialize_columns(model);
     if table.columns.iter().any(|c| json_coder.contains(&c.name)) {
         push_schema_symbol_list(methods, owner, "schema_json_coder_columns", table, |c| json_coder.contains(&c.name));
@@ -3690,14 +3787,14 @@ fn synth_initialize(
         ExprNode::Hash { entries: Vec::new(), kwargs: false },
     );
     let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
-    let signature = Ty::Fn {
+    let signature = Ty::Fn(Box::new(FnTy {
         params: vec![crate::ty::Param {
             name: attrs.clone(), ty: attrs_ty.into(), kind: crate::ty::ParamKind::Optional,
         }].into(),
         block: None,
         ret: std::sync::Arc::new(Ty::Nil),
         effects: EffectSet::default(),
-    };
+    }));
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Private,
         unsupported_formals: None,

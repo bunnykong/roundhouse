@@ -14,7 +14,7 @@
 //! prefers the nullable shorthand `T?`.
 #![allow(dead_code)]
 
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 pub fn csharp_ty(t: &Ty) -> String {
     match t {
@@ -89,7 +89,8 @@ pub fn csharp_ty(t: &Ty) -> String {
         // Function type → C# delegate. `Action<…>` when the result is
         // `void`/`Nil` (C# splits void-returning delegates from value-
         // returning ones), `Func<…, R>` otherwise.
-        Ty::Fn { params, ret, .. } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, ret, .. } = &**fn_ty;
             let ps: Vec<String> = params.iter().map(|p| csharp_ty(&p.ty)).collect();
             let ret_s = csharp_ty(ret);
             if ret_s == "void" {
@@ -175,7 +176,8 @@ pub fn has_untyped(t: &Ty) -> bool {
         Ty::Tuple { elems } => elems.iter().any(has_untyped),
         Ty::Union { variants } => variants.iter().any(has_untyped),
         Ty::Class { args, .. } => args.iter().any(has_untyped),
-        Ty::Fn { params, ret, .. } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, ret, .. } = &**fn_ty;
             params.iter().any(|p| has_untyped(&p.ty)) || has_untyped(ret)
         }
         _ => false,

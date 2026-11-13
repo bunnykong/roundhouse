@@ -456,6 +456,27 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             emit_library_lc(lc, &mut out);
         }
 
+        // The app's ActiveModel::Serializer classes, which ingest expanded
+        // into plain classes (`ingest::active_model_serializer`): a
+        // `render json:, serializer:` calls `ArticleSerializer.new`, and
+        // no module of that name was emitted. Their fields are registered
+        // before the controllers emit; their module names are not: the
+        // registry resolves a constant by its last segment, which would
+        // read `Api::ArticleSerializer` as a top-level `ArticleSerializer`.
+        // Unregistered, a constant keeps its full path.
+        let serializer_lcs: Vec<crate::dialect::LibraryClass> = app
+            .library_classes
+            .iter()
+            .filter(|lc| matches!(lc.origin, Some(crate::dialect::LibraryClassOrigin::ActiveModelSerializer { .. })))
+            .cloned()
+            .collect();
+        for class in crate::lower::functionalize::functionalize(serializer_lcs.clone()) {
+            expr::register_field_names(class.name.0.as_str(), &library::struct_fields(&class));
+        }
+        for lc in serializer_lcs {
+            emit_library_lc(lc, &mut out);
+        }
+
         // ---- Controllers (Phase C / W1) -----------------------------
         // Per-controller app modules (`ArticlesController`, …) lowered
         // from the same `controller_to_library` pipeline go/rust use.

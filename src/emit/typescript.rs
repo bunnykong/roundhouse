@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 const JUNTOS_SQLITE_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
 const JUNTOS_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/juntos-libsql.ts");
@@ -1134,6 +1134,59 @@ fn append_code(file: &mut EmittedFile, text: &str) {
     }
 }
 
+/// How a generated entry file names a controller: the class its file
+/// exports (the last segment: `Admin::StatsController` is `export class
+/// StatsController`), the local binding, and the dispatch key, which is
+/// the route table's own (`controller_symbol`: `admin__stats`).
+///
+/// A top-level controller is bound under its own name. A namespaced one
+/// is bound under its segments joined (`AdminStatsController`), so it
+/// cannot meet a top-level `StatsController`; when that joined name is a
+/// top-level controller's too (`Mod::MailsController` beside
+/// `ModMailsController`), or an earlier namespaced controller's, it takes
+/// the first free numbered form (`ModMailsController2`).
+fn controller_binding(app: &App, c: &crate::dialect::Controller) -> (String, String, String) {
+    let full = c.name.0.as_str();
+    let exported = full.rsplit("::").next().unwrap_or(full).to_string();
+    let key = crate::lower::routes_to_library::controller_symbol(full);
+    let mut taken: crate::det::HashSet<String> = app
+        .controllers
+        .iter()
+        .map(|o| o.name.0.as_str())
+        .filter(|n| !n.contains("::"))
+        .map(str::to_string)
+        .collect();
+    let mut local = String::new();
+    for other in app.controllers.iter().filter(|o| o.name.0.as_str().contains("::")) {
+        let joined = other.name.0.as_str().split("::").collect::<String>();
+        let name = std::iter::once(joined.clone())
+            .chain((2..).map(|n| format!("{joined}{n}")))
+            .find(|n| !taken.contains(n))
+            .unwrap_or_default();
+        taken.insert(name.clone());
+        if other.name == c.name {
+            local = name;
+            break;
+        }
+    }
+    if local.is_empty() {
+        local = full.to_string();
+    }
+    (exported, local, key)
+}
+
+/// The `import { X } from "<prefix><stem>.js";` line for a controller,
+/// aliased when the class is namespaced.
+fn controller_import(app: &App, c: &crate::dialect::Controller, prefix: &str) -> String {
+    let stem = crate::naming::snake_case(c.name.0.as_str());
+    let (exported, local, _) = controller_binding(app, c);
+    if exported == local {
+        format!("import {{ {exported} }} from \"{prefix}{stem}.js\";\n")
+    } else {
+        format!("import {{ {exported} as {local} }} from \"{prefix}{stem}.js\";\n")
+    }
+}
+
 /// Hand-written `main.ts` shell. Wires together the generated
 /// schema, optional seeds, the routes dispatch table, the imported
 /// controller classes, and the runtime's `startServer`. The server
@@ -1172,11 +1225,7 @@ fn emit_main_ts(app: &App, has_seeds: bool) -> EmittedFile {
         );
     }
     for c in &app.controllers {
-        let stem = crate::naming::snake_case(c.name.0.as_str());
-        let class_name = c.name.0.as_str();
-        s.push_str(&format!(
-            "import {{ {class_name} }} from \"./app/controllers/{stem}.js\";\n"
-        ));
+        s.push_str(&controller_import(app, c, "./app/controllers/"));
     }
     s.push('\n');
     s.push_str("await startServer({\n");
@@ -1198,13 +1247,9 @@ fn emit_main_ts(app: &App, has_seeds: bool) -> EmittedFile {
         }
         s.push_str("  controllers: {\n");
         for c in &app.controllers {
-            let class_name = c.name.0.as_str();
-            // `ArticlesController` → `articles` — same convention as
-            // `controller_symbol` in the routes lowerer.
-            let symbol = crate::naming::snake_case(
-                class_name.strip_suffix("Controller").unwrap_or(class_name),
-            );
-            s.push_str(&format!("    {symbol}: {class_name},\n"));
+            // `ArticlesController` → `articles`, the route table's key.
+            let (_, local, symbol) = controller_binding(app, c);
+            s.push_str(&format!("    {symbol}: {local},\n"));
         }
         s.push_str("  },\n");
     } else {
@@ -1273,11 +1318,7 @@ fn emit_worker_app_ts(app: &App, has_seeds: bool) -> EmittedFile {
         );
     }
     for c in &app.controllers {
-        let stem = crate::naming::snake_case(c.name.0.as_str());
-        let class_name = c.name.0.as_str();
-        s.push_str(&format!(
-            "import {{ {class_name} }} from \"./app/controllers/{stem}.js\";\n"
-        ));
+        s.push_str(&controller_import(app, c, "./app/controllers/"));
     }
     // Model imports feed the `globalThis.app` debug handle below, not
     // the dispatcher — controllers already reach models through their
@@ -1317,11 +1358,9 @@ fn emit_worker_app_ts(app: &App, has_seeds: bool) -> EmittedFile {
         }
         s.push_str("  controllers: {\n");
         for c in &app.controllers {
-            let class_name = c.name.0.as_str();
-            let symbol = crate::naming::snake_case(
-                class_name.strip_suffix("Controller").unwrap_or(class_name),
-            );
-            s.push_str(&format!("    {symbol}: {class_name},\n"));
+            // `ArticlesController` → `articles`, the route table's key.
+            let (_, local, symbol) = controller_binding(app, c);
+            s.push_str(&format!("    {symbol}: {local},\n"));
         }
         s.push_str("  },\n");
     } else {
@@ -1596,11 +1635,7 @@ fn emit_test_setup_ts(
         s.push_str("import { installRoutes } from \"./minitest.js\";\n");
         s.push_str("import { RouteTable } from \"../../app/routes.js\";\n");
         for c in &app.controllers {
-            let stem = crate::naming::snake_case(c.name.0.as_str());
-            let class_name = c.name.0.as_str();
-            s.push_str(&format!(
-                "import {{ {class_name} }} from \"../../app/controllers/{stem}.js\";\n",
-            ));
+            s.push_str(&controller_import(app, c, "../../app/controllers/"));
         }
     }
 
@@ -1652,11 +1687,9 @@ fn emit_test_setup_ts(
         }
         s.push_str("  {\n");
         for c in &app.controllers {
-            let class_name = c.name.0.as_str();
-            let symbol = crate::naming::snake_case(
-                class_name.strip_suffix("Controller").unwrap_or(class_name),
-            );
-            s.push_str(&format!("    {symbol}: {class_name},\n"));
+            // `ArticlesController` → `articles`, the route table's key.
+            let (_, local, symbol) = controller_binding(app, c);
+            s.push_str(&format!("    {symbol}: {local},\n"));
         }
         s.push_str("  },\n");
         s.push_str(");\n");
@@ -1836,7 +1869,7 @@ pub(super) fn js_library_class(
                 continue;
             }
             let ty = match m.signature.as_ref() {
-                Some(Ty::Fn { ret, .. }) => ts_ty(ret),
+                Some(Ty::Fn(fn_ty)) => ts_ty(&fn_ty.ret),
                 _ => m.body.ty.as_ref().map(ts_ty).unwrap_or_else(|| "any".to_string()),
             };
             let is_static = matches!(m.receiver, MethodReceiver::Class);
@@ -2240,7 +2273,7 @@ pub(crate) fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
             _ => false,
         }
     }
-    matches!(sig, Some(Ty::Fn { ret, .. }) if is_time(ret))
+    matches!(sig, Some(Ty::Fn(fn_ty)) if is_time(&fn_ty.ret))
 }
 
 /// Emit the body of a `constructor` from an `initialize` method's
@@ -2393,8 +2426,8 @@ fn body_contains_yield(body: &crate::expr::Expr) -> bool {
         } => {
             body_contains_yield(inner)
                 || rescues.iter().any(|r| body_contains_yield(&r.body))
-                || else_branch.as_ref().is_some_and(body_contains_yield)
-                || ensure.as_ref().is_some_and(body_contains_yield)
+                || else_branch.as_deref().is_some_and(body_contains_yield)
+                || ensure.as_deref().is_some_and(body_contains_yield)
         }
         ExprNode::Range { begin, end, .. } => {
             begin.as_ref().is_some_and(body_contains_yield)
@@ -2464,7 +2497,8 @@ fn js_class_member(
         Vec<bool>,
         Ty,
     ) = match m.signature.as_ref() {
-        Some(Ty::Fn { params: sig_params, ret, .. }) => {
+        Some(Ty::Fn(fn_ty)) => {
+            let FnTy { params: sig_params, ret, .. } = &**fn_ty;
             let non_block: Vec<&crate::ty::Param> = sig_params
                 .iter()
                 .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
@@ -2500,9 +2534,14 @@ fn js_class_member(
                 .collect();
             (tys, optionals, is_keyword, (**ret).clone())
         }
+        // Unstamped (an `initialize` always is): a positional default
+        // still makes the argument optional, as it does in Ruby. Without
+        // it `def initialize(object, options = {})` became
+        // `constructor(object: any, options: any)` and `new X(record)` was
+        // TS2554.
         _ => (
             m.params.iter().map(|_| Ty::Untyped).collect(),
-            m.params.iter().map(|_| false).collect(),
+            m.params.iter().map(|p| p.ty_kind() == crate::ty::ParamKind::Optional).collect(),
             m.params.iter().map(|_| false).collect(),
             m.body.ty.clone().unwrap_or(Ty::Nil),
         ),
@@ -2730,7 +2769,8 @@ pub(super) fn js_library_function(
 
     let (sig_param_tys, sig_param_optional, ret_ty): (Vec<Ty>, Vec<bool>, Ty) =
         match func.signature.as_ref() {
-            Some(Ty::Fn { params: sig_params, ret, .. }) => {
+            Some(Ty::Fn(fn_ty)) => {
+                let FnTy { params: sig_params, ret, .. } = &**fn_ty;
                 let non_block: Vec<&crate::ty::Param> = sig_params
                     .iter()
                     .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
@@ -3081,9 +3121,10 @@ pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
         .signature
         .as_ref()
         .expect("emit_method requires a signature");
-    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+    let Ty::Fn(fn_ty) = sig else {
         panic!("signature is not Ty::Fn");
     };
+    let FnTy { params: sig_params, ret, .. } = &**fn_ty;
     assert_eq!(
         sig_params.len(),
         m.params.len(),

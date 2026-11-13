@@ -69,3 +69,20 @@ fn an_app_with_a_root_route_keeps_it_first_in_the_table() {
         }
     }
 }
+
+#[test]
+fn an_app_without_routes_still_defines_the_route_table_its_dispatcher_calls() {
+    let routes = "Rails.application.routes.draw do\nend\n";
+    for target in [BuildTarget::Spinel, BuildTarget::Ruby, BuildTarget::Jruby] {
+        let files = emit(routes, target);
+        let table = file(&files, "config/routes.rb", target);
+        for def in ["def self.table", "def self.route_defaults"] {
+            assert!(table.contains(def), "{target:?}: config/routes.rb lacks {def}:\n{table}");
+        }
+        for path in ["main.rb", "test/test_helper.rb"] {
+            let content = file(&files, path, target);
+            assert!(!content.contains("RouteTable.root"), "{target:?} {path} calls RouteTable.root");
+            assert!(content.contains("RouteTable.table"), "{target:?} {path}");
+        }
+    }
+}

@@ -83,7 +83,7 @@ fn a_sidecar_only_class_gains_data_methods_without_losing_reader_types() {
         );
     }
     assert!(
-        matches!(info.instance_methods.get(&Symbol::from("request")), Some(Ty::Fn { ret, .. }) if **ret == Ty::Str)
+        matches!(info.instance_methods.get(&Symbol::from("request")), Some(Ty::Fn(fn_ty)) if *fn_ty.ret == Ty::Str)
     );
 }
 

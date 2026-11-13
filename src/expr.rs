@@ -419,10 +419,18 @@ fn deserialize_cold<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Box
 
 // A field that grows `Expr` grows every tree about fourfold (see
 // `ExprCold`). Put rare data in `ExprCold` instead of raising these.
+// Every node is one `ExprNode` allocation, and the allocator (mimalloc)
+// rounds it up to a size class: 248 bytes take the 256 class, past 256 a
+// node takes 320 (296 took 320, 392 took 448). The largest variants are
+// `If` (three `Expr`s) and `OpAssign`; rare large payloads are boxed
+// (`Ty::Fn`, `BeginRescue`'s `else_branch` and `ensure`). `Ty` sits
+// inline in `Expr::ty`.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<Expr>() <= 120);
+const _: () = assert!(std::mem::size_of::<Expr>() <= 80);
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<ExprNode>() <= 392);
+const _: () = assert!(std::mem::size_of::<ExprNode>() <= 256);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<crate::ty::Ty>() <= 32);
 
 fn is_zero_u64(v: &u64) -> bool {
     *v == 0
@@ -865,11 +873,15 @@ pub enum ExprNode {
     /// `RescueModifier` instead. An `implicit` begin arises when a
     /// `def` body contains trailing `rescue` clauses — same shape, no
     /// surface `begin` keyword.
+    ///
+    /// `else_branch` and `ensure` are boxed: inline they made this rare
+    /// variant (0.35% of nodes) the largest, and so the size of every
+    /// `ExprNode`.
     BeginRescue {
         body: Expr,
         rescues: Vec<RescueClause>,
-        else_branch: Option<Expr>,
-        ensure: Option<Expr>,
+        else_branch: Option<Box<Expr>>,
+        ensure: Option<Box<Expr>>,
         #[serde(default)]
         implicit: bool,
     },

@@ -13,7 +13,7 @@
 
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::{BodyTyper, ClassInfo, Ctx, union_many, union_of, unknown};
 
@@ -86,7 +86,7 @@ impl<'a> BodyTyper<'a> {
         // A reader declared as a method (an RBS or Sorbet signature, an
         // input object's argument) is its return type, not the method.
         Some(match entry {
-            Ty::Fn { ret, .. } => (**ret).clone(),
+            Ty::Fn(fn_ty) => (*fn_ty.ret).clone(),
             other => other.clone(),
         })
     }
@@ -176,7 +176,7 @@ impl<'a> BodyTyper<'a> {
                 let class = self.classes().get(current?)?;
                 if let Some(ty) = class.instance_methods.get(name) {
                     return Some(match ty {
-                        Ty::Fn { ret, .. } => ret.as_ref().clone(),
+                        Ty::Fn(fn_ty) => fn_ty.ret.as_ref().clone(),
                         value => value.clone(),
                     });
                 }
@@ -827,11 +827,12 @@ impl<'a> BodyTyper<'a> {
                         } else {
                             (&c.instance_methods, &c.class_methods)
                         };
-                        let return_seed = |ty: &Ty| !matches!(ty, Ty::Fn { .. });
+                        let return_seed = |ty: &Ty| !matches!(ty, Ty::Fn(_));
+                        let has_block = |ty: &Ty| matches!(ty, Ty::Fn(fn_ty) if fn_ty.block.is_some());
                         let sig = match (preferred.get(method), other.get(method)) {
-                            (Some(s @ Ty::Fn { block: Some(_), .. }), _) => Some(s),
-                            (pref, Some(s @ Ty::Fn { block: Some(_), .. }))
-                                if pref.map_or(true, return_seed) =>
+                            (Some(s), _) if has_block(s) => Some(s),
+                            (pref, Some(s))
+                                if has_block(s) && pref.map_or(true, return_seed) =>
                             {
                                 Some(s)
                             }
@@ -860,13 +861,16 @@ impl<'a> BodyTyper<'a> {
                                 // that registers the yielded type
                                 // itself has a non-`Fn` block and
                                 // takes the last arm.)
-                                Ty::Fn { block: Some(block_ty), .. } => match &**block_ty {
-                                    Ty::Fn { params, .. } => Some(
-                                        params
-                                            .iter()
-                                            .map(|p| p.ty.subst_self(&self_ty))
-                                            .collect(),
-                                    ),
+                                Ty::Fn(sig_fn) if let Some(block_ty) = &sig_fn.block => match &**block_ty {
+                                    Ty::Fn(fn_ty) => {
+                                        let FnTy { params, .. } = &**fn_ty;
+                                        Some(
+                                            params
+                                                .iter()
+                                                .map(|p| p.ty.subst_self(&self_ty))
+                                                .collect(),
+                                        )
+                                    },
                                     _ => Some(vec![block_ty.subst_self(&self_ty)]),
                                 },
                                 _ => None,
@@ -1139,7 +1143,8 @@ impl<'a> BodyTyper<'a> {
         // `<=>`) must present a concrete param type to the check
         // below, not a self type it cannot classify.
         let sig = sig.map(|s| s.subst_self(&Ty::Class { id: id.clone(), args: Vec::new().into() }));
-        let Some(Ty::Fn { params, .. }) = sig else { return };
+        let Some(Ty::Fn(fn_ty)) = sig else { return };
+        let FnTy { params, .. } = *fn_ty;
         let Some(last_param) = params.last() else { return };
         let last_kind_positional = matches!(
             last_param.kind,
@@ -1566,6 +1571,30 @@ impl<'a> BodyTyper<'a> {
             return ty;
         }
         if matches!(method.as_str(), "try" | "try!") {
+            // A core value answers its own method too (Doorkeeper's `options.try(:dup)` on a Hash): `try` lowers to the
+            // direct call (`lower::try_guard`), which a typeless `try` left to fail its dispatch check.
+            let nilable = recv_ty.is_some_and(|t| t.clone().strip_nil() != *t);
+            let named = match args.first().map(|a| &*a.node) {
+                Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => Some(value.clone()),
+                Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => Some(Symbol::from(value.as_str())),
+                _ => None,
+            };
+            // Only the name alone, and one that takes no block: an argument or a block changes what a core method
+            // answers (`first(2)`, `fetch { }`), and an iterator's blockless form is an Enumerator (`map`).
+            let alone = args.len() == 1
+                && block_ret.is_none()
+                && named.as_ref().is_some_and(|m| {
+                    matches!(m.as_str(), "dup" | "clone" | "freeze" | "to_s" | "to_a" | "to_h" | "size" | "length" | "empty?" | "first" | "last" | "keys" | "values" | "compact")
+                });
+            let core = match (recv_ty.map(|t| t.clone().strip_nil()), &named) {
+                (Some(Ty::Hash { key, value }), Some(m)) if alone => Some(hash_method(m, &key, &value, None, &[])),
+                (Some(Ty::Array { elem }), Some(m)) if alone => Some(array_method(m, &elem, None)),
+                (Some(Ty::Str), Some(m)) if alone => Some(str_method(m)),
+                _ => None,
+            };
+            if let Some(ty) = core.filter(|t| !matches!(t, Ty::Untyped) && !t.is_open()) {
+                return if nilable { union_of(ty, Ty::Nil) } else { ty };
+            }
             // A nullable receiver (`@user.try(:username)` with `@user:
             // User?`) answers the same: `nil.try` is nil, already in the
             // union below.
@@ -1666,9 +1695,9 @@ impl<'a> BodyTyper<'a> {
         // a `Ty::Fn` receiver claims this; anything else keeps its
         // own `call` (a callable app class, an untyped proc).
         if matches!(method.as_str(), "call" | "[]") {
-            if let Some(Ty::Fn { ret, .. }) = recv_ty {
+            if let Some(Ty::Fn(fn_ty)) = recv_ty {
                 // Not left a type variable: `call` is known, and what the body answers is the body's own sends' to report.
-                return match &**ret {
+                return match &*fn_ty.ret {
                     Ty::Var { .. } => Ty::Untyped,
                     ret => ret.clone(),
                 };
@@ -4545,7 +4574,7 @@ fn gradual_array(ty: &Ty) -> bool {
     match ty {
         Ty::Untyped | Ty::Var { .. } => true,
         Ty::Array { elem } => matches!(elem.as_ref(), Ty::Untyped | Ty::Var { .. }),
-        Ty::Fn { ret, .. } => gradual_array(ret),
+        Ty::Fn(fn_ty) => gradual_array(&fn_ty.ret),
         _ => false,
     }
 }
@@ -4568,7 +4597,7 @@ pub(crate) const ENUMERABLE_METHODS: &[&str] = &[
 
 fn unwrap_fn_ret(ty: &Ty) -> Ty {
     match ty {
-        Ty::Fn { ret, .. } => (**ret).clone(),
+        Ty::Fn(fn_ty) => (*fn_ty.ret).clone(),
         other => other.clone(),
     }
 }

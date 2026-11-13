@@ -49,7 +49,7 @@ fn param_ty(app: &roundhouse::App, class: &str, method: &str) -> Option<Ty> {
         .and_then(|m| m.get(&Symbol::new(method)))
         .cloned()?;
     match ty {
-        Ty::Fn { params, .. } => params.first().map(|p| (*p.ty).clone()),
+        Ty::Fn(fn_ty) => fn_ty.params.first().map(|p| (*p.ty).clone()),
         _ => None,
     }
 }
