@@ -1134,6 +1134,32 @@ fn append_code(file: &mut EmittedFile, text: &str) {
     }
 }
 
+/// How a generated entry file names a controller: the class its file
+/// exports (the last segment: `Admin::StatsController` is `export class
+/// StatsController`), the local binding (the segments joined,
+/// `AdminStatsController`, so it cannot meet a top-level
+/// `StatsController`), and the dispatch key, which is the route table's
+/// own (`controller_symbol`: `admin__stats`).
+fn controller_binding(c: &crate::dialect::Controller) -> (String, String, String) {
+    let full = c.name.0.as_str();
+    let exported = full.rsplit("::").next().unwrap_or(full).to_string();
+    let local = full.split("::").collect::<String>();
+    let key = crate::lower::routes_to_library::controller_symbol(full);
+    (exported, local, key)
+}
+
+/// The `import { X } from "<prefix><stem>.js";` line for a controller,
+/// aliased when the class is namespaced.
+fn controller_import(c: &crate::dialect::Controller, prefix: &str) -> String {
+    let stem = crate::naming::snake_case(c.name.0.as_str());
+    let (exported, local, _) = controller_binding(c);
+    if exported == local {
+        format!("import {{ {exported} }} from \"{prefix}{stem}.js\";\n")
+    } else {
+        format!("import {{ {exported} as {local} }} from \"{prefix}{stem}.js\";\n")
+    }
+}
+
 /// Hand-written `main.ts` shell. Wires together the generated
 /// schema, optional seeds, the routes dispatch table, the imported
 /// controller classes, and the runtime's `startServer`. The server
@@ -1172,11 +1198,7 @@ fn emit_main_ts(app: &App, has_seeds: bool) -> EmittedFile {
         );
     }
     for c in &app.controllers {
-        let stem = crate::naming::snake_case(c.name.0.as_str());
-        let class_name = c.name.0.as_str();
-        s.push_str(&format!(
-            "import {{ {class_name} }} from \"./app/controllers/{stem}.js\";\n"
-        ));
+        s.push_str(&controller_import(c, "./app/controllers/"));
     }
     s.push('\n');
     s.push_str("await startServer({\n");
@@ -1198,13 +1220,9 @@ fn emit_main_ts(app: &App, has_seeds: bool) -> EmittedFile {
         }
         s.push_str("  controllers: {\n");
         for c in &app.controllers {
-            let class_name = c.name.0.as_str();
-            // `ArticlesController` → `articles` — same convention as
-            // `controller_symbol` in the routes lowerer.
-            let symbol = crate::naming::snake_case(
-                class_name.strip_suffix("Controller").unwrap_or(class_name),
-            );
-            s.push_str(&format!("    {symbol}: {class_name},\n"));
+            // `ArticlesController` → `articles`, the route table's key.
+            let (_, local, symbol) = controller_binding(c);
+            s.push_str(&format!("    {symbol}: {local},\n"));
         }
         s.push_str("  },\n");
     } else {
@@ -1273,11 +1291,7 @@ fn emit_worker_app_ts(app: &App, has_seeds: bool) -> EmittedFile {
         );
     }
     for c in &app.controllers {
-        let stem = crate::naming::snake_case(c.name.0.as_str());
-        let class_name = c.name.0.as_str();
-        s.push_str(&format!(
-            "import {{ {class_name} }} from \"./app/controllers/{stem}.js\";\n"
-        ));
+        s.push_str(&controller_import(c, "./app/controllers/"));
     }
     // Model imports feed the `globalThis.app` debug handle below, not
     // the dispatcher — controllers already reach models through their
@@ -1317,11 +1331,9 @@ fn emit_worker_app_ts(app: &App, has_seeds: bool) -> EmittedFile {
         }
         s.push_str("  controllers: {\n");
         for c in &app.controllers {
-            let class_name = c.name.0.as_str();
-            let symbol = crate::naming::snake_case(
-                class_name.strip_suffix("Controller").unwrap_or(class_name),
-            );
-            s.push_str(&format!("    {symbol}: {class_name},\n"));
+            // `ArticlesController` → `articles`, the route table's key.
+            let (_, local, symbol) = controller_binding(c);
+            s.push_str(&format!("    {symbol}: {local},\n"));
         }
         s.push_str("  },\n");
     } else {
@@ -1596,11 +1608,7 @@ fn emit_test_setup_ts(
         s.push_str("import { installRoutes } from \"./minitest.js\";\n");
         s.push_str("import { RouteTable } from \"../../app/routes.js\";\n");
         for c in &app.controllers {
-            let stem = crate::naming::snake_case(c.name.0.as_str());
-            let class_name = c.name.0.as_str();
-            s.push_str(&format!(
-                "import {{ {class_name} }} from \"../../app/controllers/{stem}.js\";\n",
-            ));
+            s.push_str(&controller_import(c, "../../app/controllers/"));
         }
     }
 
@@ -1652,11 +1660,9 @@ fn emit_test_setup_ts(
         }
         s.push_str("  {\n");
         for c in &app.controllers {
-            let class_name = c.name.0.as_str();
-            let symbol = crate::naming::snake_case(
-                class_name.strip_suffix("Controller").unwrap_or(class_name),
-            );
-            s.push_str(&format!("    {symbol}: {class_name},\n"));
+            // `ArticlesController` → `articles`, the route table's key.
+            let (_, local, symbol) = controller_binding(c);
+            s.push_str(&format!("    {symbol}: {local},\n"));
         }
         s.push_str("  },\n");
         s.push_str(");\n");
