@@ -511,9 +511,10 @@ fn migrations_read_sqlite_checks_as_the_schema_does() {
     };
     let ddl = app(Some(SQLITE)).unwrap();
     assert!(ddl.contains("CHECK (code GLOB '[a-z]*')") && ddl.contains("CHECK (CASE WHEN code LIKE 'a%' THEN length(code) > 1 ELSE true END)"), "{ddl}");
-    for database in [None, Some(POSTGRES)] {
-        assert!(app(database).unwrap_err().contains("unsupported"), "{database:?}");
-    }
+    assert!(app(None).unwrap_err().contains("unsupported"));
+    // Another database's application leaves both out, with a warning (`other_database`).
+    let ddl = app(Some(POSTGRES)).unwrap();
+    assert!(!ddl.contains("CHECK"), "{ddl}");
 }
 
 #[test]
@@ -615,23 +616,30 @@ fn an_unconfigured_application_keeps_the_portable_grammar() {
 
 /// Another database's CHECK is read as on main: only the shared grammar, so a
 /// PostgreSQL expression SQLite would read differently never reaches SQLite.
+/// A file naming that database leaves the rest out, with a warning
+/// (`other_database`); one that names no database refuses it.
 #[test]
 fn another_database_keeps_the_portable_grammar() {
     let mysql = "test:\n  adapter: mysql2\n  database: predicates_test\n";
     let computed = "<% if ENV['PG'] %>\ntest:\n  adapter: postgresql\n<% else %>\ntest:\n  adapter: sqlite3\n<% end %>\n";
     let production = "production:\n  adapter: postgresql\n  database: predicates\n";
-    for database in [POSTGRES, mysql, computed, production, "test:\n  url: postgres://localhost/predicates\n", ""] {
+    for (database, named) in [(POSTGRES, true), (mysql, true), (computed, false), (production, true), ("test:\n  url: postgres://localhost/predicates\n", true), ("", false)] {
         for predicate in PREDICATES.iter().filter(|p| p.name != "like_column") {
             let read = app_schema(&schema(predicate), Some(database));
-            assert_eq!(read.is_ok(), SHARED.contains(&predicate.name), "{} under {database:?}", predicate.name);
+            let shared = SHARED.contains(&predicate.name);
+            if named {
+                let ddl = sqlite_ddl(&read.unwrap_or_else(|error| panic!("{} under {database:?}: {error}", predicate.name)));
+                assert_eq!(ddl.contains("CHECK ("), shared, "{} under {database:?}: {ddl}", predicate.name);
+            } else {
+                assert_eq!(read.is_ok(), shared, "{} under {database:?}", predicate.name);
+            }
         }
     }
     // The parked candidate emitted this for SQLite: PostgreSQL rejects `ABC` and SQLite accepts it.
     let like_column = "ActiveRecord::Schema[8.1].define do\n create_table :predicate_items do |t|\n  t.text :code\n  t.text :like\n  t.check_constraint \"CASE WHEN code LIKE 'a%' THEN true ELSE false END\"\n end\nend\n";
-    for database in [Some(POSTGRES), None] {
-        let error = app_schema(like_column, database).map(|_| ()).unwrap_err();
-        assert!(error.contains("unsupported schema expression on predicate_items: CASE WHEN code LIKE"), "{error}");
-    }
+    let error = app_schema(like_column, None).map(|_| ()).unwrap_err();
+    assert!(error.contains("unsupported schema expression on predicate_items: CASE WHEN code LIKE"), "{error}");
+    assert!(!sqlite_ddl(&app_schema(like_column, Some(POSTGRES)).unwrap()).contains("CHECK"));
 }
 
 /// SQLite's own grammar needs the whole file to say SQLite: the test
@@ -657,15 +665,23 @@ fn only_a_file_naming_sqlite3_throughout_reads_sqlite_grammar() {
     ] {
         for predicate in PREDICATES.iter().filter(|p| p.name != "like_column") {
             let read = app_schema(&schema(predicate), Some(database));
-            assert_eq!(read.is_ok(), SHARED.contains(&predicate.name), "{} with {why}", predicate.name);
+            let shared = SHARED.contains(&predicate.name);
+            // A file naming PostgreSQL leaves out, with a warning, what the shared grammar can't read (`other_database`).
+            if database.contains("adapter: postgresql") {
+                let ddl = sqlite_ddl(&read.unwrap_or_else(|error| panic!("{} with {why}: {error}", predicate.name)));
+                assert_eq!(ddl.contains("CHECK ("), shared, "{} with {why}: {ddl}", predicate.name);
+            } else {
+                assert_eq!(read.is_ok(), shared, "{} with {why}", predicate.name);
+            }
         }
     }
     // The reviewer's migration: PostgreSQL rejects `Abc` and SQLite would accept it.
     let mut tree = std::collections::HashMap::new();
     tree.insert(std::path::PathBuf::from("db/migrate/20260101000000_create_items.rb"), b"class CreateItems < ActiveRecord::Migration[8.1]\n  def change\n    create_table :items do |t|\n      t.text :code\n    end\n    add_check_constraint :items, \"code LIKE 'a%'\", name: 'code_starts_a'\n  end\nend\n".to_vec());
     tree.insert(std::path::PathBuf::from("config/database.yml"), b"default: &default\n  adapter: sqlite3\n  pool: 5\n\nproduction:\n  adapter: postgresql\n  url: <%= ENV[\"DATABASE_URL\"] %>\n".to_vec());
-    let error = roundhouse::ingest::ingest_app_from_tree(tree).map(|_| ()).unwrap_err().to_string();
-    assert!(error.contains("unsupported CHECK expression on items"), "{error}");
+    let (result, diagnostics) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app_from_tree(tree));
+    assert!(!sqlite_ddl(&result.unwrap().schema).contains("CHECK"));
+    assert!(diagnostics.iter().any(|d| d.message.contains("CHECK `code LIKE 'a%'` on items is left out")), "{diagnostics:?}");
 }
 
 /// The emitted SQLite types of some columns differ from Rails' (`decimal` is

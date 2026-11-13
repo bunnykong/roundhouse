@@ -13589,8 +13589,13 @@ pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
 /// of the app may not be SQLite. So does a file whose pragmas may set
 /// `case_sensitive_like`, to either value: Rails runs it on connect, and
 /// it decides what `LIKE` matches.
+///
+/// A file that names another adapter for any configuration (postgresql,
+/// mysql2, trilogy, ...) gives `OtherDatabase`: the portable grammar, with
+/// what it can't read left out of the schema and warned about rather than
+/// refused, since that text may be the other database's own SQL.
 fn schema_expression_dialect<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::schema::generated::GeneratedExpressionDialect {
-    use crate::schema::generated::GeneratedExpressionDialect::{Portable, Sqlite};
+    use crate::schema::generated::GeneratedExpressionDialect::{OtherDatabase, Portable, Sqlite};
     let Ok(text) = vfs.read_to_string(&dir.join("config/database.yml")) else { return Portable };
     let read = super::database_yml::database_configurations(&text, crate::span::FileId(0));
     let sqlite = read.refusals.is_empty()
@@ -13598,7 +13603,13 @@ fn schema_expression_dialect<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::sch
         && !read.case_sensitive_like
         && read.databases.iter().any(|d| d.env == "test" && d.primary)
         && read.databases.iter().all(|d| d.adapter == crate::database::DatabaseAdapter::Sqlite3);
-    if sqlite { Sqlite } else { Portable }
+    if sqlite {
+        Sqlite
+    } else if read.databases.iter().any(|d| d.adapter != crate::database::DatabaseAdapter::Sqlite3) {
+        OtherDatabase
+    } else {
+        Portable
+    }
 }
 
 /// Use the ordinary schema readers for selection too. The normal primary schema

@@ -41,6 +41,8 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
 /// Ingest a Rails schema while validating generated expressions for an
 /// explicit DDL source dialect. Application ingestion passes the one its
 /// `config/database.yml` settles, never Postgres; [`ingest_schema`] is Portable.
+/// Under `OtherDatabase` a CHECK or index expression the grammar can't
+/// read is left out with a warning (in the [`super::prism::scope`] buffer).
 pub fn ingest_schema_with_generated_expression_dialect(
     source: &[u8],
     file: &str,
@@ -586,7 +588,9 @@ fn apply_table_verb(
                 let to_kwarg = kwarg_value(args.iter().skip(2), "to");
                 let value = to_kwarg.as_ref().or_else(|| args.get(2));
                 let expression = value.filter(|n| sql_default_candidate(n))
-                    .map(sql_default_expression).transpose().map_err(|message| IngestError::Unsupported { file: file.into(), message }).and_then(|expression| {
+                    .map(sql_default_expression).transpose()
+                    .or_else(|gap| match value { Some(n) if leave_out_default(&gap, dialect, file, node_span(n), &t, &c) => Ok(None), _ => Err(gap) })
+                    .map_err(|gap| IngestError::Unsupported { file: file.into(), message: gap.to_string() }).and_then(|expression| {
                         if let Some(sql) = expression.as_deref() {
                             if let Some(col) = schema.tables.get(&Symbol::from(t.as_str())).and_then(|table| table.columns.iter().find(|col| col.name.as_str() == c)) {
                                 validate_sql_default_type(sql, col.col_type == ColumnType::Boolean, !col.array && col.col_type.stores_sql_literal_default_as_text())
@@ -702,14 +706,18 @@ fn apply_table_verb(
                 if expression.is_some() || !columns.is_empty() {
                     if let Some(table) = schema.tables.get_mut(&Symbol::from(t.clone())) {
                         if expression.is_some() || columns.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
-                            if expression.as_ref().is_some_and(|e| !crate::emit::shared::schema_sql::schema_expression_supported(e, Some(table), dialect)) {
-                                return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported index expression on {t}") });
+                            if let Some(e) = expression.as_ref().filter(|e| !crate::emit::shared::schema_sql::schema_expression_supported(e, Some(table), dialect)) {
+                                return leave_out_or_refuse(dialect, file, node_span(keys), &t, "index expression", e, || {
+                                    IngestError::Unsupported { file: file.into(), message: format!("unsupported index expression on {t}") }
+                                });
                             }
                             let index = build_index(&t, columns, expression, args.iter().skip(2), file)?;
-                            if index.expression.is_some()
-                                && index.predicate.as_ref().is_some_and(|p| !crate::emit::shared::schema_sql::schema_expression_supported(p, Some(table), dialect)) {
-                                let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
-                                return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") });
+                            if let Some(p) = index.predicate.as_ref().filter(|p| index.expression.is_some()
+                                && !crate::emit::shared::schema_sql::schema_expression_supported(p, Some(table), dialect)) {
+                                return leave_out_or_refuse(dialect, file, node_span(keys), &t, "expression index `where:`", p, || {
+                                    let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
+                                    IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") }
+                                });
                             }
                             table.indexes.push(index);
                         }
@@ -770,7 +778,9 @@ fn apply_table_verb(
                     let check = check_constraint(&args[1..], file, table.name.as_str())?;
                     if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect)
                         && !crate::emit::shared::schema_sql::sqlite_check_expression(&check.expression, table, dialect) {
-                        return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) });
+                        return leave_out_or_refuse(dialect, file, node_span(&args[1]), table.name.as_str(), "CHECK", &check.expression, || {
+                            IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) }
+                        });
                     }
                     table.check_constraints.push(check);
                 } else {
@@ -845,7 +855,8 @@ fn fold_column(
         }
         generated_column_from_options(c, t, file, if ty == "virtual" { None } else { Some(ty) }, option_args)?
     } else {
-        let opts = parse_column_opts(option_args.iter());
+        let mut opts = parse_column_opts(option_args.iter());
+        leave_out_column_default(&mut opts, dialect, file, t, &c);
         let mut col = column_with_type(ty, c, &opts, t, file)?;
         // Every Rails adapter's `change_column` keeps the column's
         // nullability and default unless the call gives them (MySQL
@@ -1812,6 +1823,72 @@ fn index_access_method(value: &Node<'_>, file: &str, table: &str) -> IngestResul
     Ok(method.to_ascii_lowercase())
 }
 
+/// Where a `create_table` block's SQL text stands: a CHECK, an index's
+/// keys, or the `where:` of the expression index named.
+enum SqlSite {
+    Check,
+    Index,
+    Predicate(Symbol),
+}
+
+fn node_span(node: &Node<'_>) -> (usize, usize) {
+    (node.location().start_offset(), node.location().end_offset())
+}
+
+/// A CHECK, index expression or expression-index predicate the grammar
+/// can't read. Under [`GeneratedExpressionDialect::OtherDatabase`] it is
+/// the app's database's own SQL: the caller leaves it out of the schema,
+/// as ingest did before it modeled them, and this warns that the
+/// compiled app does not enforce it. Any other grammar refuses it.
+fn leave_out_or_refuse(
+    dialect: GeneratedExpressionDialect,
+    file: &str,
+    (start, end): (usize, usize),
+    table: &str,
+    what: &str,
+    expression: &str,
+    refusal: impl FnOnce() -> IngestError,
+) -> IngestResult<()> {
+    if dialect != GeneratedExpressionDialect::OtherDatabase {
+        return Err(refusal());
+    }
+    warn_left_out(file, (start, end), "schema_expression", format!(
+        "{what} `{expression}` on {table} is left out of the emitted schema: config/database.yml names a database other than SQLite, \
+         and SQLite does not read this text alike, so the compiled app does not enforce it"
+    ));
+    Ok(())
+}
+
+/// A SQL default the app's other database applies and SQLite may not: a
+/// function or expression from a literal proc. Under
+/// [`GeneratedExpressionDialect::OtherDatabase`] the caller leaves it out
+/// of the column, as ingest did before it modeled SQL defaults, and this
+/// warns and returns true. Any other grammar keeps the refusal.
+fn leave_out_default(gap: &SqlDefaultGap, dialect: GeneratedExpressionDialect, file: &str, span: (usize, usize), table: &str, column: &str) -> bool {
+    let Some(sql) = gap.sql.as_deref().filter(|_| dialect == GeneratedExpressionDialect::OtherDatabase) else { return false };
+    warn_left_out(file, span, "sql_default", format!(
+        "SQL default `{sql}` for {table}.{column} is left out of the emitted schema: config/database.yml names a database other than SQLite, \
+         and SQLite does not apply this text alike, so the compiled app's column has no default"
+    ));
+    true
+}
+
+/// [`leave_out_default`] for a parsed column's options.
+fn leave_out_column_default(opts: &mut ColumnOpts, dialect: GeneratedExpressionDialect, file: &str, table: &str, column: &str) {
+    if let Some((span, Err(gap))) = &opts.default_expression {
+        if leave_out_default(gap, dialect, file, *span, table, column) {
+            opts.default_expression = None;
+        }
+    }
+}
+
+fn warn_left_out(file: &str, (start, end): (usize, usize), construct: &str, message: String) {
+    let span = crate::span::Span { file: super::sources::file_id(file), start: start as u32, end: end as u32 };
+    let mut warning = crate::diagnostic::Diagnostic::unsupported(span, None, construct, message);
+    warning.severity = crate::diagnostic::Severity::Warning;
+    super::prism::push(warning);
+}
+
 /// `create_table NAME[, opts] do |t| … end` → (table key, Table).
 /// Shared by the schema.rb walker and the migration fold.
 fn table_from_create_table(
@@ -1970,8 +2047,9 @@ fn table_from_create_table(
                     if let Some(call) = stmt.as_call_node() {
                         let call_name = constant_id_str(&call.name()).to_string();
                         if matches!(call_name.as_str(), "index" | "check_constraint") {
-                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, n.location().start_offset(), call_name == "check_constraint")))
-                                .filter(|(s, _, check)| *check || s.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_'))
+                            let site = if call_name == "check_constraint" { SqlSite::Check } else { SqlSite::Index };
+                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, node_span(n), site)))
+                                .filter(|(s, _, site)| matches!(site, SqlSite::Check) || s.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_'))
                             {
                                 sql_locations.push(value);
                             }
@@ -1993,7 +2071,7 @@ fn table_from_create_table(
                                 Ok(Some(idx)) => {
                                     if idx.expression.is_some() {
                                         if let Some(value) = kwarg_value(call_arguments(&call).iter().skip(1), "where") {
-                                            if let Some(sql) = string_value(&value) { sql_locations.push((sql, value.location().start_offset(), false)); }
+                                            if let Some(sql) = string_value(&value) { sql_locations.push((sql, node_span(&value), SqlSite::Predicate(idx.name.clone()))); }
                                         }
                                     }
                                     indexes.push(idx);
@@ -2011,7 +2089,7 @@ fn table_from_create_table(
                             // already materialized as two datetimes.
                             columns.extend(timestamp_columns());
                         } else {
-                            match column_from_call(&call, &table_name, file) {
+                            match column_from_call(&call, &table_name, file, dialect) {
                                 Ok(Some(col)) => columns.push(col),
                                 Ok(None) => {}
                                 Err(gap) => gaps.push(gap),
@@ -2083,17 +2161,25 @@ fn table_from_create_table(
             idx.columns.iter().all(|name| table.columns.iter().any(|col| col.name == *name))
         });
     }
-    for (expression, offset, check) in sql_locations {
+    for (expression, span, site) in sql_locations {
+        let check = matches!(site, SqlSite::Check);
         if !crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect)
             && !(check && crate::emit::shared::schema_sql::sqlite_check_expression(&expression, &table, dialect))
         {
-            let line = super::sources::line_at(file, offset).unwrap_or(1);
-            gaps.push(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported schema expression on {table_name}: {expression}") });
+            let what = match &site { SqlSite::Check => "CHECK", SqlSite::Index => "index expression", SqlSite::Predicate(_) => "expression index `where:`" };
+            if let Err(gap) = leave_out_or_refuse(dialect, file, span, &table_name, what, &expression, || {
+                let line = super::sources::line_at(file, span.0).unwrap_or(1);
+                IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported schema expression on {table_name}: {expression}") }
+            }) {
+                gaps.push(gap);
+            }
             // Only the rejected kind goes: SQLite may accept a CHECK whose text an index can't use.
-            if check {
-                table.check_constraints.retain(|c| c.expression != expression);
-            } else {
-                table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str()));
+            match site {
+                SqlSite::Check => table.check_constraints.retain(|c| c.expression != expression),
+                SqlSite::Index => table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str())),
+                // Left out, the predicate's index goes with it, as the whole index did before predicates were kept.
+                SqlSite::Predicate(name) if dialect == GeneratedExpressionDialect::OtherDatabase => table.indexes.retain(|i| i.name != name),
+                SqlSite::Predicate(_) => table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str())),
             }
         }
     }
@@ -2363,7 +2449,7 @@ fn reference_column(name: &str) -> Column {
 struct ColumnOpts {
     nullable: Option<bool>,
     default: Option<String>,
-    default_expression: Option<(usize, Result<String, String>)>,
+    default_expression: Option<((usize, usize), Result<String, SqlDefaultGap>)>,
     json_default: Option<String>,
     /// Whether `default:` was given at all (`default: nil` included):
     /// `change_column` keeps the old default only when it was not.
@@ -2386,8 +2472,22 @@ fn default_value(node: &Node<'_>) -> Option<String> {
     bool_value(node).map(|b| b.to_string()).or_else(|| string_value(node))
 }
 
-fn sql_default_expression(node: &Node<'_>) -> Result<String, String> {
-    let gap = || "SQL defaults require a zero-argument literal proc returning a SQL string literal, clock keyword, or supported scalar function expression".to_string();
+/// Why ingest doesn't carry a SQL `default:`. `sql` is the text when the
+/// default is a literal proc returning SQL other than a quoted literal:
+/// a function or expression, which SQLite DDL may not apply alike.
+#[derive(Clone, Debug)]
+struct SqlDefaultGap {
+    sql: Option<String>,
+}
+
+impl std::fmt::Display for SqlDefaultGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SQL defaults require a zero-argument literal proc returning a SQL string literal, clock keyword, or supported scalar function expression")
+    }
+}
+
+fn sql_default_expression(node: &Node<'_>) -> Result<String, SqlDefaultGap> {
+    let gap = || SqlDefaultGap { sql: None };
     if let Some(parens) = node.as_parentheses_node() {
         let statements = parens.body().map(flatten_statements).ok_or_else(gap)?;
         return if statements.len() == 1 { sql_default_expression(&statements[0]) } else { Err(gap()) };
@@ -2411,17 +2511,19 @@ fn sql_default_expression(node: &Node<'_>) -> Result<String, String> {
     let quoted = sql.len() >= 2 && sql.starts_with('\'') && sql.ends_with('\'')
         && !sql[1..sql.len() - 1].replace("''", "").contains('\'');
     if quoted && sql.contains('|') { return Err(gap()); }
+    // Each refusal below is of SQL text that is no quoted literal.
+    let unapplied = || SqlDefaultGap { sql: Some(sql.clone()) };
     // Only direct calls have the lazy classification Rails' SQLite quoting
     // and default extraction establish here; parentheses can expose a literal.
     if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())
-        && !regex::Regex::new(r"\A[a-zA-Z_]\w*\(.*\)\z").unwrap().is_match(&sql) { return Err(gap()); }
+        && !regex::Regex::new(r"\A[a-zA-Z_]\w*\(.*\)\z").unwrap().is_match(&sql) { return Err(unapplied()); }
     // Rails' default-function regexp does not span lines; its binary-literal
     // extraction also takes precedence over function recognition (`x'…'`).
     if !quoted && (sql.contains(['\n', '\r']) || regex::Regex::new("x'[^\\n]*'").unwrap().is_match(&sql)) {
-        return Err(gap());
+        return Err(unapplied());
     }
     if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())
-        && !crate::emit::shared::schema_sql::schema_expression_supported(&sql, None, GeneratedExpressionDialect::Portable) { return Err(gap()); }
+        && !crate::emit::shared::schema_sql::schema_expression_supported(&sql, None, GeneratedExpressionDialect::Portable) { return Err(unapplied()); }
     Ok(sql)
 }
 
@@ -2493,7 +2595,7 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
                     opts.default = default_value(value);
                     opts.default_expression = None;
                     if sql_default_candidate(value) {
-                        opts.default_expression = Some((value.location().start_offset(), sql_default_expression(value)));
+                        opts.default_expression = Some((node_span(value), sql_default_expression(value)));
                     }
                     opts.json_default = json_default_value(value);
                     opts.empty_array_default = value.as_array_node().is_some_and(|a| a.elements().iter().next().is_none());
@@ -2716,11 +2818,11 @@ fn column_with_type(
     // Strict ingest refuses a default it cannot carry. Survey records it and
     // keeps the column without it: the name and type are still known, and a
     // dropped column would make every use of its reader another error.
-    let default_expression = opts.default_expression.as_ref().map(|(offset, result)| {
-        result.clone().and_then(|sql| {
+    let default_expression = opts.default_expression.as_ref().map(|(span, result)| {
+        result.clone().map_err(|gap| gap.to_string()).and_then(|sql| {
             validate_sql_default_type(&sql, type_name == "boolean", !opts.array && matches!(type_name, "string" | "text" | "json" | "jsonb" | "uuid" | "inet" | "cidr" | "macaddr" | "enum" | "citext"))
                 .map(|()| sql)
-        }).map_err(|why| IngestError::Unsupported { file: file.into(), message: format!("line {}: default for {table}.{col_name}: {why}", super::sources::line_at(file, *offset).unwrap_or(1)) })
+        }).map_err(|why| IngestError::Unsupported { file: file.into(), message: format!("line {}: default for {table}.{col_name}: {why}", super::sources::line_at(file, span.0).unwrap_or(1)) })
     }).transpose().or_else(|gap| super::survey::continue_or_fail(gap).map(|()| None))?;
     let col_type = match type_name {
         // An integer's `limit:` is its size in bytes, and Rails' PostgreSQL
@@ -2818,6 +2920,7 @@ fn column_from_call(
     call: &ruby_prism::CallNode<'_>,
     table: &str,
     file: &str,
+    dialect: GeneratedExpressionDialect,
 ) -> Result<Option<Column>, IngestError> {
     // Expected: t.string "title", null: false  (schema.rb)
     //       or: t.string :title               (migration)
@@ -2893,10 +2996,12 @@ fn column_from_call(
                 message: format!("column dropped: {table}.{col_name} has no literal type"),
             });
         };
-        let opts = parse_column_opts(args.iter().skip(2));
+        let mut opts = parse_column_opts(args.iter().skip(2));
+        leave_out_column_default(&mut opts, dialect, file, table, &col_name);
         return column_with_type(&type_name, col_name, &opts, table, file).map(Some);
     }
-    let opts = parse_column_opts(args.iter().skip(1));
+    let mut opts = parse_column_opts(args.iter().skip(1));
+    leave_out_column_default(&mut opts, dialect, file, table, &col_name);
     column_with_type(&col_type_name, col_name, &opts, table, file).map(Some)
 }
 

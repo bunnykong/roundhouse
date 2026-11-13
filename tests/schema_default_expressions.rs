@@ -4,6 +4,8 @@ mod prerequisite;
 mod emit_and_run;
 #[path = "support/scratch.rs"]
 mod scratch;
+#[path = "support/schema_defaults_other_database.rs"]
+mod other_database;
 
 use roundhouse::emit::shared::schema_sql::{Dialect, render_schema_statements_for};
 use roundhouse::ingest::ingest_schema;
