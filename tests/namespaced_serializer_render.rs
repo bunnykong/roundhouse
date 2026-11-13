@@ -83,3 +83,39 @@ fn elixir_emits_the_serializer_modules_the_renders_call() {
     assert!(controller.contains("Api.ArticleSerializer.new(Article.find("), "{controller}");
     assert!(controller.contains("ArticleSerializer.new(ams_item)"), "{controller}");
 }
+
+/// `Mod::MailsController` beside a top-level `ModMailsController`: the
+/// namespaced one's joined name is taken, so it is bound under another,
+/// and each is registered under its own route key. Both were imported
+/// as `ModMailsController`, a duplicate identifier.
+fn joined_name_taken_overlay() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/mod/mails_controller.rb",
+            "module Mod\n  class MailsController < ApplicationController\n    def index\n      render plain: \"namespaced\"\n    end\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/mod_mails_controller.rb",
+            "class ModMailsController < ApplicationController\n  def index\n    render plain: \"top-level\"\n  end\nend\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"mod/mails\" => \"mod/mails#index\"\n  get \"mod_mails\" => \"mod_mails#index\"\n  resources :articles do",
+        )
+}
+
+#[test]
+fn typescript_binds_a_namespaced_controller_apart_from_a_top_level_one_of_its_joined_name() {
+    let (emitted, errors) = joined_name_taken_overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    for (path, prefix) in [("main.ts", "./app/controllers/"), ("test/_runtime/setup.ts", "../../app/controllers/")] {
+        let entry = read(&emitted, path);
+        let top = format!("import {{ ModMailsController }} from \"{prefix}mod_mails_controller.js\";");
+        let nested = format!("import {{ MailsController as ModMailsController2 }} from \"{prefix}mod::mails_controller.js\";");
+        assert!(entry.contains(&top), "{path}:\n{entry}");
+        assert!(entry.contains(&nested), "{path}:\n{entry}");
+        assert!(entry.contains("    mod_mails: ModMailsController,\n"), "{path}:\n{entry}");
+        assert!(entry.contains("    mod__mails: ModMailsController2,\n"), "{path}:\n{entry}");
+    }
+}

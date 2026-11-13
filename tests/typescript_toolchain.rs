@@ -307,6 +307,31 @@ fn real_blog_namespaced_serializer_render_tsc_passes() {
     assert_tsc_passes("real-blog with a namespaced serializer render", &emitted);
 }
 
+/// A namespaced controller whose joined name a top-level controller
+/// already has (`Mod::MailsController`, `ModMailsController`): the entry
+/// files bound both as `ModMailsController` (TS2300).
+#[test]
+#[ignore]
+fn real_blog_namespaced_controller_beside_its_joined_name_tsc_passes() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "app/controllers/mod/mails_controller.rb",
+            "module Mod\n  class MailsController < ApplicationController\n    def index\n      render plain: \"namespaced\"\n    end\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/mod_mails_controller.rb",
+            "class ModMailsController < ApplicationController\n  def index\n    render plain: \"top-level\"\n  end\nend\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"mod/mails\" => \"mod/mails#index\"\n  get \"mod_mails\" => \"mod_mails#index\"\n  resources :articles do",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_tsc_passes("real-blog with Mod::MailsController and ModMailsController", &emitted);
+}
+
 /// Diagnostic test: emit transpiled_blog and dump tsc errors so we
 /// know what the body-walker still needs to fix. Does NOT assert
 /// success — purely an inspection helper.
