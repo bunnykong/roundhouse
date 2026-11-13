@@ -3184,11 +3184,15 @@ Three gaps remain, all on spinel's side:
   each message was added on, as `errors[:field]`'s are (see above).
   A form over a record that is not one of the app's models (a form
   object, say) is not wrapped, even when it has errors.
-- **`config.after_initialize` blocks do not run at boot.** campfire has
-  two: `Room::MessagesCount.ensure!` (its counter triggers, which
-  `schema.rb` cannot dump) and starting the WAL checkpointer outside
-  tests. The test suite gets the first through its `load_fixtures`
-  override, which is read; a served tree gets neither.
+- **`config.after_initialize` blocks run at boot only in the spellings
+  `ingest::after_initialize` reads**: a block with no parameters that
+  reads no local around it, at the top of an initializer, in
+  `config/application.rb`'s class body, or inside
+  `Rails.application.configure`. Each entry runs them once it has opened
+  the database and set up the job drain, before it serves or works off a
+  job. campfire's two (`Room::MessagesCount.ensure!` and starting the WAL
+  checkpointer outside tests) run this way. A block under a guard or in
+  any other spelling is not run, and the initializer ledger reports it.
 - **`Rails.application.env_config` holds what is set and is consulted
   for nothing**: a forgery failure always renders the 422 that
   `action_dispatch.show_exceptions = :rescuable` asks for.
