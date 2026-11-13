@@ -230,7 +230,8 @@ fn route_defaults_function(defaults: &[Vec<(String, Literal)>]) -> LibraryFuncti
 
 fn dispatch_functions(app: &App, flat: Vec<(FlatRoute, Option<usize>)>, asks_guards: bool) -> Vec<LibraryFunction> {
     let mounts = super::rack_mounts::mounts(app);
-    if flat.is_empty() && mounts.is_empty() {
+    // Not for the Ruby-family router: its main.rb and test helper call `table` and `route_defaults` with no route too.
+    if flat.is_empty() && mounts.is_empty() && !asks_guards {
         return Vec::new();
     }
     let mut defaults = Vec::new();
