@@ -491,3 +491,54 @@ end
         assert!(constructor_keywords_are_refused(&source), "{hook} / {class_extends:?}");
     }
 }
+
+/// An `inherited` hook that hands its receiver a value read from it, through
+/// a class-side writer the receiver answers (view_component's
+/// `child.virtual_path = child.identifier.gsub(…)`): the writer only stores
+/// it, so keywords stay supported. A writer whose body, or a method it
+/// calls, changes lookup still refuses.
+#[test]
+fn inherited_storing_a_value_through_its_own_writer_keeps_keywords() {
+    for (writer, refused) in [
+        ("@path = value", false),
+        ("@path = value.to_s\n    note(value)", false),
+        ("define_singleton_method(:new) { |**o| o }", true),
+        ("install(value)", true),
+    ] {
+        let source = format!(
+            r#"
+class Base
+  def self.path=(value)
+    {writer}
+  end
+
+  def self.inherited(child)
+    child.path = child.name.to_s.downcase
+    super
+  end
+end
+
+class Notes
+  def self.note(value)
+    @noted = value
+  end
+
+  def self.install(value)
+    value.define_singleton_method(:new) {{ |**o| o }}
+  end
+end
+
+class Widget < Base
+  def initialize(label:)
+    @label = label
+  end
+
+  def self.build
+    new(label: "x")
+  end
+end
+"#
+        );
+        assert_eq!(constructor_keywords_are_refused(&source), refused, "{writer}");
+    }
+}

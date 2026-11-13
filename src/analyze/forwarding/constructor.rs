@@ -61,6 +61,12 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
         .filter(|method| !makes_no_call(method))
         .map(|method| method.name.clone())
         .collect();
+    let class_side_methods: HashSet<Symbol> = super::classes(app)
+        .flat_map(|class| class.methods.iter())
+        .chain(app.models.iter().flat_map(|model| model.methods()))
+        .filter(|method| method.receiver == MethodReceiver::Class)
+        .map(|method| method.name.clone())
+        .collect();
     let modules_with_custom_new: HashSet<ClassId> = index
         .virtual_owners
         .iter()
@@ -119,14 +125,25 @@ pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceCont
             modules_with_custom_initialize,
             &modules_with_mutating_hooks,
         );
+        let lookup_changers = lookup_changing_methods(
+            app,
+            &app_methods,
+            &modules_with_custom_new,
+            modules_with_custom_initialize,
+            &known_module_names,
+            &modules_with_mutating_hooks,
+            &hook_targets,
+            question,
+        );
         let context = ConstructorMutationContext {
             owner_aliases: &constructor_owner_aliases,
             modules_with_custom_new: &modules_with_custom_new,
             modules_with_custom_initialize,
             known_modules: &known_module_names,
-            app_methods: &app_methods,
+            app_methods: &lookup_changers,
             modules_with_mutating_hooks: &modules_with_mutating_hooks,
             hook_targets: Some(&hook_targets),
+            class_side_methods: Some(&class_side_methods),
             question,
         };
         let findings = collect_app_lookup_mutations(app, &context);
@@ -348,6 +365,7 @@ fn resolve_mutating_hook_modules(
                     app_methods,
                     modules_with_mutating_hooks,
                     hook_targets: None,
+                    class_side_methods: None,
                     question,
                 };
                 let scan = scan_constructor_mutations(
@@ -612,6 +630,17 @@ pub(super) fn scan_constructor_mutations(
             _ => false,
         }
     }
+    // Not every app method handed a value of the receiver: a class-side one no body of which changes lookup only stores it (`child.virtual_path = child.identifier.gsub(…)`).
+    fn runs_own_harmless_method(
+        recv: Option<&Expr>,
+        method: &Symbol,
+        callback_receiver: &Symbol,
+        context: &ConstructorMutationContext<'_>,
+    ) -> bool {
+        recv.is_some_and(|recv| matches!(&*recv.node, ExprNode::Var { name, .. } if name == callback_receiver))
+            && context.class_side_methods.is_some_and(|names| names.contains(method))
+            && !context.app_methods.contains(method)
+    }
     fn contains_callback(expr: &Expr, callback_receiver: &Symbol) -> bool {
         if matches!(&*expr.node, ExprNode::Var { name, .. } if name == callback_receiver) {
             return true;
@@ -666,9 +695,10 @@ pub(super) fn scan_constructor_mutations(
                     && recv
                         .as_ref()
                         .is_some_and(|recv| receiver_uses_callback(recv, callback_receiver)))
-                    || args
-                        .iter()
-                        .any(|arg| contains_callback(arg, callback_receiver))
+                    || (!runs_own_harmless_method(recv.as_ref(), method, callback_receiver, context)
+                        && args
+                            .iter()
+                            .any(|arg| contains_callback(arg, callback_receiver)))
             });
             if mutates_lookup || mutates_callback_receiver {
                 match recv.as_ref().map(|recv| &*recv.node) {
@@ -733,6 +763,8 @@ pub(super) struct ConstructorMutationContext<'a> {
     pub(super) modules_with_mutating_hooks: &'a HashSet<ClassId>,
     /// The module sets above, probed by spelling: once they are final.
     pub(super) hook_targets: Option<&'a HookTargets>,
+    /// Every class-side method name the app defines, once `app_methods` is final.
+    pub(super) class_side_methods: Option<&'a HashSet<Symbol>>,
     pub(super) question: Question,
 }
 
@@ -1011,13 +1043,100 @@ fn eval_only_registers_filters(
     )
 }
 
+// Not every app method's name: one no definition of which changes lookup, sends by a built name, or calls such a method runs code that cannot reach it.
+#[allow(clippy::too_many_arguments)]
+fn lookup_changing_methods(
+    app: &App,
+    app_methods: &HashSet<Symbol>,
+    modules_with_custom_new: &HashSet<ClassId>,
+    modules_with_custom_initialize: &HashSet<ClassId>,
+    known_modules: &KnownModules,
+    modules_with_mutating_hooks: &HashSet<ClassId>,
+    hook_targets: &HookTargets,
+    question: Question,
+) -> HashSet<Symbol> {
+    fn visit(expr: &Expr, name: &Symbol, changes: &mut dyn FnMut(&Symbol, &[Expr]) -> bool, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if expr.diagnostic().is_some() || expr.nested_def().is_some() {
+            *found = true;
+            return;
+        }
+        match &*expr.node {
+            ExprNode::Send { method, args, .. } if changes(method, args) => {
+                *found = true;
+                return;
+            }
+            // Not the `super` call's own arguments alone: a zsuper passes the method's, so a primitive's override (`def self.include(*m) = super`) changes lookup whatever it is handed.
+            ExprNode::Super { .. }
+                if changes(name, &[])
+                    || matches!(
+                        name.as_str(),
+                        "include" | "extend" | "prepend" | "define_method" | "define_singleton_method" | "remove_method"
+                            | "undef_method" | "alias_method" | "class_eval" | "module_eval" | "instance_eval"
+                            | "class_exec" | "module_exec" | "instance_exec" | "send" | "public_send" | "__send__"
+                    )
+                    || is_method_lookup_hook(name.as_str())
+                    || defines_constructor_lookup_callback(name.as_str()) =>
+            {
+                *found = true;
+                return;
+            }
+            _ => {}
+        }
+        expr.node.for_each_child(&mut |child| visit(child, name, changes, found));
+    }
+    let methods: Vec<&MethodDef> = super::classes(app)
+        .flat_map(|class| class.methods.iter())
+        .chain(app.models.iter().flat_map(|model| model.methods()))
+        .chain(app.test_modules.iter().flat_map(|module| module.helpers.iter()))
+        .filter(|method| app_methods.contains(&method.name))
+        .collect();
+    let mut changers: HashSet<Symbol> = HashSet::default();
+    loop {
+        let before = changers.len();
+        for method in &methods {
+            if changers.contains(&method.name) {
+                continue;
+            }
+            let mut changes = |called: &Symbol, args: &[Expr]| {
+                mutates_constructor_lookup_method(
+                    called.as_str(),
+                    args,
+                    modules_with_custom_new,
+                    modules_with_custom_initialize,
+                    known_modules,
+                    modules_with_mutating_hooks,
+                    Some(hook_targets),
+                    question,
+                ) || sends_app_method(called, args, &changers)
+                    || (matches!(called.as_str(), "send" | "public_send" | "__send__")
+                        && args.first().and_then(literal_method_name).is_none())
+            };
+            let mut found = false;
+            visit(&method.body, &method.name, &mut changes, &mut found);
+            for default in method.params.iter().filter_map(|param| param.default.as_ref()) {
+                visit(default, &method.name, &mut changes, &mut found);
+            }
+            if found {
+                changers.insert(method.name.clone());
+            }
+        }
+        if changers.len() == before {
+            return changers;
+        }
+    }
+}
+
 /// Whether `method(args)` runs a method the app defines: by name, or
 /// through `send` / `public_send` / `__send__` with a literal name. A
 /// dynamic send with any other name may run one, so it counts.
 fn sends_app_method(method: &Symbol, args: &[Expr], app_methods: &HashSet<Symbol>) -> bool {
     if matches!(method.as_str(), "send" | "public_send" | "__send__") {
-        return match args.first().map(literal_method_name) {
-            Some(Some(name)) => app_methods.contains(&Symbol::from(name)),
+        // Not the literal name alone: `public_send(:send, :install, …)` runs what the inner send names.
+        return match args.split_first().map(|(first, rest)| (literal_method_name(first), rest)) {
+            Some((Some(name), rest)) => sends_app_method(&Symbol::from(name), rest, app_methods),
             _ => true,
         };
     }
