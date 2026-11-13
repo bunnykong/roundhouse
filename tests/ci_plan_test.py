@@ -2039,6 +2039,15 @@ class Results(unittest.TestCase):
 
 
 class Workflow(unittest.TestCase):
+    def test_tiny_api_runs_on_the_shard_the_plan_counts_it_on(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+        job = re.search(r"(?ms)^  spinel-toolchain:\n(.*?)(?=^  [\w-]+:|\Z)", workflow)[1]
+        shards = re.search(r"shard: \[([0-9, ]+)\]", job)[1]
+        self.assertEqual([int(n) for n in shards.split(",")], list(range(ci.SPINEL_TOOLCHAIN_SHARDS)))
+        gate = re.search(r"- name: run tiny_api spinel_gate_ --ignored\n\s+if: \$\{\{ !cancelled\(\) && matrix.shard == (\d+) \}\}", job)
+        self.assertIsNotNone(gate, "the tiny_api step's shard condition moved")
+        self.assertEqual(int(gate[1]), ci.SPINEL_TOOLCHAIN_SHARDS - 1)
+
     def test_jruby_runs_cleanup_after_runtime_setup(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
         job = re.search(

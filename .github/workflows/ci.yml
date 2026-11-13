@@ -1966,8 +1966,9 @@ jobs:
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
       # after an open issue (#163) is not selected.
+      # Not any shard: spinel_toolchain_shard counts tiny_api's seconds on the last one (loads[-1]).
       - name: run tiny_api spinel_gate_ --ignored
-        if: ${{ !cancelled() && matrix.shard == 3 }}
+        if: ${{ !cancelled() && matrix.shard == 4 }}
         env:
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/toolchain-${{ matrix.shard }}.jsonl
         run: |
