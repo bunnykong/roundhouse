@@ -506,7 +506,7 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting, rails: Op
                 // any other use (a mutation, an unmodelled write) still counts against the assignments read.
                 .filter(|(at, m)| {
                     let rest = code[at + m.len()..].trim_start();
-                    let before = code[..*at].trim_end();
+                    let before = code[..*at].trim_end_matches(|c: char| word(c) || c == '.' || c == ':').trim_end();
                     let read_after = ["==", "!=", ")", ",", "&&", "?", "then"].iter().any(|t| rest.starts_with(t))
                         || (rest.starts_with("||") && !rest.starts_with("||="));
                     let read_before = ["if", "unless", "elsif", "&&", "||", "!", "(", "==", "!="].iter().any(|t| before.ends_with(t));
