@@ -532,7 +532,19 @@ fn apply_table_verb(
         }
         "add_column" | "change_column" => {
             if let (Some(t), Some(c), Some(ty)) = (arg_name(0), arg_name(1), arg_name(2)) {
+                // An unconfigured app refuses a change its conditions no longer
+                // read alike under; the table stays as it was, as when the
+                // column itself is refused.
+                let before = (dialect == GeneratedExpressionDialect::Portable).then(|| schema.tables.get(&Symbol::from(t.as_str())).cloned()).flatten();
                 fold_column(verb, &t, c, &ty, &args[3..], file, schema, dialect)?;
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
+                    if let Err(refusal) = read_conditions_again(table, dialect, file, node_span(&args[1])) {
+                        if let Some(before) = before {
+                            *table = before;
+                        }
+                        return Err(refusal);
+                    }
+                }
             }
         }
         "remove_column" => {
@@ -713,7 +725,7 @@ fn apply_table_verb(
                             }
                             let index = build_index(&t, columns, expression, args.iter().skip(2), file)?;
                             if let Some(p) = index.predicate.as_ref().filter(|p| index.expression.is_some()
-                                && !crate::emit::shared::schema_sql::schema_expression_supported(p, Some(table), dialect)) {
+                                && !crate::emit::shared::schema_sql::schema_condition_supported(p, table, dialect)) {
                                 return leave_out_or_refuse(dialect, file, node_span(keys), &t, "expression index `where:`", p, || {
                                     let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
                                     IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") }
@@ -775,12 +787,15 @@ fn apply_table_verb(
         "add_check_constraint" | "remove_check_constraint" => {
             if let Some(table) = arg_name(0).and_then(|n| schema.tables.get_mut(&Symbol::from(n))) {
                 if verb == "add_check_constraint" {
-                    let check = check_constraint(&args[1..], file, table.name.as_str())?;
-                    if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect)
+                    let mut check = check_constraint(&args[1..], file, table.name.as_str())?;
+                    if !crate::emit::shared::schema_sql::schema_condition_supported(&check.expression, table, dialect)
                         && !crate::emit::shared::schema_sql::sqlite_check_expression(&check.expression, table, dialect) {
-                        return leave_out_or_refuse(dialect, file, node_span(&args[1]), table.name.as_str(), "CHECK", &check.expression, || {
-                            IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) }
-                        });
+                        match carry_check(dialect, &check.expression, table) {
+                            Some(carried) => check.carried_from = Some(std::mem::replace(&mut check.expression, carried)),
+                            None => return leave_out_or_refuse(dialect, file, node_span(&args[1]), table.name.as_str(), "CHECK", &check.expression, || {
+                                IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) }
+                            }),
+                        }
                     }
                     table.check_constraints.push(check);
                 } else {
@@ -790,10 +805,12 @@ fn apply_table_verb(
                         || args.get(1).is_some_and(|n| n.as_keyword_hash_node().is_none() && n.as_nil_node().is_none() && string_value(n).is_none()) {
                         return Err(IngestError::Unsupported { file: file.into(), message: "remove_check_constraint requires a literal name or expression".into() });
                     }
-                    table.check_constraints.retain(|c| !match &name {
-                        Some(name) => c.name.as_ref() == Some(name),
-                        None => expression.as_ref().is_some_and(|e| &c.expression == e),
-                    });
+                    // Rails 8.1.4 removes the CHECK named `name:`, or else the
+                    // name the expression generates, and compares names only
+                    // (`check_constraint_for`): another CHECK that reads the
+                    // same, or a carried one's rewritten text, stays.
+                    let name = name.or_else(|| expression.as_deref().map(|e| rails_check_name(table.name.as_str(), e)));
+                    table.check_constraints.retain(|c| c.name != name);
                 }
             }
         }
@@ -1789,12 +1806,17 @@ fn check_constraint(args: &[Node<'_>], file: &str, table: &str) -> IngestResult<
             if !matches!(key.as_deref(), Some("name" | "validate")) { return Err(gap()); }
         }
     }
-    let name = kwarg_value(args.iter().skip(1), "name").map(|n| name_value(&n).ok_or_else(gap)).transpose()?.unwrap_or_else(|| {
-        let digest = format!("{:x}", Sha256::digest(format!("{table}_{expression}_chk")));
-        format!("chk_rails_{}", &digest[..10])
-    });
+    let name = kwarg_value(args.iter().skip(1), "name").map(|n| name_value(&n).ok_or_else(gap)).transpose()?.unwrap_or_else(|| rails_check_name(table, &expression));
     if kwarg_value(args.iter().skip(1), "validate").is_some_and(|v| bool_value(&v) != Some(true)) { return Err(gap()); }
-    Ok(crate::schema::CheckConstraint { name: Some(name), expression })
+    Ok(crate::schema::CheckConstraint { name: Some(name), expression, carried_from: None })
+}
+
+/// Rails 8.1.4's name for a CHECK given without `name:`
+/// (`check_constraint_name`): `chk_rails_` and the first ten hex digits
+/// of the SHA-256 of `<table>_<expression>_chk`.
+fn rails_check_name(table: &str, expression: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(format!("{table}_{expression}_chk")));
+    format!("chk_rails_{}", &digest[..10])
 }
 
 /// Rails interpolates `using:` as an unquoted SQL identifier. Fold its
@@ -1833,6 +1855,60 @@ enum SqlSite {
 
 fn node_span(node: &Node<'_>) -> (usize, usize) {
     (node.location().start_offset(), node.location().end_offset())
+}
+
+/// Under [`GeneratedExpressionDialect::OtherDatabase`], a CHECK the
+/// grammar can't read rewritten to what SQLite reads alike, when it is in
+/// the forms Rails' PostgreSQL dump writes for plain comparisons
+/// ([`carry_postgres_check`](crate::emit::shared::schema_sql::carry_postgres_check)).
+/// Index expressions are never carried: PostgreSQL's `lower` folds case
+/// beyond ASCII, which SQLite's does not.
+fn carry_check(dialect: GeneratedExpressionDialect, expression: &str, table: &Table) -> Option<String> {
+    (dialect == GeneratedExpressionDialect::OtherDatabase)
+        .then(|| crate::emit::shared::schema_sql::carry_postgres_check(expression, table))
+        .flatten()
+}
+
+/// After a column changes, PostgreSQL rereads each CHECK and index
+/// predicate against the new type or collation (`ALTER COLUMN ... TYPE`).
+/// For an app whose database may not be SQLite, ingest reads them again
+/// too: a carried CHECK is carried again from its PostgreSQL text, and any
+/// other CHECK or expression index's `where:` must still read alike
+/// ([`schema_condition_supported`](crate::emit::shared::schema_sql::schema_condition_supported)).
+/// One that no longer does is left out with the warning, or refused, as
+/// when it was added; the caller then restores the table. A SQLite app's
+/// text is SQLite's own.
+fn read_conditions_again(table: &mut Table, dialect: GeneratedExpressionDialect, file: &str, span: (usize, usize)) -> IngestResult<()> {
+    use crate::emit::shared::schema_sql::schema_condition_supported;
+    if !matches!(dialect, GeneratedExpressionDialect::Portable | GeneratedExpressionDialect::OtherDatabase) {
+        return Ok(());
+    }
+    let name = table.name.clone();
+    let refusal = |what: &str| IngestError::Unsupported { file: file.into(), message: format!("unsupported {what} on {name}") };
+    let again: Vec<_> = table.check_constraints.iter().map(|c| match &c.carried_from {
+        Some(source) => carry_check(dialect, source, table),
+        None => schema_condition_supported(&c.expression, table, dialect).then(|| c.expression.clone()),
+    }).collect();
+    let mut kept = Vec::new();
+    for (mut check, again) in std::mem::take(&mut table.check_constraints).into_iter().zip(again) {
+        match again {
+            Some(expression) => {
+                check.expression = expression;
+                kept.push(check);
+            }
+            None => leave_out_or_refuse(dialect, file, span, name.as_str(), "CHECK", check.carried_from.as_deref().unwrap_or(&check.expression), || refusal("CHECK expression"))?,
+        }
+    }
+    table.check_constraints = kept;
+    let mut kept = Vec::new();
+    for index in std::mem::take(&mut table.indexes) {
+        match index.predicate.as_deref().filter(|p| index.expression.is_some() && !schema_condition_supported(p, table, dialect)) {
+            Some(predicate) => leave_out_or_refuse(dialect, file, span, name.as_str(), "expression index `where:`", predicate, || refusal("index predicate"))?,
+            None => kept.push(index),
+        }
+    }
+    table.indexes = kept;
+    Ok(())
 }
 
 /// A CHECK, index expression or expression-index predicate the grammar
@@ -2021,6 +2097,7 @@ fn table_from_create_table(
                 array: false,
                 array_stored: false,
                 unset_until_assigned: false,
+                collated: false,
             }),
             Some(t) => column_with_type(t, id_name.clone(), &opts, &table_name, file),
         };
@@ -2163,9 +2240,19 @@ fn table_from_create_table(
     }
     for (expression, span, site) in sql_locations {
         let check = matches!(site, SqlSite::Check);
-        if !crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect)
-            && !(check && crate::emit::shared::schema_sql::sqlite_check_expression(&expression, &table, dialect))
+        let supported = match site {
+            SqlSite::Index => crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect),
+            SqlSite::Check | SqlSite::Predicate(_) => crate::emit::shared::schema_sql::schema_condition_supported(&expression, &table, dialect),
+        };
+        if !supported && !(check && crate::emit::shared::schema_sql::sqlite_check_expression(&expression, &table, dialect))
         {
+            if check && let Some(carried) = carry_check(dialect, &expression, &table) {
+                for c in table.check_constraints.iter_mut().filter(|c| c.expression == expression) {
+                    c.expression = carried.clone();
+                    c.carried_from = Some(expression.clone());
+                }
+                continue;
+            }
             let what = match &site { SqlSite::Check => "CHECK", SqlSite::Index => "index expression", SqlSite::Predicate(_) => "expression index `where:`" };
             if let Err(gap) = leave_out_or_refuse(dialect, file, span, &table_name, what, &expression, || {
                 let line = super::sources::line_at(file, span.0).unwrap_or(1);
@@ -2225,6 +2312,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             array: false,
             array_stored: false,
             unset_until_assigned: false,
+            collated: false,
         })
         .collect();
     Some((
@@ -2340,6 +2428,7 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
             array,
             array_stored: false,
             unset_until_assigned: false,
+            collated: false,
         });
     }
     columns
@@ -2418,6 +2507,7 @@ fn timestamp_columns_with(nullable: bool) -> [Column; 2] {
         array: false,
         array_stored: false,
         unset_until_assigned: false,
+        collated: false,
     };
     [col("created_at"), col("updated_at")]
 }
@@ -2440,6 +2530,7 @@ fn reference_column(name: &str) -> Column {
         array: false,
         array_stored: false,
         unset_until_assigned: false,
+        collated: false,
     }
 }
 
@@ -2459,6 +2550,8 @@ struct ColumnOpts {
     array: bool,
     /// `default: []`, which `default_value` reads as no default.
     empty_array_default: bool,
+    /// `collation:` with a value ([`Column::collated`]).
+    collated: bool,
 }
 
 // Not `string_value` alone: schema.rb dumps an integer, float or boolean default unquoted (`default: 0`, `default: true`).
@@ -2613,6 +2706,7 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
                         None => value.as_nil_node().is_none(),
                     };
                 }
+                "collation" => opts.collated = value.as_nil_node().is_none(),
                 _ => {}
             }
         }
@@ -2911,6 +3005,7 @@ fn column_with_type(
         array: opts.array,
         array_stored: false,
         unset_until_assigned: false,
+        collated: opts.collated,
     })
 }
 

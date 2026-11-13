@@ -84,7 +84,7 @@ pub fn build_unique_keys(app: &crate::App) -> UniqueKeys {
             .map(|i| UniqueKey {
                 columns: i.columns.clone(),
                 predicate: crate::emit::shared::schema_sql::Dialect::Sqlite
-                    .index_predicate(table, i)
+                    .index_predicate(table, i, app.schema.expression_dialect)
                     .map(str::to_string),
             })
             .collect();

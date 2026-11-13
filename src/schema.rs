@@ -123,6 +123,12 @@ pub struct Column {
     /// reader still answers the column's own type. Lowering-only.
     #[serde(skip)]
     pub unset_until_assigned: bool,
+    /// Ingest-only evidence: the column declares `collation:`. Its
+    /// database compares the column's text under that collation, which
+    /// may ignore case, so no CHECK comparing it is rewritten for SQLite
+    /// (`carry_postgres_check`).
+    #[serde(skip)]
+    pub collated: bool,
 }
 
 impl Column {
@@ -253,6 +259,11 @@ fn deserialize_key_columns<'de, D: serde::Deserializer<'de>>(input: D) -> Result
 pub struct CheckConstraint {
     pub name: Option<String>,
     pub expression: String,
+    /// Ingest-only: the PostgreSQL text `expression` was rewritten from
+    /// for SQLite (`carry_postgres_check`). PostgreSQL rereads that text
+    /// when a column it names changes, so ingest carries it again then.
+    #[serde(skip)]
+    pub carried_from: Option<String>,
 }
 
 /// Column a `pluck` or `pick` argument selects.
