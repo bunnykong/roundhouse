@@ -210,12 +210,19 @@ fn declares<V: Vfs + ?Sized>(vfs: &V, lib: &Path, path: &str) -> bool {
         let name = name.trim_start_matches("::");
         name == last || name.ends_with(&format!("::{last}"))
     };
+    // Each real directory once: a symlink back into `lib/` would
+    // otherwise be walked again at every level, up to the OS's limit.
+    let real = |dir: &Path| vfs.canonical(dir).unwrap_or_else(|| dir.to_path_buf());
+    let mut seen: HashSet<std::path::PathBuf> = HashSet::default();
+    seen.insert(real(lib));
     let mut dirs = vec![lib.to_path_buf()];
     while let Some(dir) = dirs.pop() {
         let Ok(entries) = vfs.read_dir(&dir) else { continue };
         for entry in entries {
             if vfs.is_dir(&entry) {
-                dirs.push(entry);
+                if seen.insert(real(&entry)) {
+                    dirs.push(entry);
+                }
             } else if entry.extension().is_some_and(|e| e == "rb")
                 && vfs.read_to_string(&entry).is_ok_and(|text| text.lines().any(opens))
             {
