@@ -579,20 +579,52 @@ fn real_blog_spinel_tests_pass() {
     if std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").is_some() {
         panic!("spinel bundle collect: not bundled");
     }
+    // Not `make spinel-test` on PRs and pushes: it compiles the whole runtime once per test file, four times the
+    // lane's longest test; Full validation (ROUNDHOUSE_SPINEL_SLIM=0) still builds each file alone, as the tree ships.
+    let (target, files) = if std::env::var("ROUNDHOUSE_SPINEL_SLIM").is_ok_and(|v| v == "0") {
+        ("spinel-test".to_string(), 0)
+    } else {
+        let makefile = std::fs::read_to_string(scratch.join("Makefile")).expect("read Makefile");
+        let tests: Vec<&str> = makefile
+            .split("SPINEL_TESTS := \\\n")
+            .nth(1)
+            .expect("Makefile lists SPINEL_TESTS")
+            .lines()
+            .map(|l| l.trim().trim_end_matches('\\').trim())
+            .take_while(|l| !l.is_empty())
+            .collect();
+        assert!(tests.len() > 1, "SPINEL_TESTS: {tests:?}");
+        let requires: String = tests
+            .iter()
+            .map(|t| format!("require_relative {:?}\n", t.trim_start_matches("test/")))
+            .collect();
+        std::fs::write(scratch.join("test/all_spinel_tests.rb"), requires).expect("write test/all_spinel_tests.rb");
+        ("build/test/all_spinel_tests".to_string(), tests.len())
+    };
     let output = Command::new("make")
-        .arg("spinel-test")
+        .arg(&target)
         .current_dir(&scratch)
         .output()
-        .expect("spawn make spinel-test");
-
+        .expect("spawn make");
     assert!(
         output.status.success(),
-        "make spinel-test failed\n\
+        "make {target} failed\n\
          \n=== stdout ===\n{}\n\
          \n=== stderr ===\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    if files > 0 {
+        let run = Command::new(scratch.join(&target)).current_dir(&scratch).output().expect("run the suite");
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(
+            run.status.success(),
+            "{target} failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        // Every file's driver ran: one all-green line each.
+        assert_eq!(stdout.matches(" tests passed").count(), files, "{stdout}");
+    }
 }
 
 /// Exercise the shipped CLI/spin package, not the pre-spin_shape test overlay.
