@@ -15012,7 +15012,7 @@ mod tests {
     #[test]
     fn names_constant_skips_a_reference_a_defined_guard_covers() {
         let guarded = [
-            "if value.is_a?(Method) || (defined?(::Singleton) && value.is_a?(::Singleton))\n",
+            "if value.is_a?(Method) || (defined?(::Singleton) && value.is_a?(::Singleton))\n  1\nend\n",
             "x = defined?(Singleton) ? Singleton.name : nil\n",
             "return Singleton.name if defined?(::Singleton)\n",
             "if defined?(::Singleton)\n  Singleton.name\n\n  ::Singleton.name\nend\n",
@@ -15037,6 +15037,9 @@ mod tests {
     /// disjunctive condition, the other arm of an `||` or a ternary, and the
     /// next argument still use the name. `&&`/`and` joins (an unrelated `!=`
     /// arm too) and an `&&` after an `||` (which binds tighter) still cover.
+    /// A call that only ends in `defined?`, a guard passed to a call and a
+    /// modifier `if`'s own condition cover nothing, and neither does source
+    /// that does not parse.
     #[test]
     fn names_constant_counts_what_a_defined_guard_does_not_cover() {
         let used = [
@@ -15056,6 +15059,13 @@ mod tests {
             "x = a || defined?(Singleton) and Singleton.name\n",
             "x = (defined?(Singleton) && 1) || Singleton.name\n",
             "foo(defined?(Singleton) && 1, Singleton.name)\n",
+            // A call that merely ends in `defined?`, a guard passed to a
+            // call, and a modifier's own condition (it runs first).
+            "already_defined?(Singleton)\nSingleton.name\n",
+            "if accept? defined?(Singleton)\n  Singleton.name\nend\n",
+            "defined?(Singleton) && 1 if Singleton.respond_to?(:x)\n",
+            // Source that does not parse is read as using every name it spells.
+            "if defined?(Singleton)\n  Singleton.name\n",
         ];
         for src in used {
             assert!(names_constant(src, "Singleton"), "{src:?}");
@@ -15068,6 +15078,7 @@ mod tests {
             "Singleton.name if defined?(Singleton) && kind != :plain\n",
             "x = a || defined?(Singleton) && Singleton.name\n",
             "x = !a && defined?(Singleton) && Singleton.name\n",
+            "x = defined?(Singleton) &&\n  Singleton.name\n",
         ];
         for src in guarded {
             assert!(!names_constant(src, "Singleton"), "{src:?}");
