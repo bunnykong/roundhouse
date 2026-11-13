@@ -479,3 +479,22 @@ fn partial_unique_index_predicates_reach_sqlite_only_when_evaluated_alike() {
     let (_, _, ddl) = ingest(&[(path, &migration("status = 'pending'")), ("config/database.yml", POSTGRES)]).unwrap();
     assert!(ddl.contains("ON exports (email) WHERE status = 'pending'"), "{ddl}");
 }
+
+/// A `structure.sql` column with `COLLATE` is collated as a `schema.rb`
+/// column with `collation:` is: a unique index's `where:` comparing it is
+/// kept for the app's own database and left out of the SQLite index.
+#[test]
+fn structure_sql_collated_columns_keep_their_predicates_out_of_sqlite() {
+    let sql = |modifier: &str| format!(
+        "CREATE TABLE public.exports (\n    id bigint NOT NULL,\n    email text NOT NULL,\n    code text{modifier}\n);\n\n\
+         CREATE UNIQUE INDEX exports_email ON public.exports USING btree (email) WHERE (code = 'pending');\n"
+    );
+    let collated = sql(" COLLATE public.case_insensitive");
+    let (schema, _, ddl) = ingest(&[("db/structure.sql", &collated), ("config/database.yml", POSTGRES)]).unwrap();
+    let exports = &schema.tables[&roundhouse::Symbol::from("exports")];
+    assert!(exports.columns.iter().any(|c| c.name.as_str() == "code" && c.collated), "{:#?}", exports.columns);
+    assert_eq!(exports.indexes[0].predicate.as_deref(), Some("(code = 'pending')"), "kept for the app's own database");
+    assert!(ddl.contains("CREATE UNIQUE INDEX IF NOT EXISTS exports_email ON exports (email)") && !ddl.contains("code = 'pending'"), "{ddl}");
+    let (_, _, ddl) = ingest(&[("db/structure.sql", &sql("")), ("config/database.yml", POSTGRES)]).unwrap();
+    assert!(ddl.contains("ON exports (email) WHERE (code = 'pending')"), "{ddl}");
+}
