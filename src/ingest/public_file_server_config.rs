@@ -502,7 +502,17 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting, rails: Op
         .map(|code| {
             let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
             code.match_indices(path_text.as_str())
-                .filter(|(at, m)| !code[at + m.len()..].starts_with(word) && !code[..*at].ends_with(word))
+                // Nor a plain read of the setting (`if config.eager_load`, `x == config.eager_load`): it writes nothing, while
+                // any other use (a mutation, an unmodelled write) still counts against the assignments read.
+                .filter(|(at, m)| {
+                    let rest = code[at + m.len()..].trim_start();
+                    let before = code[..*at].trim_end();
+                    let read_after = ["==", "!=", ")", ",", "&&", "?", "then"].iter().any(|t| rest.starts_with(t))
+                        || (rest.starts_with("||") && !rest.starts_with("||="));
+                    let read_before = ["if", "unless", "elsif", "&&", "||", "!", "(", "==", "!="].iter().any(|t| before.ends_with(t));
+                    let read = read_after || (rest.is_empty() && read_before);
+                    !code[at + m.len()..].starts_with(word) && !code[..*at].ends_with(word) && !read
+                })
                 .count()
         })
         .sum() };
@@ -639,6 +649,17 @@ mod tests {
             out,
             "def public_file_server_headers\n  env = Rails.env.to_s\n  if env == \"production\"\n    return ({\n    \"Cache-Control\" => \"public, max-age=2592000\"\n  })\n  end\n  return {}\nend\n"
         );
+    }
+
+    #[test]
+    fn a_read_of_the_setting_is_no_unmodelled_assignment() {
+        let out = synth(&[(
+            "config/environments/production.rb",
+            "Rails.application.configure do\n  config.public_file_server.headers = { \"X\" => \"1\" }\n  puts \"set\" if config.public_file_server.headers\nend\n",
+        )])
+        .unwrap()
+        .expect("an override");
+        assert!(out.contains("return ({ \"X\" => \"1\" })"), "{out}");
     }
 
     #[test]

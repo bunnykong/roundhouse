@@ -1043,6 +1043,16 @@ fn eval_only_registers_filters(
     )
 }
 
+/// A method that may change lookup by what it is handed (`extend(Factory)`), or by running code (`class_eval`).
+fn lookup_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "include" | "extend" | "prepend" | "define_method" | "define_singleton_method" | "remove_method" | "undef_method"
+            | "alias_method" | "class_eval" | "module_eval" | "instance_eval" | "class_exec" | "module_exec" | "instance_exec"
+            | "send" | "public_send" | "__send__"
+    )
+}
+
 // Not every app method's name: one no definition of which changes lookup, sends by a built name, or calls such a method runs code that cannot reach it.
 #[allow(clippy::too_many_arguments)]
 fn lookup_changing_methods(
@@ -1067,9 +1077,13 @@ fn lookup_changing_methods(
         // attribute's compound or multiple assignment calls its writer.
         let writer = |attr: &Symbol| Symbol::from(format!("{}=", attr.as_str()).as_str());
         let implicit = match &*expr.node {
-            ExprNode::MethodRef { name: referenced, .. } => changes(referenced, &[]),
+            // Not the reference's own arguments: the bound method runs with the later call's, so a primitive whose
+            // effect its arguments decide (`method(:extend).call(Factory)`) counts whatever it is handed.
+            ExprNode::MethodRef { name: referenced, .. } => lookup_primitive(referenced.as_str()) || changes(referenced, &[]),
             ExprNode::Send { method, args, .. } if matches!(method.as_str(), "method" | "public_method" | "instance_method") => {
-                args.first().map(literal_method_name).is_none_or(|name| name.is_none_or(|name| changes(&Symbol::from(name), &[])))
+                args.first().map(literal_method_name).is_none_or(|name| {
+                    name.is_none_or(|name| lookup_primitive(name) || changes(&Symbol::from(name), &[]))
+                })
             }
             ExprNode::OpAssign { target: crate::expr::LValue::Attr { name: attr, .. }, value, .. } => {
                 changes(attr, &[]) || changes(&writer(attr), std::slice::from_ref(value))
@@ -1091,12 +1105,7 @@ fn lookup_changing_methods(
             // Not the `super` call's own arguments alone: a zsuper passes the method's, so a primitive's override (`def self.include(*m) = super`) changes lookup whatever it is handed.
             ExprNode::Super { .. }
                 if changes(name, &[])
-                    || matches!(
-                        name.as_str(),
-                        "include" | "extend" | "prepend" | "define_method" | "define_singleton_method" | "remove_method"
-                            | "undef_method" | "alias_method" | "class_eval" | "module_eval" | "instance_eval"
-                            | "class_exec" | "module_exec" | "instance_exec" | "send" | "public_send" | "__send__"
-                    )
+                    || lookup_primitive(name.as_str())
                     || is_method_lookup_hook(name.as_str())
                     || defines_constructor_lookup_callback(name.as_str()) =>
             {
