@@ -572,6 +572,43 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // genuinely a statement (the prior TODO-append swallowed the
         // side effect and broke stack-walking templates).
         ExprNode::Send { recv: Some(_), block: None, .. } => vec![stmt.clone()],
+        // A call on a value with a block, for its effect (a component's slot: `<% card.with_header { "Title" } %>`,
+        // or `<% card.with_item do %> markup <% end %>`). Kept as written; a template body is captured into a string
+        // the block returns, as an output helper's is, not left as buffer writes the block does not own.
+        ExprNode::Send { recv: Some(recv), method, args, block: Some(block), parenthesized } => {
+            let ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } = &*block.node else {
+                return vec![stmt.clone()];
+            };
+            if !block_body_is_template(body) {
+                return vec![stmt.clone()];
+            }
+            let cap = next_capture_name(&ctx.accumulator);
+            let cap_ctx = ViewCtx { accumulator: cap.clone(), ..ctx.clone() };
+            let mut cap_stmts = vec![assign_accumulator_string_new(&cap)];
+            cap_stmts.extend(walk_body(body, &cap_ctx));
+            cap_stmts.push(accumulator_result_ref(&cap));
+            let new_block = Expr::new(
+                block.span,
+                ExprNode::Lambda {
+                    rest_param: rest_param.clone(),
+                    extra_params: extra_params.clone(),
+                    params: params.clone(),
+                    block_param: block_param.clone(),
+                    body: seq(cap_stmts),
+                    block_style: *block_style,
+                },
+            );
+            vec![Expr::new(
+                stmt.span,
+                ExprNode::Send {
+                    recv: Some(rewrite_helpers_in_expr(recv, ctx)),
+                    method: method.clone(),
+                    args: args.iter().map(|a| rewrite_helpers_in_expr(a, ctx)).collect(),
+                    block: Some(new_block),
+                    parenthesized: *parenthesized,
+                },
+            )]
+        }
         ExprNode::Raise { .. } => vec![stmt.clone()],
         // A bare literal — most often the synthesized `nil` arm `<% unless
         // %>` lowers to — renders nothing and does nothing: nothing is

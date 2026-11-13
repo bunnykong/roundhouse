@@ -8938,6 +8938,9 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionDispatch::Http::Parameters::ParseError",
     "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
+    // `runtime/ruby/action_view/base.rb`: a component render's buffer and lookup context.
+    "ActionView::OutputBuffer",
+    "ActionView::LookupContext",
     // `runtime/ruby/active_record/arel.rb` — node constructors the ruby
     // family and spinel load with that file. A strict target has no Arel
     // text nodes to construct.

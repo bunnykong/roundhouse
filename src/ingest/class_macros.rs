@@ -419,7 +419,8 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
                 // And the class's own that runs a load-time call the expansion cannot (`require`): Ruby runs it, as the replay does.
                 Err(why) if from_module.contains(method)
                     || own_plain.contains(method)
-                    || (own.contains(&(method.clone(), MethodReceiver::Class)) && why.as_str() == "it calls `require`") =>
+                    || (own.contains(&(method.clone(), MethodReceiver::Class)) && why.as_str() == "it calls `require`")
+                    || super::gem_hooks::macro_written_by_hook(&lineage, method.as_str()) =>
                 {
                     consumed.remove(&index);
                     failed.insert(method.clone());
@@ -2779,3 +2780,4 @@ fn defines_methods(e: &Expr) -> bool {
     e.node.for_each_child(&mut |c| found = found || defines_methods(c));
     found
 }
+

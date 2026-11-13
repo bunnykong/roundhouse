@@ -293,6 +293,16 @@ pub fn drain() -> Vec<SourceFile> {
     })
 }
 
+/// Refill a drained registry with the app's files, so a late registration takes the next id rather than one an
+/// earlier file holds; [`drain`] then answers them all, the late ones after `files`.
+pub(super) fn resume(files: &[SourceFile]) {
+    SOURCES.with(|s| {
+        let mut reg = s.borrow_mut();
+        reg.files = files.to_vec();
+        reg.by_path = files.iter().enumerate().map(|(i, f)| (f.path.clone(), FileId(i as u32 + 1))).collect();
+    })
+}
+
 /// Clone the registered files without clearing the registry — unlike
 /// [`drain`], `FileId`s already handed out (and any registered after
 /// this call) stay valid, because the table itself is untouched.

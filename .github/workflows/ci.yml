@@ -603,6 +603,9 @@ jobs:
           gem install --no-document --ignore-dependencies responders -v 3.1.1
           # doorkeeper, compiled from source (tests/emit_and_run/doorkeeper.rs).
           gem install --no-document --ignore-dependencies doorkeeper -v 5.8.2
+          # view_component, compiled from source (tests/emit_and_run/view_component.rs).
+          gem install --no-document --ignore-dependencies view_component -v 3.23.2
+          gem install --no-document --ignore-dependencies method_source -v 1.1.0
           # simple_form, compiled from source (tests/emit_and_run/simple_form.rs).
           gem install --no-document --ignore-dependencies simple_form -v 5.4.1
           # OmniAuth for devise's :omniauthable, installed as the Ruby family loads it (tests/emit_and_run/devise.rs).

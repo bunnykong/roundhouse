@@ -154,6 +154,27 @@ end
 # constantization, transliteration, and parameterization remain unexposed.
 module ActiveSupport
   module Inflector
+    # Rails' `Inflector.pluralize(word)` and `singularize(word)` under the default rules (view_component names a
+    # slot's methods with them); the String forms' own ports answer.
+    def self.pluralize(word)
+      ::Inflector.pluralize_word(word.to_s, 2)
+    end
+
+    # Not the regular-suffix `ActiveSupport.singularize` alone: Rails' uncountables and irregulars come first.
+    def self.singularize(word)
+      s = word.to_s
+      d = s.downcase
+      return s if ::Inflector.pluralize_uncountable?(d) || d.end_with?("news")
+      return ::Inflector.pluralize_cased(s, 6, "erson") if d.end_with?("people") || d.end_with?("person")
+      return ::Inflector.pluralize_cased(s, 8, "hild") if d.end_with?("children")
+      return ::Inflector.pluralize_cased(s, 5, "hild") if d.end_with?("child")
+      return ::Inflector.pluralize_cased(s, 3, "an") if d.end_with?("men") || d.end_with?("man")
+      return ::Inflector.pluralize_cased(s, 5, "ex") if d.end_with?("sexes")
+      return ::Inflector.pluralize_cased(s, 5, "ove") if d.end_with?("moves")
+      return ::Inflector.pluralize_cased(s, 7, "ombie") if d.end_with?("zombies")
+      ActiveSupport.singularize(s)
+    end
+
     # Rails' camelize with the default (upper camel case) and lower-camel
     # option. A slash separates namespaces; an underscore starts a new word.
     def self.camelize(text, uppercase_first_letter = true)
