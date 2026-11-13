@@ -50,6 +50,11 @@ fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::Bui
     }
     let mut analyzer = crate::analyze::Analyzer::new(app);
     analyzer.analyze(app);
+    // Before the shake: a render that becomes `render_in` is what reaches the object's rendering code (a gem's).
+    if crate::lower::renderable::apply(app) {
+        analyzer = crate::analyze::Analyzer::new(app);
+        analyzer.analyze(app);
+    }
     // Typed again without the gem code the program does not reach: its calls are no evidence for what the reached code is
     // passed, as Warden's `update(label, &block)`, which nothing calls, would type `add`'s strategy `untyped`.
     if crate::source_gem_shake::shakes_source_gems(app, target)
