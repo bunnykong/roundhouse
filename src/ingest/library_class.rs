@@ -6519,6 +6519,36 @@ const CONCERN_MODEL_MACROS: &[&str] = &[
 
 /// Unclaimed direct `included do` statements run in each includer's
 /// class body. Visibility and definition statements keep their refusal.
+/// `self.table_name = …` and the other Active Record class settings, alone or under a modifier `if` (Doorkeeper's
+/// `self.strict_loading_by_default = false if respond_to?(:strict_loading_by_default)`): a carried statement that
+/// writes a setting and defines no method, so it cannot change an accessor the block carries beside it.
+fn writes_a_framework_class_setting(item: &crate::dialect::ModelBodyItem) -> bool {
+    use crate::expr::{ExprNode, Literal};
+    const SETTINGS: &[&str] = &[
+        "table_name=", "primary_key=", "inheritance_column=", "abstract_class=", "strict_loading_by_default=",
+        "ignored_columns=", "record_timestamps=", "store_full_sti_class=", "sequence_name=", "table_name_prefix=",
+        "table_name_suffix=", "implicit_order_column=", "lock_optimistically=", "locking_column=",
+    ];
+    fn setting(e: &crate::expr::Expr) -> bool {
+        match &*e.node {
+            ExprNode::Send { recv: Some(r), method, block: None, .. } => matches!(&*r.node, ExprNode::SelfRef) && SETTINGS.contains(&method.as_str()),
+            ExprNode::If { cond, then_branch, else_branch } => {
+                let empty = match &*else_branch.node {
+                    ExprNode::Lit { value: Literal::Nil } => true,
+                    ExprNode::Seq { exprs } => exprs.is_empty(),
+                    _ => false,
+                };
+                empty
+                    && setting(then_branch)
+                    && matches!(&*cond.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "respond_to?")
+            }
+            _ => false,
+        }
+    }
+    let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+    setting(expr)
+}
+
 fn carries_to_includer(item: &crate::dialect::ModelBodyItem) -> bool {
     use crate::expr::ExprNode;
     let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
@@ -7010,7 +7040,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                                     } else if is_concern && is_direct && carries_to_includer(&item) {
                                         // General class-body replay is not available
                                         // here. Keep accessor admission conservative.
-                                        unclaimed = true;
+                                        unclaimed |= !writes_a_framework_class_setting(&item);
                                         items.push(item);
                                     } else {
                                         unclaimed = true;
