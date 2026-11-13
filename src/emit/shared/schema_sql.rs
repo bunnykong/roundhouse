@@ -528,9 +528,10 @@ pub(crate) fn sqlite_reads_predicate_alike(predicate: &str, table: &Table, sourc
 /// ordering comparison only between integers. Strings are only ever
 /// compared for equality, which compares bytes in SQLite and, under a
 /// deterministic collation, in PostgreSQL: no collation order and no case
-/// folding (`lower`) enters. A column ingest reads as a string that
-/// PostgreSQL stores otherwise (`citext`, `inet`, an enum) has no identity
-/// cast to `text`, so it is not carried. The result must still pass the
+/// folding (`lower`) enters. A column of any other type (a datetime,
+/// `jsonb`, a boolean, an array, or a string PostgreSQL stores otherwise,
+/// such as `citext`, `inet` or an enum, which has no identity cast to
+/// `text`) is only tested with `IS [NOT] NULL`. The result must still pass the
 /// shared reader and [`sqlite_evaluates_alike`], as any condition of an app
 /// whose database may not be SQLite does (row values, `IN` operands, bare
 /// literals, integer range, collated and bounded columns). `None` for
@@ -541,6 +542,9 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
     enum Kind {
         Text,
         Integer,
+        // Any other column: only `IS [NOT] NULL`, which both databases
+        // answer alike whatever the column stores.
+        NullTested,
     }
     const KEYWORDS: &[&str] = &["AND", "OR", "NOT", "IS", "NULL", "IN", "TRUE", "FALSE", "ANY", "ALL", "SOME", "ARRAY", "BETWEEN", "LIKE"];
     let keyword = |token: Option<&Token>| matches!(token, Some(Token::Name(n, false)) if KEYWORDS.iter().any(|w| n.eq_ignore_ascii_case(w)));
@@ -553,11 +557,11 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
                 .columns
                 .iter()
                 .find(|c| if *quoted { c.name.as_str() == name } else { c.name.as_str().eq_ignore_ascii_case(name) })
-                .filter(|c| !c.array)
-                .and_then(|c| match c.col_type {
-                    ColumnType::String { .. } | ColumnType::Text if c.generated_text_compatible != Some(false) => Some(Kind::Text),
-                    ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => Some(Kind::Integer),
-                    _ => None,
+                .map(|c| match c.col_type {
+                    _ if c.array => Kind::NullTested,
+                    ColumnType::String { .. } | ColumnType::Text if c.generated_text_compatible != Some(false) => Kind::Text,
+                    ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. } => Kind::Integer,
+                    _ => Kind::NullTested,
                 }),
             Token::Num(_) | Token::Op(_) => None,
         }
@@ -674,12 +678,14 @@ pub(crate) fn carry_postgres_check(sql: &str, table: &Table) -> Option<String> {
         let ok = match token {
             // Two operands, or an operand and `(`, are never adjacent.
             _ if (operand(Some(token)) || *token == Token::Op(")")) && (operand(after) || after == Some(&Token::Op("("))) => false,
+            // A column of another type stands only before `IS [NOT] NULL`.
+            _ if kind_of(token) == Some(Kind::NullTested) && !word(after, "is") => false,
             Token::Str(_) | Token::Num(_) | Token::Name(_, true) => operand(Some(token)),
             Token::Name(n, false) if n.eq_ignore_ascii_case("IS") => {
                 word(after, "null") || word(after, "not") && word(carried.get(k + 2), "null")
             }
             Token::Name(n, false) => ["AND", "OR", "NOT", "NULL", "IN"].iter().any(|w| n.eq_ignore_ascii_case(w)) || operand(Some(token)),
-            Token::Op("=" | "<>" | "!=") => matches!(sides, (Some(a), Some(b)) if a == b),
+            Token::Op("=" | "<>" | "!=") => matches!(sides, (Some(a), Some(b)) if a == b && a != Kind::NullTested),
             Token::Op("<" | ">" | "<=" | ">=") => sides == (Some(Kind::Integer), Some(Kind::Integer)),
             Token::Op("(" | ")" | ",") => true,
             Token::Op(_) => false,
@@ -1487,6 +1493,9 @@ end
     t.inet "address"
     t.decimal "price"
     t.string "tags", array: true
+    t.datetime "completed_at"
+    t.jsonb "articles"
+    t.boolean "active"
   end
 end
 "#,
@@ -1509,6 +1518,10 @@ end
             ("amount = ANY (ARRAY[1, 2, 3])", "amount IN (1, 2, 3)"),
             ("((status)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[]))", "(status IN ('a', 'b'))"),
             ("\"Mixed Case\"::text = 'it''s'::text AND NOT label IS NOT NULL", "\"Mixed Case\" = 'it''s' AND NOT label IS NOT NULL"),
+            // Any column may be tested for NULL: both databases answer alike.
+            ("status::text = 'done'::text OR completed_at IS NULL", "status = 'done' OR completed_at IS NULL"),
+            ("status::text <> 'draft'::text OR articles IS NOT NULL", "status <> 'draft' OR articles IS NOT NULL"),
+            ("status::text = 'a'::text AND (handle IS NULL OR address IS NOT NULL OR tags IS NULL OR price IS NULL OR active IS NULL)", "status = 'a' AND (handle IS NULL OR address IS NOT NULL OR tags IS NULL OR price IS NULL OR active IS NULL)"),
         ] {
             assert_eq!(carry_postgres_check(dumped, table).as_deref(), Some(carried), "{dumped}");
             assert!(!sqlite_reads_alike(dumped, table) && sqlite_reads_alike(carried, table), "{dumped}");
@@ -1542,6 +1555,14 @@ end
             "status::text = 'a'::text || 'b'::text",
             "status::text = $$a$$::text",
             "status::text = 'a'::text 'b'",
+            // A column of another type is only tested for NULL.
+            "status::text = 'a'::text OR completed_at = completed_at",
+            "status::text = 'a'::text OR completed_at > '2026-01-01 00:00:00'::timestamp without time zone",
+            "status::text = 'a'::text OR active IS TRUE",
+            "status::text = 'a'::text OR active",
+            "status::text = 'a'::text OR price IN (1)",
+            "status::text = 'a'::text OR articles = '[]'::jsonb",
+            "status::text = 'a'::text OR handle <> handle",
         ] {
             assert_eq!(carry_postgres_check(kept_out, table), None, "{kept_out}");
         }
