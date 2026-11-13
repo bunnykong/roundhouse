@@ -8997,6 +8997,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     // do not load the files.
     "ActiveRecord::ConnectionFailed",
     "ActiveRecord::ConnectionTimeoutError",
+    "ActiveRecord::NoDatabaseError",
     "ActiveRecord::Encryption::Errors::Decryption",
     "ActiveRecord::Encryption::Errors::Configuration",
     "ActiveRecord::StaleObjectError",

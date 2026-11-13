@@ -1113,6 +1113,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActiveRecord::ConnectionNotEstablished", None),
         ("ActiveRecord::ConnectionFailed", None),
         ("ActiveRecord::ConnectionTimeoutError", None),
+        ("ActiveRecord::NoDatabaseError", None),
         ("ActiveRecord::Encryption::Errors::Decryption", None),
         ("ActiveRecord::Encryption::Errors::Configuration", None),
         ("ActiveJob::EnqueueError", None),

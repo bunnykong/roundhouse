@@ -449,3 +449,55 @@ print Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(
         format!("{}|{}", boot::STATUSES_AFTER_BOOT, boot::BOOT_LOG_AFTER_BOOT)
     );
 }
+
+/// A callback that rescues what Rails raises when the database is missing,
+/// around a boot-time query (`rescue ActiveRecord::NoDatabaseError,
+/// ActiveRecord::ConnectionNotEstablished`), checks clean and runs. In Rails
+/// 8.1.4 NoDatabaseError is a StatementInvalid whose message defaults to
+/// "Database not found" (`no_database_error_matches_rails`).
+const NO_DATABASE_CHECKS: &str = r#"raise "not a StatementInvalid" unless ActiveRecord::NoDatabaseError < ActiveRecord::StatementInvalid
+error = begin
+  raise ActiveRecord::NoDatabaseError
+rescue ActiveRecord::StatementInvalid => caught
+  caught
+end
+raise "message: #{error.message.inspect}" unless error.message == "Database not found"
+"#;
+
+#[test]
+fn a_callback_that_rescues_a_missing_database_runs_on_ruby() {
+    let run = base()
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def self.prepare!\n    BootLog.record(\"prepared #{count}\")\n  end\nend\n")
+        .write(
+            "config/initializers/prepare.rb",
+            "Rails.application.config.after_initialize do\n  Widget.prepare!\nrescue ActiveRecord::NoDatabaseError, ActiveRecord::ConnectionNotEstablished\nend\n",
+        )
+        .run_ruby(&format!(
+            "{SERVE}raise \"boot log: #{{BootLog.entries.inspect}}\" unless BootLog.entries == [\"prepared 0\"]\n{NO_DATABASE_CHECKS}puts \"the rescuing callback ran\"\n"
+        ));
+    run.assert_passes();
+    assert!(run.stdout.contains("the rescuing callback ran"));
+}
+
+#[test]
+fn no_database_error_matches_rails() {
+    let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/rails_oracle.rb");
+    let script = format!(
+        r#"require {helper:?}
+unless RailsOracle.available?("activerecord")
+  warn "skipping NoDatabaseError oracle: #{{RailsOracle.label}} needs activerecord"
+  exit 77
+end
+RailsOracle.activate("activerecord")
+require "active_record"
+{NO_DATABASE_CHECKS}print "Rails agrees"
+"#
+    );
+    let output = std::process::Command::new("ruby").args(["-e", &script]).output().expect("Rails oracle");
+    if output.status.code() == Some(77) {
+        prerequisite::missing(String::from_utf8_lossy(&output.stderr).trim());
+        return;
+    }
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Rails agrees");
+}

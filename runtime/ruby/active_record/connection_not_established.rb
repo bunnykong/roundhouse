@@ -22,4 +22,14 @@ module ActiveRecord
 
   class ConnectionTimeoutError < ConnectionNotEstablished
   end
+
+  # Rails raises it when the configured database does not exist. An
+  # after_initialize callback rescues it around a boot-time query, beside
+  # ConnectionNotEstablished; the emitted Db has opened its database by
+  # then, so nothing here raises it either. A StatementInvalid, as in Rails.
+  class NoDatabaseError < StatementInvalid
+    def initialize(message = "Database not found")
+      super(message)
+    end
+  end
 end
