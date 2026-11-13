@@ -19,9 +19,12 @@
 //!
 //! HOW. Each body is ingested from its own source like any method body
 //! (real spans) and becomes a class method of the generated
-//! [`AFTER_INITIALIZE_RUNNER`] module; its `run` calls them in order and
-//! the emitted `boot.rb` calls `run` once everything is loaded, on the
-//! Ruby family and on Spinel alike (`project::apply_app_initializers`).
+//! [`AFTER_INITIALIZE_RUNNER`] module; its `run` calls them in order. Rails
+//! runs them last in `initialize!`, once the database and the job queue
+//! adapter are configured and before the server starts, so each emitted
+//! entry calls `run` after it opens the database and sets up the job drain,
+//! and before it serves or works off jobs, on the Ruby family and on Spinel
+//! alike (`project::apply_app_initializers`).
 //! `diagnose` walks these bodies with the policy of a model method, not
 //! the lenient library one, so a call with no runtime behind it is an
 //! error, as it would be in the app's own code. A `next` at the body's
@@ -45,8 +48,8 @@
 //!   symlink, is an error: the emitted program loads no files at run time.
 //!
 //! Applying a reopen statically means code that runs during boot, before
-//! the callbacks fire, already sees the patched method. Nothing emitted
-//! runs app code at that point.
+//! the callbacks fire, already sees the patched method: an initializer's
+//! own statements (`ingest::boot_program`) do.
 
 use crate::det::HashSet;
 use std::path::{Path, PathBuf};

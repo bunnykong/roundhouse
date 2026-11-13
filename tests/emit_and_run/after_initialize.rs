@@ -6,7 +6,15 @@
 //! `entries=["application", "patched", "configure", "required"]`,
 //! `greet="hello ann!"`, `original_greet="hello ann"`, `wave="wave"`.
 
+#[path = "../support/prerequisite.rs"]
+mod prerequisite;
+
+use super::after_initialize_boot_contract as boot;
 use super::emit_and_run;
+
+/// `config.ru` as Puma (or Falcon) loads it before serving: it opens the
+/// database and sets up the job drain, then runs the app's callbacks.
+const SERVE: &str = "require \"rack\"\nRack::Builder.new.instance_eval(File.read(\"config.ru\"), \"config.ru\")\n";
 
 const APPLICATION: &str = r#"require "rails"
 require "active_record/railtie"
@@ -105,13 +113,19 @@ puts "after_initialize callbacks ran"
 
 #[test]
 fn after_initialize_callbacks_run_at_boot_on_ruby() {
-    app().run_ruby(ASSERTIONS).assert_passes();
+    app().run_ruby(&format!("{SERVE}{ASSERTIONS}")).assert_passes();
 }
+
+/// A contract loads the libraries (`require_relative "boot"`) and starts no
+/// server, so it calls the runner as the server's `main.rb` does once the
+/// database and the job drain are set up;
+/// `tests/spinel_toolchain/after_initialize_boot.rs` boots the server itself.
+const SPINEL_RUN: &str = "AppInitializers.run\n";
 
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn after_initialize_callbacks_run_at_boot_on_spinel() {
-    app().run_spinel(ASSERTIONS).assert_passes();
+    app().run_spinel(&format!("{SPINEL_RUN}{ASSERTIONS}")).assert_passes();
 }
 
 /// The body is analyzed like the app's own code: a call no runtime
@@ -189,7 +203,7 @@ begin
 rescue Errno::EEXIST
 end
 "#;
-    let run = mkpath_app().run_ruby(&format!("{MKPATH_ASSERTIONS}{through_a_file}"));
+    let run = mkpath_app().run_ruby(&format!("{SERVE}{MKPATH_ASSERTIONS}{through_a_file}"));
     run.assert_passes();
     assert!(run.stdout.contains("Rails.root mkpath ran"));
 }
@@ -197,7 +211,7 @@ end
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn a_rails_root_mkpath_callback_runs_on_spinel() {
-    mkpath_app().run_spinel(MKPATH_ASSERTIONS).assert_passes();
+    mkpath_app().run_spinel(&format!("{SPINEL_RUN}{MKPATH_ASSERTIONS}")).assert_passes();
 }
 
 /// A target that does not boot through `boot.rb` cannot run a callback:
@@ -272,13 +286,13 @@ BootLog.record("required")
 
 #[test]
 fn a_file_several_callbacks_require_is_read_once() {
-    let run = require_once_app().run_ruby(r#"
+    let run = require_once_app().run_ruby(&format!("{SERVE}{}", r#"
 raise "entries: #{BootLog.entries.inspect}" unless BootLog.entries == ["required"]
 greeter = Greeter.new
 raise "patched greet: #{greeter.greet("ann").inspect}" unless greeter.greet("ann") == "hello ann!"
 raise "aliased original: #{greeter.original_greet("ann").inspect}" unless greeter.original_greet("ann") == "hello ann"
 puts "required once"
-"#);
+"#));
     run.assert_passes();
     assert!(run.stdout.contains("required once"));
 }
@@ -345,4 +359,93 @@ fn a_require_that_leaves_the_app_is_an_error() {
         assert!(error.contains("names no app file the compiled program carries"), "{name}: {error}");
     }
     std::fs::remove_dir_all(root).expect("remove temp app");
+}
+
+
+/// A callback that reads a table and enqueues a job runs once the database
+/// and the job drain are set up: the shipment queued before boot is found,
+/// and its job sends it, as Rails 8.1.4 answers (`the_boot_order_matches_rails`).
+#[test]
+fn a_boot_callback_reads_a_table_and_enqueues_a_job_on_ruby() {
+    let script = format!(
+        r#"Shipment.create!(status: "queued")
+raise "a callback ran before serving" unless BootLog.entries.empty?
+{SERVE}deadline = Time.now + 10
+sleep 0.02 while Shipment.where(status: "queued").count > 0 && Time.now < deadline
+answer = Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
+raise "after boot: #{{answer.inspect}}" unless answer == {expected:?}
+puts "the boot callback resumed the queued shipment"
+"#,
+        expected = format!("{}|{}", boot::STATUSES_AFTER_BOOT, boot::BOOT_LOG_AFTER_BOOT),
+    );
+    let run = boot::app().run_ruby_env(&script, &[("BLOG_DB", "boot.sqlite3")]);
+    run.assert_passes();
+    assert!(run.stdout.contains("the boot callback resumed the queued shipment"));
+}
+
+/// Rails 8.1.4 boots the same files, with the shipment queued in its
+/// database and the `:async` queue adapter: the callback finds it and the
+/// job sends it.
+#[test]
+fn the_boot_order_matches_rails() {
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse_after_initialize_oracle_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for (path, content) in boot::FILES {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).expect("create app directory");
+        std::fs::write(file, content).expect("write app file");
+    }
+    let database = root.join("boot.sqlite3");
+    std::fs::write(
+        root.join("config/database.yml"),
+        format!("development:\n  adapter: sqlite3\n  database: {}\n", database.display()),
+    )
+    .expect("write database.yml");
+    let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/rails_oracle.rb");
+    let script = format!(
+        r#"require {helper:?}
+unless RailsOracle.available?("railties", "activerecord", "activejob", sqlite3: ">= 2.1")
+  warn "skipping boot-order oracle: #{{RailsOracle.label}} needs railties, activerecord, activejob and sqlite3"
+  exit 77
+end
+RailsOracle.activate("railties", "activerecord", "activejob", sqlite3: ">= 2.1")
+require "rails"
+require "active_record/railtie"
+require "active_job/railtie"
+require "sqlite3"
+SQLite3::Database.new({database:?}) do |db|
+  db.execute({table:?})
+  db.execute("INSERT INTO shipments (status) VALUES ('queued')")
+end
+class BootOrderOracle < Rails::Application
+  config.root = {root:?}
+  config.load_defaults 8.1
+  config.eager_load = false
+  config.logger = Logger.new(File::NULL)
+  config.secret_key_base = "boot-order-oracle"
+  config.active_job.queue_adapter = :async
+end
+BootOrderOracle.initialize!
+deadline = Time.now + 10
+sleep 0.02 while Shipment.where(status: "queued").exists? && Time.now < deadline
+print Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
+"#,
+        database = database.display().to_string(),
+        table = boot::TABLE_SQL,
+        root = root.display().to_string(),
+    );
+    let output = std::process::Command::new("ruby").args(["-e", &script]).output().expect("Rails oracle");
+    let _ = std::fs::remove_dir_all(&root);
+    if output.status.code() == Some(77) {
+        prerequisite::missing(String::from_utf8_lossy(&output.stderr).trim());
+        return;
+    }
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}|{}", boot::STATUSES_AFTER_BOOT, boot::BOOT_LOG_AFTER_BOOT)
+    );
 }

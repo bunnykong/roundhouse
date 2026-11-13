@@ -190,6 +190,10 @@ mod route_default_format;
 mod route_request_defaults_contract;
 #[path = "spinel_toolchain/route_request_defaults.rs"]
 mod route_request_defaults;
+#[path = "support/after_initialize_boot.rs"]
+mod after_initialize_boot_contract;
+#[path = "spinel_toolchain/after_initialize_boot.rs"]
+mod after_initialize_boot;
 #[path = "support/json_params.rs"]
 mod json_params_contract;
 #[path = "spinel_toolchain/json_params.rs"]

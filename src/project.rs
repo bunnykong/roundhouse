@@ -1739,11 +1739,11 @@ fn report_time_tag_calls(app: &App, target: BuildTarget) {
     }
 }
 
-/// A target that does not boot through `boot.rb` never runs the callbacks:
-/// each one is an unsupported construct there, not a silent drop.
+/// A target whose entries do not run the callbacks never runs them: each
+/// one is an unsupported construct there, not a silent drop.
 fn report_unrun_after_initialize(app: &App, target: BuildTarget) {
-    // Only the Ruby family and Spinel boot through `boot.rb`, where
-    // `apply_app_initializers` calls the runner; Blog and Futamura walk the source.
+    // Only the Ruby family's and Spinel's entries call the runner
+    // (`apply_app_initializers`); Blog and Futamura walk the source.
     if !app.runs_after_initialize
         || matches!(target, BuildTarget::Blog | BuildTarget::Futamura | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel)
     {
@@ -5663,8 +5663,8 @@ fn ruby_family_runtime_files(
         apply_digest_gem(&mut files);
     }
     drop_solid_queue_standin(app, &mut files);
-    // Last, as in `spinel_files`: the overlay boot.rb replaced that one.
-    apply_app_initializers(&mut files, app);
+    // The overlay's entries (main.rb, config.ru, sidekiq.rb) replaced the spinel tree's.
+    apply_app_initializers(&mut files, app, RequireTarget::RubyFamily)?;
     Ok(files)
 }
 
@@ -6416,20 +6416,71 @@ end\n";
 }
 
 /// Run the app's `after_initialize` callbacks (the generated
-/// [`crate::app::AFTER_INITIALIZE_RUNNER`], `ingest::after_initialize`) at
-/// the end of `boot.rb`, where Rails fires them: after every initializer and
-/// once everything the bodies can name is loaded. One helper for the Spinel
-/// tree and the Ruby family, so both lanes run the same callbacks.
-fn apply_app_initializers(files: &mut [(String, String)], app: &App) {
+/// [`crate::app::AFTER_INITIALIZE_RUNNER`], `ingest::after_initialize`)
+/// where Rails runs them: last in `initialize!`, once the database is
+/// configured and the job queue adapter is set, before the server or a
+/// worker starts (Rails 8.1.4's `finisher_hook`). Here `boot.rb` loads the
+/// app and its initializers, and each entry then opens the database and
+/// sets up the job drain, so the call goes into each entry after that, under
+/// a connection lease as a request or a drain takes one: the Spinel server
+/// before its job loop and listener, its worker role and `sidekiq.rb` before
+/// the worker loop, `config.ru` before the stack Puma and Falcon serve, and
+/// the one-request script path once its database is open. A program that
+/// requires `boot.rb` alone runs none, as requiring Rails' `config/boot.rb`
+/// runs none. One helper for the Spinel tree and the Ruby family, so both
+/// run the same callbacks.
+fn apply_app_initializers(files: &mut [(String, String)], app: &App, target: RequireTarget) -> Result<(), String> {
     if !app.runs_after_initialize {
-        return;
+        return Ok(());
     }
-    let call = format!("{}.run", crate::app::AFTER_INITIALIZE_RUNNER);
-    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
-    if boot.lines().any(|line| line.trim() == call) {
-        return;
+    // (file, the line the step after the setup starts with); the call goes
+    // ahead of that line and the comment above it, at its indentation.
+    let sites: &[(&str, &str)] = match target {
+        RequireTarget::Spinel => &[("main.rb", "  SidekiqWorker.cli(ARGV)"), ("main.rb", "Thread.new do")],
+        RequireTarget::RubyFamily => &[
+            ("main.rb", "  env = {"),
+            ("config.ru", "use ThrusterCache::Middleware"),
+            ("sidekiq.rb", "SidekiqWorker.cli(ARGV)"),
+        ],
+    };
+    let call = format!("Db.with_connection {{ {}.run }}", crate::app::AFTER_INITIALIZE_RUNNER);
+    for (path, content) in files.iter_mut() {
+        let anchors: Vec<&str> = sites.iter().filter(|(file, _)| file == path).map(|(_, line)| *line).collect();
+        if anchors.is_empty() || content.lines().any(|line| line.trim() == call) {
+            continue;
+        }
+        let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+        for anchor in anchors {
+            let found: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| line.as_str() == anchor).map(|(i, _)| i).collect();
+            let [at] = found.as_slice() else {
+                return Err(format!(
+                    "apply_app_initializers: {path} has {} lines `{anchor}`, where the after_initialize callbacks run before",
+                    found.len()
+                ));
+            };
+            let indent = &anchor[..anchor.len() - anchor.trim_start().len()];
+            let mut start = *at;
+            while start > 0 && lines[start - 1].trim_start().starts_with('#') && lines[start - 1].starts_with(indent) {
+                start -= 1;
+            }
+            let mut block: Vec<String> = [
+                "# The app's after_initialize callbacks (ingest::after_initialize), as",
+                "# Rails runs them last in initialize!: after the database and the job",
+                "# drain are set up, before anything serves or works off a job.",
+                call.as_str(),
+            ]
+            .iter()
+            .map(|line| format!("{indent}{line}"))
+            .collect();
+            // Apart from the comment that opens the next step.
+            if start < *at {
+                block.push(String::new());
+            }
+            lines.splice(start..start, block);
+        }
+        *content = lines.join("\n") + "\n";
     }
-    boot.push_str(&format!("\n# The app's after_initialize callbacks (ingest::after_initialize).\n{call}\n"));
+    Ok(())
 }
 
 /// The JRuby tree's Gemfile: the committed scaffold Gemfile is MRI-only
@@ -11195,8 +11246,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // Not a program's anchor: this tree writes no gem file programs.
     rewrite_carried_requires(&mut files, app, |_| None);
     drop_solid_queue_standin(app, &mut files);
-    // Last: the callbacks run once everything boot.rb loads is loaded.
-    apply_app_initializers(&mut files, app);
+    apply_app_initializers(&mut files, app, RequireTarget::Spinel)?;
     Ok((files, test_stems))
 }
 
@@ -14810,6 +14860,62 @@ mod tests {
         let mut files = vec![("main.rb".into(), "Main.configure_default_adapter!\n".into())];
         let error = apply_puma_boot_hooks(&mut files, &app, RequireTarget::Spinel).unwrap_err();
         assert!(error.contains("main.rb lost its configure_default_adapter! anchor"), "{error}");
+    }
+
+    /// Each scaffold entry runs the after_initialize callbacks once, after
+    /// the line that sets up its job drain and before the line that starts
+    /// its server or worker; a second pass adds nothing.
+    #[test]
+    fn app_initializers_run_between_the_drain_and_the_server_in_each_entry() {
+        let mut app = App::new();
+        app.runs_after_initialize = true;
+        let call = "Db.with_connection { AppInitializers.run }";
+        let read = |path: &str| crate::runtime_files::read_to_string(path).unwrap();
+        let mut spinel = vec![("main.rb".to_string(), read("runtime/spinel/scaffold/main.rb"))];
+        apply_app_initializers(&mut spinel, &app, RequireTarget::Spinel).unwrap();
+        apply_app_initializers(&mut spinel, &app, RequireTarget::Spinel).unwrap();
+        let main = &spinel[0].1;
+        assert_eq!(main.matches(call).count(), 2, "{main}");
+        let at = |text: &str, needle: &str| text.find(needle).unwrap_or_else(|| panic!("no `{needle}`"));
+        let worker_role = &main[at(main, "if ARGV.length > 0 && ARGV[0] == \"sidekiq\"")..];
+        assert!(at(worker_role, "  ActiveJob.register_drain") < at(worker_role, &format!("  {call}")));
+        assert!(at(worker_role, &format!("  {call}")) < at(worker_role, "  SidekiqWorker.cli(ARGV)"));
+        let server = &main[at(main, "\nMain.configure_default_adapter!\n")..];
+        assert!(at(server, "\nActiveJob.register_drain\n") < at(server, &format!("\n{call}\n")));
+        assert!(at(server, &format!("\n{call}\n")) < at(server, "\nThread.new do\n  Main.job_loop\n"));
+
+        let overlay = "runtime/spinel/scaffold/ruby_overlay";
+        let mut ruby: Vec<(String, String)> = ["main.rb", "config.ru", "sidekiq.rb"]
+            .iter()
+            .map(|file| (file.to_string(), read(&format!("{overlay}/{file}"))))
+            .collect();
+        apply_app_initializers(&mut ruby, &app, RequireTarget::RubyFamily).unwrap();
+        apply_app_initializers(&mut ruby, &app, RequireTarget::RubyFamily).unwrap();
+        for (path, before, after) in [
+            ("main.rb", "if __FILE__ == $PROGRAM_NAME\n  Main.configure_default_adapter!\n", "\n  env = {\n"),
+            ("config.ru", "\nActiveJob.drain_in_background!\n", "\nuse ThrusterCache::Middleware\n"),
+            ("sidekiq.rb", "\nActiveJob.register_drain\n", "\nSidekiqWorker.cli(ARGV)\n"),
+        ] {
+            let text = &ruby.iter().find(|(p, _)| p == path).unwrap().1;
+            assert_eq!(text.matches(call).count(), 1, "{path}:\n{text}");
+            assert!(at(text, before) < at(text, call) && at(text, call) < at(text, after), "{path}:\n{text}");
+        }
+        let config_ru = &ruby.iter().find(|(p, _)| p == "config.ru").unwrap().1;
+        assert!(at(config_ru, "Broadcasts.set_transport(") < at(config_ru, call), "{config_ru}");
+    }
+
+    /// An app with no callbacks keeps its entries as written, and an entry
+    /// that lost the line the callbacks run before is an error, not a tree
+    /// that silently skips them.
+    #[test]
+    fn app_initializers_refuse_an_entry_without_its_anchor() {
+        let mut app = App::new();
+        let mut files = vec![("main.rb".to_string(), "Main.configure_default_adapter!\n".to_string())];
+        apply_app_initializers(&mut files, &app, RequireTarget::Spinel).unwrap();
+        assert_eq!(files[0].1, "Main.configure_default_adapter!\n");
+        app.runs_after_initialize = true;
+        let error = apply_app_initializers(&mut files, &app, RequireTarget::Spinel).unwrap_err();
+        assert!(error.contains("main.rb has 0 lines `  SidekiqWorker.cli(ARGV)`"), "{error}");
     }
 
     /// A symlinked data file is carried by its contents only when its

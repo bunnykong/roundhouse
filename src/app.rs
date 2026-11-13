@@ -66,7 +66,8 @@ pub struct ConcernGuardedItem {
 }
 
 /// The generated module whose `run` performs the app's `after_initialize`
-/// callbacks (`ingest::after_initialize`); boot calls it last.
+/// callbacks (`ingest::after_initialize`); each entry calls it once the
+/// database and the job drain are set up (`project::apply_app_initializers`).
 pub const AFTER_INITIALIZE_RUNNER: &str = "AppInitializers";
 
 /// The top-level IR: a Rails application as data. This is the serializable
@@ -592,7 +593,7 @@ pub struct App {
     pub initializer_response_headers: Vec<InitializerResponseHeader>,
     /// Whether ingest generated the after_initialize runner module
     /// ([`AFTER_INITIALIZE_RUNNER`], `ingest::after_initialize`), so the
-    /// emitted boot calls its `run`. Recorded, not inferred from the name.
+    /// emitted entries call its `run`. Recorded, not inferred from the name.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub runs_after_initialize: bool,
     /// `ActionView::PartialRenderer.collection_cache = Store.reader` from
