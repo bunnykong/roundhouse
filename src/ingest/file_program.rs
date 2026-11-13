@@ -295,13 +295,19 @@ fn file_branch(
     list_dir: &dyn Fn(&std::path::Path) -> Vec<(String, bool)>,
     span_of: &dyn Fn(&ruby_prism::Node<'_>) -> Span,
 ) -> Option<ProgramItem> {
-    if !declares_inside(stmt) || super::visibility::console_only_node(stmt) {
+    // Not only one that declares: a branch of requires alone (view_component's `require
+    // "action_view/renderer/collection_renderer" if Rails.version.to_f >= 6.1`) is one too, modifier or not, so a
+    // framework feature in it is the runtime's, as an unconditional one is.
+    let requires_only = requires_only(stmt);
+    if !(declares_inside(stmt) || requires_only) || super::visibility::console_only_node(stmt) {
         return None;
     }
     let items = |stmts: &[ruby_prism::Node<'_>]| program_items(stmts, file, carried, list_dir, span_of);
     if let Some(branch) = stmt.as_if_node() {
-        branch.if_keyword_loc()?;
-        branch.end_keyword_loc()?;
+        if !requires_only {
+            branch.if_keyword_loc()?;
+            branch.end_keyword_loc()?;
+        }
         let condition = ingest_expr(&branch.predicate(), file).ok()?;
         let then_items = items(&statements(branch.statements()));
         let else_items = match branch.subsequent() {
@@ -320,11 +326,31 @@ fn file_branch(
         return Some(ProgramItem::Branch { condition, negated: false, then_items, else_items });
     }
     let branch = stmt.as_unless_node()?;
-    branch.end_keyword_loc()?;
+    if !requires_only {
+        branch.end_keyword_loc()?;
+    }
     let condition = ingest_expr(&branch.predicate(), file).ok()?;
     let then_items = items(&statements(branch.statements()));
     let else_items = branch.else_clause().map(|e| items(&statements(e.statements()))).unwrap_or_default();
     Some(ProgramItem::Branch { condition, negated: true, then_items, else_items })
+}
+
+/// Whether every arm of a file-level `if` / `unless` is literal `require`s and nothing else.
+fn requires_only(stmt: &ruby_prism::Node<'_>) -> bool {
+    let all_requires = |s: Option<ruby_prism::StatementsNode<'_>>| {
+        let body = statements(s);
+        !body.is_empty() && body.iter().all(|n| n.as_call_node().is_some_and(|c| literal_require(&c).is_some()))
+    };
+    if let Some(branch) = stmt.as_if_node() {
+        return all_requires(branch.statements())
+            && match branch.subsequent() {
+                None => true,
+                Some(sub) => sub.as_else_node().is_some_and(|e| all_requires(e.statements())),
+            };
+    }
+    stmt.as_unless_node().is_some_and(|branch| {
+        all_requires(branch.statements()) && branch.else_clause().is_none_or(|e| all_requires(e.statements()))
+    })
 }
 
 /// A branch's statements.

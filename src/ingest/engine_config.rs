@@ -307,6 +307,80 @@ fn config_hook<'pr>(node: &Node<'pr>, hook: &str) -> Option<Vec<Node<'pr>>> {
     Some(block.body().map(|b| flatten_statements(b)).unwrap_or_default())
 }
 
+/// Whether a condition is true whatever runs: literals compared, and `||` with such a side.
+pub(super) fn folds_true(cond: &Expr) -> bool {
+    fn number(e: &Expr) -> Option<f64> {
+        match &*e.node {
+            ExprNode::Lit { value: Literal::Int { value } } => Some(*value as f64),
+            ExprNode::Lit { value: Literal::Float { value } } => Some(*value),
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. } if method.as_str() == "to_f" && args.is_empty() => match &*r.node {
+                ExprNode::Lit { value: Literal::Str { value } } => {
+                    let digits: String = value.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+                    // Not a mantissa an exponent or a digit separator follows (`"1.2e-2".to_f`, `"1_0".to_f`), which Ruby reads whole.
+                    if value[digits.len()..].starts_with(['e', 'E', '_']) {
+                        return None;
+                    }
+                    let digits = match digits.match_indices('.').nth(1) {
+                        Some((second, _)) => digits[..second].to_string(),
+                        None => digits,
+                    };
+                    digits.parse().ok()
+                }
+                _ => number(r),
+            },
+            _ => None,
+        }
+    }
+    // Not a condition that calls anything (`Boot.prepare! || true`): settling it would drop the call.
+    fn pure(e: &Expr) -> bool {
+        match &*e.node {
+            ExprNode::Lit { .. } => true,
+            ExprNode::BoolOp { left, right, .. } => pure(left) && pure(right),
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. } => {
+                matches!(method.as_str(), "to_f" | "to_i" | ">=" | ">" | "<=" | "<" | "==" | "!") && pure(r) && args.iter().all(pure)
+            }
+            _ => false,
+        }
+    }
+    if !pure(cond) {
+        return false;
+    }
+    match &*cond.node {
+        ExprNode::Lit { value: Literal::Bool { value } } => *value,
+        ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } => folds_true(left) || folds_true(right),
+        ExprNode::Send { recv: Some(l), method, args, block: None, .. } if args.len() == 1 => {
+            let (Some(a), Some(b)) = (number(l), number(&args[0])) else { return false };
+            match method.as_str() {
+                ">=" => a >= b,
+                ">" => a > b,
+                "<=" => a <= b,
+                "<" => a < b,
+                "==" => a == b,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The statements of `ActiveSupport.on_load(:after_initialize) do … end`.
+fn after_initialize_load_hook<'pr>(node: &Node<'pr>) -> Option<Vec<Node<'pr>>> {
+    let call = node.as_call_node()?;
+    if constant_id_str(&call.name()) != "on_load" || constant_path_of(&call.receiver()?)? != ["ActiveSupport"] {
+        return None;
+    }
+    let args: Vec<Node<'pr>> = call.arguments()?.arguments().iter().collect();
+    let [hook] = args.as_slice() else { return None };
+    if hook.as_symbol_node().map(|s| s.unescaped().to_vec()).as_deref() != Some(b"after_initialize") {
+        return None;
+    }
+    let block = call.block()?.as_block_node()?;
+    if block.parameters().is_some() {
+        return None;
+    }
+    Some(block.body().map(|b| flatten_statements(b)).unwrap_or_default())
+}
+
 /// `[]` for `config`, `["a", "b"]` for `config.a.b`.
 fn config_chain(node: &Node<'_>) -> Option<Vec<String>> {
     let call = node.as_call_node()?;
@@ -619,21 +693,87 @@ struct Boot<'a> {
     config_opaque: bool,
 }
 
+/// Whether a block's statements leave it at a `next`: never, always, or on some path only.
+#[derive(Clone, Copy, PartialEq)]
+enum Exit {
+    Stays,
+    Leaves,
+    May,
+}
+
+struct GuardedNext<'pr> {
+    predicate: Node<'pr>,
+    unless: bool,
+}
+
+/// `next if cond` / `next unless cond`, with nothing else in the branch.
+fn guarded_next<'pr>(node: &Node<'pr>) -> Option<GuardedNext<'pr>> {
+    let only_next = |stmts: Option<ruby_prism::StatementsNode<'pr>>| {
+        stmts.is_some_and(|s| {
+            let body: Vec<_> = s.body().iter().collect();
+            matches!(body.as_slice(), [n] if n.as_next_node().is_some_and(|n| n.arguments().is_none()))
+        })
+    };
+    if let Some(n) = node.as_if_node() {
+        return (n.subsequent().is_none() && only_next(n.statements())).then(|| GuardedNext { predicate: n.predicate(), unless: false });
+    }
+    let n = node.as_unless_node()?;
+    (n.else_clause().is_none() && only_next(n.statements())).then(|| GuardedNext { predicate: n.predicate(), unless: true })
+}
+
 impl Boot<'_> {
-    fn statements(&mut self, nodes: &[Node<'_>]) {
-        for node in nodes {
-            self.statement(node);
+    // Not every statement after a `next`: the replay leaves the block there, so what follows writes nothing, or only
+    // on the path where `next if cond`'s condition is false.
+    fn statements(&mut self, nodes: &[Node<'_>]) -> Exit {
+        for (at, node) in nodes.iter().enumerate() {
+            if node.as_next_node().is_some_and(|n| n.arguments().is_none()) {
+                return Exit::Leaves;
+            }
+            let exit = match guarded_next(node) {
+                Some(guard) => match self.value(&guard.predicate).truthy().map(|truthy| truthy != guard.unless) {
+                    Some(true) => Exit::Leaves,
+                    Some(false) => Exit::Stays,
+                    None => Exit::May,
+                },
+                None => self.statement(node),
+            };
+            match exit {
+                Exit::Stays => {}
+                Exit::Leaves => return Exit::Leaves,
+                Exit::May => {
+                    self.on_one_path(&nodes[at + 1..]);
+                    return Exit::May;
+                }
+            }
+        }
+        Exit::Stays
+    }
+
+    /// What `rest` writes when it runs on only one path: no longer known.
+    fn on_one_path(&mut self, rest: &[Node<'_>]) {
+        let before = (self.modules.clone(), self.config.clone());
+        self.statements(rest);
+        let module_keys: Vec<(String, String)> = self.modules.keys().cloned().collect();
+        for k in module_keys {
+            if self.modules.get(&k) != before.0.get(&k) {
+                self.modules.insert(k, Val::Unknown);
+            }
+        }
+        let config_keys: Vec<Vec<String>> = self.config.keys().cloned().collect();
+        for k in config_keys {
+            if self.config.get(&k) != before.1.get(&k) {
+                self.config.insert(k, Val::Unknown);
+            }
         }
     }
 
-    fn branch(&mut self, node: Option<Node<'_>>) {
-        if let Some(node) = node {
-            let stmts = match node.as_statements_node() {
-                Some(s) => s.body().iter().collect(),
-                None => node.as_else_node().and_then(|e| e.statements()).map(|s| s.body().iter().collect()).unwrap_or_else(|| vec![node]),
-            };
-            self.statements(&stmts);
-        }
+    fn branch(&mut self, node: Option<Node<'_>>) -> Exit {
+        let Some(node) = node else { return Exit::Stays };
+        let stmts: Vec<Node<'_>> = match node.as_statements_node() {
+            Some(s) => s.body().iter().collect(),
+            None => node.as_else_node().and_then(|e| e.statements()).map(|s| s.body().iter().collect()).unwrap_or_else(|| vec![node]),
+        };
+        self.statements(&stmts)
     }
 
     fn kill(&mut self, node: Option<Node<'_>>) {
@@ -644,11 +784,11 @@ impl Boot<'_> {
     }
 
     /// Both branches may run: what either writes is no longer known.
-    fn either(&mut self, a: Option<Node<'_>>, b: Option<Node<'_>>) {
+    fn either(&mut self, a: Option<Node<'_>>, b: Option<Node<'_>>) -> Exit {
         let before = (self.modules.clone(), self.config.clone());
-        self.branch(a);
+        let exit_a = self.branch(a);
         let after_a = (std::mem::replace(&mut self.modules, before.0.clone()), std::mem::replace(&mut self.config, before.1.clone()));
-        self.branch(b);
+        let exit_b = self.branch(b);
         // Not only the keys `a` wrote: one only `b` wrote holds `b`'s value though `b` may not have run.
         let module_keys: Vec<(String, String)> = after_a.0.keys().chain(self.modules.keys()).cloned().collect();
         for k in module_keys {
@@ -661,6 +801,11 @@ impl Boot<'_> {
             if self.config.get(&k) != after_a.1.get(&k) {
                 self.config.insert(k, Val::Unknown);
             }
+        }
+        match (exit_a, exit_b) {
+            (Exit::Stays, Exit::Stays) => Exit::Stays,
+            (Exit::Leaves, Exit::Leaves) => Exit::Leaves,
+            _ => Exit::May,
         }
     }
 
@@ -682,43 +827,48 @@ impl Boot<'_> {
         self.config_opaque = true;
     }
 
-    fn statement(&mut self, node: &Node<'_>) {
+    // Not a statement that runs on: an `if` whose branch holds a `next` leaves the block there (`Exit`), and what follows
+    // writes nothing, or only on the path that stays.
+    fn statement(&mut self, node: &Node<'_>) -> Exit {
         if node.as_if_node().is_none() && node.as_unless_node().is_none() {
             self.effects += 1;
         }
         if let Some(n) = node.as_if_node() {
             let then = n.statements().map(|s| s.as_node());
             let other = n.subsequent();
-            match self.value(&n.predicate()).truthy() {
+            return match self.value(&n.predicate()).truthy() {
                 Some(true) => {
                     self.live.push((self.file.clone(), node.location().start_offset() as u32));
                     self.kill(other);
-                    self.branch(then);
+                    self.branch(then)
                 }
                 Some(false) => {
                     self.kill(then);
-                    self.branch(other);
+                    self.branch(other)
                 }
                 None => self.either(then, other),
-            }
-            return;
+            };
         }
         if let Some(n) = node.as_unless_node() {
             let then = n.statements().map(|s| s.as_node());
             let other = n.else_clause().map(|e| e.as_node());
-            match self.value(&n.predicate()).truthy() {
+            return match self.value(&n.predicate()).truthy() {
                 Some(false) => {
                     self.kill(other);
-                    self.branch(then);
+                    self.branch(then)
                 }
                 Some(true) => {
                     self.kill(then);
-                    self.branch(other);
+                    self.branch(other)
                 }
                 None => self.either(then, other),
-            }
-            return;
+            };
         }
+        self.plain(node);
+        Exit::Stays
+    }
+
+    fn plain(&mut self, node: &Node<'_>) {
         if let Some(w) = node.as_call_or_write_node() {
             if let Some(path) = w.receiver().and_then(|r| config_chain(&r)) {
                 let mut key = path;
@@ -1145,6 +1295,13 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
                         (Phase::BeforeInitialize, hook, None)
                     } else if let Some(hook) = config_hook(&stmt, "after_initialize") {
                         (Phase::AfterInitialize, hook, hook_param(&stmt))
+                    } else if let Some((app, hook)) = initializer_block(&stmt)
+                        && let [only] = hook.as_slice()
+                        && let Some(inner) = after_initialize_load_hook(only)
+                    {
+                        // An initializer whose body is only `ActiveSupport.on_load(:after_initialize) do … end`: the block
+                        // runs once the app has initialized, as `config.after_initialize`'s does.
+                        (Phase::AfterInitialize, inner, app)
                     } else if let Some((app, hook)) = initializer_block(&stmt) {
                         // Not one the ledger already takes: a quiet one runs nothing, and a load hook's mixins are carried.
                         if settled.quiet.iter().any(|(f, at, _)| *f == boot.file && *at == start) {
@@ -1430,11 +1587,38 @@ struct Replayer<'a> {
 impl Replayer<'_> {
     fn block(&self, nodes: &[Node<'_>]) -> Option<Vec<Expr>> {
         let mut out = Vec::new();
-        for node in nodes {
+        for (at, node) in nodes.iter().enumerate() {
             let expr = super::expr::ingest_expr(node, &self.file).ok()?;
-            if let Some(expr) = self.statement(expr)? {
-                out.push(expr);
+            let Some(expr) = self.statement(expr)? else { continue };
+            // A `next` the replay settled already (`next if true`): nothing after it runs.
+            if matches!(&*expr.node, ExprNode::Next { value: None }) {
+                return Some(out);
             }
+            // An initializer block's `next if cond` leaves the block: the statements after it run only when `cond` is
+            // false. Not replayed as written, where a top-level `next` is no Ruby.
+            // Either way round: `next unless cond` is read as `if cond then nil else next`.
+            let is_next = |e: &Expr| matches!(&*e.node, ExprNode::Next { value: None });
+            let is_nil = |e: &Expr| matches!(&*e.node, ExprNode::Lit { value: crate::expr::Literal::Nil });
+            if let ExprNode::If { cond, then_branch, else_branch } = &*expr.node
+                && ((is_next(then_branch) && is_nil(else_branch)) || (is_nil(then_branch) && is_next(else_branch)))
+            {
+                let leaves_when_true = is_next(then_branch);
+                // Not kept when the condition is already settled true (`Rails.version.to_f >= 6.1`, read as the
+                // runtime's version): nothing after it ever runs, or, for `unless`, all of it does.
+                if folds_true(cond) {
+                    if leaves_when_true {
+                        return Some(out);
+                    }
+                    continue;
+                }
+                let rest = self.block(&nodes[at + 1..])?;
+                let rest = Expr::new(expr.span, ExprNode::Seq { exprs: rest });
+                let nil = Expr::new(expr.span, ExprNode::Lit { value: crate::expr::Literal::Nil });
+                let (then_branch, else_branch) = if leaves_when_true { (nil, rest) } else { (rest, nil) };
+                out.push(Expr::new(expr.span, ExprNode::If { cond: cond.clone(), then_branch, else_branch }));
+                return Some(out);
+            }
+            out.push(expr);
         }
         Some(out)
     }

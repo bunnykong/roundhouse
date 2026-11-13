@@ -6240,24 +6240,74 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
 }
 
 /// A class-body load-time conditional (`dialect::ConditionalDefinitions`)
-/// is written as the source has it only by the Ruby family; another
+/// is written as the source has it by the Ruby family and Spinel; another
 /// target would define every branch's methods, the last one winning, so
 /// each such statement is an error there.
 fn refuse_conditional_definitions(app: &App, target: BuildTarget) {
     for lc in &app.library_classes {
         for conditional in &lc.conditional_definitions {
+            // Not Spinel's when no other method answers the names: Spinel compiles the `if` around `def`s as Ruby
+            // loads it, and refuses only a name a builtin, an accessor or another def answers when the branch did not run.
+            if target == BuildTarget::Spinel && !conditional_names_answered_elsewhere(app, lc, conditional) {
+                continue;
+            }
             let diagnostic = crate::diagnostic::Diagnostic::unsupported(
                 conditional.span,
                 Some(crate::ident::Symbol::from(target.as_str())),
                 "conditional_definition",
-                format!(
-                    "`{}` defines methods in a load-time `if`/`unless`, which only the Ruby and JRuby targets carry",
-                    lc.name.0.as_str()
-                ),
+                if target == BuildTarget::Spinel {
+                    format!(
+                        "`{}` defines a method in a load-time `if`/`unless` that a builtin, an accessor or another def also answers, which Spinel does not compile",
+                        lc.name.0.as_str()
+                    )
+                } else {
+                    format!(
+                        "`{}` defines methods in a load-time `if`/`unless`, which only the Ruby, JRuby and Spinel targets carry",
+                        lc.name.0.as_str()
+                    )
+                },
             );
             emit::diagnostics::push(diagnostic);
         }
     }
+}
+
+fn conditional_names_answered_elsewhere(app: &App, lc: &crate::dialect::LibraryClass, conditional: &crate::dialect::ConditionalDefinitions) -> bool {
+    fn members(c: &crate::dialect::ConditionalDefinitions, out: &mut Vec<(crate::ident::Symbol, crate::dialect::MethodReceiver)>) {
+        for arm in &c.arms {
+            out.extend(arm.methods.iter().map(|m| (m.name.clone(), m.receiver)));
+            for nested in &arm.nested {
+                members(nested, out);
+            }
+        }
+    }
+    let mut names = Vec::new();
+    members(conditional, &mut names);
+    let core = crate::lower::core_instance_methods::OBJECT.iter().chain(crate::lower::core_instance_methods::KERNEL_PRIVATE);
+    let builtins: crate::det::HashSet<&str> = core.copied().chain(["method_missing", "initialize"]).collect();
+    names.iter().any(|(name, receiver)| {
+        if *receiver == crate::dialect::MethodReceiver::Instance && builtins.contains(name.as_str()) {
+            return true;
+        }
+        let mut current = Some(lc.name.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { break };
+            let mut parent = None;
+            for class in app.library_classes.iter().filter(|c| c.name == id) {
+                let elsewhere = class.methods.iter().any(|m| {
+                    &m.name == name
+                        && m.receiver == *receiver
+                        && (class.name != lc.name || !class.conditional_definitions.iter().any(|c| c.contains(m)))
+                });
+                if elsewhere {
+                    return true;
+                }
+                parent = parent.or_else(|| class.parent.clone());
+            }
+            current = parent;
+        }
+        false
+    })
 }
 
 /// One line or item of a program as written, branches flattened
@@ -8938,6 +8988,9 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionDispatch::Http::Parameters::ParseError",
     "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
+    // `runtime/ruby/action_view/base.rb`: a component render's buffer and lookup context.
+    "ActionView::OutputBuffer",
+    "ActionView::LookupContext",
     // `runtime/ruby/active_record/arel.rb` — node constructors the ruby
     // family and spinel load with that file. A strict target has no Arel
     // text nodes to construct.

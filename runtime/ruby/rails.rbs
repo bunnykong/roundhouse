@@ -83,6 +83,7 @@ module Rails
 
   class Application
     def session_cookie_key: () -> String
+    def eager_load: () -> bool
     def propshaft_asset_path: (String source) -> String
     def forgery_protection_verification_strategy: () -> String
     def public_file_server_headers: () -> Hash[String, String]
@@ -148,6 +149,7 @@ module Rails
     def initialize: () -> void
     def assets: () -> AssetConfig
     def relative_url_root: () -> String?
+    def eager_load: () -> bool
     def action_controller: () -> ActionControllerOptions
     def filter_parameters: () -> Array[String | Regexp]
     def session_options: () -> Hash[Symbol, String]

@@ -882,7 +882,14 @@ impl<'a> Gems<'a> {
             });
         }
         let views_before = trimmed.views.len();
-        trimmed.views.retain(|v| !self.unreached_action_view(v.name.as_str(), reached));
+        // Nor a gem's template no request reaches (`ingest::unreachable_views`): view_component's preview pages,
+        // whose routes the engine draws only for previews, call route helpers no route defines.
+        let gem_view = |v: &crate::dialect::View| {
+            app.source_path(v.body.span.file).is_some_and(|p| p.contains("/.roundhouse/source_gems/") || p.starts_with(".roundhouse/source_gems/"))
+        };
+        trimmed
+            .views
+            .retain(|v| !self.unreached_action_view(v.name.as_str(), reached) && !(app.unreachable_views.contains(&v.name) && gem_view(v)));
         let after: usize = trimmed.library_classes.iter().map(|c| c.methods.len() + 1).sum();
         (after != before || copies_dropped > 0 || blocks_dropped > 0 || trimmed.views.len() != views_before).then_some(trimmed)
     }
@@ -2038,7 +2045,24 @@ pub(crate) fn compiled_on_the_ruby_family(app: &App) -> crate::det::HashSet<Stri
         }
         false
     };
-    let mut kept: crate::det::HashSet<String> = app.auto_source_gems.iter().filter(|g| needs_railties(g)).cloned().collect();
+    // Nor its gemspec alone: a gem may require a framework it does not declare (view_component's `require "action_view"`,
+    // with only activesupport in its dependencies), and the real gem would load the real framework too.
+    let requires_the_framework = |gem: &str| {
+        let Some(version) = lock.version_of(gem) else { return false };
+        fn requires(items: &[crate::app::ProgramItem]) -> bool {
+            items.iter().any(|item| match item {
+                crate::app::ProgramItem::Require { feature, relative: false, .. } => matches!(
+                    feature.split('/').next(),
+                    Some("rails" | "action_view" | "action_controller" | "action_dispatch" | "active_model" | "active_record" | "action_mailer" | "active_job" | "action_text" | "active_storage")
+                ),
+                crate::app::ProgramItem::Branch { then_items, else_items, .. } => requires(then_items) || requires(else_items),
+                _ => false,
+            })
+        }
+        app.file_programs.iter().filter(|p| crate::ingest::source_gems::file_of(&p.source, gem, version)).any(|p| requires(&p.items))
+    };
+    let mut kept: crate::det::HashSet<String> =
+        app.auto_source_gems.iter().filter(|g| needs_railties(g) || requires_the_framework(g)).cloned().collect();
     loop {
         let more: Vec<String> = app
             .auto_source_gems

@@ -72,6 +72,8 @@ mod class_param_or_assign_app;
 mod class_param_or_assign;
 #[path = "spinel_toolchain/addressable.rs"]
 mod addressable;
+#[path = "spinel_toolchain/conditional_definitions.rs"]
+mod conditional_definitions;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/class_configuration.rs"]

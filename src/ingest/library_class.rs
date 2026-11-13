@@ -3191,6 +3191,14 @@ fn walk_decl_body_with_visibility<'pr>(
             out.conditional_definitions.push(record);
             continue;
         }
+        // `ruby2_keywords(:m) if respond_to?(:ruby2_keywords, true)` (view_component's `set_slot`): every Ruby this runs
+        // on answers it, so the call is the class's, replayed where it stands, after the `def` it flags.
+        if let Some(call) = ruby2_keywords_guarded(&statement) {
+            let mut expr = ingest_expr(&call, file)?;
+            expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+            out.unknown_calls.push(expr);
+            continue;
+        }
         if statement.as_if_node().is_some() || statement.as_unless_node().is_some() {
             Visibility::reject_conditional_declaration(&statement, file)?;
             reject_conditional_accessor(&statement, file)?;
@@ -4286,9 +4294,12 @@ fn library_mattr_claim(
                             }
                         }
                         Some("default") => unmodeled = true,
-                        // `instance_reader:` / friends are ignored when no
-                        // default is claimed; mixed with `default:` they
-                        // would silently drop half the declaration.
+                        // Not another option: these only leave the instance copies out, which
+                        // `mattr_instance_options` reads (view_component's `mattr_accessor :cache, instance_reader:
+                        // false, instance_accessor: false do Set.new end`).
+                        Some("instance_reader" | "instance_writer" | "instance_accessor") if assoc.value().as_false_node().is_some() => {}
+                        // Other options are ignored when no default is claimed; mixed with `default:` they would
+                        // silently drop half the declaration.
                         _ => other_kwargs = true,
                     }
                 }
@@ -4584,8 +4595,32 @@ pub(crate) fn synth_mattr_reader(owner: &ClassId, name: &Symbol, receiver: Metho
     }
 }
 
-/// `def <name>; Owner.<name>; end` and `def <name>=(value); Owner.<name> = value; end`: Rails' instance-level copies
-/// of a mattr/cattr, which read and write the declaring module's value.
+/// The `ruby2_keywords(...)` call of `ruby2_keywords(...) if respond_to?(:ruby2_keywords, true)`.
+fn ruby2_keywords_guarded<'pr>(statement: &Node<'pr>) -> Option<Node<'pr>> {
+    let branch = statement.as_if_node()?;
+    if branch.subsequent().is_some() {
+        return None;
+    }
+    let guard = branch.predicate().as_call_node()?;
+    let asks = constant_id_str(&guard.name()) == "respond_to?"
+        && guard.receiver().is_none()
+        && guard.arguments().is_some_and(|a| {
+            // Not `respond_to?(:ruby2_keywords)` alone: without `true` it skips the private method, and the branch never runs.
+            let args: Vec<_> = a.arguments().iter().collect();
+            matches!(args.as_slice(), [name, all] if name.as_symbol_node().is_some_and(|s| s.unescaped() == b"ruby2_keywords") && all.as_true_node().is_some())
+        });
+    if !asks {
+        return None;
+    }
+    let mut body: Vec<Node<'pr>> = branch.statements()?.body().iter().collect();
+    if body.len() != 1 {
+        return None;
+    }
+    let only = body.remove(0);
+    let call = only.as_call_node()?;
+    (constant_id_str(&call.name()) == "ruby2_keywords" && call.receiver().is_none()).then_some(only)
+}
+
 /// Whether a `mattr_*` keeps its instance reader and writer: Rails leaves them out for `instance_accessor: false`, and
 /// each for its own `instance_reader: false` / `instance_writer: false`.
 fn mattr_instance_options(call: &ruby_prism::CallNode<'_>) -> (bool, bool) {
@@ -4608,6 +4643,8 @@ fn mattr_instance_options(call: &ruby_prism::CallNode<'_>) -> (bool, bool) {
     (reader, writer)
 }
 
+/// `def <name>; Owner.<name>; end` and `def <name>=(value); Owner.<name> = value; end`: Rails' instance-level copies
+/// of a mattr/cattr, which read and write the declaring module's value.
 pub(crate) fn synth_mattr_instance_accessor(owner: &ClassId, name: &Symbol, writer: bool) -> MethodDef {
     let mut reader = synth_mattr_reader(owner, name, MethodReceiver::Instance);
     let module = Expr::new(Span::synthetic(), ExprNode::Const { path: owner.0.as_str().split("::").map(Symbol::from).collect() });
