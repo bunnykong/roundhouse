@@ -38,10 +38,15 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
     let carried = crate::gems::native_extension_gem_namespaces(app);
     let ownership = crate::gems::LockGemIndex::new(lock);
     let mut out: BTreeSet<String> = BTreeSet::new();
+    // Whether a gem's `lib/` declares a constant, per gem and path: asked only for a name the app declares too.
+    let mut declared: crate::det::HashMap<(String, String), bool> = Default::default();
     let mut consider = |path: &str, from_gem: bool, required: bool| {
-        if !required && (own.contains(path) || ported.contains(path)) {
+        if !required && ported.contains(path) {
             return;
         }
+        // A name the app declares is the app's, unless the declaration reopens a class of a gem the app
+        // depends on (#2093): Ruby loads the gem first, so the class holds the gem's methods and the app's.
+        let reopened = !required && own.contains(path);
         let owners = if required { vec![path] } else { ownership.owners(path) };
         let [gem] = owners.as_slice() else { return };
         if lock.is_in_repo(gem)
@@ -71,6 +76,9 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
             return;
         }
         let lib = installed.join("lib");
+        if reopened && !*declared.entry((gem.to_string(), path.to_string())).or_insert_with(|| declares(vfs, &lib, path)) {
+            return;
+        }
         let has_entry = match lock.gemfile_requires.get(*gem).filter(|f| !f.is_empty()) {
             Some(features) => features.iter().all(|f| vfs.exists(&lib.join(if f.ends_with(".rb") { f.clone() } else { format!("{f}.rb") }))),
             None => [gem.to_string(), gem.replace('-', "/")].iter().any(|f| vfs.exists(&lib.join(format!("{f}.rb")))),
@@ -187,6 +195,35 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
     }
     out.extend(extenders);
     out.into_iter().collect()
+}
+
+/// Whether a `.rb` file under `lib` (a gem's) declares `path` as a class or
+/// module: `class Box` inside `module Shelf`, or `class Shelf::Box`. Read by
+/// the last segment, on lines that open a declaration; the gem was chosen
+/// by its namespace already.
+fn declares<V: Vfs + ?Sized>(vfs: &V, lib: &Path, path: &str) -> bool {
+    let last = path.rsplit("::").next().unwrap_or(path);
+    let opens = |line: &str| {
+        let line = line.trim_start();
+        let Some(rest) = line.strip_prefix("class ").or_else(|| line.strip_prefix("module ")) else { return false };
+        let name = rest.split(|c: char| c.is_whitespace() || c == '<' || c == ';').next().unwrap_or("");
+        let name = name.trim_start_matches("::");
+        name == last || name.ends_with(&format!("::{last}"))
+    };
+    let mut dirs = vec![lib.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = vfs.read_dir(&dir) else { continue };
+        for entry in entries {
+            if vfs.is_dir(&entry) {
+                dirs.push(entry);
+            } else if entry.extension().is_some_and(|e| e == "rb")
+                && vfs.read_to_string(&entry).is_ok_and(|text| text.lines().any(opens))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn required_features(items: &[crate::app::ProgramItem], out: &mut Vec<String>) {
