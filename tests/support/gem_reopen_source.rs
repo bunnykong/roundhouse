@@ -59,13 +59,21 @@ pub const ARTICLE_BOX: &str = r##"class ArticleBox
 end
 "##;
 
+/// The app's use of the class a constant-only reopen extends.
+pub const BOX_LIMITS: &str = r##"class BoxLimits
+  def self.describe
+    [Shelf::Box.kind, Shelf::Box::LIMIT, Shelf::Box.new.tag]
+  end
+end
+"##;
+
 pub const LOCAL_ASSERTIONS: &str = r##"got = ArticleBox.describe
 raise "describe #{got.inspect}" unless got == "box / app box / local"
 puts "reopen passed"
 "##;
 
-pub const EXTRAS_ASSERTIONS: &str = r##"got = [Shelf::Box.kind, Shelf::Box.label, Shelf::Box::LIMIT, Shelf::Box.new.tag]
-raise "extras #{got.inspect}" unless got == ["box", "shelf box", 3, "tagged"]
+pub const EXTRAS_ASSERTIONS: &str = r##"got = BoxLimits.describe + [Shelf::Box.label]
+raise "extras #{got.inspect}" unless got == ["box", 3, "tagged", "shelf box"]
 puts "extras passed"
 "##;
 
@@ -106,4 +114,5 @@ pub fn extras_app() -> emit_and_run::Overlay {
         .write("app/models/tagging.rb", TAGGING)
         .write("lib/shelf_box_extras.rb", EXTRAS)
         .write("config/initializers/shelf_box_extras.rb", "require Rails.root.join(\"lib/shelf_box_extras\").to_s\n")
+        .write("app/models/box_limits.rb", BOX_LIMITS)
 }
