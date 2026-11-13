@@ -631,6 +631,15 @@ class Routing(unittest.TestCase):
                 self.assertEqual(ci.main(), 0)
             return output.call_args.args[0]
 
+    def test_the_plan_hands_the_shards_their_cpu_seconds(self):
+        main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
+        changed = {"return_value": (["README.md"], None)}
+        recorded = {"toolchain": {"a": 300}, "toolchain_cpu": {"a": 900}, "framework": {"b": 40}}
+        outputs = self.run_planner({"before": "0" * 40}, {**main, "CI_SPINEL_TIMINGS": json.dumps(recorded)}, changed)
+        self.assertEqual(outputs["spinel-timings"], recorded)
+        outputs = self.run_planner({"before": "0" * 40}, {**main, "CI_SPINEL_TIMINGS": json.dumps({"toolchain": {"a": 300}})}, changed)
+        self.assertEqual(outputs["spinel-timings"], {"framework": {}, "toolchain": {"a": 300}})
+
     def test_full_input_on_main_still_selects_every_sdk(self):
         with tempfile.TemporaryDirectory() as directory:
             event = Path(directory) / "event.json"
@@ -1817,26 +1826,22 @@ class Results(unittest.TestCase):
         # #1781: a test whose contract runs from a shared bundle finishes in well under a second, and
         # recording only that put every bundled test on one shard, which then paid all their compiles.
         heavy = {"heavy0": 600, "heavy1": 500, "heavy2": 400}
-        bundled = [f"bundled{i:02}" for i in range(16)]
+        bundled = [f"bundled{i:02}" for i in range(48)]
         share = 60
         true_cost = {**heavy, **{t: 1 + share for t in bundled}}
         tests = sorted(true_cost)
+        threads = ci.SPINEL_TOOLCHAIN_THREADS
 
-        def plan(recorded):
+        def ends(recorded):
             timings = {"toolchain": {**heavy, **{t: recorded for t in bundled}}}
-            # Not the live shard count: the half-of-bundled bound below is drawn for four shards beside these three heavy tests.
+            # Not the live shard count: the bounds below are drawn for four shards beside these three heavy tests.
             shards = [ci.spinel_toolchain_shard(tests, k, count=4, timings=timings) for k in range(4)]
             self.assertEqual(sorted(t for s in shards for t in s), tests)
-            loads = [sum(true_cost[t] for t in s) for s in shards]
-            loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
-            return shards, loads
+            tail = [0, 0, 0, ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * threads]
+            return [max((sum(true_cost[t] for t in s) + tail[k]) / threads, max(true_cost[t] for t in s)) for k, s in enumerate(shards)]
 
-        shards, loads = plan(recorded=1)
-        self.assertEqual(max(sum(t in bundled for t in s) for s in shards), len(bundled))
-        self.assertGreater(max(loads) - min(loads), len(bundled) * share // 2)
-        shards, loads = plan(recorded=1 + share)
-        self.assertLessEqual(max(sum(t in bundled for t in s) for s in shards), len(bundled) // 2)
-        self.assertLess(max(loads) - min(loads), max(heavy.values()))
+        self.assertGreater(max(ends(recorded=1)), max(heavy.values()) + share)
+        self.assertLessEqual(max(ends(recorded=1 + share)), max(heavy.values()) + share)
 
     def test_run_tests_charges_each_bundled_test_its_share_of_the_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1913,6 +1918,67 @@ class Results(unittest.TestCase):
             ],
         )
         self.assertEqual(merged, {"toolchain": {"a": 150, "b": 50}, "framework": {"d": 30}})
+
+    def test_merge_averages_a_passing_toolchain_tests_cpu_seconds_apart(self):
+        merged = ci.merge_timings(
+            {"toolchain": {"a": 300}, "toolchain_cpu": {"a": 100}},
+            [
+                {"kind": "toolchain", "name": "a", "seconds": 500, "ok": True, "cpu": 200},
+                {"kind": "toolchain", "name": "b", "seconds": 90, "ok": True, "cpu": 40.4},
+                {"kind": "toolchain", "name": "c", "seconds": 900, "ok": False, "timed_out": True},
+                {"kind": "toolchain", "name": "d", "seconds": 50, "ok": False, "cpu": 10},
+                {"kind": "framework", "name": "e", "seconds": 30, "ok": True, "cpu": 30},
+            ],
+        )
+        self.assertEqual(merged["toolchain_cpu"], {"a": 150, "b": 40})
+        self.assertEqual(merged["toolchain"], {"a": 400, "b": 90, "c": 900})
+        self.assertEqual(ci.load_spinel_timings(json.dumps(merged))["toolchain_cpu"], {"a": 150, "b": 40})
+
+    def test_cpu_seconds_place_tests_where_wall_seconds_misled(self):
+        # Wall seconds measured beside other tests: all four took as long, but a and b kept every thread busy.
+        tests = ["a", "b", "c", "d"]
+        wall = {"toolchain": {**{t: 400 for t in tests}, ci.SPINEL_TOOLCHAIN_TAIL: 1}}
+        cpu = {**wall, "toolchain_cpu": {"a": 1600, "b": 1600, "c": 100, "d": 100}}
+        shards = [ci.spinel_toolchain_shard(tests, k, count=2, timings=cpu) for k in range(2)]
+        self.assertEqual(sorted(sorted(s) for s in shards), [["a", "c"], ["b", "d"]])
+        # No shard ends before its longest test, whatever its CPU seconds.
+        lone = {"toolchain": {"long": 900, "x": 100, "y": 100, ci.SPINEL_TOOLCHAIN_TAIL: 1}, "toolchain_cpu": {"long": 900, "x": 400, "y": 400}}
+        shards = [ci.spinel_toolchain_shard(["long", "x", "y"], k, count=2, timings=lone) for k in range(2)]
+        self.assertIn(["long"], shards)
+
+    def test_equal_tests_fill_every_shard(self):
+        tests = [f"t{i:02}" for i in range(12)]
+        timings = {"toolchain": {t: 400 for t in tests}, "toolchain_cpu": {t: 400 for t in tests}}
+        shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(ci.SPINEL_TOOLCHAIN_SHARDS)]
+        self.assertTrue(all(shards), shards)
+        self.assertEqual(sorted(t for s in shards for t in s), tests)
+
+    def test_run_tests_records_cpu_seconds_with_the_bundle_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "records.jsonl"
+            bundle = Path(tmp) / "bundle"
+            bundle.mkdir()
+            (bundle / "seconds.json").write_text('{"a": 30, "b": 10}')
+            (bundle / "cpu.json").write_text('{"cpu": 200}')
+            env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": str(out), "RH_SPINEL_BUNDLE": str(bundle)}
+            subprocess.run(
+                ["python3", spec.origin, "run-tests", "--kind", "toolchain", "--parallel", "2", "--", "true"],
+                input="a\nb\nc\n", capture_output=True, text=True, env=env, check=True,
+            )
+            cpu = {r["name"]: r["cpu"] for r in map(json.loads, out.read_text().splitlines())}
+            self.assertEqual({k: round(v) for k, v in cpu.items()}, {"a": 150, "b": 50, "c": 0})
+            self.assertLess(cpu["c"], 1)
+
+    def test_cpu_of_writes_the_commands_cpu_seconds_with_its_children(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "nested" / "cpu.json"
+            busy = "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done"
+            run = subprocess.run(
+                ["python3", spec.origin, "cpu-of", "--out", str(out), "--", "sh", "-c", f"sh -c '{busy}'; exit 3"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(run.returncode, 3)
+            self.assertGreater(json.loads(out.read_text())["cpu"], 0.1)
 
     def test_a_stopped_tests_seconds_only_raise_its_last_value(self):
         merged = ci.merge_timings(

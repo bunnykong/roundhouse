@@ -17,6 +17,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
@@ -248,6 +249,9 @@ SPINEL_TOOLCHAIN_TAIL = "tiny_api"
 SPINEL_TOOLCHAIN_TAIL_SECONDS = 111
 # The tables above are seeds and the fallback only: main's runs keep measured seconds in the Actions cache (ci.yml spinel-timings).
 SPINEL_TIMING_KINDS = ("framework", "toolchain")
+# Not the toolchain seconds alone: a test's wall seconds grow with what shares its runner, and the plan that put them there is made from them.
+SPINEL_TOOLCHAIN_CPU = "toolchain_cpu"
+SPINEL_TIMING_STORED = (*SPINEL_TIMING_KINDS, SPINEL_TOOLCHAIN_CPU)
 # Inputs of the ActiveJob payload gate (tests/active_job_payload.rs):
 # the files its driver loads beside it.
 ACTIVE_JOB_PAYLOAD_INPUTS = {
@@ -1090,7 +1094,7 @@ def load_spinel_timings(raw):
             for name, seconds in data[kind].items()
             if positive_seconds(seconds)
         }
-        for kind in SPINEL_TIMING_KINDS
+        for kind in SPINEL_TIMING_STORED
         if isinstance(data.get(kind), dict)
     }
 
@@ -1114,6 +1118,11 @@ def spinel_toolchain_seconds(test, timings=None):
     return recorded or SPINEL_TOOLCHAIN_SECONDS.get(test, SPINEL_TOOLCHAIN_DEFAULT_SECONDS)
 
 
+def spinel_toolchain_cpu(test, timings=None):
+    """The CPU seconds recorded for test with its share of the shared builds, or None."""
+    return (timings or {}).get(SPINEL_TOOLCHAIN_CPU, {}).get(test)
+
+
 def spinel_framework_shards(tests, count=SPINEL_FRAMEWORK_SHARDS, timings=None):
     """Longest suite first onto the lightest shard; each shard keeps SPINEL_TESTS order."""
     shards = [[] for _ in range(min(count, len(tests)) or 1)]
@@ -1126,11 +1135,13 @@ def spinel_framework_shards(tests, count=SPINEL_FRAMEWORK_SHARDS, timings=None):
 
 
 def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=None, units=None):
-    """This shard's tests: longest first onto the lightest shard, by name order within it.
+    """This shard's tests: longest first onto the shard that would end first, by name order within it.
 
     A unit (tests one shared Spinel build would take, from spinel_bundle_plan) goes to one
-    shard whole: split across shards, each part pays the build again."""
+    shard whole: split across shards, each part pays the build again. A shard ends once its
+    CPU seconds are spread over its threads, and not before its longest item."""
     loads = [0] * count
+    longest = [0] * count
     tail = (timings or {}).get("toolchain", {}).get(SPINEL_TOOLCHAIN_TAIL, SPINEL_TOOLCHAIN_TAIL_SECONDS)
     loads[-1] = tail * SPINEL_TOOLCHAIN_THREADS
     present = set(tests)
@@ -1148,21 +1159,31 @@ def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=
     def cost(item):
         seconds = [spinel_toolchain_seconds(t, timings) for t in item]
         return min(sum(seconds), max(seconds) * (1 + (len(item) - 1) / 8))
+    # Not the wall seconds where every test has its CPU seconds: those of a unit already sum to its one build.
+    def cpu(item):
+        seconds = [spinel_toolchain_cpu(t, timings) for t in item]
+        return sum(seconds) if all(seconds) else cost(item)
+    def ends(i, item):
+        return max((loads[i] + cpu(item)) / SPINEL_TOOLCHAIN_THREADS, longest[i], cost(item))
     mine = []
-    for item in sorted(items, key=lambda item: (-cost(item), item[0])):
-        i = loads.index(min(loads))
-        loads[i] += cost(item)
+    for item in sorted(items, key=lambda item: (-cpu(item), item[0])):
+        # Not the lowest index on a tie: equal tests end every shard at the longest one, and the index alone left the last shards empty.
+        i = min(range(count), key=lambda i: (ends(i, item), loads[i], i))
+        loads[i] += cpu(item)
+        longest[i] = max(longest[i], cost(item))
         if i == shard:
             mine.extend(item)
     return sorted(mine)
 
 
-def record_timing(kind, name, seconds, ok, timed_out=False):
+def record_timing(kind, name, seconds, ok, timed_out=False, cpu=None):
     if out := os.environ.get("CI_SPINEL_TIMINGS_OUT"):
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         record = {"kind": kind, "name": name, "seconds": max(round(seconds), 1), "ok": ok}
         if timed_out:
             record["timed_out"] = True
+        if cpu is not None:
+            record["cpu"] = round(cpu, 1)
         with open(out, "a") as f:
             f.write(json.dumps(record) + "\n")
 
@@ -1175,7 +1196,23 @@ def deadline_left():
         return None
 
 
-def run_timed(kind, name, command, charged=0):
+def reap(proc, left):
+    """proc's exit status and the CPU seconds of it and the children it waited for (None once stopped at left)."""
+    reaped = {}
+    # Not proc.wait: it reaps the test without its rusage, the CPU seconds of the test and the spinel and cc it waited for.
+    waiter = threading.Thread(target=lambda: reaped.update(zip(("pid", "raw", "usage"), os.wait4(proc.pid, 0))), daemon=True)
+    waiter.start()
+    waiter.join(left)
+    if waiter.is_alive():
+        os.killpg(proc.pid, signal.SIGKILL)
+        waiter.join()
+        proc.returncode = 124
+        return 124, None
+    proc.returncode = os.waitstatus_to_exitcode(reaped["raw"])
+    return proc.returncode, reaped["usage"].ru_utime + reaped["usage"].ru_stime
+
+
+def run_timed(kind, name, command, charged=0, charged_cpu=0):
     start = time.monotonic()
     left = deadline_left()
     if left is not None and left <= 0:
@@ -1183,16 +1220,21 @@ def run_timed(kind, name, command, charged=0):
         return 124
     # Its own process group: killing the test alone would leave its spinel and cc children on the CPUs.
     proc = subprocess.Popen(command, start_new_session=left is not None)
-    try:
-        status = proc.wait(timeout=left)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait()
+    status, cpu = reap(proc, left)
+    if cpu is None:
         print(f"::error::{name} stopped at this shard's deadline")
-        status = 124
     charged = charged() if callable(charged) else charged
     # 124 is timeout(1) stopping the command: its seconds are still worth recording.
-    record_timing(kind, name, time.monotonic() - start + charged, status == 0, status == 124)
+    record_timing(kind, name, time.monotonic() - start + charged, status == 0, status == 124, cpu + charged_cpu if cpu is not None else None)
+    return status
+
+
+def cpu_of(command, out):
+    """Run command and write its CPU seconds, with the children it waited for, to out as {"cpu": seconds}."""
+    proc = subprocess.Popen(command)
+    status, cpu = reap(proc, None)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(json.dumps({"cpu": round(cpu, 1)}) + "\n")
     return status
 
 
@@ -1227,11 +1269,25 @@ def suite_bundle_seconds(cases):
     return sum(charged.get(t, 0) for t in tests if isinstance(t, str))
 
 
+def bundle_cpu_shares():
+    """Each test's share of the shared builds' CPU seconds (cpu.json, by `cpu-of`), split as their seconds are."""
+    seconds = bundle_seconds()
+    path = os.environ.get("RH_SPINEL_BUNDLE", "")
+    try:
+        total = json.loads((Path(path) / "cpu.json").read_text()).get("cpu") if path else None
+    except (OSError, UnicodeError, ValueError, AttributeError):
+        return {}
+    whole = sum(seconds.values())
+    if not positive_seconds(total) or not whole:
+        return {}
+    return {name: total * share / whole for name, share in seconds.items()}
+
+
 def run_tests(kind, tests, parallel, command):
     """Each test in its own process, so each one's seconds can be recorded."""
-    charged = bundle_seconds()
+    charged, charged_cpu = bundle_seconds(), bundle_cpu_shares()
     with ThreadPoolExecutor(max_workers=max(parallel, 1)) as pool:
-        statuses = list(pool.map(lambda t: run_timed(kind, t, [*command, t], charged.get(t, 0)), tests))
+        statuses = list(pool.map(lambda t: run_timed(kind, t, [*command, t], charged.get(t, 0), charged_cpu.get(t, 0)), tests))
     failed = [t for t, status in zip(tests, statuses) if status != 0]
     print(f"{len(tests) - len(failed)} passed, {len(failed)} failed")
     for test in failed:
@@ -1244,19 +1300,24 @@ def merge_timings(previous, records, weight=0.5):
 
     A stopped test's seconds are a floor: they can raise its value, never lower it, so the slowest runs still count.
     """
-    merged = {kind: dict(previous.get(kind, {})) for kind in SPINEL_TIMING_KINDS}
+    merged = {kind: dict(previous.get(kind, {})) for kind in SPINEL_TIMING_STORED}
+    def average(kind, name, seconds, timed_out):
+        last = merged[kind].get(name)
+        if timed_out and last and seconds <= last:
+            return
+        merged[kind][name] = round(last + (seconds - last) * weight) if last else round(seconds)
     for record in records:
         kind, name, seconds = record.get("kind"), record.get("name"), record.get("seconds")
-        if not isinstance(kind, str) or kind not in merged or not isinstance(name, str):
+        if kind not in SPINEL_TIMING_KINDS or not isinstance(name, str):
             continue
         timed_out = record.get("timed_out") is True
         if (record.get("ok") is not True and not timed_out) or not positive_seconds(seconds):
             continue
-        last = merged[kind].get(name)
-        if timed_out and last and seconds <= last:
-            continue
-        merged[kind][name] = round(last + (seconds - last) * weight) if last else round(seconds)
-    return merged
+        average(kind, name, seconds, timed_out)
+        # (a stopped test has no CPU seconds: it was killed, not reaped)
+        if kind == "toolchain" and record.get("ok") is True and positive_seconds(record.get("cpu")):
+            average(SPINEL_TOOLCHAIN_CPU, name, record["cpu"], False)
+    return {kind: seconds for kind, seconds in merged.items() if seconds or kind in SPINEL_TIMING_KINDS}
 
 
 def finish(
@@ -1526,7 +1587,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=["plan", "gate", "compact-gate", "toolchain-shard", "timed", "run-tests", "merge-timings"],
+        choices=["plan", "gate", "compact-gate", "toolchain-shard", "timed", "cpu-of", "run-tests", "merge-timings"],
     )
     parser.add_argument("--shard", type=int)
     parser.add_argument("--units")
@@ -1552,6 +1613,8 @@ def main():
         # The command's own status: the framework loop tells timeout(1)'s 124 from a failure.
         charged = (lambda: args.charged + suite_bundle_seconds(args.charge_cases)) if args.charge_cases else args.charged
         return run_timed(args.kind, args.name, command, charged)
+    if args.command == "cpu-of":
+        return cpu_of(command, args.out)
     if args.command == "run-tests":
         tests = [line.strip() for line in sys.stdin if line.strip()]
         return run_tests(args.kind, tests, args.parallel, command)
@@ -1684,9 +1747,9 @@ def main():
             "compare": plan["compare"],
             "spinel-tests": plan["spinel_tests"],
             "spinel-framework-shards": plan["spinel_framework_shards"],
+            # Not the two wall kinds alone: each toolchain shard plans from this, on its CPU seconds where recorded.
             "spinel-timings": {
-                "framework": timings.get("framework", {}),
-                "toolchain": timings.get("toolchain", {}),
+                kind: timings.get(kind, {}) for kind in SPINEL_TIMING_STORED if kind in SPINEL_TIMING_KINDS or timings.get(kind)
             },
             "smoke": plan["smoke"],
             "smoke-extra": plan["smoke_extra"],
