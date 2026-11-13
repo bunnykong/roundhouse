@@ -507,8 +507,9 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting, rails: Op
                 .filter(|(at, m)| {
                     let rest = code[at + m.len()..].trim_start();
                     let before = code[..*at].trim_end_matches(|c: char| word(c) || c == '.' || c == ':').trim_end();
-                    let read_after = ["==", "!=", ")", ",", "&&", "?", "then"].iter().any(|t| rest.starts_with(t))
-                        || (rest.starts_with("||") && !rest.starts_with("||="));
+                    let read_after = ["==", "!=", ")", ",", "?", "then"].iter().any(|t| rest.starts_with(t))
+                        || (rest.starts_with("||") && !rest.starts_with("||="))
+                        || (rest.starts_with("&&") && !rest.starts_with("&&="));
                     let read_before = ["if", "unless", "elsif", "&&", "||", "!", "(", "==", "!="].iter().any(|t| before.ends_with(t));
                     let read = read_after || (rest.is_empty() && read_before);
                     !code[at + m.len()..].starts_with(word) && !code[..*at].ends_with(word) && !read
@@ -660,6 +661,15 @@ mod tests {
         .unwrap()
         .expect("an override");
         assert!(out.contains("return ({ \"X\" => \"1\" })"), "{out}");
+    }
+
+    #[test]
+    fn a_compound_assignment_is_still_refused() {
+        let out = synth(&[(
+            "config/environments/production.rb",
+            "Rails.application.configure do\n  config.public_file_server.headers = { \"X\" => \"1\" }\n  config.public_file_server.headers &&= { \"X\" => \"2\" }\nend\n",
+        )]);
+        assert!(out.is_err(), "{out:?}");
     }
 
     #[test]
