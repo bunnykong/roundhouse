@@ -891,10 +891,6 @@ const RUNTIME_SRC_IMPORTS: &[(&str, &str)] = &[
     ("ParamValue", "param_value"),
 ];
 
-/// Compute the import block for a class: scan method bodies for Const
-/// references, partition into juntos-provided names vs sibling models /
-/// library_classes vs unknown (skipped). Also imports the parent class
-/// when it's a juntos export.
 /// The class references in a method's parameter defaults.
 fn collect_param_default_refs(m: &crate::dialect::MethodDef, refs: &mut BTreeSet<String>) {
     for p in &m.params {
@@ -904,6 +900,10 @@ fn collect_param_default_refs(m: &crate::dialect::MethodDef, refs: &mut BTreeSet
     }
 }
 
+/// Compute the import block for a class: scan method bodies for Const
+/// references, partition into juntos-provided names vs sibling models /
+/// library_classes vs unknown (skipped). Also imports the parent class
+/// when it's a juntos export.
 fn collect_imports(lc: &LibraryClass, app: &App, out_path: &std::path::Path) -> Vec<JsImport> {
     collect_imports_with_companions(lc, app, out_path, &[], &[])
 }
