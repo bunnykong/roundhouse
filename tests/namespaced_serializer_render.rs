@@ -45,7 +45,7 @@ fn typescript_serializer_options_keep_their_default() {
     let serializer = read(&emitted, "app/models/article_serializer.ts");
     assert!(serializer.contains("constructor(object: any, options: any = {}) {"), "{serializer}");
     let controller = read(&emitted, "app/controllers/api::articles_controller.ts");
-    assert!(controller.contains("new ArticleSerializer(__ams_item)"), "{controller}");
+    assert!(controller.contains("new ArticleSerializer(ams_item)"), "{controller}");
 }
 
 /// The namespaced serializer is declared in its namespace, imported by
@@ -81,5 +81,5 @@ fn elixir_emits_the_serializer_modules_the_renders_call() {
     assert!(nested.contains("def as_json_str(record) do"), "{nested}");
     let controller = read(&emitted, "lib/api_articlescontroller.ex");
     assert!(controller.contains("Api.ArticleSerializer.new(Article.find("), "{controller}");
-    assert!(controller.contains("ArticleSerializer.new(__ams_item)"), "{controller}");
+    assert!(controller.contains("ArticleSerializer.new(ams_item)"), "{controller}");
 }
