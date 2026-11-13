@@ -83,6 +83,8 @@ mod i18n_locales_app;
 #[path = "support/record_slice_app.rs"]
 #[allow(dead_code)]
 mod record_slice_app;
+#[path = "support/namespaced_serializer.rs"]
+mod namespaced_serializer;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -289,6 +291,20 @@ fn non_model_find_keeps_its_params_argument() {
     assert!(controller.contains("Shelf.find(this.params[\"id\"])"), "{controller}");
     assert!(controller.contains("Article.find(Number(typeof this.params[\"id\"] === \"string\""), "{controller}");
     assert_tsc_passes("real-blog with a non-model find", &emitted);
+}
+
+/// #2087: a controller in `module Api` rendering through a top-level
+/// serializer, one per element, and one in its own namespace. The entry
+/// files named the controller `Api::ArticlesController` (TS1005), the
+/// one-argument `new ArticleSerializer(record)` missed the constructor's
+/// defaulted `options` (TS2554), and `Api.ArticleSerializer.new(...)`
+/// named nothing in scope (TS2304).
+#[test]
+#[ignore]
+fn real_blog_namespaced_serializer_render_tsc_passes() {
+    let (emitted, errors) = namespaced_serializer::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_tsc_passes("real-blog with a namespaced serializer render", &emitted);
 }
 
 /// Diagnostic test: emit transpiled_blog and dump tsc errors so we
