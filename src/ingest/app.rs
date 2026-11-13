@@ -3265,7 +3265,7 @@ end
     super::metal_actions::synthesize(&mut app);
     super::absence_guards::raise_undefined_capitalized_calls(&mut app);
     // Not asked at `absence_guards::mark`: by then a source gem's methods no longer resolve their file.
-    let source_gem_classes = super::absence_guards::source_gem_classes(&app);
+    let source_gem_code = super::absence_guards::source_gem_code(&app);
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
@@ -3450,7 +3450,19 @@ end
     splice_concern_to_param_into_includers(&mut app);
     super::job_class_lookup::rewrite(&mut app);
     super::uncalled_definers::mark(&mut app);
-    super::absence_guards::mark(&mut app, &source_gem_classes);
+    // A feature an installed locked gem ships as `lib/<feature>.rb`, whatever the gem's name or namespace.
+    let locked_gem_libs: Vec<PathBuf> = {
+        let roots = crate::i18n::gems::gem_roots(vfs, dir);
+        app.gem_lock
+            .iter()
+            .flat_map(|lock| lock.specs.iter())
+            .filter_map(|(name, version)| crate::i18n::gems::installed_gem(vfs, &roots, name, version))
+            .chain(path_gems.iter().cloned())
+            .map(|gem| gem.join("lib"))
+            .collect()
+    };
+    let shipped = |feature: &str| locked_gem_libs.iter().any(|lib| vfs.exists(&lib.join(format!("{feature}.rb"))));
+    super::absence_guards::mark(&mut app, &source_gem_code, &shipped);
     // After every pass that changes a controller's methods, the concern
     // splice and the class-body macros above all: the lowering clones
     // from the controller they leave.

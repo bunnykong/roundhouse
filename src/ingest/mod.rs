@@ -46,6 +46,7 @@ mod aliased_includes;
 mod forwardable;
 mod railtie_middleware;
 pub(crate) mod absence_guards;
+mod stdlib_features;
 pub(crate) mod source_gem_autoload;
 mod metal_actions;
 mod uncalled_definers;

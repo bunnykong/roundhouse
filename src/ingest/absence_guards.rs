@@ -3,21 +3,60 @@ use crate::app::App;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 
-/// The classes whose code a source gem wrote: what reads a constant no
-/// locked gem could define there is a gem written for apps without it.
-pub(super) fn source_gem_classes(app: &App) -> crate::det::HashSet<String> {
-    app.library_classes
-        .iter()
-        .filter(|lc| lc.methods.iter().any(|m| super::sources::path_of(m.name_span.file).is_some_and(|p| is_source_gem_path(&p))))
-        .map(|lc| lc.name.0.as_str().to_string())
-        .collect()
+/// A method by its class, name and side: `(class, name, class-side)`.
+type MethodKey = (String, String, bool);
+
+fn method_key(class: &str, m: &crate::dialect::MethodDef) -> MethodKey {
+    (class.to_string(), m.name.as_str().to_string(), matches!(m.receiver, crate::dialect::MethodReceiver::Class))
+}
+
+/// What a source gem wrote, read while each method still resolves its
+/// file: the classes it wrote code in, and its methods. A class the app
+/// reopens holds the app's methods too.
+pub(super) struct SourceGemCode {
+    /// What reads a constant no locked gem could define there is a gem
+    /// written for apps without it.
+    pub(super) classes: crate::det::HashSet<String>,
+    gem_methods: crate::det::HashSet<MethodKey>,
+    app_methods: crate::det::HashSet<MethodKey>,
+}
+
+impl SourceGemCode {
+    /// Whether the gem alone wrote this method: one the app also defines
+    /// under that name is left as the app's.
+    fn wrote(&self, class: &str, m: &crate::dialect::MethodDef) -> bool {
+        self.wrote_key(&method_key(class, m))
+    }
+
+    fn wrote_key(&self, key: &MethodKey) -> bool {
+        self.gem_methods.contains(key) && !self.app_methods.contains(key)
+    }
+}
+
+pub(super) fn source_gem_code(app: &App) -> SourceGemCode {
+    let mut code = SourceGemCode { classes: Default::default(), gem_methods: Default::default(), app_methods: Default::default() };
+    for lc in &app.library_classes {
+        let class = lc.name.0.as_str();
+        for m in &lc.methods {
+            if super::sources::path_of(m.name_span.file).is_some_and(|p| is_source_gem_path(&p)) {
+                code.classes.insert(class.to_string());
+                code.gem_methods.insert(method_key(class, m));
+            } else {
+                code.app_methods.insert(method_key(class, m));
+            }
+        }
+    }
+    code
 }
 
 pub(crate) fn is_source_gem_path(p: &str) -> bool {
     p.contains("/.roundhouse/source_gems/") || p.starts_with(".roundhouse/source_gems/")
 }
 
-pub(super) fn mark(app: &mut App, source_gem_classes: &crate::det::HashSet<String>) {
+/// `shipped`: whether an installed locked gem (or a path gem) has the
+/// feature's file under its `lib`.
+pub(super) fn mark(app: &mut App, source_gem: &SourceGemCode, shipped: &dyn Fn(&str) -> bool) {
+    let source_gem_classes = &source_gem.classes;
     let Some(lock) = app.gem_lock.clone() else { return };
     let index = crate::gems::LockGemIndex::new(&lock);
     let absent_namespaces = crate::gems::AbsentGemNamespaces::new(&lock);
@@ -86,8 +125,30 @@ pub(super) fn mark(app: &mut App, source_gem_classes: &crate::det::HashSet<Strin
             Some(full[..depth].join("::"))
         })
     };
-    // A required path is the absent gem's own when its namespace is (tzinfo-data's `tzinfo/data`).
-    let unloadable = |path: &str| absent_namespaces.owner(&path.split('/').collect::<Vec<_>>().join("::")).is_some();
+    // A required path is the absent gem's own when its namespace is (tzinfo-data's `tzinfo/data`), unless a locked,
+    // installed gem ships the file: Ruby's `require` then loads that one.
+    let unloadable = |path: &str| {
+        absent_namespaces.owner(&path.split('/').collect::<Vec<_>>().join("::")).is_some() && !shipped(feature_of(path))
+    };
+    // Not a feature any locked gem (by name, constant or file), Ruby (by exact path) or Rails provides: a gem's optional feature's library the app doesn't bundle
+    // (`require "method_source"` in a loader that rescues LoadError). Ruby raises LoadError where the method runs; Spinel
+    // resolves a require statically, and `spin build` refuses one it cannot satisfy.
+    let provided_by_nothing = |path: &str| {
+        // Looked up without its suffix: `io/wait.so` is Ruby's `io/wait` (the raise keeps the name as written).
+        let feature = feature_of(path);
+        let root = feature.split('/').next().unwrap_or(feature);
+        let under_ruby_root = feature.contains('/') && RUBY_FEATURE_ROOTS.contains(&root);
+        let as_constant: Vec<String> = feature.split('/').map(|s| s.split(['_', '-']).map(capitalized).collect::<String>()).collect();
+        !root.is_empty()
+            && !feature.starts_with('.')
+            && !crate::gems::is_framework_feature(feature)
+            && !ships_with_ruby(feature)
+            && ![root.to_string(), root.replace('_', "-"), feature.replace('/', "-")].iter().any(|n| lock.version_of(n).is_some())
+            // Under a standard-library root, the first segment (`Net`) is every `net-*` gem's namespace, so the
+            // constant names no gem: the gem's name (net-http-persistent) or a file it ships decides.
+            && (under_ruby_root || index.owners(&as_constant.join("::")).is_empty())
+            && !shipped(feature)
+    };
     unreached_gated_classes(app, source_gem_classes, &absent);
     for lc in app.library_classes.iter_mut() {
         let owner = lc.name.0.as_str().to_string();
@@ -95,11 +156,64 @@ pub(super) fn mark(app: &mut App, source_gem_classes: &crate::det::HashSet<Strin
         // A gem's own read of a constant nothing locked defines is Ruby's NameError where it runs (rack-attack's `Redis::VERSION`).
         let everywhere: Vec<Vec<Symbol>> = if source_gem_classes.contains(&owner) { vec![Vec::new()] } else { Vec::new() };
         for m in lc.methods.iter_mut() {
+            // Only in a source gem's own methods: its `require` runs when the method does. An app's own, in a
+            // class it reopens or not, is the app's to bundle.
+            let from_gem = source_gem.wrote(&owner, m);
+            let unloadable = |path: &str| unloadable(path) || (from_gem && provided_by_nothing(path));
             walk(&mut m.body, &everywhere, &absent, &gone, &unloadable);
         }
     }
     let gone = |written: &[&Symbol]| gone_in("", written);
+    // A mixin's method spliced into a controller is a copy of the module's: one a source gem alone wrote decides its
+    // `require`s as the original does. The walk below then finds nothing left to rewrite in it.
+    for controller in app.controllers.iter_mut() {
+        let Some(origins) = app.concern_spliced_actions.get(&controller.name) else { continue };
+        for item in controller.body.iter_mut() {
+            let crate::dialect::ControllerBodyItem::Action { action, .. } = item else { continue };
+            let Some(module) = origins.get(&action.name) else { continue };
+            let key = (module.0.as_str().to_string(), action.name.as_str().to_string(), false);
+            if source_gem.wrote_key(&key) {
+                let unloadable = |path: &str| unloadable(path) || provided_by_nothing(path);
+                walk(&mut action.body, &[], &absent, &gone, &unloadable);
+            }
+        }
+    }
     crate::lower::for_each_hook_body(app, &mut |e| walk(e, &[], &absent, &gone, &unloadable));
+}
+
+/// Ruby ships this exact feature: a root such as `json`, or a path under one that Ruby's own library or a default gem
+/// has (`net/http`, not net-http-persistent's `net/http/persistent`).
+fn ships_with_ruby(feature: &str) -> bool {
+    if feature.contains('/') {
+        super::stdlib_features::STDLIB_SUBFEATURES.binary_search(&feature).is_ok()
+            || super::app::APP_REQUIRABLE_STDLIB.contains(&feature)
+    } else {
+        RUBY_FEATURE_ROOTS.contains(&feature)
+    }
+}
+
+/// A required path as a feature: without `.rb` or a native extension's suffix.
+fn feature_of(path: &str) -> &str {
+    [".rb", ".so", ".bundle", ".dll"].iter().find_map(|ext| path.strip_suffix(ext)).unwrap_or(path)
+}
+
+/// The first segment of a feature Ruby itself provides, as a default or bundled gem or part of the standard
+/// library, beyond `APP_REQUIRABLE_STDLIB` (`net/smtp`, `rbconfig`, `prism`).
+const RUBY_FEATURE_ROOTS: &[&str] = &[
+    "abbrev", "base64", "benchmark", "bigdecimal", "bundler", "cgi", "continuation", "coverage", "csv", "date", "debug",
+    "delegate", "did_you_mean", "digest", "drb", "English", "erb", "error_highlight", "etc", "expect", "fcntl", "fiber",
+    "fiddle", "fileutils", "find", "forwardable", "getoptlong", "io", "ipaddr", "irb", "json", "logger", "matrix",
+    "minitest", "mkmf", "monitor", "mutex_m", "net", "nkf", "objspace", "observer", "open-uri", "open3", "openssl",
+    "optparse", "ostruct", "pathname", "power_assert", "pp", "prettyprint", "prime", "prism", "pstore", "psych", "pty",
+    "racc", "rake", "rbconfig", "rbs", "rdoc", "readline", "reline", "repl_type_completor", "resolv", "rexml", "rinda",
+    "ripper", "rss", "ruby2_keywords", "rubygems", "securerandom", "set", "shellwords", "singleton", "socket",
+    "stringio", "strscan", "syntax_suggest", "syslog", "tempfile", "test", "time", "timeout", "tmpdir", "tsort",
+    "typeprof", "un", "uri", "weakref", "win32ole", "yaml", "zlib",
+];
+
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }
 
 type Probe<'p> = &'p dyn Fn(&[&Symbol]) -> bool;
@@ -107,7 +221,7 @@ type Gone<'p> = &'p dyn Fn(&[&Symbol]) -> Option<String>;
 type Unloadable<'p> = &'p dyn Fn(&str) -> bool;
 
 fn walk(e: &mut Expr, guarded: &[Vec<Symbol>], absent: Probe<'_>, gone: Gone<'_>, unloadable: Unloadable<'_>) {
-    // Not left as the require: Spinel ignores one it cannot satisfy, so tzinfo's `rescue LoadError` probe would read the gem as present.
+    // Not left as the require: Spinel ignores one it cannot satisfy (and `spin build` refuses it), so tzinfo's `rescue LoadError` probe would read the gem as present.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*e.node
         && method.as_str() == "require"
         && let [arg] = args.as_slice()
@@ -389,5 +503,41 @@ pub(super) fn raise_undefined_capitalized_calls(app: &mut App) {
             let class_side = (m.receiver == crate::dialect::MethodReceiver::Class).then_some(kind);
             visit(&mut m.body, &owner, class_side, &defined);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOX: &str = "module Shelf\n  class Box\n    def self.pretty!\n      require \"fancy_printer\"\n    end\n\n    def self.local_tag\n      require \"local_formatter\"\n    end\n  end\nend\n";
+
+    /// A gem class the app reopens holds the gem's methods and the app's. Only the gem's own `require` of a library
+    /// nothing provides becomes the `LoadError` Ruby raises; the app's `require` of its own lib file is the app's.
+    #[test]
+    fn an_apps_own_method_on_a_reopened_gem_class_keeps_its_require() {
+        let tree: crate::vfs::FileTree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+            ("lib/shelf/box.rb", BOX),
+            ("lib/local_formatter.rb", "class LocalFormatter\nend\n"),
+        ]
+        .into_iter()
+        .map(|(path, source)| (std::path::PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        // The class as ingest sees it when the gem is compiled from source and an app file reopens it.
+        let gem_file = super::super::sources::register(".roundhouse/source_gems/shelf-1.0.0/lib/shelf.rb", BOX);
+        let app_file = super::super::sources::register("lib/shelf/box.rb", BOX);
+        let class = app.library_classes.iter_mut().find(|c| c.name.0.as_str() == "Shelf::Box").expect("Shelf::Box");
+        for m in &mut class.methods {
+            m.name_span.file = if m.name.as_str() == "pretty!" { gem_file } else { app_file };
+        }
+        app.gem_lock = Some(crate::gems::Lockfile::default());
+        let code = source_gem_code(&app);
+        mark(&mut app, &code, &|_| false);
+        let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "Shelf::Box").expect("Shelf::Box");
+        let body = |name: &str| format!("{:?}", class.methods.iter().find(|m| m.name.as_str() == name).expect(name).body);
+        assert!(body("pretty!").contains("cannot load such file -- fancy_printer"), "{}", body("pretty!"));
+        assert!(body("local_tag").contains("local_formatter") && !body("local_tag").contains("cannot load such file"), "{}", body("local_tag"));
     }
 }

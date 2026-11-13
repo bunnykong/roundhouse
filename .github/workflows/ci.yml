@@ -1852,9 +1852,9 @@ jobs:
       # Full validation compiles each inside the whole blog's boot instead.
       ROUNDHOUSE_SPINEL_SLIM: ${{ inputs.full && '0' || '1' }}
     steps:
-      # Not left to timeout-minutes: a job stopped there uploads no seconds, so the planner kept the shard as it was.
+      # Not left to timeout-minutes: a job stopped there uploads no seconds, so the planner kept the shard as it was. Not earlier than a minute before it: shards that used to pass near 24 minutes would fail.
       - name: Set this shard's deadline
-        run: echo "CI_SPINEL_DEADLINE=$(( $(date +%s) + 1380 ))" >> "$GITHUB_ENV"
+        run: echo "CI_SPINEL_DEADLINE=$(( $(date +%s) + 1440 ))" >> "$GITHUB_ENV"
       - uses: actions/checkout@v7
       # No setup-rust: the producer archive restores the test binaries.
       - uses: actions/download-artifact@v8
