@@ -98,7 +98,6 @@ fn an_alias_of_a_builtin_answers_as_the_builtin_on_ruby() {
 /// - a module included before (the alias is the module's) or after (the
 ///   alias keeps `Object#to_s` while `to_s` is the module's);
 /// - a module prepended (the alias keeps `Object#to_s`);
-/// - a superclass that defines it (the alias is the superclass's);
 /// - a later `self.include`, `attr_reader :to_s`, `define_method(:to_s)` or
 ///   `alias to_s other` (the alias keeps `Object#to_s`).
 #[test]
@@ -110,7 +109,6 @@ fn a_builtin_something_else_defines_stays_the_gap() {
         ("include_before_presenter", "class IncludeBeforePresenter\n  include Loud\n  alias label to_s\nend\n"),
         ("include_after_presenter", "class IncludeAfterPresenter\n  alias label to_s\n  include Loud\nend\n"),
         ("prepend_presenter", "class PrependPresenter\n  alias label to_s\n  prepend Loud\nend\n"),
-        ("child_presenter", "class ChildPresenter < BasePresenter\n  alias label to_s\nend\n"),
         ("self_include_presenter", "class SelfIncludePresenter\n  alias label to_s\n  self.include Loud\nend\n"),
         ("reader_presenter", "class ReaderPresenter\n  alias label to_s\n  attr_reader :to_s\nend\n"),
         ("defined_presenter", "class DefinedPresenter\n  alias label to_s\n  define_method(:to_s) { \"defined\" }\nend\n"),
@@ -132,6 +130,18 @@ fn a_builtin_something_else_defines_stays_the_gap() {
     }
     assert!(app.library_classes.iter().any(|c| c.name.0.as_str() == "NamePresenter"), "{gaps:#?}");
     assert!(app.library_classes.iter().any(|c| c.name.0.as_str() == "BasePresenter"), "{gaps:#?}");
+}
+
+/// An alias in a subclass whose superclass defines the builtin's name is a copy of the superclass's method
+/// (`inherited_alias::settle`), which answers as Ruby 4.0.7 does: the superclass's body under the alias.
+#[test]
+fn an_alias_of_a_builtin_a_superclass_defines_is_the_superclass_method_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("app/presenters/base_presenter.rb", "class BasePresenter\n  def to_s\n    \"base\"\n  end\nend\n")
+        .write("app/presenters/child_presenter.rb", "class ChildPresenter < BasePresenter\n  alias label to_s\nend\n")
+        .run_ruby("got = ChildPresenter.new.label\nraise \"label #{got.inspect}\" unless got == \"base\"\nputs \"child alias passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("child alias passed"), "{}", run.stdout);
 }
 
 /// The strict targets have no `send` to delegate to: refused where it is

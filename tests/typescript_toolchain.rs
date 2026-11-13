@@ -83,6 +83,10 @@ mod i18n_locales_app;
 #[path = "support/record_slice_app.rs"]
 #[allow(dead_code)]
 mod record_slice_app;
+#[path = "support/namespaced_serializer.rs"]
+mod namespaced_serializer;
+#[path = "support/param_default_import.rs"]
+mod param_default_import;
 
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
@@ -289,6 +293,56 @@ fn non_model_find_keeps_its_params_argument() {
     assert!(controller.contains("Shelf.find(this.params[\"id\"])"), "{controller}");
     assert!(controller.contains("Article.find(Number(typeof this.params[\"id\"] === \"string\""), "{controller}");
     assert_tsc_passes("real-blog with a non-model find", &emitted);
+}
+
+/// #2087: a controller in `module Api` rendering through a top-level
+/// serializer, one per element, and one in its own namespace. The entry
+/// files named the controller `Api::ArticlesController` (TS1005), the
+/// one-argument `new ArticleSerializer(record)` missed the constructor's
+/// defaulted `options` (TS2554), and `Api.ArticleSerializer.new(...)`
+/// named nothing in scope (TS2304).
+#[test]
+#[ignore]
+fn real_blog_namespaced_serializer_render_tsc_passes() {
+    let (emitted, errors) = namespaced_serializer::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_tsc_passes("real-blog with a namespaced serializer render", &emitted);
+}
+
+/// A namespaced controller whose joined name a top-level controller
+/// already has (`Mod::MailsController`, `ModMailsController`): the entry
+/// files bound both as `ModMailsController` (TS2300).
+#[test]
+#[ignore]
+fn real_blog_namespaced_controller_beside_its_joined_name_tsc_passes() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "app/controllers/mod/mails_controller.rb",
+            "module Mod\n  class MailsController < ApplicationController\n    def index\n      render plain: \"namespaced\"\n    end\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/mod_mails_controller.rb",
+            "class ModMailsController < ApplicationController\n  def index\n    render plain: \"top-level\"\n  end\nend\n",
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"mod/mails\" => \"mod/mails#index\"\n  get \"mod_mails\" => \"mod_mails#index\"\n  resources :articles do",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_tsc_passes("real-blog with Mod::MailsController and ModMailsController", &emitted);
+}
+
+/// A constructor default naming another app class
+/// (`opts = Options.new`): the default is emitted, and its class must be
+/// imported (TS2304).
+#[test]
+#[ignore]
+fn real_blog_param_default_import_tsc_passes() {
+    let (emitted, errors) = param_default_import::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_tsc_passes("real-blog with a constructor default naming an app class", &emitted);
 }
 
 /// Diagnostic test: emit transpiled_blog and dump tsc errors so we

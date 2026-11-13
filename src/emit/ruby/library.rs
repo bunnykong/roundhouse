@@ -8624,6 +8624,19 @@ fn emit_library_class_decl_inner(
         if !requires.contains(&rel) {
             requires.push(rel);
         }
+        // So is every segment between the runtime's and this one (rack-protection's `Rack::Protection` around
+        // `class Rack::Protection::Base`): the compound header looks it up too.
+        for end in 2..outer_segments.len() {
+            let path: Vec<String> = outer_segments[..end].iter().map(|s| s.to_string()).collect();
+            let Some(inner) = require_path_for_body_const(&path, app, classes, "") else { continue };
+            if inner == self_anchor || inner.starts_with("runtime/") || inner.starts_with(&format!("{self_anchor}/")) {
+                continue;
+            }
+            let rel = relpath(&out_dir, &inner);
+            if !requires.contains(&rel) {
+                requires.push(rel);
+            }
+        }
     }
     // `include`d modules must be LOADED before the `include` executes at
     // class-definition time — unlike body const-refs (request-time), so we
@@ -11298,8 +11311,19 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
         // Columns only: an ActiveModel attribute has no `_before_type_cast`,
         // so its check reads the cast value (`"abc"` is 0, Rails 8.1.4).
         checked.retain(|c| casts.contains_key(c) && table.is_some_and(|t| t.columns.iter().any(|col| col.name == *c)));
+        // A column held unset until assigned has a method writer over its
+        // `@<col>_raw` slot (`validations::hold_unset_presence_columns`).
+        let held: Vec<Symbol> = crate::lower::validations::held_unset_columns(&app.models, &app.schema)
+            .into_iter()
+            .filter(|(class, _)| *class == model.name)
+            .map(|(_, col)| col)
+            .collect();
+        let held_writer = |m: &crate::dialect::MethodDef| {
+            m.kind == crate::dialect::AccessorKind::Method
+                && m.name.as_str().strip_suffix('=').is_some_and(|c| held.iter().any(|h| h.as_str() == c))
+        };
         for m in &mut lc.methods {
-            if m.receiver != MethodReceiver::Instance || m.kind != crate::dialect::AccessorKind::AttributeWriter {
+            if m.receiver != MethodReceiver::Instance || (m.kind != crate::dialect::AccessorKind::AttributeWriter && !held_writer(m)) {
                 if !checked.is_empty() {
                     read_raw_in_numericality_checks(&mut m.body, &checked);
                     forget_raw_on_internal_writes(&mut m.body, &checked);
@@ -11327,7 +11351,7 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
             let ExprNode::Assign { target: crate::expr::LValue::Ivar { name: ivar }, value } = assign else {
                 continue;
             };
-            if *ivar != col {
+            if *ivar != col && !(held.contains(&col) && ivar.as_str() == format!("{}_raw", col.as_str())) {
                 continue;
             }
             cast_param_reads(value, &param, cast);
@@ -11366,7 +11390,9 @@ fn apply_string_keyed_attrs_lowering(lcs: &mut [LibraryClass], app: &App) {
     };
     for model in &app.models {
         let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else { continue };
-        let Some(init) = lc.methods.iter_mut().find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize") else { continue };
+        // Not `initialize` alone: `update(attrs)` reads the same Symbol keys (Devise's `update_with_password(params)`).
+        // Only the generated `update`: one the model writes takes its arguments as it reads them.
+        for init in lc.methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Instance && (m.name.as_str() == "initialize" || (m.name.as_str() == "update" && m.name_span.is_synthetic()))) {
         if init.params.first().is_none_or(|p| p.name.as_str() != "attrs") {
             continue;
         }
@@ -11395,6 +11421,7 @@ fn apply_string_keyed_attrs_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
             other => sp_expr(ExprNode::Seq { exprs: vec![guarded, Expr::new(body.span, other)] }),
         };
+        }
     }
 }
 

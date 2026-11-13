@@ -13,8 +13,10 @@
 //! modeled gem the Gemfile asks for.
 //!
 //! The rule, per `defined?(A::B::C)` on a plain (possibly `::`-rooted)
-//! constant path. Anything else — a method, ivar, `yield`, `super`,
-//! expression — is never touched.
+//! constant path, and `defined?(Rails.env)` of a class method the runtime
+//! models on a framework root that folds true (`FRAMEWORK_METHODS`).
+//! Anything else — another method, ivar, `yield`, `super`, expression —
+//! is never touched.
 //!
 //! TRUE, folded to `"constant"`:
 //!  * the path (or, for an unrooted path, its name under the owning
@@ -287,6 +289,11 @@ impl Facts {
         if in_tree(&full) {
             return Some(true);
         }
+        // A framework root the application loads, though the tree defines a class under it (`Rails::Railtie`'s
+        // subclasses): Rails loads it before any of them.
+        if segs.len() == 1 && self.frameworks.as_ref().is_some_and(|f| f.iter().any(|f| f == head)) {
+            return Some(true);
+        }
         if self.tree_and_prefixes.contains(head) {
             // Load-time or not, a name in the tree is never provably absent.
             // Prefix resolves, tail does not: a gem or a reopening may add it.
@@ -537,6 +544,22 @@ const FRAMEWORK_ANSWERS: &[(&str, &str, bool)] = &[
     ("ActiveSupport::Dependencies", "reference", false),
 ];
 
+/// The class methods of a framework module the emitted program models (`runtime/ruby/rails.rb`), which
+/// `defined?(Rails.env)` asks for: simple_form's `@@cache_discovery = defined?(Rails.env) && …`.
+const FRAMEWORK_METHODS: &[(&str, &[&str])] = &[("Rails", &["env", "root", "cache", "logger", "application", "configuration"])];
+
+fn framework_method(operand: &Expr) -> Option<(Vec<String>, &'static str)> {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*operand.node else { return None };
+    let ExprNode::Const { path } = &*r.node else { return None };
+    if !args.is_empty() {
+        return None;
+    }
+    let segments: Vec<String> = path.iter().map(|s| s.as_str().to_string()).collect();
+    let name = segments.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join("::");
+    let (_, methods) = FRAMEWORK_METHODS.iter().find(|(c, _)| *c == name)?;
+    methods.iter().find(|m| **m == method.as_str()).map(|m| (segments, *m))
+}
+
 fn framework_answer(e: &Expr) -> Option<bool> {
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else { return None };
     if method.as_str() != "respond_to?" {
@@ -588,6 +611,13 @@ fn walk(e: &mut Expr, owner: Option<&ClassId>, facts: &Facts, lt: bool, cond: bo
         return true;
     }
     if let ExprNode::Defined { operand } = &*e.node {
+        // Only true: an absent framework leaves the call's NameError to Ruby, which `defined?` would answer nil.
+        if let Some((path, _)) = framework_method(operand)
+            && facts.decide(owner, &path, lt) == Some(true)
+        {
+            *e = if cond { lit(e, Literal::Bool { value: true }, Ty::Bool) } else { lit(e, Literal::Str { value: "method".into() }, Ty::Str) };
+            return true;
+        }
         if let ExprNode::Const { path } = &*operand.node {
             let path: Vec<String> = path.iter().map(|s| s.as_str().to_string()).collect();
             let answer = facts.decide(owner, &path, lt);

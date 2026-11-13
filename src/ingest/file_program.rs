@@ -154,6 +154,9 @@ fn program_items(
                 modules.insert(name.clone());
                 found.push((m.location().start_offset(), name));
             }
+            // A class a namespace body makes by assignment (Doorkeeper's `AccessDenied = Class.new(BaseResponseError)`
+            // in `module Errors`), where Ruby makes it, not with the app's files.
+            found.extend(nested_constant_writes(&stmt));
             found.sort_by_key(|(start, _)| *start);
             let mut names: Vec<ClassId> = Vec::new();
             for (_, name) in found {
@@ -172,11 +175,27 @@ fn program_items(
             if !opened.is_empty() {
                 items.push(ProgramItem::Opened(opened));
             }
+            let mut loads = Vec::new();
+            body_requires(&stmt, &[], file, list_dir, &span_of, &mut loads);
+            // A module's autoloads go ahead of its declaration: its body can read them as it loads (simple_form's
+            // `wrappers` reads `Wrappers::Leaf`), and registering one early is lazy. Not a class's: opening it ahead
+            // of the declaration would drop its superclass.
+            let chains = nestings(&stmt);
+            let joined = |chain: &Vec<(String, bool)>| chain.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join("::");
+            let modules_only: Vec<String> = chains.iter().filter(|chain| chain.iter().all(|(_, is_class)| !is_class)).map(joined).collect();
+            let opened: Vec<String> = chains.iter().map(joined).collect();
+            // Nor one of a constant the statement opens itself (Doorkeeper's `autoload :Client, …` then `class Client`):
+            // Ruby runs that autoload at the `class`, and the emitted declaration reopening it would run the program
+            // that drops the very autoload it is reopening under.
+            let (early, late): (Vec<_>, Vec<_>) = loads.into_iter().partition(|item| {
+                matches!(item, ProgramItem::Autoload { owner, name, .. } if modules_only.contains(owner) && !opened.contains(&format!("{owner}::{name}")))
+            });
+            items.extend(early);
             if !names.is_empty() {
                 items.push(ProgramItem::Declared(names));
             }
-            // What the bodies require and autoload as they load, after them.
-            body_requires(&stmt, &[], file, list_dir, &span_of, &mut items);
+            // What the bodies require as they load, after them.
+            items.extend(late);
             continue;
         }
         // A constant rides with the file's classes (`carry_file_constants`).
@@ -629,6 +648,33 @@ fn nestings(stmt: &ruby_prism::Node<'_>) -> Vec<Vec<(String, bool)>> {
             for inner in statements.body().iter() {
                 walk(&inner, &chain, out);
             }
+        }
+    }
+    let mut out = Vec::new();
+    walk(stmt, &[], &mut out);
+    out
+}
+
+/// Each `Name = …` a class or module body of `stmt` writes, as its full name, with where it starts.
+fn nested_constant_writes(stmt: &ruby_prism::Node<'_>) -> Vec<(usize, String)> {
+    fn walk(node: &ruby_prism::Node<'_>, outer: &[String], out: &mut Vec<(usize, String)>) {
+        let (path, body) = if let Some(c) = node.as_class_node() {
+            (class_name_path(&c), c.body())
+        } else if let Some(m) = node.as_module_node() {
+            (module_name_path(&m), m.body())
+        } else {
+            return;
+        };
+        let Some(path) = path else { return };
+        let mut scope = outer.to_vec();
+        scope.extend(path);
+        let Some(statements) = body.as_ref().and_then(|b| b.as_statements_node()) else { return };
+        for inner in statements.body().iter() {
+            if let Some(write) = inner.as_constant_write_node() {
+                let name = scope.iter().map(String::as_str).chain(std::iter::once(constant_id_str(&write.name()).as_ref())).collect::<Vec<_>>().join("::");
+                out.push((write.location().start_offset(), name));
+            }
+            walk(&inner, &scope, out);
         }
     }
     let mut out = Vec::new();

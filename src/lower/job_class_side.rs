@@ -28,7 +28,7 @@
 //! ingest); runs on the post-analyze hook so every target's tree
 //! carries the wrappers.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
@@ -161,6 +161,12 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
 
     // The jobs given a synthesized `perform_later`: the ones
     // `lower::job_payload` can plan a payload for.
+    let mut own_entries: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for lc in &app.library_classes {
+        own_entries.entry(lc.name.0.as_str().into()).or_default().extend(lc.methods.iter()
+            .filter(|m| m.receiver == crate::dialect::MethodReceiver::Class).map(|m| m.name.as_str().to_string()));
+    }
+    let adapters: BTreeMap<_, _> = jobs.iter().map(|name| (name.clone(), super::job_payload::job_adapter(app, name))).collect();
     let mut payload_jobs: BTreeSet<String> = BTreeSet::new();
     let native_keywords = app.native_library_keywords;
     // Jobs refused a wrapper: their `perform_later` / `perform_now`
@@ -218,12 +224,8 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             }
         }
         let entries: &[&str] = if is_worker { &["perform_async"] } else { &["perform_later", "perform_now"] };
-        let class_side: BTreeSet<&str> = lc
-            .methods
-            .iter()
-            .filter(|m| m.receiver == crate::dialect::MethodReceiver::Class)
-            .map(|m| m.name.as_str())
-            .collect();
+        let class_side = &own_entries[lc.name.0.as_str()];
+        let adapter = adapters.get(lc.name.0.as_str()).and_then(|a| a.as_deref());
         let Some(perform) = lc
             .methods
             .iter()
@@ -474,6 +476,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     },
                 );
                 drained.ty = Some(Ty::Bool);
+                if adapter == Some("inline") { drained.node = Box::new(ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }); }
                 let mut queued_or_inline = Expr::new(
                     span,
                     ExprNode::If {
@@ -506,6 +509,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     },
                 );
                 cond.ty = Some(Ty::Bool);
+                if let Some("inline" | "test") = adapter { cond.node = Box::new(ExprNode::Lit { value: crate::expr::Literal::Bool { value: adapter == Some("inline") } }); }
                 // Under `enqueue_only` the work is HELD rather than
                 // dropped, so a blockless `perform_enqueued_jobs` can run
                 // it later, as Rails' `:test` adapter can

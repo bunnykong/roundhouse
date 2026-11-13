@@ -43,6 +43,8 @@ require_relative "active_support_number_helper"
 #
 # Other objects use Rails' optional `empty?` protocol. Their `to_s`
 # says nothing about blankness and may even return nil.
+require_relative "json_builder"
+
 module ActiveSupport
   # `ActiveSupport::JSON` — Rails' JSON coder over the json library.
   #
@@ -867,6 +869,16 @@ module ActiveSupport
     return out if hash.nil?
     hash.each { |key, item| out[ActiveSupport.indifferent_key(key)] = ActiveSupport.indifferent_value(item, false) }
     out
+  end
+
+  # A Hash a parameter takes where an indifferent one reaches it too: one keyed by Symbol converted, one keyed by String
+  # kept, as the caller's indifferent hash is the one Rails writes in place.
+  def self.indifferent_param(hash)
+    return hash if hash.nil?
+    # Not a value of another class a union lets in (a String): only a Hash has keys to convert.
+    return hash unless hash.is_a?(Hash)
+    return hash if hash.keys.all? { |key| key.is_a?(String) }
+    ActiveSupport.indifferent(hash)
   end
 
   # Not a copy for every Array: Rails converts one written by `[]=` in place, unless it is frozen.

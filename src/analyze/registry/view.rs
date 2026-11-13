@@ -268,6 +268,18 @@ pub(in crate::analyze) fn register(
     let helper_modules: BTreeSet<ClassId> =
         app.helper_method_index.values().cloned().collect();
     action_view.includes.extend(helper_modules);
+    // What a gem's `ActiveSupport.on_load(:action_view) { include M }` mixes into every view (simple_form's
+    // `ActionViewExtensions::FormHelper`): its methods answer a template's receiverless calls, as Rails' do.
+    for lc in app.library_classes.iter().filter(|c| c.name.0.as_str() == "ActionView::Base") {
+        for m in &lc.includes {
+            if !action_view.includes.contains(m) {
+                action_view.includes.push(m.clone());
+            }
+            for name in app.library_classes.iter().filter(|c| c.name == *m).flat_map(|c| c.methods.iter()).filter(|d| d.receiver == crate::dialect::MethodReceiver::Instance).map(|d| d.name.clone()) {
+                action_view.instance_methods.remove(&name);
+            }
+        }
+    }
     classes.insert(ClassId(Symbol::from("ActionView::Base")), action_view);
 
     // `ActionView::ViewHelpers` itself, called by its constant — the

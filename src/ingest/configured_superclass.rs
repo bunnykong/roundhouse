@@ -570,6 +570,12 @@ impl<'a> Eval<'a> {
                 let Some(writes) = confined.or_else(|| self.may_write_with(e, &owner, side, &mut HashSet::default(), &frame.locals)) else {
                     return Err(format!("{why}, in a statement whose writes are not known"));
                 };
+                if let Some((class, method)) = super::gem_hooks::route_side_effect(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), e)
+                    && let ExprNode::Send { args, .. } = &*e.node
+                    && let Ok(given) = args.iter().map(|a| self.value(a, frame)).collect::<Res<Vec<_>>>()
+                {
+                    self.side_calls.push((class.to_string(), method.to_string(), given));
+                }
                 self.passed_over = true;
                 for tag in &writes {
                     self.make_unsure(tag);
@@ -1642,6 +1648,20 @@ impl<'a> Eval<'a> {
             ("pluralize", Val::Str(t), []) => Ok(Val::Str(crate::naming::pluralize(t))),
             ("underscore", Val::Str(t), []) => Ok(Val::Str(crate::naming::underscore(t))),
             ("lambda" | "proc", _, []) if recv.is_none() => blk.ok_or_else(|| format!("`{method}` without a block")),
+            ("class", Val::Obj(i), []) => Ok(Val::Class(self.heap[*i].class.clone())),
+            // Ruby's `Singleton`: the one instance, made on the first call and kept where Ruby keeps it.
+            ("instance", Val::Class(name), []) if self.known.contains(name) && self.includes_singleton(name) => {
+                if let Some(found) = self.ivar(&this, "singleton__instance__") {
+                    return Ok(found);
+                }
+                self.heap.push(Object { class: name.clone(), ivars: HashMap::default() });
+                let obj = Val::Obj(self.heap.len() - 1);
+                if let Some((def, scope)) = self.lookup(&obj, "initialize") {
+                    self.invoke(&def, scope, obj.clone(), argv, blk)?;
+                }
+                self.set_ivar(&this, "singleton__instance__", obj.clone())?;
+                Ok(obj)
+            }
             ("new", Val::Class(name), _) if self.known.contains(name) => {
                 self.heap.push(Object { class: name.clone(), ivars: HashMap::default() });
                 let obj = Val::Obj(self.heap.len() - 1);
@@ -2001,6 +2021,13 @@ impl<'a> Eval<'a> {
                 };
                 match &*body.node {
                     ExprNode::Ivar { name } => Some(Slot::Ivar(holder, name.as_str().to_string())),
+                    // A mattr's instance copy (`def mapping = Routes.mapping`): the module's value it reads.
+                    // Not in the caller's frame: the reader's constant is looked up from where the reader is defined.
+                    ExprNode::Send { recv: Some(owner), args, block: None, .. } if args.is_empty() && matches!(&*owner.node, ExprNode::Const { .. }) => {
+                        let body = body.clone();
+                        let mut reader = Frame { this: holder, locals: HashMap::default(), block: None, scope: Some(scope) };
+                        self.held_by(&body, &mut reader)
+                    }
                     _ => None,
                 }
             }
@@ -2419,6 +2446,20 @@ impl<'a> Eval<'a> {
             at = class.rsplit_once("::").map(|(o, _)| o.to_string());
         }
         None
+    }
+
+    fn includes_singleton(&self, name: &str) -> bool {
+        let mut current = Some(name.trim_start_matches("::").to_string());
+        let mut seen = 0;
+        while let Some(c) = current.take() {
+            seen += 1;
+            let Some(class) = self.classes.iter().find(|k| k.name.0.as_str() == c) else { return false };
+            if class.includes.iter().any(|i| i.0.as_str().trim_start_matches("::") == "Singleton") {
+                return true;
+            }
+            current = class.parent.as_ref().map(|p| p.0.as_str().to_string()).filter(|_| seen < 32);
+        }
+        false
     }
 
     fn ivar(&self, this: &Val, name: &str) -> Option<Val> {
@@ -3172,18 +3213,131 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
 
 /// An engine initializer's loop that inserts a middleware per element: over a collection the app's own
 /// initializers leave empty (no `config.omniauth` for `Devise.omniauth_configs`), Rails inserts none.
-pub(super) fn fold_middleware_loops<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App, loops: Vec<(Expr, crate::diagnostic::Diagnostic)>) {
+pub(super) fn fold_middleware_loops<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    app: &mut App,
+    loops: Vec<super::railtie_middleware::MiddlewareLoop>,
+    env_writes_by_class: &crate::det::HashMap<String, crate::det::HashMap<String, String>>,
+) {
     if loops.is_empty() {
         return;
     }
     let initializers = initializer_statements(vfs, dir, &[]);
-    for (collection, refusal) in loops {
-        let empty = matches!(Eval::new(app).answer_value(&collection, &initializers), Ok(Val::Hash(e)) if e.is_empty())
-            || matches!(Eval::new(app).answer_value(&collection, &initializers), Ok(Val::Array(e)) if e.is_empty());
-        if !empty {
-            app.gem_middleware_refusals.push(refusal);
+    for lp in loops {
+        let value = Eval::new(app).answer_value(&lp.collection, &initializers);
+        let empty = matches!(&value, Ok(Val::Hash(e)) if e.is_empty()) || matches!(&value, Ok(Val::Array(e)) if e.is_empty());
+        if empty {
+            continue;
+        }
+        match unroll_middleware_loop(app, &lp, &initializers) {
+            Some(stacked) => {
+                for (class, args, block) in stacked {
+                    if !args.is_empty() {
+                        app.gem_middleware_args.insert(class.clone(), args);
+                    }
+                    if let Some(block) = block {
+                        app.gem_middleware_blocks.insert(class.clone(), block);
+                    }
+                    super::railtie_middleware::stacked_env_writes(env_writes_by_class, std::slice::from_ref(&class), &mut app.rack_env_writes);
+                    app.gem_middlewares.push(class);
+                }
+            }
+            None => app.gem_middleware_refusals.push(lp.refusal),
         }
     }
+}
+
+/// `collection.each do |key, value| app.middleware.use K, *args do |…| … end end` over a Hash the app's settings fill
+/// (Devise's provider per `config.omniauth`): one `use` per entry, as Rails runs the loop at boot. The class is what
+/// `K` answers for the entry; the arguments and the block are written over the entry itself
+/// (`Devise.omniauth_configs[:github]`), which the boot's replay of the settings fills the same.
+// Not a value the evaluation answers in place of the arguments: they are the app's settings (a secret read from ENV),
+// which the emitted boot holds as Rails' does.
+fn unroll_middleware_loop(app: &App, lp: &super::railtie_middleware::MiddlewareLoop, initializers: &[Expr]) -> Option<Vec<(String, String, Option<String>)>> {
+    let statement = lp.statement.as_ref()?;
+    let ExprNode::Send { recv: Some(collection), method, block: Some(block), .. } = &*statement.node else { return None };
+    if !matches!(method.as_str(), "each" | "each_pair") {
+        return None;
+    }
+    let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
+    let [key_name, value_name] = params.as_slice() else { return None };
+    let body = match &*body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => body,
+    };
+    let ExprNode::Send { recv: Some(stack), method: verb, args, block: use_block, .. } = &*body.node else { return None };
+    let on_app_stack = matches!(&*stack.node, ExprNode::Send { recv: Some(r), method, args, .. }
+        if method.as_str() == "middleware" && args.is_empty() && matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == lp.app_param));
+    if verb.as_str() != "use" || !on_app_stack {
+        return None;
+    }
+    let (class_expr, rest) = args.split_first()?;
+    let mut eval = Eval::new(app);
+    let Ok(Val::Hash(entries)) = eval.answer_value(collection, initializers) else { return None };
+    let mut out = Vec::new();
+    for (key, entry) in entries {
+        let key_lit = match &key {
+            Val::Sym(k) => Literal::Sym { value: Symbol::from(k.as_str()) },
+            Val::Str(k) => Literal::Str { value: k.clone() },
+            _ => return None,
+        };
+        let mut frame = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
+        frame.locals.insert(key_name.clone(), key.clone());
+        frame.locals.insert(value_name.clone(), entry.clone());
+        let got = eval.value(class_expr, &mut frame).or_else(|why| {
+            // `config.strategy_class` over an object a gem hook resolves (Devise's provider config).
+            let ExprNode::Send { recv: Some(r), method, args, .. } = &*class_expr.node else { return Err(why) };
+            let Val::Obj(i) = eval.value(r, &mut frame.clone())? else { return Err(why) };
+            if method.as_str() != "strategy_class" || !args.is_empty() {
+                return Err(why);
+            }
+            let object = &eval.heap[i];
+            super::gem_hooks::devise_strategy_class(app, &object.class, &object.ivars).map(Val::Class).ok_or(why)
+        });
+        let Ok(Val::Class(class)) = got else { return None };
+        let class = class.trim_start_matches("::").to_string();
+        if !app.library_classes.iter().any(|c| c.name.0.as_str() == class) || out.iter().any(|(c, _, _): &(String, String, Option<String>)| *c == class) {
+            return None;
+        }
+        let span = collection.span;
+        let key_expr = Expr::new(span, ExprNode::Lit { value: key_lit });
+        let indexed = Expr::new(span, ExprNode::Send { recv: Some(collection.clone()), method: Symbol::from("[]"), args: vec![key_expr.clone()], block: None, parenthesized: true });
+        let written = |e: &Expr| {
+            let mut e = e.clone();
+            substitute_var(&mut e, key_name, &key_expr);
+            substitute_var(&mut e, value_name, &indexed);
+            crate::emit::ruby::emit_expr(&e)
+        };
+        let given = rest.iter().map(&written).collect::<Vec<_>>().join(", ");
+        let block_src = match use_block.as_ref().map(|b| &*b.node) {
+            None => None,
+            Some(ExprNode::Lambda { params, body, rest_param: None, block_param: None, extra_params, .. }) if extra_params.is_empty() => {
+                if params.iter().any(|p| p == key_name || p == value_name) {
+                    return None;
+                }
+                let names = params.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ");
+                Some(format!("{{ |{names}| {} }}", written(body).replace('\n', "; ")))
+            }
+            Some(_) => return None,
+        };
+        out.push((class, given, block_src));
+    }
+    Some(out)
+}
+
+fn substitute_var(e: &mut Expr, name: &Symbol, with: &Expr) {
+    if matches!(&*e.node, ExprNode::Var { name: n, .. } if n == name) {
+        *e = with.clone();
+        return;
+    }
+    // Not inside a block that binds the name itself: there it is the block's own.
+    if let ExprNode::Lambda { params, rest_param, block_param, extra_params, .. } = &*e.node
+        && (params.contains(name) || rest_param.as_ref() == Some(name) || block_param.as_ref() == Some(name) || extra_params.iter().any(|p| &p.name == name))
+    {
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| substitute_var(c, name, with));
 }
 
 /// A class body's call of another module's method handed the class itself (devise's

@@ -64,7 +64,7 @@ run_suite() {
   left=$(( deadline - $(date +%s) ))
   : > "$tmp/logs/$suite.log"
   if [ "$left" -gt 0 ]; then
-    python3 scripts/ci-plan.py timed --kind framework --name "$suite" --charged "$(cat "$tmp/charged/$suite" 2>/dev/null || echo 0)" -- \
+    python3 scripts/ci-plan.py timed --kind framework --name "$suite" --charge-cases "$tmp/collect/$suite" -- \
       timeout -k 15 "$left" "$bin" --ignored --nocapture $(filter "$suite") > "$tmp/logs/$suite.log" 2>&1
     status=$?
   fi
@@ -104,42 +104,35 @@ for suite in $ordered; do
   case "$suite" in spinel_pg_db) serial+=("$suite") ;; *) parallel+=("$suite") ;; esac
 done
 # The cases one Spinel build can share (tests/support/emit_and_run.rs `bundle`), as spinel-toolchain shares them.
-mkdir -p "$tmp/nospinel" "$tmp/collect-all" "$tmp/charged"
+mkdir -p "$tmp/nospinel" "$tmp/collect-all"
 printf '#!/bin/sh\nexit 1\n' > "$tmp/nospinel/spinel"
 cp "$tmp/nospinel/spinel" "$tmp/nospinel/spin"
 chmod +x "$tmp/nospinel/spinel" "$tmp/nospinel/spin"
 printf '%s\n' "${parallel[@]}" | xargs -P "$(( $(nproc) * 2 ))" -I{} bash -c 'collect_suite {}'
 cp "$tmp"/collect/*/*.json "$tmp/collect-all/" 2> /dev/null || true
-now=()
-later=()
+sharing=0
 for suite in "${parallel[@]}"; do
-  if compgen -G "$tmp/collect/$suite/*.json" > /dev/null; then later+=("$suite"); else now+=("$suite"); fi
+  if compgen -G "$tmp/collect/$suite/*.json" > /dev/null; then sharing=$(( sharing + 1 )); fi
 done
-echo "collected $(ls "$tmp/collect-all" | wc -l) cases from ${#later[@]} suites in $(( $(date +%s) - start ))s"
+echo "collected $(ls "$tmp/collect-all" | wc -l) cases from $sharing suites in $(( $(date +%s) - start ))s"
 export RH_SPINEL_BUNDLE="$tmp/bundles"
-# Not after the shared builds: a suite with no case to share compiles alone, so it runs while they build.
-printf '%s\n' "${now[@]}" | { grep . || true; } | xargs -r -P "$(nproc)" -I{} bash -c 'run_suite {}' &
-alone=$!
-if [ "${#later[@]}" -gt 0 ]; then
-  RH_SPINEL_BUNDLE_COLLECT="$tmp/collect-all" RH_SPINEL_BUNDLE_OUT="$RH_SPINEL_BUNDLE" \
-    timeout -k 15 "$(( deadline - $(date +%s) > 1 ? deadline - $(date +%s) : 1 ))" "$(exe spinel_bundle)" --ignored --exact spinel_bundle_build --nocapture \
-    > "$tmp/logs/spinel_bundle.log" 2>&1
-  grep '^spinel bundle' "$tmp/logs/spinel_bundle.log" || true
-  echo "bundled in $(( $(date +%s) - start ))s"
-  python3 - "$tmp" "${later[@]}" <<'PY'
-import json, pathlib, sys
-tmp = pathlib.Path(sys.argv[1])
-try:
-    seconds = json.loads((tmp / "bundles/seconds.json").read_text())
-except (OSError, ValueError):
-    seconds = {}
-for suite in sys.argv[2:]:
-    tests = {json.loads(p.read_text()).get("test") for p in (tmp / "collect" / suite).glob("*.json")}
-    (tmp / "charged" / suite).write_text(str(sum(seconds.get(t, 0) for t in tests)))
-PY
+mkdir -p "$RH_SPINEL_BUNDLE"
+if [ "$sharing" -gt 0 ]; then
+  (
+    RH_SPINEL_BUNDLE_COLLECT="$tmp/collect-all" RH_SPINEL_BUNDLE_OUT="$RH_SPINEL_BUNDLE" \
+      timeout -k 15 "$(( deadline - $(date +%s) > 1 ? deadline - $(date +%s) : 1 ))" "$(exe spinel_bundle)" --ignored --exact spinel_bundle_build --nocapture \
+      > "$tmp/logs/spinel_bundle.log" 2>&1
+    # Not left to spinel_bundle_build: stopped or panicking, it never marks itself, and its suites' cases would wait on it.
+    touch "$RH_SPINEL_BUNDLE/finished"
+    grep '^spinel bundle' "$tmp/logs/spinel_bundle.log" || true
+    echo "bundled in $(( $(date +%s) - start ))s"
+  ) &
+  builder=$!
+  # Not before the build ends: each case waits only on its own group, so the suites start once the groups are named.
+  until [ -e "$RH_SPINEL_BUNDLE/pending.json" ] || ! kill -0 "$builder" 2> /dev/null; do sleep 1; done
 fi
-printf '%s\n' "${later[@]}" | { grep . || true; } | xargs -r -P "$(nproc)" -I{} bash -c 'run_suite {}' || status=1
-wait "$alone" || status=1
+printf '%s\n' "${parallel[@]}" | { grep . || true; } | xargs -r -P "$(nproc)" -I{} bash -c 'run_suite {}' || status=1
+[ -z "${builder:-}" ] || wait "$builder"
 for suite in "${serial[@]}"; do run_suite "$suite" || status=1; done
 echo "finished in $(( $(date +%s) - start ))s"
 exit "$status"

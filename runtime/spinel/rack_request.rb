@@ -68,6 +68,53 @@ module Rack
       query_string.empty? ? path : "#{path}?#{query_string}"
     end
 
+    def media_type
+      type = content_type
+      type.nil? ? nil : type.to_s.split(/\s*[;,]\s*/, 2).first.to_s.downcase
+    end
+
+    def form_data?
+      type = media_type
+      (request_method == "POST" && type.nil?) || type == "application/x-www-form-urlencoded" || type == "multipart/form-data"
+    end
+
+    def GET
+      query = query_string
+      if @env["rack.request.query_string"] == query
+        @env["rack.request.query_hash"]
+      else
+        hash = {}
+        CgiIo.parse_form_into(query, hash)
+        @env["rack.request.query_string"] = query
+        @env["rack.request.query_hash"] = hash
+        hash
+      end
+    end
+
+    def POST
+      input = @env["rack.input"]
+      raise "Missing rack.input" if input.nil?
+      return @env["rack.request.form_hash"] if @env["rack.request.form_input"].equal?(input)
+      hash = {}
+      if form_data?
+        body = input.read.to_s
+        if media_type == "multipart/form-data"
+          form = ActionDispatch::Http::Multipart.parse(body, content_type.to_s)
+          form.fields.each { |k, v| CgiIo.assign_form_pair(hash, k, v) }
+          form.file_parts.each { |part| CgiIo.assign_form_pair(hash, part.name, part.file) }
+        else
+          CgiIo.parse_form_into(body, hash)
+        end
+      end
+      @env["rack.request.form_input"] = input
+      @env["rack.request.form_hash"] = hash
+      hash
+    end
+
+    def params
+      self.GET.merge(self.POST)
+    end
+
     def user_agent
       @env["HTTP_USER_AGENT"]
     end

@@ -261,6 +261,7 @@ pub struct ViewLowerCtx<'a> {
     partial_form_bindings: crate::det::HashMap<ViewKey, PartialFormBinding>,
     route_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
     app_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
+    view_context_helpers: std::rc::Rc<crate::det::HashSet<String>>,
     direct_route_helpers: std::rc::Rc<crate::det::HashSet<String>>,
     i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
@@ -366,6 +367,7 @@ impl<'a> ViewLowerCtx<'a> {
             app_helper_names: std::rc::Rc::new(
                 app.helper_method_index.keys().map(|n| n.as_str().to_string()).collect(),
             ),
+            view_context_helpers: std::rc::Rc::new(view_context_helpers(app)),
             direct_route_helpers: std::rc::Rc::new(
                 crate::lower::routes::direct_helper_names(app)
                     .into_iter()
@@ -894,6 +896,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         store_readers: lx.store_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
         app_helper_names: lx.app_helper_names.clone(),
+        view_context_helpers: lx.view_context_helpers.clone(),
         direct_route_helpers: lx.direct_route_helpers.clone(),
         i18n: lx.i18n.clone(),
         route_helper_arity: lx.route_helper_arity.clone(),
@@ -5289,6 +5292,9 @@ pub(super) struct ViewCtx {
     /// app helpers in above the url helpers), so its arguments are the
     /// app's to read, not a route's to project.
     pub(super) app_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
+    /// The methods a gem mixes into `ActionView::Base` (`on_load(:action_view) { include M }`), which a template calls
+    /// on a view context at request time.
+    pub(super) view_context_helpers: std::rc::Rc<crate::det::HashSet<String>>,
     /// The app's `direct` route helpers (`lower::routes::direct_helper_names`).
     /// Their bodies are the blocks the app wrote, which read what they're
     /// handed (campfire's `fresh_user_avatar` reads `user.updated_at`), so
@@ -6672,4 +6678,17 @@ pub(crate) fn lexxy_uses_editor_adapter(lock: &crate::gems::Lockfile) -> bool {
         true
     }
     at_least(lock.version_of("lexxy"), &[0, 9, 24]) && at_least(lock.version_of("actiontext"), &[8, 2])
+}
+
+/// The instance methods of the modules a gem's load hook mixes into `ActionView::Base`.
+fn view_context_helpers(app: &crate::App) -> crate::det::HashSet<String> {
+    app.library_classes
+        .iter()
+        .filter(|c| c.name.0.as_str() == "ActionView::Base")
+        .flat_map(|c| c.includes.iter())
+        .flat_map(|m| app.library_classes.iter().filter(move |c| c.name == *m))
+        .flat_map(|c| c.methods.iter())
+        .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.visibility == crate::dialect::MethodVisibility::Public)
+        .map(|m| m.name.as_str().to_string())
+        .collect()
 }

@@ -257,7 +257,7 @@ fn required_belongs_to(
         && table
             .foreign_keys
             .iter()
-            .any(|fk| &fk.from_column == foreign_key)
+            .any(|fk| fk.from_columns.as_slice() == std::slice::from_ref(foreign_key))
 }
 
 fn class_index(app: &App) -> HashMap<&ClassId, &LibraryClass> {

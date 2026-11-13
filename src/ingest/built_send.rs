@@ -25,7 +25,11 @@ const DIRTY_AFFIXES: &[(&str, &str)] = &[
     ("restore_", "!"),
 ];
 
+/// The attribute methods every column has (`email`, `email=`, `email?`), which the model lowering synthesizes.
+const ATTRIBUTE_AFFIXES: &[(&str, &str)] = &[("", ""), ("", "="), ("", "?")];
+
 pub(super) fn devirtualize(app: &mut App) {
+    devirtualize_controllers(app);
     let includers = module_includers(app);
     let mut plans: Vec<(Option<usize>, Option<usize>, Vec<String>)> = Vec::new();
     for (mi, model) in app.models.iter().enumerate() {
@@ -116,7 +120,13 @@ fn names_of(app: &App, models: &[ClassId]) -> Vec<String> {
             }
         }
         if let Some(table) = app.schema.tables.get(&model.table.0) {
-            for column in table.columns.iter().filter(|c| c.name.as_str() != "id") {
+            for column in table.columns.iter() {
+                for (prefix, suffix) in ATTRIBUTE_AFFIXES {
+                    names.insert(format!("{prefix}{}{suffix}", column.name.as_str()));
+                }
+                if column.name.as_str() == "id" {
+                    continue;
+                }
                 for (prefix, suffix) in DIRTY_AFFIXES {
                     names.insert(format!("{prefix}{}{suffix}", column.name.as_str()));
                 }
@@ -138,21 +148,41 @@ fn rewrite(e: &mut Expr, names: &[String]) {
         return;
     }
     let asks = method.as_str() == "respond_to?";
+    let public = method.as_str() == "public_send";
     if !asks && !matches!(method.as_str(), "send" | "public_send" | "__send__") {
         return;
     }
     let Some((name, rest)) = args.split_first() else { return };
-    // Not a respond_to? with `include_all`, nor a writer handed its value: Spinel resolves that one itself.
+    // Not a respond_to? with `include_all`.
     if asks && !rest.is_empty() {
         return;
     }
     let Some((prefix, part, suffix)) = built(name) else { return };
-    if !asks && suffix.ends_with('=') {
+    // A literal part (a folded `resource_name`): the one name, called as written.
+    let literal = match &*part.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    if let Some(infix) = literal
+        && !asks
+    {
+        let exact = format!("{prefix}{infix}{suffix}");
+        let span = e.span;
+        if public {
+            let mut sent = vec![Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(exact.as_str()) } })];
+            sent.extend(rest.iter().cloned());
+            *e.node = ExprNode::Send { recv: Some(Expr::new(span, ExprNode::SelfRef)), method: Symbol::from("public_send"), args: sent, block: None, parenthesized: true };
+            return;
+        }
+        let recv = exact.ends_with('=').then(|| Expr::new(span, ExprNode::SelfRef));
+        *e.node = ExprNode::Send { recv, method: Symbol::from(exact.as_str()), args: rest.to_vec(), block: None, parenthesized: !rest.is_empty() };
         return;
     }
+    // Not an operator (`[]=`): a built name is an attribute's or a method's.
     let matching: Vec<&String> = names
         .iter()
-        .filter(|n| n.len() > prefix.len() + suffix.len() && n.starts_with(&prefix) && n.ends_with(&suffix))
+        .filter(|n| n.len() > prefix.len() + suffix.len() && n.starts_with(&prefix) && n.ends_with(&suffix) && !n.starts_with('['))
         .collect();
     if matching.is_empty() {
         return;
@@ -166,8 +196,15 @@ fn rewrite(e: &mut Expr, names: &[String]) {
             let infix = &n[prefix.len()..n.len() - suffix.len()];
             let body = if asks {
                 Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: true } })
+            } else if public {
+                // Not the plain call: `public_send` still refuses a private method of the name.
+                let mut sent = vec![Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(n.as_str()) } })];
+                sent.extend(rest.iter().cloned());
+                Expr::new(span, ExprNode::Send { recv: Some(Expr::new(span, ExprNode::SelfRef)), method: Symbol::from("public_send"), args: sent, block: None, parenthesized: true })
             } else {
-                Expr::new(span, ExprNode::Send { recv: None, method: Symbol::from(n.as_str()), args: rest.clone(), block: None, parenthesized: !rest.is_empty() })
+                // A writer on `self` explicitly: a bare `email=(v)` is a local's assignment to Ruby.
+                let recv = n.ends_with('=').then(|| Expr::new(span, ExprNode::SelfRef));
+                Expr::new(span, ExprNode::Send { recv, method: Symbol::from(n.as_str()), args: rest.clone(), block: None, parenthesized: !rest.is_empty() })
             };
             Arm { pattern: Pattern::Lit { value: Literal::Str { value: infix.to_string() } }, guard: None, body }
         })
@@ -320,4 +357,36 @@ fn rewrite_param_send(e: &mut Expr, names_of: &dyn Fn(&Symbol) -> Option<std::co
     ] });
     arms.push(Arm { pattern: Pattern::Wildcard, guard: None, body: Expr::new(span, ExprNode::Send { recv: None, method: Symbol::from("raise"), args: vec![error, message], block: None, parenthesized: false }) });
     *e.node = ExprNode::Case { scrutinee: first.clone(), arms };
+}
+
+/// The same `case` for a controller's own `send("current_#{resource_name}".to_sym)` (Devise's
+/// `RegistrationsController`): the methods it answers are its own and its parent controllers', the helpers spliced
+/// into them among them.
+fn devirtualize_controllers(app: &mut App) {
+    let parents: crate::det::HashMap<ClassId, ClassId> =
+        app.controllers.iter().filter_map(|c| Some((c.name.clone(), c.parent.clone()?))).collect();
+    let own: crate::det::HashMap<ClassId, Vec<String>> = app
+        .controllers
+        .iter()
+        .map(|c| (c.name.clone(), c.actions().map(|a| a.name.as_str().to_string()).collect()))
+        .collect();
+    let mut plans: Vec<(usize, Vec<String>)> = Vec::new();
+    for (i, c) in app.controllers.iter().enumerate() {
+        let mut names: crate::det::HashSet<String> = crate::det::HashSet::default();
+        let mut at = Some(c.name.clone());
+        let mut depth = 0;
+        while let Some(id) = at.filter(|_| depth < 32) {
+            names.extend(own.get(&id).into_iter().flatten().cloned());
+            at = parents.get(&id).cloned();
+            depth += 1;
+        }
+        let mut names: Vec<String> = names.into_iter().collect();
+        names.sort();
+        plans.push((i, names));
+    }
+    for (i, names) in plans {
+        for a in app.controllers[i].actions_mut() {
+            rewrite(&mut a.body, &names);
+        }
+    }
 }

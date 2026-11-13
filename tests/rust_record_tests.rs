@@ -45,31 +45,19 @@ fn record_tests_app_emits_the_model_surface_its_tests_call() {
     assert!(item_test.contains(", 7_i64)") && !item_test.contains("Self::padded_size"), "{item_test}");
 }
 
-/// `validates :x, presence:` on a NOT NULL number with no default cannot
-/// fire on a strict target, whose field starts at 0, so the build reports
-/// it rather than claiming it — as a warning naming the target, out of
-/// `target_files`. A String column (`name`) checks blank, and the ruby
-/// family keeps nil, so neither is reported.
+/// `validates :x, presence:` on a NOT NULL integer with no default, and
+/// a scoped `uniqueness:`, are lowered on a strict target (the column
+/// starts unset; the rule queries the table), so the build reports
+/// neither.
 #[test]
-fn presence_on_a_not_null_number_is_reported_on_strict_targets() {
-    let presence = |target| -> Vec<roundhouse::diagnostic::Diagnostic> {
-        rust_record_tests_app::app()
-            .emit_warnings(target)
-            .into_iter()
-            .filter(|d| d.message.starts_with("validates :") && d.message.contains(", presence:"))
-            .collect()
-    };
-    let rust = presence(roundhouse::project::BuildTarget::Rust);
-    let messages: Vec<&str> = rust.iter().map(|d| d.message.as_str()).collect();
-    assert_eq!(rust.len(), 3, "{messages:?}");
-    for attr in ["aisle", "position", "weight"] {
-        assert!(messages.iter().any(|m| m.starts_with(&format!("validates :{attr}, presence: not supported (rust)"))), "{attr}: {messages:?}");
-    }
-    assert!(rust.iter().all(|d| matches!(
-        &d.kind,
-        roundhouse::diagnostic::DiagnosticKind::Unsupported { target: Some(t), .. } if t.as_str() == "rust"
-    )));
-    assert!(presence(roundhouse::project::BuildTarget::Ruby).is_empty());
+fn presence_and_uniqueness_are_lowered_on_strict_targets() {
+    let warnings: Vec<String> = rust_record_tests_app::app()
+        .emit_warnings(roundhouse::project::BuildTarget::Rust)
+        .into_iter()
+        .map(|d| d.message)
+        .filter(|m| m.starts_with("validates :"))
+        .collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 /// The same app's emitted `cargo test`: every test whose rules the target

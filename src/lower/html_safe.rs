@@ -113,7 +113,7 @@ pub fn apply_html_safe_lowering(app: &mut App) {
         }
     }
     for lc in &mut app.library_classes {
-        for m in &mut lc.methods {
+        for m in lc.methods.iter_mut().filter(|m| !from_source_gem(&app.sources, m)) {
             rewrite(&mut m.body);
         }
     }
@@ -131,6 +131,38 @@ pub fn apply_html_safe_lowering(app: &mut App) {
             rewrite(&mut m.body);
         }
     }
+}
+
+// A source gem's method runs on the view context at request time (simple_form's `content = "".html_safe`, then
+// `content.safe_concat …`): the Ruby family's `SafeString` answers the mark there, which erasing would drop.
+fn from_source_gem(sources: &[crate::span::SourceFile], m: &crate::dialect::MethodDef) -> bool {
+    (m.name_span.file.0 as usize)
+        .checked_sub(1)
+        .and_then(|i| sources.get(i))
+        .is_some_and(|f| crate::ingest::absence_guards::is_source_gem_path(&f.path))
+}
+
+/// Every other target has no safe String: a source gem's marks are erased there, as the app's are.
+pub fn lower_for_target(app: &App, target: crate::build_target::BuildTarget) -> Option<App> {
+    use crate::build_target::BuildTarget;
+    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        return None;
+    }
+    fn marks(e: &Expr) -> bool {
+        let mut found = matches!(&*e.node, ExprNode::Send { recv: Some(_), method, args, block: None, .. } if method.as_str() == "html_safe" && args.is_empty());
+        e.node.for_each_child(&mut |c| found |= marks(c));
+        found
+    }
+    if !app.library_classes.iter().flat_map(|lc| lc.methods.iter()).any(|m| from_source_gem(&app.sources, m) && marks(&m.body)) {
+        return None;
+    }
+    let mut app = app.clone();
+    let sources = std::mem::take(&mut app.sources);
+    for m in app.library_classes.iter_mut().flat_map(|lc| lc.methods.iter_mut()).filter(|m| from_source_gem(&sources, m)) {
+        rewrite(&mut m.body);
+    }
+    app.sources = sources;
+    Some(app)
 }
 
 /// Can this body return a marked value? Every tail position is a

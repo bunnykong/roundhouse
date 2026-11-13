@@ -202,11 +202,13 @@ fn receiver_unknown(ty: Option<&Ty>) -> bool {
 ///
 /// Host-only: the CLI is the emit gate that raises these, and the
 /// playground has no emit gate to raise anything for.
-/// `validates :attr, uniqueness: …` needs a query at validation time,
-/// which only the targets that ship the runtime Relation lower
-/// (`model_to_library::RuntimeRelation::Present`). Elsewhere the rule is
-/// not lowered, and this reports it, as the gap it was before, once per
-/// validation, so the emit says what it leaves out.
+/// `validates :attr, uniqueness: …` needs a query at validation time.
+/// The targets that ship the runtime Relation run Rails' own; the others
+/// lower a fixed `SELECT 1 … LIMIT 1` probe per rule
+/// (`adapter_emit::uniqueness`), which compares plain scalar columns
+/// only (`validations::strict_uniqueness_columns`). A rule over any other
+/// column is not lowered there, and this reports it once per validation,
+/// so the emit says what it leaves out.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn uniqueness_gaps_for_target(app: &App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
     if target.has_runtime_relation() {
@@ -214,16 +216,25 @@ pub fn uniqueness_gaps_for_target(app: &App, target: crate::build_target::BuildT
     }
     let mut out = Vec::new();
     for model in &app.models {
+        let table = app.schema.tables.get(&model.table.0);
         for item in &model.body {
             let crate::dialect::ModelBodyItem::Validation { validation, .. } = item else { continue };
-            if !validation.rules.iter().any(|r| matches!(r, crate::dialect::ValidationRule::Uniqueness { .. })) {
+            // The strict lowering queries a plain-scalar comparison itself
+            // (`model_to_library::validations`, `Exists` over the columns).
+            let unsupported = validation.rules.iter().any(|r| match r {
+                crate::dialect::ValidationRule::Uniqueness { scope, .. } => table.is_none_or(|table| {
+                    crate::lower::validations::strict_uniqueness_columns(model, table, &validation.attribute, scope).is_none()
+                }),
+                _ => false,
+            });
+            if !unsupported {
                 continue;
             }
             let mut d = Diagnostic::unsupported(
                 item.span(),
                 Some(crate::ident::Symbol::from(target.as_str())),
                 format!("validates :{}, uniqueness:", validation.attribute.as_str()),
-                "the uniqueness query needs the runtime Relation, which this target does not ship; Rails rejects records this build saves",
+                "this target compares a uniqueness query over plain scalar columns of a keyed table only, and one of these is temporal, JSON, a float or decimal, an enum, an array, a polymorphic association or a column the model reads itself, or the table has no key; Rails rejects records this build saves",
             );
             d.severity = crate::diagnostic::Severity::Warning;
             out.push(d);

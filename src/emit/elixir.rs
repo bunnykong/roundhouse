@@ -89,10 +89,13 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // dispatch (`record.title.empty?` → `record.title == ""` when
     // `title: Str`) — the body-typer's annotations don't survive the
     // functionalize passes, so the schema type is recorded here instead.
+    // The lowering's own schema copy, whose held columns store under `<col>_raw`.
+    let held_schema = crate::lower::validations::hold_unset_presence_columns(&app.models, &app.schema);
     for model in &app.models {
-        if let Some(table) = app.schema.tables.get(&model.table.0) {
+        if let Some(table) = held_schema.tables.get(&model.table.0) {
             // MODEL struct slots use the STORAGE name (`created_at_raw`
-            // for a temporal column — the shared lowering's split); the
+            // for a temporal column, `<col>_raw` for one held unset until
+            // assigned — the shared lowering's split); the
             // Row class is the raw transport and keeps plain column
             // names. A temporal reader's public name is NOT a slot — it
             // resolves to the emitted parsing function
@@ -450,6 +453,27 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             emit_library_lc(lc, &mut out);
         }
         for lc in view_layer_lcs {
+            emit_library_lc(lc, &mut out);
+        }
+
+        // The app's ActiveModel::Serializer classes, which ingest expanded
+        // into plain classes (`ingest::active_model_serializer`): a
+        // `render json:, serializer:` calls `ArticleSerializer.new`, and
+        // no module of that name was emitted. Their fields are registered
+        // before the controllers emit; their module names are not: the
+        // registry resolves a constant by its last segment, which would
+        // read `Api::ArticleSerializer` as a top-level `ArticleSerializer`.
+        // Unregistered, a constant keeps its full path.
+        let serializer_lcs: Vec<crate::dialect::LibraryClass> = app
+            .library_classes
+            .iter()
+            .filter(|lc| matches!(lc.origin, Some(crate::dialect::LibraryClassOrigin::ActiveModelSerializer { .. })))
+            .cloned()
+            .collect();
+        for class in crate::lower::functionalize::functionalize(serializer_lcs.clone()) {
+            expr::register_field_names(class.name.0.as_str(), &library::struct_fields(&class));
+        }
+        for lc in serializer_lcs {
             emit_library_lc(lc, &mut out);
         }
 

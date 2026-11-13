@@ -1520,6 +1520,12 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             }
             // Every other `?`/`!` (and `[]`/`[]=`) name is legalized the
             // same way at the definition site, so calls and defs align.
+            // A writer the analyzer resolved to a `Method`-kind `x=` (a
+            // column's own-typed writer over its `_raw` slot) is the
+            // `x_set` def, not a field: `recv.x=(v)` would only shadow it.
+            if parenthesized && args_s.len() == 1 && method.ends_with('=') && !matches!(method, "==" | "!=" | "<=" | ">=" | "===" | "[]=") {
+                return format!("{recv_s}.{}({})", super::shared::py_def_name(method), args_s[0]);
+            }
             let m = super::shared::py_method_name(method);
             if args_s.is_empty() {
                 // A zero-arg send is either an attribute read (`parent.id`,

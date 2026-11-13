@@ -25,6 +25,8 @@
 module ActionView
   module ViewHelpers
     def self.html_escape(s)
+      # Not only a String: Rails' `ERB::Util.html_escape` takes `s.to_s` first (a Symbol, an Integer, nil).
+      s = s.to_s unless s.is_a?(String)
       return s if s.html_safe?
       # CGI.escapeHTML is the C-accelerated escape — same five entities,
       # byte-identical output incl. &#39; for apostrophe (verified

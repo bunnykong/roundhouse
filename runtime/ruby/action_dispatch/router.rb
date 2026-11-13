@@ -26,7 +26,7 @@ module ActionDispatch
     # like this one.
     class Route
       attr_reader :verb, :pattern, :controller, :action, :req_format, :int_params,
-                  :pattern_parts, :seg_constraints, :part_count, :globbed, :lead, :guard
+                  :pattern_parts, :seg_constraints, :part_count, :globbed, :lead, :guard, :defaults
 
       # `req_format` — the route-forced response format (Rails'
       # `get "/rss" => "home#index", :format => "rss"`), nil for the
@@ -61,8 +61,9 @@ module ActionDispatch
       # request once the path matches, and a request it refuses goes on to
       # the routes after this one. An Integer rather than a Proc so the
       # table stays plain data on every target.
-      def initialize(verb, pattern, controller, action, req_format = nil, int_params = +"", seg_constraints = +"", guard = -1)
+      def initialize(verb, pattern, controller, action, req_format = nil, int_params = +"", seg_constraints = +"", guard = -1, defaults = -1)
         @guard       = guard
+        @defaults    = defaults
         @verb        = verb
         @pattern     = pattern
         @controller  = controller
@@ -105,17 +106,18 @@ module ActionDispatch
     # Replaces the prior `{ controller:, action:, path_params: }` hash
     # return shape. Positional initialize, same rationale as Route.
     class MatchResult
-      attr_reader :controller, :action, :path_params, :req_format, :index, :guard
+      attr_reader :controller, :action, :path_params, :req_format, :index, :guard, :defaults
 
       # `index` — the matched route's position in the table, where
       # `Router.match_from` resumes when its `guard` refuses the request.
-      def initialize(controller, action, path_params, req_format = nil, index = 0, guard = -1)
+      def initialize(controller, action, path_params, req_format = nil, index = 0, guard = -1, defaults = -1)
         @controller  = controller
         @action      = action
         @path_params = path_params
         @req_format  = req_format
         @index       = index
         @guard       = guard
+        @defaults    = defaults
       end
     end
 
@@ -284,7 +286,7 @@ module ActionDispatch
              !(unpeeled && format_held_param_tail(route))
             params = match_parts(route.pattern_parts, path_parts, route.int_params + "", format, route.seg_constraints + "")
             unless params.nil?
-              return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format, i, route.guard)
+              return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format, i, route.guard, route.defaults)
             end
           end
         end

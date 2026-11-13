@@ -521,6 +521,18 @@ fn uses_as_hash(body: &Expr, name: &Symbol, ar_hash_api: bool) -> bool {
             } if matches!(method.as_str(), "delete" | "[]=") && reads_name(r) => {
                 found = true;
             }
+            // The same `delete`, written by `params_permit` as the read of either key Parameters answer.
+            ExprNode::Send {
+                recv: Some(r),
+                method,
+                args,
+                ..
+            } if method.as_str() == "indifferent_delete"
+                && matches!(&*r.node, ExprNode::Const { path } if path.last().is_some_and(|p| p.as_str() == "Params"))
+                && args.first().is_some_and(&reads_name) =>
+            {
+                found = true;
+            }
             ExprNode::Assign {
                 target: LValue::Index { recv, .. },
                 ..

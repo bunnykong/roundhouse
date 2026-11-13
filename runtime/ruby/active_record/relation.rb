@@ -3,6 +3,74 @@
 require_relative "../inflector"
 
 module ActiveRecord
+  # The `where` casts of an enum column live beside the Relation that
+  # calls them (through a model's generated `_enum_where_value`), not in
+  # base.rb: the strict runtimes translate base.rb and have no runtime
+  # Relation, so they never cast a `where` value at run time.
+
+  # A `where` value on an Integer enum column, cast as Rails' enum type
+  # serializes one (activerecord 8.1.4): a label, Symbol or String, is
+  # its stored value, an Integer passes, and anything else casts as the
+  # Integer column would: a numeric String or a Float is its Integer,
+  # `true`/`false` are 1/0, and a label no mapping names is nil, which
+  # the predicate writes as `IS NULL`. `nil_label` is the mapping's `nil`
+  # entry's label (`unknown: nil`), "" when it has none. Unlike the
+  # writer's `enum_int` this does not raise: Rails' `where` doesn't.
+  def self.enum_where_int(value, labels, values, nil_label)
+    result = nil
+    if value.is_a?(Integer)
+      result = value
+    elsif value.is_a?(Float)
+      result = value.to_i
+    elsif value == true
+      result = 1
+    elsif value == false
+      result = 0
+    elsif value.is_a?(Symbol) || value.is_a?(String)
+      text = value.to_s
+      found = nil_label != "" && text == nil_label
+      i = 0
+      while !found && i < labels.length
+        if labels[i] == text
+          result = values[i]
+          found = true
+        end
+        i += 1
+      end
+      result = text.to_i if !found && value.is_a?(String) && text.match?(/\A\s*[+-]?\d/)
+    end
+    result
+  end
+
+  # `enum_where_int` for a String-valued mapping: a label is its stored
+  # value, and anything else binds as Rails' String column type
+  # serializes it: a Symbol or a number is its text, `true`/`false` are
+  # "t"/"f".
+  def self.enum_where_str(value, labels, values, nil_label)
+    result = nil
+    if value.is_a?(Symbol) || value.is_a?(String)
+      text = value.to_s
+      result = text
+      found = nil_label != "" && text == nil_label
+      result = nil if found
+      i = 0
+      while !found && i < labels.length
+        if labels[i] == text
+          result = values[i]
+          found = true
+        end
+        i += 1
+      end
+    elsif value == true
+      result = "t"
+    elsif value == false
+      result = "f"
+    elsif value.is_a?(Integer) || value.is_a?(Float)
+      result = value.to_s
+    end
+    result
+  end
+
   # A lazy, chainable query builder — the metaprogramming-free analog of
   # ActiveRecord::Relation. Lowered model code drives it: `scope`s become
   # class methods that take/return a Relation, associations return one,
@@ -2390,7 +2458,9 @@ module ActiveRecord
       sql = if id.is_a?(Hash)
         hash_conditions(id)
       else
-        "#{@table}.#{@model.primary_key} = #{bind_literal(id)}"
+        # Rails' `where(primary_key => id)`: the key casts as a hash
+        # condition's value does.
+        column_predicate(@model.primary_key.to_s, id)
       end
       push_where(sql) unless sql.empty?
       begin
@@ -3054,10 +3124,12 @@ module ActiveRecord
     # Reading `scope_attributes` AFTER the find is safe: `find_by`
     # appends to `@wheres`, and only `where_scope` ever writes the
     # create-seed slot.
-    def find_or_create_by(conditions)
+    def find_or_create_by(conditions, &block)
       record = find_by(conditions)
       return record if !record.nil?
       created = @model.new(scope_attributes.merge(conditions))
+      # Rails' `create(attributes, &block)`: the new record handed to the block before it is saved.
+      yield created if block_given?
       created.save
       created
     end
@@ -3077,10 +3149,12 @@ module ActiveRecord
     # Rails' `find_or_create_by!`: `find_by(attributes) ||
     # create!(attributes)`. A block is the lowering's statement form
     # (`lower::first_or_create`); the runtime method takes none.
-    def find_or_create_by!(conditions)
+    def find_or_create_by!(conditions, &block)
       record = find_by(conditions)
       return record if !record.nil?
       created = @model.new(scope_attributes.merge(conditions))
+      # Rails' `create(attributes, &block)`: the new record handed to the block before it is saved.
+      yield created if block_given?
       created.save!
       created
     end
@@ -3088,10 +3162,12 @@ module ActiveRecord
     # Rails' `find_or_initialize_by`: `find_by(attributes) ||
     # new(attributes)`, the new record unsaved and carrying the
     # relation's scope attributes and the given ones.
-    def find_or_initialize_by(conditions)
+    def find_or_initialize_by(conditions, &block)
       record = find_by(conditions)
       return record if !record.nil?
-      @model.new(scope_attributes.merge(conditions))
+      built = @model.new(scope_attributes.merge(conditions))
+      yield built if block_given?
+      built
     end
 
     def build(conditions)
@@ -3341,19 +3417,7 @@ module ActiveRecord
         # its primary key here, not every column.
         "#{qcol} IN (#{val.to_subquery_sql})"
       elsif val.is_a?(Array)
-        # Record elements read their id — Rails' IN-of-records form
-        # (`where(comment: comments)`, lobsters Vote.comments_flags);
-        # scalar elements escape as-is. An empty list is Rails' none
-        # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
-        # `mark_null!` from `none` / lasting positive `where` only.
-        ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
-        if ids.empty?
-          "1=0"
-        elsif ids.any? { |x| x.nil? || x.is_a?(Range) }
-          array_with_ranges_predicate(qcol, ids)
-        else
-          "#{qcol} IN (#{escape_list(ids)})"
-        end
+        enum_column?(col) ? enum_list_predicate(col, qcol, val) : list_predicate(col, qcol, val)
       elsif val.is_a?(Range)
         range_predicate(qcol, val)
       elsif val.nil?
@@ -3365,8 +3429,138 @@ module ActiveRecord
         # runtime dispatch: hash values from untyped scope params can
         # be a record OR a collection, and only the runtime knows.
         "#{qcol} = #{bind_literal(val._primary_key_value)}"
+      elsif enum_column?(col)
+        # An enum label held in a variable (the literal ones were cast
+        # when the app was lowered): its stored value, and a label no
+        # mapping names is nil, which Rails writes as `IS NULL`.
+        stored = @model._enum_where_value(col, val)
+        stored.nil? ? "#{qcol} IS NULL" : "#{qcol} = #{bind_literal(stored)}"
       else
+        limit = integer_query_limit(col)
+        return integer_value_predicate(qcol, val, limit) if limit > 0
         "#{qcol} = #{bind_literal(column_bound_value(col, val))}"
+      end
+    end
+
+    # ---- integer query values -----------------------------------------
+    #
+    # Rails casts a hash condition's value through the column's type
+    # before it writes SQL (ActiveModel::Type::Integer#serialize, and
+    # #serializable? for its range). Sent as given, a String reaches the
+    # database: SQLite compares it loosely, and PostgreSQL rejects it
+    # (`id = 'abc'` is SQLSTATE 22P02, `'99999999999999999999'` 22003).
+    # For a plain integer column, then, as Rails:
+    #
+    #   "12", "12abc", " +12"   12, the String's to_i
+    #   "abc", "", "_1"         `= NULL`: Rails binds nil, so the
+    #                           condition and its negation match no row
+    #   outside the column's    `1=0`, which `where.not` negates to
+    #   limit bytes             every row, NULLs included
+    #   true, false, 7.9        1, 0, 7
+    #
+    # The width is the model's emitted `schema_integer_query_limits`:
+    # an enum, `attribute` or `normalizes` declaration has its own cast,
+    # so its column is not there and keeps the path below.
+    def integer_query_limit(col)
+      table_name = @model.table_name.to_s
+      prefix = "#{table_name}."
+      name = col.start_with?(prefix) ? col[prefix.length, col.length].to_s : col
+      return 0 if name.include?(".")
+      limit = @model.schema_integer_query_limits[name.to_sym]
+      limit.nil? ? 0 : limit
+    end
+
+    # One value's condition: Rails' Equality node, whose visitor writes
+    # `1=0` for a value it cannot bind.
+    def integer_value_predicate(qcol, val, limit)
+      return "#{qcol} = NULL" if integer_query_null?(val)
+      cast = integer_query_cast(val, limit)
+      cast.valid ? "#{qcol} = #{bind_literal(cast.value)}" : "1=0"
+    end
+
+    # A value Rails' integer type serializes as nil: a String with no
+    # number at its start (Helpers::Numeric's `/\A\s*[+-]?\d/`), a
+    # NaN or infinite Float, or a Symbol, whose `to_i` raises and is
+    # rescued to nil (Integer#cast_value; no Float here is below
+    # infinity).
+    def integer_query_null?(val)
+      return true if val.is_a?(Symbol)
+      if val.is_a?(String)
+        i = ActiveRecord::IntegerKeyCast.number_start(val)
+        sign = val[i, 1].to_s
+        i += 1 if sign == "+" || sign == "-"
+        return ActiveRecord::IntegerKeyCast.digit_value(val[i, 1].to_s) < 0
+      end
+      val.is_a?(Float) && !(val.abs < Float::INFINITY)
+    end
+
+    # A numeric value cast and range-checked: Rails' `value.to_i` (a
+    # String's decimal prefix, a Float truncated, a Time's epoch
+    # seconds), valid only within
+    # the column's `limit` bytes, 4 or 8. IntegerKeyCast already holds a
+    # value to 8 bytes without converting text that overflows them.
+    def integer_query_cast(val, limit)
+      return ActiveRecord::IntegerKeyCast.new(false, 0) if val.is_a?(Symbol)
+      return ActiveRecord::IntegerKeyCast.new(true, 1) if val == true
+      return ActiveRecord::IntegerKeyCast.new(true, 0) if val == false
+      # A Time is its epoch seconds (Rails' `to_i`), not its text's year.
+      cast = val.is_a?(Time) ? ActiveRecord::IntegerKeyCast.parse(val.to_i) : ActiveRecord::IntegerKeyCast.parse(val)
+      return cast unless cast.valid && limit == 4
+      return ActiveRecord::IntegerKeyCast.new(false, 0) if cast.value >= 2147483648 || cast.value < -2147483648
+      cast
+    end
+
+    # Rails' ArrayHandler: several values are a HomogeneousIn, which
+    # drops each value it cannot bind and writes `IN (NULL)` when none is
+    # left; a nil is `IS NULL` and each Range its own arm, all ORed. One
+    # value is an Equality, so out of range it is `1=0`, which differs
+    # from `IN (NULL)` under `where.not`.
+    def integer_list_predicate(qcol, vals, limit)
+      scalars = []
+      ranges = []
+      has_nil = false
+      vals.each do |x|
+        if x.nil?
+          has_nil = true
+        elsif x.is_a?(Range)
+          ranges << range_predicate(qcol, x)
+        else
+          scalars << x
+        end
+      end
+      kept = []
+      scalars.each do |x|
+        cast = integer_query_cast(x, limit)
+        kept << cast.value if cast.valid
+      end
+      arms = []
+      if scalars.length == 1 && kept.empty? && !integer_query_null?(scalars[0])
+        arms << "1=0"
+      elsif scalars.length > 0
+        arms << "#{qcol} IN (#{kept.empty? ? "NULL" : escape_list(kept)})"
+      end
+      arms << "#{qcol} IS NULL" if has_nil
+      ranges.each { |r| arms << r }
+      return arms[0] if arms.length == 1
+      "(#{arms.join(" OR ")})"
+    end
+
+    # Record elements read their id — Rails' IN-of-records form
+    # (`where(comment: comments)`, lobsters Vote.comments_flags);
+    # scalar elements escape as-is. An empty list is Rails' none
+    # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
+    # `mark_null!` from `none` / lasting positive `where` only.
+    def list_predicate(col, qcol, val)
+      ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : column_bound_value(col, x) }
+      limit = integer_query_limit(col)
+      if ids.empty?
+        "1=0"
+      elsif limit > 0
+        integer_list_predicate(qcol, ids, limit)
+      elsif ids.any? { |x| x.nil? || x.is_a?(Range) }
+        array_with_ranges_predicate(qcol, ids)
+      else
+        "#{qcol} IN (#{escape_list(ids)})"
       end
     end
 
@@ -3381,6 +3575,36 @@ module ActiveRecord
       return 1 if val == true && integer_column?(col)
       return 0 if val == false && integer_column?(col)
       val
+    end
+
+    def enum_column?(col)
+      !col.include?(".") && @model.schema_enum_columns.include?(col.to_sym)
+    end
+
+    # An Array on an enum column, cast element by element as Rails'
+    # `ArrayHandler` does: a record is its id, nil and Range elements
+    # keep their own arms, and of several other values the ones that
+    # cast to nil (a label no mapping names) leave the `IN` list. When
+    # all of them do, Rails writes `IN (NULL)`, which matches no row,
+    # negated or not. A lone value is a scalar condition, so an unknown
+    # one is `IS NULL`.
+    def enum_list_predicate(col, qcol, val)
+      cast = []
+      stored = []
+      val.each do |x|
+        if x.nil? || x.is_a?(Range)
+          cast << x
+        elsif x.is_a?(Base)
+          stored << @model._enum_where_value(col, x._primary_key_value)
+        else
+          stored << @model._enum_where_value(col, x)
+        end
+      end
+      known = stored.compact
+      return list_predicate(col, qcol, cast + stored) if stored.length < 2
+      return list_predicate(col, qcol, cast + known) unless known.empty?
+      return "#{qcol} IN (NULL)" if cast.empty?
+      "(#{qcol} IN (NULL) OR #{list_predicate(col, qcol, cast)})"
     end
 
     def integer_column?(col)

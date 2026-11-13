@@ -76,6 +76,15 @@ module ActionView
       )
     end
 
+    # Rails' `url_for(:back)`: the request's referrer, or a step back in the history where it has none or names a
+    # `javascript:` URL.
+    def self.back_url
+      request = ActionController::Current.request
+      referrer = request.nil? ? nil : request.referrer
+      return "javascript:history.back()" if referrer.nil? || referrer.empty? || referrer.start_with?("javascript:")
+      referrer
+    end
+
     # Not url_for_path's host: a class that defines `default_url_options` names the host its `_url` helpers answer on, as Rails' url_for merges them
     def self.url_for_options(path, options)
       host = options[:host]

@@ -219,6 +219,9 @@ pub struct Ctx {
 pub struct ClassInfo {
     /// `request.env[KEY]` a middleware on the stack writes (`ActionDispatch::Request` only).
     pub env_keys: HashMap<String, Ty>,
+    /// The values a call no method answers reads through `method_missing`, by name, where a gem documents them
+    /// (`ingest::gem_hooks::method_missing_readers`: OmniAuth's AuthHash `info`).
+    pub missing_readers: HashMap<Symbol, Ty>,
     pub upload_array_fields: std::collections::BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), std::collections::BTreeSet<Symbol>>,
     /// Kind of the indexed source declaration; never inferred from its name.
     pub is_module: bool,
@@ -968,9 +971,10 @@ impl<'a> BodyTyper<'a> {
         let mut evaluated = Vec::new();
         if let ExprNode::If { cond, .. } = &mut *expr.node
             && let Some(answer) = self.constant_predicate_parts(cond, ctx, &mut evaluated)
-            && let ExprNode::If { then_branch, else_branch, .. } = &*expr.node
+            && let ExprNode::If { cond, then_branch, else_branch } = &*expr.node
         {
-            let branch = if answer { then_branch.clone() } else { else_branch.clone() };
+            let (kept, dropped) = if answer { (then_branch.clone(), else_branch.clone()) } else { (else_branch.clone(), then_branch.clone()) };
+            let branch = declare_dropped_locals(kept, &dropped, cond, ctx);
             // Not the branch alone where the condition runs code (`fetch_resource.respond_to?(:m)`): Ruby still runs it.
             *expr = if evaluated.is_empty() {
                 branch
@@ -1340,6 +1344,20 @@ impl<'a> BodyTyper<'a> {
 
     fn constant_predicate_leaf(&self, cond: &mut Expr, ctx: &Ctx) -> Option<bool> {
         let predicates = self.constant_predicates?;
+        // `respond_to?(:disable_warnings)` in a class method (OmniAuth's `KeyStore.override_logging`): true where the
+        // class side's chain defines it, which every class below answers too.
+        // Not false where nothing defines it: a subclass the call runs on may.
+        if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*cond.node
+            && method.as_str() == "respond_to?"
+            && ctx.class_side
+            && let [name] = args.as_slice()
+            && let ExprNode::Lit { value: Literal::Sym { value: asked } } = &*name.node
+            && let Some(Ty::Class { id, .. }) = ctx.self_ty.as_ref()
+            && self.class_side_defines(id, asked)
+            && !self.class_side_defines(id, &Symbol::from("respond_to?"))
+        {
+            return Some(true);
+        }
         let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *cond.node else { return None };
         // `resource.respond_to?(:unlock_access!)` on a model that is not `:lockable`: nothing in its chain answers it.
         if method.as_str() == "respond_to?"
@@ -1784,7 +1802,8 @@ impl<'a> BodyTyper<'a> {
                         let id = class.as_ref().clone();
                         if self.classes().contains_key(&id) || *runtime {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
-                            if *runtime && crate::gems::preloaded_constant(id.0.as_str()) {
+                            let rooted = self.const_resolver.as_ref().is_some_and(|resolver| resolver.rooted(expr_span, path));
+                            if rooted || (*runtime && crate::gems::preloaded_constant(id.0.as_str())) {
                                 // Object:: and Object aliases name this same preloaded
                                 // namespace. Its resolved name lets BUNDLED load the package.
                                 *path = std::iter::once(Symbol::from(""))
@@ -2914,6 +2933,11 @@ impl<'a> BodyTyper<'a> {
                     }));
                     return unknown();
                 }
+                // The receiver's type can become known in a later fixpoint round (an ivar a class-side reader fills): an
+                // earlier round's refusal is recomputed, not kept.
+                if matches!(crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str().starts_with("Hash#deep_merge")) {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
+                }
                 let unsupported_deep_merge = match method.as_str() {
                     "deep_merge" if block.is_some() => Some((
                         "Hash#deep_merge conflict block",
@@ -4028,13 +4052,15 @@ impl<'a> BodyTyper<'a> {
                     {
                         local_ctx.ivar_bindings.insert(name, ty);
                     }
-                    if let ExprNode::OpAssign { target, .. } = &*e.node
+                    if let ExprNode::OpAssign { target, value, .. } = &*e.node
                         && e.decisions & crate::expr::DEAD_OR_ASSIGN == 0
                     {
                         if let Some(ty) = e.ty.clone() {
                             if !matches!(ty, Ty::Var { .. }) {
                                 match target {
                                     LValue::Ivar { name } => {
+                                        // `@x &&= Klass` stores the class, as `walk_ivar_assignments` records it.
+                                        let ty = super::class_object_arg_ty(value, ty);
                                         let merged = match local_ctx
                                             .ivar_bindings
                                             .remove(name)
@@ -8444,4 +8470,51 @@ fn builtin_never_answers(ty: &Ty, method: &Symbol) -> bool {
             Ty::Hash { .. } => !answers.contains(&"Hash"),
             _ => false,
         })
+}
+
+/// `kept`, with `x = nil` ahead of it for each local the untaken branch first assigns: Ruby defines a local an
+/// assignment names wherever the parser meets it, a branch that never runs included (`x = y if false` leaves `x` nil).
+fn declare_dropped_locals(kept: Expr, dropped: &Expr, cond: &Expr, ctx: &Ctx) -> Expr {
+    fn assigned(e: &Expr, out: &mut Vec<(crate::ident::VarId, Symbol)>) {
+        // Every form that makes a local: `x = `, `x ||= `, and each target of `a, b = `.
+        let mut push = |target: &crate::expr::LValue| {
+            if let crate::expr::LValue::Var { id, name } = target
+                && !out.iter().any(|(_, n)| n == name)
+            {
+                out.push((*id, name.clone()));
+            }
+        };
+        match &*e.node {
+            ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => push(target),
+            ExprNode::MultiAssign { targets, .. } => targets.iter().for_each(&mut push),
+            _ => {}
+        }
+        // Not a block's own: its locals are its body's.
+        if matches!(&*e.node, ExprNode::Lambda { .. }) {
+            return;
+        }
+        e.node.for_each_child(&mut |c| assigned(c, out));
+    }
+    let mut names = Vec::new();
+    assigned(dropped, &mut names);
+    // Nor one the condition binds (`if (x = find)`): it already holds what the kept branch reads.
+    let mut in_cond = Vec::new();
+    assigned(cond, &mut in_cond);
+    let fresh: Vec<_> = names
+        .into_iter()
+        .filter(|(_, n)| !ctx.local_bindings.contains_key(n) && !in_cond.iter().any(|(_, c)| c == n))
+        .collect();
+    if fresh.is_empty() {
+        return kept;
+    }
+    let span = kept.span;
+    let mut exprs: Vec<Expr> = fresh
+        .into_iter()
+        .map(|(id, name)| {
+            let nil = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+            Expr::new(span, ExprNode::Assign { target: crate::expr::LValue::Var { id, name }, value: nil })
+        })
+        .collect();
+    exprs.push(kept);
+    Expr::new(span, ExprNode::Seq { exprs })
 }

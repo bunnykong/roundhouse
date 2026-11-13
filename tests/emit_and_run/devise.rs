@@ -65,11 +65,19 @@ fn all_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<std::p
 }
 
 fn app(modules: &str, routes: &str) -> emit_and_run::Overlay {
+    app_with(modules, routes, &[], "", &[])
+}
+
+/// [`app`] with more gems in the bundle: their lock specs (before `rack`'s), the names the Gemfile lists, and the
+/// installed gems written into `vendor/bundle`.
+fn app_with(modules: &str, routes: &str, gems: &[(&str, &str)], specs: &str, listed: &[&str]) -> emit_and_run::Overlay {
     let fixture = roundhouse::fixtures::real_blog();
     let lock = std::fs::read_to_string(fixture.join("Gemfile.lock")).unwrap();
+    let dependencies: String = std::iter::once("devise").chain(listed.iter().copied()).map(|g| format!("  {g}\n")).collect();
     // Not a bare "    rack (": a dependency line ("      rack (>= 2.2.4)") holds it too.
-    let lock = lock.replacen("\n    rack (", &format!("\n{SPECS}    rack ("), 1).replacen("DEPENDENCIES\n", "DEPENDENCIES\n  devise\n", 1);
-    let gemfile = std::fs::read_to_string(fixture.join("Gemfile")).unwrap() + "gem \"devise\"\n";
+    let lock = lock.replacen("\n    rack (", &format!("\n{SPECS}{specs}    rack ("), 1).replacen("DEPENDENCIES\n", &format!("DEPENDENCIES\n{dependencies}"), 1);
+    let gemfile = std::fs::read_to_string(fixture.join("Gemfile")).unwrap()
+        + &std::iter::once("devise").chain(listed.iter().copied()).map(|g| format!("gem \"{g}\"\n")).collect::<String>();
     let mut overlay = emit_and_run::real_blog()
         .write("Gemfile", &gemfile)
         .write("Gemfile.lock", &lock)
@@ -79,7 +87,7 @@ fn app(modules: &str, routes: &str) -> emit_and_run::Overlay {
         .write("config/initializers/devise.rb", "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  require \"devise/orm/active_record\"\nend\n")
         .write("app/models/user.rb", &format!("class User < ApplicationRecord\n  devise {modules}\nend\n"))
         .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{routes}"));
-    for (name, version) in GEMS {
+    for (name, version) in GEMS.iter().chain(gems) {
         let gem = installed(name, version);
         let mut files = Vec::new();
         rb_files(&gem, &gem.join("lib"), &mut files);
@@ -826,4 +834,738 @@ fn a_devise_password_resets_over_http_natively() {
     let cookie = header(&jar);
     let (secret, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
     assert_eq!(secret.status, 200, "{}", server.log());
+}
+
+/// `:registerable`, as Rails 8.1.4 with Devise 4.9.4 answers it: a bad sign-up renders its errors, a good one signs the
+/// user in, the edit form updates the email past the current password, and cancelling deletes the user and signs out.
+const REGISTERABLE_MODULES: &str = ":database_authenticatable, :registerable, :recoverable, :validatable";
+
+const REGISTERABLE_ROUTES: &str = "  devise_for :users\n  authenticate :user do\n    get \"/secret\", to: \"articles#index\"\n  end\n";
+
+const RACK_REGISTER: &str = r##"require "uri"
+$jar = {}
+def req(verb, path, body = "")
+  env = { "REQUEST_METHOD" => verb, "PATH_INFO" => path, "QUERY_STRING" => "", "SERVER_NAME" => "localhost",
+          "SERVER_PORT" => "80", "HTTP_HOST" => "localhost", "rack.url_scheme" => "http", "rack.input" => StringIO.new(body),
+          "HTTP_COOKIE" => $jar.map { |k, v| "#{k}=#{v}" }.join("; ") }
+  unless body.empty?
+    env["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    env["CONTENT_LENGTH"] = body.bytesize.to_s
+  end
+  status, headers, chunks = Main.run_rack(env)
+  Array(headers["set-cookie"]).flat_map { |line| line.split("\n") }.each do |line|
+    name, rest = line.split("=", 2)
+    value = rest.split(";").first.to_s
+    value.empty? ? $jar.delete(name) : $jar[name] = value
+  end
+  [status, headers, chunks.join]
+end
+token_of = ->(page) { URI.encode_www_form_component(page[/name="authenticity_token" value="([^"]*)"/, 1]) }
+
+status, _, page = req("GET", "/users/sign_up")
+raise "sign-up page #{status}" unless status == 200 && page.include?(%(action="/users"))
+status, _, bad = req("POST", "/users", "authenticity_token=#{token_of.(page)}&user%5Bemail%5D=bad&user%5Bpassword%5D=123&user%5Bpassword_confirmation%5D=123")
+errors = bad.scan(%r{<li>([^<]*)</li>}).flatten
+raise "bad #{status} #{errors.inspect}" unless status == 200 && errors == ["Email is invalid", "Password is too short (minimum is 6 characters)"]
+status, headers, = req("POST", "/users", "authenticity_token=#{token_of.(page)}&user%5Bemail%5D=new%40example.com&user%5Bpassword%5D=secret123&user%5Bpassword_confirmation%5D=secret123")
+raise "create #{status} #{headers.inspect}" unless status == 302 && headers["location"] == "http://localhost/"
+status, = req("GET", "/secret")
+raise "signed up #{status}" unless status == 200
+status, _, edit = req("GET", "/users/edit")
+raise "edit #{status}" unless status == 200 && edit.include?(%(value="new@example.com"))
+status, headers, = req("POST", "/users", "_method=put&authenticity_token=#{token_of.(edit)}&user%5Bemail%5D=renamed%40example.com&user%5Bcurrent_password%5D=secret123")
+raise "update #{status} #{headers.inspect}" unless status == 302 && headers["location"] == "http://localhost/"
+raise "renamed" if User.find_by(email: "renamed@example.com").nil?
+status, headers, = req("POST", "/users", "_method=delete&authenticity_token=#{token_of.(edit)}")
+raise "cancel #{status} #{headers.inspect}" unless status == 302 && headers["location"] == "http://localhost/" && User.count == 0
+status, = req("GET", "/secret")
+raise "cancelled #{status}" unless status == 302
+puts "devise registration over rack passed"
+"##;
+
+#[test]
+fn a_devise_user_registers_edits_and_cancels_over_rack_on_the_ruby_family() {
+    let run = app(REGISTERABLE_MODULES, REGISTERABLE_ROUTES).run_ruby(RACK_REGISTER);
+    run.assert_passes();
+    assert!(run.stdout.contains("devise registration over rack passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_user_registers_edits_and_cancels_over_http_natively() {
+    let tree = app(REGISTERABLE_MODULES, REGISTERABLE_ROUTES).native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    let form_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let mut jar = Vec::new();
+    let post = |jar: &mut Vec<(String, String)>, body: String| {
+        let cookie = header(jar);
+        let (answer, cookies) = server.request_with_set_cookies("POST", "/users", &[form_type, ("Cookie", cookie.as_str())], &body);
+        kept(jar, &cookies);
+        answer
+    };
+
+    let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_up", &[], "");
+    assert_eq!(page.status, 200, "{}", server.log());
+    kept(&mut jar, &cookies);
+    let token = form_encode(between(&page.body, "name=\"authenticity_token\" value=\"", "\""));
+    let bad = post(&mut jar, format!("authenticity_token={token}&user%5Bemail%5D=bad&user%5Bpassword%5D=123&user%5Bpassword_confirmation%5D=123"));
+    assert_eq!(bad.status, 200, "{}\n{}", bad.body, server.log());
+    assert!(bad.body.contains("<li>Email is invalid</li>"), "{}", bad.body);
+    assert!(bad.body.contains("<li>Password is too short (minimum is 6 characters)</li>"), "{}", bad.body);
+    let created = post(
+        &mut jar,
+        format!("authenticity_token={token}&user%5Bemail%5D=new%40example.com&user%5Bpassword%5D=secret123&user%5Bpassword_confirmation%5D=secret123"),
+    );
+    assert_eq!(created.status, 302, "{}\n{}", created.body, server.log());
+    let cookie = header(&jar);
+    let (secret, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(secret.status, 200, "{}", server.log());
+
+    let (edit, cookies) = server.request_with_set_cookies("GET", "/users/edit", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(edit.status, 200, "{}\n{}", edit.body, server.log());
+    assert!(edit.body.contains(r#"value="new@example.com""#), "{}", edit.body);
+    kept(&mut jar, &cookies);
+    let token = form_encode(between(&edit.body, "name=\"authenticity_token\" value=\"", "\""));
+    let updated = post(&mut jar, format!("_method=put&authenticity_token={token}&user%5Bemail%5D=renamed%40example.com&user%5Bcurrent_password%5D=secret123"));
+    assert_eq!(updated.status, 302, "{}\n{}", updated.body, server.log());
+    let cancelled = post(&mut jar, format!("_method=delete&authenticity_token={token}"));
+    assert_eq!(cancelled.status, 302, "{}\n{}", cancelled.body, server.log());
+    let cookie = header(&jar);
+    let (secret, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(secret.status, 302, "{}", server.log());
+}
+
+/// `:confirmable`, as Rails 8.1.4 with Devise 4.9.4 answers it: a sign-up mails a confirmation link from its
+/// `after_commit` (declared under `if Devise::Orm.active_record?(self)`), signs no one in, and refuses a sign-in until
+/// the link confirms the account.
+const CONFIRMABLE_MODULES: &str = ":database_authenticatable, :registerable, :recoverable, :validatable, :confirmable";
+
+const CONFIRMABLE_COLUMNS: &str = "    t.datetime \"reset_password_sent_at\"\n    t.string \"confirmation_token\"\n    t.datetime \"confirmed_at\"\n    t.datetime \"confirmation_sent_at\"\n    t.string \"unconfirmed_email\"\n";
+
+fn confirmable_app() -> emit_and_run::Overlay {
+    app(CONFIRMABLE_MODULES, RECOVERABLE_ROUTES)
+        .edit("db/schema.rb", "    t.datetime \"reset_password_sent_at\"\n", CONFIRMABLE_COLUMNS)
+        .write("app/controllers/accounts_controller.rb", RESETS)
+}
+
+const RACK_CONFIRM: &str = r##"require "uri"
+$jar = {}
+def req(verb, path, body = "")
+  path, query = path.split("?", 2)
+  env = { "REQUEST_METHOD" => verb, "PATH_INFO" => path, "QUERY_STRING" => query.to_s, "SERVER_NAME" => "localhost",
+          "SERVER_PORT" => "80", "HTTP_HOST" => "localhost", "rack.url_scheme" => "http", "rack.input" => StringIO.new(body),
+          "HTTP_COOKIE" => $jar.map { |k, v| "#{k}=#{v}" }.join("; ") }
+  unless body.empty?
+    env["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    env["CONTENT_LENGTH"] = body.bytesize.to_s
+  end
+  status, headers, chunks = Main.run_rack(env)
+  Array(headers["set-cookie"]).flat_map { |line| line.split("\n") }.each do |line|
+    name, rest = line.split("=", 2)
+    value = rest.split(";").first.to_s
+    value.empty? ? $jar.delete(name) : $jar[name] = value
+  end
+  [status, headers, chunks.join]
+end
+token_of = ->(page) { URI.encode_www_form_component(page[/name="authenticity_token" value="([^"]*)"/, 1]) }
+sign_in = lambda do
+  _, _, page = req("GET", "/users/sign_in")
+  req("POST", "/users/sign_in", "authenticity_token=#{token_of.(page)}&user%5Bemail%5D=new%40example.com&user%5Bpassword%5D=secret123")
+end
+
+_, _, page = req("GET", "/users/sign_up")
+status, headers, = req("POST", "/users", "authenticity_token=#{token_of.(page)}&user%5Bemail%5D=new%40example.com&user%5Bpassword%5D=secret123&user%5Bpassword_confirmation%5D=secret123")
+raise "sign up #{status} #{headers.inspect}" unless status == 302 && headers["location"] == "http://localhost/"
+_, _, home = req("GET", "/")
+raise "inactive notice" unless home.include?("A message with a confirmation link has been sent to your email address.")
+status, = req("GET", "/secret")
+raise "unconfirmed signed in #{status}" unless status == 302
+_, _, mailed = req("GET", "/account/mailed")
+subject, from, to, body = mailed.split("|", 4)
+raise "mail #{[subject, from, to].inspect}" unless [subject, from, to] == ["Confirmation instructions", "please-change-me@example.com", "new@example.com"]
+raw = body[/confirmation_token=([^"&]+)"/, 1]
+raise "no token in #{body}" if raw.nil?
+status, headers, = sign_in.()
+raise "unconfirmed sign in #{status} #{headers.inspect}" unless status == 302 && headers["location"].end_with?("/users/sign_in")
+status, = req("GET", "/secret")
+raise "refused sign in kept #{status}" unless status == 302
+status, headers, = req("GET", "/users/confirmation?confirmation_token=#{raw}")
+raise "confirm #{status} #{headers.inspect}" unless status == 302 && headers["location"].end_with?("/users/sign_in")
+raise "confirmed_at" if User.find_by(email: "new@example.com").confirmed_at.nil?
+status, headers, = sign_in.()
+raise "sign in #{status} #{headers.inspect}" unless status == 302 && headers["location"].end_with?("/secret")
+status, = req("GET", "/secret")
+raise "confirmed signed in #{status}" unless status == 200
+puts "devise confirmation over rack passed"
+"##;
+
+#[test]
+fn a_devise_user_confirms_before_signing_in_over_rack_on_the_ruby_family() {
+    let run = confirmable_app().run_ruby(RACK_CONFIRM);
+    run.assert_passes();
+    assert!(run.stdout.contains("devise confirmation over rack passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_user_confirms_before_signing_in_over_http_natively() {
+    let tree = confirmable_app().native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    let form_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let mut jar = Vec::new();
+    let get = |jar: &mut Vec<(String, String)>, path: &str| {
+        let cookie = header(jar);
+        let (answer, cookies) = server.request_with_set_cookies("GET", path, &[("Cookie", cookie.as_str())], "");
+        kept(jar, &cookies);
+        answer
+    };
+    let post = |jar: &mut Vec<(String, String)>, path: &str, body: String| {
+        let cookie = header(jar);
+        let (answer, cookies) = server.request_with_set_cookies("POST", path, &[form_type, ("Cookie", cookie.as_str())], &body);
+        kept(jar, &cookies);
+        answer
+    };
+    let token_of = |page: &str| form_encode(between(page, "name=\"authenticity_token\" value=\"", "\""));
+    let sign_in = |jar: &mut Vec<(String, String)>| {
+        let page = get(jar, "/users/sign_in");
+        post(jar, "/users/sign_in", format!("authenticity_token={}&user%5Bemail%5D=new%40example.com&user%5Bpassword%5D=secret123", token_of(&page.body)))
+    };
+
+    let page = get(&mut jar, "/users/sign_up");
+    assert_eq!(page.status, 200, "{}", server.log());
+    let created = post(
+        &mut jar,
+        "/users",
+        format!("authenticity_token={}&user%5Bemail%5D=new%40example.com&user%5Bpassword%5D=secret123&user%5Bpassword_confirmation%5D=secret123", token_of(&page.body)),
+    );
+    assert_eq!(created.status, 302, "{}\n{}", created.body, server.log());
+    assert_eq!(get(&mut jar, "/secret").status, 302, "{}", server.log());
+    let mailed = get(&mut jar, "/account/mailed");
+    let mut parts = mailed.body.splitn(4, '|');
+    let head: Vec<&str> = parts.by_ref().take(3).collect();
+    assert_eq!(head, ["Confirmation instructions", "please-change-me@example.com", "new@example.com"], "{}", mailed.body);
+    let raw = between(parts.next().unwrap_or_default(), "confirmation_token=", "\"").to_string();
+
+    let refused = sign_in(&mut jar);
+    assert_eq!(refused.status, 302, "{}\n{}", refused.body, server.log());
+    assert!(refused.headers.get("location").is_some_and(|l| l.ends_with("/users/sign_in")), "{:?}", refused.headers);
+    assert_eq!(get(&mut jar, "/secret").status, 302, "{}", server.log());
+    let confirmed = get(&mut jar, &format!("/users/confirmation?confirmation_token={raw}"));
+    assert_eq!(confirmed.status, 302, "{}\n{}", confirmed.body, server.log());
+    let signed = sign_in(&mut jar);
+    assert_eq!(signed.status, 302, "{}\n{}", signed.body, server.log());
+    assert_eq!(get(&mut jar, "/secret").status, 200, "{}", server.log());
+}
+
+/// `:trackable`, as Rails 8.1.4 with Devise 4.9.4 records it: its Warden hook counts each sign-in and moves the current
+/// address and time to the last ones. Its model file is loaded by the autoload `Devise.add_module` registers.
+const TRACKABLE_COLUMNS: &str = "    t.integer \"sign_in_count\", default: 0, null: false\n    t.datetime \"current_sign_in_at\"\n    t.datetime \"last_sign_in_at\"\n    t.string \"current_sign_in_ip\"\n    t.string \"last_sign_in_ip\"\n";
+
+fn trackable_app() -> emit_and_run::Overlay {
+    app(":database_authenticatable, :trackable", "  devise_for :users\n  get \"/account/new\", to: \"accounts#create\"\n")
+        .edit("db/schema.rb", "    t.datetime \"reset_password_sent_at\"\n", &format!("    t.datetime \"reset_password_sent_at\"\n{TRACKABLE_COLUMNS}"))
+        .write("app/controllers/accounts_controller.rb", ACCOUNTS)
+}
+
+const RACK_TRACK: &str = r##"require "uri"
+$ip = "10.0.0.1"
+def req(verb, path, body = "")
+  env = { "REQUEST_METHOD" => verb, "PATH_INFO" => path, "QUERY_STRING" => "", "SERVER_NAME" => "localhost",
+          "SERVER_PORT" => "80", "HTTP_HOST" => "localhost", "rack.url_scheme" => "http", "REMOTE_ADDR" => $ip,
+          "rack.input" => StringIO.new(body), "HTTP_COOKIE" => $jar.map { |k, v| "#{k}=#{v}" }.join("; ") }
+  unless body.empty?
+    env["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    env["CONTENT_LENGTH"] = body.bytesize.to_s
+  end
+  status, headers, chunks = Main.run_rack(env)
+  Array(headers["set-cookie"]).flat_map { |line| line.split("\n") }.each do |line|
+    name, rest = line.split("=", 2)
+    value = rest.split(";").first.to_s
+    value.empty? ? $jar.delete(name) : $jar[name] = value
+  end
+  [status, headers, chunks.join]
+end
+sign_in = lambda do
+  $jar = {}
+  _, _, page = req("GET", "/users/sign_in")
+  token = URI.encode_www_form_component(page[/name="authenticity_token" value="([^"]*)"/, 1])
+  req("POST", "/users/sign_in", "authenticity_token=#{token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=secret123")
+end
+
+$jar = {}
+req("GET", "/account/new")
+status, = sign_in.()
+raise "first sign in #{status}" unless status == 302
+user = User.find_by(email: "a@example.com")
+first = [user.sign_in_count, user.current_sign_in_ip, user.last_sign_in_ip]
+raise "first #{first.inspect}" unless first == [1, "10.0.0.1", "10.0.0.1"] && user.current_sign_in_at == user.last_sign_in_at
+$ip = "10.0.0.2"
+status, = sign_in.()
+raise "second sign in #{status}" unless status == 302
+user = User.find_by(email: "a@example.com")
+second = [user.sign_in_count, user.current_sign_in_ip, user.last_sign_in_ip]
+raise "second #{second.inspect}" unless second == [2, "10.0.0.2", "10.0.0.1"] && user.last_sign_in_at <= user.current_sign_in_at
+puts "devise tracking over rack passed"
+"##;
+
+#[test]
+fn a_devise_sign_in_is_tracked_over_rack_on_the_ruby_family() {
+    let run = trackable_app().run_ruby(RACK_TRACK);
+    run.assert_passes();
+    assert!(run.stdout.contains("devise tracking over rack passed"), "{}", run.stdout);
+}
+
+/// `:trackable` natively: the same two sign-ins, each counted, the current address the peer's and the last one the
+/// previous sign-in's, read back through an action, as the Rack test reads the record.
+const TRACKED: &str = "class AccountsController < ApplicationController\n  def create\n    User.create!(email: \"a@example.com\", password: \"secret123\")\n    head :ok\n  end\n\n  def tracked\n    user = User.find_by(email: \"a@example.com\")\n    render plain: \"#{user.sign_in_count}|#{user.current_sign_in_ip}|#{user.last_sign_in_ip}|#{user.current_sign_in_at == user.last_sign_in_at}\"\n  end\nend\n";
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_sign_in_is_tracked_over_http_natively() {
+    let tree = app(":database_authenticatable, :trackable", "  devise_for :users\n  get \"/account/new\", to: \"accounts#create\"\n  get \"/account/tracked\", to: \"accounts#tracked\"\n")
+        .edit("db/schema.rb", "    t.datetime \"reset_password_sent_at\"\n", &format!("    t.datetime \"reset_password_sent_at\"\n{TRACKABLE_COLUMNS}"))
+        .write("app/controllers/accounts_controller.rb", TRACKED)
+        .native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    assert_eq!(server.get("/account/new").status, 200, "{}", server.log());
+    let form_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let sign_in = || {
+        let mut jar = Vec::new();
+        let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_in", &[], "");
+        kept(&mut jar, &cookies);
+        let token = form_encode(between(&page.body, "name=\"authenticity_token\" value=\"", "\""));
+        let cookie = header(&jar);
+        let body = format!("authenticity_token={token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=secret123");
+        server.request_with_set_cookies("POST", "/users/sign_in", &[form_type, ("Cookie", cookie.as_str())], &body).0
+    };
+    assert_eq!(sign_in().status, 302, "{}", server.log());
+    let first = server.get("/account/tracked");
+    assert_eq!(first.body, "1|127.0.0.1|127.0.0.1|true", "{}", server.log());
+    assert_eq!(sign_in().status, 302, "{}", server.log());
+    let second = server.get("/account/tracked");
+    assert!(second.body.starts_with("2|127.0.0.1|127.0.0.1|"), "{}\n{}", second.body, server.log());
+}
+
+/// `:lockable`, as Rails 8.1.4 with Devise 4.9.4 answers it with `config.maximum_attempts = 3`: the third wrong
+/// password locks the account and mails an unlock link, the right password is refused while it is locked, and the link
+/// unlocks it. Its `delegate ..., to: "self.class"` forwards the strategy, as Rails' generated method does.
+const LOCKABLE_COLUMNS: &str = "    t.integer \"failed_attempts\", default: 0, null: false\n    t.string \"unlock_token\"\n    t.datetime \"locked_at\"\n";
+
+fn lockable_app() -> emit_and_run::Overlay {
+    app(":database_authenticatable, :lockable", RECOVERABLE_ROUTES)
+        .edit("db/schema.rb", "    t.datetime \"reset_password_sent_at\"\n", &format!("    t.datetime \"reset_password_sent_at\"\n{LOCKABLE_COLUMNS}"))
+        .write("config/initializers/devise.rb", "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  config.maximum_attempts = 3\n  require \"devise/orm/active_record\"\nend\n")
+        .write("app/controllers/accounts_controller.rb", RESETS)
+}
+
+const RACK_LOCK: &str = r##"require "uri"
+$jar = {}
+def req(verb, path, body = "")
+  path, query = path.split("?", 2)
+  env = { "REQUEST_METHOD" => verb, "PATH_INFO" => path, "QUERY_STRING" => query.to_s, "SERVER_NAME" => "localhost",
+          "SERVER_PORT" => "80", "HTTP_HOST" => "localhost", "rack.url_scheme" => "http", "rack.input" => StringIO.new(body),
+          "HTTP_COOKIE" => $jar.map { |k, v| "#{k}=#{v}" }.join("; ") }
+  unless body.empty?
+    env["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    env["CONTENT_LENGTH"] = body.bytesize.to_s
+  end
+  status, headers, chunks = Main.run_rack(env)
+  Array(headers["set-cookie"]).flat_map { |line| line.split("\n") }.each do |line|
+    name, rest = line.split("=", 2)
+    value = rest.split(";").first.to_s
+    value.empty? ? $jar.delete(name) : $jar[name] = value
+  end
+  [status, headers, chunks.join]
+end
+sign_in = lambda do |password|
+  _, _, page = req("GET", "/users/sign_in")
+  token = URI.encode_www_form_component(page[/name="authenticity_token" value="([^"]*)"/, 1])
+  req("POST", "/users/sign_in", "authenticity_token=#{token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=#{password}")
+end
+
+req("GET", "/account/new")
+[[1, false], [2, false], [3, true]].each do |count, locked|
+  status, = sign_in.("wrong")
+  user = User.find_by(email: "a@example.com")
+  raise "wrong #{count}: #{[status, user.failed_attempts, user.locked_at.nil?].inspect}" unless status == 200 && user.failed_attempts == count && user.locked_at.nil? != locked
+end
+_, _, mailed = req("GET", "/account/mailed")
+subject, from, to, body = mailed.split("|", 4)
+raise "mail #{[subject, from, to].inspect}" unless [subject, from, to] == ["Unlock instructions", "please-change-me@example.com", "a@example.com"]
+raw = body[/unlock_token=([^"&]+)"/, 1]
+raise "no token in #{body}" if raw.nil?
+status, = sign_in.("secret123")
+raise "locked sign in #{status}" unless status == 200
+status, = req("GET", "/secret")
+raise "locked signed in #{status}" unless status == 302
+status, headers, = req("GET", "/users/unlock?unlock_token=#{raw}")
+raise "unlock #{status} #{headers.inspect}" unless status == 302 && headers["location"].end_with?("/users/sign_in")
+user = User.find_by(email: "a@example.com")
+raise "unlocked #{[user.failed_attempts, user.locked_at].inspect}" unless user.failed_attempts == 0 && user.locked_at.nil?
+status, headers, = sign_in.("secret123")
+raise "sign in #{status} #{headers.inspect}" unless status == 302 && headers["location"].end_with?("/secret")
+puts "devise locking over rack passed"
+"##;
+
+#[test]
+fn a_devise_account_locks_and_unlocks_over_rack_on_the_ruby_family() {
+    let run = lockable_app().run_ruby(RACK_LOCK);
+    run.assert_passes();
+    assert!(run.stdout.contains("devise locking over rack passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_account_locks_and_unlocks_over_http_natively() {
+    let tree = lockable_app().native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    assert_eq!(server.get("/account/new").status, 200, "{}", server.log());
+    let form_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let sign_in = |password: &str| {
+        let mut jar = Vec::new();
+        let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_in", &[], "");
+        kept(&mut jar, &cookies);
+        let token = form_encode(between(&page.body, "name=\"authenticity_token\" value=\"", "\""));
+        let cookie = header(&jar);
+        let body = format!("authenticity_token={token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D={password}");
+        server.request_with_set_cookies("POST", "/users/sign_in", &[form_type, ("Cookie", cookie.as_str())], &body).0
+    };
+    for _ in 0..3 {
+        let wrong = sign_in("wrong");
+        assert_eq!(wrong.status, 200, "{}\n{}", wrong.body, server.log());
+    }
+    let mailed = server.get("/account/mailed");
+    let mut parts = mailed.body.splitn(4, '|');
+    let head: Vec<&str> = parts.by_ref().take(3).collect();
+    assert_eq!(head, ["Unlock instructions", "please-change-me@example.com", "a@example.com"], "{}", mailed.body);
+    let raw = between(parts.next().unwrap_or_default(), "unlock_token=", "\"").to_string();
+    assert_eq!(sign_in("secret123").status, 200, "{}", server.log());
+    let unlocked = server.get(&format!("/users/unlock?unlock_token={raw}"));
+    assert_eq!(unlocked.status, 302, "{}\n{}", unlocked.body, server.log());
+    let signed = sign_in("secret123");
+    assert_eq!(signed.status, 302, "{}\n{}", signed.body, server.log());
+}
+
+/// `:rememberable`, as Rails 8.1.4 with Devise 4.9.4 answers it: a sign-in with "remember me" sets the signed
+/// `remember_user_token` (its value `[[id], salt, at]` read back as JSON, an Expires `remember_for` out), the cookie
+/// alone signs the user back in through a route's `authenticate` (a Warden strategy before any controller, reading
+/// `request.cookie_jar`), and signing out forgets it.
+const RACK_REMEMBER: &str = r##"require "uri"
+$jar = {}
+def req(verb, path, body = "")
+  env = { "REQUEST_METHOD" => verb, "PATH_INFO" => path, "QUERY_STRING" => "", "SERVER_NAME" => "localhost",
+          "SERVER_PORT" => "80", "HTTP_HOST" => "localhost", "rack.url_scheme" => "http", "rack.input" => StringIO.new(body),
+          "HTTP_COOKIE" => $jar.map { |k, v| "#{k}=#{v}" }.join("; ") }
+  unless body.empty?
+    env["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    env["CONTENT_LENGTH"] = body.bytesize.to_s
+  end
+  status, headers, chunks = Main.run_rack(env)
+  $set = Array(headers["set-cookie"]).flat_map { |line| line.split("\n") }
+  $set.each do |line|
+    name, rest = line.split("=", 2)
+    value = rest.split(";").first.to_s
+    value.empty? ? $jar.delete(name) : $jar[name] = value
+  end
+  [status, headers, chunks.join]
+end
+token_of = ->(page) { URI.encode_www_form_component(page[/name="authenticity_token" value="([^"]*)"/, 1]) }
+
+req("GET", "/account/new")
+_, _, page = req("GET", "/users/sign_in")
+status, = req("POST", "/users/sign_in", "authenticity_token=#{token_of.(page)}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=secret123&user%5Bremember_me%5D=1")
+remember = $set.find { |line| line.start_with?("remember_user_token=") }
+raise "sign in #{status} #{$set.inspect}" unless status == 302 && remember && remember =~ /expires=/i && remember =~ /httponly/i
+raise "remember_created_at" if User.find_by(email: "a@example.com").remember_created_at.nil?
+$jar.delete("_real_blog_session")
+status, = req("GET", "/secret")
+raise "remembered #{status}" unless status == 200
+_, _, home = req("GET", "/")
+token = URI.encode_www_form_component(home[/name="csrf-token" content="([^"]*)"/, 1].to_s)
+status, = req("POST", "/users/sign_out", "_method=delete&authenticity_token=#{token}")
+raise "sign out #{status} #{$set.inspect}" unless status == 302 && $set.any? { |line| line.start_with?("remember_user_token=;") && line.include?("Max-Age=0") }
+raise "forgotten" unless User.find_by(email: "a@example.com").remember_created_at.nil?
+$jar.delete("_real_blog_session")
+status, = req("GET", "/secret")
+raise "signed out #{status}" unless status == 302
+puts "devise remember-me over rack passed"
+"##;
+
+#[test]
+fn a_devise_user_is_remembered_by_cookie_over_rack_on_the_ruby_family() {
+    let run = app(":database_authenticatable, :rememberable", "  devise_for :users\n  get \"/account/new\", to: \"accounts#create\"\n  authenticate :user do\n    get \"/secret\", to: \"articles#index\"\n  end\n")
+        .edit("db/schema.rb", "    t.datetime \"reset_password_sent_at\"\n", "    t.datetime \"reset_password_sent_at\"\n    t.datetime \"remember_created_at\"\n")
+        .write("app/controllers/accounts_controller.rb", ACCOUNTS)
+        .run_ruby(RACK_REMEMBER);
+    run.assert_passes();
+    assert!(run.stdout.contains("devise remember-me over rack passed"), "{}", run.stdout);
+}
+
+/// `:rememberable` natively: the remember-me sign-in sets the signed `remember_user_token`, which alone (no session
+/// cookie) signs the user back in through the route's `authenticate`, and signing out expires it.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_user_is_remembered_by_cookie_over_http_natively() {
+    let tree = app(":database_authenticatable, :rememberable", "  devise_for :users\n  get \"/account/new\", to: \"accounts#create\"\n  authenticate :user do\n    get \"/secret\", to: \"articles#index\"\n  end\n")
+        .edit("db/schema.rb", "    t.datetime \"reset_password_sent_at\"\n", "    t.datetime \"reset_password_sent_at\"\n    t.datetime \"remember_created_at\"\n")
+        .write("app/controllers/accounts_controller.rb", ACCOUNTS)
+        .native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    assert_eq!(server.get("/account/new").status, 200, "{}", server.log());
+    let form_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let mut jar = Vec::new();
+    let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_in", &[], "");
+    kept(&mut jar, &cookies);
+    let token = form_encode(between(&page.body, "name=\"authenticity_token\" value=\"", "\""));
+    let cookie = header(&jar);
+    let body = format!("authenticity_token={token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=secret123&user%5Bremember_me%5D=1");
+    let (signed, set) = server.request_with_set_cookies("POST", "/users/sign_in", &[form_type, ("Cookie", cookie.as_str())], &body);
+    assert_eq!(signed.status, 302, "{}", server.log());
+    let remember = set.iter().find(|c| c.starts_with("remember_user_token=")).unwrap_or_else(|| panic!("no remember cookie: {set:?}"));
+    assert!(remember.to_lowercase().contains("expires="), "{remember}");
+    kept(&mut jar, &set);
+    // The remember cookie alone, as a browser keeps it after the session ends.
+    jar.retain(|(name, _)| name == "remember_user_token");
+    let only_remember = header(&jar);
+    let (back, set) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", only_remember.as_str())], "");
+    assert_eq!(back.status, 200, "{}\n{}", back.body, server.log());
+    kept(&mut jar, &set);
+    let cookie = header(&jar);
+    let (home, set) = server.request_with_set_cookies("GET", "/", &[("Cookie", cookie.as_str())], "");
+    kept(&mut jar, &set);
+    let csrf = form_encode(between(&home.body, "name=\"csrf-token\" content=\"", "\""));
+    let cookie = header(&jar);
+    let (out, set) = server.request_with_set_cookies("POST", "/users/sign_out", &[form_type, ("Cookie", cookie.as_str())], &format!("_method=delete&authenticity_token={csrf}"));
+    assert_eq!(out.status, 302, "{}\n{}", out.body, server.log());
+    assert!(set.iter().any(|c| c.starts_with("remember_user_token=;") && c.contains("Max-Age=0")), "{set:?}");
+    let (after, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", only_remember.as_str())], "");
+    assert_eq!(after.status, 302, "the forgotten token signs no one in: {}", server.log());
+}
+
+/// `:timeoutable`, as Rails 8.1.4 with Devise 4.9.4 answers it with `config.timeout_in = 2.seconds`: a request past
+/// the timeout signs the user out and redirects back to the page, the redirect to sign in that follows keeps the
+/// flash's `:timedout` and its alert (`flash.keep`), and the alert is the session-expired one.
+const RACK_TIMEOUT: &str = r##"require "uri"
+$jar = {}
+def req(verb, path, body = "")
+  env = { "REQUEST_METHOD" => verb, "PATH_INFO" => path, "QUERY_STRING" => "", "SERVER_NAME" => "localhost",
+          "SERVER_PORT" => "80", "HTTP_HOST" => "localhost", "rack.url_scheme" => "http", "rack.input" => StringIO.new(body),
+          "HTTP_COOKIE" => $jar.map { |k, v| "#{k}=#{v}" }.join("; ") }
+  unless body.empty?
+    env["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    env["CONTENT_LENGTH"] = body.bytesize.to_s
+  end
+  status, headers, chunks = Main.run_rack(env)
+  Array(headers["set-cookie"]).flat_map { |line| line.split("\n") }.each do |line|
+    name, rest = line.split("=", 2)
+    value = rest.split(";").first.to_s
+    value.empty? ? $jar.delete(name) : $jar[name] = value
+  end
+  [status, headers, chunks.join]
+end
+flashes = lambda do
+  $jar.select { |k, _| k.start_with?("flash_") }.map { |k, v| ActionDispatch::Flash.cookie_flashes(URI.decode_www_form_component(v), k) }.reduce({}, :merge)
+end
+
+req("GET", "/account/new")
+_, _, page = req("GET", "/users/sign_in")
+token = URI.encode_www_form_component(page[/name="authenticity_token" value="([^"]*)"/, 1])
+status, = req("POST", "/users/sign_in", "authenticity_token=#{token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=secret123")
+raise "sign in #{status}" unless status == 302
+status, = req("GET", "/secret")
+raise "fresh #{status}" unless status == 200
+sleep 3
+status, headers, = req("GET", "/secret")
+raise "timed out #{status} #{headers.inspect}" unless status == 302 && headers["location"] == "http://localhost/secret"
+expired = { "alert" => "Your session expired. Please sign in again to continue.", "timedout" => true }
+raise "timed-out flash #{flashes.().inspect}" unless flashes.() == expired
+status, headers, = req("GET", "/secret")
+raise "signed out #{status} #{headers.inspect}" unless status == 302 && headers["location"].end_with?("/users/sign_in")
+raise "kept flash #{flashes.().inspect}" unless flashes.() == expired
+puts "devise timeout over rack passed"
+"##;
+
+#[test]
+fn a_devise_session_times_out_over_rack_on_the_ruby_family() {
+    let run = app(":database_authenticatable, :timeoutable", "  devise_for :users\n  get \"/account/new\", to: \"accounts#create\"\n  authenticate :user do\n    get \"/secret\", to: \"articles#index\"\n  end\n")
+        .write("config/initializers/devise.rb", "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  config.timeout_in = 2.seconds\n  require \"devise/orm/active_record\"\nend\n")
+        .write("app/controllers/accounts_controller.rb", ACCOUNTS)
+        .run_ruby(RACK_TIMEOUT);
+    run.assert_passes();
+    assert!(run.stdout.contains("devise timeout over rack passed"), "{}", run.stdout);
+}
+
+/// `:timeoutable` natively, with `config.timeout_in = 2.seconds`: a request past the timeout is redirected back to the
+/// page it asked for, and the next one, now signed out, to the sign-in page.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_session_times_out_over_http_natively() {
+    let tree = app(":database_authenticatable, :timeoutable", "  devise_for :users\n  get \"/account/new\", to: \"accounts#create\"\n  authenticate :user do\n    get \"/secret\", to: \"articles#index\"\n  end\n")
+        .write("config/initializers/devise.rb", "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  config.timeout_in = 2.seconds\n  require \"devise/orm/active_record\"\nend\n")
+        .write("app/controllers/accounts_controller.rb", ACCOUNTS)
+        .native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    assert_eq!(server.get("/account/new").status, 200, "{}", server.log());
+    let form_type = ("Content-Type", "application/x-www-form-urlencoded");
+    let mut jar = Vec::new();
+    let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_in", &[], "");
+    kept(&mut jar, &cookies);
+    let token = form_encode(between(&page.body, "name=\"authenticity_token\" value=\"", "\""));
+    let cookie = header(&jar);
+    let body = format!("authenticity_token={token}&user%5Bemail%5D=a%40example.com&user%5Bpassword%5D=secret123");
+    let (signed, set) = server.request_with_set_cookies("POST", "/users/sign_in", &[form_type, ("Cookie", cookie.as_str())], &body);
+    assert_eq!(signed.status, 302, "{}", server.log());
+    kept(&mut jar, &set);
+    let cookie = header(&jar);
+    let (fresh, set) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(fresh.status, 200, "{}", server.log());
+    kept(&mut jar, &set);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let cookie = header(&jar);
+    let (timed_out, set) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(timed_out.status, 302, "{}", server.log());
+    assert!(timed_out.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("location") && v.ends_with("/secret")), "{:?}", timed_out.headers);
+    kept(&mut jar, &set);
+    let cookie = header(&jar);
+    let (signed_out, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(signed_out.status, 302, "{}", server.log());
+    assert!(signed_out.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("location") && v.ends_with("/users/sign_in")), "{:?}", signed_out.headers);
+}
+
+/// `:omniauthable` with OmniAuth's `developer` strategy, as Rails 8.1.4 with Devise 4.9.4 and OmniAuth 2.1.4 answer
+/// it: the sign-in page links the provider, Devise's engine puts the strategy on the stack per `config.omniauth`
+/// (`app.middleware.use config.strategy_class, *config.args`), the strategy answers the request phase under the
+/// path prefix Devise's routes set, and its callback reaches the app's `OmniauthCallbacksController`, which signs the
+/// user `find_or_create_by` made in. OmniAuth runs as the installed gem on the Ruby family.
+const OMNIAUTH_GEMS: [(&str, &str); 3] = [("omniauth", "2.1.4"), ("hashie", "5.1.0"), ("rack-protection", "4.2.1")];
+
+const OMNIAUTH_SPECS: &str = "    hashie (5.1.0)
+      logger
+    omniauth (2.1.4)
+      hashie (>= 3.4.6)
+      logger
+      rack (>= 2.2.3)
+      rack-protection
+    rack-protection (4.2.1)
+      base64 (>= 0.1.0)
+      logger (>= 1.6.0)
+      rack (>= 3.0.0, < 4)
+";
+
+const OMNIAUTH_USER: &str = "class User < ApplicationRecord
+  devise :database_authenticatable, :omniauthable, omniauth_providers: [:developer]
+
+  def self.from_omniauth(auth)
+    find_or_create_by(provider: auth.provider, uid: auth.uid) do |user|
+      user.email = auth.info.email
+      user.password = Devise.friendly_token[0, 20]
+    end
+  end
+end
+";
+
+const OMNIAUTH_CALLBACKS: &str = "class Users::OmniauthCallbacksController < Devise::OmniauthCallbacksController
+  skip_forgery_protection only: :developer
+
+  def developer
+    @user = User.from_omniauth(request.env[\"omniauth.auth\"])
+    sign_in_and_redirect @user, event: :authentication
+  end
+end
+";
+
+fn omniauth_app() -> emit_and_run::Overlay {
+    app_with(
+        ":database_authenticatable",
+        "  devise_for :users, controllers: { omniauth_callbacks: \"users/omniauth_callbacks\" }\n  authenticate :user do\n    get \"/secret\", to: \"articles#index\"\n  end\n",
+        &OMNIAUTH_GEMS,
+        OMNIAUTH_SPECS,
+        &["omniauth"],
+    )
+    .edit("db/schema.rb", "    t.string \"encrypted_password\", default: \"\", null: false\n", "    t.string \"encrypted_password\", default: \"\", null: false\n    t.string \"provider\"\n    t.string \"uid\"\n")
+    .write("config/initializers/devise.rb", "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  require \"devise/orm/active_record\"\n  config.omniauth :developer\nend\n")
+    // Not OmniAuth's own request check: it reads a session key Rails does not write, which omniauth-rails_csrf_protection replaces.
+    .write("config/initializers/omniauth.rb", "OmniAuth.config.request_validation_phase = nil\n")
+    .write("app/models/user.rb", OMNIAUTH_USER)
+    .write("app/controllers/users/omniauth_callbacks_controller.rb", OMNIAUTH_CALLBACKS)
+}
+
+const RACK_OMNIAUTH: &str = r##"$jar = {}
+def req(verb, path, body = "")
+  env = { "REQUEST_METHOD" => verb, "PATH_INFO" => path, "QUERY_STRING" => "", "SERVER_NAME" => "localhost",
+          "SERVER_PORT" => "80", "HTTP_HOST" => "localhost", "rack.url_scheme" => "http", "rack.input" => StringIO.new(body),
+          "HTTP_COOKIE" => $jar.map { |k, v| "#{k}=#{v}" }.join("; ") }
+  unless body.empty?
+    env["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    env["CONTENT_LENGTH"] = body.bytesize.to_s
+  end
+  status, headers, chunks = Main.run_rack(env)
+  Array(headers["set-cookie"]).flat_map { |line| line.split("\n") }.each do |line|
+    name, rest = line.split("=", 2)
+    value = rest.split(";").first.to_s
+    value.empty? ? $jar.delete(name) : $jar[name] = value
+  end
+  [status, headers, chunks.join]
+end
+
+_, _, page = req("GET", "/users/sign_in")
+raise "no provider button in #{page}" unless page.include?(%(<form action="/users/auth/developer" method="post" class="button_to">))
+status, _, form = req("POST", "/users/auth/developer")
+raise "request phase #{status} #{form[0, 200]}" unless status == 200 && form.include?(%(action='/users/auth/developer/callback'))
+status, = req("GET", "/secret")
+raise "signed in before the callback #{status}" unless status == 302
+status, headers, = req("POST", "/users/auth/developer/callback", "name=Dev&email=dev%40example.com")
+raise "callback #{status} #{headers.inspect}" unless status == 302 && headers["location"].end_with?("/secret")
+user = User.find_by(provider: "developer", uid: "dev@example.com")
+raise "user #{user.inspect}" unless user && user.email == "dev@example.com"
+status, = req("GET", "/secret")
+raise "signed in #{status}" unless status == 200
+puts "devise omniauth over rack passed"
+"##;
+
+#[test]
+fn a_devise_user_signs_in_through_omniauth_over_rack_on_the_ruby_family() {
+    let run = omniauth_app().run_ruby(RACK_OMNIAUTH);
+    run.assert_passes();
+    assert!(run.stdout.contains("devise omniauth over rack passed"), "{}", run.stdout);
+}
+
+/// The same flow natively, with OmniAuth compiled from source on Spinel: the provider button, the developer
+/// strategy's request phase, and its callback signing in the user `from_omniauth` made.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_devise_user_signs_in_through_omniauth_over_http_natively() {
+    let tree = omniauth_app()
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/account/me\", to: \"accounts#me\"\n")
+        .write("app/controllers/accounts_controller.rb", "class AccountsController < ApplicationController\n  def me\n    render plain: \"#{current_user.provider}|#{current_user.uid}|#{current_user.email}\"\n  end\nend\n")
+        .native_http_tree();
+    let server = super::native_http::Server::start(&tree);
+    let mut jar = Vec::new();
+    let (page, cookies) = server.request_with_set_cookies("GET", "/users/sign_in", &[], "");
+    assert_eq!(page.status, 200, "{}", server.log());
+    assert!(page.body.contains(r#"<form action="/users/auth/developer" method="post" class="button_to">"#), "{}", page.body);
+    kept(&mut jar, &cookies);
+    let cookie = header(&jar);
+    let (form, cookies) = server.request_with_set_cookies("POST", "/users/auth/developer", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(form.status, 200, "{}\n{}", form.body, server.log());
+    assert!(form.body.contains("action='/users/auth/developer/callback'"), "{}", form.body);
+    kept(&mut jar, &cookies);
+    let cookie = header(&jar);
+    let (before, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(before.status, 302, "signed in before the callback: {}", server.log());
+    let (callback, cookies) = server.request_with_set_cookies(
+        "POST",
+        "/users/auth/developer/callback",
+        &[("Content-Type", "application/x-www-form-urlencoded"), ("Cookie", cookie.as_str())],
+        "name=Dev&email=dev%40example.com",
+    );
+    assert_eq!(callback.status, 302, "{}\n{}", callback.body, server.log());
+    assert!(callback.headers.get("location").is_some_and(|l| l.ends_with("/secret")), "{:?}", callback.headers);
+    kept(&mut jar, &cookies);
+    let cookie = header(&jar);
+    let (after, _) = server.request_with_set_cookies("GET", "/secret", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(after.status, 200, "{}", server.log());
+    // The user `from_omniauth` made from the callback's `email`, signed in.
+    let (me, _) = server.request_with_set_cookies("GET", "/account/me", &[("Cookie", cookie.as_str())], "");
+    assert_eq!(me.body, "developer|dev@example.com|dev@example.com", "{}", server.log());
 }

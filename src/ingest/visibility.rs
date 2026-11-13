@@ -454,6 +454,21 @@ impl Visibility {
         }
     }
 
+    /// [`Self::resolve_library`] for a class body whose walk carries a marker naming an inherited method as a body
+    /// statement (Hashie's `private :_regular_reader` after `alias _regular_reader []`), which the Ruby family writes
+    /// back and Ruby resolves along the ancestors.
+    /// [`Self::resolve_library`] for a class body whose walk carries a marker naming an inherited method as a body
+    /// statement (Hashie's `private :_regular_reader` after `alias _regular_reader []`), which the Ruby family writes
+    /// back and Ruby resolves along the ancestors.
+    pub(super) fn resolve_library_carrying(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+        owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
+        Self::resolve_carrying_inherited_with(body, file, module_owner, owner, true)
+    }
+
     /// Whether this body's load-time conditional definitions are admitted.
     pub(super) fn admits_conditionals(&self) -> bool {
         self.conditionals

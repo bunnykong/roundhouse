@@ -33,6 +33,10 @@ const SCHEMA: &str = r#"ActiveRecord::Schema.define do
     t.integer "account_id"
     t.string "label"
   end
+
+  create_table "stamps", force: :cascade do |t|
+    t.datetime "at"
+  end
 end
 "#;
 
@@ -90,11 +94,12 @@ puts "uniqueness passed"
         .assert_passes();
 }
 
-/// The strict targets have no runtime Relation to run the query, so the
-/// rule stays a reported gap there: the emit raises no error (no dynamic
-/// relation chain reaches their emitters).
+/// The strict targets have no runtime Relation to run the query; each
+/// rule is a fixed probe there (`adapter_emit::uniqueness`), so the emit
+/// raises no error (no dynamic relation chain reaches their emitters).
+/// `tests/validation_gaps.rs` runs these shapes on each of them.
 #[test]
-fn strict_targets_keep_uniqueness_a_gap_without_emit_errors() {
+fn strict_targets_emit_uniqueness_without_errors() {
     use roundhouse::project::BuildTarget;
     for target in [BuildTarget::Rust, BuildTarget::Typescript, BuildTarget::Go, BuildTarget::Crystal] {
         let (_emitted, errors) = app().emit(target);
@@ -102,8 +107,10 @@ fn strict_targets_keep_uniqueness_a_gap_without_emit_errors() {
     }
 }
 
-/// Through the CLI, a strict target reports the rule it leaves out, and a
-/// ruby-family target, which runs the check, reports nothing for it.
+/// Through the CLI, neither a strict target, which probes these plain
+/// scalar columns itself, nor a ruby-family target, which runs Rails'
+/// query, reports a rule it leaves out; a strict target still reports a
+/// rule over a temporal column, which its probe does not compare.
 #[test]
 fn the_cli_reports_uniqueness_only_where_it_is_not_lowered() {
     let root = scratch::dir("roundhouse-uniqueness-cli");
@@ -111,6 +118,7 @@ fn the_cli_reports_uniqueness_only_where_it_is_not_lowered() {
         ("app/models/application_record.rb", APPLICATION_RECORD),
         ("app/models/account.rb", "class Account < ApplicationRecord\nend\n"),
         ("app/models/widget.rb", MODEL),
+        ("app/models/stamp.rb", "class Stamp < ApplicationRecord\n  validates :at, uniqueness: true\nend\n"),
         ("db/schema.rb", SCHEMA),
     ] {
         let file = root.join("app_src").join(path);
@@ -132,7 +140,7 @@ fn the_cli_reports_uniqueness_only_where_it_is_not_lowered() {
     let rust = warnings("rust");
     let ruby = warnings("ruby");
     std::fs::remove_dir_all(&root).ok();
-    assert_eq!(rust, 4, "one warning per uniqueness rule on rust");
+    assert_eq!(rust, 1, "the temporal rule alone on rust");
     assert_eq!(ruby, 0, "the ruby target lowers the check");
 }
 

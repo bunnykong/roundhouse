@@ -1598,6 +1598,9 @@ module ActionDispatch
         # is one of the route's defaults, which Rails recognizes too.
         format = matched.req_format.to_s if format.empty? && !matched.req_format.nil?
         recognized["format"] = format unless format.empty?
+        defaults = {}
+        RouteTable.route_defaults(matched.defaults, defaults, matched.path_params)
+        defaults.each { |name, value| recognized[name] = value.is_a?(String) ? ActionDispatch::Router.percent_bytes(value.bytes).pack("C*") : value }
         recognized
       end
 
@@ -1674,6 +1677,12 @@ module ActionDispatch
           end
           names = generation_segment_names(route.pattern)
           next unless names.all? { |name| given.key?(name) }
+          defaults = {}
+          RouteTable.route_defaults(route.defaults, defaults, {})
+          trailing = names.last.to_s
+          if (!route.req_format.nil? || !given.key?("format")) && defaults.key?(trailing) && defaults[trailing].to_s == given[trailing]
+            next if routes.any? { |short| short.defaults == route.defaults && short.controller == route.controller && short.action == route.action && route.pattern.start_with?(short.pattern + "/") && generation_segment_names(short.pattern) == names[0, names.length - 1] }
+          end
           path = generated_route_path(route, given)
           bare = route.req_format.nil? && given.key?("format") ? path.delete_suffix("." + given["format"].to_s) : path
           next if ActionDispatch::Router.match_pattern(route.pattern, bare, route.int_params + "", route.seg_constraints + "").nil?
@@ -1741,6 +1750,9 @@ module ActionDispatch
       def generated_query_keys(route, options)
         used = generation_segment_names(route.pattern) + ["controller", "action"]
         used << "format" if !route.req_format.nil? || route.pattern != "/"
+        defaults = {}
+        RouteTable.route_defaults(route.defaults, defaults, {})
+        used.concat(defaults.keys)
         options.keys.reject { |key| used.include?(key) }
       end
     end
@@ -2481,7 +2493,7 @@ module RequestDispatch
                    when :comments then CommentsController.new
                    else ActiveStorage::Routes.instantiate_controller(matched.controller)
                    end
-      run_controller(controller, matched.action, matched.path_params, matched.req_format, method, wire_method, path, query, params, headers, as)
+      run_controller(controller, matched.action, matched.path_params, matched.req_format, method, wire_method, path, query, params, headers, as, matched.defaults)
       [@__response.status, @__response.headers, [@__response.body.to_s]]
     end
     return @__response if @__routed
@@ -2507,7 +2519,7 @@ module RequestDispatch
   # the action run inside a connection lease, and the response kept.
   # `dispatch_request` comes here after the router matched the path;
   # ActionController::TestCase#process with the controller it holds.
-  def run_controller(controller, action, path_params, req_format, method, wire_method, path, query, params, headers, as)
+  def run_controller(controller, action, path_params, req_format, method, wire_method, path, query, params, headers, as, defaults = -1)
     # Test fixtures pass Symbol-keyed nested hashes (`{article: {title:
     # ...}}`); the wire-level request body is String-keyed at runtime.
     # Stringify recursively so the harness shape matches what the
@@ -2558,6 +2570,7 @@ module RequestDispatch
     end
     # Rails' `params.merge!(path_parameters)`: the route's own segments win over both.
     path_params.each { |k, v| merged[k.to_s] = v }
+    RouteTable.route_defaults(defaults, merged, path_params)
     controller.params  = merged
     controller.path_parameters = path_params
     controller.session = @__session ||= ActionDispatch::Session.new

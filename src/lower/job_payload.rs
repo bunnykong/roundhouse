@@ -174,7 +174,8 @@ pub fn plan_jobs(app: &App, jobs: &BTreeSet<String>, wrapped: &BTreeSet<String>)
     let sidekiq = app.queue_adapter.as_deref() == Some("sidekiq");
     let mut plans = Vec::new();
     for name in wrapped {
-        let Some(lc) = app.library_classes.iter().find(|lc| lc.name.0.as_str() == name) else {
+        let Some(lc) = app.library_classes.iter().rev().find(|lc| lc.name.0.as_str() == name
+            && lc.methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() == "perform")) else {
             continue;
         };
         let Some(perform) = lc.methods.iter().find(|m| {
@@ -996,11 +997,17 @@ fn ancestry<'a>(app: &'a App, lc: &'a LibraryClass) -> Vec<&'a LibraryClass> {
 pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
     let sidekiq = app.queue_adapter.as_deref() == Some("sidekiq");
     let solid_queue = app.queue_adapter.as_deref() == Some("solid_queue");
+    let durable = if sidekiq || (solid_queue && app.models.iter().any(|m| m.name.0.as_str() == "SolidQueue::Job")) {
+        app.queue_adapter.as_deref()
+    } else {
+        None
+    };
     for d in handler_diagnostics(app) {
         crate::emit::diagnostics::push(d);
     }
     for lc in lcs.iter_mut() {
         let own_name = lc.name.0.as_str().to_string();
+        if matches!(job_adapter(app, &own_name).as_deref(), Some("inline" | "test")) { continue; }
         let Some(plan) = app.job_plans.iter().find(|p| p.job == own_name) else { continue };
         if (sidekiq || solid_queue) && plan.is_payload() {
             if let Some(with) = lc.methods.iter_mut().find(|m| {
@@ -1017,7 +1024,7 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
                                 .to_string(),
                         },
                         span,
-                        sidekiq,
+                        durable,
                     ));
                 }
             }
@@ -1029,7 +1036,13 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
         };
         let span = wrapper.name_span;
         if let Some(f) = &plan.fallback {
-            crate::emit::diagnostics::push(fallback_diagnostic(plan, f, span, sidekiq));
+            let mut spans = if durable.is_some() { fallback_spans(app, plan) } else { vec![span] };
+            // An unused wrapper (including a perform_now-only job) needs no payload.
+            let durable = durable.filter(|_| sidekiq || !spans.is_empty());
+            if spans.is_empty() { spans.push(span); }
+            for span in spans {
+                crate::emit::diagnostics::push(fallback_diagnostic(plan, f, span, durable));
+            }
             continue;
         }
         let (_, args) = wrapper_vars(wrapper, 0);
@@ -1049,10 +1062,91 @@ pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
                     reason: "the generated perform_later is not the shape this pass rewrites".to_string(),
                 },
                 span,
-                sidekiq,
+                durable,
             ));
         }
     }
+}
+
+/// Point at actual enqueues and recurring task class declarations.
+fn fallback_spans(app: &App, plan: &JobPlan) -> Vec<crate::span::Span> {
+    use crate::span::{FileId, Span};
+    use yaml_rust2::parser::{Event, Parser};
+    fn visit(e: &Expr, job: &str, owner: Option<&str>, spans: &mut Vec<Span>) {
+        if let ExprNode::Send { recv, method, args, .. } = &*e.node {
+            let reflected = matches!(method.as_str(), "send" | "public_send" | "__send__");
+            let method = if reflected { args.first().and_then(|a| match &*a.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
+                ExprNode::Lit { value: Literal::Str { value } } => Some(value.as_str()),
+                _ => None,
+            }) } else { Some(method.as_str()) };
+            let receiver = match recv.as_ref().map(|r| &*r.node) {
+                Some(ExprNode::Const { path }) => path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").trim_start_matches("::") == job,
+                None | Some(ExprNode::SelfRef) => owner == Some(job),
+                // An unknown class receiver already makes every possible job's plan conservative.
+                Some(_) => true,
+            };
+            if receiver && matches!(method, Some("perform_later" | "perform_later_with")) { spans.push(e.span); }
+        }
+        e.node.for_each_child(&mut |c| visit(c, job, owner, spans));
+    }
+    let mut spans = Vec::new();
+    crate::lower::for_each_hook_body_ref(app, &mut |body| visit(body, &plan.job, None, &mut spans));
+    for lc in &app.library_classes {
+        for m in &lc.methods { visit(&m.body, &plan.job, Some(lc.name.0.as_str()), &mut spans); }
+    }
+    for (i, source) in app.sources.iter().enumerate().filter(|(_, s)| s.path.ends_with("config/recurring.yml")) {
+        let mut parser = Parser::new_from_str(&source.text);
+        // A recurring class is a value in the task mapping, never inside args.
+        // None denotes a sequence; Some(key) a mapping awaiting a key/value.
+        let mut stack: Vec<Option<Option<String>>> = Vec::new();
+        while let Ok((event, marker)) = parser.next_token() {
+            if event == Event::StreamEnd { break; }
+            if matches!(event, Event::MappingStart(..) | Event::SequenceStart(..)) {
+                stack.push(if matches!(event, Event::MappingStart(..)) { Some(None) } else { None });
+            } else if matches!(event, Event::MappingEnd | Event::SequenceEnd) {
+                stack.pop();
+                if let Some(Some(key)) = stack.last_mut() { *key = None; }
+            } else if let Event::Alias(..) = event {
+                if let Some(Some(key)) = stack.last_mut() { *key = None; }
+            } else if let Event::Scalar(value, ..) = &event {
+                if stack.len() == 3 && stack.last() == Some(&Some(Some("class".into()))) && value.trim_start_matches("::") == plan.job {
+                    let line = source.text.split_inclusive('\n').take(marker.line() - 1).map(str::len).sum::<usize>();
+                    let start = line + source.text[line..].char_indices().nth(marker.col()).map_or(0, |(i, _)| i);
+                    spans.push(Span { file: FileId(i as u32 + 1), start: start as u32, end: (start + value.len()) as u32 });
+                }
+                if let Some(Some(key)) = stack.last_mut() { *key = if key.is_none() { Some(value.clone()) } else { None }; }
+            }
+        }
+    }
+    spans.sort_by_key(|s| (s.file.0, s.start, s.end));
+    spans.dedup();
+    spans
+}
+
+/// A literal adapter set on this exact job, across its reopenings.
+pub(super) fn job_adapter(app: &App, name: &str) -> Option<String> {
+    for lc in app.library_classes.iter().rev().filter(|lc| lc.name.0.as_str() == name) {
+        for call in lc.unknown_calls.iter().rev() {
+            if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*call.node
+                && method.as_str() == "queue_adapter=" && args.len() == 1 {
+                let own = match &*recv.node {
+                    ExprNode::SelfRef => true,
+                    // The class Ruby looks it up to from this body (`ingest::written_names`).
+                    ExprNode::Const { path } => path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::").trim_start_matches("::") == name,
+                    _ => false,
+                };
+                if !own { continue; }
+                let value = &args[0];
+                return match &*value.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().into()),
+                    ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
 }
 
 /// A wrapper's parameters as typed reads: the first `lead` of them, then
@@ -1082,27 +1176,28 @@ fn wrapper_vars(wrapper: &crate::dialect::MethodDef, lead: usize) -> (Vec<Expr>,
 }
 
 /// The ledger line for a job that keeps its Proc. Under `queue_adapter
-/// :sidekiq` it is an error: a Proc can't be pushed to Redis, so the job
-/// would silently run in process instead of where the app sends it.
+/// :sidekiq` or the SQL-backed Solid Queue runner it is an error: a Proc
+/// cannot reach the durable store that drains the app's jobs.
 fn fallback_diagnostic(
     plan: &JobPlan,
     f: &JobFallback,
     span: crate::span::Span,
-    sidekiq: bool,
+    durable: Option<&str>,
 ) -> crate::diagnostic::Diagnostic {
     let what = match &f.param {
         Some(p) => format!("`{}`'s parameter `{}`: {}", plan.job, p.as_str(), f.reason),
         None => format!("`{}`: {}", plan.job, f.reason),
     };
-    if sidekiq {
+    if let Some(adapter) = durable {
+        let store = if adapter == "sidekiq" { "Redis" } else { "solid_queue_jobs" };
         let mut d = crate::lower::residue_diagnostic(
             "job_payload",
             "job-closure-fallback",
             span,
             "argument not serializable",
             format!(
-                "job_payload: {what}; under queue_adapter :sidekiq the job must be pushed to Redis \
-                 as an ActiveJob payload, and a closure can't be"
+                "job_payload: {what}; under queue_adapter :{adapter} the job must be stored in {store} \
+                 as an ActiveJob payload; a closure cannot be stored there"
             ),
         );
         d.severity = crate::diagnostic::Severity::Error;

@@ -134,3 +134,33 @@ fn module_protocol_queries_are_unsupported_on_strict_targets() {
         assert!(!errors.iter().any(|e| e.contains("asks a class object")), "{target:?}: {errors:#?}");
     }
 }
+
+/// A private method every call of which passes a class object (simple_form's `attempt_mapping(name, Object)`,
+/// `attempt_mapping(name, self.class)` and `attempt_mapping(name, namespace.constantize)`) asks its parameter a
+/// Module query; a public one, which any caller may pass anything, stays refused.
+const LOOKUP: &str = r#"class ConstLookup
+  VALID_CONTEXTS = [:post].freeze
+
+  def found
+    [lookup(:VALID_CONTEXTS, self.class), lookup(:String, Object), lookup(:VALID_CONTEXTS, "ConstLookup".constantize)]
+  end
+
+  private
+
+  def lookup(name, at)
+    at.const_get(name)
+  end
+end
+"#;
+
+#[test]
+fn a_private_methods_class_object_parameter_answers_module_queries() {
+    let run = emit_and_run::real_blog()
+        .write("app/models/const_lookup.rb", LOOKUP)
+        .run_ruby("raise ConstLookup.new.found.inspect unless ConstLookup.new.found == [[:post], String, [:post]]\nputs \"lookup passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("lookup passed"), "{}", run.stdout);
+    let public = LOOKUP.replace("  private\n\n", "");
+    let (_, errors) = emit_and_run::real_blog().write("app/models/const_lookup.rb", &public).emit(roundhouse::build_target::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("Module protocol")), "{errors:#?}");
+}

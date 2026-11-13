@@ -274,7 +274,9 @@ fn a_modifier_if_is_not_a_conditional_visibility_declaration() {
 
 /// A model carries a marker naming a method its body does not define
 /// (generated, a superclass's or a gem's) for the lowering and the
-/// analyzer; a library class still refuses it.
+/// analyzer; a library class carries it as a body statement, which the
+/// Ruby family writes back (Hashie's `private :_regular_reader` after
+/// `alias _regular_reader []`) and the other targets report as dropped.
 #[test]
 fn an_inherited_visibility_change_is_carried_by_a_model() {
     for body in ["private :inherited", "private_class_method :inherited"] {
@@ -288,7 +290,12 @@ fn an_inherited_visibility_change_is_carried_by_a_model() {
                     if expr.decisions & roundhouse::expr::INHERITED_VISIBILITY != 0)),
             "{body}"
         );
-        assert!(ingest_library_class(source.as_bytes(), "thing.rb").is_err(), "library accepted {body}");
+        let class = ingest_library_class(source.as_bytes(), "thing.rb").unwrap_or_else(|e| panic!("library refused {body}: {e:?}"));
+        assert!(
+            class.iter().any(|lc| lc.unknown_calls.iter().any(|call| matches!(&*call.node,
+                roundhouse::expr::ExprNode::Send { method, .. } if method.as_str() == body.split(' ').next().unwrap()))),
+            "library dropped {body}"
+        );
     }
     let nested = "class Thing < ApplicationRecord\nclass << self\n  private :inherited\nend\nend";
     assert!(

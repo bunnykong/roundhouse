@@ -988,7 +988,7 @@ fn framework_loop_stops_a_slow_suite_and_compiles_at_its_opt_level() {
 
 #[cfg(unix)]
 #[test]
-fn framework_loop_builds_a_suites_shared_cases_before_running_it() {
+fn framework_loop_runs_a_suite_beside_the_build_of_its_shared_cases() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
@@ -1021,6 +1021,8 @@ fn framework_loop_builds_a_suites_shared_cases_before_running_it() {
         concat!(
             "#!/bin/sh\n",
             "if [ -n \"$RH_SPINEL_BUNDLE_COLLECT\" ]; then echo '{\"test\":\"shared::case\"}' > \"$RH_SPINEL_BUNDLE_COLLECT/k.json\"; exit 101; fi\n",
+            "echo shared-started >> \"$RUN_LOG\"\n",
+            "until [ -e \"$RH_SPINEL_BUNDLE/finished\" ]; do sleep 0.1; done\n",
             "printf 'shared %s bundle=%s\\n' \"$*\" \"$RH_SPINEL_BUNDLE\" >> \"$RUN_LOG\"\n",
         ),
     );
@@ -1029,8 +1031,9 @@ fn framework_loop_builds_a_suites_shared_cases_before_running_it() {
         &stubs.join("spinel_bundle"),
         concat!(
             "#!/bin/sh\n",
+            "echo '[\"k\"]' > \"$RH_SPINEL_BUNDLE_OUT/pending.json\"\n",
+            "i=0; until grep -q shared-started \"$RUN_LOG\" 2> /dev/null || [ $i -gt 100 ]; do i=$((i+1)); sleep 0.1; done\n",
             "printf 'spinel_bundle %s cases=%s\\n' \"$*\" \"$(ls \"$RH_SPINEL_BUNDLE_COLLECT\")\" >> \"$RUN_LOG\"\n",
-            "mkdir -p \"$RH_SPINEL_BUNDLE_OUT\"\n",
             "echo '{\"shared::case\": 40}' > \"$RH_SPINEL_BUNDLE_OUT/seconds.json\"\n",
         ),
     );
@@ -1052,7 +1055,8 @@ fn framework_loop_builds_a_suites_shared_cases_before_running_it() {
     let shared = ran.lines().position(|l| {
         l == format!("shared --ignored --nocapture bundle={}/spinel-framework/bundles", root.display())
     });
-    assert!(bundle.is_some() && shared.is_some() && bundle < shared, "{ran}");
+    let started = ran.lines().position(|l| l == "shared-started");
+    assert!(started.is_some() && bundle.is_some() && shared.is_some() && started < bundle && bundle < shared, "{ran}");
     assert!(ran.lines().any(|l| l == "alone --ignored --nocapture"), "{ran}");
     let recorded = fs::read_to_string(&timings).unwrap();
     let seconds = recorded

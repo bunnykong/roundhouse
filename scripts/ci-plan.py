@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -77,6 +78,7 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "route_request_defaults",
     "data_record_composition",
     "spinel_chunked_body",
     "spinel_stream_error",
@@ -90,6 +92,7 @@ SPINEL_TESTS = [
     "temporal_initialize_spinel",
     "framework_tests_spinel",
     "object_blank",
+    "untyped_key_conversion",
     "spinel_web_push_crypto",
     "openssl_random",
     "openssl_registrations",
@@ -106,6 +109,7 @@ SPINEL_TESTS = [
     "spinel_db_contract",
     "generated_columns_spinel",
     "schema_constraints",
+    "schema_keys",
     "schema_default_expressions",
     "postgres_json_types_spinel",
     "array_column_storage_spinel",
@@ -132,6 +136,7 @@ SPINEL_TESTS = [
     "kernel_method_shadowing",
     "jbuilder_array_value_spinel",
     "active_job_payload",
+    "solid_queue_durability",
     "render_json_encoder_spinel",
     "url_helpers_absolute_spinel",
     "jbuilder_extract_attributes_spinel",
@@ -228,7 +233,7 @@ SPINEL_TEST_SECONDS = {
     ),
 }
 SPINEL_TEST_DEFAULT_SECONDS = 40
-SPINEL_FRAMEWORK_SHARDS = 4
+SPINEL_FRAMEWORK_SHARDS = 5
 # Not balanced by count: these three take two to three times a typical test (local run, 2026-10-17).
 SPINEL_TOOLCHAIN_SECONDS = {
     "real_blog_spinel_tests_pass": 265,
@@ -236,7 +241,7 @@ SPINEL_TOOLCHAIN_SECONDS = {
     "finite_concern_class_configuration_runs_natively": 133,
 }
 SPINEL_TOOLCHAIN_DEFAULT_SECONDS = 80
-SPINEL_TOOLCHAIN_SHARDS = 4
+SPINEL_TOOLCHAIN_SHARDS = 5
 SPINEL_TOOLCHAIN_THREADS = 4
 # tiny_api's gate runs alone after the suite on the last shard, so its seconds count once per test thread.
 SPINEL_TOOLCHAIN_TAIL = "tiny_api"
@@ -523,6 +528,15 @@ def native_coverage(path):
         or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
+    # Owning a suite also selects CORE, so these run the native HTTP half
+    # (tests/spinel_toolchain/route_request_defaults.rs) in spinel-toolchain.
+    if path in {
+        "src/ingest/routes.rs", "src/lower/routes.rs", "src/lower/routes_to_library/mod.rs", "src/dialect.rs",
+        "src/build_target.rs", "src/lower/route_guards.rs", "src/project.rs", "runtime/ruby/action_dispatch/router.rb",
+        "runtime/ruby/action_dispatch/router.rbs", "runtime/spinel/scaffold/main.rb", "runtime/spinel/test/test_helper.rb", "runtime/spinel/test/test_helper.rbs",
+        "tests/emit_and_run/route_request_defaults.rs", "tests/support/route_request_defaults.rs",
+    } or path.startswith("tests/support/route_request_defaults/"):
+        suites.add("route_request_defaults")
     if path in {
         "src/analyze/registry/stdlib.rs", "src/analyze/registry/library.rs", "src/project.rs",
         "tests/openssl_registrations.rs", "tests/support/openssl_registrations.rb",
@@ -554,6 +568,8 @@ def native_coverage(path):
         suites.add("framework_tests_spinel")
     if path in {"runtime/ruby/active_support_ext.rb", "src/lower/blank.rs", "src/lower/mod.rs", "src/lower/jbuilder_to_library/mod.rs"}:
         suites.add("object_blank")
+    if path in {"runtime/ruby/active_support_ext.rb", "src/lower/symbolize_keys.rs", "src/lower/config_reader.rs", "src/lower/mod.rs"}:
+        suites.add("untyped_key_conversion")
     # `Model.transaction` (rollback, nesting, savepoints) lives here; its
     # gate compiles it with the real_blog fixture.
     if path in {
@@ -639,6 +655,12 @@ def native_coverage(path):
         "src/lower/model_to_library/schema.rs", "src/session.rs", "src/project.rs",
     } or path.startswith("tests/support/schema_defaults_"):
         suites.add("schema_default_expressions")
+    if path in {
+        "tests/schema_keys.rs", "src/schema.rs", "src/ingest/schema.rs", "src/emit/shared/schema_sql.rs",
+        "src/emit/roda.rs", "src/ingest/sequel_model.rs", "src/analyze/graphql.rs",
+        "src/ingest/sequel_migration.rs", "src/ingest/structure_sql.rs", "src/ingest/roda_app.rs",
+    } or path.startswith("tests/support/schema_keys_"):
+        suites.add("schema_keys")
     if path in JSON_TYPES_SPINEL_INPUTS:
         suites.add("postgres_json_types_spinel")
     if path in APP_REOPENS_INPUTS:
@@ -755,6 +777,9 @@ def native_coverage(path):
         suites.update(owned_tests)
     if path in ACTIVE_JOB_PAYLOAD_INPUTS or path.startswith("tests/active_job_payload/"):
         suites.add("active_job_payload")
+    if path in {"src/ingest/app.rs", "src/lower/job_payload.rs", "src/lower/job_class_side.rs",
+                "runtime/spinel/solid_queue_runner.rb", "tests/support/solid_queue_worker.rs"} or path.startswith("tests/solid_queue_durability/"):
+        suites.add("solid_queue_durability")
     if path in SIDEKIQ_PUSH_INPUTS or path.startswith("tests/sidekiq_push/"):
         suites.add("sidekiq_push")
     if path in SIDEKIQ_WORKER_INPUTS or path.startswith("tests/sidekiq_worker/"):
@@ -1142,9 +1167,30 @@ def record_timing(kind, name, seconds, ok, timed_out=False):
             f.write(json.dumps(record) + "\n")
 
 
+def deadline_left():
+    """Seconds until CI_SPINEL_DEADLINE (epoch seconds), or None when no deadline is set."""
+    try:
+        return int(os.environ["CI_SPINEL_DEADLINE"]) - time.time()
+    except (KeyError, ValueError):
+        return None
+
+
 def run_timed(kind, name, command, charged=0):
     start = time.monotonic()
-    status = subprocess.run(command).returncode
+    left = deadline_left()
+    if left is not None and left <= 0:
+        print(f"::error::{name} not started: past this shard's deadline")
+        return 124
+    # Its own process group: killing the test alone would leave its spinel and cc children on the CPUs.
+    proc = subprocess.Popen(command, start_new_session=left is not None)
+    try:
+        status = proc.wait(timeout=left)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        print(f"::error::{name} stopped at this shard's deadline")
+        status = 124
+    charged = charged() if callable(charged) else charged
     # 124 is timeout(1) stopping the command: its seconds are still worth recording.
     record_timing(kind, name, time.monotonic() - start + charged, status == 0, status == 124)
     return status
@@ -1164,6 +1210,21 @@ def bundle_seconds():
     if not isinstance(data, dict):
         return {}
     return {name: seconds for name, seconds in data.items() if positive_seconds(seconds)}
+
+
+def suite_bundle_seconds(cases):
+    """The bundle seconds charged to the tests whose cases a suite left in `cases` (RH_SPINEL_BUNDLE_COLLECT).
+
+    Read once the suite has ended, not when it starts: it starts while the bundle still builds.
+    """
+    charged = bundle_seconds()
+    tests = set()
+    for path in Path(cases).glob("*.json"):
+        try:
+            tests.add(json.loads(path.read_text()).get("test"))
+        except (OSError, UnicodeError, ValueError, AttributeError):
+            continue
+    return sum(charged.get(t, 0) for t in tests if isinstance(t, str))
 
 
 def run_tests(kind, tests, parallel, command):
@@ -1472,6 +1533,7 @@ def main():
     parser.add_argument("--kind", choices=SPINEL_TIMING_KINDS)
     parser.add_argument("--name")
     parser.add_argument("--charged", type=float, default=0)
+    parser.add_argument("--charge-cases")
     parser.add_argument("--parallel", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--previous")
     parser.add_argument("--records")
@@ -1488,7 +1550,8 @@ def main():
         return False
     if args.command == "timed":
         # The command's own status: the framework loop tells timeout(1)'s 124 from a failure.
-        return run_timed(args.kind, args.name, command, args.charged)
+        charged = (lambda: args.charged + suite_bundle_seconds(args.charge_cases)) if args.charge_cases else args.charged
+        return run_timed(args.kind, args.name, command, charged)
     if args.command == "run-tests":
         tests = [line.strip() for line in sys.stdin if line.strip()]
         return run_tests(args.kind, tests, args.parallel, command)

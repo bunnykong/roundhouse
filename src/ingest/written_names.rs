@@ -1,5 +1,6 @@
-//! Each superclass and `include` target the source writes, resolved
-//! once from Rubydex's answers and stored on the IR in place.
+//! Each superclass and `include` target the source writes, and the
+//! class a job's `X.queue_adapter =` names, resolved once from
+//! Rubydex's answers and stored on the IR in place.
 //!
 //! Ruby looks a constant up in the lexical scopes around the reference
 //! (`Module.nesting`), then in the ancestors of the innermost one, then
@@ -57,6 +58,12 @@ pub(super) fn resolve(app: &mut App, sources: &[SourceFile], resolver: &ConstRes
         // reads Rubydex's answer instead of guessing a second one.
         for call in &mut class.unknown_calls {
             names.rewrite_mixin_call(call, &["extend", "prepend"]);
+            // `lower::job_payload::job_adapter` exempts a job whose own
+            // body sets it an inline adapter, and reads this receiver to
+            // tell. A bare `NotifyJob` there is the job itself inside
+            // `module Admin; class NotifyJob`, and the top-level one
+            // inside `class Admin::NotifyJob`.
+            names.rewrite_receiver(call, "queue_adapter=");
         }
     }
     // A concern's `included do` statements, which the concern splices
@@ -249,6 +256,24 @@ impl Names<'_> {
                 *path = resolved.0.as_str().split("::").map(Symbol::from).collect();
             }
             arg.decisions |= crate::expr::RESOLVED_MIXIN;
+        }
+    }
+
+    /// The class receiver of a `X.method …` call in a class body. A
+    /// rooted `::X` is absolute as written.
+    fn rewrite_receiver(&self, expr: &mut Expr, method: &str) {
+        let ExprNode::Send { recv: Some(recv), method: called, .. } = &mut *expr.node else { return };
+        if called.as_str() != method {
+            return;
+        }
+        let span = recv.span;
+        let ExprNode::Const { path } = &mut *recv.node else { return };
+        if path.first().is_none_or(|head| head.as_str().is_empty()) {
+            return;
+        }
+        let written = path.iter().map(Symbol::as_str).collect::<Vec<_>>().join("::");
+        if let Some(resolved) = self.resolved(span, &written) {
+            *path = resolved.0.as_str().split("::").map(Symbol::from).collect();
         }
     }
 }

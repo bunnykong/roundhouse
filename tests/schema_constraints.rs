@@ -14,6 +14,8 @@ const EXPECTED: &str = "CHECK and lower(email) enforce writes; NULL is accepted"
 mod scratch;
 #[path = "support/schema_constraints_predicates.rs"]
 mod sqlite_predicates;
+#[path = "support/schema_constraints_other_database.rs"]
+mod other_database;
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app().write("db/schema.rb", SCHEMA)
@@ -655,20 +657,27 @@ fn scope_body_insert_all_with_expression_index_is_refused_at_its_source() {
     }
 }
 
+/// The PostgreSQL text never reaches the schema the emitters read: the
+/// portable grammar decides, a CHECK in the plain form Rails' dump writes is
+/// carried as the comparison, and what is neither is left out with a
+/// warning rather than refused (`other_database`).
 #[test]
 fn postgres_config_does_not_bypass_portable_app_schema_ingestion() {
-    for declaration in [
-        "t.check_constraint \"email::text <> 'blocked'\", name: 'members_email_check'",
-        "t.index 'lower(email::text)', name: 'members_lower'",
+    for (declaration, carried) in [
+        ("t.check_constraint \"email::text <> 'blocked'\", name: 'members_email_check'", Some("email <> 'blocked'")),
+        ("t.index 'lower(email::text)', name: 'members_lower'", None),
     ] {
         let schema = format!("ActiveRecord::Schema[8.1].define do\n create_table :members do |t|\n t.string :email\n {declaration}\n end\nend");
         let tree = roundhouse::vfs::FileTree::from([
             (std::path::PathBuf::from("config/database.yml"), b"development:\n  adapter: postgresql\n  database: schema_test\n".to_vec()),
             (std::path::PathBuf::from("db/schema.rb"), schema.as_bytes().to_vec()),
         ]);
-        let (result, _) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app_from_tree(tree));
-        let error = result.expect_err("app ingestion must refuse before calling the Roda emitter").to_string();
-        assert!(error.contains("db/schema.rb") && error.contains("::text"), "{error}");
+        let (result, diagnostics) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app_from_tree(tree));
+        let members = &result.expect("left out, not refused").schema.tables[&roundhouse::Symbol::from("members")];
+        assert!(members.indexes.is_empty(), "{members:?}");
+        assert_eq!(members.check_constraints.iter().map(|c| c.expression.as_str()).collect::<Vec<_>>(), Vec::from_iter(carried), "{members:?}");
+        let warned = diagnostics.iter().any(|d| d.message.contains("::text") && d.message.contains("left out of the emitted schema"));
+        assert_eq!(warned, carried.is_none(), "{diagnostics:?}");
     }
 }
 

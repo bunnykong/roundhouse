@@ -221,7 +221,9 @@ module Main
     env["roundhouse.path_params"] ||= matched.path_params
     controller = endpoint.nil? ? Main.instantiate_controller(matched.controller) : endpoint[0]
     merged = matched.path_params.dup
-    request[:params].each { |k, v| merged[k] = v }
+    # Rails' `params.merge!(path_parameters)`: a captured segment wins over the query and body.
+    request[:params].each { |k, v| merged[k] = v unless matched.path_params.key?(k) }
+    RouteTable.route_defaults(matched.defaults, merged, matched.path_params)
     controller.params  = merged
     controller.path_parameters = matched.path_params
 
@@ -307,6 +309,8 @@ module Main
     controller.request.flash = flash
     # The env's own request, which a gem's `ActionDispatch::Request.new(env)` is (`Request.for_env`).
     env["roundhouse.request"] = controller.request
+    # Rails' `request.cookie_jar` is the controller's `cookies`: Warden's `cookies` (Devise's remember-me) reads and writes it.
+    controller.cookies = controller.request.adopt_cookie_jar(controller.cookies)
     controller.request.path_parameters = Main.route_parameters(controller, matched)
     # The body's params alone, for ParamsWrapper (`Params.wrap`).
     controller.request.request_parameters = request[:body_params]
@@ -382,7 +386,7 @@ module Main
     httponly_cookies = {}
     expires_cookies = {}
     jar.pending.each do |k, v|
-      out_cookies[k] = v
+      out_cookies[k] = jar.deleted?(k) ? nil : v
       secure_cookies[k] = true if jar.flag_secure?(k)
       httponly_cookies[k] = jar.flag_httponly?(k)
       ss = jar.flag_samesite(k).to_s

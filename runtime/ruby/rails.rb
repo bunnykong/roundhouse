@@ -202,6 +202,11 @@ module Rails
     Application.new
   end
 
+  # Rails' `Rails.configuration`, the application's config.
+  def self.configuration
+    Rails.application.config
+  end
+
   # `Rails.env.production?` etc. — a plain object answering the known
   # environment predicates (no `method_missing`, no `String` subclass).
   # Rails' is ActiveSupport::EnvironmentInquirer (activesupport 8.1.4
@@ -899,6 +904,12 @@ module Rails
 
     def action_controller
       @action_controller
+    end
+
+    # `config.session_options`, what `config.session_store` was given: the cookie's name alone, as ingest lifts no
+    # other option (`path:`, `domain:`, `secure:` are not read, and a cookie a gem scopes by them takes none).
+    def session_options
+      { key: Rails.application.session_cookie_key }
     end
 
     # `Rails.application.config.filter_parameters` read at run time. The

@@ -72,9 +72,29 @@ pub fn apply_module_mattr_storage(app: &mut App) {
         for method in &mut lc.methods {
             rewrite(&mut method.body, &movable);
         }
+        // Not kept as `@x = nil` when the body writes `self.x = {}` (Doorkeeper's `GrantFlow::Registry`): the seed is
+        // emitted after the body and would undo it. Kept otherwise, since it is what types the slot.
+        let written: HashSet<Symbol> = lc.unknown_calls.iter().filter_map(self_writer).collect();
+        lc.class_ivar_initializers.retain(|init| {
+            !unguarded_seed(init, &movable).is_some_and(|seed| {
+                matches!(&*seed.node, ExprNode::Assign { target: LValue::Var { name, .. }, value }
+                    if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) && written.contains(&ivar_name(name)))
+            })
+        });
         for init in &mut lc.class_ivar_initializers {
             rewrite(init, &movable);
         }
+    }
+}
+
+/// `x` of a class-body `self.x = v`.
+fn self_writer(call: &Expr) -> Option<Symbol> {
+    match &*call.node {
+        ExprNode::Assign { target: LValue::Attr { recv, name }, .. } if matches!(&*recv.node, ExprNode::SelfRef) => Some(name.clone()),
+        ExprNode::Send { recv: Some(recv), method, .. } if matches!(&*recv.node, ExprNode::SelfRef) => {
+            method.as_str().strip_suffix('=').filter(|n| !n.is_empty() && !n.ends_with(['=', '!', '<', '>'])).map(Symbol::from)
+        }
+        _ => None,
     }
 }
 

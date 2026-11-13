@@ -21,12 +21,16 @@ pub(super) struct Delegation {
     pub(super) allow_nil: bool,
     /// Called only with a block and no arguments: the forwarder hands the block on, as Rails' `...` does.
     pub(super) block: bool,
+    /// Every call passes this many arguments and no block: the forwarder hands them on, as Rails' `...` does.
+    pub(super) arity: usize,
 }
 
 #[derive(Default)]
 pub(super) struct CallShapes {
     pub(super) positional_arities: HashSet<usize>,
     pub(super) has_block: bool,
+    /// A call passed keywords, which a positional forwarder would hand on as a Hash.
+    pub(super) keywords: bool,
 }
 
 pub(super) type CallsWithArguments = HashMap<String, CallShapes>;
@@ -168,6 +172,7 @@ impl<'a> DelegateEligibility<'a> {
                 return None;
             }
             let mut block = false;
+            let mut arity = 0;
             if !method.as_str().ends_with('=') {
                 if let Some(calls) = self.called_with_args.get(&name) {
                     let block_only = calls.has_block
@@ -182,8 +187,13 @@ impl<'a> DelegateEligibility<'a> {
                                     .iter()
                                     .all(|call_arity| *call_arity == arity)
                         });
+                    let fixed = (!calls.has_block && !calls.keywords && super::operator_forwarder("", method.as_str()).is_none() && calls.positional_arities.len() == 1)
+                        .then(|| calls.positional_arities.iter().copied().next())
+                        .flatten();
                     if block_only {
                         block = true;
+                    } else if let Some(n) = fixed {
+                        arity = n;
                     } else if !forwardable_operator {
                         return None;
                     }
@@ -199,6 +209,7 @@ impl<'a> DelegateEligibility<'a> {
                 visibility: if declaration.private == Some(true) { MethodVisibility::Private } else { MethodVisibility::Public },
                 allow_nil: declaration.allow_nil,
                 block,
+                arity,
             });
         }
         if self.supported_target_methods.is_some_and(|supported| {
@@ -207,7 +218,7 @@ impl<'a> DelegateEligibility<'a> {
                     && !supported.contains(&(
                     entry.target.as_str().to_string(),
                     entry.method.as_str().to_string(),
-                    synthesized_arity(entry.method.as_str()),
+                    synthesized_arity(entry.method.as_str()).max(entry.arity),
                 ))
             })
         }) {
@@ -309,6 +320,8 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
                     match key.as_str() {
                         "to" => match &*value.node {
                             ExprNode::Lit { value: Literal::Sym { value } } => target = Some(value.clone()),
+                            // Rails writes `to.to_s` into the forwarder as code: a String is the expression it reads (Devise's `to: "self.class"`).
+                            ExprNode::Lit { value: Literal::Str { value } } => target = Some(Symbol::from(value.as_str())),
                             // Rails writes `to.to_s` into the forwarder, so a constant is its own receiver.
                             ExprNode::Const { path } if !path.is_empty() => {
                                 let rooted = path[0].as_str().is_empty();
@@ -465,6 +478,11 @@ fn valid_delegate_target(target: &str) -> bool {
     if is_constant_target(target) {
         return true;
     }
+    // Not any expression a String may hold: a chain of reads, which the forwarder's text spells as written.
+    if let Some((head, rest)) = target.split_once('.') {
+        let head_ok = head == "self" || valid_identifier(head.strip_prefix('@').unwrap_or(head));
+        return head_ok && rest.split('.').all(valid_identifier);
+    }
     let name = target.strip_prefix('@').unwrap_or(target);
     valid_identifier(name)
 }
@@ -519,5 +537,10 @@ fn collect_calls_with_args(expr: &Expr, out: &mut CallsWithArguments) {
         let calls = out.entry(method.as_str().to_string()).or_default();
         calls.positional_arities.insert(args.len());
         calls.has_block |= block.is_some();
+        // Nor a splat of either kind, whose count the call does not show.
+        calls.keywords |= args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { kwargs: true, .. } | ExprNode::KeywordSplat { .. } | ExprNode::Splat { .. }));
+    } else if instance_call {
+        // A call without arguments too, so one name called both ways is no fixed arity.
+        out.entry(method.as_str().to_string()).or_default().positional_arities.insert(0);
     }
 }

@@ -1,0 +1,12 @@
+{
+  "/literal": "\"fixed\"|:staff|1|true|false|nil",
+  "/literal?text=query&number=9&yes=false": "\"fixed\"|:staff|1|true|false|nil",
+  "/optional": "nil|nil|1|nil|nil|nil",
+  "/optional?number=9": "nil|nil|1|nil|nil|nil",
+  "/optional/9": "nil|nil|\"9\"|nil|nil|nil",
+  "/optional/9?number=99": "nil|nil|\"9\"|nil|nil|nil",
+  "/number/9": "nil|nil|\"9\"|nil|nil|nil",
+  "/number/9?number=99": "nil|nil|\"9\"|nil|nil|nil",
+  "/matched": "\"fixed\"|nil|nil|nil|nil|nil",
+  "/duplicate": "\"last\"|nil|nil|nil|nil|nil"
+}

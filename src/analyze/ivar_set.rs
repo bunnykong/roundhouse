@@ -109,7 +109,8 @@ pub(crate) fn binding_from_send(stmt: &Expr, self_ty: Option<&Ty>) -> Option<(Sy
     };
     let name = fold_ivar_name(&args[0], &env)?;
     let ty = args[1].ty.clone().filter(|t| !t.is_open())?;
-    Some((name, ty))
+    // A class object stored is the class, as an `@x = Klass` write records it.
+    Some((name, super::class_object_arg_ty(&args[1], ty)))
 }
 
 pub(crate) fn fold_ivar_name(expr: &Expr, env: &IvarNameEnv<'_>) -> Option<Symbol> {
@@ -344,6 +345,8 @@ pub(crate) fn harvest_ivar_set(
     let Some(ty) = args[1].ty.clone().filter(|t| !t.is_open()) else {
         return;
     };
+    // A class object stored is the class, as an `@x = Klass` write records it.
+    let ty = super::class_object_arg_ty(&args[1], ty);
     let ty = narrow_to_named_model(&name, ty, env.models_by_ivar);
     let merged = match out.remove(&name) {
         Some(prev) => super::body::join_ivar_slot(prev, ty),

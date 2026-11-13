@@ -166,6 +166,7 @@ module ActionView
     # Callers passing a record or other value handle the stringify at
     # the call site. `href` is the URL path. `opts` is the attribute
     # hash (Symbol or String keys; values flatten through render_attrs).
+    def self.back_url: () -> String
     def self.link_to: (String text, String href, ?Hash[Symbol, untyped] opts) -> String
     def self.button_to: (String text, String href, ?Hash[Symbol, untyped] opts) -> String
 

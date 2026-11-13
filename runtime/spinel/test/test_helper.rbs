@@ -356,7 +356,8 @@ module RequestDispatch
     String query,
     untyped params,
     Hash[untyped, untyped] headers,
-    Symbol? as
+    Symbol? as,
+    ?Integer defaults
   ) -> ActionResponse
 
   # Recursive Hash-keys-to-strings. Strictly `(Hash) -> Hash`; non-

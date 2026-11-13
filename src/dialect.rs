@@ -2160,6 +2160,8 @@ pub enum RouteSpec {
     /// The explicit form is the only one that can express arbitrary paths
     /// and custom constraints.
     Explicit {
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        defaults: IndexMap<Symbol, (Literal, Span)>,
         method: HttpMethod,
         path: String,
         controller: ClassId,

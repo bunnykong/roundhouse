@@ -112,6 +112,17 @@ class SafeString < String
   def to_s
     self
   end
+
+  # Rails' `SafeBuffer#safe_concat`: appended as it is, the buffer still safe.
+  def safe_concat(value)
+    concat(value.to_s)
+  end
+
+  # Rails' `SafeBuffer#+`: still safe, the other side escaped unless it is safe too (a builder's `label + text_field`).
+  def +(other)
+    return String.new(self) + other.to_s unless html_safe?
+    SafeString.new(String.new(self) + ActionView::ViewHelpers.html_escape(other))
+  end
 end
 
 class String
@@ -352,6 +363,337 @@ unless Object.method_defined?(:try)
 
     def try!(*)
       nil
+    end
+  end
+end
+
+# ActiveSupport's `Class#class_attribute` (core_ext/class/attribute.rb), for a call the class body does not write
+# itself, which the ingest lowers: a gem's `self.extended(base)` hook's `base.class_attribute :mappings`.
+unless Class.method_defined?(:class_attribute)
+  class Class
+    def class_attribute(*attrs, instance_accessor: true, instance_reader: instance_accessor, instance_writer: instance_accessor, instance_predicate: true, default: nil)
+      attrs.each do |name|
+        ivar = :"@#{name}"
+        singleton_class.send(:redefine_class_attribute, name, default)
+        singleton_class.define_method(:"#{name}=") do |value|
+          singleton_class.send(:redefine_class_attribute, name, value)
+          value
+        end
+        singleton_class.define_method(:"#{name}?") { !!public_send(name) } if instance_predicate
+        if instance_reader
+          define_method(name) { instance_variable_defined?(ivar) ? instance_variable_get(ivar) : self.class.public_send(name) }
+          define_method(:"#{name}?") { !!public_send(name) } if instance_predicate
+        end
+        define_method(:"#{name}=") { |value| instance_variable_set(ivar, value) } if instance_writer
+      end
+    end
+  end
+
+  class Module
+    private
+
+    # Not `define_method` over the old one: Ruby warns of each redefinition under -w, as Rails silences it.
+    def redefine_class_attribute(name, value)
+      remove_method(name) if method_defined?(name, false) || private_method_defined?(name, false)
+      define_method(name) { value }
+    end
+  end
+end
+
+# ActiveSupport's String inflections and Hash/Array extensions, for a receiver the analysis did not type, which the
+# lowering would otherwise rewrite to the typed runtime's (`ActiveSupport.camelize(s)`): a gem's own code, such as
+# simple_form's `options.reverse_merge!(…)`. Each only where ActiveSupport itself has not defined it.
+class String
+  unless method_defined?(:camelize)
+    def camelize(first_letter = :upper)
+      s = sub(/^[a-z\d]*/) { |m| first_letter == :lower ? m : m.capitalize }
+      s.gsub(%r{(?:_|(/))([a-z\d]*)}i) { "#{$1}#{$2.capitalize}" }.gsub("/", "::")
+    end
+  end
+
+  unless method_defined?(:underscore)
+    def underscore
+      return dup unless match?(/[A-Z-]|::/)
+      gsub("::", "/").gsub(/([A-Z\d]+)([A-Z][a-z])/, '\1_\2').gsub(/([a-z\d])([A-Z])/, '\1_\2').tr("-", "_").downcase
+    end
+  end
+
+  unless method_defined?(:humanize)
+    def humanize(capitalize: true, keep_id_suffix: false)
+      s = tr("_", " ").lstrip
+      s = s.delete_suffix(" id") unless keep_id_suffix
+      s = s.downcase
+      capitalize ? s.sub(/\A\w/) { |m| m.upcase } : s
+    end
+  end
+
+  unless method_defined?(:demodulize)
+    def demodulize
+      (i = rindex("::")) ? self[(i + 2)..] : dup
+    end
+  end
+
+  unless method_defined?(:constantize)
+    def constantize
+      Object.const_get(self)
+    end
+  end
+end
+
+class Hash
+  unless method_defined?(:reverse_merge)
+    def reverse_merge(other_hash)
+      other_hash.merge(self)
+    end
+
+    def reverse_merge!(other_hash)
+      replace(reverse_merge(other_hash))
+    end
+    alias_method :with_defaults, :reverse_merge
+    alias_method :with_defaults!, :reverse_merge!
+  end
+
+  unless method_defined?(:deep_merge)
+    def deep_merge(other_hash, &block)
+      dup.deep_merge!(other_hash, &block)
+    end
+
+    def deep_merge!(other_hash, &block)
+      merge!(other_hash) do |key, this_val, other_val|
+        if this_val.is_a?(Hash) && other_val.is_a?(Hash)
+          this_val.deep_merge(other_val, &block)
+        elsif block
+          block.call(key, this_val, other_val)
+        else
+          other_val
+        end
+      end
+    end
+  end
+
+  unless method_defined?(:stringify_keys)
+    def stringify_keys
+      transform_keys(&:to_s)
+    end
+
+    def symbolize_keys
+      transform_keys { |key| key.to_sym rescue key }
+    end
+  end
+
+  unless method_defined?(:extractable_options?)
+    def extractable_options?
+      instance_of?(Hash)
+    end
+  end
+end
+
+class Array
+  unless method_defined?(:extract_options!)
+    def extract_options!
+      last.is_a?(Hash) && last.extractable_options? ? pop : {}
+    end
+  end
+end
+
+# ActiveSupport's `HashWithIndifferentAccess`: String keys, read and written by a Symbol as well, nested Hashes
+# converted, for a gem's code on untyped values (Doorkeeper's `request.parameters.values_at(:client_id, …)`).
+unless defined?(ActiveSupport::HashWithIndifferentAccess)
+  module ActiveSupport
+    class HashWithIndifferentAccess < Hash
+      # Rails' constructor: a Hash's entries and its defaults, or a plain default value.
+      def initialize(constructor = nil)
+        if constructor.respond_to?(:to_hash)
+          super()
+          update(constructor)
+          hash = constructor.is_a?(Hash) ? constructor : constructor.to_hash
+          self.default = hash.default if hash.default
+          self.default_proc = hash.default_proc if hash.default_proc
+        elsif constructor.nil?
+          super()
+        else
+          super(constructor)
+        end
+      end
+
+      # Rails' `extractable_options?`: an indifferent Hash is a trailing options Hash too.
+      def extractable_options?
+        true
+      end
+
+      def self.[](*args)
+        new.merge!(Hash[*args])
+      end
+
+      alias regular_writer []=
+      private :regular_writer
+
+      def []=(key, value)
+        super(convert_key(key), convert_value(value))
+      end
+      alias store []=
+
+      def [](key)
+        super(convert_key(key))
+      end
+
+      def fetch(key, *extras, &block)
+        super(convert_key(key), *extras, &block)
+      end
+
+      def dig(key, *rest)
+        super(convert_key(key), *rest)
+      end
+
+      def key?(key)
+        super(convert_key(key))
+      end
+      alias include? key?
+      alias has_key? key?
+      alias member? key?
+
+      # Not left to Hash's: MRI's `fetch_values` looks keys up in C, past this class's `fetch`.
+      def fetch_values(*keys, &block)
+        keys.map { |key| fetch(key, &block) }
+      end
+
+      def values_at(*keys)
+        keys.map { |key| self[key] }
+      end
+
+      def delete(key)
+        super(convert_key(key))
+      end
+
+      # Rails' `update`: a key already here takes the block's answer for its old and new values.
+      def update(*others, &block)
+        others.each do |other|
+          # Not `to_hash` for another indifferent Hash: that rebuilds its nested ones, and a copy is shallow in Rails.
+          indifferent = other.is_a?(HashWithIndifferentAccess)
+          (indifferent ? other : other.to_hash).each_pair do |key, value|
+            value = block.call(convert_key(key), self[key], value) if block && key?(key)
+            # Not converted again from another indifferent Hash: its values are already, and a copy shares them.
+            indifferent ? regular_writer(convert_key(key), value) : self[key] = value
+          end
+        end
+        self
+      end
+      alias merge! update
+
+      def merge(*others, &block)
+        dup.update(*others, &block)
+      end
+
+      # Rails' `reverse_merge`: the defaults' keys converted first, so this Hash's own values win under either spelling.
+      def reverse_merge(other_hash)
+        self.class.new(other_hash).merge!(self)
+      end
+      alias with_defaults reverse_merge
+
+      def reverse_merge!(other_hash)
+        replace(reverse_merge(other_hash))
+      end
+      alias with_defaults! reverse_merge!
+
+      def replace(other_hash)
+        super(self.class.new(other_hash))
+      end
+
+      # Rails' filters and transforms: an indifferent Hash again, its keys written through `[]=`.
+      def select(*args, &block)
+        return to_enum(:select) unless block
+        dup.tap { |hash| hash.select!(*args, &block) }
+      end
+      alias filter select
+
+      def reject(*args, &block)
+        return to_enum(:reject) unless block
+        dup.tap { |hash| hash.reject!(*args, &block) }
+      end
+
+      def transform_values(&block)
+        return to_enum(:transform_values) unless block
+        dup.tap { |hash| hash.transform_values!(&block) }
+      end
+
+      # Rails 8.1's: the whole Hash transformed first and then taken in, so keys that trade places keep their values.
+      def transform_keys(mapping = nil, &block)
+        return to_enum(:transform_keys) if mapping.nil? && !block
+        self.class.new(mapping ? super(mapping, &block) : super(&block))
+      end
+
+      def transform_keys!(mapping = nil, &block)
+        return to_enum(:transform_keys!) if mapping.nil? && !block
+        transformed = transform_keys(mapping, &block)
+        transformed.default = default
+        transformed.default_proc = default_proc if default_proc
+        replace(transformed)
+        self
+      end
+
+      # Rails' `symbolize_keys`: a plain Hash, since an indifferent one would write the Symbols back as Strings.
+      def symbolize_keys
+        to_hash.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+      end
+      alias to_options symbolize_keys
+
+      def compact
+        dup.tap(&:compact!)
+      end
+
+      def slice(*keys)
+        self.class.new(super(*keys.map { |key| convert_key(key) }))
+      end
+
+      def except(*keys)
+        self.class.new(super(*keys.map { |key| convert_key(key) }))
+      end
+
+      def dup
+        self.class.new(self)
+      end
+
+      def with_indifferent_access
+        dup
+      end
+
+      def to_hash
+        out = {}
+        out.default = default
+        out.default_proc = default_proc if default_proc
+        each { |key, value| out[key] = plain(value) }
+        out
+      end
+
+      private
+
+      # Rails' `to_hash` conversion: nested indifferent Hashes, in Arrays too, become plain ones.
+      def plain(value)
+        case value
+        when HashWithIndifferentAccess then value.to_hash
+        when Array then value.map { |item| plain(item) }
+        else value
+        end
+      end
+
+      def convert_key(key)
+        key.is_a?(Symbol) ? key.name : key
+      end
+
+      def convert_value(value)
+        case value
+        when HashWithIndifferentAccess then value
+        when Hash then self.class.new(value)
+        when Array then value.map { |item| convert_value(item) }
+        else value
+        end
+      end
+    end
+  end
+
+  class Hash
+    def with_indifferent_access
+      ActiveSupport::HashWithIndifferentAccess.new(self)
     end
   end
 end

@@ -113,6 +113,12 @@ impl InstanceCallParams {
                 &mut unknown_new,
             );
         }
+        // Not a core container's subclass where the tree keeps keywords (the Ruby family): its `new` is the container's,
+        // which no lowering rewrites, so the call written as the source's reaches what Ruby looks up as it runs
+        // (OmniAuth's `AuthHash.new(:provider => name)`, a Hash subclass whose modules hook `included`).
+        if app.native_library_keywords {
+            unknown_new.retain(|class| !descends_from_core_container(app, class));
+        }
         Self {
             slots,
             custom_new_slots,
@@ -280,6 +286,32 @@ pub(super) fn lexical_refinement_calls(app: &App) -> HashSet<crate::span::Span> 
         }
     }
     spans
+}
+
+fn descends_from_core_container(app: &App, class: &str) -> bool {
+    let mut current = class.to_string();
+    for _ in 0..32 {
+        let Some(parent) = app.library_classes.iter().filter(|c| !c.is_module && c.name.0.as_str() == current).find_map(|c| c.parent.clone()) else {
+            return false;
+        };
+        let rooted = parent.0.as_str().starts_with("::");
+        let written = parent.0.as_str().trim_start_matches("::").to_string();
+        if rooted && matches!(written.as_str(), "Hash" | "Array" | "String") && !app.library_classes.iter().any(|c| c.name.0.as_str() == written) {
+            return true;
+        }
+        // The parent as Ruby's lexical lookup would find it from the class's namespace, else as written: an app's
+        // `A::Hash` before the core one.
+        let scope: Vec<&str> = current.split("::").collect();
+        let resolved = (0..scope.len())
+            .rev()
+            .map(|depth| if depth == 0 { written.clone() } else { format!("{}::{written}", scope[..depth].join("::")) })
+            .find(|candidate| *candidate != current && app.library_classes.iter().any(|c| !c.is_module && c.name.0.as_str() == candidate));
+        match resolved {
+            Some(next) => current = next,
+            None => return matches!(written.as_str(), "Hash" | "Array" | "String"),
+        }
+    }
+    false
 }
 
 fn add_constructor_slots(

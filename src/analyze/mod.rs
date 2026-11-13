@@ -57,7 +57,7 @@ mod render;
 mod ivar_set;
 pub(crate) use ivar_set::controller_name_of;
 mod effects;
-mod diagnostics;
+pub(crate) mod diagnostics;
 pub(crate) use diagnostics::datetime_local_time_reads;
 pub mod open_classes;
 pub(crate) mod forwarding;
@@ -247,6 +247,8 @@ pub struct Analyzer {
     /// Per model and library class, the ivars its instance side and its class side write, and its parent
     /// ([`class_ivar_writes`]).
     class_ivar_writes: Option<ClassIvarWrites>,
+    /// The parameters of a private method every call of which passes a class object ([`class_object_params`]).
+    class_object_params: crate::det::HashSet<(ClassId, Symbol, usize)>,
     /// Each class-owned unification work item's send sites and the
     /// targets it calls, as the last unification collected them. A
     /// site is read off its body's stamped types, so a body no typing
@@ -480,6 +482,12 @@ impl Analyzer {
                     Symbol::from("type_for_attribute"),
                     Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Type::Value")), args: vec![].into() },
                 );
+                // The same reopen's table description: Doorkeeper's `secret_required?` asks a column whether it may be null.
+                cls.class_methods.insert(
+                    Symbol::from("columns"),
+                    Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Column")), args: vec![].into() }) },
+                );
+                cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
                 cls.class_methods.insert(Symbol::from("none"), relation_of_self.clone());
                 cls.class_methods.insert(Symbol::from("delete_all"), Ty::Int);
                 cls.class_methods.insert(Symbol::from("update_all"), Ty::Int);
@@ -1149,8 +1157,7 @@ impl Analyzer {
         // `registry::controllers`. Runs after view::register because the
         // Devise fold also augments ActionView::Base.
         registry::controllers::register(&mut classes, app, &route_helper_names);
-
-        // User-authored RBS sidecars. Signatures discovered under
+     // User-authored RBS sidecars. Signatures discovered under
         // `sig/**/*.rbs` at ingest time apply on top of the hardcoded
         // catalog — later entries win, so RBS overrides conventions
         // when both declare the same method. All RBS methods land in
@@ -1172,7 +1179,18 @@ impl Analyzer {
         // ActionMailer classes, ActiveJob classes, and Sidekiq workers —
         // see `registry::library`.
         registry::library::register(&mut classes, app, &route_helper_names);
+        for (class, readers) in crate::ingest::method_missing_readers() {
+            let Some(cls) = classes.get_mut(&ClassId(Symbol::from(*class))) else { continue };
+            for (name, held) in readers.iter() {
+                let (base, nilable) = held.strip_suffix('?').map_or((*held, false), |b| (b, true));
+                let ty = if base == "String" { Ty::Str } else { Ty::Class { id: ClassId(Symbol::from(base)), args: vec![].into() } };
+                let ty = if nilable { Ty::Union { variants: vec![ty, Ty::Nil].into() } } else { ty };
+                cls.missing_readers.insert(Symbol::from(format!("{name}?")), Ty::Bool);
+                cls.missing_readers.insert(Symbol::from(*name), ty);
+            }
+        }
 
+   
         // A helper object built from a YAML table
         // (`WebUrlHelpers = Factory.create(YAML.load_file(…)["paths"])`):
         // one path/URL String per generated name. See
@@ -1477,6 +1495,7 @@ impl Analyzer {
             settle: oscillation::Settle::default(),
             written_ivars: None,
             class_ivar_writes: None,
+            class_object_params: Default::default(),
             site_cache: Vec::new(),
             retyped_since_unify: None,
             settled_constants: None,
@@ -1572,6 +1591,7 @@ impl Analyzer {
         self.settle = oscillation::Settle::default();
         self.written_ivars = None;
         self.class_ivar_writes = class_ivar_writes(app);
+        self.class_object_params = class_object_params(app, &self.classes);
         self.site_cache = Vec::new();
         self.retyped_since_unify = None;
         self.settled_constants = None;
@@ -4488,7 +4508,9 @@ impl Analyzer {
                 query_class_objects: Default::default(),
                 call_site_params: Default::default(),
                 unseen_params: Default::default(),
-                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: self.helper_modules.contains(&lc.name),
+                // Not empty: a constant the class macros made (an option's default lambda) has no source answer, and the
+                // bare-name values are where its reads find it.
+                constants: global_constants.clone(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: self.helper_modules.contains(&lc.name),
             };
 
             if retype {
@@ -4667,7 +4689,7 @@ impl Analyzer {
                     query_class_objects: Default::default(),
                     call_site_params: Default::default(),
                     unseen_params: Default::default(),
-                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: class_ctx.helper_body,
+                    constants: global_constants.clone(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: class_ctx.helper_body,
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);
@@ -5302,6 +5324,12 @@ impl Analyzer {
             );
             if let Some(ty) = ty {
                 ctx.local_bindings.insert(param.name.clone(), ty);
+            }
+        }
+        // simple_form's `attempt_mapping(input_name, Object)` and `attempt_mapping(input_name, namespace.constantize)`.
+        for (i, param) in method.params.iter().enumerate() {
+            if self.class_object_params.contains(&(class_id.clone(), method.name.clone(), i)) {
+                ctx.query_class_objects.insert(param.name.clone());
             }
         }
         // An indexed module's Ruby callback gets its host as a Module object,
@@ -8101,6 +8129,60 @@ impl ClassIvarWrites {
     }
 }
 
+/// Each positional parameter of a private method that every call of it, a receiverless call from its own class,
+/// passes a class object in: a constant naming a class, an object's `class`, or a name's `constantize`. Its body may ask the parameter
+/// a Module query (`at.const_get(mapping)`), as of a local assigned one.
+fn class_object_params(app: &App, classes: &crate::det::HashMap<ClassId, ClassInfo>) -> crate::det::HashSet<(ClassId, Symbol, usize)> {
+    use crate::dialect::MethodVisibility;
+    let constantize_owned = app.library_classes.iter().flat_map(|c| c.methods.iter()).chain(app.models.iter().flat_map(|m| m.methods()))
+        .any(|m| m.name.as_str() == "constantize");
+    let class_owned = app.library_classes.iter().flat_map(|c| c.methods.iter()).chain(app.models.iter().flat_map(|m| m.methods()))
+        .any(|m| m.name.as_str() == "class");
+    let proves = |arg: &Expr| match &*arg.node {
+        ExprNode::Const { path } => {
+            let name = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+            // Not left to the registry, which seeds no class for Ruby's root ones.
+            matches!(name.as_str(), "Object" | "BasicObject" | "Module" | "Class") || classes.contains_key(&ClassId(Symbol::from(name.as_str())))
+        }
+        ExprNode::Send { recv: Some(_), method, args, block: None, .. } if args.is_empty() => match method.as_str() {
+            "constantize" => !constantize_owned,
+            "class" => !class_owned,
+            _ => false,
+        },
+        _ => false,
+    };
+    fn sites<'a>(e: &'a Expr, name: &Symbol, out: &mut Vec<&'a [Expr]>) {
+        if let ExprNode::Send { recv: None, method, args, .. } = &*e.node
+            && method == name
+        {
+            out.push(args.as_slice());
+        }
+        e.node.for_each_child(&mut |c| sites(c, name, out));
+    }
+    let mut out = crate::det::HashSet::default();
+    for lc in &app.library_classes {
+        for m in lc.methods.iter().filter(|m| m.visibility != MethodVisibility::Public) {
+            let mut calls = Vec::new();
+            for caller in lc.methods.iter().filter(|c| c.receiver == m.receiver) {
+                sites(&caller.body, &m.name, &mut calls);
+            }
+            if calls.is_empty() {
+                continue;
+            }
+            for (i, param) in m.params.iter().enumerate() {
+                if param.keyword || param.rest || param.from_keyword {
+                    continue;
+                }
+                let splat = |args: &[Expr]| args.iter().take(i + 1).any(|a| matches!(&*a.node, ExprNode::Splat { .. }));
+                if calls.iter().all(|args| !splat(args) && args.get(i).is_some_and(|a| proves(a))) {
+                    out.insert((lc.name.clone(), m.name.clone(), i));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn class_ivar_writes(app: &App) -> Option<ClassIvarWrites> {
     fn walk(e: &Expr, out: &mut BTreeSet<Symbol>, dynamic: &mut bool) {
         match &*e.node {
@@ -8566,7 +8648,8 @@ fn collect_transitive_filter_ivars(
         | ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
             let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
             if !own {
-                if let Some(ty) = value.ty.clone() {
+                // A class object stored is the class, as `walk_ivar_assignments` records the same write.
+                if let Some(ty) = value.ty.clone().map(|t| class_object_arg_ty(value, t)) {
                     union_ivar_maps(&mut out, HashMap::from_iter([(name.clone(), ty)]));
                 }
             }
@@ -11127,7 +11210,7 @@ fn walk_ivar_assignments(
         // a plain assignment so a controller's `@story ||= Story.find(..)`
         // still flows its type to before_action seeds and views.
         ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
-            if let Some(ty) = value.ty.clone() {
+            if let Some(ty) = value.ty.clone().map(|t| class_object_arg_ty(value, t)) {
                 let merged = match out.remove(name) {
                     Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),
                     None => ty,

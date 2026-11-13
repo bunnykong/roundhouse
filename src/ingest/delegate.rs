@@ -92,6 +92,21 @@ fn lower_library_class_delegates(
         // bypass association checks for the model; consumer-specific module
         // expansion is not modeled yet, so retain the declaration visibly.
         if lc.is_module && model_concerns.contains(&lc.name) {
+            // Except a target no association can be: `to: "self.class"` (Devise's `Lockable`) or a constant reads the
+            // same in every includer, and Rails defines the forwarder on the module itself.
+            let calls = std::mem::take(&mut lc.unknown_calls);
+            let (fixed, others): (Vec<Expr>, Vec<Expr>) = calls.into_iter().partition(|e| is_delegate_declaration(e) && includer_free_target(e));
+            if fixed.is_empty() {
+                lc.unknown_calls = others;
+                continue;
+            }
+            lc.unknown_calls = fixed;
+            let methods = expand_delegates_with(lc, false);
+            let left = std::mem::take(&mut lc.unknown_calls);
+            lc.unknown_calls = others.into_iter().chain(left).collect();
+            if !methods.is_empty() {
+                generated.push((i, methods));
+            }
             continue;
         }
         let is_enumerable = enumerable.contains(&lc.name);
@@ -103,6 +118,23 @@ fn lower_library_class_delegates(
     for (i, methods) in generated {
         app.library_classes[i].methods.extend(methods);
     }
+}
+
+/// A `delegate` whose `to:` is `"self.<reads>"` or a constant: what it reads does not depend on the includer's associations.
+fn includer_free_target(expr: &Expr) -> bool {
+    let ExprNode::Send { args, .. } = &*expr.node else { return false };
+    args.iter().any(|arg| {
+        let ExprNode::Hash { entries, .. } = &*arg.node else { return false };
+        entries.iter().any(|(k, v)| {
+            matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "to")
+                && match &*v.node {
+                    // Not any `self.` read: `self.profile` may name the includer's association.
+                    ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value == "self.class" || value.starts_with("self.class."),
+                    ExprNode::Const { .. } => true,
+                    _ => false,
+                }
+        })
+    })
 }
 
 pub(super) fn is_delegate_declaration(expr: &Expr) -> bool {
@@ -400,12 +432,17 @@ fn synthesized_source(
         // A setter takes the one argument Ruby's own assignment syntax
         // supplies (with `prefix: true`, `d.name` is already
         // `<prefix>_name=`); an operator takes its fixed operands.
+        let listed: String = (0..d.arity).map(|i| format!("__delegate_arg{i}")).collect::<Vec<_>>().join(", ");
         let (params, call) = if let Some(forwarder) = operator_forwarder(t, m) {
             forwarder
         } else if let Some(attr) = m.strip_suffix('=') {
             ("value", format!("{t}.{attr} = value"))
         } else if d.block && d.allow_nil {
             ("&block", format!("__allow_nil_target__ = {t}\n    __allow_nil_target__.nil? ? nil : __allow_nil_target__.{m}(&block)"))
+        } else if d.arity > 0 && d.allow_nil {
+            (listed.as_str(), format!("__allow_nil_target__ = {t}\n    __allow_nil_target__.nil? ? nil : __allow_nil_target__.{m}({listed})"))
+        } else if d.arity > 0 {
+            (listed.as_str(), format!("{t}.{m}({listed})"))
         } else if d.block {
             ("&block", format!("{t}.{m}(&block)"))
         } else if d.allow_nil {
@@ -613,20 +650,17 @@ mod tests {
     }
 
     #[test]
-    fn a_self_call_with_arguments_declines_a_zero_argument_delegate() {
+    fn a_self_call_with_arguments_takes_a_forwarder_of_that_arity() {
         let mut lc = library_class(
             "class Filter\n  delegate :title, to: :article\n  def render\n    self.title(\"caption\")\n  end\nend\n",
         );
-        assert!(take_delegate_decls(&mut lc).is_empty());
-        assert_eq!(
-            lc.unknown_calls.len(),
-            1,
-            "the unsupported forwarding stays visible"
-        );
+        let delegates = take_delegate_decls(&mut lc);
+        assert_eq!(delegates.len(), 1, "Rails forwards the argument");
+        assert_eq!(delegates[0].arity, 1);
     }
 
     #[test]
-    fn a_concern_method_call_with_arguments_declines_model_delegate_expansion() {
+    fn a_concern_method_call_with_arguments_takes_a_forwarder_of_that_arity() {
         let mut model = library_class("class Post\n  delegate :title, to: :leaf\nend\n");
         let concern = library_class(
             "class Rendering\n  def render_title\n    title(\"caption\")\n  end\nend\n",
@@ -642,15 +676,8 @@ mod tests {
         let mut eligibility =
             DelegateEligibility::new(&model.methods, &called_with_args, &blocked_names, None, &no_targets, &[]);
         let delegates = take_delegate_decls_from_calls(&mut model.unknown_calls, &mut eligibility);
-        assert!(
-            delegates.is_empty(),
-            "the concern's call needs argument forwarding"
-        );
-        assert_eq!(
-            model.unknown_calls.len(),
-            1,
-            "the declaration remains unexpanded"
-        );
+        assert_eq!(delegates.len(), 1, "the concern's call forwards its argument");
+        assert_eq!(delegates[0].arity, 1);
     }
 
     #[test]

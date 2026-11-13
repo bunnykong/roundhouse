@@ -330,6 +330,8 @@ fn file_of_class(c: &LibraryClass) -> Option<FileId> {
 /// The gems' classes and the class graph reach walks; none of it changes as reach grows.
 struct Gems<'a> {
     names: HashSet<String>,
+    /// Every constant the program writes, as written: a module only these name is a value no call of unknown receiver holds.
+    written_consts: HashSet<String>,
     entries: HashMap<String, Vec<&'a LibraryClass>>,
     /// `(owner, class side, method)` for every method a class defines.
     defined: HashSet<(&'a str, bool, &'a str)>,
@@ -403,7 +405,20 @@ impl<'a> Gems<'a> {
                 model_copies.entry((model.name.0.to_string(), m.receiver == MethodReceiver::Class, m.name.to_string())).or_default().push(m);
             }
         }
-        let mut gems = Gems { names, entries, defined, owners, sinks, app_mixins: HashSet::default(), app_classes, unloadable, model_copies };
+        let mut written_consts: HashSet<String> = HashSet::default();
+        fn consts_in(e: &crate::expr::Expr, out: &mut HashSet<String>) {
+            if let ExprNode::Const { path } = &*e.node {
+                out.insert(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::"));
+            }
+            e.node.for_each_child(&mut |c| consts_in(c, out));
+        }
+        for c in &app.library_classes {
+            for e in c.methods.iter().map(|m| &m.body).chain(c.unknown_calls.iter()).chain(c.constants.iter().map(|(_, v)| v)).chain(c.class_ivar_initializers.iter()) {
+                consts_in(e, &mut written_consts);
+            }
+        }
+        crate::lower::for_each_emit_body_ref(app, &mut |e| consts_in(e, &mut written_consts));
+        let mut gems = Gems { names, written_consts, entries, defined, owners, sinks, app_mixins: HashSet::default(), app_classes, unloadable, model_copies };
         gems.app_mixins = gems.mixed_into_the_app(app);
         Some(gems)
     }
@@ -645,6 +660,29 @@ impl<'a> Gems<'a> {
                 s.body(e, &[]);
             }
         });
+        // What a gem's file runs as it loads (`app.file_programs`, the boot's): Devise's `OmniAuth.config.on_failure =
+        // proc { … Devise::Mapping.find_by_path!(…) … }` calls into the gem when a provider fails.
+        fn program_bodies<'e>(items: &'e [crate::app::ProgramItem], out: &mut Vec<&'e crate::expr::Expr>) {
+            for item in items {
+                match item {
+                    crate::app::ProgramItem::Statement(e) => out.push(e),
+                    crate::app::ProgramItem::Branch { condition, then_items, else_items, .. } => {
+                        out.push(condition);
+                        program_bodies(then_items, out);
+                        program_bodies(else_items, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut loaded = Vec::new();
+        // Not every program: a file nothing loads (Devise's `strategies/rememberable`, which only the model module requires) runs none of it.
+        for program in app.file_programs.iter().filter(|p| app.gem_loaded_files.contains(&crate::ingest::normalize_source(&p.source))) {
+            program_bodies(&program.items, &mut loaded);
+        }
+        for e in loaded {
+            s.body(e, &[]);
+        }
         let (mut calls, mut consts) = (s.calls, s.consts);
         let mut live = Vec::new();
         for c in app.library_classes.iter().filter(|c| !self.is_gem(c)) {
@@ -668,6 +706,11 @@ impl<'a> Gems<'a> {
                 }
             }
         }
+        // A template runs as a method of `ActionView::Base`: what a gem mixes into it (`on_load(:action_view) { include
+        // SimpleForm::ActionViewExtensions::FormHelper }`) answers the template's receiverless calls.
+        if !app.views.is_empty() && app.library_classes.iter().any(|c| c.name.0.as_str() == "ActionView::Base") {
+            consts.push((None, "ActionView::Base".to_string()));
+        }
         // Not only the app's code: the stack builds each middleware (`Warden::Manager.new(app) { … }`) and calls it.
         for class in &app.gem_middlewares {
             consts.push((None, class.clone()));
@@ -677,7 +720,7 @@ impl<'a> Gems<'a> {
             calls.push((Target::Any, "finalize!".to_string()));
         }
         // Not parsed: the block is Ruby source, so every name called on something in it is reached on any receiver.
-        for block in app.gem_middleware_blocks.values() {
+        for block in app.gem_middleware_blocks.values().chain(app.gem_middleware_args.values()) {
             for name in called_names(block) {
                 calls.push((Target::Any, format!("{BLOCK}{name}")));
                 // Not parsed, so what it passes is not known either.
@@ -919,6 +962,11 @@ impl Walk<'_, '_> {
         }
     }
 
+    fn unnamed_module(&self, name: &str) -> bool {
+        let is_module = self.gems.entries.get(name).is_some_and(|e| !e.is_empty() && e.iter().all(|c| c.is_module));
+        is_module && !self.gems.written_consts.iter().any(|written| written == name || name.ends_with(&format!("::{written}")))
+    }
+
     fn found(&mut self, calls: Vec<Call>, consts: Vec<Const>) {
         for call in calls {
             self.call(call);
@@ -961,7 +1009,7 @@ impl Walk<'_, '_> {
         for a in ancestors.iter() {
             for entry in gems.entries.get(a.as_str()).into_iter().flatten() {
                 for m in &entry.methods {
-                    if self.any.contains(m.name.as_str()) {
+                    if self.any.contains(m.name.as_str()) && !(m.receiver == MethodReceiver::Class && self.unnamed_module(&d)) {
                         self.answer(&d, m.receiver == MethodReceiver::Class, m.name.as_str());
                     }
                 }
@@ -1053,6 +1101,12 @@ impl Walk<'_, '_> {
                 }
                 for d in receivers {
                     for side in [false, true] {
+                        // Not a module's own class-side method a constant of it never reaches: a module is no other
+                        // object's class, so a receiver of unknown type answers it only as the module itself, a value the
+                        // program reads somewhere (rack-protection's `Rack::Protection.new`, which nothing names).
+                        if side && self.unnamed_module(&d) {
+                            continue;
+                        }
                         self.answer(&d, side, &method);
                     }
                 }
@@ -1134,7 +1188,8 @@ impl<'a> Scan<'a> {
     }
 
     /// The calls `send(name)` on `target` makes by `name`.
-    fn send_by(&mut self, target: &Target, name: &Expr, rest: &[Expr]) {
+    /// `rest` is `None` when the arguments come later and are not known here (a `method(name)`'s call).
+    fn send_by(&mut self, target: &Target, name: &Expr, rest: Option<&[Expr]>) {
         let mut names = names_of(name, &self.locals, self.gems, self.context, 2);
         // Not a parameter's callers: Ruby calls `method_missing` and its kin with no call site to read.
         let implicit = self.context.is_some_and(|(_, _, m)| IMPLICIT.contains(&m));
@@ -1172,7 +1227,7 @@ impl<'a> Scan<'a> {
             None => g.may_answer(target, sink),
         } || (from_callers && !matches!(target, Target::Any) && g.may_answer(target, sink))).collect()).unwrap_or_default();
         for sink in sinks {
-            self.pass(sink, Some(rest));
+            self.pass(sink, rest);
         }
         match names {
             Some(names) => self.calls.extend(names.iter().map(|n| n.call(target))),
@@ -1213,7 +1268,7 @@ fn sends_by_parameter(e: &Expr, params: &[crate::dialect::Param]) -> bool {
             return;
         }
         if let ExprNode::Send { method, args, .. } = &*e.node {
-            if matches!(method.as_str(), "send" | "public_send" | "__send__")
+            if matches!(method.as_str(), "send" | "public_send" | "__send__" | "method" | "public_method")
                 && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Var { name, .. }) if params.iter().any(|p| p.name == *name))
             {
                 *found = true;
@@ -1429,10 +1484,25 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
                         s.pass(value.as_str(), Some(&args[1..]));
                     }
                 }
-                // Not dropped as unknown: svg-graph's `init_with` reaches its option writers by `send(key.to_s + "=", value)`.
-                Some(_) if by_name && matches!(method.as_str(), "send" | "public_send" | "__send__") => {
+                // Not dropped as unknown: svg-graph's `init_with` reaches its option writers by `send(key.to_s + "=", value)`,
+                // and Doorkeeper's `Credentials.from_request` its readers by `self.method(method)` over a configured list.
+                // Not a `method` read outside a gem method: Hashie's `method(method_key)` is also scanned with no context, where
+                // it would reach every method of the app's mixins (Devise's class accessors on User, which nothing types).
+                Some(_) if by_name
+                    && (matches!(method.as_str(), "send" | "public_send" | "__send__")
+                        || (s.context.is_some() && matches!(method.as_str(), "method" | "public_method"))) =>
+                {
                     let own = s.context.is_none() && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
-                    s.send_by(if own { &Target::AppSelf } else { &target }, &args[0], &args[1..]);
+                    let rest = if matches!(method.as_str(), "method" | "public_method") { None } else { Some(&args[1..]) };
+                    s.send_by(if own { &Target::AppSelf } else { &target }, &args[0], rest);
+                    // The Method is called later, maybe with a block (`method(name).call { … }`), as a `method(:name)` is.
+                    if matches!(method.as_str(), "method" | "public_method") {
+                        let every = match &target {
+                            Target::Virtual(c, _) if !c.starts_with('\u{0}') => format!("{c}\u{1}*"),
+                            _ => "*".to_string(),
+                        };
+                        s.calls.push((Target::Any, format!("{BLOCK}{every}")));
+                    }
                 }
                 _ => {}
             }
@@ -1890,11 +1960,13 @@ pub(crate) fn shakes_source_gems(app: &App, target: crate::build_target::BuildTa
 pub(crate) fn compiled_on_the_ruby_family(app: &App) -> crate::det::HashSet<String> {
     let Some(lock) = app.gem_lock.as_ref() else { return Default::default() };
     let deps = |gem: &str| lock.spec_deps.get(gem).cloned().unwrap_or_default();
+    // Not railties alone: a gem on Rails' view or model stack (simple_form's `require 'action_view'`) would load the
+    // real framework beside the runtime's own `ActionView`/`ActiveModel`, which the emitted tree is instead.
     let needs_railties = |gem: &str| {
         let mut seen: crate::det::HashSet<String> = Default::default();
         let mut stack = vec![gem.to_string()];
         while let Some(g) = stack.pop() {
-            if g == "railties" {
+            if matches!(g.as_str(), "railties" | "actionpack" | "actionview" | "activemodel" | "activerecord" | "actionmailer" | "activejob" | "actiontext" | "activestorage") {
                 return true;
             }
             if seen.insert(g.clone()) {

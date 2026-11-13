@@ -517,31 +517,7 @@ fn transpile(
     };
     analyze_diags.extend(lower_diags);
 
-    // CRuby can carry an external include only when the lockfile uniquely
-    // identifies its gem and the defining source has a matching literal
-    // top-level require. Keep check's source diagnostic and all strict-target
-    // refusals unchanged.
-    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
-        let (external_namespaces, supported_includes) = if target == BuildTarget::Ruby {
-            (roundhouse::gems::locked_external_gem_namespaces(&app), roundhouse::gems::statically_resolved_external_includes(&app))
-        } else {
-            (roundhouse::gems::native_extension_gem_namespaces(&app), Default::default())
-        };
-        let mut external_roots = roundhouse::gems::ExternalRootIndex::new(&external_namespaces);
-        analyze_diags.retain(|diagnostic| match &diagnostic.kind {
-            roundhouse::diagnostic::DiagnosticKind::Unsupported {
-                construct, detail, ..
-            } if construct.as_str() == "include" => !supported_includes.contains_key(detail),
-            roundhouse::diagnostic::DiagnosticKind::Unsupported {
-                construct, detail, ..
-            } if construct.as_str() == "constant" => !external_roots.names_any(detail),
-            // Not this tree's: it runs the gem file's statements in the file's program (`ingest::gem_load_program`).
-            roundhouse::diagnostic::DiagnosticKind::Unsupported {
-                target: Some(only), construct, ..
-            } if only.as_str() == "spinel" && construct.as_str() == "gem file statement" => false,
-            _ => true,
-        });
-    }
+    roundhouse::session::drop_answered_by_target(&app, target, &mut analyze_diags);
 
     // A residue whose own text says the construct is "unsupported at
     // strict-target emit" has to fail the emit it predicts that for.

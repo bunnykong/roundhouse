@@ -12,6 +12,7 @@ module Rails
   def self.error: () -> ActiveSupport::ErrorReporter
   def self.event: () -> ActiveSupport::EventReporter
   def self.application: () -> Application
+  def self.configuration: () -> FrameworkConfig
 
   class BacktraceCleaner
     APP_DIRS_PATTERN: Regexp
@@ -149,6 +150,7 @@ module Rails
     def relative_url_root: () -> String?
     def action_controller: () -> ActionControllerOptions
     def filter_parameters: () -> Array[String | Regexp]
+    def session_options: () -> Hash[Symbol, String]
   end
 
   class ActionControllerOptions

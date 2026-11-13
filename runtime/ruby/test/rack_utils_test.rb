@@ -1,5 +1,5 @@
 # frozen_string_literal: true
-# The `Rack::Utils.unescape_path` port, against rack's own answers.
+# The `Rack::Utils` port (`unescape_path`, `parse_query`, `build_query`), against rack's own answers.
 #
 # A FRAMEWORK test (`tests/runtime_ruby_unit.rs` runs every file under
 # `runtime/ruby/test/` on each `cargo test`), not one that ships into an
@@ -41,5 +41,34 @@ class RackUtilsTest < Minitest::Test
       assert_equal valid, unescaped.valid_encoding?, path
       assert_equal Encoding::UTF_8, unescaped.encoding, path
     end
+  end
+  # rack 3.2.7's `parse_query` and `build_query` over these (Doorkeeper's redirect URI builder calls both).
+  QUERIES = [
+    ["a=1&b=2", { "a" => "1", "b" => "2" }],
+    ["a=1&a=2&a=3", { "a" => ["1", "2", "3"] }],
+    ["a&b=", { "a" => nil, "b" => "" }],
+    ["=x&&c=%41+b", { "" => "x", "c" => "A b" }],
+    ["a=1& b=2", { "a" => "1", "b" => "2" }],
+    ["", {}],
+    [nil, {}],
+    ["k=%E3%81%82", { "k" => "\u3042" }],
+    ["a&a=1", { "a" => "1" }],
+    ["a=1&a&a=2", { "a" => ["1", nil, "2"] }],
+    ["a&a", { "a" => nil }],
+  ].freeze
+
+  def test_every_query_parses_as_rack_does
+    QUERIES.each { |query, params| assert_equal params, Rack::Utils.parse_query(query), query.inspect }
+  end
+
+  def test_a_percent_without_two_hex_digits_is_an_argument_error
+    error = assert_raises(ArgumentError) { Rack::Utils.parse_query("a=%4") }
+    assert_equal "invalid %-encoding (%4)", error.message
+  end
+
+  def test_params_build_the_query_rack_does
+    assert_equal "a=1&b&c+d=x+y", Rack::Utils.build_query({ "a" => "1", b: nil, "c d" => "x y" })
+    assert_equal "a=1&a&a=2&", Rack::Utils.build_query({ "a" => ["1", nil, "2"], "e" => [] })
+    assert_equal "q=a%26b%3Dc%2F%C3%A9", Rack::Utils.build_query({ "q" => "a&b=c/\u00e9" })
   end
 end

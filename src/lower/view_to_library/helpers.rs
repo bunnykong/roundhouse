@@ -416,7 +416,13 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                 Some(inline) => inline,
                 None => {
                     let label = pre_escaped.clone().unwrap_or_else(|| lit_str_coerce(lowered.clone()));
-                    let mut args = vec![label, rewrite_helpers_in_expr(url, ctx)];
+                    // `:back` is Rails' `url_for(:back)`, the referrer, not a String to escape.
+                    let href = if matches!(&*url.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "back") {
+                        view_helpers_call("back_url", Vec::new())
+                    } else {
+                        rewrite_helpers_in_expr(url, ctx)
+                    };
+                    let mut args = vec![label, href];
                     if let Some(o) = opts {
                         args.push((*o).clone());
                     }

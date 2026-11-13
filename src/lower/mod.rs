@@ -126,6 +126,11 @@ pub mod presence_in;
 pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
 pub mod save_without_validation;
+pub mod defined_ivar_read;
+pub mod method_missing_calls;
+pub mod dynamic_try;
+pub mod primary_key_send;
+mod core_instance_methods;
 pub mod route_param_recall;
 pub mod expect_string_key;
 pub mod defined_ivar_memo;
@@ -716,6 +721,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `record.slice(:a, :b)` on a typed model → a Hash of its typed
     // readers. Reads the analyzer's receiver types; nothing keys on it.
     ("record_slice", &[]),
+    // `record.send(record.class.primary_key)` -> `record.id` on an analyzer-typed record, before the dynamic
+    // send would reach send_static_dispatch's residue.
+    ("primary_key_send", &[]),
     ("send_static_dispatch", &[]),
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
@@ -893,6 +901,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
         fused::apply_fused_independent_rewrites(app);
     });
     save_without_validation::apply_bare_model_saves(app);
+    defined_ivar_read::apply_defined_ivar_read_lowering(app);
     ran!("pathname_ctor");
     ran!("array_ordinal");
     ran!("save_without_validation");
@@ -955,6 +964,8 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("try_guard");
     record_snapshot::apply_record_snapshot_lowering(app);
     ran!("record_snapshot");
+    method_missing_calls::apply_method_missing_calls(app, registry, target);
+    dynamic_try::apply_dynamic_try(app, target);
     diags.extend(where_range_split::apply_where_range_split(app, target));
     ran!("where_range_split");
     for_each_hook_body(app, &mut |body| {
@@ -993,7 +1004,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("status_literal");
     ran!("to_param_residue");
     crate::timings::phase("post-analyze: fused mid rewrites", || {
-        fused::apply_fused_mid_rewrites(app);
+        fused::apply_fused_mid_rewrites(app, target);
     });
     ran!("route_format_suffix");
     ran!("route_url_options");
@@ -1015,7 +1026,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("inquiry");
     has_one_builder::apply_has_one_builder_lowering(app);
     ran!("has_one_builder");
-    config_reader::apply_config_reader_lowering(app);
+    config_reader::apply_config_reader_lowering_for(app, target);
     ran!("config_reader");
     ran!("symbolize_keys");
     enum_mapping_keys::apply_enum_mapping_keys(app);
@@ -1113,6 +1124,8 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("module_mattr_storage");
     diags.extend(record_slice::apply_record_slice_lowering(app, registry));
     ran!("record_slice");
+    primary_key_send::apply_primary_key_send(app);
+    ran!("primary_key_send");
     diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
         send_dispatch::apply_send_static_dispatch(app, registry)
     }));

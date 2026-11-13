@@ -1331,7 +1331,16 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 963 on devise-recoverable (devise-boot: 959 + 2): KeyGenerator reads
     // `hash_digest_class` out of its open options Hash, and Credentials#fetch answers
     // what its block gives. Raise to 965, preserving the two-site headroom.
-    const CEILING: usize = 965;
+    // MEASURED 984 on devise-lockable (main 963): Devise's remember cookie reads back the JSON Rails' signed
+    // cookies hold, a value of any shape (action_controller/cookies.rb); Params.indifferent_read/delete take a
+    // value that is Rails' Parameters or a typed params object; Rack::Utils.escape takes what OmniAuth's failure
+    // redirect hands it; increment/decrement_counter read their options. Raise to 986, preserving the two-site
+    // headroom.
+    // MEASURED 985 on integer query casts (main 6b6dab7e2: 981): Relation's
+    // integer_list_predicate reads the elements of a hash condition's
+    // untyped Array (+4 in active_record/relation.rb); its typed helpers
+    // add none. Within the ceiling, which is unchanged.
+    const CEILING: usize = 986;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

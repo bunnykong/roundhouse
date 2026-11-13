@@ -30,6 +30,12 @@ pub enum GeneratedExpressionDialect {
     /// in the application's `config/database.yml` is sqlite3, so SQLite DDL
     /// carries the text to the engine it was written for.
     Sqlite,
+    /// The portable grammar, for an application whose `config/database.yml`
+    /// names another adapter than sqlite3. A CHECK or index expression the
+    /// grammar can't read is that database's own SQL: ingest leaves it out
+    /// of the schema with a warning, as it did before it modeled them,
+    /// where [`Portable`](Self::Portable) refuses it.
+    OtherDatabase,
 }
 
 impl GeneratedExpressionDialect {

@@ -134,3 +134,48 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
     refused.extend(analyze_and_lower_with_target(app, target));
     refused
 }
+
+/// What the target's own tree answers, which `check` still reports for the targets that do not: an external include
+/// or constant the lockfile places, and what [`drop_runtime_answered`] drops.
+pub fn drop_answered_by_target(app: &App, target: crate::build_target::BuildTarget, diags: &mut Vec<Diagnostic>) {
+    use crate::build_target::BuildTarget;
+    drop_runtime_answered(target, diags);
+    // CRuby can carry an external include only when the lockfile uniquely
+    // identifies its gem and the defining source has a matching literal
+    // top-level require. Keep check's source diagnostic and all strict-target
+    // refusals unchanged.
+    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        let (external_namespaces, supported_includes) = if target == BuildTarget::Ruby {
+            (crate::gems::locked_external_gem_namespaces(app), crate::gems::statically_resolved_external_includes(app))
+        } else {
+            (crate::gems::native_extension_gem_namespaces(app), Default::default())
+        };
+        let mut external_roots = crate::gems::ExternalRootIndex::new(&external_namespaces);
+        diags.retain(|diagnostic| match &diagnostic.kind {
+            crate::diagnostic::DiagnosticKind::Unsupported {
+                construct, detail, ..
+            } if construct.as_str() == "include" => !supported_includes.contains_key(detail),
+            crate::diagnostic::DiagnosticKind::Unsupported {
+                construct, detail, ..
+            } if construct.as_str() == "constant" => !external_roots.names_any(detail),
+            _ => true,
+        });
+    }
+}
+
+/// What the Ruby family's runtime answers, which every other target refuses: a custom form builder's own methods
+/// (its overlay carries Rails' FormBuilder) and a gem file's statements (`ingest::gem_load_program` runs them in the
+/// file's program).
+pub fn drop_runtime_answered(target: crate::build_target::BuildTarget, diags: &mut Vec<Diagnostic>) {
+    use crate::build_target::BuildTarget;
+    if !matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        return;
+    }
+    diags.retain(|diagnostic| match &diagnostic.kind {
+        crate::diagnostic::DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "custom form builder method" => false,
+        crate::diagnostic::DiagnosticKind::Unsupported { target: Some(only), construct, .. } => {
+            !(only.as_str() == "spinel" && construct.as_str() == "gem file statement")
+        }
+        _ => true,
+    });
+}

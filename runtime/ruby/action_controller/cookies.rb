@@ -16,8 +16,54 @@
 # `Tep.str_hash` route through one store. This replaces the former CRuby-only
 # overlay CookieJar; one typed implementation now serves all three ruby-family
 # targets.
+require_relative "../active_support_ext"
+
 module ActionController
   class CookieJar
+    # rack's `parse_cookies_header`: each `name=value` of a `Cookie:` header, `+` and `%XX` unescaped, the first of a
+    # repeated name kept; a bare name, which rack keeps as nil, is left out and reads nil from the jar alike.
+    # Not `Rack::Utils.parse_cookies`: a tree without the rack gem (JRuby's run outside Bundler) loads this file, and
+    # the ruby family's `rack_utils` is that gem.
+    def self.parse_header(header)
+      out = {}
+      return out if header.empty?
+      header.split(";").each do |pair|
+        pair = pair.strip
+        eq = pair.index("=")
+        next if eq.nil?
+        name = unescape_component(pair[0, eq].strip)
+        value = unescape_component(pair[eq + 1, pair.length - eq - 1].strip)
+        out[name] = value unless name.empty? || out.key?(name)
+      end
+      out
+    end
+
+    def self.unescape_component(s)
+      out = +""
+      i = 0
+      n = s.bytesize
+      while i < n
+        b = s.getbyte(i)
+        hi = i + 2 < n ? hex_value(s.getbyte(i + 1)) : -1
+        lo = i + 2 < n ? hex_value(s.getbyte(i + 2)) : -1
+        if b == 37 && hi >= 0 && lo >= 0
+          out << (hi * 16 + lo).chr
+          i += 3
+        else
+          out << (b == 43 ? " " : b.chr)
+          i += 1
+        end
+      end
+      out.force_encoding("UTF-8")
+    end
+
+    def self.hex_value(b)
+      return b - 48 if b >= 48 && b <= 57
+      return b - 55 if b >= 65 && b <= 70
+      return b - 87 if b >= 97 && b <= 102
+      -1
+    end
+
     def initialize(inbound = {})
       @inbound = {}
       @out = {}
@@ -25,6 +71,7 @@ module ActionController
       @flag_samesite = {}
       @flag_secure = {}
       @flag_expires = {}
+      @deleted = {}
       # Copy via `.each` (pair iteration), not `.keys`: the inbound hash is
       # the request's `Tep.str_hash` (a `Hash.new("")`), whose `.keys`
       # intrinsic yields a null array through the loosely-typed `req.cookies`
@@ -108,6 +155,7 @@ module ActionController
     # observes the difference — and it keeps this pair off the untyped
     # ledger, which a `-> untyped` return would have joined for no gain.
     def raw_set(key, value)
+      @deleted.delete(key.to_s)
       @out[key.to_s] = value.to_s
       @out[key.to_s]
     end
@@ -168,10 +216,27 @@ module ActionController
     # Removing a cookie is recorded as an empty write; the dispatcher emits a
     # cleared Set-Cookie. (No separate tombstone type keeps @out a plain
     # String→String map for the strict typer.)
-    def delete(key)
+    # Rails' `delete(key, options)`: the options scope the clearing cookie (`path:`, `domain:`), which this jar writes
+    # at the default scope only.
+    def delete(key, options = {})
       @out[key.to_s] = ""
       @flag_expires.delete(key.to_s)
+      @deleted[key.to_s] = "1"
       ""
+    end
+
+    # Whether the pending write is a removal, which the response sends expired (`Max-Age=0`), not a cookie whose
+    # value is "" (`cookies[:k] = ""`).
+    def deleted?(key)
+      @deleted.key?(key.to_s)
+    end
+
+    # An `expires:` an options Hash gave a write (Devise's remember cookie, `remember_for` out), as the HTTP date
+    # Rack writes.
+    def record_expires(key, at)
+      k = key.to_s
+      @flag_expires[k] = at.utc.strftime("%a, %d %b %Y %H:%M:%S GMT")
+      k
     end
 
     # Pending writes, for the dispatcher's Set-Cookie serialization. NOT
@@ -257,15 +322,18 @@ module ActionController
     # spinel's nullable path. Only this one read is nullable, which is
     # where the truthiness shape actually lives. Ledgered in
     # docs/pipeline/runtime.md.
+    # The value as the cookie's JSON gives it back, as Rails' JSON cookie serializer does: a String a String, an Array
+    # an Array (Devise's remember cookie, `[[id], salt, at]`), an Integer an Integer.
     def [](key)
       raw = @jar.raw(key)
       return nil if raw == ""
-      verified = ActionController::MessageVerifier.verified(
+      json = ActionController::MessageVerifier.verified_json(
         Rails.application.secret_key_base,
         ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
         raw, "cookie." + key.to_s, true
       )
-      verified == "" ? nil : verified
+      return nil if json == ""
+      ActionController::EncryptedCookieJar.parse(json)
     end
 
     # Rails takes either a bare value or an options Hash carrying
@@ -274,11 +342,11 @@ module ActionController
     # `flag_httponly?` keeps the HttpOnly default; an options Hash
     # records the explicit bits the dispatcher reads.
     def []=(key, value)
-      signed = ActionController::MessageVerifier.generate(
+      signed = ActionController::MessageVerifier.envelope(
         Rails.application.secret_key_base,
         ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
-        ActionController::SignedCookieJar.value_of(value),
-        "cookie." + key.to_s, true
+        ActiveSupport::JSON.encode(ActionController::EncryptedCookieJar.value_of(value)),
+        "cookie." + key.to_s, "null", true
       )
       @jar.raw_set(key, signed)
       @jar.record_permanent(key) if @permanent
@@ -289,6 +357,8 @@ module ActionController
         # `httponly: false` records an opt-out; `== true` treated a
         # missing key as off and dropped HttpOnly on Rack.
         @jar.record_flags(key, value[:httponly] != false, ss.to_s, value[:secure] == true)
+        expires = value[:expires]
+        @jar.record_expires(key, expires) if expires.is_a?(Time)
       end
       value
     end
@@ -298,18 +368,8 @@ module ActionController
       ActionController::SignedCookieJar.new(@jar, true)
     end
 
-    def delete(key)
-      @jar.delete(key)
-    end
-
-    # The value out of either write form. Kept a class method with an
-    # untyped parameter rather than an `is_a?` branch inside `[]=`: the
-    # options-Hash form carries mixed value types (String, bool, Symbol),
-    # and confining the poly read to one place keeps it off the jar's
-    # own String-typed surface.
-    def self.value_of(value)
-      return value[:value].to_s if value.is_a?(Hash)
-      value.to_s
+    def delete(key, options = {})
+      @jar.delete(key, options)
     end
   end
 
@@ -439,6 +499,29 @@ module ActionController
     def cookies=(value)
       @cookies = value
       value
+    end
+  end
+end
+
+# Rails' `request.cookie_jar`: the env's one jar (`action_dispatch.cookies`), built from the request's Cookie header
+# when a gem reaches it first (a Warden strategy a route constraint runs, before any controller), and the
+# controller's `cookies` too, so what either writes is what the response sets.
+module ActionDispatch
+  class Request
+    def cookie_jar
+      found = @env["action_dispatch.cookies"]
+      return found if found.is_a?(ActionController::CookieJar)
+      jar = ActionController::CookieJar.new(ActionController::CookieJar.parse_header(@env["HTTP_COOKIE"].to_s))
+      @env["action_dispatch.cookies"] = jar
+      jar
+    end
+
+    # The dispatcher's jar for the controller, unless the env holds one already: the one a gem wrote to above it.
+    def adopt_cookie_jar(jar)
+      found = @env["action_dispatch.cookies"]
+      return found if found.is_a?(ActionController::CookieJar)
+      @env["action_dispatch.cookies"] = jar
+      jar
     end
   end
 end

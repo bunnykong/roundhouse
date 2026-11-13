@@ -314,6 +314,29 @@ end
     );
 }
 
+/// A bare `super` passes each parameter's value as it stands then: a rebind
+/// moved onto a fresh local would hand the parent the value before it
+/// (omniauth's `AuthHash#regular_writer`).
+#[test]
+fn a_rebind_before_a_bare_super_is_left_alone() {
+    let out = emit_classes(
+        r#"class Base
+  def write(key, value)
+    value
+  end
+end
+class Wrapped < Base
+  def write(key, value)
+    value = value.to_s if key == :info
+    super
+  end
+end
+"#,
+    );
+    assert!(!out.contains("__rh_value"), "a bare super reads the parameter itself:\n{out}");
+    assert!(assigns_parameter(&out, "value"), "the write stays on the parameter:\n{out}");
+}
+
 /// An `if` whose body is more than the assign cannot become a join, and
 /// cannot split onto a branch-local either: Ruby's write is visible
 /// after the `unless`, so the whole parameter stays as written.

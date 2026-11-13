@@ -255,6 +255,14 @@ fn required_files<V: Vfs + ?Sized>(
                 }
             }
         }
+        // ActiveSupport::Autoload's `autoload :Name` with no path (simple_form's `eager_autoload do autoload :FormBuilder
+        // end`): the file its module's nesting and the name underscore to, which Rails' eager load reads at boot.
+        for feature in active_support_autoloads(&text) {
+            let path = normalize(&lib.join(format!("{feature}.rb")));
+            if vfs.exists(&path) {
+                pending.push(path);
+            }
+        }
         for (relative, feature) in requires(&text) {
             let base = if relative { file.parent().unwrap().to_path_buf() } else { lib.clone() };
             let path = base.join(if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") });
@@ -924,4 +932,48 @@ mod tests {
         assert!(super::loaded_begins(&text.replace("rescue LoadError", "rescue LoadError => e"), &|_| true).is_none());
         assert!(super::loaded_begins(&text.replace("  A = 1\n", "  require \"optional\"\n"), &|_| true).is_none());
     }
+}
+
+/// The features a file's `autoload :Name` calls name under `extend ActiveSupport::Autoload`: each module's nesting and
+/// the name, underscored (`module SimpleForm; autoload :FormBuilder` is `simple_form/form_builder`).
+fn active_support_autoloads(text: &str) -> Vec<String> {
+    if !text.contains("ActiveSupport::Autoload") {
+        return Vec::new();
+    }
+    struct V {
+        nesting: Vec<String>,
+        out: Vec<String>,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for V {
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            let name = String::from_utf8_lossy(node.constant_path().location().as_slice()).into_owned();
+            self.nesting.push(name);
+            ruby_prism::visit_module_node(self, node);
+            self.nesting.pop();
+        }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            let name = String::from_utf8_lossy(node.constant_path().location().as_slice()).into_owned();
+            self.nesting.push(name);
+            ruby_prism::visit_class_node(self, node);
+            self.nesting.pop();
+        }
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if node.receiver().is_none() && node.name().as_slice() == b"autoload" {
+                let args: Vec<ruby_prism::Node<'pr>> = node.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                if let [only] = args.as_slice()
+                    && let Some(sym) = only.as_symbol_node()
+                {
+                    let name = String::from_utf8_lossy(sym.unescaped()).into_owned();
+                    let mut path = self.nesting.clone();
+                    path.push(name);
+                    self.out.push(crate::naming::underscore(&path.join("::")));
+                }
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let result = ruby_prism::parse(text.as_bytes());
+    let mut v = V { nesting: Vec::new(), out: Vec::new() };
+    ruby_prism::Visit::visit(&mut v, &result.node());
+    v.out
 }

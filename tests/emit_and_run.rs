@@ -197,6 +197,14 @@ mod stdlib_scan_zlib;
 mod stdlib_rexml_include_contract;
 #[path = "emit_and_run/stdlib_rexml_include.rs"]
 mod stdlib_rexml_include;
+#[path = "support/gem_reopen_source.rs"]
+mod gem_reopen_source_contract;
+#[path = "emit_and_run/gem_reopen_source.rs"]
+mod gem_reopen_source;
+#[path = "support/stdlib_singleton.rs"]
+mod stdlib_singleton_contract;
+#[path = "emit_and_run/stdlib_singleton.rs"]
+mod stdlib_singleton;
 #[path = "support/mutable_literals.rs"]
 mod mutable_literals_contract;
 #[path = "emit_and_run/mutable_literals.rs"]
@@ -205,6 +213,10 @@ mod mutable_literals;
 mod auto_source_gem_contract;
 #[path = "emit_and_run/auto_source_gem.rs"]
 mod auto_source_gem;
+#[path = "support/gem_method_require.rs"]
+mod gem_method_require_contract;
+#[path = "emit_and_run/gem_method_require.rs"]
+mod gem_method_require;
 #[path = "support/block_arg_conditional.rs"]
 mod block_arg_conditional_contract;
 #[path = "emit_and_run/block_arg_conditional.rs"]
@@ -21118,6 +21130,10 @@ mod resource_dynamic_path;
 mod enumerable_mixin_contract;
 #[path = "emit_and_run/enumerable_mixin.rs"]
 mod enumerable_mixin;
+#[path = "support/enum_where_runtime_cast.rs"]
+mod enum_where_runtime_cast_contract;
+#[path = "emit_and_run/enum_where_runtime_cast.rs"]
+mod enum_where_runtime_cast;
 #[path = "support/file_level_struct.rs"]
 mod file_level_struct_contract;
 #[path = "emit_and_run/file_level_struct.rs"]
@@ -21150,6 +21166,8 @@ mod devise;
 mod warden;
 #[path = "emit_and_run/class_eval_string_macro.rs"]
 mod class_eval_string_macro;
+#[path = "emit_and_run/primary_key_send.rs"]
+mod primary_key_send;
 #[path = "emit_and_run/send_built_name.rs"]
 mod send_built_name;
 #[path = "emit_and_run/app_middleware.rs"]
@@ -22154,6 +22172,18 @@ mod deprecation;
 mod loaded_begin;
 #[path = "emit_and_run/class_eval_definer_call.rs"]
 mod class_eval_definer_call;
+#[path = "emit_and_run/custom_form_builder.rs"]
+mod custom_form_builder;
+#[path = "emit_and_run/simple_form.rs"]
+mod simple_form;
+#[path = "emit_and_run/classvar_block_initializers.rs"]
+mod classvar_block_initializers;
+#[path = "emit_and_run/concern_class_settings.rs"]
+mod concern_class_settings;
+#[path = "emit_and_run/load_time_constants.rs"]
+mod load_time_constants;
+#[path = "emit_and_run/doorkeeper.rs"]
+mod doorkeeper;
 #[path = "emit_and_run/model_mixin_macro.rs"]
 mod model_mixin_macro;
 #[path = "emit_and_run/controller_append_callbacks.rs"]

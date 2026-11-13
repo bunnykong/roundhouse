@@ -41,6 +41,41 @@ module ActionDispatch
       nil
     end
 
+    # Rails' `flash.keep(key)`: a loaded message kept for the next request too (Devise's FailureApp keeps `:timedout`
+    # and `:alert` across the redirect to sign in); every one without a key.
+    # Keyed, it answers that message, as FlashHash's `keep(k)` does; without a key, the flash.
+    def keep(key = nil)
+      return keep_all if key.nil?
+      @discard.delete(key.to_s)
+      self[key]
+    end
+
+    def keep_all
+      @discard = []
+      self
+    end
+
+    # Rails' `flash.discard(key)`: a message dropped at this request's end, a notice or alert this request set
+    # included; every one without a key. Keyed, it answers that message.
+    def discard(key = nil)
+      return discard_all if key.nil?
+      discard_key(key.to_s)
+      self[key]
+    end
+
+    def discard_all
+      keys.each { |k| discard_key(k) }
+      self
+    end
+
+    # Not left to `to_persisted`'s changed-value test: a notice set and then discarded is not carried either.
+    def discard_key(k)
+      @notice_was = @notice if k == "notice"
+      @alert_was = @alert if k == "alert"
+      @discard.push(k) unless @discard.include?(k)
+      k
+    end
+
     def [](key)
       k = key.to_s
       return @notice if k == "notice"

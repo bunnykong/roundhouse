@@ -202,10 +202,44 @@ fn guard_allows_function(chains: &[Vec<usize>]) -> LibraryFunction {
     }
 }
 
+/// Apply typed request defaults after body/query/captures have been merged. Captures always win.
+fn route_defaults_function(defaults: &[Vec<(String, Literal)>]) -> LibraryFunction {
+    let expr = |node| Expr::new(Span::synthetic(), node);
+    let var = |name: &str| expr(ExprNode::Var { id: VarId(0), name: Symbol::from(name) });
+    let nil = || with_ty(expr(ExprNode::Lit { value: Literal::Nil }), Ty::Nil);
+    let send = |recv, method: &str, args| with_ty(expr(ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true }), Ty::Bool);
+    let body = defaults.iter().enumerate().rev().fold(nil(), |rest, (index, values)| {
+        let mut assignments: Vec<_> = values.iter().map(|(key, value)| {
+            let captured = send(var("captures"), "key?", vec![lit_str(key.clone())]);
+            let assign = expr(ExprNode::Assign { target: crate::expr::LValue::Index { recv: var("params"), index: lit_str(key.clone()) }, value: expr(ExprNode::Lit { value: value.clone() }) });
+            expr(ExprNode::If { cond: captured, then_branch: nil(), else_branch: assign })
+        }).collect();
+        assignments.push(nil());
+        let cond = send(var("n"), "==", vec![crate::lower::typing::lit_int(index as i64)]);
+        expr(ExprNode::If { cond, then_branch: expr(ExprNode::Seq { exprs: assignments }), else_branch: rest })
+    });
+    let hash = |value| Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(value) };
+    LibraryFunction {
+        module_path: vec![Symbol::from("RouteTable")], name: Symbol::from("route_defaults"),
+        params: ["n", "params", "captures"].into_iter().map(|name| Param::positional(Symbol::from(name))).collect(),
+        unsupported_formals: None, has_anonymous_block: false, body,
+        signature: Some(fn_sig(vec![(Symbol::from("n"), Ty::Int), (Symbol::from("params"), hash(Ty::Untyped)), (Symbol::from("captures"), hash(Ty::Str))], Ty::Nil)),
+        effects: EffectSet::default(), is_async: false,
+    }
+}
+
 fn dispatch_functions(app: &App, flat: Vec<(FlatRoute, Option<usize>)>, asks_guards: bool) -> Vec<LibraryFunction> {
     let mounts = super::rack_mounts::mounts(app);
-    if flat.is_empty() && mounts.is_empty() {
+    // Not for the Ruby-family router: its main.rb and test helper call `table` and `route_defaults` with no route too.
+    if flat.is_empty() && mounts.is_empty() && !asks_guards {
         return Vec::new();
+    }
+    let mut defaults = Vec::new();
+    if asks_guards {
+        for (route, _) in &flat {
+            let values: Vec<_> = route.request_defaults.iter().map(|(k, v, _)| (k.clone(), v.clone())).collect();
+            if !values.is_empty() && !defaults.contains(&values) { defaults.push(values); }
+        }
     }
     let module_path = vec![Symbol::from("RouteTable")];
     // The first route on path "/" (the `root`, when the app has one)
@@ -227,6 +261,7 @@ fn dispatch_functions(app: &App, flat: Vec<(FlatRoute, Option<usize>)>, asks_gua
     };
 
     let mut out: Vec<LibraryFunction> = Vec::new();
+    if asks_guards { out.push(route_defaults_function(&defaults)); }
 
     let table_body = with_ty(
         Expr::new(
@@ -234,7 +269,7 @@ fn dispatch_functions(app: &App, flat: Vec<(FlatRoute, Option<usize>)>, asks_gua
             ExprNode::Array {
                 elements: table_routes
                     .iter()
-                    .map(|(r, chain)| build_route_new(r, *chain, asks_guards, &route_class_id, &route_ty))
+                    .map(|(r, chain)| build_route_new(r, *chain, asks_guards, &defaults, &route_class_id, &route_ty))
                     .collect(),
                 style: ArrayStyle::Brackets,
             },
@@ -257,7 +292,7 @@ fn dispatch_functions(app: &App, flat: Vec<(FlatRoute, Option<usize>)>, asks_gua
     });
 
     if let Some((r, chain)) = root_routes.first() {
-        let root_body = build_route_new(r, *chain, asks_guards, &route_class_id, &route_ty);
+        let root_body = build_route_new(r, *chain, asks_guards, &defaults, &route_class_id, &route_ty);
         // Where the root was declared among the table's routes: route
         // generation (the test helper's `assert_generates`) breaks a
         // tie by declaration order, so `root "articles#index"` declared
@@ -291,12 +326,12 @@ fn dispatch_functions(app: &App, flat: Vec<(FlatRoute, Option<usize>)>, asks_gua
         for (index, mount) in mounts.iter().enumerate() {
             out.push(rack_route_array(
                 &format!("rack_routes_before_{index}"), mount.preceding.iter(),
-                &route_class_id, &route_ty,
+                &route_class_id, &route_ty, &defaults,
             ));
         }
         out.push(rack_route_array(
             "rack_head_routes", flat.iter().map(|(route, _)| route).filter(|route| route.method == HttpMethod::Head),
-            &route_class_id, &route_ty,
+            &route_class_id, &route_ty, &defaults,
         ));
     }
     out
@@ -305,14 +340,14 @@ fn dispatch_functions(app: &App, flat: Vec<(FlatRoute, Option<usize>)>, asks_gua
 /// Reuse the controller route constructor, including all its requirements.
 fn rack_route_array<'a>(
     name: &str, routes: impl Iterator<Item = &'a FlatRoute>,
-    class: &ClassId, route_ty: &Ty,
+    class: &ClassId, route_ty: &Ty, defaults: &[Vec<(String, Literal)>],
 ) -> LibraryFunction {
     let ty = Ty::Array { elem: std::sync::Arc::new(route_ty.clone()) };
     LibraryFunction {
         module_path: vec![Symbol::from("RouteTable")], name: Symbol::from(name),
         params: Vec::new(), unsupported_formals: None, has_anonymous_block: false,
         body: with_ty(Expr::new(Span::synthetic(), ExprNode::Array {
-            elements: routes.map(|route| build_route_new(route, None, false, class, route_ty)).collect(),
+            elements: routes.map(|route| build_route_new(route, None, false, defaults, class, route_ty)).collect(),
             style: ArrayStyle::Brackets,
         }), ty.clone()),
         signature: Some(fn_sig(vec![], ty)), effects: EffectSet::default(), is_async: false,
@@ -327,7 +362,7 @@ fn rack_route_array<'a>(
 /// args — per-target emitters convert kwarg-style def to positional
 /// pub fn but don't unpack kwarg-style call sites; matches the
 /// positional `initialize` signature.
-fn build_route_new(r: &FlatRoute, chain: Option<usize>, asks_guards: bool, class_id: &ClassId, route_ty: &Ty) -> Expr {
+fn build_route_new(r: &FlatRoute, chain: Option<usize>, asks_guards: bool, defaults: &[Vec<(String, Literal)>], class_id: &ClassId, route_ty: &Ty) -> Expr {
     let verb_str = match r.method {
         HttpMethod::Get => "GET",
         HttpMethod::Post => "POST",
@@ -395,6 +430,13 @@ fn build_route_new(r: &FlatRoute, chain: Option<usize>, asks_guards: bool, class
             _ => {}
         }
         args.push(with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: chain as i64 } }), Ty::Int));
+    }
+    let values: Vec<_> = r.request_defaults.iter().map(|(k, v, _)| (k.clone(), v.clone())).collect();
+    if let Some(index) = defaults.iter().position(|set| *set == values) {
+        if args.len() == 4 { args.push(with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }), Ty::Nil)); }
+        while args.len() < 7 { args.push(lit_str(String::new())); }
+        if args.len() == 7 { args.push(crate::lower::typing::lit_int(-1)); }
+        args.push(crate::lower::typing::lit_int(index as i64));
     }
     let class_path: Vec<Symbol> = class_id
         .0
@@ -1497,6 +1539,17 @@ fn build_helper_function(
     } else {
         build_path_expr(path, &seg_params, &slug_params)
     };
+    // A single optional default is omitted only when no format follows it.
+    if let Some(p) = seg_params.get(required).filter(|_| seg_params.len() == required + 1 && ext.is_none_or(|ext| route.format.as_ref().is_some_and(|default| default.as_str() == ext)))
+        && let Some((_, value, _)) = route.request_defaults.iter().find(|(name, _, _)| name == p) {
+        let default = Expr::new(Span::synthetic(), ExprNode::Lit { value: value.clone() });
+        let cond = with_ty(send_method(send_method(var_ref(p), "to_s", vec![]), "==", vec![send_method(default, "to_s", vec![])]), Ty::Bool);
+        let omitted = build_path_expr(route.required_path.as_deref().unwrap_or("/"), &seg_params[..required], &slug_params);
+        let omitted = if has_format {
+            with_ty(Expr::new(Span::synthetic(), ExprNode::If { cond: with_ty(send_method(send_method(var_ref("format"), "to_s", vec![]), "==", vec![lit_str(String::new())]), Ty::Bool), then_branch: omitted, else_branch: body.clone() }), Ty::Str)
+        } else { omitted };
+        body = with_ty(Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: omitted, else_branch: body }), Ty::Str);
+    }
     // Rails' `(.:format)`: a route path spelled the `rails routes` way
     // ends in `(.:format)`, which gives the helper a trailing optional
     // positional — `comments_path(:rss)` → "/comments.rss".
@@ -1671,6 +1724,7 @@ fn build_helper_function(
                 kind: crate::ty::ParamKind::Keyword { required: false },
             });
         }
+        let plain_keys: Vec<_> = plain_keys.into_iter().filter(|key| !route.request_defaults.iter().any(|(name, _, _)| name == &key.name)).collect();
         body = append_query_string(body, &plain_keys);
         if let Some(anchor) = anchor_keys.first() {
             body = append_anchor(body, &anchor.name);

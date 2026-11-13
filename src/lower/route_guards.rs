@@ -267,3 +267,14 @@ pub fn route_guard_gaps_for_target(app: &crate::App, target: crate::build_target
         })
         .collect()
 }
+
+/// Request defaults need the Ruby-family dispatcher; other targets refuse at the original pair.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn route_default_gaps_for_target(app: &crate::App, target: crate::build_target::BuildTarget) -> Vec<crate::diagnostic::Diagnostic> {
+    if target.applies_route_defaults() { return Vec::new(); }
+    let mut seen = crate::det::HashSet::default();
+    crate::lower::routes::flatten_routes_for_helpers(app).into_iter().flat_map(|route| route.request_defaults)
+        .filter(|(key, _, span)| seen.insert((key.clone(), *span)))
+        .map(|(key, _, span)| crate::diagnostic::Diagnostic::unsupported(span, Some(Symbol::from(target.as_str())), "route defaults", format!("this target's router does not apply request default `{key}`")))
+        .collect()
+}

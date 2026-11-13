@@ -756,6 +756,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let stack = super::railtie_middleware::read(vfs, dir, &gem_libs);
     let stacked_application_uses = stack.application_taken;
     let middleware_loops = stack.loops;
+    let env_writes_by_class = stack.env_writes_by_class;
     (app.gem_middlewares, app.gem_middleware_blocks, app.rack_env_writes, app.gem_middleware_refusals) =
         (stack.classes, stack.blocks, stack.env_writes, stack.diags);
     // `enum` columns declared inside a concern's `included do`, keyed by
@@ -1513,8 +1514,14 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     app.active_job_retry_jitter = read_active_job_retry_jitter(vfs, dir);
     // The ActiveJob queue adapter (see `App::queue_adapter`).
     app.queue_adapter = read_queue_adapter(vfs, dir);
+    // Retain recurring declarations for payload refusal locations.
+    let recurring = dir.join("config/recurring.yml");
+    if let Ok(text) = vfs.read_to_string(&recurring) {
+        super::sources::register(&recurring.display().to_string(), &text);
+    }
     // Where Sidekiq pushes (see `App::sidekiq_redis`).
-    app.sidekiq_redis = read_sidekiq_redis(vfs, dir);
+    let (sidekiq_redis, sidekiq_redis_refused) = read_sidekiq_redis(vfs, dir);
+    app.sidekiq_redis = sidekiq_redis;
     // The worker's defaults (see `App::sidekiq_worker`).
     let (worker_defaults, worker_warnings) = super::sidekiq_yml::read(vfs, dir);
     app.sidekiq_worker = worker_defaults;
@@ -2995,7 +3002,12 @@ end
     let (rate_limit_stores, rate_limit_store_values) = super::rate_limit::install_boot_stores(&mut app, rate_limit_stores, &const_resolver.for_sources(&sources));
     if app.queue_adapter.as_deref() == Some("sidekiq") {
         sidekiq_warnings.into_iter().for_each(warn_sidekiq);
+        sidekiq_redis_refused.into_iter().for_each(refuse_sidekiq);
         require_sidekiq_redis_url(&app);
+    } else {
+        // Off :sidekiq the settings reach no client, so these stay
+        // warnings, as the ignored keys are.
+        sidekiq_redis_refused.into_iter().for_each(warn_sidekiq);
     }
     if app.queue_adapter.as_deref() == Some("sidekiq") && app.cable_redis.is_none() {
         warn_sidekiq(format!(
@@ -3242,7 +3254,7 @@ end
     // After the macros: a configured object's readers and its builder's writers are methods by now.
     super::configured_superclass::fold(vfs, dir, &mut app);
     super::configured_superclass::fold_class_names(vfs, dir, &mut app);
-    super::configured_superclass::fold_middleware_loops(vfs, dir, &mut app, middleware_loops);
+    super::configured_superclass::fold_middleware_loops(vfs, dir, &mut app, middleware_loops, &env_writes_by_class);
     super::gem_routes::expand(vfs, dir, &path_gems, &mut app);
     super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
     super::extend_splice::splice_load_hook_extended_calls(&mut app);
@@ -3253,7 +3265,7 @@ end
     super::metal_actions::synthesize(&mut app);
     super::absence_guards::raise_undefined_capitalized_calls(&mut app);
     // Not asked at `absence_guards::mark`: by then a source gem's methods no longer resolve their file.
-    let source_gem_classes = super::absence_guards::source_gem_classes(&app);
+    let source_gem_code = super::absence_guards::source_gem_code(&app);
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
@@ -3292,9 +3304,7 @@ end
     drop_modelled_included_hooks(&mut app);
     splice_concerns_into_controllers(&mut app);
     // After the splice: a concern's filter reads the key as the controller's own body does.
-    if every_primary_key_is_id(&app) {
-        crate::lower::for_each_hook_body(&mut app, &mut read_primary_key_sends);
-    }
+    crate::lower::primary_key_send::rewrite_guarded(&mut app);
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
     // After the splice: a macro has to resolve against the concern's
@@ -3440,7 +3450,19 @@ end
     splice_concern_to_param_into_includers(&mut app);
     super::job_class_lookup::rewrite(&mut app);
     super::uncalled_definers::mark(&mut app);
-    super::absence_guards::mark(&mut app, &source_gem_classes);
+    // A feature an installed locked gem ships as `lib/<feature>.rb`, whatever the gem's name or namespace.
+    let locked_gem_libs: Vec<PathBuf> = {
+        let roots = crate::i18n::gems::gem_roots(vfs, dir);
+        app.gem_lock
+            .iter()
+            .flat_map(|lock| lock.specs.iter())
+            .filter_map(|(name, version)| crate::i18n::gems::installed_gem(vfs, &roots, name, version))
+            .chain(path_gems.iter().cloned())
+            .map(|gem| gem.join("lib"))
+            .collect()
+    };
+    let shipped = |feature: &str| locked_gem_libs.iter().any(|lib| vfs.exists(&lib.join(format!("{feature}.rb"))));
+    super::absence_guards::mark(&mut app, &source_gem_code, &shipped);
     // After every pass that changes a controller's methods, the concern
     // splice and the class-body macros above all: the lowering clones
     // from the controller they leave.
@@ -4202,6 +4224,7 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
         .collect();
 
     let dependencies = concern_dependencies(app, carriers);
+    let facts = super::gem_hooks::Facts::of(app);
 
     for model in &mut app.models {
         if !only.is_empty() && !only.iter().any(|n| n == &model.name.0) {
@@ -4262,7 +4285,12 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
                     for i in 0..=plain.len() {
                         for g in guarded {
                             let here = if i == plain.len() { g.at >= i } else { g.at == i };
-                            if here && g.guard.admits(includer) {
+                            // Not admitted where the module's question goes unanswered: neither branch is known to run.
+                            let admitted = match &g.guard.asked {
+                                Some((module, method)) => super::gem_hooks::includer_answer(&facts, module, method, includer).is_some_and(|answer| answer != g.guard.negate),
+                                None => g.guard.admits(includer),
+                            };
+                            if here && admitted {
                                 ordered.push(&g.item);
                             }
                         }
@@ -5152,9 +5180,56 @@ fn splice_concerns_into_controllers(app: &mut App) {
                 methods.push(ControllerBodyItem::Unknown { expr: call.clone(), leading_comments: Vec::new(), leading_blank_line: false });
             }
             for method in module_methods.get(module).into_iter().flatten() {
-                if !defined.insert(method.name.clone()) {
-                    continue;
-                }
+                let renamed;
+                let method: &crate::dialect::MethodDef = if defined.insert(method.name.clone()) {
+                    method
+                } else {
+                    // Not dropped where the winning copy calls `super` (Devise's `Helpers#expire_data_after_sign_out!`
+                    // over `SignInOut`'s): Ruby runs this one there, which the flattened controller keeps under its own name.
+                    // The chain's end: the definition of the name, or a shadowed one kept under its own, that still calls `super`.
+                    let chained = |name: &crate::ident::Symbol| {
+                        *name == method.name || name.as_str().strip_prefix("__super").is_some_and(|rest| rest.ends_with(&format!("_{}", method.name.as_str())))
+                    };
+                    let Some(winner) = methods.iter_mut().chain(actions.iter_mut()).find_map(|item| match item {
+                        ControllerBodyItem::Action { action, .. } if chained(&action.name) && calls_super(&action.body) => Some(action),
+                        _ => None,
+                    }) else {
+                        continue;
+                    };
+                    // Not a winner that forwards anonymously (`def f(...)`, `def f(**)`): its `super` passes what no name holds.
+                    if winner.anonymous_formal.is_some() {
+                        continue;
+                    }
+                    // A distinct name per level, so each shadowed definition keeps its own `super`.
+                    let Some(target) = (1..64)
+                        .map(|depth| crate::ident::Symbol::from(format!("__super{}_{}", if depth == 1 { String::new() } else { depth.to_string() }, method.name.as_str())))
+                        .find(|t| !defined.contains(t))
+                    else {
+                        continue;
+                    };
+                    defined.insert(target.clone());
+                    let var = |n: &crate::ident::Symbol| crate::expr::Expr::new(winner.body.span, crate::expr::ExprNode::Var { id: crate::ident::VarId(0), name: n.clone() });
+                    // Every channel a bare `super` passes on, as Ruby's does: positional, rest, keywords and keyword rest.
+                    let mut forwarded: Vec<crate::expr::Expr> = winner.params.fields.keys().chain(winner.opt_params.iter().map(|(n, _)| n)).map(var).collect();
+                    if let Some(rest) = &winner.rest_param {
+                        forwarded.push(crate::expr::Expr::new(winner.body.span, crate::expr::ExprNode::Splat { value: var(rest) }));
+                    }
+                    let mut keywords: Vec<(crate::expr::Expr, crate::expr::Expr)> = winner
+                        .kw_params
+                        .iter()
+                        .map(|(n, _)| (crate::expr::Expr::new(winner.body.span, crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value: n.clone() } }), var(n)))
+                        .collect();
+                    if let Some(kwrest) = &winner.kwrest_param {
+                        keywords.push((crate::expr::Expr::new(winner.body.span, crate::expr::ExprNode::KeywordSplat { value: var(kwrest) }), crate::expr::Expr::new(winner.body.span, crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil })));
+                    }
+                    if !keywords.is_empty() {
+                        forwarded.push(crate::expr::Expr::new(winner.body.span, crate::expr::ExprNode::Hash { entries: keywords, kwargs: true }));
+                    }
+                    let block = winner.block_param.as_ref().map(var);
+                    redirect_super(&mut winner.body, &target, &forwarded, block.as_ref());
+                    renamed = crate::dialect::MethodDef { name: target, ..(*method).clone() };
+                    &renamed
+                };
                 let mut body = method.body.clone();
                 if let Some(consts) = module_constants.get(module) {
                     qualify_lexical_consts(&mut body, module, consts);
@@ -5522,46 +5597,22 @@ fn answers_callback_macro(app: &App, name: &crate::ident::ClassId) -> bool {
     false
 }
 
-/// `record.send(record.class.primary_key)` (orm_adapter's `conditions_to_fields`) where every model's key is `id`:
-/// `record.id`, the same method the send names, an override of `id` included.
-// Not `record[key]`: that reads the column past a reader the model overrides.
-fn read_primary_key_sends(body: &mut crate::expr::Expr) {
-    use crate::expr::ExprNode;
-    body.node.for_each_child_mut(&mut read_primary_key_sends);
-    if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *body.node
-        && matches!(method.as_str(), "send" | "public_send" | "__send__")
-        && matches!(&*recv.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)
-        && let [name] = args.as_slice()
-        && let ExprNode::Send { recv: Some(class), method: key, args: key_args, block: None, .. } = &*name.node
-        && key.as_str() == "primary_key"
-        && key_args.is_empty()
-        // Only the record's own class's key: another class's (`KeySource.primary_key`) names any column.
-        && matches!(&*class.node, ExprNode::Send { recv: Some(of), method, args, block: None, .. }
-            if method.as_str() == "class" && args.is_empty() && same_read(of, recv))
-    {
-        *method = crate::ident::Symbol::from("id");
-        args.clear();
-    }
+fn calls_super(e: &crate::expr::Expr) -> bool {
+    let mut found = matches!(&*e.node, crate::expr::ExprNode::Super { .. });
+    e.node.for_each_child(&mut |c| found |= calls_super(c));
+    found
 }
 
-fn same_read(a: &crate::expr::Expr, b: &crate::expr::Expr) -> bool {
-    use crate::expr::ExprNode;
-    match (&*a.node, &*b.node) {
-        (ExprNode::Var { name: x, .. }, ExprNode::Var { name: y, .. }) | (ExprNode::Ivar { name: x }, ExprNode::Ivar { name: y }) => x == y,
-        (ExprNode::SelfRef, ExprNode::SelfRef) => true,
-        _ => false,
+/// Each `super` of a spliced method, as the call to the shadowed definition kept under `target`; a bare one passes
+/// the method's own arguments, as Ruby's does.
+fn redirect_super(e: &mut crate::expr::Expr, target: &crate::ident::Symbol, forwarded: &[crate::expr::Expr], block: Option<&crate::expr::Expr>) {
+    if let crate::expr::ExprNode::Super { args } = &*e.node {
+        let args = args.clone().unwrap_or_else(|| forwarded.to_vec());
+        // The method's own block, which `super` hands on as Ruby's does.
+        *e.node = crate::expr::ExprNode::Send { recv: None, method: target.clone(), args, block: block.cloned(), parenthesized: true };
+        return;
     }
-}
-
-fn every_primary_key_is_id(app: &App) -> bool {
-    // Nor where a class of the app answers `primary_key` itself: the send then names whatever that method answers.
-    let own_primary_key = app.library_classes.iter().flat_map(|c| c.methods.iter()).any(|m| m.name.as_str() == "primary_key")
-        || app.models.iter().any(|m| m.methods().any(|d| d.name.as_str() == "primary_key"));
-    !own_primary_key
-        && app.models.iter().all(|m| m.primary_key.as_ref().is_none_or(|k| k.as_str() == "id"))
-        && app.schema.tables.values().all(|t| {
-            t.primary_key_columns.is_empty() && t.columns.iter().filter(|c| c.primary_key).all(|c| c.name.as_str() == "id")
-        })
+    e.node.for_each_child_mut(&mut |c| redirect_super(c, target, forwarded, block));
 }
 
 /// A modelled hook has nothing left to do at load, and the emitted
@@ -8552,6 +8603,15 @@ fn map_enum_labels(app: &mut App) {
             if in_writer && kept.contains(column) {
                 continue;
             }
+            // A String mapping keeps its label: one cast turns it into the
+            // stored value later, the writer's (`enum_str`) for an
+            // assignment, and for a query the runtime relation's or, on a
+            // target without one, `lower::enum_symbols`. Mapped here as
+            // well, a stored value that is also a label (`{ queued: "sent",
+            // sent: "done" }`) was cast a second time.
+            if string_mapping(mapping) {
+                continue;
+            }
             let label = match &*value.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
                 ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
@@ -8560,6 +8620,12 @@ fn map_enum_labels(app: &mut App) {
             let Some((_, stored)) = mapping.iter().find(|(l, _)| *l == label) else { continue };
             *value.node = ExprNode::Lit { value: stored.clone() };
         }
+    }
+
+    /// Every stored value a String (the `nil` entry aside).
+    fn string_mapping(mapping: &[(String, Literal)]) -> bool {
+        let mut stored = mapping.iter().map(|(_, v)| v).filter(|v| !matches!(v, Literal::Nil)).peekable();
+        stored.peek().is_some() && stored.all(|v| matches!(v, Literal::Str { .. }))
     }
 
     /// Rule two: `Model.method(…)` anywhere in the app.
@@ -13538,8 +13604,13 @@ pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
 /// of the app may not be SQLite. So does a file whose pragmas may set
 /// `case_sensitive_like`, to either value: Rails runs it on connect, and
 /// it decides what `LIKE` matches.
+///
+/// A file that names another adapter for any configuration (postgresql,
+/// mysql2, trilogy, ...) gives `OtherDatabase`: the portable grammar, with
+/// what it can't read left out of the schema and warned about rather than
+/// refused, since that text may be the other database's own SQL.
 fn schema_expression_dialect<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::schema::generated::GeneratedExpressionDialect {
-    use crate::schema::generated::GeneratedExpressionDialect::{Portable, Sqlite};
+    use crate::schema::generated::GeneratedExpressionDialect::{OtherDatabase, Portable, Sqlite};
     let Ok(text) = vfs.read_to_string(&dir.join("config/database.yml")) else { return Portable };
     let read = super::database_yml::database_configurations(&text, crate::span::FileId(0));
     let sqlite = read.refusals.is_empty()
@@ -13547,7 +13618,13 @@ fn schema_expression_dialect<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::sch
         && !read.case_sensitive_like
         && read.databases.iter().any(|d| d.env == "test" && d.primary)
         && read.databases.iter().all(|d| d.adapter == crate::database::DatabaseAdapter::Sqlite3);
-    if sqlite { Sqlite } else { Portable }
+    if sqlite {
+        Sqlite
+    } else if read.databases.iter().any(|d| d.adapter != crate::database::DatabaseAdapter::Sqlite3) {
+        OtherDatabase
+    } else {
+        Portable
+    }
 }
 
 /// Use the ordinary schema readers for selection too. The normal primary schema
@@ -13647,8 +13724,8 @@ fn effective_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<Strin
 /// job that inherits it, so it overrides the config files' setting, the
 /// last assignment winning, and a value that isn't a literal leaves the
 /// adapter unknown, as in `read_queue_adapter`. Another job class's own
-/// setting is not honored yet: its jobs follow the app's adapter, with a
-/// warning.
+/// durable setting is not honored yet: its jobs follow the app's adapter,
+/// with a warning. The class-side lowering honors literal inline/test adapters.
 fn apply_application_job_queue_adapter(app: &mut App) {
     let mut set: Option<Option<String>> = None;
     for lc in &app.library_classes {
@@ -13657,9 +13734,22 @@ fn apply_application_job_queue_adapter(app: &mut App) {
             let Some(value) = job_queue_adapter(call) else { continue };
             if name == "ApplicationJob" {
                 set = Some(value);
-            } else {
+            } else if !matches!(value.as_deref(), Some("inline" | "test")) {
                 warn_sidekiq(format!(
                     "`self.queue_adapter =` in {name} is not honored yet (only ApplicationJob's is read); its jobs use the app's adapter"
+                ));
+            } else if let Some(heir) = app.library_classes.iter().find(|other| {
+                other.parent.as_ref().is_some_and(|p| p.0.as_str().trim_start_matches("::") == name)
+                    && !app.library_classes.iter().any(|same| {
+                        same.name == other.name && same.unknown_calls.iter().any(|c| job_queue_adapter(c).is_some())
+                    })
+            }) {
+                // The class-side lowering honors a literal inline/test
+                // adapter on the job that sets it, not on a subclass that
+                // inherits it: that subclass's jobs still use the app's.
+                warn_sidekiq(format!(
+                    "`self.queue_adapter =` in {name} is honored for {name} only; {} inherits it and its jobs use the app's adapter",
+                    heir.name.0.as_str()
                 ));
             }
         }
@@ -13688,8 +13778,12 @@ fn job_queue_adapter(call: &crate::expr::Expr) -> Option<Option<String>> {
 /// `App::sidekiq_redis`: the `Sidekiq.configure_client` Redis settings
 /// in `config/initializers`, the last block that sets them winning, as it
 /// does when Rails runs the initializers in order.
-fn read_sidekiq_redis<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::app::SidekiqRedisConfig {
-    let mut config = crate::app::SidekiqRedisConfig::default();
+///
+/// Also the settings that block gives that can't be honored, each a
+/// message: errors on a tree that ends up on `:sidekiq`, warnings on any
+/// other.
+fn read_sidekiq_redis<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> (crate::app::SidekiqRedisConfig, Vec<String>) {
+    let mut config = (crate::app::SidekiqRedisConfig::default(), Vec::new());
     let init = dir.join("config/initializers");
     if !vfs.is_dir(&init) {
         return config;
@@ -13703,15 +13797,16 @@ fn read_sidekiq_redis<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::app::Sidek
     config
 }
 
-/// The `url:` and `password:` a file's `Sidekiq.configure_client do
-/// |config| config.redis = { … } end` gives, `None` when the file has no
-/// such assignment. Only those two keys are read, each as a String
-/// literal, `ENV["NAME"]` or `ENV.fetch("NAME"[, "default"])`. Any other
-/// key, a value in another form, or a `config.redis =` that isn't a Hash
-/// literal is a warning, and the setting is not read. A tree on
-/// `:sidekiq` whose blocks leave it no `url:` is an error
-/// (`require_sidekiq_redis_url`): there is no environment fallback.
-pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::app::SidekiqRedisConfig> {
+/// The Redis settings a file's `Sidekiq.configure_client do |config|
+/// config.redis = { … } end` gives, `None` when the file has no such
+/// assignment, with the messages for the keys that can't be honored
+/// (`sidekiq_redis_key` says which key does what). A key that changes
+/// nothing here, an unknown key, a `url:` or `password:` in a form
+/// ingest doesn't read, or a `config.redis =` that isn't a Hash literal
+/// is a warning. A tree on `:sidekiq` whose blocks leave it no `url:` is
+/// an error (`require_sidekiq_redis_url`): there is no environment
+/// fallback.
+pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<(crate::app::SidekiqRedisConfig, Vec<String>)> {
     let src = String::from_utf8_lossy(source);
     // Cheap skip before parsing, as `kaminari_default_per_page` does.
     if !src.contains("configure_client") {
@@ -13762,14 +13857,18 @@ pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::a
             let args: Vec<_> = args.arguments().iter().collect();
             let [value] = args.as_slice() else { continue };
             let mut config = crate::app::SidekiqRedisConfig::default();
+            let mut refused = Vec::new();
             let Some(hash) = value.as_hash_node() else {
                 warn_sidekiq(format!(
                     "`{param}.redis = {}` in {file} is not a Hash literal, so it is not read",
                     text(value)
                 ));
-                found = Some(config);
+                found = Some((config, refused));
                 continue;
             };
+            // Sidekiq maps `network_timeout:` onto `timeout:` after its
+            // own `timeout ||= 3`, so it wins wherever it is written.
+            let mut network_timeout = None;
             for element in hash.elements().iter() {
                 let Some(pair) = element.as_assoc_node() else {
                     warn_sidekiq(format!("`{}` in {file}'s Sidekiq Redis settings is not read", text(&element)));
@@ -13779,33 +13878,186 @@ pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::a
                     warn_sidekiq(format!("`{}` in {file}'s Sidekiq Redis settings is not read", text(&element)));
                     continue;
                 };
-                if key != "url" && key != "password" {
-                    warn_sidekiq(format!(
-                        "Sidekiq Redis setting `{key}:` in {file} is not supported yet (only url: and password: are read); it is ignored"
-                    ));
-                    continue;
-                }
                 let value = pair.value();
-                let Some(setting) = redis_setting(&value, &src) else {
-                    warn_sidekiq(format!(
-                        "Sidekiq Redis `{key}: {}` in {file} is not a String literal, ENV[\"NAME\"] or ENV.fetch(\"NAME\"); it is ignored",
-                        text(&value)
-                    ));
-                    continue;
-                };
-                if key == "url" {
-                    config.url = Some(setting);
-                } else {
-                    config.password = Some(setting);
+                let shown = format!("`{key}: {}` in {file}", text(&value));
+                match sidekiq_redis_key(&key, &value, &src) {
+                    RedisKey::Url(setting) => config.url = Some(setting),
+                    RedisKey::Password(setting) => config.password = Some(setting),
+                    RedisKey::Username(setting) => config.username = Some(setting),
+                    RedisKey::Db(setting) => config.db = Some(setting),
+                    RedisKey::Timeout(seconds) => config.timeout = Some(seconds),
+                    RedisKey::NetworkTimeout(seconds) => network_timeout = Some(seconds),
+                    RedisKey::ConnectTimeout(seconds) => config.connect_timeout = Some(seconds),
+                    RedisKey::ReadTimeout(seconds) => config.read_timeout = Some(seconds),
+                    RedisKey::ReconnectAttempts(delays) => config.reconnect_attempts = delays,
+                    RedisKey::AsHere => {}
+                    RedisKey::Unread(why) => {
+                        warn_sidekiq(format!("Sidekiq Redis {shown} is not read: {why}; it is ignored"));
+                    }
+                    RedisKey::Ignored(why) => {
+                        warn_sidekiq(format!("Sidekiq Redis setting `{key}:` in {file} is ignored: {why}"));
+                    }
+                    RedisKey::Refused(why) => {
+                        refused.push(format!("Sidekiq Redis setting `{key}:` in {file} can't be honored: {why}"));
+                    }
+                    RedisKey::Unknown => warn_sidekiq(format!(
+                        "Sidekiq Redis setting `{key}:` in {file} is not supported; it is ignored"
+                    )),
                 }
             }
-            found = Some(config);
+            if network_timeout.is_some() {
+                config.timeout = network_timeout;
+            }
+            found = Some((config, refused));
         }
     }
     found
 }
 
+/// What one key of a `configure_client` `config.redis = { … }` Hash
+/// does here, keyed as Sidekiq 8.1.7 hands it to redis-client.
+enum RedisKey {
+    /// `url:` and `password:`, each a String literal or a variable.
+    Url(crate::app::RedisSetting),
+    Password(crate::app::RedisSetting),
+    Username(crate::app::RedisSetting),
+    Db(crate::app::RedisSetting),
+    Timeout(f64),
+    NetworkTimeout(f64),
+    ConnectTimeout(f64),
+    ReadTimeout(f64),
+    /// `None` keeps Sidekiq's default of one retry.
+    ReconnectAttempts(Option<Vec<f64>>),
+    /// A value that asks for what the push already does (`id: nil`,
+    /// `ssl: false`, `protocol: 3`).
+    AsHere,
+    /// A key that is read but changes nothing here, with the reason.
+    Ignored(&'static str),
+    /// A key this pipeline can't honor: an error on `:sidekiq`, where
+    /// ignoring it would connect somewhere, or some way, the app didn't
+    /// ask for.
+    Refused(String),
+    /// A `url:` or `password:` in a form ingest doesn't read.
+    Unread(&'static str),
+    Unknown,
+}
+
+fn sidekiq_redis_key(key: &str, value: &Node<'_>, src: &str) -> RedisKey {
+    const STRING_FORMS: &str = "it is not a String literal, ENV[\"NAME\"] or ENV.fetch(\"NAME\"[, \"default\"])";
+    const TLS: &str = "TLS is not supported, since Spinel's sp_net has no TLS yet (matz/spinel#1054); \
+                       use a redis:// URL, through a local TLS proxy such as stunnel if the server needs TLS";
+    const SENTINEL: &str = "Redis Sentinel is not supported: the client connects to the one host in url:";
+    let seconds = |key: &str| match number_value(value) {
+        Some(n) if n > 0.0 => Ok(n),
+        _ => Err(RedisKey::Refused(format!(
+            "`{key}:` must be a positive Integer or Float literal, or a Duration literal such as 5.seconds"
+        ))),
+    };
+    let nil_or_false = value.as_nil_node().is_some() || value.as_false_node().is_some();
+    match key {
+        "url" | "password" => {
+            let Some(setting) = redis_setting(value, src) else { return RedisKey::Unread(STRING_FORMS) };
+            if key == "url" { RedisKey::Url(setting) } else { RedisKey::Password(setting) }
+        }
+        "username" => match redis_setting(value, src) {
+            Some(setting) => RedisKey::Username(setting),
+            None => RedisKey::Refused(
+                "`username:` must be a String literal, ENV[\"NAME\"] or ENV.fetch(\"NAME\"[, \"default\"])".to_string(),
+            ),
+        },
+        "db" => match super::util::integer_value(value) {
+            Some(n) if n >= 0 => RedisKey::Db(crate::app::RedisSetting::Literal(n.to_string())),
+            Some(_) => RedisKey::Refused("`db:` must not be negative".to_string()),
+            None => match redis_setting(value, src) {
+                // A String literal is emitted as an Integer literal, so it
+                // must read as one in plain decimal: `"08"` would emit `08`,
+                // which Ruby refuses, and `"010"` would be octal.
+                Some(crate::app::RedisSetting::Literal(text)) => match decimal_db(&text) {
+                    Some(n) => RedisKey::Db(crate::app::RedisSetting::Literal(n.to_string())),
+                    None => RedisKey::Refused(
+                        "`db:` must be an Integer, written in decimal without leading zeros".to_string(),
+                    ),
+                },
+                Some(setting) => RedisKey::Db(setting),
+                None => RedisKey::Refused(
+                    "`db:` is read only as an Integer literal, ENV[\"NAME\"] or ENV.fetch(\"NAME\"[, \"default\"])".to_string(),
+                ),
+            },
+        },
+        "timeout" => seconds(key).map_or_else(|e| e, RedisKey::Timeout),
+        "network_timeout" => seconds(key).map_or_else(|e| e, RedisKey::NetworkTimeout),
+        "connect_timeout" => seconds(key).map_or_else(|e| e, RedisKey::ConnectTimeout),
+        "read_timeout" => seconds(key).map_or_else(|e| e, RedisKey::ReadTimeout),
+        // Sidekiq's `reconnect_attempts ||= 1` turns `nil` and `false`
+        // into one retry; only 0 (or `[]`) turns retrying off.
+        "reconnect_attempts" => {
+            if nil_or_false {
+                return RedisKey::ReconnectAttempts(None);
+            }
+            if let Some(n) = super::util::integer_value(value).filter(|n| (0..=100).contains(n)) {
+                return RedisKey::ReconnectAttempts(Some(vec![0.0; n as usize]));
+            }
+            let delays: Option<Vec<f64>> = value
+                .as_array_node()
+                .and_then(|array| array.elements().iter().map(|e| number_value(&e).filter(|n| *n >= 0.0)).collect());
+            match delays {
+                Some(delays) => RedisKey::ReconnectAttempts(Some(delays)),
+                None => RedisKey::Refused(
+                    "`reconnect_attempts:` must be an Integer literal from 0 to 100 or an Array of literal delays in seconds".to_string(),
+                ),
+            }
+        }
+        // redis-client names the connection with `CLIENT SETNAME`, which
+        // the push doesn't send. `id: nil` (the old way to turn Sidekiq 6's
+        // naming off) asks for exactly that.
+        "id" if value.as_nil_node().is_some() => RedisKey::AsHere,
+        "id" => RedisKey::Refused(
+            "naming the connection needs CLIENT SETNAME, which spinel-redis does not send yet; leave `id:` out or set it to nil".to_string(),
+        ),
+        "ssl" if nil_or_false => RedisKey::AsHere,
+        "ssl" | "ssl_params" => RedisKey::Refused(TLS.to_string()),
+        "sentinels" | "role" | "name" | "master_name" | "sentinel_username" | "sentinel_password" => {
+            RedisKey::Refused(SENTINEL.to_string())
+        }
+        "path" => RedisKey::Refused("unix sockets are not supported; use a redis://host:port URL".to_string()),
+        // redis-client lets an explicit `host:` or `port:` win over the
+        // URL's, so ignoring one would connect to another server.
+        "host" | "port" => RedisKey::Refused(format!("`{key}:` overrides url:'s, and is not read; put it in url:")),
+        "namespace" => RedisKey::Refused("Sidekiq 7 and later raise for a namespace; drop it".to_string()),
+        "nodes" => RedisKey::Refused("Redis Cluster is not supported, as Sidekiq itself refuses it".to_string()),
+        "protocol" if super::util::integer_value(value) == Some(3) => RedisKey::AsHere,
+        "protocol" => RedisKey::Refused("Sidekiq 7 and later speak only RESP3 (`protocol: 3`)".to_string()),
+        "size" | "pool_timeout" | "pool_name" => RedisKey::Ignored(
+            "there is no connection pool: pushes share one connection per process, and the worker opens one per thread",
+        ),
+        "driver" => RedisKey::Ignored("the client is spinel-redis on spinel and redis-rb on ruby and jruby"),
+        "write_timeout" => RedisKey::Ignored("spinel-redis has no write timeout, so a write waits until the socket takes it"),
+        "logger" => RedisKey::Ignored("the boot line is the only connection log"),
+        _ => RedisKey::Unknown,
+    }
+}
+
+/// A number literal: an Integer, a Float, or a Duration literal's seconds.
+fn number_value(node: &Node<'_>) -> Option<f64> {
+    if let Some(n) = super::util::integer_value(node) {
+        return Some(n as f64);
+    }
+    if let Some(n) = node.as_float_node().map(|f| f.value()).filter(|n| n.is_finite()) {
+        return Some(n);
+    }
+    super::util::duration_seconds(node).map(|n| n as f64)
+}
+
 /// A Redis setting's value as `RedisSetting` reads it.
+/// A `db:` given as a String literal, read as the Integer it names: plain
+/// decimal digits, `"0"` or no leading zero, and small enough for an i64.
+fn decimal_db(text: &str) -> Option<i64> {
+    let decimal = !text.is_empty()
+        && text.bytes().all(|b| b.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'));
+    if decimal { text.parse().ok() } else { None }
+}
+
 fn redis_setting(node: &Node<'_>, src: &str) -> Option<crate::app::RedisSetting> {
     use crate::app::RedisSetting;
     if let Some(literal) = string_literal_value(node) {
@@ -13854,6 +14106,12 @@ fn require_sidekiq_redis_url(app: &App) {
         "Sidekiq",
         detail,
     ));
+}
+
+/// An error for a Sidekiq setting, on a tree on `:sidekiq`, that can't
+/// be honored.
+fn refuse_sidekiq(detail: String) {
+    super::prism::push(crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "Sidekiq", detail));
 }
 
 /// A warning about what ingest reads from the app's Sidekiq settings.

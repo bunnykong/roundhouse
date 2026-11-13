@@ -186,6 +186,10 @@ mod multipart_file_parts;
 mod default_format_dispatch;
 #[path = "spinel_toolchain/route_default_format.rs"]
 mod route_default_format;
+#[path = "support/route_request_defaults.rs"]
+mod route_request_defaults_contract;
+#[path = "spinel_toolchain/route_request_defaults.rs"]
+mod route_request_defaults;
 #[path = "support/json_params.rs"]
 mod json_params_contract;
 #[path = "spinel_toolchain/json_params.rs"]
@@ -304,6 +308,14 @@ mod stdlib_scan_zlib;
 mod stdlib_rexml_include_contract;
 #[path = "spinel_toolchain/stdlib_rexml_include.rs"]
 mod stdlib_rexml_include;
+#[path = "support/gem_reopen_source.rs"]
+mod gem_reopen_source_contract;
+#[path = "spinel_toolchain/gem_reopen_source.rs"]
+mod gem_reopen_source;
+#[path = "support/stdlib_singleton.rs"]
+mod stdlib_singleton_contract;
+#[path = "spinel_toolchain/stdlib_singleton.rs"]
+mod stdlib_singleton;
 #[path = "support/mutable_literals.rs"]
 mod mutable_literals_contract;
 #[path = "spinel_toolchain/mutable_literals.rs"]
@@ -312,6 +324,10 @@ mod mutable_literals;
 mod auto_source_gem_contract;
 #[path = "spinel_toolchain/auto_source_gem.rs"]
 mod auto_source_gem;
+#[path = "support/gem_method_require.rs"]
+mod gem_method_require_contract;
+#[path = "spinel_toolchain/gem_method_require.rs"]
+mod gem_method_require;
 #[path = "support/block_arg_conditional.rs"]
 mod block_arg_conditional_contract;
 #[path = "spinel_toolchain/block_arg_conditional.rs"]
@@ -324,6 +340,10 @@ mod untyped_calendar;
 mod enumerable_mixin_contract;
 #[path = "spinel_toolchain/enumerable_mixin.rs"]
 mod enumerable_mixin;
+#[path = "support/enum_where_runtime_cast.rs"]
+mod enum_where_runtime_cast_contract;
+#[path = "spinel_toolchain/enum_where_runtime_cast.rs"]
+mod enum_where_runtime_cast;
 #[path = "support/file_level_struct.rs"]
 mod file_level_struct_contract;
 #[path = "spinel_toolchain/file_level_struct.rs"]

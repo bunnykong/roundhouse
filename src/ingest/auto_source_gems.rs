@@ -38,10 +38,15 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
     let carried = crate::gems::native_extension_gem_namespaces(app);
     let ownership = crate::gems::LockGemIndex::new(lock);
     let mut out: BTreeSet<String> = BTreeSet::new();
+    // Whether a gem's `lib/` declares a constant, per gem and path: asked only for a name the app declares too.
+    let mut declared: crate::det::HashMap<(String, String), bool> = Default::default();
     let mut consider = |path: &str, from_gem: bool, required: bool| {
-        if !required && (own.contains(path) || ported.contains(path)) {
+        if !required && ported.contains(path) {
             return;
         }
+        // A name the app declares is the app's, unless the declaration reopens a class of a gem the app
+        // depends on (#2093): Ruby loads the gem first, so the class holds the gem's methods and the app's.
+        let reopened = !required && own.contains(path);
         let owners = if required { vec![path] } else { ownership.owners(path) };
         let [gem] = owners.as_slice() else { return };
         if lock.is_in_repo(gem)
@@ -71,6 +76,9 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
             return;
         }
         let lib = installed.join("lib");
+        if reopened && !*declared.entry((gem.to_string(), path.to_string())).or_insert_with(|| declares(vfs, &lib, path)) {
+            return;
+        }
         let has_entry = match lock.gemfile_requires.get(*gem).filter(|f| !f.is_empty()) {
             Some(features) => features.iter().all(|f| vfs.exists(&lib.join(if f.ends_with(".rb") { f.clone() } else { format!("{f}.rb") }))),
             None => [gem.to_string(), gem.replace('-', "/")].iter().any(|f| vfs.exists(&lib.join(format!("{f}.rb")))),
@@ -189,6 +197,42 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
     out.into_iter().collect()
 }
 
+/// Whether a `.rb` file under `lib` (a gem's) declares `path` as a class or
+/// module: `class Box` inside `module Shelf`, or `class Shelf::Box`. Read by
+/// the last segment, on lines that open a declaration; the gem was chosen
+/// by its namespace already.
+fn declares<V: Vfs + ?Sized>(vfs: &V, lib: &Path, path: &str) -> bool {
+    let last = path.rsplit("::").next().unwrap_or(path);
+    let opens = |line: &str| {
+        let line = line.trim_start();
+        let Some(rest) = line.strip_prefix("class ").or_else(|| line.strip_prefix("module ")) else { return false };
+        let name = rest.split(|c: char| c.is_whitespace() || c == '<' || c == ';').next().unwrap_or("");
+        let name = name.trim_start_matches("::");
+        name == last || name.ends_with(&format!("::{last}"))
+    };
+    // Each real directory once: a symlink back into `lib/` would
+    // otherwise be walked again at every level, up to the OS's limit.
+    let real = |dir: &Path| vfs.canonical(dir).unwrap_or_else(|| dir.to_path_buf());
+    let mut seen: HashSet<std::path::PathBuf> = HashSet::default();
+    seen.insert(real(lib));
+    let mut dirs = vec![lib.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = vfs.read_dir(&dir) else { continue };
+        for entry in entries {
+            if vfs.is_dir(&entry) {
+                if seen.insert(real(&entry)) {
+                    dirs.push(entry);
+                }
+            } else if entry.extension().is_some_and(|e| e == "rb")
+                && vfs.read_to_string(&entry).is_ok_and(|text| text.lines().any(opens))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn required_features(items: &[crate::app::ProgramItem], out: &mut Vec<String>) {
     for item in items {
         match item {
@@ -199,5 +243,92 @@ fn required_features(items: &[crate::app::ProgramItem], out: &mut Vec<String>) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::io;
+    use std::path::PathBuf;
+
+    /// A gem `lib/` whose `loop` entry is a symlink back to `lib/` itself,
+    /// and whose `ext` entry is a symlink to a directory outside it
+    /// holding `ext/box.rb`. `read_dir` gives up after `LIMIT` calls, as
+    /// the OS does at its symlink depth, so a walk that follows the loop
+    /// ends instead of hanging.
+    struct Linked {
+        read_dirs: Cell<usize>,
+    }
+
+    const LIMIT: usize = 64;
+
+    impl Linked {
+        /// Where `path` really is: every `loop` component resolves to `lib`.
+        fn real(path: &Path) -> PathBuf {
+            let mut real = PathBuf::new();
+            for part in path.components() {
+                if part.as_os_str() == "loop" { real = PathBuf::from("/gem/lib"); } else { real.push(part); }
+            }
+            if let Ok(rest) = real.strip_prefix("/gem/lib/ext") {
+                let mut outside = PathBuf::from("/elsewhere/ext");
+                outside.extend(rest.components());
+                return outside;
+            }
+            real
+        }
+    }
+
+    impl Vfs for Linked {
+        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.read_to_string(path).map(String::into_bytes)
+        }
+        fn read_to_string(&self, path: &Path) -> io::Result<String> {
+            match Self::real(path).to_str() {
+                Some("/gem/lib/shelf.rb") => Ok("module Shelf\nend\n".into()),
+                Some("/elsewhere/ext/box.rb") => Ok("module Shelf\n  class Box\n  end\nend\n".into()),
+                _ => Err(io::ErrorKind::NotFound.into()),
+            }
+        }
+        fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            self.read_dirs.set(self.read_dirs.get() + 1);
+            if self.read_dirs.get() > LIMIT {
+                return Err(io::Error::other("too many levels of symbolic links"));
+            }
+            match Self::real(path).to_str() {
+                Some("/gem/lib") => Ok(vec![path.join("shelf.rb"), path.join("loop"), path.join("ext")]),
+                Some("/elsewhere/ext") => Ok(vec![path.join("box.rb")]),
+                _ => Err(io::ErrorKind::NotFound.into()),
+            }
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.is_dir(path) || self.read_to_string(path).is_ok()
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            matches!(Self::real(path).to_str(), Some("/gem/lib" | "/elsewhere/ext"))
+        }
+        fn is_symlink(&self, path: &Path) -> bool {
+            path.file_name().is_some_and(|name| name == "loop" || name == "ext")
+        }
+        fn canonical(&self, path: &Path) -> Option<PathBuf> {
+            Some(Self::real(path))
+        }
+    }
+
+    /// A symlink back into `lib/` is walked once: `lib/` and the linked
+    /// `ext/` are read, and the loop adds nothing.
+    #[test]
+    fn declares_reads_each_real_directory_once() {
+        let vfs = Linked { read_dirs: Cell::new(0) };
+        assert!(!declares(&vfs, Path::new("/gem/lib"), "Shelf::Crate"));
+        assert_eq!(vfs.read_dirs.get(), 2);
+    }
+
+    /// A symlinked subdirectory outside `lib/` is still searched.
+    #[test]
+    fn declares_finds_a_class_under_a_symlinked_directory() {
+        let vfs = Linked { read_dirs: Cell::new(0) };
+        assert!(declares(&vfs, Path::new("/gem/lib"), "Shelf::Box"));
     }
 }
