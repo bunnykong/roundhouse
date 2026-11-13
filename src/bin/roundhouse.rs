@@ -560,10 +560,11 @@ fn transpile(
     // Each gap still degrades to a stub in the emitted output, so a
     // single run surfaces the whole inventory instead of dying on the
     // first one.
-    let emit = || {
+    let mut emit = || {
         roundhouse::emit::diagnostics::scope(|| match &whole_route {
             Some(wr) => project::futamura_target_files(&app, input, Some(wr)),
-            None => project::target_files(&app, input, target),
+            // What follows reads the app's sources, lockfile and assets, never its bodies.
+            None => project::target_files_lowering_in_place(&mut app, input, target),
         })
     };
     let audit = std::env::var_os("ROUNDHOUSE_AUDIT").is_some();

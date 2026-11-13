@@ -15,21 +15,37 @@ fn keeps_source_call(target: BuildTarget) -> bool {
 }
 
 pub fn lower_for_target(app: &App, target: BuildTarget) -> Option<App> {
-    if keeps_source_call(target) {
+    if !applies(app, target) {
         return None;
+    }
+    let mut app = app.clone();
+    lower(&mut app, target);
+    Some(app)
+}
+
+/// [`lower_for_target`] on the caller's own app: no second copy of the
+/// whole program beside the first (a quarter of the emit's peak on a large app).
+pub fn lower_in_place(app: &mut App, target: BuildTarget) {
+    if applies(app, target) {
+        lower(app, target);
+    }
+}
+
+fn applies(app: &App, target: BuildTarget) -> bool {
+    if keeps_source_call(target) {
+        return false;
     }
     let mut found = false;
     crate::lower::for_each_emit_body_ref(app, &mut |body| found |= has_call(body));
-    if !found {
-        return None;
-    }
+    found
+}
+
+fn lower(app: &mut App, target: BuildTarget) {
     let runs = case_runs(target);
     let lookup = runs.then(|| if resolves_by_name(target) { native_lookup_class() } else { lookup_class(&app_constants(app)) });
-    let mut app = app.clone();
     let target_name = target.as_str();
-    crate::lower::for_each_emit_body(&mut app, &mut |body| rewrite(body, runs, target_name));
+    crate::lower::for_each_emit_body(app, &mut |body| rewrite(body, runs, target_name));
     app.library_classes.extend(lookup.into_iter().flatten());
-    Some(app)
 }
 
 // Only the app's own constants: a name from run-time data must not reach every class in the process
