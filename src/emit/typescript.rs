@@ -2506,9 +2506,14 @@ fn js_class_member(
                 .collect();
             (tys, optionals, is_keyword, (**ret).clone())
         }
+        // Unstamped (an `initialize` always is): a positional default
+        // still makes the argument optional, as it does in Ruby. Without
+        // it `def initialize(object, options = {})` became
+        // `constructor(object: any, options: any)` and `new X(record)` was
+        // TS2554.
         _ => (
             m.params.iter().map(|_| Ty::Untyped).collect(),
-            m.params.iter().map(|_| false).collect(),
+            m.params.iter().map(|p| p.ty_kind() == crate::ty::ParamKind::Optional).collect(),
             m.params.iter().map(|_| false).collect(),
             m.body.ty.clone().unwrap_or(Ty::Nil),
         ),
