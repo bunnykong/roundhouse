@@ -601,6 +601,8 @@ jobs:
           gem install --no-document --ignore-dependencies warden -v 1.2.9
           gem install --no-document --ignore-dependencies orm_adapter -v 0.5.0
           gem install --no-document --ignore-dependencies responders -v 3.1.1
+          # doorkeeper, compiled from source (tests/emit_and_run/doorkeeper.rs).
+          gem install --no-document --ignore-dependencies doorkeeper -v 5.8.2
           # simple_form, compiled from source (tests/emit_and_run/simple_form.rs).
           gem install --no-document --ignore-dependencies simple_form -v 5.4.1
           # OmniAuth for devise's :omniauthable, installed as the Ruby family loads it (tests/emit_and_run/devise.rs).

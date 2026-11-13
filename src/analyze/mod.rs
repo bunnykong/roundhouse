@@ -482,6 +482,12 @@ impl Analyzer {
                     Symbol::from("type_for_attribute"),
                     Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Type::Value")), args: vec![].into() },
                 );
+                // The same reopen's table description: Doorkeeper's `secret_required?` asks a column whether it may be null.
+                cls.class_methods.insert(
+                    Symbol::from("columns"),
+                    Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Column")), args: vec![].into() }) },
+                );
+                cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
                 cls.class_methods.insert(Symbol::from("none"), relation_of_self.clone());
                 cls.class_methods.insert(Symbol::from("delete_all"), Ty::Int);
                 cls.class_methods.insert(Symbol::from("update_all"), Ty::Int);
@@ -4502,7 +4508,9 @@ impl Analyzer {
                 query_class_objects: Default::default(),
                 call_site_params: Default::default(),
                 unseen_params: Default::default(),
-                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: self.helper_modules.contains(&lc.name),
+                // Not empty: a constant the class macros made (an option's default lambda) has no source answer, and the
+                // bare-name values are where its reads find it.
+                constants: global_constants.clone(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: self.helper_modules.contains(&lc.name),
             };
 
             if retype {
@@ -4681,7 +4689,7 @@ impl Analyzer {
                     query_class_objects: Default::default(),
                     call_site_params: Default::default(),
                     unseen_params: Default::default(),
-                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: class_ctx.helper_body,
+                    constants: global_constants.clone(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: class_ctx.helper_body,
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);

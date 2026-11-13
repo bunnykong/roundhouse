@@ -1188,7 +1188,8 @@ impl<'a> Scan<'a> {
     }
 
     /// The calls `send(name)` on `target` makes by `name`.
-    fn send_by(&mut self, target: &Target, name: &Expr, rest: &[Expr]) {
+    /// `rest` is `None` when the arguments come later and are not known here (a `method(name)`'s call).
+    fn send_by(&mut self, target: &Target, name: &Expr, rest: Option<&[Expr]>) {
         let mut names = names_of(name, &self.locals, self.gems, self.context, 2);
         // Not a parameter's callers: Ruby calls `method_missing` and its kin with no call site to read.
         let implicit = self.context.is_some_and(|(_, _, m)| IMPLICIT.contains(&m));
@@ -1226,7 +1227,7 @@ impl<'a> Scan<'a> {
             None => g.may_answer(target, sink),
         } || (from_callers && !matches!(target, Target::Any) && g.may_answer(target, sink))).collect()).unwrap_or_default();
         for sink in sinks {
-            self.pass(sink, Some(rest));
+            self.pass(sink, rest);
         }
         match names {
             Some(names) => self.calls.extend(names.iter().map(|n| n.call(target))),
@@ -1267,7 +1268,7 @@ fn sends_by_parameter(e: &Expr, params: &[crate::dialect::Param]) -> bool {
             return;
         }
         if let ExprNode::Send { method, args, .. } = &*e.node {
-            if matches!(method.as_str(), "send" | "public_send" | "__send__")
+            if matches!(method.as_str(), "send" | "public_send" | "__send__" | "method" | "public_method")
                 && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Var { name, .. }) if params.iter().any(|p| p.name == *name))
             {
                 *found = true;
@@ -1483,10 +1484,25 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
                         s.pass(value.as_str(), Some(&args[1..]));
                     }
                 }
-                // Not dropped as unknown: svg-graph's `init_with` reaches its option writers by `send(key.to_s + "=", value)`.
-                Some(_) if by_name && matches!(method.as_str(), "send" | "public_send" | "__send__") => {
+                // Not dropped as unknown: svg-graph's `init_with` reaches its option writers by `send(key.to_s + "=", value)`,
+                // and Doorkeeper's `Credentials.from_request` its readers by `self.method(method)` over a configured list.
+                // Not a `method` read outside a gem method: Hashie's `method(method_key)` is also scanned with no context, where
+                // it would reach every method of the app's mixins (Devise's class accessors on User, which nothing types).
+                Some(_) if by_name
+                    && (matches!(method.as_str(), "send" | "public_send" | "__send__")
+                        || (s.context.is_some() && matches!(method.as_str(), "method" | "public_method"))) =>
+                {
                     let own = s.context.is_none() && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
-                    s.send_by(if own { &Target::AppSelf } else { &target }, &args[0], &args[1..]);
+                    let rest = if matches!(method.as_str(), "method" | "public_method") { None } else { Some(&args[1..]) };
+                    s.send_by(if own { &Target::AppSelf } else { &target }, &args[0], rest);
+                    // The Method is called later, maybe with a block (`method(name).call { … }`), as a `method(:name)` is.
+                    if matches!(method.as_str(), "method" | "public_method") {
+                        let every = match &target {
+                            Target::Virtual(c, _) if !c.starts_with('\u{0}') => format!("{c}\u{1}*"),
+                            _ => "*".to_string(),
+                        };
+                        s.calls.push((Target::Any, format!("{BLOCK}{every}")));
+                    }
                 }
                 _ => {}
             }
