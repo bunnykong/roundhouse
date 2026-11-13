@@ -1087,6 +1087,7 @@ pub mod bundle {
     // The edits that change a file of the base app rather than add one beside it. Not one that only
     // adds methods (`adds_only_methods`): it changes nothing another case's script calls, and a
     // case that fails in the shared build is run again alone (`Overlay::run_spinel_with_flags`).
+    // Nor a route the case adds, which no other case's script reaches (`http_base_edits`).
     fn base_edits(case: &Case) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let in_base = |path: &str| case.base.as_os_str() != EMPTY && case.base.join(path).exists();
@@ -1095,6 +1096,7 @@ pub mod bundle {
                 Edit::Write { path, content } if in_base(path) => ("w", path, content).hash(&mut h),
                 Edit::Write { .. } => {}
                 Edit::Replace { find, replace, .. } if adds_only_methods(find, replace) => {}
+                Edit::Replace { path, find, replace } if inserts_route(path, find, replace) => {}
                 Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
                 Edit::Remove { path } => ("d", path).hash(&mut h),
             }
@@ -1104,7 +1106,11 @@ pub mod bundle {
 
     const ROUTES: &str = "config/routes.rb";
 
-    // `base_edits` but for routes a case inserts, which change nothing another case's requests reach.
+    fn inserts_route(path: &str, find: &str, replace: &str) -> bool {
+        path == ROUTES && (replace.starts_with(find) || replace.ends_with(find))
+    }
+
+    // `base_edits` but apart on added methods: a server that fails shared is not built again alone, and two cases adding one name both compose.
     fn http_base_edits(case: &Case) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let in_base = |path: &str| case.base.as_os_str() != EMPTY && case.base.join(path).exists();
@@ -1112,8 +1118,7 @@ pub mod bundle {
             match edit {
                 Edit::Write { path, content } if in_base(path) => ("w", path, content).hash(&mut h),
                 Edit::Write { .. } => {}
-                Edit::Replace { path, find, replace }
-                    if path == ROUTES && (replace.starts_with(find.as_str()) || replace.ends_with(find.as_str())) => {}
+                Edit::Replace { path, find, replace } if inserts_route(path, find, replace) => {}
                 Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
                 Edit::Remove { path } => ("d", path).hash(&mut h),
             }
