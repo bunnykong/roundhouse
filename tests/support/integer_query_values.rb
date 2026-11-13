@@ -13,7 +13,7 @@ lines << "find_by huge: #{Export.find_by(id: huge, user_id: 1).inspect}"
 lines << "find_by 1: #{Export.find_by(id: "1", user_id: 1)&.id.inspect}"
 lines << "find_by 1abc: #{Export.find_by(id: " +1abc", user_id: 1)&.id.inspect}"
 lines << "exists? abc, 1abc: #{Export.where(user_id: 1).exists?("abc")} #{Export.where(user_id: 1).exists?("1abc")}"
-["abc", "", " \t", "+x", "_7", "7tail", "7.9", "1_0", "0junk", huge, "-#{huge}", 7.9, true, false, :"7"].each do |value|
+["abc", "", " \t", "+x", "_7", "7tail", "7.9", "1_0", "0junk", huge, "-#{huge}", 7.9, true, false, :"7", Time.at(0).utc, Time.at(7).utc].each do |value|
   lines << "#{value.inspect}: #{ids(Export.where(number: value)).inspect} not #{ids(Export.where.not(number: value)).inspect}"
 end
 lines << "nil: #{ids(Export.where(number: nil)).inspect} not #{ids(Export.where.not(number: nil)).inspect}"

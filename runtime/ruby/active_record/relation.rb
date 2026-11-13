@@ -3495,14 +3495,16 @@ module ActiveRecord
     end
 
     # A numeric value cast and range-checked: Rails' `value.to_i` (a
-    # String's decimal prefix, a Float truncated), valid only within
+    # String's decimal prefix, a Float truncated, a Time's epoch
+    # seconds), valid only within
     # the column's `limit` bytes, 4 or 8. IntegerKeyCast already holds a
     # value to 8 bytes without converting text that overflows them.
     def integer_query_cast(val, limit)
       return ActiveRecord::IntegerKeyCast.new(false, 0) if val.is_a?(Symbol)
       return ActiveRecord::IntegerKeyCast.new(true, 1) if val == true
       return ActiveRecord::IntegerKeyCast.new(true, 0) if val == false
-      cast = ActiveRecord::IntegerKeyCast.parse(val)
+      # A Time is its epoch seconds (Rails' `to_i`), not its text's year.
+      cast = val.is_a?(Time) ? ActiveRecord::IntegerKeyCast.parse(val.to_i) : ActiveRecord::IntegerKeyCast.parse(val)
       return cast unless cast.valid && limit == 4
       return ActiveRecord::IntegerKeyCast.new(false, 0) if cast.value >= 2147483648 || cast.value < -2147483648
       cast
