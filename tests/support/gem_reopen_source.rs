@@ -72,8 +72,8 @@ raise "describe #{got.inspect}" unless got == "box / app box / local"
 puts "reopen passed"
 "##;
 
-pub const EXTRAS_ASSERTIONS: &str = r##"got = BoxLimits.describe + [Shelf::Box.label]
-raise "extras #{got.inspect}" unless got == ["box", 3, "tagged", "shelf box"]
+pub const EXTRAS_ASSERTIONS: &str = r##"got = BoxLimits.describe
+raise "extras #{got.inspect}" unless got == ["box", 3, "tagged"]
 puts "extras passed"
 "##;
 

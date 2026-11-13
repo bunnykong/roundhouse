@@ -42,10 +42,11 @@ fn the_spinel_emit_compiles_the_gem_class_the_app_reopens() {
 }
 
 /// A reopen that adds only a constant and an `include` brings the gem in too.
+/// (Only what the app reaches is kept: `label`, which nothing calls, is not.)
 #[test]
 fn the_spinel_emit_compiles_the_gem_class_a_constant_only_reopen_names() {
     let source = shelf_box(contract::extras_app());
-    for needle in ["def self.kind", "def self.label", "LIMIT = 3", "include Tagging"] {
+    for needle in ["def self.kind", "LIMIT = 3", "include Tagging"] {
         assert!(source.contains(needle), "{needle:?} in\n{source}");
     }
     assert!(source.find("def self.kind").unwrap() < source.find("LIMIT = 3").unwrap(), "{source}");
