@@ -12666,174 +12666,99 @@ fn for_each_capitalised_word(src: &str, mut f: impl FnMut(&str)) {
     }
 }
 
-/// A `defined?(Name)` guard found in code on one line.
-struct DefinedGuard {
-    /// The byte range the guard covers: the guard itself, plus the code that
-    /// runs only once it held.
-    covers: (usize, usize),
-    /// Whether the guard decides the `if`/`elsif`/modifier `if` it sits in:
-    /// the condition is the guard alone or joined to others by `&&`/`and`.
-    dominates: bool,
-}
-
-fn ident_byte(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_'
-}
-
-/// The offsets in `text` where `word` stands as a whole word.
-fn word_at(text: &str, word: &str) -> impl Iterator<Item = usize> {
-    let b = text.as_bytes();
-    text.match_indices(word)
-        .map(|(at, _)| at)
-        .filter(move |&at| (at == 0 || !ident_byte(b[at - 1])) && b.get(at + word.len()).is_none_or(|c| !ident_byte(*c)))
-        .collect::<Vec<_>>()
-        .into_iter()
-}
-
-/// Whether a condition can hold while a guard in it fails: an `||` or `or`,
-/// a ternary, or a negation (`!x`, `not x`; `!=`, `!~` and a `save!` name
-/// are not one). Read without regard to literals, so a string that spells
-/// one only makes the guard count less.
-fn not_conjunctive(cond: &str) -> bool {
-    let b = cond.as_bytes();
-    let negation = b
-        .iter()
-        .enumerate()
-        .any(|(i, &c)| c == b'!' && !matches!(b.get(i + 1), Some(b'=' | b'~')) && !(i > 0 && ident_byte(b[i - 1])));
-    negation
-        || cond.contains("||")
-        || cond.contains(" ? ")
-        || word_at(cond, "or").next().is_some()
-        || word_at(cond, "not").next().is_some()
-}
-
-/// The first `defined?(Name)` on `line` outside a literal and a comment, and
-/// what it covers. The code after it on the line is covered only up to where
-/// it could run with the guard failed: an `||`, a ternary's `?`/`:`, a `,`,
-/// a `;`, an `or`/`else`/`end`, or a bracket the guard sits inside closing.
-/// A negated or compared guard (`!defined?(X)`, `defined?(X).nil?`) and one
-/// joined by `and`/a ternary to an `||` before it cover only themselves.
-fn defined_guard(line: &str, guards: &[String]) -> Option<DefinedGuard> {
-    let b = line.as_bytes();
-    let comment = (0..b.len()).find(|&p| b[p] == b'#' && !inside_quotes(&b[..p])).unwrap_or(b.len());
-    let (start, end) = guards
-        .iter()
-        .flat_map(|g| line.match_indices(g.as_str()).map(|(at, g)| (at, at + g.len())))
-        .filter(|&(at, _)| at < comment && !inside_quotes(&b[..at]))
-        .min()?;
-    let only_itself = DefinedGuard { covers: (start, end), dominates: false };
-
-    let head = line[..start].trim_end_matches(|c: char| c == '(' || c.is_whitespace());
-    // An assignment (`x =`, `x ||=`) passes the guard's value on; `==`,
-    // `<=`, `!~` and the like compare it.
-    let assignment = head.ends_with('=') && !head[..head.len() - 1].ends_with(['=', '!', '<', '>']);
-    let inverted = head.ends_with('!')
-        || head.rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next() == Some("not")
-        || (head.ends_with(['=', '<', '>', '~']) && !assignment);
-    if inverted {
-        return Some(only_itself);
+/// The byte ranges of the references to `konst` that a `defined?(konst)`
+/// guard covers, read from the parsed program: anything inside the guard's
+/// own argument (it is never evaluated), the right side of an `&&`/`and`
+/// whose left side is the guard or an `&&`/`and` chain holding it, and the
+/// `then` branch of an `if`/`elsif`, modifier `if` or ternary whose condition
+/// is one. An `else` branch, an `||`, a negation, `unless`, a guard passed to
+/// a call and a modifier's own condition cover nothing. `None` when the
+/// source does not parse: every reference then counts.
+fn defined_guard_covers(src: &str, konst: &str) -> Option<Vec<(usize, usize)>> {
+    use crate::ingest::prism_api::PrismLocation;
+    use ruby_prism::Visit;
+    struct Covers<'k> {
+        konst: &'k str,
+        depth: usize,
+        ranges: Vec<(usize, usize)>,
     }
-
-    // The brackets the guard sits inside, and the text from the innermost
-    // one's opening to the guard.
-    let mut openers: Vec<usize> = Vec::new();
-    for p in 0..start {
-        if inside_quotes(&b[..p]) {
-            continue;
-        }
-        match b[p] {
-            b'(' | b'[' | b'{' => openers.push(p),
-            b')' | b']' | b'}' => {
-                openers.pop();
+    impl Covers<'_> {
+        /// `konst` or `::konst`.
+        fn names(&self, node: &ruby_prism::Node<'_>) -> bool {
+            if node.as_constant_read_node().is_none() && node.as_constant_path_node().is_none() {
+                return false;
             }
-            _ => {}
+            let name = node.location().as_slice();
+            name.strip_prefix(b"::").unwrap_or(name) == self.konst.as_bytes()
+        }
+        /// `defined?(konst)`, alone, parenthesised or in an `&&`/`and` chain.
+        fn guard(&self, node: &ruby_prism::Node<'_>) -> bool {
+            if let Some(defined) = node.as_defined_node() {
+                return self.names(&defined.value());
+            }
+            if let Some(and) = node.as_and_node() {
+                return self.guard(&and.left()) || self.guard(&and.right());
+            }
+            if let Some(body) = node.as_parentheses_node().and_then(|p| p.body()) {
+                return match body.as_statements_node() {
+                    Some(stmts) => {
+                        let mut body = stmts.body().iter();
+                        body.next().is_some_and(|only| body.next().is_none() && self.guard(&only))
+                    }
+                    None => self.guard(&body),
+                };
+            }
+            false
+        }
+        fn mark(&mut self, node: &ruby_prism::Node<'_>) {
+            if self.depth > 0 && self.names(node) {
+                let at = node.location();
+                self.ranges.push((at.start_offset(), at.end_offset()));
+            }
         }
     }
-    let before = &line[openers.last().map_or(0, |p| p + 1)..start];
-    // Only grouping parentheses: a guard passed to a call (`is_a?(`) is
-    // whatever the call makes of it.
-    let grouped = openers.iter().all(|&p| b[p] == b'(' && (p == 0 || !(ident_byte(b[p - 1]) || matches!(b[p - 1], b'?' | b'!'))));
-
-    let after = &line[end..comment];
-    let gap = after.len() - after.trim_start().len();
-    let after = after.trim_start();
-    let starts_word = |w: &str| word_at(after, w).next() == Some(0);
-    // `&&` binds tighter than `||`, `or`, `not`, `and` and a ternary, so its
-    // right side runs only once the guard held, whatever comes before it;
-    // `and` and a ternary's branch take in an `||`/`or` before the guard.
-    let (joined, join_len) = if after.starts_with("&&") {
-        (true, 2)
-    } else if starts_word("and") || after.starts_with('?') {
-        let tail_or = before.contains("||") || before.contains(" ? ") || word_at(before, "or").next().is_some();
-        let low_not = starts_word("and") && word_at(before, "not").next().is_some();
-        if tail_or || low_not {
-            return Some(only_itself);
+    impl<'pr> Visit<'pr> for Covers<'_> {
+        fn visit_defined_node(&mut self, node: &ruby_prism::DefinedNode<'pr>) {
+            self.depth += 1;
+            ruby_prism::visit_defined_node(self, node);
+            self.depth -= 1;
         }
-        (true, if starts_word("and") { 3 } else { 1 })
-    } else if after.is_empty() || after.starts_with(')') || starts_word("then") {
-        (false, 0)
-    } else {
-        return Some(only_itself);
-    };
-    let ternary = after.starts_with('?');
-
-    let mut cut = end;
-    if joined {
-        cut = comment;
-        let mut depth = 0usize;
-        let mut p = end + gap + join_len;
-        while p < comment {
-            if inside_quotes(&b[..p]) {
-                p += 1;
-                continue;
+        fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
+            let left = node.left();
+            self.visit(&left);
+            let held = usize::from(self.guard(&left));
+            self.depth += held;
+            self.visit(&node.right());
+            self.depth -= held;
+        }
+        fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+            let predicate = node.predicate();
+            self.visit(&predicate);
+            if let Some(then) = node.statements() {
+                let held = usize::from(self.guard(&predicate));
+                self.depth += held;
+                self.visit_statements_node(&then);
+                self.depth -= held;
             }
-            let rest = &b[p..comment];
-            let word = |w: &[u8]| rest.starts_with(w) && !ident_byte(b[p - 1]) && rest.get(w.len()).is_none_or(|c| !ident_byte(*c));
-            let stop = match b[p] {
-                b'(' | b'[' | b'{' => {
-                    depth += 1;
-                    false
-                }
-                b')' | b']' | b'}' if depth == 0 => true,
-                b')' | b']' | b'}' => {
-                    depth -= 1;
-                    false
-                }
-                _ if depth > 0 => false,
-                b',' | b';' => true,
-                _ => {
-                    rest.starts_with(b"||")
-                        || rest.starts_with(b" ? ")
-                        || rest.starts_with(b" : ")
-                        || [&b"or"[..], b"else", b"elsif", b"end"].iter().any(|w| word(w))
-                }
-            };
-            if stop {
-                cut = p;
-                break;
+            if let Some(subsequent) = node.subsequent() {
+                self.visit(&subsequent);
             }
-            p += 1;
+        }
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            self.mark(&node.as_node());
+        }
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            self.mark(&node.as_node());
+            ruby_prism::visit_constant_path_node(self, node);
         }
     }
-
-    // The `if`/`elsif` (or modifier `if`) whose condition holds the guard.
-    let keyword = ["if", "elsif"]
-        .iter()
-        .flat_map(|kw| word_at(&line[..start], kw).map(move |at| (at, at + kw.len())))
-        .filter(|&(at, _)| !inside_quotes(&b[..at]))
-        .max();
-    let Some((kw_at, kw_end)) = keyword else {
-        return Some(DefinedGuard { covers: (start, cut), dominates: false });
-    };
-    let dominates = grouped && !ternary && !not_conjunctive(&line[kw_end..comment]);
-    let stmt = (0..kw_at).rev().find(|&p| b[p] == b';' && !inside_quotes(&b[..p])).map_or(0, |p| p + 1);
-    let covers = if dominates && !line[stmt..kw_at].trim().is_empty() {
-        // A modifier `if`: the statement it ends runs only once the guard held.
-        (stmt, comment)
-    } else {
-        (start, cut)
-    };
-    Some(DefinedGuard { covers, dominates })
+    let parsed = ruby_prism::parse(src.as_bytes());
+    if parsed.errors().next().is_some() {
+        return None;
+    }
+    let mut covers = Covers { konst, depth: 0, ranges: Vec::new() };
+    covers.visit(&parsed.node());
+    Some(covers.ranges)
 }
 
 fn names_constant(src: &str, konst: &str) -> bool {
@@ -12845,36 +12770,25 @@ fn names_constant(src: &str, konst: &str) -> bool {
     // A reference a `defined?(Name)` guard covers is not a use: the code
     // is written to run without the library (runtime/ruby/active_support_ext.rb's
     // `defined?(::Singleton) && value.is_a?(::Singleton)`), so it must not
-    // pull the library into every program. See [`defined_guard`] for what a
-    // guard covers; the body of an `if`/`elsif` it dominates is covered up
-    // to the next line at the `if`'s indentation (`else` is not).
-    let guards = [format!("defined?({konst})"), format!("defined?(::{konst})")];
-    let mut guarded_body: Option<usize> = None;
+    // pull the library into every program. Only a file that spells a guard
+    // is parsed; the covered references read as blanks, so offsets stay put.
+    let masked;
+    let src = match src.contains("defined?").then(|| defined_guard_covers(src, konst)).flatten() {
+        Some(covers) if !covers.is_empty() => {
+            let mut bytes = src.as_bytes().to_vec();
+            for (from, to) in covers {
+                bytes[from..to].fill(b' ');
+            }
+            // Constant names are ASCII, so blanking them keeps UTF-8 whole.
+            masked = String::from_utf8(bytes).expect("blanked ASCII");
+            masked.as_str()
+        }
+        _ => src,
+    };
     src.lines().any(|line| {
         if line.trim_start().starts_with('#') {
             return false;
         }
-        let indent = line.len() - line.trim_start().len();
-        if let Some(outer) = guarded_body {
-            if line.trim().is_empty() || indent > outer {
-                return false;
-            }
-            guarded_body = None;
-        }
-        let masked;
-        let line = match defined_guard(line, &guards) {
-            Some(guard) => {
-                let trimmed = line.trim_start();
-                if guard.dominates && (trimmed.starts_with("if ") || trimmed.starts_with("elsif ")) {
-                    guarded_body = Some(indent);
-                }
-                // The covered code reads as blanks, so offsets stay put.
-                let (from, to) = guard.covers;
-                masked = format!("{}{}{}", &line[..from], " ".repeat(to - from), &line[to..]);
-                masked.as_str()
-            }
-            None => line,
-        };
         // SUPERCLASS position — `class ApplicationPlatform <
         // PlatformAgent`. The only place a used constant stands at end
         // of line with no trailing `.`/`(`/`::` to prove it is a use
