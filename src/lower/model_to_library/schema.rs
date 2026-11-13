@@ -238,6 +238,7 @@ pub(super) fn push_schema_methods(
     );
     if runtime_relation == super::RuntimeRelation::Present {
         push_enum_condition_methods(methods, model, table);
+        push_enum_where_methods(methods, model, table);
     }
     let mut demanded: Option<std::rc::Rc<crate::det::HashSet<Symbol>>> = None;
     for col in &table.columns {
@@ -744,7 +745,7 @@ pub(super) fn push_schema_methods(
     // there (`rewrite_update_to_typed_variant`), and `update` stays
     // Rails-shaped for everyone else.
     for bang in [false, true] {
-        methods.push(synth_update_hash(owner, model, table, bang));
+        methods.push(synth_update_hash(owner, model, table, bang, runtime_relation));
     }
 
     // def fill_timestamps(creating); now = ActiveSupport.db_now; @updated_at = now; @created_at = now if creating; end
@@ -3020,7 +3021,7 @@ fn synth_initialize(
                 target: LValue::Ivar { name: col_storage_name(col) },
                 value: with_ty(raw_default, slot_ty.clone()),
             }), slot_ty));
-            stmts.push(given_value_assign(col, &attrs, enum_label_cast(model, col, lookup.clone()).unwrap_or_else(|| Expr::new(Span::synthetic(), ExprNode::Cast { value: lookup, target_ty: super::ty_of_column_slot(col) }))));
+            stmts.push(given_value_assign(col, &attrs, enum_writer_input(model, col, lookup.clone(), runtime_relation).unwrap_or_else(|| Expr::new(Span::synthetic(), ExprNode::Cast { value: lookup, target_ty: super::ty_of_column_slot(col) }))));
             continue;
         }
         // is_id_column reference retained as a feature flag for
@@ -3964,6 +3965,29 @@ fn enum_label_cast(model: &Model, col: &Column, raw: Expr) -> Option<Expr> {
     enum_setter_value(model, col, raw)
 }
 
+/// What the constructor and `update` hand an enum column's public
+/// writer, which casts what it is given (`enum_setter_value`). A String
+/// mapping's value goes in as assigned, so it is cast once, as Rails
+/// casts an assigned value once: cast here as well, a stored value that
+/// is also a label (`{ queued: "sent", sent: "done" }`) was read again
+/// as that label. An Integer mapping keeps the cast ahead of the writer,
+/// whose own cast passes a stored Integer through.
+///
+/// The Ruby-family writer takes the value untyped (`synth_attr_writer`'s
+/// `raw_inputs`) and keeps it for `<col>_before_type_cast`, so it is
+/// handed over as is; elsewhere the writer takes the column's type, so a
+/// `Cast` bridges the untyped attrs value.
+fn enum_writer_input(model: &Model, col: &Column, raw: Expr, runtime_relation: super::RuntimeRelation) -> Option<Expr> {
+    match enum_arrays(model, col) {
+        Some((_, _, Ty::Str)) if runtime_relation == super::RuntimeRelation::Present => Some(raw),
+        Some((_, _, Ty::Str)) => Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Cast { value: raw, target_ty: super::ty_of_column_slot(col) },
+        )),
+        _ => enum_label_cast(model, col, raw),
+    }
+}
+
 /// The setter's twin of [`enum_label_cast`]: `record.status = "archived"` reaches the column through `status=`.
 fn enum_setter_value(model: &Model, col: &Column, value: Expr) -> Option<Expr> {
     let text = Expr::new(
@@ -4040,6 +4064,124 @@ fn push_enum_condition_methods(methods: &mut Vec<MethodDef>, model: &Model, tabl
             block_param: None,
         });
     }
+}
+
+/// The runtime relation's cast of a `where` value on an enum column
+/// (#2078): `def self.schema_enum_columns; [:status]; end`, and
+/// `def self._enum_where_value(col, value)` answering
+/// `ActiveRecord.enum_where_int(value, STATUS_ENUM_LABELS,
+/// STATUS_ENUM_VALUES, "")` for `col == "status"` and nil for any
+/// other column, which `schema_enum_columns` keeps from calling it.
+/// `lower::enum_symbols` casts a literal label when the app is lowered;
+/// this is the half for a label known only at runtime (a method
+/// argument, a `params` value), which Rails casts through the enum type
+/// as well. Nothing for a model without an enum, so the base
+/// class's defaults (no enum column) answer.
+fn push_enum_where_methods(methods: &mut Vec<MethodDef>, model: &Model, table: &Table) {
+    let castable = |c: &Column| model.enums.contains_key(&c.name) && enum_arrays(model, c).is_some();
+    if !table.columns.iter().any(castable) {
+        return;
+    }
+    push_schema_symbol_list(methods, &model.name, "schema_enum_columns", table, castable);
+    let col_param = Symbol::from("col");
+    let value = Symbol::from("value");
+    // The value types `ActiveRecord.enum_where_int` / `enum_where_str`
+    // take, and the stored value either answers.
+    let value_ty = Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Bool, Ty::Sym, Ty::Str, Ty::Nil].into() };
+    let stored_ty = Ty::Union { variants: vec![Ty::Int, Ty::Str, Ty::Nil].into() };
+    let mut body = nil_lit();
+    for col in table.columns.iter().rev().filter(|c| castable(c)) {
+        let Some((_, _, col_value_ty)) = enum_arrays(model, col) else { continue };
+        let (labels, values, _) = enum_array_refs(model, col, &col_value_ty);
+        let nil_label = enum_nil_label(model, col).unwrap_or_default();
+        let cast = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
+                    method: Symbol::from(if col_value_ty == Ty::Int { "enum_where_int" } else { "enum_where_str" }),
+                    args: vec![with_ty(var_ref(value.clone()), value_ty.clone()), labels, values, with_ty(lit_str(nil_label), Ty::Str)],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            Ty::Union { variants: vec![if col_value_ty == Ty::Int { Ty::Int } else { Ty::Str }, Ty::Nil].into() },
+        );
+        let is_col = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(with_ty(var_ref(col_param.clone()), Ty::Str)),
+                    method: Symbol::from("=="),
+                    args: vec![with_ty(lit_str(col.name.as_str().to_string()), Ty::Str)],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Bool,
+        );
+        body = with_ty(Expr::new(Span::synthetic(), ExprNode::If { cond: is_col, then_branch: cast, else_branch: body }), stored_ty.clone());
+    }
+    // `stored = <the column's cast>; stored`: the method ends in a read
+    // of its typed result, not in the chain's trailing `nil`.
+    let stored = Symbol::from("stored");
+    let body = seq(vec![
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign { target: LValue::Var { id: VarId(0), name: stored.clone() }, value: body },
+            ),
+            stored_ty.clone(),
+        ),
+        with_ty(var_ref(stored), stored_ty.clone()),
+    ]);
+    methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("_enum_where_value"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(col_param.clone()), Param::positional(value.clone())],
+        body,
+        signature: Some(fn_sig(vec![(col_param, Ty::Str), (value, value_ty)], stored_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
+/// The cast `_enum_where_value` applies to a String-valued enum
+/// column, around `value`: `ActiveRecord.enum_where_str(value,
+/// STATUS_ENUM_LABELS, STATUS_ENUM_VALUES, "<nil label>")`, a label's
+/// stored value (nil for the `nil` entry's) and anything else as given.
+/// A `where` folded to SQL on the Ruby-family targets
+/// (`arel::ruby_values`) casts a value known only at runtime with it,
+/// since no runtime relation sees that value. `None` for any other
+/// mapping.
+pub(crate) fn enum_where_str_cast(model: &Model, col: &Column, value: Expr) -> Option<Expr> {
+    let (_, _, value_ty) = enum_arrays(model, col)?;
+    if value_ty != Ty::Str {
+        return None;
+    }
+    let (labels, values, _) = enum_array_refs(model, col, &value_ty);
+    let nil_label = enum_nil_label(model, col).unwrap_or_default();
+    Some(with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
+                method: Symbol::from("enum_where_str"),
+                args: vec![value, labels, values, with_ty(lit_str(nil_label), Ty::Str)],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
+    ))
 }
 
 /// What `normalizes` on an enum hands its lambda: the label, as Rails'
@@ -5347,6 +5489,7 @@ fn synth_update_hash(
     model: &Model,
     table: &Table,
     bang: bool,
+    runtime_relation: super::RuntimeRelation,
 ) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
@@ -5417,7 +5560,7 @@ fn synth_update_hash(
             lookup(&col.name),
             slot_ty.clone(),
         )
-        .or_else(|| enum_label_cast(model, col, lookup(&col.name)))
+        .or_else(|| enum_writer_input(model, col, lookup(&col.name), runtime_relation))
         .or_else(|| column.is_json().then(|| lookup(&col.name)))
         .unwrap_or_else(|| {
             Expr::new(

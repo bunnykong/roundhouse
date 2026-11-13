@@ -181,6 +181,8 @@ module ActiveRecord
     def self.schema_date_columns: () -> Array[Symbol]
     def self.schema_boolean_columns: () -> Array[Symbol]
     def self.schema_decimal_columns: () -> Array[Symbol]
+    def self.schema_enum_columns: () -> Array[Symbol]
+    def self._enum_where_value: (String _col, Integer | Float | bool | Symbol | String | nil _value) -> (Integer | String)?
     def self.instantiate: (Hash[String, untyped] _row) -> Base
 
     # Eager-load hook consumed by `Relation#to_a`; the Ruby emit path

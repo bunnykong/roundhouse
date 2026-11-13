@@ -427,6 +427,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     let unset_schema = crate::lower::validations::hold_unset_presence_columns(models, schema);
     let schema = &unset_schema;
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
+    let string_enums = if ruby_read_values { crate::lower::arel::StringEnums::of_models(models, schema) } else { Default::default() };
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::default();
     let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {
@@ -622,7 +623,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                 && (unfolded.contains(&key) || relation_returns.contains_key(&key));
             if !unfold {
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
-                    &mut method.body, schema, &classes, &[], ruby_read_values,
+                    &mut method.body, schema, &classes, &[], ruby_read_values.then_some(&string_enums),
                     &relation_class_methods,
                     crate::lower::arel::SqliteVisitor { param_binds },
                 );

@@ -21120,6 +21120,10 @@ mod resource_dynamic_path;
 mod enumerable_mixin_contract;
 #[path = "emit_and_run/enumerable_mixin.rs"]
 mod enumerable_mixin;
+#[path = "support/enum_where_runtime_cast.rs"]
+mod enum_where_runtime_cast_contract;
+#[path = "emit_and_run/enum_where_runtime_cast.rs"]
+mod enum_where_runtime_cast;
 #[path = "support/file_level_struct.rs"]
 mod file_level_struct_contract;
 #[path = "emit_and_run/file_level_struct.rs"]

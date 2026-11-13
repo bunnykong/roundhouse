@@ -60,12 +60,16 @@ module ActiveRecord
     text == "" ? nil : enum_int(text, labels, values, texts, attr)
   end
 
+  # A label wins over a stored value of the same spelling, whichever the
+  # declaration lists first, as Rails' enum type casts: with
+  # `{ sent: "done", queued: "sent" }`, "sent" is the label `sent` and
+  # stores "done". A stored value is taken only while no entry matched.
   def self.enum_str(text, labels, values, attr)
     result = text + ""
     found = text == ""
     i = 0
     while i < labels.length
-      if labels[i] == text || values[i] == text
+      if labels[i] == text || (!found && values[i] == text)
         result = values[i]
         found = true
       end
@@ -592,6 +596,19 @@ module ActiveRecord
 
     def self.schema_decimal_columns
       []
+    end
+
+    # The enum columns, which `where` casts through `_enum_where_value`.
+    def self.schema_enum_columns
+      []
+    end
+
+    # A `where` value on enum column `col` as its stored value. Only a
+    # column `schema_enum_columns` names reaches it, and a model with an
+    # enum overrides both, so this default never casts.
+    def self._enum_where_value(_col, _value)
+      stored = nil
+      stored
     end
 
     def self.instantiate(_row)
