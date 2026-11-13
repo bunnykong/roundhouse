@@ -71,3 +71,38 @@ fn a_unique_predicate_sqlite_cannot_run_is_named_in_a_warning() {
         "{schema}"
     );
 }
+
+/// The Roda conversion's Sequel migrations drop the same predicates the
+/// SQLite DDL does, so the same warning names them.
+#[test]
+fn a_unique_predicate_the_roda_migration_drops_is_named_in_a_warning() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/monitor_scan.rb"),
+        b"class MonitorScan < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\nend\n".to_vec(),
+    );
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/tiny-blog");
+    let (files, diags) =
+        roundhouse::emit::diagnostics::scope(|| target_files(&app, &root, BuildTarget::Roda));
+    let files = files.expect("roda target files");
+
+    let named: Vec<_> = diags.iter().filter(|d| d.message.contains("partial_unique_index")).collect();
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert!(named[0].message.contains("index_monitor_scans_initial"), "{}", named[0].message);
+
+    let migration = files
+        .iter()
+        .find(|(_, c)| c.contains("create_table(:monitor_scans)") || c.contains("create_table :monitor_scans"))
+        .map(|(_, c)| c.as_str())
+        .unwrap_or_else(|| panic!("no monitor_scans migration in {:?}", files.iter().map(|(p, _)| p).collect::<Vec<_>>()));
+    assert!(migration.contains("index :monitor_id, unique: true\n"), "{migration}");
+    assert!(migration.contains("where: Sequel.lit(\"(retired_at IS NULL)\")"), "{migration}");
+}
