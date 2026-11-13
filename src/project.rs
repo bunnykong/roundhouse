@@ -12926,12 +12926,125 @@ fn for_each_capitalised_word(src: &str, mut f: impl FnMut(&str)) {
     }
 }
 
+/// The byte ranges of the references to `konst` that a `defined?(konst)`
+/// guard covers, read from the parsed program: anything inside the guard's
+/// own argument (it is never evaluated), the right side of an `&&`/`and`
+/// whose left side is the guard or an `&&`/`and` chain holding it, and the
+/// `then` branch of an `if`/`elsif`, modifier `if` or ternary whose condition
+/// is one. An `else` branch, an `||`, a negation, `unless`, a guard passed to
+/// a call and a modifier's own condition cover nothing. `None` when the
+/// source does not parse: every reference then counts.
+fn defined_guard_covers(src: &str, konst: &str) -> Option<Vec<(usize, usize)>> {
+    use crate::ingest::prism_api::PrismLocation;
+    use ruby_prism::Visit;
+    struct Covers<'k> {
+        konst: &'k str,
+        depth: usize,
+        ranges: Vec<(usize, usize)>,
+    }
+    impl Covers<'_> {
+        /// `konst` or `::konst`.
+        fn names(&self, node: &ruby_prism::Node<'_>) -> bool {
+            if node.as_constant_read_node().is_none() && node.as_constant_path_node().is_none() {
+                return false;
+            }
+            let name = node.location().as_slice();
+            name.strip_prefix(b"::").unwrap_or(name) == self.konst.as_bytes()
+        }
+        /// `defined?(konst)`, alone, parenthesised or in an `&&`/`and` chain.
+        fn guard(&self, node: &ruby_prism::Node<'_>) -> bool {
+            if let Some(defined) = node.as_defined_node() {
+                return self.names(&defined.value());
+            }
+            if let Some(and) = node.as_and_node() {
+                return self.guard(&and.left()) || self.guard(&and.right());
+            }
+            if let Some(body) = node.as_parentheses_node().and_then(|p| p.body()) {
+                return match body.as_statements_node() {
+                    Some(stmts) => {
+                        let mut body = stmts.body().iter();
+                        body.next().is_some_and(|only| body.next().is_none() && self.guard(&only))
+                    }
+                    None => self.guard(&body),
+                };
+            }
+            false
+        }
+        fn mark(&mut self, node: &ruby_prism::Node<'_>) {
+            if self.depth > 0 && self.names(node) {
+                let at = node.location();
+                self.ranges.push((at.start_offset(), at.end_offset()));
+            }
+        }
+    }
+    impl<'pr> Visit<'pr> for Covers<'_> {
+        fn visit_defined_node(&mut self, node: &ruby_prism::DefinedNode<'pr>) {
+            self.depth += 1;
+            ruby_prism::visit_defined_node(self, node);
+            self.depth -= 1;
+        }
+        fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
+            let left = node.left();
+            self.visit(&left);
+            let held = usize::from(self.guard(&left));
+            self.depth += held;
+            self.visit(&node.right());
+            self.depth -= held;
+        }
+        fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+            let predicate = node.predicate();
+            self.visit(&predicate);
+            if let Some(then) = node.statements() {
+                let held = usize::from(self.guard(&predicate));
+                self.depth += held;
+                self.visit_statements_node(&then);
+                self.depth -= held;
+            }
+            if let Some(subsequent) = node.subsequent() {
+                self.visit(&subsequent);
+            }
+        }
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            self.mark(&node.as_node());
+        }
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            self.mark(&node.as_node());
+            ruby_prism::visit_constant_path_node(self, node);
+        }
+    }
+    let parsed = ruby_prism::parse(src.as_bytes());
+    if parsed.errors().next().is_some() {
+        return None;
+    }
+    let mut covers = Covers { konst, depth: 0, ranges: Vec::new() };
+    covers.visit(&parsed.node());
+    Some(covers.ranges)
+}
+
 fn names_constant(src: &str, konst: &str) -> bool {
     // Most files never mention this name. Reject those with the optimized
     // substring search before walking/decoding every line of the runtime.
     if !src.contains(konst) {
         return false;
     }
+    // A reference a `defined?(Name)` guard covers is not a use: the code
+    // is written to run without the library (runtime/ruby/active_support_ext.rb's
+    // `defined?(::Singleton) && value.is_a?(::Singleton)`), so it must not
+    // pull the library into every program. Only a file that spells a guard
+    // is parsed; the covered references read as blanks, so offsets stay put.
+    let masked;
+    let src = match src.contains("defined?").then(|| defined_guard_covers(src, konst)).flatten() {
+        Some(covers) if !covers.is_empty() => {
+            let mut bytes = src.as_bytes().to_vec();
+            for (from, to) in covers {
+                bytes[from..to].fill(b' ');
+            }
+            // Constant names are ASCII, so blanking them keeps UTF-8 whole.
+            masked = String::from_utf8(bytes).expect("blanked ASCII");
+            masked.as_str()
+        }
+        _ => src,
+    };
     src.lines().any(|line| {
         if line.trim_start().starts_with('#') {
             return false;
@@ -13149,7 +13262,7 @@ fn drop_facades_the_program_defines(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 30] = [
+const BUNDLED: [(&str, &str); 31] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -13173,6 +13286,10 @@ const BUNDLED: [(&str, &str); 30] = [
     ("OptionParser", "optparse"),
     ("Pathname", "pathname"),
     ("Set", "set"),
+    // `include Singleton`: a default library ActiveSupport has loaded before
+    // the app, so an app never requires it. Spinel has `Singleton` (and its
+    // `.instance`) only once the file requires it.
+    ("Singleton", "singleton"),
     ("StringIO", "stringio"),
     ("StringScanner", "strscan"),
     // `Vips::Image.new_from_buffer`: the ruby-vips gem on CRuby/JRuby, the
@@ -15102,6 +15219,100 @@ mod tests {
         assert!(names_constant("  include Raabro\n", "Raabro"));
         assert!(names_constant("  extend ::Raabro, Other\n", "Raabro"));
         assert!(!names_constant("  include RaabroExt\n", "Raabro"));
+    }
+
+    /// Code behind `defined?(Name)` runs without the library, so it is not
+    /// a use; an unguarded reference, and an `else` branch, still are.
+    #[test]
+    fn names_constant_skips_a_reference_a_defined_guard_covers() {
+        let guarded = [
+            "if value.is_a?(Method) || (defined?(::Singleton) && value.is_a?(::Singleton))\n  1\nend\n",
+            "x = defined?(Singleton) ? Singleton.name : nil\n",
+            "return Singleton.name if defined?(::Singleton)\n",
+            "if defined?(::Singleton)\n  Singleton.name\n\n  ::Singleton.name\nend\n",
+            "if x\n  1\nelsif defined?(Singleton)\n  Singleton.name\nend\n",
+        ];
+        for src in guarded {
+            assert!(!names_constant(src, "Singleton"), "{src:?}");
+        }
+        let used = [
+            "  include Singleton\n",
+            "x = Singleton.name\n",
+            "if defined?(::Singleton)\n  1\nelse\n  Singleton.name\nend\n",
+            "if defined?(::Singleton)\n  1\nend\nSingleton.name\n",
+            "Singleton.name if defined?(::Other)\n",
+        ];
+        for src in used {
+            assert!(names_constant(src, "Singleton"), "{src:?}");
+        }
+    }
+
+    /// A guard covers only code that runs after it held: a negated or
+    /// disjunctive condition, the other arm of an `||` or a ternary, and the
+    /// next argument still use the name. `&&`/`and` joins (an unrelated `!=`
+    /// arm too) and an `&&` after an `||` (which binds tighter) still cover.
+    /// A call that only ends in `defined?`, a guard passed to a call and a
+    /// modifier `if`'s own condition cover nothing, and neither does source
+    /// that does not parse.
+    #[test]
+    fn names_constant_counts_what_a_defined_guard_does_not_cover() {
+        let used = [
+            "if defined?(::Singleton) || enabled\n  Singleton.name\nend\n",
+            "if !defined?(Singleton)\n  Singleton.name\nend\n",
+            "if not defined?(Singleton)\n  Singleton.name\nend\n",
+            "if defined?(Singleton) or enabled\n  Singleton.name\nend\n",
+            "if x\n  1\nelsif enabled || defined?(Singleton)\n  Singleton.name\nend\n",
+            "if defined?(Singleton).nil?\n  Singleton.name\nend\n",
+            "Singleton.name if defined?(Singleton) || enabled\n",
+            "Singleton.name if !defined?(Singleton)\n",
+            "Singleton.name; a if defined?(Singleton)\n",
+            "x = defined?(Singleton) || Singleton.name\n",
+            "x = !defined?(Singleton) && Singleton.name\n",
+            "x = defined?(Singleton) ? 1 : Singleton.name\n",
+            "x = defined?(Singleton) && a ? 1 : Singleton.name\n",
+            "x = a || defined?(Singleton) and Singleton.name\n",
+            "x = (defined?(Singleton) && 1) || Singleton.name\n",
+            "foo(defined?(Singleton) && 1, Singleton.name)\n",
+            // A call that merely ends in `defined?`, a guard passed to a
+            // call, and a modifier's own condition (it runs first).
+            "already_defined?(Singleton)\n",
+            "if accept? defined?(Singleton)\n  Singleton.name\nend\n",
+            "defined?(Singleton) && 1 if Singleton.respond_to?(:x)\n",
+            // Source that does not parse is read as using every name it spells.
+            "if defined?(Singleton)\n  Singleton.name\n",
+        ];
+        for src in used {
+            assert!(names_constant(src, "Singleton"), "{src:?}");
+        }
+        let guarded = [
+            "if defined?(Singleton) && Singleton.respond_to?(:x)\n  Singleton.name\nend\n",
+            "if defined?(Singleton) && kind != :plain\n  Singleton.name\nend\n",
+            "if defined?(Singleton) and ready\n  Singleton.name\nend\n",
+            "if (defined?(::Singleton) && x.valid?)\n  Singleton.name\nend\n",
+            "Singleton.name if defined?(Singleton) && kind != :plain\n",
+            "x = a || defined?(Singleton) && Singleton.name\n",
+            "x = !a && defined?(Singleton) && Singleton.name\n",
+            "x = defined?(Singleton) &&\n  Singleton.name\n",
+        ];
+        for src in guarded {
+            assert!(!names_constant(src, "Singleton"), "{src:?}");
+        }
+    }
+
+    /// `defined?(Name)` in a string or a comment guards nothing: the code
+    /// after it, on its line or in the block below, still uses the name.
+    #[test]
+    fn names_constant_reads_a_guard_only_in_code() {
+        let used = [
+            "if description == \"defined?(Singleton)\"\n  Singleton.name\nend\n",
+            "if ready # defined?(Singleton)\n  Singleton.name\nend\n",
+            "x = \"defined?(Singleton)\"; Singleton.name\n",
+            "x = 'defined?(::Singleton) && '; Singleton.name\n",
+        ];
+        for src in used {
+            assert!(names_constant(src, "Singleton"), "{src:?}");
+        }
+        assert!(!names_constant("if description == \"x\" && defined?(Singleton)\n  Singleton.name\nend\n", "Singleton"));
     }
 
     /// A rooted `::Name` names the top-level constant, and so does a value
