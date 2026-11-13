@@ -79,3 +79,37 @@ fn a_shared_case_waits_on_its_own_group_only() {
     assert_eq!(emit_and_run::bundle::shared_case(&dir, "unsettled"), None);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn contract_cases_adding_routes_share_a_build_and_a_rewritten_route_does_not() {
+    let dir = std::env::temp_dir().join(format!("rh-bundle-routes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (base, collected) = (dir.join("base"), dir.join("collected"));
+    std::fs::create_dir_all(base.join("config")).unwrap();
+    std::fs::create_dir_all(&collected).unwrap();
+    std::fs::write(base.join("config/routes.rb"), "Rails.application.routes.draw do\n  resources :articles do\n  end\nend\n").unwrap();
+    let anchor = "  resources :articles do";
+    let case = |key: &str, with: &str, file: &str| {
+        let v = serde_json::json!({
+            "key": key, "test": key, "base": base.to_str().unwrap(), "flags": [], "script": "",
+            "edits": [
+                {"write": file, "content": "class Probe\nend\n"},
+                {"replace": "config/routes.rb", "find": anchor, "with": with},
+            ],
+        });
+        std::fs::write(collected.join(format!("{key}.json")), v.to_string()).unwrap();
+    };
+    case("kinds", "  get \"kinds\" => \"kinds#index\"\n  resources :articles do", "app/controllers/kinds_controller.rb");
+    case("json", "  get \"article_json/:id\" => \"article_json#show\"\n  resources :articles do", "app/controllers/article_json_controller.rb");
+    case("rewritten", "  resources :articles, only: [:index] do", "app/controllers/other_controller.rb");
+    let v = serde_json::json!({
+        "key": "inline", "test": "inline", "base": base.to_str().unwrap(), "flags": [], "script": "",
+        "edits": [{"replace": "config/routes.rb", "find": "  resources :articles", "with": "  resources :articles, only: [:show]"}],
+    });
+    std::fs::write(collected.join("inline.json"), v.to_string()).unwrap();
+    let out = dir.join("plan.json");
+    emit_and_run::bundle::plan(&collected, &out);
+    let units: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!(units, vec![vec!["json".to_string(), "kinds".to_string()]]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
