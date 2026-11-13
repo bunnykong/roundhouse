@@ -236,7 +236,7 @@ fn builder_chain_sends_do_not_carry_db_effects() {
     assert!(
         published.body.effects.is_pure(),
         "Builder Send `where(...)` should carry no effects; got {:?}",
-        published.body.effects.effects,
+        published.body.effects.effects(),
     );
 }
 
@@ -261,9 +261,9 @@ fn terminal_sends_still_carry_db_effects() {
     // `value` is the `Post.all` Send — Terminal, should carry
     // DbRead(posts) as before.
     assert!(
-        value.effects.effects.contains(&posts_read),
+        value.effects.effects().contains(&posts_read),
         "Terminal Send `Post.all` should carry DbRead(posts); got {:?}",
-        value.effects.effects,
+        value.effects.effects(),
     );
 }
 
@@ -354,7 +354,7 @@ fn custom_adapter_suppresses_db_effects() {
     Analyzer::with_adapter(&app, Box::new(NoDbAdapter)).analyze(&mut app);
 
     for action in app.controllers[0].actions() {
-        for e in &action.effects.effects {
+        for e in action.effects.effects() {
             match e {
                 Effect::DbRead { .. } | Effect::DbWrite { .. } => {
                     panic!(
@@ -379,9 +379,9 @@ fn action_effects_include_db_reads() {
     for action_name in ["index", "show", "destroy"] {
         let action = ctrl.actions().find(|a| a.name.as_str() == action_name).unwrap();
         assert!(
-            action.effects.effects.contains(&posts_read),
+            action.effects.effects().contains(&posts_read),
             "{action_name} missing DbRead(posts); got {:?}",
-            action.effects.effects
+            action.effects.effects()
         );
     }
 }
@@ -399,9 +399,9 @@ fn destroy_effects_include_db_write_via_ivar_dispatch() {
         .unwrap();
     let posts_write = Effect::DbWrite { table: TableRef(Symbol::from("posts")) };
     assert!(
-        destroy.effects.effects.contains(&posts_write),
+        destroy.effects.effects().contains(&posts_write),
         "destroy missing DbWrite(posts); got {:?}",
-        destroy.effects.effects
+        destroy.effects.effects()
     );
 }
 
@@ -452,7 +452,7 @@ fn actions_without_db_calls_stay_pure() {
         app.controllers[0].actions().next().unwrap().effects.clone()
     };
     action.effects = body_ctx_effects;
-    assert!(action.effects.effects.is_empty(), "expected empty effects for empty body");
+    assert!(action.effects.effects().is_empty(), "expected empty effects for empty body");
 }
 
 // Per-expression effect annotation --------------------------------------
@@ -479,14 +479,14 @@ fn per_expr_effects_populated_on_send_site() {
         .unwrap();
     let ExprNode::Assign { value, .. } = &*index.body.node else { panic!() };
     assert!(
-        value.effects.effects.contains(&posts_read),
+        value.effects.effects().contains(&posts_read),
         "Post.all Send should carry DbRead(posts); got {:?}",
-        value.effects.effects,
+        value.effects.effects(),
     );
     assert!(
         index.body.effects.is_pure(),
         "Assign wrapper has no local effect; got {:?}",
-        index.body.effects.effects,
+        index.body.effects.effects(),
     );
     let ExprNode::Send { recv, .. } = &*value.node else { panic!() };
     assert!(
@@ -517,9 +517,9 @@ fn per_expr_effects_on_instance_dispatch() {
         ))
         .expect("destroy Send present");
     assert!(
-        destroy_send.effects.effects.contains(&posts_write),
+        destroy_send.effects.effects().contains(&posts_write),
         "@post.destroy should carry DbWrite(posts); got {:?}",
-        destroy_send.effects.effects,
+        destroy_send.effects.effects(),
     );
     let ExprNode::Send { recv, .. } = &*destroy_send.node else { panic!() };
     assert!(
@@ -546,9 +546,9 @@ fn per_expr_effects_on_io_calls() {
         ))
         .expect("redirect_to Send present");
     assert!(
-        redirect.effects.effects.contains(&Effect::Io),
+        redirect.effects.effects().contains(&Effect::Io),
         "redirect_to should carry Io; got {:?}",
-        redirect.effects.effects,
+        redirect.effects.effects(),
     );
 }
 
@@ -562,7 +562,7 @@ fn action_aggregate_equals_subtree_fold() {
     use std::collections::BTreeSet;
 
     fn fold(expr: &Expr, acc: &mut BTreeSet<Effect>) {
-        acc.extend(expr.effects.effects.iter().cloned());
+        acc.extend(expr.effects.effects().iter().cloned());
         match &*expr.node {
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
@@ -735,8 +735,8 @@ fn action_aggregate_equals_subtree_fold() {
         let mut folded: BTreeSet<Effect> = BTreeSet::new();
         fold(&action.body, &mut folded);
         assert_eq!(
-            folded,
-            action.effects.effects,
+            &folded,
+            action.effects.effects(),
             "action {} — tree fold should equal the aggregate",
             action.name.as_str(),
         );
@@ -766,7 +766,7 @@ fn analyze_action_body(body: roundhouse::expr::Expr) -> roundhouse::expr::Expr {
         block_param: None,
         body,
         renders: RenderTarget::Inferred,
-        effects: EffectSet { effects: BTreeSet::new() },
+        effects: EffectSet::pure(),
     };
     let mut app = roundhouse::App::new();
     app.controllers.push(Controller {
@@ -4107,7 +4107,7 @@ end
         set_widget.assigns
     );
     assert!(
-        set_widget.effects.effects.iter().any(|e| matches!(e, Effect::DbRead { .. })),
+        set_widget.effects.effects().iter().any(|e| matches!(e, Effect::DbRead { .. })),
         "Widget.find in the filter body surfaces as DbRead; got {:?}",
         set_widget.effects
     );
@@ -4174,7 +4174,7 @@ end
     assert_eq!(load.defined_in.0.as_str(), "RoomsController");
     assert_eq!(load.included_via.0.as_str(), "RoomsController");
     assert!(
-        load.effects.effects.iter().any(|e| matches!(e, Effect::DbRead { .. })),
+        load.effects.effects().iter().any(|e| matches!(e, Effect::DbRead { .. })),
         "parent load_room DbRead must reach the subclass filter hop; got {:?}",
         load.effects
     );

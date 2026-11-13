@@ -27,7 +27,7 @@ use crate::app::App;
 use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// Every mailer class: transitive parent-chain closure, since
 /// ApplicationMailer names ActionMailer::Base directly, BanNotification
@@ -134,10 +134,13 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
             // and unstamped sends on typed receivers read as dispatch
             // failures.
             let (param_tys, ret_ty): (Vec<Option<Ty>>, Option<Ty>) = match &m.signature {
-                Some(Ty::Fn { params, ret, .. }) if params.len() == m.params.len() => (
-                    params.iter().map(|p| Some((*p.ty).clone())).collect(),
-                    Some((**ret).clone()),
-                ),
+                Some(Ty::Fn(fn_ty)) if fn_ty.params.len() == m.params.len() => {
+                    let FnTy { params, ret, .. } = &**fn_ty;
+                    (
+                        params.iter().map(|p| Some((*p.ty).clone())).collect(),
+                        Some((**ret).clone()),
+                    )
+                },
                 _ => (vec![None; m.params.len()], None),
             };
 
@@ -322,12 +325,12 @@ fn parameterized_constructor(mailer: &crate::ident::ClassId) -> crate::dialect::
         receiver: crate::dialect::MethodReceiver::Class,
         params: vec![crate::dialect::Param::positional(params.clone())],
         body,
-        signature: Some(Ty::Fn {
+        signature: Some(Ty::Fn(Box::new(FnTy {
             params: vec![crate::ty::Param { name: params, ty: params_ty.into(), kind: crate::ty::ParamKind::Required }].into(),
             block: None,
             ret: instance.into(),
             effects: Default::default(),
-        }),
+        }))),
         effects: Default::default(),
         enclosing_class: Some(mailer.0.clone()),
         kind: crate::dialect::AccessorKind::Method,

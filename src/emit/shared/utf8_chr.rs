@@ -274,9 +274,10 @@ fn main() {{
                 owner.0.as_str().rsplit("::").next().unwrap(),
             ));
             for (name, signature) in signatures {
-                let crate::ty::Ty::Fn { ret, .. } = signature else {
+                let crate::ty::Ty::Fn(fn_ty) = signature else {
                     panic!("method signature")
                 };
+                let crate::ty::FnTy { ret, .. } = *fn_ty;
                 for id in [owner.clone(), short.clone()] {
                     registry
                         .entry(id)

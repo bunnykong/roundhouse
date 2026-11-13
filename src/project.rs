@@ -3382,6 +3382,42 @@ pub fn target_files(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    target_files_lent(Lent::Shared(app), fixture, target)
+}
+
+/// [`target_files`] for a caller that is done with the app's bodies: the
+/// target lowerings that would copy the whole app to rewrite it rewrite
+/// this one instead (`lower::constantize`). The files are the same; the
+/// app is left as the emit lowered it.
+pub fn target_files_lowering_in_place(
+    app: &mut App,
+    fixture: &Path,
+    target: BuildTarget,
+) -> Result<Vec<(String, String)>, String> {
+    target_files_lent(Lent::Own(app), fixture, target)
+}
+
+/// The app an emit reads: borrowed, or the caller's own to lower in place.
+enum Lent<'a> {
+    Shared(&'a App),
+    Own(&'a mut App),
+}
+
+impl Lent<'_> {
+    fn get(&self) -> &App {
+        match self {
+            Lent::Shared(app) => app,
+            Lent::Own(app) => app,
+        }
+    }
+}
+
+fn target_files_lent(
+    lent: Lent<'_>,
+    fixture: &Path,
+    target: BuildTarget,
+) -> Result<Vec<(String, String)>, String> {
+    let app = lent.get();
     // Stage 0 of the specializer: the identity. Nothing is specialized
     // yet, so none of the trimming or refusals below apply — every construct is
     // residue, and the residue runs on Rails.
@@ -3404,10 +3440,10 @@ pub fn target_files(
             (crate::gems::native_extension_gem_namespaces(app), Default::default())
         };
         return crate::emit::ruby::with_external_gem_namespaces(&namespaces, includes, || {
-            crate::emit::ruby::expr::with_body_statements(|| target_files_inner(app, fixture, target))
+            crate::emit::ruby::expr::with_body_statements(|| target_files_inner(lent, fixture, target))
         });
     }
-    target_files_inner(app, fixture, target)
+    target_files_inner(lent, fixture, target)
 }
 
 /// The ruby family runs an automatically sourced gem as the real gem,
@@ -3476,10 +3512,11 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
 pub(crate) use crate::source_gem_shake::{compiled_on_the_ruby_family, shakes_source_gems};
 
 fn target_files_inner(
-    app: &App,
+    mut lent: Lent<'_>,
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    let app = lent.get();
     let without_inherited_replay;
     let app = if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
         let mut trimmed = app.clone();
@@ -3554,12 +3591,20 @@ fn target_files_inner(
         None => app,
     };
     let with_closed_constantize;
-    let app = match crate::lower::constantize::lower_for_target(app, target) {
-        Some(lowered) => {
-            with_closed_constantize = lowered;
-            &with_closed_constantize
+    // No step above replaced the app: the caller's own is lowered where it is.
+    let in_place = matches!(lent, Lent::Own(_)) && std::ptr::eq(app, lent.get());
+    let app = if in_place {
+        let Lent::Own(own) = &mut lent else { unreachable!() };
+        crate::lower::constantize::lower_in_place(own, target);
+        &**own
+    } else {
+        match crate::lower::constantize::lower_for_target(app, target) {
+            Some(lowered) => {
+                with_closed_constantize = lowered;
+                &with_closed_constantize
+            }
+            None => app,
         }
-        None => app,
     };
     let with_nil_operands;
     let app = match crate::lower::nil_operand::lower_for_target(app, target) {
@@ -10411,6 +10456,9 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // request-finder registry; one model lowering serves them all.
     let _registry = crate::lower::model_to_library::share_request_finder_registry(&app.models, &app.schema);
     let _writers = crate::lower::model_to_library::share_module_writers(app);
+    // Whole-App answers several passes ask for (`app_answers::of`), each
+    // computed once for this assembly; `app` is borrowed for the guard's life.
+    let _answers = crate::app_answers::share(app);
     let mut files: Vec<(String, String)> = Vec::new();
 
     crate::runtime_files::walk_into("runtime/spinel/scaffold", "", &mut files)?;
@@ -13198,7 +13246,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
             files.iter().any(|(p, c)| {
                 p.ends_with(".rb")
                     && (requires_feature(c, &require_line)
-                        || c.lines().any(|line| line.trim_start().starts_with(&under_gem)))
+                        || (c.contains(&under_gem) && c.lines().any(|line| line.trim_start().starts_with(&under_gem))))
             })
         })
         .collect();

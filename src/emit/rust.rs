@@ -2038,7 +2038,7 @@ fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> Stri
             continue;
         }
         let sig_params: &[crate::ty::Param] = match m.signature.as_ref() {
-            Some(crate::ty::Ty::Fn { params, .. }) => params,
+            Some(crate::ty::Ty::Fn(fn_ty)) => &fn_ty.params,
             _ => &[],
         };
         let params: Vec<String> = m
@@ -2478,7 +2478,7 @@ fn collect_global_class_methods(
 ) -> EmitCtx {
     use crate::dialect::LibraryClass;
     use crate::ident::Symbol;
-    use crate::ty::{Param, ParamKind, Ty};
+    use crate::ty::{FnTy, Param, ParamKind, Ty};
 
     fn collect_one(
         lc: &LibraryClass,
@@ -2502,11 +2502,14 @@ fn collect_global_class_methods(
                 out_mutating.insert(m.name.as_str().to_string());
             }
             let params: Vec<Param> = match m.signature.as_ref() {
-                Some(Ty::Fn { params, .. }) => params
-                    .iter()
-                    .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
-                    .cloned()
-                    .collect(),
+                Some(Ty::Fn(fn_ty)) => {
+                    let FnTy { params, .. } = &**fn_ty;
+                    params
+                        .iter()
+                        .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
+                        .cloned()
+                        .collect()
+                },
                 _ => m
                     .params
                     .iter()

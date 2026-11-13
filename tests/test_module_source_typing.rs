@@ -2,6 +2,7 @@
 use roundhouse::analyze::LoopEnd;
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::{App, Expr, ExprNode, Ty};
+use roundhouse::ty::FnTy;
 use std::path::PathBuf;
 
 fn ingest(source: &str) -> App {
@@ -100,8 +101,8 @@ end
         "source calls must not acquire synthetic self"
     );
     assert!(
-        matches!(module.helpers[0].signature, Some(Ty::Fn { ref ret, .. })
-        if matches!(&**ret, Ty::Array { .. })),
+        matches!(module.helpers[0].signature, Some(Ty::Fn(ref fn_ty))
+        if matches!(&*fn_ty.ret, Ty::Array { .. })),
         "converged helper signature"
     );
 }
@@ -257,7 +258,7 @@ end
         .iter_mut()
         .find(|module| module.name.0.as_str() == "SourceProbeTest")
         .unwrap();
-    child.helpers[0].signature = Some(Ty::Fn {
+    child.helpers[0].signature = Some(Ty::Fn(Box::new(FnTy {
         params: vec![roundhouse::ty::Param {
             name: "value".into(),
             ty: Ty::Int.into(),
@@ -266,7 +267,7 @@ end
         block: None,
         ret: std::sync::Arc::new(Ty::Int),
         effects: roundhouse::effect::EffectSet::pure(),
-    });
+    })));
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
     let child = app
         .test_modules
@@ -282,7 +283,7 @@ end
         })]
     );
     assert_eq!(child.helpers[0].body.ty, Some(Ty::Int));
-    assert!(matches!(child.helpers[0].signature, Some(Ty::Fn { ref ret, .. }) if **ret == Ty::Int));
+    assert!(matches!(child.helpers[0].signature, Some(Ty::Fn(ref fn_ty)) if *fn_ty.ret == Ty::Int));
 }
 
 #[test]
@@ -340,9 +341,10 @@ end
     );
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
     let helper = &app.test_modules[0].helpers[1];
-    let Some(Ty::Fn { params, .. }) = &helper.signature else {
+    let Some(Ty::Fn(fn_ty)) = &helper.signature else {
         panic!("target helper signature: {:?}", helper.signature);
     };
+    let FnTy { params, .. } = &**fn_ty;
     assert_eq!(
         params[0].ty,
         Ty::Int.into(),
@@ -379,9 +381,10 @@ end
         value: std::sync::Arc::new(Ty::Str),
     };
     assert_eq!(helper.body.ty, Some(hash.clone()));
-    let Some(Ty::Fn { params, .. }) = &helper.signature else {
+    let Some(Ty::Fn(fn_ty)) = &helper.signature else {
         panic!("positional Hash helper signature: {:?}", helper.signature);
     };
+    let FnTy { params, .. } = &**fn_ty;
     assert_eq!(params[0].ty, hash.into());
 }
 
@@ -626,7 +629,7 @@ end
             };
             assert_eq!(module.helpers[0].body.ty, Some(expected.clone()), "{name}");
             assert!(matches!(&module.helpers[0].signature,
-                Some(Ty::Fn { ret, .. }) if **ret == expected));
+                Some(Ty::Fn(fn_ty)) if *fn_ty.ret == expected));
             let mut receivers = Vec::new();
             each_receivers(&module.tests[0].body, &mut receivers);
             assert_eq!(

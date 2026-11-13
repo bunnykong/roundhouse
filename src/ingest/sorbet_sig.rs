@@ -24,7 +24,7 @@ use ruby_prism::Node;
 
 use crate::ident::{ClassId, Symbol};
 use crate::effect::EffectSet;
-use crate::ty::{Param, ParamKind, Ty};
+use crate::ty::{FnTy, Param, ParamKind, Ty};
 
 use super::util::constant_id_str;
 
@@ -103,15 +103,18 @@ fn unnamed_relation_is_gradual(ty: &Ty) -> Ty {
         Ty::Hash { key, value } => Ty::Hash { key: std::sync::Arc::new(go(key)), value: std::sync::Arc::new(go(value)) },
         Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(go).collect() },
         Ty::Union { variants } => Ty::Union { variants: variants.iter().map(go).collect() },
-        Ty::Fn { params, block, ret, effects } => Ty::Fn {
-            params: params
-                .iter()
-                .map(|p| Param { name: p.name.clone(), ty: std::sync::Arc::new(go(&p.ty)), kind: p.kind.clone() })
-                .collect(),
-            block: block.as_ref().map(|b| std::sync::Arc::new(go(b))),
-            ret: std::sync::Arc::new(go(ret)),
-            effects: effects.clone(),
-        },
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, block, ret, effects } = &**fn_ty;
+            Ty::Fn(Box::new(FnTy {
+                params: params
+                    .iter()
+                    .map(|p| Param { name: p.name.clone(), ty: std::sync::Arc::new(go(&p.ty)), kind: p.kind.clone() })
+                    .collect(),
+                block: block.as_ref().map(|b| std::sync::Arc::new(go(b))),
+                ret: std::sync::Arc::new(go(ret)),
+                effects: effects.clone(),
+            }))
+        }
         other => other.clone(),
     }
 }
@@ -280,18 +283,18 @@ fn collect_struct_properties(
         let mut arguments = arguments.arguments().iter();
         let Some(name) = arguments.next().and_then(|n| symbol_name(&n)) else { continue };
         let Some(ty) = arguments.next().and_then(|n| sorbet_ty(&n, true, &HashMap::default())) else { continue };
-        let reader = Ty::Fn {
+        let reader = Ty::Fn(Box::new(FnTy {
             params: Vec::new().into(),
             block: None,
             ret: std::sync::Arc::new(ty.clone()),
             effects: EffectSet::pure(),
-        };
+        }));
         let class = out.entry(ClassId(Symbol::new(class_name))).or_default();
         class.insert(Symbol::new(&name), reader);
         if writable {
             class.insert(
                 Symbol::new(&format!("{name}=")),
-                Ty::Fn {
+                Ty::Fn(Box::new(FnTy {
                     params: vec![Param {
                         name: Symbol::new("value"),
                         ty: ty.clone().into(),
@@ -300,7 +303,7 @@ fn collect_struct_properties(
                     block: None,
                     ret: std::sync::Arc::new(ty),
                     effects: EffectSet::pure(),
-                },
+                })),
             );
         }
     }
@@ -349,17 +352,17 @@ fn collect_enum_surface(
     }
     let Some(value_ty) = value_ty else { return };
     let enum_ty = Ty::Class { id: ClassId(Symbol::new(class_name)), args: Vec::new().into() };
-    let nullary = |ret: Ty| Ty::Fn {
+    let nullary = |ret: Ty| Ty::Fn(Box::new(FnTy {
         params: Vec::new().into(),
         block: None,
         ret: std::sync::Arc::new(ret),
         effects: EffectSet::pure(),
-    };
+    }));
     let class = out.entry(ClassId(Symbol::new(class_name))).or_default();
     class.insert(Symbol::new("serialize"), nullary(value_ty.clone()));
     class.insert(
         Symbol::new("deserialize"),
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: vec![Param {
                 name: Symbol::new("value"),
                 ty: value_ty.into(),
@@ -368,7 +371,7 @@ fn collect_enum_surface(
             block: None,
             ret: std::sync::Arc::new(enum_ty.clone()),
             effects: EffectSet::pure(),
-        },
+        })),
     );
     class.insert(Symbol::new("values"), nullary(Ty::Array { elem: std::sync::Arc::new(enum_ty) }));
 }
@@ -523,11 +526,11 @@ fn signature_ty(
             // reader does, holding the callable itself.
             if kind == ParamKind::Block {
                 if let Ty::Union { variants } = &ty {
-                    if let [only @ Ty::Fn { .. }, Ty::Nil] = variants.as_slice() {
+                    if let [only @ Ty::Fn(_), Ty::Nil] = variants.as_slice() {
                         ty = only.clone();
                     }
                 }
-                if matches!(ty, Ty::Fn { .. }) {
+                if matches!(ty, Ty::Fn(_)) {
                     block = Some(std::sync::Arc::new(ty.clone()));
                 }
             }
@@ -540,12 +543,12 @@ fn signature_ty(
         return None;
     }
 
-    Some(Ty::Fn {
+    Some(Ty::Fn(Box::new(FnTy {
         params: params.into(),
         block,
         ret: std::sync::Arc::new(returns?),
         effects: EffectSet::pure(),
-    })
+    })))
 }
 
 /// The def's own parameters, in order, with the kind Ruby gives them —
@@ -870,12 +873,12 @@ fn sorbet_proc_ty(
                 _ => return None,
             }
         }
-        Some(Ty::Fn {
+        Some(Ty::Fn(Box::new(FnTy {
             params: params.into(),
             block: None,
             ret: std::sync::Arc::new(ret.unwrap_or(Ty::Untyped)),
             effects: EffectSet::default(),
-        })
+        })))
     };
     Some(read())
 }
@@ -926,9 +929,10 @@ fn rbs_comment_signature(
     let receiver = if in_singleton_class || def.receiver().is_some() { "self." } else { "" };
     let wrapped = format!("class X\n  def {receiver}m: {text}\nend\n");
     let sigs = crate::rbs::parse_signatures_with_aliases(&wrapped, rbs_aliases).ok()?;
-    let Ty::Fn { params: declared, block, ret, effects } = sigs.methods.into_iter().next()?.1 else {
+    let Ty::Fn(fn_ty) = sigs.methods.into_iter().next()?.1 else {
         return None;
     };
+    let crate::ty::FnTy { params: declared, block, ret, effects } = *fn_ty;
     let (declared_block, declared): (Vec<Param>, Vec<Param>) =
         declared.into_iter().partition(|p| matches!(p.kind, ParamKind::Block));
     let def_params = match def.parameters() {
@@ -974,7 +978,7 @@ fn rbs_comment_signature(
         let ty = declared_block.into_iter().next().map(|p| p.ty).unwrap_or(Ty::Untyped.into());
         params.push(Param { name: Symbol::new(name), ty, kind: ParamKind::Block });
     }
-    Some(Ty::Fn { params: params.into(), block, ret, effects })
+    Some(Ty::Fn(Box::new(FnTy { params: params.into(), block, ret, effects })))
 }
 
 /// The `#: type name = ...` aliases a class or module body declares,

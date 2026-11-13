@@ -200,7 +200,8 @@ pub fn emit_rails_application(app: &App) -> Option<EmittedFile> {
 fn relax_from_stmt_handle(lc: &mut LibraryClass) {
     for m in &mut lc.methods {
         if m.name.as_str() == "from_stmt" && m.receiver == MethodReceiver::Class {
-            if let Some(crate::ty::Ty::Fn { params, .. }) = m.signature.as_mut() {
+            if let Some(crate::ty::Ty::Fn(fn_ty)) = m.signature.as_mut() {
+                let crate::ty::FnTy { params, .. } = &mut **fn_ty;
                 if let Some(p) = params.first_mut() {
                     p.ty = crate::ty::Ty::Untyped.into();
                 }

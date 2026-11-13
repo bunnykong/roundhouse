@@ -13,7 +13,7 @@ use super::expr::emit_expr;
 use super::shared::escape_ident;
 use super::ty::{crystal_ty, has_untyped};
 use crate::dialect::{MethodDef, MethodReceiver};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// Emit a single `MethodDef` as Crystal source (trailing newline
 /// included). Mirrors `super::super::ruby::emit_method` in surface
@@ -35,7 +35,8 @@ pub fn emit_method(m: &MethodDef) -> String {
 
     let params = render_params(m, annotate);
     let ret_clause = if annotate {
-        if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+        if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+            let FnTy { ret, .. } = &**fn_ty;
             // Drop the return-type annotation when the declared
             // return references the enclosing class — these are
             // self-typed methods (RBS `instance` / `self` types,
@@ -82,7 +83,8 @@ pub fn emit_method(m: &MethodDef) -> String {
     // `backprop_return_ty_to_tail` and the runtime_src pre-type stamp
     // — without it, `default_url_options : Hash(Symbol, String)` with
     // body `{}` fails Crystal typecheck (FV compare-extra crystal).
-    let body = if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+    let body = if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+        let FnTy { ret, .. } = &**fn_ty;
         let mut body = m.body.clone();
         crate::analyze::stamp_expected_on_empty_return_tail(&mut body, ret);
         body
@@ -184,7 +186,8 @@ fn render_params(m: &MethodDef, annotate: bool) -> String {
         return String::new();
     }
     let sig_params = if annotate {
-        if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+        if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+            let FnTy { params, .. } = &**fn_ty;
             Some(params)
         } else {
             None
@@ -213,9 +216,10 @@ fn render_params(m: &MethodDef, annotate: bool) -> String {
 }
 
 fn sig_has_untyped(sig: &Ty) -> bool {
-    let Ty::Fn { params, ret, .. } = sig else {
+    let Ty::Fn(fn_ty) = sig else {
         return true;
     };
+    let FnTy { params, ret, .. } = &**fn_ty;
     params.iter().any(|p| has_untyped(&p.ty)) || has_untyped(ret)
 }
 
@@ -266,12 +270,12 @@ mod empty_hash_return_tests {
             block_param: None,
             name_span: Span::synthetic(),
             body,
-            signature: Some(Ty::Fn {
+            signature: Some(Ty::Fn(Box::new(FnTy {
                 params: vec![].into(),
                 block: None,
                 ret: Arc::new(ret),
                 effects: Default::default(),
-            }),
+            }))),
             effects: Default::default(),
             enclosing_class: Some(Symbol::from("ActionController::Base")),
             kind: Default::default(),

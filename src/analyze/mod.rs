@@ -106,7 +106,7 @@ use crate::dialect::{
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::{ParamKind, Row, Ty};
+use crate::ty::{FnTy, ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
@@ -2295,7 +2295,8 @@ impl Analyzer {
     fn stamp_inferred_method_signatures(&self, app: &mut App) {
         let declared_sigs = app.rbs_signatures.clone();
         let declared = |owner: &ClassId, method: &crate::dialect::MethodDef| -> Option<Ty> {
-            let sig @ Ty::Fn { params, .. } = declared_sigs.get(owner)?.get(&method.name)? else { return None };
+            let sig @ Ty::Fn(fn_ty) = declared_sigs.get(owner)?.get(&method.name)? else { return None };
+            let FnTy { params, .. } = &**fn_ty;
             (params.len() == method.params.len() && params.iter().zip(&method.params).all(|(d, p)| d.kind == p.ty_kind()))
                 .then(|| sig.clone())
         };
@@ -2342,7 +2343,7 @@ impl Analyzer {
                 // there).
                 let ret = table
                     .and_then(|t| t.get(&method.name))
-                    .filter(|t| !matches!(t, Ty::Fn { .. }))
+                    .filter(|t| !matches!(t, Ty::Fn(_)))
                     .cloned()
                     .or_else(|| effective_return_ty(&method.body))
                     .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped));
@@ -2404,12 +2405,12 @@ impl Analyzer {
                         ret = if kept.len() == 1 { kept.into_iter().next().unwrap() } else { Ty::Union { variants: kept.into() } };
                     }
                 }
-                method.signature = Some(Ty::Fn {
+                method.signature = Some(Ty::Fn(Box::new(FnTy {
                     params: params.into(),
                     block: None,
                     ret: std::sync::Arc::new(ret),
                     effects: method.effects.clone(),
-                });
+                })));
             }
         }
     }
@@ -5136,7 +5137,8 @@ impl Analyzer {
             .instance_methods
             .get(method)
             .or_else(|| cls.class_methods.get(method))?;
-        let Ty::Fn { params, .. } = ty else { return None };
+        let Ty::Fn(fn_ty) = ty else { return None };
+        let params = &fn_ty.params;
         let found = params.iter().find(|p| p.name == *name).or_else(|| {
             let n = positional?;
             params
@@ -5164,17 +5166,17 @@ impl Analyzer {
             return false;
         }
         let Some(cls) = self.classes.get(class_id) else { return false };
-        let Some(Ty::Fn { params, .. }) =
+        let Some(Ty::Fn(fn_ty)) =
             cls.instance_methods.get(method).or_else(|| cls.class_methods.get(method))
         else {
             return false;
         };
-        params
+        fn_ty.params
             .iter()
             .find(|p| p.name == *name)
             .or_else(|| {
                 let n = positional?;
-                params
+                fn_ty.params
                     .iter()
                     .filter(|p| matches!(p.kind, crate::ty::ParamKind::Required | crate::ty::ParamKind::Optional))
                     .nth(n)
@@ -6259,8 +6261,8 @@ impl Analyzer {
         // body harvest: `delegated_type`'s `def page; leafable if page?;
         // end` body types as the full polymorphic union, but the useful
         // call-site answer is `Page | nil`.
-        if let Some(Ty::Fn { ret, .. }) = &method.signature {
-            return Some((**ret).clone());
+        if let Some(Ty::Fn(fn_ty)) = &method.signature {
+            return Some((*fn_ty.ret).clone());
         }
         tuple_return_ty(&method.body)
             .or_else(|| effective_return_ty_with(&method.body, Self::class_object_return_ty))
@@ -10315,12 +10317,12 @@ struct ParamShape {
 /// answers `untyped`, and passing it on (`I18n.with_locale(locale,
 /// &action)`) is a read of a bound local rather than of nothing.
 fn captured_block_ty() -> Ty {
-    Ty::Fn {
+    Ty::Fn(Box::new(FnTy {
         params: vec![].into(),
         block: None,
         ret: std::sync::Arc::new(Ty::Untyped),
         effects: crate::effect::EffectSet::default(),
-    }
+    }))
 }
 
 /// What a parameter is typed as inside its method, given what its
@@ -12063,12 +12065,12 @@ mod rbs_ingestion_tests {
     use super::*;
 
     fn fn_ty_returning(ret: Ty) -> Ty {
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: vec![].into(),
             block: None,
             ret: std::sync::Arc::new(ret),
             effects: EffectSet::default(),
-        }
+        }))
     }
 
     #[test]
@@ -12093,9 +12095,10 @@ mod rbs_ingestion_tests {
 
         // Returned Ty is the Ty::Fn — the whole method type, since
         // parameterless method dispatch preserves this shape today.
-        let Ty::Fn { ret, .. } = theme else {
+        let Ty::Fn(fn_ty) = theme else {
             panic!("expected Ty::Fn for theme");
         };
+        let FnTy { ret, .. } = &**fn_ty;
         assert_eq!(**ret, Ty::Str);
     }
 
@@ -12123,9 +12126,10 @@ mod rbs_ingestion_tests {
             .expect("find method from RBS is in Article's instance_methods");
 
         // The RBS override is present with the user-declared return.
-        let Ty::Fn { ret, .. } = find else {
+        let Ty::Fn(fn_ty) = find else {
             panic!("expected Ty::Fn for find override");
         };
+        let FnTy { ret, .. } = &**fn_ty;
         assert_eq!(**ret, Ty::Str);
     }
 
@@ -12381,7 +12385,7 @@ fn value_leaves(body: &Expr, include_returns: bool) -> Vec<&Expr> {
             ExprNode::Case { arms, .. } => arms.iter().for_each(|a| tails(&a.body, out)),
             ExprNode::Seq { exprs } if !exprs.is_empty() => tails(exprs.last().unwrap(), out),
             ExprNode::BeginRescue { body, rescues, else_branch, .. } => {
-                tails(else_branch.as_ref().unwrap_or(body), out);
+                tails(else_branch.as_deref().unwrap_or(body), out);
                 rescues.iter().for_each(|r| tails(&r.body, out));
             }
             ExprNode::Return { .. } => {}

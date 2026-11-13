@@ -90,7 +90,7 @@ pub(super) fn column_writer_with(
             }
             _ => {
                 let ty = match info.instance_methods.get(&column.name) {
-                    Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                    Some(Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
                     Some(ty) => ty.clone(),
                     None => info
                         .attributes
@@ -108,7 +108,7 @@ pub(super) fn column_writer_with(
     }
     for name in &opts.methods {
         let ty = match info.instance_methods.get(name) {
-            Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+            Some(Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
             Some(ty) => ty.clone(),
             None => return Err("a `methods:` name has no typed reader"),
         };

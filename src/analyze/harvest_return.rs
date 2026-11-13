@@ -113,7 +113,7 @@ enum HarvestWrite {
 
 /// Single merge decision for an existing harvested return vs a new body type.
 fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
-    if matches!(existing, Ty::Fn { .. }) {
+    if matches!(existing, Ty::Fn(_)) {
         return HarvestWrite::Keep;
     }
     if existing == &new {
@@ -172,6 +172,7 @@ pub(super) fn insert_inferred_return(
 mod tests {
     use super::*;
     use crate::ident::{ClassId, TyVar};
+    use crate::ty::FnTy;
     use crate::det::HashMap;
 
     fn cfg() -> Ty {
@@ -229,12 +230,12 @@ mod tests {
     fn insert_preserves_rbs_fn() {
         let method = Symbol::from("config");
         let mut table = HashMap::default();
-        let fn_ty = Ty::Fn {
+        let fn_ty = Ty::Fn(Box::new(FnTy {
             params: vec![].into(),
             ret: std::sync::Arc::new(Ty::Str),
             block: None,
             effects: crate::effect::EffectSet::default(),
-        };
+        }));
         insert_inferred_return(&mut table, &method, fn_ty.clone());
         insert_inferred_return(&mut table, &method, cfg());
         assert_eq!(table.get(&method), Some(&fn_ty));

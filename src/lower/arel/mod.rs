@@ -666,7 +666,7 @@ fn model_declares_scope(registry: &HashMap<ClassId, ClassInfo>, model: &ClassId,
 pub(crate) fn returns_relation(ty: &Ty) -> bool {
     match ty {
         Ty::Relation { .. } => true,
-        Ty::Fn { ret, .. } => returns_relation(ret),
+        Ty::Fn(fn_ty) => returns_relation(&fn_ty.ret),
         _ => false,
     }
 }

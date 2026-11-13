@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 use roundhouse::{ClassId, Symbol};
 
 #[test]
@@ -39,7 +39,8 @@ end
         .get(&ClassId(Symbol::new("Cust::Tok")))
         .and_then(|m| m.get(&Symbol::new("from_token")))
         .expect("from_token keeps its signature");
-    let Ty::Fn { ret, .. } = sig else { panic!("{sig:?}") };
+    let Ty::Fn(fn_ty) = sig else { panic!("{sig:?}") };
+    let FnTy { ret, .. } = &**fn_ty;
     match &**ret {
         Ty::Class { id, args } => {
             assert_eq!(id.0.as_str(), "Cust::Res");

@@ -18,7 +18,7 @@ fn ret_of(source: &str, class: &str, method: &str) -> Option<Ty> {
     let owner = app.library_classes.iter().find(|c| c.name.0.as_str() == class).expect("class");
     let def = owner.methods.iter().find(|m| m.name.as_str() == method).expect("method");
     match &def.signature {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
         _ => None,
     }
 }

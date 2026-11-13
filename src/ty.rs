@@ -103,12 +103,9 @@ pub enum Ty {
 
     Class { id: ClassId, args: Shared<Vec<Ty>> },
 
-    Fn {
-        params: Shared<Vec<Param>>,
-        block: Option<Arc<Ty>>,
-        ret: Arc<Ty>,
-        effects: EffectSet,
-    },
+    /// A callable's signature, boxed: it is the largest payload and a
+    /// rare one, so inline it would size every `Ty` (and every `Expr`).
+    Fn(Box<FnTy>),
 
     Var { var: TyVar },
 
@@ -188,19 +185,22 @@ impl Ty {
                 id: id.clone(),
                 args: args.iter().map(|t| t.subst_self(with)).collect(),
             },
-            Ty::Fn { params, block, ret, effects } => Ty::Fn {
-                params: params
-                    .iter()
-                    .map(|p| Param {
-                        name: p.name.clone(),
-                        ty: p.ty.subst_self(with).into(),
-                        kind: p.kind.clone(),
-                    })
-                    .collect(),
-                block: block.as_ref().map(|b| std::sync::Arc::new(b.subst_self(with))),
-                ret: std::sync::Arc::new(ret.subst_self(with)),
-                effects: effects.clone(),
-            },
+            Ty::Fn(fn_ty) => {
+                let FnTy { params, block, ret, effects } = &**fn_ty;
+                Ty::Fn(Box::new(FnTy {
+                    params: params
+                        .iter()
+                        .map(|p| Param {
+                            name: p.name.clone(),
+                            ty: p.ty.subst_self(with).into(),
+                            kind: p.kind.clone(),
+                        })
+                        .collect(),
+                    block: block.as_ref().map(|b| std::sync::Arc::new(b.subst_self(with))),
+                    ret: std::sync::Arc::new(ret.subst_self(with)),
+                    effects: effects.clone(),
+                }))
+            }
             // Leaves, and `Relation { of }` whose `of` is a ClassId
             // rather than a Ty.
             other => other.clone(),
@@ -220,15 +220,18 @@ impl Ty {
             Ty::Hash { key, value } => Ty::Hash { key: std::sync::Arc::new(go(key)), value: std::sync::Arc::new(go(value)) },
             Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(go).collect() },
             Ty::Union { variants } => Ty::Union { variants: variants.iter().map(go).collect() },
-            Ty::Fn { params, block, ret, effects } => Ty::Fn {
-                params: params
-                    .iter()
-                    .map(|p| Param { name: p.name.clone(), ty: go(&p.ty).into(), kind: p.kind.clone() })
-                    .collect(),
-                block: block.as_ref().map(|b| std::sync::Arc::new(go(b))),
-                ret: std::sync::Arc::new(go(ret)),
-                effects: effects.clone(),
-            },
+            Ty::Fn(fn_ty) => {
+                let FnTy { params, block, ret, effects } = &**fn_ty;
+                Ty::Fn(Box::new(FnTy {
+                    params: params
+                        .iter()
+                        .map(|p| Param { name: p.name.clone(), ty: go(&p.ty).into(), kind: p.kind.clone() })
+                        .collect(),
+                    block: block.as_ref().map(|b| std::sync::Arc::new(go(b))),
+                    ret: std::sync::Arc::new(go(ret)),
+                    effects: effects.clone(),
+                }))
+            }
             other => other.clone(),
         }
     }
@@ -253,15 +256,18 @@ impl Ty {
             Ty::Union { variants } => {
                 Ty::Union { variants: variants.iter().map(|t| t.map_class_ids(f)).collect() }
             }
-            Ty::Fn { params, block, ret, effects } => Ty::Fn {
-                params: params
-                    .iter()
-                    .map(|p| Param { name: p.name.clone(), ty: p.ty.map_class_ids(f).into(), kind: p.kind.clone() })
-                    .collect(),
-                block: block.as_ref().map(|b| std::sync::Arc::new(b.map_class_ids(f))),
-                ret: std::sync::Arc::new(ret.map_class_ids(f)),
-                effects: effects.clone(),
-            },
+            Ty::Fn(fn_ty) => {
+                let FnTy { params, block, ret, effects } = &**fn_ty;
+                Ty::Fn(Box::new(FnTy {
+                    params: params
+                        .iter()
+                        .map(|p| Param { name: p.name.clone(), ty: p.ty.map_class_ids(f).into(), kind: p.kind.clone() })
+                        .collect(),
+                    block: block.as_ref().map(|b| std::sync::Arc::new(b.map_class_ids(f))),
+                    ret: std::sync::Arc::new(ret.map_class_ids(f)),
+                    effects: effects.clone(),
+                }))
+            }
             other => other.clone(),
         }
     }
@@ -282,7 +288,8 @@ impl Ty {
             Ty::Record { row } => {
                 row.fields.values().any(Ty::mentions_unknown) || row.rest.is_some()
             }
-            Ty::Fn { params, block, ret, .. } => {
+            Ty::Fn(fn_ty) => {
+                let FnTy { params, block, ret, .. } = &**fn_ty;
                 params.iter().any(|p| p.ty.mentions_unknown())
                     || block.as_ref().is_some_and(|b| b.mentions_unknown())
                     || ret.mentions_unknown()
@@ -388,7 +395,8 @@ impl Ty {
             Ty::Union { variants } => variants.iter().any(Ty::contains_date),
             Ty::Record { row } => row.fields.values().any(Ty::contains_date),
             Ty::Class { id, args } => id.0.as_str() == "Date" || args.iter().any(Ty::contains_date),
-            Ty::Fn { params, block, ret, .. } => {
+            Ty::Fn(fn_ty) => {
+                let FnTy { params, block, ret, .. } = &**fn_ty;
                 params.iter().any(|p| p.ty.contains_date())
                     || block.as_ref().is_some_and(|b| b.contains_date())
                     || ret.contains_date()
@@ -533,7 +541,8 @@ impl Ty {
                     a.hash_eq(h);
                 }
             }
-            Ty::Fn { params, ret, .. } => {
+            Ty::Fn(fn_ty) => {
+                let FnTy { params, ret, .. } = &**fn_ty;
                 params.len().hash(h);
                 ret.hash_eq(h);
             }
@@ -586,7 +595,8 @@ impl Ty {
             Ty::Tuple { elems } | Ty::Union { variants: elems } | Ty::Class { args: elems, .. } => {
                 elems.iter().any(Ty::holds_record)
             }
-            Ty::Fn { params, block, ret, .. } => {
+            Ty::Fn(fn_ty) => {
+                let FnTy { params, block, ret, .. } = &**fn_ty;
                 params.iter().any(|p| p.ty.holds_record())
                     || block.as_ref().is_some_and(|b| b.holds_record())
                     || ret.holds_record()
@@ -621,7 +631,7 @@ fn ty_tag(ty: &Ty) -> u8 {
         Ty::Union { .. } => 12,
         Ty::SelfInstance => 13,
         Ty::Class { .. } => 14,
-        Ty::Fn { .. } => 15,
+        Ty::Fn(_) => 15,
         Ty::Var { .. } => 16,
         Ty::Untyped => 17,
         Ty::Bottom => 18,
@@ -643,18 +653,19 @@ fn cmp_ty(a: &Ty, b: &Ty) -> std::cmp::Ordering {
         (Ty::Class { id: ix, args: ax }, Ty::Class { id: iy, args: ay }) => {
             ix.cmp(iy).then_with(|| cmp_ty_slice(ax, ay))
         }
-        (
-            Ty::Fn { params: px, block: bx, ret: rx, effects: ex },
-            Ty::Fn { params: py, block: by, ret: ry, effects: ey },
-        ) => cmp_params(px, py)
-            .then_with(|| match (bx, by) {
-                (None, None) => Ordering::Equal,
-                (None, Some(_)) => Ordering::Less,
-                (Some(_), None) => Ordering::Greater,
-                (Some(x), Some(y)) => cmp_ty(x, y),
-            })
-            .then_with(|| cmp_ty(rx, ry))
-            .then_with(|| ex.effects.cmp(&ey.effects)),
+        (Ty::Fn(x), Ty::Fn(y)) => {
+            let FnTy { params: px, block: bx, ret: rx, effects: ex } = &**x;
+            let FnTy { params: py, block: by, ret: ry, effects: ey } = &**y;
+            cmp_params(px, py)
+                .then_with(|| match (bx, by) {
+                    (None, None) => Ordering::Equal,
+                    (None, Some(_)) => Ordering::Less,
+                    (Some(_), None) => Ordering::Greater,
+                    (Some(x), Some(y)) => cmp_ty(x, y),
+                })
+                .then_with(|| cmp_ty(rx, ry))
+                .then_with(|| ex.cmp(ey))
+        }
         (Ty::Var { var: x }, Ty::Var { var: y }) => x.cmp(y),
         _ => Ordering::Equal,
     })
@@ -742,6 +753,16 @@ impl Row {
     pub fn closed() -> Self {
         Row { fields: IndexMap::new().into(), rest: None }
     }
+}
+
+/// The payload of [`Ty::Fn`]. Serialized flat inside the `Ty`, as the
+/// struct variant it replaced was.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FnTy {
+    pub params: Shared<Vec<Param>>,
+    pub block: Option<Arc<Ty>>,
+    pub ret: Arc<Ty>,
+    pub effects: EffectSet,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

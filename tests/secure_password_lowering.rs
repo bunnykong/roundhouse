@@ -7,7 +7,7 @@
 use roundhouse::dialect::MethodReceiver;
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::lower::lower_model_to_library_class;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 fn app_with(model_src: &str) -> roundhouse::App {
     let files: Vec<(&str, &str)> = vec![
@@ -42,7 +42,8 @@ fn secure_password_synthesizes_authenticate_and_accessors() {
         "authenticate must compare through BCrypt::Password over the digest: {abody}",
     );
     match auth.signature.as_ref().expect("authenticate signature") {
-        Ty::Fn { ret, .. } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { ret, .. } = &**fn_ty;
             let expected = Ty::Union {
                 variants: vec![
                     Ty::Class {
@@ -79,7 +80,7 @@ fn secure_password_synthesizes_authenticate_and_accessors() {
 /// so `-> User` alone stopped campfire's build at the `false` arm.
 #[test]
 fn authenticate_signature_answers_the_record_or_false() {
-    use roundhouse::ty::Ty;
+    use roundhouse::ty::{FnTy, Ty};
     let app = app_with("class User < ApplicationRecord\n  has_secure_password\nend\n");
     let user = app.models.iter().find(|m| m.name.0.as_str() == "User").expect("User model");
     let lc = lower_model_to_library_class(user, &app.schema);
@@ -88,9 +89,10 @@ fn authenticate_signature_answers_the_record_or_false() {
         .iter()
         .find(|m| m.name.as_str() == "authenticate" && m.receiver == MethodReceiver::Instance)
         .expect("authenticate synthesized");
-    let Some(Ty::Fn { ret, .. }) = &auth.signature else {
+    let Some(Ty::Fn(fn_ty)) = &auth.signature else {
         panic!("authenticate carries a signature: {:?}", auth.signature);
     };
+    let FnTy { ret, .. } = &**fn_ty;
     let Ty::Union { variants } = &**ret else {
         panic!("authenticate returns a union: {ret:?}");
     };

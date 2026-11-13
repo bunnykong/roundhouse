@@ -10,7 +10,7 @@ use std::path::Path;
 
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 fn scratch_dir(name: &str) -> std::path::PathBuf {
     let dir = scratch::dir(&format!("roundhouse-rbs-sidecar-{name}"));
@@ -72,9 +72,10 @@ end
 
     // Method types round-trip through ingest unchanged.
     let full_name = &article_methods[&Symbol::from("full_name")];
-    let Ty::Fn { ret, .. } = full_name else {
+    let Ty::Fn(fn_ty) = full_name else {
         panic!("expected Ty::Fn");
     };
+    let FnTy { ret, .. } = &**fn_ty;
     assert_eq!(**ret, Ty::Str);
 }
 

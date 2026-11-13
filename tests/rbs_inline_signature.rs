@@ -11,11 +11,12 @@ use std::path::PathBuf;
 use roundhouse::analyze::{diagnose, Analyzer, DiagnosticKind};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::{ParamKind, Ty};
+use roundhouse::ty::{FnTy, ParamKind, Ty};
 
 fn inline_params(source: &str) -> Vec<(String, ParamKind, Ty)> {
     let signatures = roundhouse::ingest::sorbet_sig::ingest_sorbet_signatures(source.as_bytes());
-    let Ty::Fn { params, .. } = &signatures[&ClassId(Symbol::new("Example"))][&Symbol::new("call")] else { panic!() };
+    let Ty::Fn(fn_ty) = &signatures[&ClassId(Symbol::new("Example"))][&Symbol::new("call")] else { panic!() };
+    let FnTy { params, .. } = &**fn_ty;
     params.iter().map(|p| (p.name.as_str().to_string(), p.kind.clone(), (*p.ty).clone())).collect()
 }
 
@@ -144,7 +145,7 @@ fn inline_self_is_an_instance_only_on_instance_methods() {
             .get(&ClassId(Symbol::new("Factory")))
             .and_then(|methods| methods.get(&Symbol::new("build")))
             .map(|ty| match ty {
-                Ty::Fn { ret, .. } => (**ret).clone(),
+                Ty::Fn(fn_ty) => (*fn_ty.ret).clone(),
                 other => panic!("{other:?}"),
             });
         assert_eq!(ret, expected, "{source}");

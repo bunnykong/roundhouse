@@ -117,7 +117,7 @@ fn the_declaring_model_gets_the_macro_expansion() {
         );
     }
     let ret = match &instance_method(&lc, "body").unwrap().signature {
-        Some(roundhouse::ty::Ty::Fn { ret, .. }) => (**ret).clone(),
+        Some(roundhouse::ty::Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
         other => panic!("body reader has no Fn signature: {other:?}"),
     };
     assert!(

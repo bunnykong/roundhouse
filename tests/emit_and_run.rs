@@ -5815,9 +5815,10 @@ fn concern_class_attribute_macros_are_fully_typed() {
     // The signature declares the parameter's own type, not the slot's.
     let probe = app.controllers.iter().find(|c| c.name.0.as_str() == "ProbeController").unwrap();
     let preload = probe.class_methods().find(|m| m.name.as_str() == "preload_site_configs").unwrap();
-    let Some(roundhouse::ty::Ty::Fn { params, .. }) = &preload.signature else {
+    let Some(roundhouse::ty::Ty::Fn(fn_ty)) = &preload.signature else {
         panic!("unsigned: {:?}", preload.signature)
     };
+    let roundhouse::ty::FnTy { params, .. } = &**fn_ty;
     assert_eq!(
         params[0].ty,
         roundhouse::ty::Ty::Array { elem: std::sync::Arc::new(roundhouse::ty::Ty::Str) }.into(),
@@ -5825,9 +5826,10 @@ fn concern_class_attribute_macros_are_fully_typed() {
     );
     // `only: nil` is nil when absent, which the signature has to say.
     let add = probe.class_methods().find(|m| m.name.as_str() == "add_preload_definition").unwrap();
-    let Some(roundhouse::ty::Ty::Fn { params, .. }) = &add.signature else {
+    let Some(roundhouse::ty::Ty::Fn(fn_ty)) = &add.signature else {
         panic!("unsigned: {:?}", add.signature)
     };
+    let roundhouse::ty::FnTy { params, .. } = &**fn_ty;
     let only = params.iter().find(|p| p.name.as_str() == "only").expect("only");
     assert!(
         matches!(&*only.ty, roundhouse::ty::Ty::Union { variants } if variants.contains(&roundhouse::ty::Ty::Nil)),
@@ -15321,7 +15323,7 @@ end
 #[test]
 fn literal_data_factories_and_aliases_check_cleanly_and_execute() {
     use roundhouse::ident::{ClassId, Symbol};
-    use roundhouse::ty::Ty;
+    use roundhouse::ty::{FnTy, Ty};
 
     let run = emit_and_run::real_blog()
         .write("app/lib/factory_examples.rb", data_factory::DECLARATIONS)
@@ -15369,13 +15371,14 @@ puts "Data factory identity, aliases, constructors, values and immutability pass
         assert!(factory.contains_key(&Symbol::from("new")), "{sidecar}");
         for reader in readers {
             let signature = &factory[&Symbol::from(reader)];
-            assert!(matches!(signature, Ty::Fn { ret, .. } if **ret == Ty::Untyped), "{sidecar}");
+            assert!(matches!(signature, Ty::Fn(fn_ty) if *fn_ty.ret == Ty::Untyped), "{sidecar}");
             assert!(!factory.contains_key(&Symbol::from(format!("{reader}="))), "{sidecar}");
         }
         let owner_methods = &signatures[&ClassId(Symbol::from(owner))];
-        let Ty::Fn { ret, .. } = &owner_methods[&Symbol::from("build")] else {
+        let Ty::Fn(fn_ty) = &owner_methods[&Symbol::from("build")] else {
             panic!("build has no function signature: {sidecar}");
         };
+        let FnTy { ret, .. } = &**fn_ty;
         assert_eq!(ret.as_ref(), &Ty::Class { id, args: vec![].into() }, "{sidecar}");
     }
 }

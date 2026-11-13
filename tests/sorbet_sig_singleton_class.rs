@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 fn app(service: &str) -> roundhouse::App {
     let tree: HashMap<PathBuf, Vec<u8>> = [
@@ -44,7 +44,7 @@ fn signature(app: &roundhouse::App, class: &str, method: &str) -> Option<Ty> {
 
 fn ret_of(ty: &Ty) -> Option<Ty> {
     match ty {
-        Ty::Fn { ret, .. } => Some((**ret).clone()),
+        Ty::Fn(fn_ty) => Some((*fn_ty.ret).clone()),
         _ => None,
     }
 }
@@ -64,7 +64,8 @@ end
 "#);
     let ty = signature(&app, "Registry", "label_for").expect("the sig is read");
     assert_eq!(ret_of(&ty), Some(Ty::Str));
-    let Ty::Fn { params, .. } = &ty else { panic!("expected a function type, got {ty:?}") };
+    let Ty::Fn(fn_ty) = &ty else { panic!("expected a function type, got {ty:?}") };
+    let FnTy { params, .. } = &**fn_ty;
     assert_eq!(params.len(), 1);
     assert_eq!(params[0].ty, Ty::Str.into());
 }

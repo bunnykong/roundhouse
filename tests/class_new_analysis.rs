@@ -140,7 +140,7 @@ fn raise_and_rescue_share_the_existing_exception_surface() {
     let owner = &analyzer.class_registry()[&ClassId(Symbol::from("Owner"))];
     let returned = owner.class_methods.get(&Symbol::from("run")).unwrap();
     let return_type = match returned {
-        Ty::Fn { ret, .. } => ret.as_ref(),
+        Ty::Fn(fn_ty) => fn_ty.ret.as_ref(),
         ty => ty,
     };
     assert_eq!(return_type, &Ty::Str);
@@ -1540,7 +1540,7 @@ fn ingest_files(files: &[(&str, &str)]) -> roundhouse::App {
 
 fn class_method_return(analyzer: &Analyzer, class: &str, method: &str) -> Ty {
     match &analyzer.class_registry()[&ClassId(Symbol::from(class))].class_methods[&Symbol::from(method)] {
-        Ty::Fn { ret, .. } => ret.as_ref().clone(),
+        Ty::Fn(fn_ty) => fn_ty.ret.as_ref().clone(),
         ty => ty.clone(),
     }
 }

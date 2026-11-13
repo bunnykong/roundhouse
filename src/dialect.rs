@@ -16,7 +16,7 @@ use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, TableRef};
 use crate::span::Span;
-use crate::ty::{Row, Ty};
+use crate::ty::{FnTy, Row, Ty};
 
 /// A source comment preserved through the pipeline. We inline comments
 /// on the owning IR node (`leading_comments` / `trailing_comment` fields)
@@ -1514,7 +1514,7 @@ pub struct LibraryFunction {
 }
 
 fn is_pure_effects(e: &crate::effect::EffectSet) -> bool {
-    e.effects.is_empty()
+    e.is_pure()
 }
 
 // Controllers -----------------------------------------------------------
@@ -2604,7 +2604,7 @@ impl Fixture {
         let ret = models.iter().find(|model| model.name == class)
             .map(|model| Ty::Class { id: model.name.clone(), args: vec![].into() })
             .unwrap_or(Ty::Untyped);
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: vec![crate::ty::Param {
                 name: Symbol::from("name"),
                 ty: Ty::Sym.into(),
@@ -2613,7 +2613,7 @@ impl Fixture {
             block: None,
             ret: std::sync::Arc::new(ret),
             effects: EffectSet::pure(),
-        }
+        }))
     }
 }
 

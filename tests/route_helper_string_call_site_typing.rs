@@ -25,7 +25,7 @@
 
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::lower::lower_routes_to_library_functions;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 const SCHEMA: &str = "ActiveRecord::Schema.define(version: 1) do\n  \
     create_table :articles do |t|\n    t.string :title\n  end\nend\n";
@@ -70,7 +70,8 @@ fn helper_params(name: &str) -> Vec<roundhouse::ty::Param> {
         .unwrap_or_else(|| panic!("helper {name} not generated"))
         .signature
         .expect("helper signature");
-    let Ty::Fn { params, .. } = sig else { panic!("helper signature is not Ty::Fn") };
+    let Ty::Fn(fn_ty) = sig else { panic!("helper signature is not Ty::Fn") };
+    let FnTy { params, .. } = *fn_ty;
     params.to_vec()
 }
 
@@ -172,7 +173,8 @@ end
         .expect("transfer_path not generated")
         .signature
         .expect("helper signature");
-    let Ty::Fn { params, .. } = sig else { panic!("not Ty::Fn") };
+    let Ty::Fn(fn_ty) = sig else { panic!("not Ty::Fn") };
+    let FnTy { params, .. } = *fn_ty;
     assert_eq!(params[0].name.as_str(), "id");
     assert!(
         matches!(*params[0].ty, Ty::Str),
@@ -301,6 +303,7 @@ end
         .expect("user_avatar_path not generated")
         .signature
         .expect("helper signature");
-    let Ty::Fn { params, .. } = sig else { panic!("not Ty::Fn") };
+    let Ty::Fn(fn_ty) = sig else { panic!("not Ty::Fn") };
+    let FnTy { params, .. } = *fn_ty;
     params.to_vec()
 }

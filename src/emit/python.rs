@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 use crate::dialect::MethodDef;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 mod expr;
 mod importmap;
@@ -62,9 +62,10 @@ pub fn emit_method(m: &MethodDef) -> String {
         .signature
         .as_ref()
         .expect("emit_method requires a signature");
-    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+    let Ty::Fn(fn_ty) = sig else {
         panic!("signature is not Ty::Fn");
     };
+    let FnTy { params: sig_params, ret, .. } = &**fn_ty;
     assert_eq!(
         sig_params.len(),
         m.params.len(),

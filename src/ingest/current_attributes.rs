@@ -142,7 +142,7 @@ fn take_attribute_decls(lc: &mut LibraryClass) -> (Vec<Symbol>, Vec<(Symbol, cra
 /// the presence test would fold to true (see current_attributes_typing).
 /// Returns each accessor's signature.
 fn declare_attribute_types(methods: &mut [MethodDef], declared: &[(Symbol, crate::ty::Ty)]) -> Vec<(Symbol, crate::ty::Ty)> {
-    use crate::ty::{Param, ParamKind, Ty};
+    use crate::ty::{FnTy, Param, ParamKind, Ty};
     let mut out = Vec::new();
     for (name, written) in declared {
         let ty = &match written {
@@ -159,7 +159,7 @@ fn declare_attribute_types(methods: &mut [MethodDef], declared: &[(Symbol, crate
             } else {
                 continue;
             };
-            let signature = Ty::Fn { params: params.into(), block: None, ret: std::sync::Arc::new(ty.clone()), effects: method.effects.clone() };
+            let signature = Ty::Fn(Box::new(FnTy { params: params.into(), block: None, ret: std::sync::Arc::new(ty.clone()), effects: method.effects.clone() }));
             method.signature = Some(signature.clone());
             out.push((method.name.clone(), signature));
         }

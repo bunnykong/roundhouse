@@ -84,7 +84,8 @@ fn sorbet_names_in_a_sidecar_rbs_file_read_the_same_way() {
     .expect("parse");
     let flags = &sigs[&roundhouse::ident::ClassId(roundhouse::ident::Symbol::new("Cart"))]
         [&roundhouse::ident::Symbol::new("flags")];
-    let roundhouse::ty::Ty::Fn { params, ret, .. } = flags else { panic!("{flags:?}") };
+    let roundhouse::ty::Ty::Fn(fn_ty) = flags else { panic!("{flags:?}") };
+    let roundhouse::ty::FnTy { params, ret, .. } = &**fn_ty;
     assert_eq!(params[0].ty, roundhouse::ty::Ty::Array { elem: std::sync::Arc::new(roundhouse::ty::Ty::Int) }.into());
     assert_eq!(**ret, roundhouse::ty::Ty::Bool);
 }
