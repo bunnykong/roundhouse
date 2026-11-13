@@ -1167,11 +1167,7 @@ pub(super) fn restore_extras_facades(files: &mut [(String, String)], app: &App) 
 /// that reads one raises there; ours renders with the caller's
 /// same-named value.
 pub(crate) fn apply_library_partial_render_lowering(lcs: &mut [LibraryClass], app: &App) {
-    let contracts = crate::lower::view_to_library::partial_call_contracts(
-        &app.views,
-        &app.controllers,
-        &app.library_classes,
-    );
+    let contracts = app_partial_call_contracts(app);
     if contracts.is_empty() {
         return;
     }
@@ -3834,7 +3830,12 @@ fn is_base_controller(lc: &LibraryClass) -> bool {
 /// A name any controller already DEFINES as a method is excluded: the
 /// reader this pass synthesizes would collide with it, and the app's
 /// own method is the one that should win.
-fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
+/// Walked once per shared App (`app_answers`): each helper lowering asks.
+fn helper_read_ivars(app: &App) -> std::rc::Rc<std::collections::BTreeSet<Symbol>> {
+    crate::app_answers::of(app, "helper read ivars", || helper_read_ivars_walk(app))
+}
+
+fn helper_read_ivars_walk(app: &App) -> std::collections::BTreeSet<Symbol> {
     let helper_modules = helper_module_ids(app);
     let mut out = std::collections::BTreeSet::new();
     let mut rendered: Vec<(String, String)> = Vec::new();
@@ -3851,11 +3852,7 @@ fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
         }
     }
     if !rendered.is_empty() {
-        let contracts = crate::lower::view_to_library::partial_call_contracts(
-            &app.views,
-            &app.controllers,
-            &app.library_classes,
-        );
+        let contracts = app_partial_call_contracts(app);
         for key in &rendered {
             if let Some(contract) = contracts.get(key) {
                 out.extend(contract.closure.iter().chain(&contract.record_ivar).map(|n| Symbol::from(n.as_str())));
@@ -10476,6 +10473,17 @@ fn file_constant_owner(name: &str, app: &App, classes: &[LibraryClass]) -> Optio
 
 /// Every constant path the app declares (models, controllers, library
 /// classes and modules, test modules) and each namespace enclosing one.
+/// The partial contracts of the app's own views, controllers and library
+/// classes, built once per shared App (`app_answers`): each helper and
+/// library partial-render lowering asks for them.
+fn app_partial_call_contracts(
+    app: &App,
+) -> std::rc::Rc<crate::det::HashMap<(String, String), crate::lower::view_to_library::PartialCallContract>> {
+    crate::app_answers::of(app, "partial call contracts", || {
+        crate::lower::view_to_library::partial_call_contracts(&app.views, &app.controllers, &app.library_classes)
+    })
+}
+
 fn app_constant_paths(app: &App, classes: &[LibraryClass]) -> std::rc::Rc<crate::det::HashSet<String>> {
     let build = || {
         #[cfg(test)]

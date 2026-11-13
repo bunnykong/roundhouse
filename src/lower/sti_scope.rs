@@ -512,17 +512,23 @@ fn no_arg_send(recv: Expr, method: &str) -> Expr {
 /// parent walk and the inheritance-column check that would drift from
 /// this one.
 pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
-    model_subclasses(app).typed
+    model_subclasses(app).typed.clone()
 }
 
 pub(crate) fn plain_subclass_bases(app: &App) -> HashMap<ClassId, ClassId> {
-    model_subclasses(app).untyped
+    model_subclasses(app).untyped.clone()
 }
 
 /// Every library class whose `parent` chain reaches a Model with a
 /// table, split on that table's inheritance column: STI subclasses
 /// (with one) and plain subclasses (without one) → their base model.
-fn model_subclasses(app: &App) -> Subclasses {
+/// Walked once per shared App (`app_answers`): each walk visits every
+/// library class, and the emit asks from several passes.
+fn model_subclasses(app: &App) -> std::rc::Rc<Subclasses> {
+    crate::app_answers::of(app, "model subclasses", || model_subclasses_walk(app))
+}
+
+fn model_subclasses_walk(app: &App) -> Subclasses {
     let mut out = Subclasses::default();
     // Name -> the FIRST model / library class of that name, the same
     // element the linear `find`s this replaced answered. Indexed once:
@@ -696,7 +702,8 @@ const VALUE_METHODS: &[&str] = &[
 /// answers a value), and the bodies walked are the ones the STI
 /// lowering rewrites, tests included.
 pub(crate) fn untyped_subclass_diagnostics(app: &App) -> Vec<crate::diagnostic::Diagnostic> {
-    let Subclasses { untyped, off, .. } = model_subclasses(app);
+    let subclasses = model_subclasses(app);
+    let (untyped, off) = (&subclasses.untyped, &subclasses.off);
     if untyped.is_empty() {
         return Vec::new();
     }

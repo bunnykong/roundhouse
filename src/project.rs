@@ -10456,6 +10456,9 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // request-finder registry; one model lowering serves them all.
     let _registry = crate::lower::model_to_library::share_request_finder_registry(&app.models, &app.schema);
     let _writers = crate::lower::model_to_library::share_module_writers(app);
+    // Whole-App answers several passes ask for (`app_answers::of`), each
+    // computed once for this assembly; `app` is borrowed for the guard's life.
+    let _answers = crate::app_answers::share(app);
     let mut files: Vec<(String, String)> = Vec::new();
 
     crate::runtime_files::walk_into("runtime/spinel/scaffold", "", &mut files)?;
@@ -13243,7 +13246,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
             files.iter().any(|(p, c)| {
                 p.ends_with(".rb")
                     && (requires_feature(c, &require_line)
-                        || c.lines().any(|line| line.trim_start().starts_with(&under_gem)))
+                        || (c.contains(&under_gem) && c.lines().any(|line| line.trim_start().starts_with(&under_gem))))
             })
         })
         .collect();
