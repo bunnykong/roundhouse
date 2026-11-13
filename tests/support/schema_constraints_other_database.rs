@@ -498,3 +498,48 @@ fn structure_sql_collated_columns_keep_their_predicates_out_of_sqlite() {
     let (_, _, ddl) = ingest(&[("db/structure.sql", &sql("")), ("config/database.yml", POSTGRES)]).unwrap();
     assert!(ddl.contains("ON exports (email) WHERE (code = 'pending')"), "{ddl}");
 }
+
+/// A dumped CHECK may test a column of any type for NULL, as a state
+/// machine's `completed_at IS NULL` does: both databases answer `IS NULL`
+/// alike whatever the column stores, so it is carried, and SQLite rejects
+/// the rows PostgreSQL rejects.
+#[test]
+fn checks_testing_any_column_for_null_are_carried() {
+    let schema = exports_schema(concat!(
+        "    t.datetime \"completed_at\"\n",
+        "    t.jsonb \"articles\"\n",
+        "    t.check_constraint \"status::text = 'done'::text OR completed_at IS NULL\", name: \"export_state\"\n",
+        "    t.check_constraint \"status::text <> 'done'::text OR articles IS NOT NULL\", name: \"export_articles\"\n",
+    ));
+    let (schema, warnings, ddl) = ingest(&[("db/schema.rb", &schema), ("config/database.yml", POSTGRES)]).unwrap();
+    assert!(warnings.is_empty(), "{warnings:#?}");
+    let checks = &schema.tables[&roundhouse::Symbol::from("exports")].check_constraints;
+    assert_eq!(
+        checks.iter().map(|c| (c.name.as_deref(), c.expression.as_str())).collect::<Vec<_>>(),
+        [(Some("export_state"), "status = 'done' OR completed_at IS NULL"), (Some("export_articles"), "status <> 'done' OR articles IS NOT NULL")]
+    );
+    let rows = [
+        ("'pending', 'p@x.test', NULL, NULL", 'A'),
+        ("'pending', 'q@x.test', '2026-01-01 00:00:00', NULL", 'R'),
+        ("'done', 'r@x.test', '2026-01-01 00:00:00', '[]'", 'A'),
+        ("'done', 's@x.test', '2026-01-01 00:00:00', NULL", 'R'),
+    ];
+    let mut script = String::from("begin\n  gem 'sqlite3', '>= 2.9'\nrescue Gem::LoadError\n  puts 'skip: sqlite3 unavailable'\n  exit\nend\nrequire 'sqlite3'\nDB = SQLite3::Database.new(':memory:')\n");
+    for statement in ddl.split(";\n") {
+        script.push_str(&format!("DB.execute({statement:?})\n"));
+    }
+    script.push_str("line = ''\n");
+    for (row, _) in rows {
+        let insert = format!("INSERT INTO exports (status, email, completed_at, articles) VALUES ({row})");
+        script.push_str(&format!("line += begin\n  DB.execute({insert:?})\n  'A'\nrescue SQLite3::ConstraintException\n  'R'\nend\n"));
+    }
+    script.push_str("puts line\n");
+    let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert_eq!(stdout.trim(), rows.iter().map(|(_, expected)| *expected).collect::<String>(), "{ddl}");
+}
