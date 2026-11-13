@@ -4604,7 +4604,11 @@ fn ruby2_keywords_guarded<'pr>(statement: &Node<'pr>) -> Option<Node<'pr>> {
     let guard = branch.predicate().as_call_node()?;
     let asks = constant_id_str(&guard.name()) == "respond_to?"
         && guard.receiver().is_none()
-        && guard.arguments().and_then(|a| a.arguments().iter().next()).and_then(|a| a.as_symbol_node()).is_some_and(|s| s.unescaped() == b"ruby2_keywords");
+        && guard.arguments().is_some_and(|a| {
+            // Not `respond_to?(:ruby2_keywords)` alone: without `true` it skips the private method, and the branch never runs.
+            let args: Vec<_> = a.arguments().iter().collect();
+            matches!(args.as_slice(), [name, all] if name.as_symbol_node().is_some_and(|s| s.unescaped() == b"ruby2_keywords") && all.as_true_node().is_some())
+        });
     if !asks {
         return None;
     }

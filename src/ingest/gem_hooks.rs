@@ -1434,7 +1434,7 @@ fn view_component_slots<V: crate::vfs::Vfs + ?Sized>(app: &mut App, vfs: &V, pat
         for child in body.iter().flat_map(|b| b.as_statements_node()).flat_map(|s| s.body().iter().collect::<Vec<_>>()) {
             if here == class
                 && let Some(call) = child.as_call_node()
-                && call.receiver().is_none()
+                && call.receiver().is_none_or(|r| r.as_self_node().is_some())
                 && let Some(why) = unsupported_component_macro(&call)
             {
                 use crate::ingest::prism_api::PrismLocation;
@@ -1444,7 +1444,7 @@ fn view_component_slots<V: crate::vfs::Vfs + ?Sized>(app: &mut App, vfs: &V, pat
             }
             if here == class
                 && let Some(call) = child.as_call_node()
-                && call.receiver().is_none()
+                && call.receiver().is_none_or(|r| r.as_self_node().is_some())
                 && let macro_name = super::util::constant_id_str(&call.name())
                 && matches!(macro_name.as_ref() as &str, "renders_one" | "renders_many")
                 && let Some(first) = call.arguments().and_then(|a| a.arguments().iter().next())
@@ -1587,14 +1587,16 @@ fn escape_template_output(body: &mut Expr) {
             && method.as_str() == "+"
             && matches!(&*buf.node, ExprNode::Var { name, .. } if name.as_str() == "_buf")
             && let [arg] = args.as_mut_slice()
-            && let ExprNode::Send { recv: Some(inner), method: to_s, args: none, block: None, .. } = &*arg.node
+            && let ExprNode::Send { recv: Some(_), method: to_s, args: none, block: None, .. } = &*arg.node
             && to_s.as_str() == "to_s"
             && none.is_empty()
         {
+            // Not the value itself: `<%= 42 %>` and `<%= nil %>` escape its `to_s`, which keeps a safe buffer's mark.
+            let inner = arg.clone();
             let helpers = Expr::new(crate::span::Span::synthetic(), ExprNode::Const { path: vec![crate::ident::Symbol::from("ActionView"), crate::ident::Symbol::from("ViewHelpers")] });
             let escaped = Expr::new(
                 arg.span,
-                ExprNode::Send { recv: Some(helpers), method: crate::ident::Symbol::from("html_escape"), args: vec![inner.clone()], block: None, parenthesized: true },
+                ExprNode::Send { recv: Some(helpers), method: crate::ident::Symbol::from("html_escape"), args: vec![inner], block: None, parenthesized: true },
             );
             *arg = escaped;
         }

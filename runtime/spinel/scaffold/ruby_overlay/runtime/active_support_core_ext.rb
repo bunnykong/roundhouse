@@ -704,6 +704,7 @@ class Module
   unless method_defined?(:module_parents)
     def module_parent_name
       return @parent_name if defined?(@parent_name)
+      return nil if name.nil?
       parent_name = name =~ /::[^:]+\z/ ? -$` : nil
       @parent_name = parent_name unless frozen?
       parent_name

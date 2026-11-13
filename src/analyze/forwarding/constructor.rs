@@ -1063,6 +1063,23 @@ fn lookup_changing_methods(
             *found = true;
             return;
         }
+        // Not the explicit sends alone: a bound method (`recv.method(:install)`) runs its name when called, and an
+        // attribute's compound or multiple assignment calls its writer.
+        let writer = |attr: &Symbol| Symbol::from(format!("{}=", attr.as_str()).as_str());
+        let implicit = match &*expr.node {
+            ExprNode::MethodRef { name: referenced, .. } => changes(referenced, &[]),
+            ExprNode::OpAssign { target: crate::expr::LValue::Attr { name: attr, .. }, value, .. } => {
+                changes(&writer(attr), std::slice::from_ref(value))
+            }
+            ExprNode::MultiAssign { targets, .. } => targets
+                .iter()
+                .any(|target| matches!(target, crate::expr::LValue::Attr { name: attr, .. } if changes(&writer(attr), &[]))),
+            _ => false,
+        };
+        if implicit {
+            *found = true;
+            return;
+        }
         match &*expr.node {
             ExprNode::Send { method, args, .. } if changes(method, args) => {
                 *found = true;

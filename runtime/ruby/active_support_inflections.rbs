@@ -21,6 +21,7 @@ module ActiveSupport
   module Inflector
     def self.pluralize: (String | Symbol word) -> String
     def self.singularize: (String | Symbol word) -> String
+    def self.singular_tail: (String s, Integer drop, String rest) -> String
     # Default Rails 8.1.4 behavior without configured acronym tables.
     def self.camelize: (String text, ?bool uppercase_first_letter) -> String
     def self.underscore: (String text) -> String

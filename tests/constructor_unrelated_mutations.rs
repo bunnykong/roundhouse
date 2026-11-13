@@ -504,6 +504,7 @@ fn inherited_storing_a_value_through_its_own_writer_keeps_keywords() {
         ("@path = value.to_s\n    note(value)", false),
         ("define_singleton_method(:new) { |**o| o }", true),
         ("install(value)", true),
+        ("Notes.method(:install).call(value)", true),
     ] {
         let source = format!(
             r#"
