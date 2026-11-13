@@ -2290,18 +2290,16 @@ fn report_forgery_protection(app: &App, target: BuildTarget) {
     emit::diagnostics::push(d);
 }
 
-fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
-    // The Roda conversion writes Sequel migrations, which carry no
-    // predicate at all.
-    if target == BuildTarget::Roda {
-        return;
-    }
+/// Every SQLite target drops such a predicate: the schema DDL through
+/// `Dialect::index_predicate`, and the Roda conversion's Sequel
+/// migrations through the same `sqlite_reads_predicate_alike`.
+fn report_sqlite_index_predicates(app: &App) {
     for table in app.schema.tables.values() {
         for index in &table.indexes {
             let Some(predicate) = index.predicate.as_deref() else { continue };
             if !index.unique
                 || crate::emit::shared::schema_sql::Dialect::Sqlite
-                    .index_predicate(table, index)
+                    .index_predicate(table, index, app.schema.expression_dialect)
                     .is_some()
             {
                 continue;
@@ -3683,7 +3681,7 @@ fn target_files_inner(
         emit::diagnostics::push(d);
     }
     report_mailers(app, target);
-    report_sqlite_index_predicates(app, target);
+    report_sqlite_index_predicates(app);
     report_array_columns(app, target);
     report_forgery_protection(app, target);
     report_native_ruby_syntax(app, target);

@@ -1,4 +1,8 @@
 module ActiveRecord
+  # `where` casts of an enum column; see `relation.rb`.
+  def self.enum_where_int: (Integer | Float | bool | Symbol | String | nil value, Array[String] labels, Array[Integer] values, String nil_label) -> Integer?
+  def self.enum_where_str: (Integer | Float | bool | Symbol | String | nil value, Array[String] labels, Array[String] values, String nil_label) -> String?
+
   # Lazy chainable query builder. Chain methods answer a new Relation
   # and leave the receiver unchanged; terminals execute and return
   # rows / scalars. Loaded records are `Base` as an interim (same as
@@ -391,11 +395,19 @@ module ActiveRecord
     def bounds_predicate: (String qcol, Time | Date | String | Integer | Float | nil lower, Time | Date | String | Integer | Float | nil upper, bool exclusive) -> String
     def range_bound_sql: (untyped bound) -> String?
     def array_with_ranges_predicate: (String qcol, Array[untyped] vals) -> String
+    def integer_query_limit: (String col) -> Integer
+    def integer_value_predicate: (String qcol, String | Integer | Float | bool val, Integer limit) -> String
+    def integer_query_null?: (String | Integer | Float | bool val) -> bool
+    def integer_query_cast: (String | Integer | Float | bool val, Integer limit) -> ::ActiveRecord::IntegerKeyCast
+    def integer_list_predicate: (String qcol, Array[untyped] vals, Integer limit) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
     def substitute_named_binds: (String sql, Hash[Symbol, untyped] binds) -> String
     def bound_text: (untyped value) -> String
     def column_bound_value: (String col, untyped val) -> untyped
     def integer_column?: (String col) -> bool
+    def enum_column?: (String col) -> bool
+    def list_predicate: (String col, String qcol, Array[untyped] val) -> String
+    def enum_list_predicate: (String col, String qcol, Array[Integer | Float | bool | Symbol | String | Base | Range[untyped] | nil] val) -> String
     def named_bind_start?: (String ch) -> bool
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String

@@ -594,6 +594,13 @@ module ActiveRecord
       {}
     end
 
+    # The byte width (4 or 8) each plain integer column range-checks a
+    # query value against, as Rails' integer type does
+    # (Relation#integer_query_limit). Schema-generated models list theirs.
+    def self.schema_integer_query_limits
+      {}
+    end
+
     def self.schema_json_coder_columns
       []
     end
