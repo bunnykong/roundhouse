@@ -1954,7 +1954,9 @@ jobs:
           sed -n 's/^now //p' "$RUNNER_TEMP/split.txt" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact &
           alone=$!
           left=$(( CI_SPINEL_DEADLINE - $(date +%s) ))
+          # Not run bare: the tests it builds for are charged a share of its CPU seconds, which the plan balances on.
           [ "$left" -le 0 ] || RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" RH_SPINEL_BUNDLE_OUT="$RUNNER_TEMP/spinel-bundles" \
+            python3 scripts/ci-plan.py cpu-of --out "$RUNNER_TEMP/spinel-bundles/cpu.json" -- \
             timeout "$left" "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_build --nocapture || true
           echo "bundled in $(( $(date +%s) - start ))s"
           status=0
