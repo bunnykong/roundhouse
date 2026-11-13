@@ -123,3 +123,172 @@ fn sqlite_functions_on_a_postgresql_primary_are_refused() {
         .emit(BuildTarget::Ruby);
     assert!(errors.iter().any(|e| e.contains("SQLite functions (regexp)") && e.contains("postgresql")), "{errors:#?}");
 }
+
+/// A hash condition's value against an integer column, cast as Rails
+/// casts it before it writes SQL: `find_by(id: "not-an-export")` and an
+/// id past the column's range find nothing, `"7tail"` is 7, and
+/// `where.not` and lists keep Rails' answers. Sent as given, the String
+/// reaches the database, where PostgreSQL rejects it (SQLSTATE 22P02 or
+/// 22003) and SQLite compares it loosely.
+const INTEGER_QUERIES: &str = include_str!("support/integer_query_values.rb");
+
+const INTEGER_QUERY_SCHEMA: &str = "ActiveRecord::Schema.define(version: 1) do\n  create_table \"exports\", force: :cascade do |t|\n    t.bigint \"user_id\"\n    t.integer \"number\"\n    t.string \"label\"\n  end\nend\n";
+
+/// What Rails 8.1.4 answers, on SQLite and on PostgreSQL alike, so two
+/// identical wrong answers still fail.
+const INTEGER_QUERY_ROWS: &[&str] = &[
+    "find_by not-an-export: nil",
+    "find_by huge: nil",
+    "find_by 1: 1",
+    "find_by 1abc: 1",
+    "exists? abc, 1abc: false true",
+    "\"abc\": [] not []",
+    "\"\": [] not []",
+    "\" \\t\": [] not []",
+    "\"+x\": [] not []",
+    "\"_7\": [] not []",
+    "\"7tail\": [1] not [3]",
+    "\"7.9\": [1] not [3]",
+    "\"1_0\": [] not [1, 3]",
+    "\"0junk\": [3] not [1]",
+    "\"99999999999999999999\": [] not [1, 2, 3]",
+    "\"-99999999999999999999\": [] not [1, 2, 3]",
+    "7.9: [1] not [3]",
+    "true: [] not [1, 3]",
+    "false: [3] not [1]",
+    ":\"7\": [] not []",
+    "nil: [2] not [1, 3]",
+    "[\"7\", \"x\"]: [1] not [3]",
+    "[\"x\", nil]: [2] not []",
+    "[\"x\", \"y\"]: [] not []",
+    "[\"99999999999999999999\"]: [] not [1, 2, 3]",
+    "[\"99999999999999999999\", nil]: [2] not [1, 3]",
+    "[\"99999999999999999999\", \"7\"]: [1] not [3]",
+    "[\"99999999999999999999\", \"99999999999999999999\"]: [] not []",
+    "[\"x\", 0..0]: [3] not []",
+    "[]: [] not [1, 2, 3]",
+    "[nil, \"7tail\", 0..0]: [1, 2, 3] not []",
+    "[:\"7\", \"7\"]: [1] not [3]",
+    "qualified: [1] []",
+    "string column: []",
+];
+
+/// Past `number`'s 4 bytes, which only PostgreSQL's `integer` has
+/// (Rails' SQLite integer is 8 bytes): under `where.not` such a value
+/// keeps every row, NULLs included. Run after INTEGER_QUERIES, on its rows.
+const POSTGRESQL_INTEGER_QUERIES: &str = r##"
+lines = []
+["2147483647", "2147483648", "-2147483648", "-2147483649", 2147483648, 1e30, Float::NAN].each do |value|
+  lines << "#{value.inspect}: #{ids(Export.where(number: value)).inspect} not #{ids(Export.where.not(number: value)).inspect}"
+end
+lines << "user_id 2147483648: #{ids(Export.where(user_id: "2147483648")).inspect} not #{ids(Export.where.not(user_id: "2147483648")).inspect}"
+puts lines
+"##;
+
+const POSTGRESQL_INTEGER_QUERY_ROWS: &[&str] = &[
+    "\"2147483647\": [] not [1, 3]",
+    "\"2147483648\": [] not [1, 2, 3]",
+    "\"-2147483648\": [] not [1, 3]",
+    "\"-2147483649\": [] not [1, 2, 3]",
+    "2147483648: [] not [1, 2, 3]",
+    "1.0e+30: [] not [1, 2, 3]",
+    "NaN: [] not []",
+    "user_id 2147483648: [] not [1, 2, 3]",
+];
+
+fn integer_query_app(database_yml: &str) -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/models/export.rb", "class Export < ApplicationRecord\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("db/schema.rb", INTEGER_QUERY_SCHEMA)
+        .write("config/database.yml", database_yml)
+}
+
+fn lines(stdout: &str) -> Vec<&str> {
+    stdout.lines().collect()
+}
+
+/// The same queries on ActiveRecord 8.1.4, over SQLite or (with a URL
+/// and a schema of its own) PostgreSQL. `None` when this Ruby has no
+/// Rails 8.1.4 or no driver for it.
+fn rails_answers(queries: &str, postgresql: Option<(&str, &str)>) -> Option<String> {
+    let oracle = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let (driver, connect) = match postgresql {
+        Some((url, schema)) => (
+            "pg: \">= 1.1\"",
+            format!(
+                "ActiveRecord::Base.establish_connection(url: {url:?})\n\
+                 ActiveRecord::Base.connection.execute(\"CREATE SCHEMA {schema}\")\n\
+                 at_exit {{ ActiveRecord::Base.connection.execute(\"DROP SCHEMA {schema} CASCADE\") }}\n\
+                 ActiveRecord::Base.connection.schema_search_path = {schema:?}\n"
+            ),
+        ),
+        None => ("sqlite3: \">= 2.9\"", "ActiveRecord::Base.establish_connection(adapter: \"sqlite3\", database: \":memory:\")\n".to_string()),
+    };
+    let program = format!(
+        "require {oracle:?}\n\
+         unless RailsOracle.available?(\"activerecord\", {driver})\n  warn \"skipped the Rails control: #{{RailsOracle.label}} or its driver is not installed\"\n  exit 77\nend\n\
+         RailsOracle.activate(\"activerecord\", {driver})\nrequire \"active_record\"\n{connect}\
+         ActiveRecord::Schema.verbose = false\n{INTEGER_QUERY_SCHEMA}class Export < ActiveRecord::Base\nend\n{queries}"
+    );
+    let output = emit_and_run::ruby().args(["-e", &program]).output().expect("ruby");
+    if output.status.code() == Some(77) {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        return None;
+    }
+    assert!(output.status.success(), "Rails control failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[test]
+fn integer_query_values_cast_as_rails_on_sqlite() {
+    let run = integer_query_app("test:\n  adapter: sqlite3\n  database: \":memory:\"\n").run_ruby(INTEGER_QUERIES);
+    run.assert_passes();
+    assert_eq!(lines(&run.stdout), INTEGER_QUERY_ROWS, "emitted, SQLite");
+    if let Some(rails) = rails_answers(INTEGER_QUERIES, None) {
+        assert_eq!(lines(&rails), INTEGER_QUERY_ROWS, "Rails, SQLite");
+    }
+}
+
+#[test]
+fn integer_query_values_cast_as_rails_on_postgresql() {
+    let Some(db) = pg_test_url::pg_test_db("integer_query_values") else { return };
+    let on_server = |sql: String| {
+        let output = std::process::Command::new("ruby")
+            .args(["-rpg", "-e", "PG.connect(ARGV[0]).exec(ARGV[1])", &db.url, &sql])
+            .output()
+            .expect("ruby with the pg gem");
+        assert!(output.status.success(), "{sql}: {}", String::from_utf8_lossy(&output.stderr));
+    };
+    let options = format!("-c search_path={}", db.schema);
+    let script = format!("{INTEGER_QUERIES}{POSTGRESQL_INTEGER_QUERIES}");
+    on_server(format!("CREATE SCHEMA {}", db.schema));
+    let run = integer_query_app(POSTGRESQL_DATABASE_YML)
+        .run_ruby_env(&script, &[("DATABASE_URL", db.url.as_str()), ("PGOPTIONS", options.as_str())]);
+    on_server(format!("DROP SCHEMA {} CASCADE", db.schema));
+    run.assert_passes();
+    let expected: Vec<&str> = INTEGER_QUERY_ROWS.iter().chain(POSTGRESQL_INTEGER_QUERY_ROWS).copied().collect();
+    assert_eq!(lines(&run.stdout), expected, "emitted, PostgreSQL");
+    let rails_schema = format!("{}_rails", db.schema);
+    if let Some(rails) = rails_answers(&script, Some((&db.url, &rails_schema))) {
+        assert_eq!(lines(&rails), expected, "Rails, PostgreSQL");
+    }
+}
+
+/// The width each value is range-checked against is the one Rails'
+/// adapter gives the column: PostgreSQL's `integer` is 4 bytes and its
+/// `bigint` 8, and Rails' SQLite integer is 8 bytes.
+#[test]
+fn integer_query_limits_follow_the_database() {
+    for (database_yml, limits) in [
+        (POSTGRESQL_DATABASE_YML, "{ id: 8, user_id: 8, number: 4 }"),
+        ("test:\n  adapter: sqlite3\n  database: \":memory:\"\n", "{ id: 8, user_id: 8, number: 8 }"),
+    ] {
+        let (emitted, errors) = integer_query_app(database_yml).emit(BuildTarget::Ruby);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let model = read(&emitted, "app/models/export.rb");
+        assert!(model.contains(&format!("def self.schema_integer_query_limits\n    {limits}\n  end")), "{model}");
+    }
+}

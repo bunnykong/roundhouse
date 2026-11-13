@@ -391,6 +391,11 @@ module ActiveRecord
     def bounds_predicate: (String qcol, Time | Date | String | Integer | Float | nil lower, Time | Date | String | Integer | Float | nil upper, bool exclusive) -> String
     def range_bound_sql: (untyped bound) -> String?
     def array_with_ranges_predicate: (String qcol, Array[untyped] vals) -> String
+    def integer_query_limit: (String col) -> Integer
+    def integer_value_predicate: (String qcol, String | Integer | Float | bool val, Integer limit) -> String
+    def integer_query_null?: (String | Integer | Float | bool val) -> bool
+    def integer_query_cast: (String | Integer | Float | bool val, Integer limit) -> ::ActiveRecord::IntegerKeyCast
+    def integer_list_predicate: (String qcol, Array[untyped] vals, Integer limit) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
     def substitute_named_binds: (String sql, Hash[Symbol, untyped] binds) -> String
     def bound_text: (untyped value) -> String
