@@ -100,7 +100,7 @@ use super::app::{
     load_defaults_version, queue_adapter_line, raise_on_missing_line, read_rb_files, wrap_parameters_line,
     FilterParametersLine, InflectEffect, VideoPreviewArgsExtract, FRAMEWORK_CONFIG_KEYS,
 };
-use super::after_initialize::{carried_block, Site};
+use super::after_initialize::{carried_block, server_guarded_hooks, Site};
 use super::util::{
     class_name_path, constant_id_str, constant_path_of, find_all_classes_with_scope,
     flatten_statements,
@@ -181,6 +181,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         origins: INIT,
         levels: TOP,
         reads: |p| carried(p, Site::Initializer),
+    },
+    Recognizer {
+        name: "after_initialize (under if defined?(Rails::Server), run by the server entries)",
+        origins: INIT,
+        levels: TOP,
+        reads: |p| server_guarded_hooks(p.node).is_some(),
     },
     Recognizer {
         name: "after_initialize (config.after_initialize inside Rails.application.configure, run at boot)",

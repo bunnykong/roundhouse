@@ -17,9 +17,25 @@
 //! `config.after_initialize` inside `Rails.application.configure do …
 //! end` there. Any other block stays unread, and the ledger reports it.
 //!
+//! SERVER-ONLY. Rails defines `Rails::Server` only under `rails server`
+//! (`rails/commands/server/server_command`), so an initializer's top-level
+//! `if defined?(Rails::Server)` registers its hooks there and not under a
+//! plain `puma`, a worker, a runner or a test. Such an `if` is carried when
+//! its predicate is exactly that, it has no `else` or `elsif`, and every
+//! statement of its body is a hook carried as above whose block has no
+//! static part (below), since a static part would apply in every process.
+//! Its hooks run only from the entries that serve
+//! (`project::apply_app_initializers`). Any other guard (an `else`,
+//! `unless`, `case`, another predicate, a mixed body) stays unread, and
+//! the ledger reports it. Inside a callback body `defined?(Rails::Server)`
+//! is left as it is: nil in every entry, the server's included, as Rails
+//! answers under a plain `puma`; under `rails server` Rails answers
+//! "constant", so a part of a body that tests it runs in no entry here.
+//!
 //! HOW. Each body is ingested from its own source like any method body
 //! (real spans) and becomes a class method of the generated
-//! [`AFTER_INITIALIZE_RUNNER`] module; its `run` calls them in order. Rails
+//! [`AFTER_INITIALIZE_RUNNER`] module; its `run(server)` calls them in
+//! registration order, a server-only one under `if server`. Rails
 //! runs them last in `initialize!`, once the database and the job queue
 //! adapter are configured and before the server starts, so each emitted
 //! entry calls `run` after it opens the database and sets up the job drain,
@@ -120,6 +136,53 @@ pub(super) fn carried_block<'pr>(call: &ruby_prism::CallNode<'pr>, site: Site) -
     (!outer.found).then_some(block)
 }
 
+/// The hooks of an initializer's top-level `if defined?(Rails::Server)`
+/// this pass carries as server-only (see the module doc), or `None`: the
+/// predicate exactly that, no `else` or `elsif`, and a body of carried
+/// hooks only, none with a static part. The initializer ledger asks with
+/// the same node.
+pub(super) fn server_guarded_hooks<'pr>(node: &Node<'pr>) -> Option<Vec<ruby_prism::CallNode<'pr>>> {
+    let guard = node.as_if_node()?;
+    if guard.subsequent().is_some() {
+        return None;
+    }
+    // `Rails::Server` or `::Rails::Server`, nothing computed in the path.
+    let tested = guard.predicate().as_defined_node()?.value();
+    let server = tested.as_constant_path_node()?;
+    let rails = server.parent()?;
+    let rails_named = match (rails.as_constant_read_node(), rails.as_constant_path_node()) {
+        (Some(read), _) => constant_id_str(&read.name()) == "Rails",
+        (None, Some(rooted)) => rooted.parent().is_none() && rooted.name().is_some_and(|n| constant_id_str(&n) == "Rails"),
+        _ => false,
+    };
+    if !rails_named || !server.name().is_some_and(|n| constant_id_str(&n) == "Server") {
+        return None;
+    }
+    let stmts: Vec<Node<'pr>> = guard.statements()?.body().iter().collect();
+    let mut hooks = Vec::new();
+    for stmt in &stmts {
+        let call = stmt.as_call_node()?;
+        let block = carried_block(&call, Site::Initializer)?;
+        if block.body().map(flatten_statements).unwrap_or_default().iter().any(is_static_part) {
+            return None;
+        }
+        hooks.push(call);
+    }
+    (!hooks.is_empty()).then_some(hooks)
+}
+
+/// A statement `read_body` applies while ingesting rather than running: a
+/// `Const.module_eval do … end` reopen or a `require`.
+fn is_static_part(stmt: &Node<'_>) -> bool {
+    stmt.as_call_node().is_some_and(|call| {
+        let name = constant_id_str(&call.name());
+        match call.receiver() {
+            Some(_) => REOPENERS.contains(&name),
+            None => matches!(name, "require" | "require_relative"),
+        }
+    })
+}
+
 /// Whether a body reads or writes a local of the code around its block:
 /// a variable whose depth is past the blocks the body itself opens.
 struct OuterLocals {
@@ -167,6 +230,8 @@ pub(super) struct Callback {
     span: Span,
     body: Vec<Expr>,
     reopens: Vec<Reopen>,
+    /// Registered under `if defined?(Rails::Server)`: run by the server only.
+    server_only: bool,
 }
 
 /// `Const.module_eval do … end` inside a callback.
@@ -225,6 +290,12 @@ pub(super) fn read_all<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec
             let root = parsed.node();
             let Some(program) = root.as_program_node() else { continue };
             for stmt in program.statements().body().iter() {
+                if let Some(hooks) = server_guarded_hooks(&stmt) {
+                    for hook in hooks {
+                        read_hook(vfs, dir, &hook, &file, Site::Initializer, true, &mut loaded, &mut out)?;
+                    }
+                    continue;
+                }
                 read_statement(vfs, dir, &stmt, &file, Site::Initializer, &mut loaded, &mut out)?;
             }
         }
@@ -255,8 +326,24 @@ fn read_statement<V: Vfs + ?Sized>(
         }
         return Ok(());
     }
-    let Some(block) = carried_block(&call, site) else { return Ok(()) };
-    let mut callback = Callback { span: span_of(stmt, file), body: Vec::new(), reopens: Vec::new() };
+    read_hook(vfs, dir, &call, file, site, false, loaded, out)
+}
+
+/// One `after_initialize` call: its callback, when this pass carries it.
+#[allow(clippy::too_many_arguments)]
+fn read_hook<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    site: Site,
+    server_only: bool,
+    loaded: &mut HashSet<PathBuf>,
+    out: &mut Vec<Callback>,
+) -> IngestResult<()> {
+    let Some(block) = carried_block(call, site) else { return Ok(()) };
+    let mut callback =
+        Callback { span: span_of(&call.as_node(), file), body: Vec::new(), reopens: Vec::new(), server_only };
     let read = block
         .body()
         .map(|body| read_body(vfs, dir, flatten_statements(body), file, loaded, &mut callback, 0))
@@ -538,9 +625,15 @@ pub(super) fn named_constants(callbacks: &[Callback]) -> std::collections::HashS
 
 /// Apply the reopens to the compiled modules and add the runner module
 /// with one class method per callback that has something to run.
+///
+/// `run(server = false)` calls them in registration order, one list for both
+/// kinds, so a server-only callback keeps its place among the others as
+/// in Rails; it is called under `if server`. Each entry says whether it
+/// is the server (`project::apply_app_initializers`).
 pub(super) fn apply(app: &mut App, callbacks: Vec<Callback>) -> IngestResult<()> {
     let runner = ClassId(Symbol::from(AFTER_INITIALIZE_RUNNER));
     let mut methods: Vec<MethodDef> = Vec::new();
+    let mut server_only: Vec<bool> = Vec::new();
     for callback in callbacks {
         for reopen in callback.reopens {
             if let Err(err) = apply_reopen(app, reopen) {
@@ -562,6 +655,7 @@ pub(super) fn apply(app: &mut App, callbacks: Vec<Callback>) -> IngestResult<()>
         method.name_span = span;
         method.body = body;
         methods.push(method);
+        server_only.push(callback.server_only);
     }
     if methods.is_empty() {
         return Ok(());
@@ -575,8 +669,17 @@ pub(super) fn apply(app: &mut App, callbacks: Vec<Callback>) -> IngestResult<()>
             format!("the app defines `{AFTER_INITIALIZE_RUNNER}`, the module its after_initialize callbacks run from"),
         ));
     }
-    let calls: String = methods.iter().map(|m| format!("  {}\n", m.name.as_str())).collect();
-    let mut run = crate::runtime_src::parse_methods(&format!("def self.run\n{calls}  nil\nend\n"))
+    let calls: String = methods
+        .iter()
+        .zip(&server_only)
+        .map(|(m, &server)| match server {
+            true => format!("  {} if server\n", m.name.as_str()),
+            false => format!("  {}\n", m.name.as_str()),
+        })
+        .collect();
+    // Every entry passes the flag; the entries are not analyzed, so the
+    // `false` default is what types it (a Boolean, not an unresolved local).
+    let mut run = crate::runtime_src::parse_methods(&format!("def self.run(server = false)\n{calls}  nil\nend\n"))
         .map_err(|e| unsupported("config/initializers", format!("after_initialize runner: {e}")))?;
     for m in &mut run {
         m.receiver = MethodReceiver::Class;

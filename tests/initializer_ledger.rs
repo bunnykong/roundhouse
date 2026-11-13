@@ -724,14 +724,66 @@ fn a_constant_a_conditional_assigns_does_not_admit_a_later_mutation() {
     assert_eq!(app.boot_program.len(), 1);
 }
 
+/// Rails registers a hook under `if defined?(Rails::Server)` under `rails
+/// server` only; it is carried as a server-only callback
+/// (`ingest::after_initialize`), so the ledger no longer reports it, and it
+/// is still no statement of the boot program.
 #[test]
-fn a_hook_under_a_guard_stays_on_the_ledger() {
+fn a_hook_under_the_server_guard_is_carried_off_the_ledger() {
     let (app, ledger) = ingest(&[(
         "config/initializers/recover_exports.rb",
         "if defined?(Rails::Server)\n  Rails.application.config.after_initialize do\n    BootProbe.recover_pending!\n  end\nend\n",
     )]);
-    assert!(!ledger.is_empty(), "the guarded hook is reported");
+    assert!(ledger.is_empty(), "{:?}", statements(&ledger));
+    assert!(app.runs_after_initialize);
     assert!(app.boot_program.is_empty(), "{:?}", app.boot_program);
+}
+
+/// The other spellings of that guard: rooted, as a modifier, and around
+/// two hooks. Each is carried, server-only, and nothing is ledgered.
+#[test]
+fn the_server_guard_is_carried_rooted_as_a_modifier_and_around_several_hooks() {
+    let hook = "Rails.application.config.after_initialize do\n  BootProbe.recover_pending!\nend\n";
+    for (name, source) in [
+        ("rooted", format!("if defined?(::Rails::Server)\n{hook}end\n")),
+        ("then", format!("if defined? Rails::Server then\n{hook}end\n")),
+        ("modifier", format!("Rails.application.config.after_initialize do\n  BootProbe.recover_pending!\nend if defined?(Rails::Server)\n")),
+        ("several", format!("if defined?(Rails::Server)\n{hook}{hook}end\n")),
+    ] {
+        let (app, ledger) = ingest(&[("config/initializers/server_hooks.rb", &source)]);
+        assert!(ledger.is_empty(), "{name}: {:?}", statements(&ledger));
+        assert!(app.runs_after_initialize, "{name}");
+        assert!(app.boot_program.is_empty(), "{name}: {:?}", app.boot_program);
+    }
+}
+
+/// Only that exact guard is carried. An `else` or `elsif`, `unless`,
+/// another predicate or constant, a mixed body, a hook inside `configure`,
+/// a hook whose block takes the app, and a hook with a static part (a
+/// reopen or a `require`, which would apply in every process) each stay on
+/// the ledger, and nothing runs.
+#[test]
+fn a_hook_under_any_other_guard_stays_on_the_ledger() {
+    let hook = "  Rails.application.config.after_initialize do\n    BootProbe.recover_pending!\n  end\n";
+    let guarded = |body: &str| format!("if defined?(Rails::Server)\n{body}end\n");
+    for (name, source) in [
+        ("else", format!("if defined?(Rails::Server)\n{hook}else\n  BOOTED = true\nend\n")),
+        ("elsif", format!("if defined?(Rails::Server)\n{hook}elsif ENV[\"SERVE\"]\n{hook}end\n")),
+        ("unless", format!("unless defined?(Rails::Server)\n{hook}end\n")),
+        ("console", format!("if defined?(Rails::Console)\n{hook}end\n")),
+        ("nested constant", format!("if defined?(Boot::Rails::Server)\n{hook}end\n")),
+        ("and", format!("if defined?(Rails::Server) && ENV[\"SERVE\"]\n{hook}end\n")),
+        ("mixed", guarded(&format!("{hook}  BootProbe.warm!\n"))),
+        ("configure", guarded("  Rails.application.configure do\n    config.after_initialize do\n      BootProbe.recover_pending!\n    end\n  end\n")),
+        ("block parameter", guarded("  Rails.application.config.after_initialize do |app|\n    BootProbe.recover_pending!(app)\n  end\n")),
+        ("reopen", guarded("  Rails.application.config.after_initialize do\n    BootProbe.module_eval do\n      def self.ready? = true\n    end\n  end\n")),
+        ("require", guarded("  Rails.application.config.after_initialize do\n    require \"ext/boot_patch\"\n  end\n")),
+    ] {
+        let (app, ledger) = ingest(&[("config/initializers/guarded.rb", &source)]);
+        assert_eq!(ledger.len(), 1, "{name}: {:?}", statements(&ledger));
+        assert!(!app.runs_after_initialize, "{name}");
+        assert!(app.boot_program.is_empty(), "{name}: {:?}", app.boot_program);
+    }
 }
 
 #[test]

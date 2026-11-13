@@ -65,9 +65,10 @@ pub struct ConcernGuardedItem {
     pub at: usize,
 }
 
-/// The generated module whose `run` performs the app's `after_initialize`
-/// callbacks (`ingest::after_initialize`); each entry calls it once the
-/// database and the job drain are set up (`project::apply_app_initializers`).
+/// The generated module whose `run(server)` performs the app's
+/// `after_initialize` callbacks (`ingest::after_initialize`); each entry
+/// calls it once the database and the job drain are set up, saying whether
+/// it serves (`project::apply_app_initializers`).
 pub const AFTER_INITIALIZE_RUNNER: &str = "AppInitializers";
 
 /// The top-level IR: a Rails application as data. This is the serializable

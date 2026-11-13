@@ -120,7 +120,7 @@ fn after_initialize_callbacks_run_at_boot_on_ruby() {
 /// server, so it calls the runner as the server's `main.rb` does once the
 /// database and the job drain are set up;
 /// `tests/spinel_toolchain/after_initialize_boot.rs` boots the server itself.
-const SPINEL_RUN: &str = "AppInitializers.run\n";
+const SPINEL_RUN: &str = "AppInitializers.run(true)\n";
 
 #[test]
 #[ignore = "requires the Spinel toolchain"]
@@ -566,4 +566,142 @@ require "active_record"
     }
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "Rails agrees");
+}
+
+/// A hook registered under `if defined?(Rails::Server)` runs where the
+/// emitted tree serves and nowhere else. With one shipment queued, the
+/// one-request script (`ruby main.rb`, CGI variables) runs the other two
+/// hooks and leaves it queued; `config.ru` runs all three in registration
+/// order and the job sends it. Rails 8.1.4 answers the same without and
+/// with `rails server` (`a_server_guarded_hook_matches_rails`). `sidekiq.rb`
+/// passes `false` as the script does (`project::tests`).
+#[test]
+fn a_server_guarded_hook_runs_from_config_ru_and_not_the_one_request_script() {
+    let (tree, errors) = boot::server_guarded_app().emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let ruby = |args: &[&str], env: &[(&str, &str)]| {
+        let output = emit_and_run::ruby()
+            .args(args)
+            .current_dir(&tree)
+            .env("BLOG_DB", "boot.sqlite3")
+            .envs(env.iter().copied())
+            .output()
+            .expect("spawn ruby");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(output.status.success(), "ruby {args:?}:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        stdout
+    };
+    ruby(&["-e", "require File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\nShipment.create!(status: \"queued\")\n"], &[]);
+    let script = ruby(&["main.rb"], &[("REQUEST_METHOD", "GET"), ("PATH_INFO", "/shipments"), ("QUERY_STRING", "")]);
+    assert!(script.trim_end().ends_with(boot::NOT_SERVED_AFTER_BOOT), "{script}");
+    let served = ruby(
+        &["-e", &format!(
+            "{SERVE}deadline = Time.now + 10\nsleep 0.02 while Shipment.where(status: \"queued\").count > 0 && Time.now < deadline\nprint Shipment.order(:id).pluck(:status).join(\",\") + \"|\" + BootLog.entries.join(\",\")\n"
+        )],
+        &[],
+    );
+    assert_eq!(served, boot::SERVED_AFTER_BOOT);
+}
+
+/// The runner's flag natively: `run(false)`, as the worker role calls it,
+/// runs the two unguarded hooks and leaves the shipment queued; `run(true)`,
+/// as the server calls it, runs all three in registration order. A contract
+/// starts no server and registers no drain, so the job runs inline.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_server_guarded_hook_runs_only_under_the_server_flag_on_spinel() {
+    boot::server_guarded_app()
+        .run_spinel_with_db(&format!(
+            r#"Shipment.create!(status: "queued")
+AppInitializers.run(false)
+answer = Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
+raise "run(false): " + answer unless answer == {not_served:?}
+AppInitializers.run(true)
+answer = Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
+raise "run(true): " + answer unless answer == "sent|first,last,first,resumed 1,last"
+puts "the server flag ran the guarded hook in its place"
+"#,
+            not_served = boot::NOT_SERVED_AFTER_BOOT,
+        ))
+        .assert_passes();
+}
+
+/// Rails 8.1.4 boots the server-guarded app twice, with one shipment queued
+/// each time: `rails/commands/server/server_command` loaded, as
+/// `rails server` loads it before the app, defines `Rails::Server`, so the
+/// guarded hook is registered and runs between the other two; without it
+/// only the other two run.
+#[test]
+fn a_server_guarded_hook_matches_rails() {
+    for (server, expected) in [(false, boot::NOT_SERVED_AFTER_BOOT), (true, boot::SERVED_AFTER_BOOT)] {
+        let Some(answer) = rails_boot(boot::SERVER_GUARDED_FILES, server) else { return };
+        assert_eq!(answer, expected, "Rails::Server defined: {server}");
+    }
+}
+
+/// Boot the shared app's files, `extra` written over them, with Rails
+/// 8.1.4 on a database holding one queued shipment and the `:async`
+/// adapter, and answer `statuses|log`; `None` when the oracle is not
+/// installed (a reasoned skip).
+fn rails_boot(extra: &[(&str, &str)], server: bool) -> Option<String> {
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse_after_initialize_server_oracle_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for (path, content) in boot::FILES.iter().chain(extra) {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).expect("create app directory");
+        std::fs::write(file, content).expect("write app file");
+    }
+    let database = root.join("boot.sqlite3");
+    std::fs::write(
+        root.join("config/database.yml"),
+        format!("development:\n  adapter: sqlite3\n  database: {}\n", database.display()),
+    )
+    .expect("write database.yml");
+    let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/rails_oracle.rb");
+    // As `rails server` loads it: the command framework, then the command.
+    let server_command = if server { "require \"rails/command\"\nrequire \"rails/commands/server/server_command\"\n" } else { "" };
+    let script = format!(
+        r#"require {helper:?}
+gems = ["railties", "activerecord", "activejob", "actionpack"]
+unless RailsOracle.available?(*gems, sqlite3: ">= 2.1", rackup: ">= 2")
+  warn "skipping server-guard oracle: #{{RailsOracle.label}} needs railties, activerecord, activejob, actionpack, rackup and sqlite3"
+  exit 77
+end
+RailsOracle.activate(*gems, sqlite3: ">= 2.1", rackup: ">= 2")
+require "rails"
+require "active_record/railtie"
+require "active_job/railtie"
+require "sqlite3"
+{server_command}SQLite3::Database.new({database:?}) do |db|
+  db.execute({table:?})
+  db.execute("INSERT INTO shipments (status) VALUES ('queued')")
+end
+class ServerGuardOracle < Rails::Application
+  config.root = {root:?}
+  config.load_defaults 8.1
+  config.eager_load = false
+  config.logger = Logger.new(File::NULL)
+  config.secret_key_base = "server-guard-oracle"
+  config.active_job.queue_adapter = :async
+end
+ServerGuardOracle.initialize!
+deadline = Time.now + 10
+sleep 0.02 while BootLog.entries.include?("resumed 1") && Shipment.where(status: "queued").exists? && Time.now < deadline
+print Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
+"#,
+        database = database.display().to_string(),
+        table = boot::TABLE_SQL,
+        root = root.display().to_string(),
+    );
+    let output = std::process::Command::new("ruby").args(["-e", &script]).output().expect("Rails oracle");
+    let _ = std::fs::remove_dir_all(&root);
+    if output.status.code() == Some(77) {
+        prerequisite::missing(String::from_utf8_lossy(&output.stderr).trim());
+        return None;
+    }
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
