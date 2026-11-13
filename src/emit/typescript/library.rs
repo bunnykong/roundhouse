@@ -672,7 +672,12 @@ pub(super) fn emit_class_file_full(
 /// its own named `importer::too_big.ts` left `Importer.TooBig` undefined.
 pub(crate) fn nested_class_root(lc: &LibraryClass) -> Option<&str> {
     let name = lc.name.0.as_str();
-    if lc.is_module || lc.origin.is_some() || !name.contains("::") {
+    // A serializer the app wrote (`module Api; class ArticleSerializer <
+    // ActiveModel::Serializer`) has an origin only because ingest expanded
+    // it: it is still the app's class, read as `Api.ArticleSerializer`.
+    let app_written =
+        matches!(lc.origin, None | Some(crate::dialect::LibraryClassOrigin::ActiveModelSerializer { .. }));
+    if lc.is_module || !app_written || !name.contains("::") {
         return None;
     }
     name.split("::").next()
