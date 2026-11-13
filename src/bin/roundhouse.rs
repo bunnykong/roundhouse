@@ -560,6 +560,11 @@ fn transpile(
     // Each gap still degrades to a stub in the emitted output, so a
     // single run surfaces the whole inventory instead of dying on the
     // first one.
+    // The emit below lowers `constantize` in the app itself, and on a target that refuses the call
+    // the name it resolved goes with it: what the app reaches is read before, as it was read
+    // when the emit lowered a copy.
+    let unreached_gem_code = (whole_route.is_none() && roundhouse::lower::constantize::applies(&app, target))
+        .then(|| roundhouse::source_gem_shake::UnreachedGemCode::of(&app));
     let mut emit = || {
         roundhouse::emit::diagnostics::scope(|| match &whole_route {
             Some(wr) => project::futamura_target_files(&app, input, Some(wr)),
@@ -610,8 +615,17 @@ fn transpile(
     // gate failure reports every diagnostic before the run aborts.
     diags.splice(0..0, parse_diags);
     // A gem's code the app does not reach is no error of the emitted program (`source_gem_shake`).
-    roundhouse::source_gem_shake::demote_unreached_gem_errors(&app, &mut diags);
-    roundhouse::source_gem_shake::demote_unreached_gem_errors(&app, &mut analyze_diags);
+    match &unreached_gem_code {
+        Some(unreached) => {
+            for d in [&mut diags, &mut analyze_diags] {
+                unreached.iter().for_each(|u| u.demote(d));
+            }
+        }
+        None => {
+            roundhouse::source_gem_shake::demote_unreached_gem_errors(&app, &mut diags);
+            roundhouse::source_gem_shake::demote_unreached_gem_errors(&app, &mut analyze_diags);
+        }
+    }
 
     // Policy: errors (unsupported constructs and type errors alike) fail
     // the transpile cleanly by default. With --allow-unsupported they

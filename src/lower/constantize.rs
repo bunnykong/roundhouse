@@ -31,7 +31,8 @@ pub fn lower_in_place(app: &mut App, target: BuildTarget) {
     }
 }
 
-fn applies(app: &App, target: BuildTarget) -> bool {
+/// Whether [`lower_in_place`] rewrites any of `app`'s bodies for `target`.
+pub fn applies(app: &App, target: BuildTarget) -> bool {
     if keeps_source_call(target) {
         return false;
     }
