@@ -231,12 +231,12 @@ pub(super) fn devise_sanitized_params(app: &mut App) {
         return;
     }
     let parameters = crate::ty::Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("ActionController::Parameters")), args: vec![].into() };
-    let sig = crate::ty::Ty::Fn {
+    let sig = crate::ty::Ty::Fn(Box::new(crate::ty::FnTy {
         params: vec![crate::ty::Param { name: crate::ident::Symbol::from("action"), ty: std::sync::Arc::new(crate::ty::Ty::Sym), kind: crate::ty::ParamKind::Required }].into(),
         block: None,
         ret: std::sync::Arc::new(parameters),
         effects: crate::effect::EffectSet::default(),
-    };
+    }));
     app.rbs_signatures.entry(owner).or_default().entry(crate::ident::Symbol::from("sanitize")).or_insert(sig);
 }
 
@@ -289,7 +289,7 @@ pub(super) fn devise_mapping_types(app: &mut App) {
         [one] => class_of(one),
         many => crate::ty::Ty::Union { variants: many.iter().map(|m| class_of(m)).collect::<Vec<_>>().into() },
     };
-    let signature = crate::ty::Ty::Fn { params: Vec::new().into(), block: None, ret: to.into(), effects: Default::default() };
+    let signature = crate::ty::Ty::Fn(Box::new(crate::ty::FnTy { params: Vec::new().into(), block: None, ret: to.into(), effects: Default::default() }));
     app.rbs_signatures
         .entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mapping")))
         .or_default()
@@ -308,7 +308,7 @@ pub(super) fn devise_mapping_types(app: &mut App) {
         .entry(crate::ident::ClassId(crate::ident::Symbol::from("DeviseController")))
         .or_default()
         .entry(crate::ident::Symbol::from("resource"))
-        .or_insert(crate::ty::Ty::Fn { params: Vec::new().into(), block: None, ret: record.clone().into(), effects: Default::default() });
+        .or_insert(crate::ty::Ty::Fn(Box::new(crate::ty::FnTy { params: Vec::new().into(), block: None, ret: record.clone().into(), effects: Default::default() })));
     if let Some(mailer) = app.library_classes.iter().find(|c| c.name.0.as_str() == "Devise::Mailer") {
         let param = |name: &crate::ident::Symbol, ty: crate::ty::Ty, optional: bool| crate::ty::Param {
             name: name.clone(),
@@ -323,7 +323,7 @@ pub(super) fn devise_mapping_types(app: &mut App) {
                 _ => param(&p.name, crate::ty::Ty::Untyped, p.default.is_some()),
             }).collect();
             if m.params.first().is_some_and(|p| p.name.as_str() == "record") {
-                actions.push((m.name.clone(), crate::ty::Ty::Fn { params: params.into(), block: None, ret: crate::ty::Ty::Untyped.into(), effects: Default::default() }));
+                actions.push((m.name.clone(), crate::ty::Ty::Fn(Box::new(crate::ty::FnTy { params: params.into(), block: None, ret: crate::ty::Ty::Untyped.into(), effects: Default::default() }))));
             }
         }
         let table = app.rbs_signatures.entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mailer"))).or_default();

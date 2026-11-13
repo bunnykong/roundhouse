@@ -42,7 +42,7 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
-use crate::ty::{Row, Ty};
+use crate::ty::{FnTy, Row, Ty};
 
 use self::associations::{push_association_methods, push_dependent_destroy, ThroughJoins};
 pub(crate) use self::associations::{ThroughWriterJoin, through_writer_join};
@@ -2607,12 +2607,12 @@ pub(crate) fn push_scope_variants(
                     receiver: MethodReceiver::Class,
                     params,
                     body,
-                    signature: Some(Ty::Fn {
+                    signature: Some(Ty::Fn(Box::new(FnTy {
                         params: sig_params.into(),
                         block: None,
                         ret: std::sync::Arc::new(Ty::Untyped),
                         effects: crate::effect::EffectSet::default(),
-                    }),
+                    }))),
                     effects: crate::effect::EffectSet::default(),
                     enclosing_class: Some(model_name.0.clone()),
                     kind: AccessorKind::Method,
@@ -2807,7 +2807,7 @@ fn build_class_info_with_finder_inputs(
         };
         method_map
             .entry(m.name.clone())
-            .or_insert_with(|| Ty::Fn {
+            .or_insert_with(|| Ty::Fn(Box::new(FnTy {
                 // Retain the calling convention too: a positional Hash
                 // default must still normalize keyword syntax into a Hash.
                 // Unsigned methods retain default types, not call-site seeds.
@@ -2820,7 +2820,7 @@ fn build_class_info_with_finder_inputs(
                     .then(|| std::sync::Arc::new(Ty::Untyped)),
                 ret: std::sync::Arc::new(inferred.clone()),
                 effects: m.effects.clone(),
-            });
+            })));
         kind_map.entry(m.name.clone()).or_insert(m.kind);
     }
 
@@ -3228,7 +3228,7 @@ fn broadcasts_class_info() -> crate::analyze::ClassInfo {
     // Hash, Crystal NamedTuple → named params, TS object literal).
     use crate::dialect::AccessorKind;
     let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
-    let sig = Ty::Fn {
+    let sig = Ty::Fn(Box::new(FnTy {
         params: vec![crate::ty::Param {
             name: Symbol::from("opts"),
             ty: opts_ty.into(),
@@ -3237,7 +3237,7 @@ fn broadcasts_class_info() -> crate::analyze::ClassInfo {
         block: None,
         ret: std::sync::Arc::new(Ty::Nil),
         effects: crate::effect::EffectSet::pure(),
-    };
+    }));
     for name in ["prepend", "replace", "remove", "append"] {
         info.class_methods.insert(Symbol::from(name), sig.clone());
         info.class_method_kinds.insert(Symbol::from(name), AccessorKind::Method);
@@ -3280,8 +3280,8 @@ fn type_method_body(
 ) {
     let typer = crate::analyze::BodyTyper::new(classes);
     let mut ctx = crate::analyze::Ctx::default();
-    if let Some(Ty::Fn { params, .. }) = &method.signature {
-        for (param, sig) in method.params.iter().zip(params.iter()) {
+    if let Some(Ty::Fn(fn_ty)) = &method.signature {
+        for (param, sig) in method.params.iter().zip(fn_ty.params.iter()) {
             ctx.local_bindings.insert(param.name.clone(), (*sig.ty).clone());
         }
     }
@@ -3417,12 +3417,12 @@ fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
             kind: p.ty_kind(),
         })
         .collect();
-    method.signature = Some(Ty::Fn {
+    method.signature = Some(Ty::Fn(Box::new(FnTy {
         params,
         block: None,
         ret: std::sync::Arc::new(body_ty),
         effects: crate::effect::EffectSet::default(),
-    });
+    })));
 }
 
 /// Does `e` contain a `return` anywhere, nested blocks included?
@@ -3567,7 +3567,7 @@ pub fn ty_of_column_stored(col: &Column) -> Ty {
 /// Build a `Ty::Fn` signature from positional (name, type) pairs and a return type.
 /// Effects default to pure — callers refine if needed (lifecycle hooks etc.).
 pub(crate) fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
-    Ty::Fn {
+    Ty::Fn(Box::new(FnTy {
         params: params
             .into_iter()
             .map(|(name, ty)| crate::ty::Param {
@@ -3579,7 +3579,7 @@ pub(crate) fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
         block: None,
         ret: std::sync::Arc::new(ret),
         effects: crate::effect::EffectSet::pure(),
-    }
+    }))
 }
 
 pub(super) fn var_ref(name: Symbol) -> Expr {
@@ -3865,7 +3865,7 @@ mod tests {
             evens.body.ty = Some(ty);
             let got = article_info(&app, &methods).class_methods.get(&Symbol::from("evens")).cloned();
             match got {
-                Some(Ty::Fn { ret, .. }) if kept => assert_eq!(*ret, ints),
+                Some(Ty::Fn(fn_ty)) if kept => assert_eq!(*fn_ty.ret, ints),
                 None if !kept => {}
                 other => panic!("unexpected registry entry: {other:?}"),
             }

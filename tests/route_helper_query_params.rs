@@ -13,7 +13,7 @@
 
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::lower::lower_routes_to_library_functions;
-use roundhouse::ty::{ParamKind, Ty};
+use roundhouse::ty::{FnTy, ParamKind, Ty};
 
 const SCHEMA: &str = "ActiveRecord::Schema.define(version: 1) do\n  \
     create_table :rooms do |t|\n    t.string :name\n  end\n  \
@@ -48,7 +48,8 @@ fn params(app: &roundhouse::App, name: &str) -> Vec<roundhouse::ty::Param> {
         .signature
         .clone()
         .expect("helper signature");
-    let Ty::Fn { params, .. } = sig else { panic!("not a Ty::Fn: {sig:?}") };
+    let Ty::Fn(fn_ty) = sig else { panic!("not a Ty::Fn: {sig:?}") };
+    let FnTy { params, .. } = *fn_ty;
     params.to_vec()
 }
 

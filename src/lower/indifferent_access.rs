@@ -286,7 +286,8 @@ fn retype(expr: &mut Expr) {
 /// Symbol-keyed one is converted as the method is entered.
 // Not the arguments at each call: a call outside the analyzed bodies (a gem's, a test's) would pass its Hash unconverted.
 fn keyed_like_indifferent(method: &mut crate::dialect::MethodDef) {
-    let Some(Ty::Fn { params, .. }) = &method.signature else { return };
+    let Some(Ty::Fn(fn_ty)) = &method.signature else { return };
+    let params = &fn_ty.params;
     let mixed = |ty: &Ty| {
         let leaves = leaves(ty);
         leaves.iter().any(|v| matches!(v, Ty::Hash { key, .. } if matches!(**key, Ty::Sym)))

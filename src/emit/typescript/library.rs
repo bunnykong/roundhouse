@@ -1334,7 +1334,7 @@ fn collect_imports_with_companions(
 /// `def self.article(article)` typed as `(Article) -> String`
 /// would have no Const ref to Article anywhere in the IR's body.
 fn collect_ty_class_refs(ty: &crate::ty::Ty, out: &mut BTreeSet<String>) {
-    use crate::ty::Ty;
+    use crate::ty::{FnTy, Ty};
     match ty {
         Ty::Class { id, args } => {
             // Mirror `collect_class_refs` (Const-position): framework-
@@ -1381,7 +1381,8 @@ fn collect_ty_class_refs(ty: &crate::ty::Ty, out: &mut BTreeSet<String>) {
                 collect_ty_class_refs(v, out);
             }
         }
-        Ty::Fn { params, block, ret, .. } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, block, ret, .. } = &**fn_ty;
             for p in params {
                 collect_ty_class_refs(&p.ty, out);
             }
@@ -1840,8 +1841,8 @@ fn rewrite_free(e: &Expr) -> Expr {
                 binding: rc.binding.clone(),
                 body: rewrite_free(&rc.body),
             }).collect(),
-            else_branch: else_branch.as_ref().map(rewrite_free),
-            ensure: ensure.as_ref().map(rewrite_free),
+            else_branch: else_branch.as_deref().map(rewrite_free).map(Box::new),
+            ensure: ensure.as_deref().map(rewrite_free).map(Box::new),
             implicit: *implicit,
         },
         ExprNode::Case { scrutinee, arms } => ExprNode::Case {
@@ -2131,8 +2132,8 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
                         body: rewrite(&rc.body, super_method),
                     })
                     .collect(),
-                else_branch: else_branch.as_ref().map(|b| rewrite(b, super_method)),
-                ensure: ensure.as_ref().map(|b| rewrite(b, super_method)),
+                else_branch: else_branch.as_ref().map(|b| Box::new(rewrite(b, super_method))),
+                ensure: ensure.as_ref().map(|b| Box::new(rewrite(b, super_method))),
                 implicit: *implicit,
             }
         }

@@ -20,7 +20,7 @@ use super::shared::indent_py;
 use super::ty::python_ty;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// Python is a flat-module target: a `Foo::Bar` library class emits as a
 /// top-level `Bar`, with cross-file references wired through
@@ -51,8 +51,9 @@ fn is_accessor(m: &MethodDef) -> bool {
 /// sole-parameter type, falling back to the body's inferred type.
 fn accessor_field_ty(m: &MethodDef) -> Ty {
     match (&m.kind, &m.signature) {
-        (AccessorKind::AttributeReader, Some(Ty::Fn { ret, .. })) => (**ret).clone(),
-        (AccessorKind::AttributeWriter, Some(Ty::Fn { params, .. })) if !params.is_empty() => {
+        (AccessorKind::AttributeReader, Some(Ty::Fn(fn_ty))) => (*fn_ty.ret).clone(),
+        (AccessorKind::AttributeWriter, Some(Ty::Fn(fn_ty))) if !fn_ty.params.is_empty() => {
+            let FnTy { params, .. } = &**fn_ty;
             (*params[0].ty).clone()
         }
         _ => m.body.ty.clone().unwrap_or(Ty::Untyped),
@@ -71,7 +72,7 @@ fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
             _ => false,
         }
     }
-    matches!(sig, Some(Ty::Fn { ret, .. }) if is_time(ret))
+    matches!(sig, Some(Ty::Fn(fn_ty)) if is_time(&fn_ty.ret))
 }
 
 /// Render a method's parameter list and return type. Prefers the
@@ -79,7 +80,8 @@ fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
 /// falls back to bare, un-annotated names when a method carries none.
 fn params_and_ret(m: &MethodDef) -> (Vec<String>, Ty) {
     match &m.signature {
-        Some(Ty::Fn { params, ret, .. }) if params.len() == m.params.len() => {
+        Some(Ty::Fn(fn_ty)) if fn_ty.params.len() == m.params.len() => {
+            let FnTy { params, ret, .. } = &**fn_ty;
             let ps = m
                 .params
                 .iter()

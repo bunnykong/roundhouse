@@ -11,7 +11,7 @@ use crate::det::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::expr::{desugar_op_assign, Expr, ExprNode, IrHint, Literal};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::shared::{go_field_name, go_method_name};
 
@@ -589,9 +589,10 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             if extra_params.is_empty()
                 && rest_param.is_none()
                 && block_param.is_none()
-                && matches!(e.ty.as_ref(), Some(Ty::Fn { .. })) =>
+                && matches!(e.ty.as_ref(), Some(Ty::Fn(_))) =>
         {
-            let Some(Ty::Fn { params: sig, ret, .. }) = e.ty.as_ref() else { unreachable!() };
+            let Some(Ty::Fn(fn_ty)) = e.ty.as_ref() else { unreachable!() };
+            let FnTy { params: sig, ret, .. } = &**fn_ty;
             let concrete = |t: &Ty| !matches!(t, Ty::Var { .. } | Ty::Untyped);
             let typed_params = params.len() == sig.len()
                 && sig.iter().zip(params.iter()).all(|(p, name)| p.name == *name && concrete(&p.ty))

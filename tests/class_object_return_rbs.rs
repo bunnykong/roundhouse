@@ -305,7 +305,7 @@ fn an_unknown_union_in_an_early_return_is_untyped() {
             // Rendering a gradual union already says `untyped`; the inferred
             // return must also be unknown before another analysis pass uses it.
             assert!(method.signature.is_none()
-                || matches!(&method.signature, Some(Ty::Fn { ret, .. }) if ret.is_unknown()),
+                || matches!(&method.signature, Some(Ty::Fn(fn_ty)) if fn_ty.ret.is_unknown()),
                 "{value}, {tail}: {:?}", method.signature);
             let files = roundhouse::emit::ruby::emit_library(&app);
             let rbs = &files.iter().find(|f| f.path.ends_with("shelf.rbs")).unwrap().content;

@@ -18,7 +18,7 @@
 use crate::dialect::LibraryClass;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
-use crate::ty::{Param, ParamKind, Ty};
+use crate::ty::{FnTy, Param, ParamKind, Ty};
 
 /// Refine every method's block-param signature across `classes`.
 /// Same-class lookup only — a method that forwards `&blk` to a sibling
@@ -79,7 +79,8 @@ pub fn propagate_one(class: &mut LibraryClass) {
 /// shaped the same as RBS-derived sigs so rust emit's existing
 /// `render_block_closure_param` consumes both uniformly.
 fn callee_block_ty(sig: &Ty) -> Option<Ty> {
-    let Ty::Fn { params, .. } = sig else { return None };
+    let Ty::Fn(fn_ty) = sig else { return None };
+    let FnTy { params, .. } = &**fn_ty;
     params
         .iter()
         .find(|p| matches!(p.kind, ParamKind::Block))
@@ -126,15 +127,11 @@ fn refine_signature_block(m: &mut crate::dialect::MethodDef, block_ty: Ty) {
         kind: ParamKind::Block,
     };
     match m.signature.take() {
-        Some(Ty::Fn { mut params, block: _, ret, effects }) => {
-            params.retain(|p| !matches!(p.kind, ParamKind::Block));
-            params.push(block_param);
-            m.signature = Some(Ty::Fn {
-                params,
-                block: Some(std::sync::Arc::new(block_ty)),
-                ret,
-                effects,
-            });
+        Some(Ty::Fn(mut fn_ty)) => {
+            fn_ty.params.retain(|p| !matches!(p.kind, ParamKind::Block));
+            fn_ty.params.push(block_param);
+            fn_ty.block = Some(std::sync::Arc::new(block_ty));
+            m.signature = Some(Ty::Fn(fn_ty));
         }
         None => {
             let placeholder_params: Vec<Param> = m
@@ -147,12 +144,12 @@ fn refine_signature_block(m: &mut crate::dialect::MethodDef, block_ty: Ty) {
                 })
                 .chain(std::iter::once(block_param))
                 .collect();
-            m.signature = Some(Ty::Fn {
+            m.signature = Some(Ty::Fn(Box::new(FnTy {
                 params: placeholder_params.into(),
                 block: Some(std::sync::Arc::new(block_ty)),
                 ret: std::sync::Arc::new(Ty::Untyped),
                 effects: crate::effect::EffectSet::default(),
-            });
+            })));
         }
         Some(other) => {
             // Non-Fn signature (unexpected for a MethodDef) — put it
@@ -170,11 +167,11 @@ mod tests {
     use crate::expr::{Expr, ExprNode};
     use crate::ident::{ClassId, Symbol};
     use crate::span::Span;
-    use crate::ty::{Param, ParamKind, Ty};
+    use crate::ty::{FnTy, Param, ParamKind, Ty};
 
     fn typed_callee_block_sig() -> Ty {
         // Block sig: `(String, untyped) -> Nil` — Session#each-shaped.
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: vec![
                 Param {
                     name: Symbol::new("k"),
@@ -190,7 +187,7 @@ mod tests {
             block: None,
             ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::pure(),
-        }
+        }))
     }
 
     fn callee_each() -> MethodDef {
@@ -205,7 +202,7 @@ mod tests {
             receiver: MethodReceiver::Instance,
             params: vec![],
             body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
-            signature: Some(Ty::Fn {
+            signature: Some(Ty::Fn(Box::new(FnTy {
                 params: vec![Param {
                     name: Symbol::new("block"),
                     ty: block_sig.clone().into(),
@@ -214,7 +211,7 @@ mod tests {
                 block: Some(std::sync::Arc::new(block_sig)),
                 ret: std::sync::Arc::new(Ty::Nil),
                 effects: EffectSet::pure(),
-            }),
+            }))),
             effects: EffectSet::pure(),
             enclosing_class: Some(Symbol::from("Holder")),
             kind: AccessorKind::Method,
@@ -289,7 +286,8 @@ mod tests {
         let block_ty = callee_block_ty(fwd.signature.as_ref().expect("fabricated sig"))
             .expect("block-Param now present in sig");
         match &block_ty {
-            Ty::Fn { params, ret, .. } => {
+            Ty::Fn(fn_ty) => {
+                let FnTy { params, ret, .. } = &**fn_ty;
                 assert_eq!(params.len(), 2, "callee block has 2 args");
                 assert!(matches!(*params[0].ty, Ty::Str));
                 assert!(matches!(**ret, Ty::Nil));
@@ -323,10 +321,10 @@ mod tests {
     fn existing_typed_block_sig_not_overwritten() {
         let mut fwd = forwarder_calls_each();
         // Pre-populate with a distinct block sig (single Int arg).
-        let pre_sig = Ty::Fn {
+        let pre_sig = Ty::Fn(Box::new(FnTy {
             params: vec![Param {
                 name: Symbol::new("block"),
-                ty: Ty::Fn {
+                ty: Ty::Fn(Box::new(FnTy {
                     params: vec![Param {
                         name: Symbol::new("x"),
                         ty: Ty::Int.into(),
@@ -335,13 +333,13 @@ mod tests {
                     block: None,
                     ret: std::sync::Arc::new(Ty::Untyped),
                     effects: EffectSet::pure(),
-                }.into(),
+                })).into(),
                 kind: ParamKind::Block,
             }].into(),
             block: None,
             ret: std::sync::Arc::new(Ty::Untyped),
             effects: EffectSet::pure(),
-        };
+        }));
         fwd.signature = Some(pre_sig.clone());
         let mut class = holder_class(vec![callee_each(), fwd]);
         propagate_one(&mut class);

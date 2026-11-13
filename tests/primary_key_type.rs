@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use roundhouse::analyze::{diagnose, Analyzer, Severity};
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 use roundhouse::Symbol;
 
 fn app(schema: &str, model: &str, controller: &str) -> (roundhouse::App, Analyzer) {
@@ -100,7 +100,8 @@ fn adapter_method(app: &roundhouse::App, name: &str) -> (Ty, String) {
 }
 
 fn param_ty(sig: &Ty, i: usize) -> Ty {
-    let Ty::Fn { params, .. } = sig else { panic!("not a signature: {sig:?}") };
+    let Ty::Fn(fn_ty) = sig else { panic!("not a signature: {sig:?}") };
+    let FnTy { params, .. } = &**fn_ty;
     (*params[i].ty).clone()
 }
 
@@ -170,7 +171,8 @@ end
 fn a_uuid_key_is_minted_when_blank_written_and_answered_by_insert() {
     let (app, _) = app(UUID_SCHEMA, MODEL, SHOW);
     let (sig, body) = adapter_method(&app, "_adapter_insert");
-    let Ty::Fn { ret, .. } = &sig else { panic!("not a signature") };
+    let Ty::Fn(fn_ty) = &sig else { panic!("not a signature") };
+    let FnTy { ret, .. } = &**fn_ty;
     assert_eq!(**ret, Ty::Str, "insert answers the key, not a rowid");
     assert!(body.contains("INSERT INTO widgets (id, name)"), "the key is a column of the INSERT: {body}");
     assert!(body.contains("SecureRandom.uuid"), "a blank uuid is minted: {body}");
@@ -195,7 +197,8 @@ end
     assert!(body.trim_end().ends_with("@identifier"), "{body}");
     // …and `id` reads the key column, so `record.id` is the key.
     let (sig, body) = adapter_method(&app, "id");
-    let Ty::Fn { ret, .. } = &sig else { panic!("not a signature") };
+    let Ty::Fn(fn_ty) = &sig else { panic!("not a signature") };
+    let FnTy { ret, .. } = &**fn_ty;
     assert_eq!(**ret, Ty::Str);
     assert_eq!(body.trim(), "@identifier");
 }
@@ -235,7 +238,8 @@ end
 fn an_integer_key_still_comes_back_as_the_rowid() {
     let (app, _) = app(INT_SCHEMA, MODEL, SHOW);
     let (sig, body) = adapter_method(&app, "_adapter_insert");
-    let Ty::Fn { ret, .. } = &sig else { panic!("not a signature") };
+    let Ty::Fn(fn_ty) = &sig else { panic!("not a signature") };
+    let FnTy { ret, .. } = &**fn_ty;
     assert_eq!(**ret, Ty::Int);
     assert!(body.contains("INSERT INTO widgets (name)"), "{body}");
     assert!(body.contains("last_insert_rowid"), "{body}");

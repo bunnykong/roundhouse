@@ -819,8 +819,8 @@ fn children(e: &Expr) -> Vec<&Expr> {
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
             v.push(body);
             v.extend(rescues.iter().map(|r| &r.body));
-            v.extend(else_branch.iter());
-            v.extend(ensure.iter());
+            v.extend(else_branch.as_deref());
+            v.extend(ensure.as_deref());
         }
         _ => {}
     }
@@ -1014,7 +1014,7 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         }
         ExprNode::Next { .. } if LOOP_DEPTH.with(|l| l.get()) > 0 => "continue".to_string(),
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-            emit_begin_rescue(body, rescues, else_branch.as_ref(), ensure.as_ref())
+            emit_begin_rescue(body, rescues, else_branch.as_deref(), ensure.as_deref())
         }
         other => crate::emit::diagnostics::report_unsupported(e.span, "kotlin", other.kind_str(), "no Kotlin form for this construct here"),
     }

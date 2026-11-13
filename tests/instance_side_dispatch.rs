@@ -27,7 +27,7 @@ fn ret(methods: &[roundhouse::dialect::MethodDef], method: &str, class_side: boo
         })
         .expect("method");
     match &def.signature {
-        Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+        Some(Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
         _ => def.body.ty.clone().expect("typed body"),
     }
 }

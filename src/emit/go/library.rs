@@ -24,7 +24,7 @@
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
 use crate::ident::Symbol;
-use crate::ty::{ParamKind, Ty};
+use crate::ty::{FnTy, ParamKind, Ty};
 
 use super::shared::go_field_name;
 
@@ -213,7 +213,7 @@ pub fn emit_library_class_with_registry(
         let is_temporal_reader = m.kind == AccessorKind::AttributeReader
             && matches!(
                 m.signature.as_ref(),
-                Some(Ty::Fn { ret, .. }) if ret.contains_time()
+                Some(Ty::Fn(fn_ty)) if fn_ty.ret.contains_time()
             );
         if !is_temporal_reader
             && matches!(
@@ -433,7 +433,8 @@ fn collect_fields(methods: &[MethodDef], nullable_columns: &[Symbol]) -> Vec<Fie
         let col_ptr = nullable_columns.iter().any(|c| c.as_str() == name);
         let go_ty = match m.kind {
             AccessorKind::AttributeReader => {
-                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { ret, .. } = &**fn_ty;
                     // Temporal reader (`Ty::Time` return): NO struct
                     // field. Storage is the `<col>_raw` String accessor
                     // pair from the shared lowering, which collapses to
@@ -455,7 +456,8 @@ fn collect_fields(methods: &[MethodDef], nullable_columns: &[Symbol]) -> Vec<Fie
                 }
             }
             AccessorKind::AttributeWriter => {
-                if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { params, .. } = &**fn_ty;
                     params
                         .first()
                         .map(|p| {
@@ -1058,7 +1060,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         // for the func decl's return type.
         let returns_void = matches!(
             m.signature.as_ref(),
-            Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil)
+            Some(Ty::Fn(fn_ty)) if matches!(fn_ty.ret.as_ref(), Ty::Nil)
         );
         let mut ctx = EmitCtx::none();
         ctx.void_method = returns_void;
@@ -1157,10 +1159,10 @@ fn emit_method(
     // body walker can suppress the implicit `return X` wrap.
     let returns_void = matches!(
         m.signature.as_ref(),
-        Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil)
+        Some(Ty::Fn(fn_ty)) if matches!(fn_ty.ret.as_ref(), Ty::Nil)
     );
     let return_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
         _ => None,
     };
     let ctx = EmitCtx {
@@ -1205,7 +1207,7 @@ fn render_params(m: &MethodDef) -> String {
 /// function, its parameter types read from the first `yield`'s values.
 pub(super) fn yield_block_param(m: &MethodDef) -> Option<String> {
     let args = first_yield_args(&m.body)?;
-    let void = matches!(m.signature.as_ref(), Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil));
+    let void = matches!(m.signature.as_ref(), Some(Ty::Fn(fn_ty)) if matches!(fn_ty.ret.as_ref(), Ty::Nil));
     report_valued_yields(&m.body, void);
     let tys: Vec<String> = args.iter().map(|a| go_ty_stub(a.ty.as_ref())).collect();
     Some(format!("block func({})", tys.join(", ")))
@@ -1335,9 +1337,10 @@ fn go_param_default(default: &Expr, go_ty: &str, boxed_as: Option<&str>) -> Opti
 }
 
 fn signature_param_tys(m: &MethodDef) -> Option<Vec<Ty>> {
-    let Some(Ty::Fn { params, .. }) = m.signature.as_ref() else {
+    let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() else {
         return None;
     };
+    let FnTy { params, .. } = &**fn_ty;
     Some(
         params
             .iter()
@@ -1374,7 +1377,8 @@ fn render_body(ctx: &EmitCtx, m: &MethodDef) -> String {
         _ => false,
     };
     if !ctx.void_method && body_is_effectively_nil {
-        if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+        if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+            let FnTy { ret, .. } = &**fn_ty;
             return format!("\treturn {}\n", go_zero_value(ret));
         }
     }
@@ -1385,7 +1389,8 @@ fn render_body(ctx: &EmitCtx, m: &MethodDef) -> String {
     // Without this, AR::Base's `def attributes; {}; end` (declared
     // `Hash[Symbol, untyped]`) would emit `map[string]string{}` via
     // the all-empty heuristic and clash with the declared return.
-    let body = if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+    let body = if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+        let FnTy { ret, .. } = &**fn_ty;
         backprop_return_ty_to_tail(&m.body, ret)
     } else {
         m.body.clone()
@@ -1561,7 +1566,8 @@ pub(super) fn sanitize(name: &str) -> String {
 }
 
 fn render_return(m: &MethodDef) -> String {
-    if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+    if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+        let FnTy { ret, .. } = &**fn_ty;
         // Ty::Nil → Go void (no return type).
         if matches!(ret.as_ref(), Ty::Nil) {
             return String::new();
@@ -1659,14 +1665,17 @@ fn collect_module_singleton_slots(methods: &[MethodDef]) -> Vec<(String, Ty)> {
         let raw_name = m.name.as_str().trim_end_matches('=').to_string();
         let ty = match m.kind {
             AccessorKind::AttributeReader => match m.signature.as_ref() {
-                Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                Some(Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
                 _ => Ty::Untyped,
             },
             AccessorKind::AttributeWriter => match m.signature.as_ref() {
-                Some(Ty::Fn { params, .. }) => params
-                    .first()
-                    .map(|p| (*p.ty).clone())
-                    .unwrap_or(Ty::Untyped.into()),
+                Some(Ty::Fn(fn_ty)) => {
+                    let FnTy { params, .. } = &**fn_ty;
+                    params
+                        .first()
+                        .map(|p| (*p.ty).clone())
+                        .unwrap_or(Ty::Untyped.into())
+                },
                 _ => Ty::Untyped.into(),
             },
             _ => continue,
@@ -1695,10 +1704,10 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
     let method = sanitize_method_name(m.name.as_str());
     let returns_void = matches!(
         m.signature.as_ref(),
-        Some(Ty::Fn { ret, .. }) if matches!(ret.as_ref(), Ty::Nil)
+        Some(Ty::Fn(fn_ty)) if matches!(fn_ty.ret.as_ref(), Ty::Nil)
     );
     let return_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
         _ => None,
     };
     let ctx = EmitCtx {

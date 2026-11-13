@@ -9,7 +9,7 @@ use std::fmt::Write;
 use super::ty::rust_ty;
 use crate::dialect::MethodDef;
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// Emit a typed `MethodDef` as a standalone `pub fn` Rust function
 /// for the runtime-extraction pipeline. Self-contained walker for a
@@ -31,9 +31,10 @@ pub fn emit_method(m: &MethodDef) -> String {
         .signature
         .as_ref()
         .expect("emit_method requires a signature");
-    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+    let Ty::Fn(fn_ty) = sig else {
         panic!("signature is not Ty::Fn");
     };
+    let FnTy { params: sig_params, ret, .. } = &**fn_ty;
     assert_eq!(
         sig_params.len(),
         m.params.len(),
@@ -76,9 +77,10 @@ fn emit_squish_bang(m: &MethodDef) -> String {
         .signature
         .as_ref()
         .expect("emit_method requires a signature");
-    let Ty::Fn { params, ret, .. } = sig else {
+    let Ty::Fn(fn_ty) = sig else {
         panic!("signature is not Ty::Fn");
     };
+    let FnTy { params, ret, .. } = &**fn_ty;
     assert_eq!(m.params.len(), 1, "squish! must take one String argument");
     assert_eq!(params.len(), 1, "squish! must take one String argument");
     assert!(

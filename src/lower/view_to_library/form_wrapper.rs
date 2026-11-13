@@ -11,7 +11,7 @@ use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
-use crate::ty::{ParamKind, Ty};
+use crate::ty::{FnTy, ParamKind, Ty};
 
 /// A single builder-yielding call, with the caller's block forwarded through.
 pub(crate) struct FormWrapperHelper {
@@ -142,7 +142,8 @@ pub(crate) fn preserve_argument_owners(app: &mut App, registry: &HashMap<ClassId
                         continue;
                     }
                     let Some(ret) = value.ty.clone() else { continue };
-                    let Some(Ty::Fn { params: sig_params, .. }) = &m.signature else { continue };
+                    let Some(Ty::Fn(fn_ty)) = &m.signature else { continue };
+                    let FnTy { params: sig_params, .. } = &**fn_ty;
                     let mut bridge = m.clone();
                     bridge.params.retain(|p| reads.contains(&p.name));
                     let mut params = Vec::new();
@@ -193,12 +194,12 @@ pub(crate) fn preserve_argument_owners(app: &mut App, registry: &HashMap<ClassId
                             arg
                         })
                         .collect();
-                    bridge.signature = Some(Ty::Fn {
+                    bridge.signature = Some(Ty::Fn(Box::new(FnTy {
                         params: params.into(),
                         block: None,
                         ret: std::sync::Arc::new(ret),
                         effects: effects.clone(),
-                    });
+                    })));
                     let recv = Expr::new(
                         value.span,
                         ExprNode::Const {

@@ -25,7 +25,7 @@ use crate::det::HashMap;
 use crate::dialect::{LibraryClass, LibraryFunction, MethodDef};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal, OpAssignOp};
 use crate::ident::Symbol;
-use crate::ty::{ParamKind, Ty};
+use crate::ty::{FnTy, ParamKind, Ty};
 
 /// Direction of a string ownership coercion at a specific emit site.
 /// Internal to the str_color analysis; the public output is the
@@ -218,7 +218,7 @@ fn signature_from_function(func: &LibraryFunction) -> CallableSig {
 }
 
 fn from_sig(sig: Option<&Ty>, param_count: usize) -> CallableSig {
-    let Some(Ty::Fn { params, ret, .. }) = sig else {
+    let Some(Ty::Fn(fn_ty)) = sig else {
         // Untyped (no signature) — leave every position blank. The
         // pass treats `None` as "don't coerce here", which is the
         // conservative choice when we don't know the param types.
@@ -227,6 +227,7 @@ fn from_sig(sig: Option<&Ty>, param_count: usize) -> CallableSig {
             return_str_color: None,
         };
     };
+    let FnTy { params, ret, .. } = &**fn_ty;
     // Skip block params + keyword-rest in the color vector — those
     // don't show up as positional args in Send call sites.
     let positional: Vec<&crate::ty::Param> = params
@@ -1007,7 +1008,7 @@ mod tests {
     use crate::expr::{Expr, ExprNode, InterpPart, Literal, LValue};
     use crate::ident::{ClassId, Symbol, VarId};
     use crate::span::Span;
-    use crate::ty::{Param as TyParam, ParamKind, Ty};
+    use crate::ty::{FnTy, Param as TyParam, ParamKind, Ty};
 
     // ----- Construction helpers -------------------------------------------
 
@@ -1052,7 +1053,7 @@ mod tests {
     }
 
     fn fn_sig(params: Vec<(&str, Ty)>, ret: Ty) -> Ty {
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: params
                 .into_iter()
                 .map(|(n, ty)| TyParam {
@@ -1064,7 +1065,7 @@ mod tests {
             block: None,
             ret: std::sync::Arc::new(ret),
             effects: EffectSet::pure(),
-        }
+        }))
     }
 
     fn class(name: &str, methods: Vec<MethodDef>) -> LibraryClass {

@@ -5,7 +5,7 @@ use crate::det::HashMap;
 
 use crate::expr::{Expr, ExprNode, Literal, Pattern};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::{BodyTyper, Ctx};
 
@@ -409,12 +409,12 @@ impl BodyTyper<'_> {
                 _ => return None,
             };
             let ret = self.derived_storage_class_value(Some(recv_ty), &name, &[])?;
-            return Some(Ty::Fn {
+            return Some(Ty::Fn(Box::new(FnTy {
                 params: vec![].into(),
                 block: None,
                 ret: std::sync::Arc::new(ret),
                 effects: crate::effect::EffectSet::default(),
-            });
+            })));
         }
         if !args.is_empty() {
             return None;

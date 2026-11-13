@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::emit::EmittedFile;
 use crate::expr::{Expr, ExprNode, LValue};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::expr::{begin_method, emit_expr, wrap_return};
 use super::naming::{camel, type_name};
@@ -333,12 +333,14 @@ fn class_accessor_props(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
         }
         match m.kind {
             AccessorKind::AttributeReader => {
-                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { ret, .. } = &**fn_ty;
                     props.entry(camel(m.name.as_str())).or_insert_with(|| (**ret).clone());
                 }
             }
             AccessorKind::AttributeWriter => {
-                if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { params, .. } = &**fn_ty;
                     if let Some(p) = params.first() {
                         let base = m.name.as_str().trim_end_matches('=');
                         props.entry(camel(base)).or_insert_with(|| (*p.ty).clone());
@@ -549,7 +551,8 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
                 if temporal_cols.contains(&camel(m.name.as_str())) {
                     continue;
                 }
-                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { ret, .. } = &**fn_ty;
                     prop_types
                         .entry(camel(m.name.as_str()))
                         .or_insert_with(|| (**ret).clone());
@@ -557,7 +560,8 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             }
             AccessorKind::AttributeWriter => {
                 let base = m.name.as_str().trim_end_matches('=');
-                if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { params, .. } = &**fn_ty;
                     if let Some(p) = params.first() {
                         // writer name is `foo=`; strip the `=`.
                         prop_types.entry(camel(base)).or_insert_with(|| (*p.ty).clone());
@@ -890,7 +894,7 @@ fn emit_subscript(
 
 fn m_sig_params(m: &MethodDef) -> Option<&Vec<crate::ty::Param>> {
     match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) => Some(params),
+        Some(Ty::Fn(fn_ty)) => Some(&fn_ty.params),
         _ => None,
     }
 }
@@ -928,7 +932,7 @@ fn widened_container_ret(cls: &str, name: &str, own: &str) -> Option<String> {
 
 fn m_sig_ret(m: &MethodDef) -> Option<Ty> {
     match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
         _ => None,
     }
 }
@@ -945,7 +949,7 @@ fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
             _ => false,
         }
     }
-    matches!(sig, Some(Ty::Fn { ret, .. }) if is_time(ret))
+    matches!(sig, Some(Ty::Fn(fn_ty)) if is_time(&fn_ty.ret))
 }
 
 fn indent_method(s: &str) -> String {
@@ -1054,7 +1058,7 @@ mod tests {
 
 fn render_params(m: &MethodDef) -> (String, String, String) {
     let sig_params = match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) => Some(params),
+        Some(Ty::Fn(fn_ty)) => Some(&fn_ty.params),
         _ => None,
     };
     let mut types: Vec<String> = Vec::new();
@@ -1103,7 +1107,7 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
     // Params — always typed (Swift requirement), underscore-labeled so
     // the positional lowered call sites work.
     let sig_params = match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) => Some(params),
+        Some(Ty::Fn(fn_ty)) => Some(&fn_ty.params),
         _ => None,
     };
     let mut params: Vec<String> = m
@@ -1125,7 +1129,7 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
     // Not left for `yield` to reach nothing: a yielding method takes its block as a closure, as the Kotlin and C# trees do
     if body_has_yield(&m.body) {
         let bt = match m.signature.as_ref() {
-            Some(Ty::Fn { block: Some(b), .. }) => swift_ty(b),
+            Some(Ty::Fn(fn_ty)) if let Some(b) = &fn_ty.block => swift_ty(b),
             _ => "(Any?) -> Void".to_string(),
         };
         params.push(format!("_ block: {bt}"));
@@ -1138,7 +1142,7 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
 
     // Return type. Not Void for a method without a signature: an app method's answer is its body's type
     let ret_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
         _ if m.name.as_str() == "initialize" => None,
         _ => m.body.ty.clone().filter(|t| !t.is_open()),
     };

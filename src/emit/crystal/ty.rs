@@ -9,7 +9,7 @@
 //! Unions render as `A | B`; an `A | Nil` union prefers the `A?`
 //! shorthand.
 
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 pub fn crystal_ty(t: &Ty) -> String {
     match t {
@@ -80,7 +80,7 @@ pub fn crystal_ty(t: &Ty) -> String {
                 .collect();
             format!("NamedTuple({})", parts.join(", "))
         }
-        Ty::Untyped | Ty::Var { .. } | Ty::Fn { .. } => "String".to_string(),
+        Ty::Untyped | Ty::Var { .. } | Ty::Fn(_) => "String".to_string(),
     }
 }
 
@@ -114,7 +114,8 @@ pub fn has_untyped(t: &Ty) -> bool {
         Ty::Tuple { elems } => elems.iter().any(has_untyped),
         Ty::Union { variants } => variants.iter().any(has_untyped),
         Ty::Class { args, .. } => args.iter().any(has_untyped),
-        Ty::Fn { params, ret, .. } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, ret, .. } = &**fn_ty;
             params.iter().any(|p| has_untyped(&p.ty)) || has_untyped(ret)
         }
         _ => false,

@@ -78,7 +78,7 @@ pub fn rust_ty(ty: &Ty) -> String {
             // the Const-emit decision in `expr.rs`.
             name.rsplit("::").next().unwrap_or(name).to_string()
         }
-        Ty::Fn { .. } => "Box<dyn Fn()>".to_string(),
+        Ty::Fn(_) => "Box<dyn Fn()>".to_string(),
         Ty::Var { .. } => "serde_json::Value".to_string(),
         // RBS `untyped` is pervasive in HWIA / Parameters / view_helpers
         // (the gradual-typing escape hatch). rust commits this to

@@ -11,7 +11,7 @@ use roundhouse::expr::{Expr, ExprNode, Literal};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_library_classes;
 use roundhouse::span::Span;
-use roundhouse::ty::{Row, Ty};
+use roundhouse::ty::{FnTy, Row, Ty};
 use roundhouse::App;
 
 fn helper_app(view_body: Expr) -> App {
@@ -82,7 +82,7 @@ fn returns(app: &App, module: &str, method: &str, class_side: bool) -> Option<Ty
         .find(|m| m.name.as_str() == method && m.receiver == side)
         .unwrap_or_else(|| panic!("{module}#{method}"));
     match &m.signature {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
         _ => m.body.ty.clone(),
     }
 }
@@ -208,9 +208,10 @@ fn view_call_sites_unify_helper_params_and_stamp_signature() {
         .iter()
         .find(|m| m.name.as_str() == "shout")
         .expect("shout method");
-    let Some(Ty::Fn { params, ret, .. }) = &shout.signature else {
+    let Some(Ty::Fn(fn_ty)) = &shout.signature else {
         panic!("expected stamped Fn signature, got {:?}", shout.signature);
     };
+    let FnTy { params, ret, .. } = &**fn_ty;
     assert_eq!(params.len(), 1);
     assert_eq!(params[0].ty, Ty::Str.into(), "param should unify to Str from the call site");
     // Body is `msg` — the param read — so the return follows the seed.
@@ -267,9 +268,10 @@ fn untyped_view_args_are_no_evidence_not_absorption() {
         .iter()
         .find(|m| m.name.as_str() == "shout")
         .expect("shout method");
-    let Some(Ty::Fn { params, .. }) = &shout.signature else {
+    let Some(Ty::Fn(fn_ty)) = &shout.signature else {
         panic!("expected stamped Fn signature, got {:?}", shout.signature);
     };
+    let FnTy { params, .. } = &**fn_ty;
     assert_eq!(
         params[0].ty,
         Ty::Str.into(),
@@ -312,7 +314,7 @@ fn a_cataloged_helper_uses_the_selected_owner_not_another_helpers_signature() {
             let entry = &analyzer.class_registry()[&ClassId(Symbol::from("ActionView::Base"))]
                 .instance_methods[&Symbol::from("content_tag")];
             let actual = match entry {
-                Ty::Fn { ret, .. } => ret.as_ref(),
+                Ty::Fn(fn_ty) => fn_ty.ret.as_ref(),
                 ty => ty,
             };
             assert_eq!(actual, &expected);

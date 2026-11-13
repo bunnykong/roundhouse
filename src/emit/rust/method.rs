@@ -9,7 +9,7 @@ use std::fmt::Write;
 use super::expr::emit_expr;
 use super::ty::rust_ty;
 use crate::dialect::{MethodDef, MethodReceiver};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// Receiver-kind picker driven by the `mutates_self` heuristic
 /// computed in `library.rs`. Returned tokens already include the
@@ -135,7 +135,8 @@ fn render_params(m: &MethodDef, mut_params: &crate::det::HashSet<String>) -> Str
         Option<Vec<&crate::ty::Param>>,
         Option<&crate::ty::Param>,
     ) = match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) => {
+        Some(Ty::Fn(fn_ty)) => {
+            let FnTy { params, .. } = &**fn_ty;
             let non_block: Vec<&crate::ty::Param> = params
                 .iter()
                 .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
@@ -228,7 +229,8 @@ fn render_block_param_placeholder(name: &str) -> String {
 /// source-declared identifier so body Var refs resolve against the
 /// same parameter; legacy `yield`-only callers pass "f".
 fn render_block_closure_param(name: &str, block_ty: &Ty) -> String {
-    if let Ty::Fn { params, ret, .. } = block_ty {
+    if let Ty::Fn(fn_ty) = block_ty {
+        let FnTy { params, ret, .. } = &**fn_ty;
         let arg_tys: Vec<String> = params
             .iter()
             .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
@@ -274,7 +276,7 @@ fn render_return(m: &MethodDef) -> String {
 /// body's value as Ruby's does.
 fn effective_return_ty(m: &MethodDef) -> Option<Ty> {
     match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
         Some(_) => None,
         None if m.name.as_str() == "initialize" || is_writer_name(m.name.as_str()) => None,
         None => m.body.ty.clone().filter(|t| settled_for_rust(t) && !matches!(t, Ty::Bottom | Ty::Nil)),
@@ -803,9 +805,10 @@ fn default_value_for_ty(ty: &Ty) -> String {
 /// the authoritative source.
 fn collect_param_types(m: &MethodDef) -> crate::det::HashMap<String, Ty> {
     let mut out = crate::det::HashMap::default();
-    let Some(Ty::Fn { params, .. }) = m.signature.as_ref() else {
+    let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() else {
         return out;
     };
+    let FnTy { params, .. } = &**fn_ty;
     if params.len() != m.params.len() {
         return out;
     }
@@ -822,7 +825,7 @@ fn render_instance_params(
     mut_params: &crate::det::HashSet<String>,
 ) -> String {
     let sig_params = match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) if params.len() == m.params.len() => Some(params),
+        Some(Ty::Fn(fn_ty)) if fn_ty.params.len() == m.params.len() => Some(&fn_ty.params),
         _ => None,
     };
     let mut parts: Vec<String> = Vec::new();
@@ -1015,10 +1018,10 @@ mod tests {
         use crate::analyze::block_refine;
         use crate::dialect::LibraryClass;
         use crate::ident::ClassId;
-        use crate::ty::{Param as TyParam, ParamKind, Ty};
+        use crate::ty::{FnTy, Param as TyParam, ParamKind, Ty};
 
         let blk = Symbol::from("blk");
-        let block_sig = Ty::Fn {
+        let block_sig = Ty::Fn(Box::new(FnTy {
             params: vec![TyParam {
                 name: Symbol::new("k"),
                 ty: Ty::Str.into(),
@@ -1027,7 +1030,7 @@ mod tests {
             block: None,
             ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::pure(),
-        };
+        }));
         let callee = MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
@@ -1037,7 +1040,7 @@ mod tests {
             receiver: MethodReceiver::Class,
             params: vec![],
             body: empty_body(),
-            signature: Some(Ty::Fn {
+            signature: Some(Ty::Fn(Box::new(FnTy {
                 params: vec![TyParam {
                     name: Symbol::new("block"),
                     ty: block_sig.clone().into(),
@@ -1046,7 +1049,7 @@ mod tests {
                 block: Some(std::sync::Arc::new(block_sig)),
                 ret: std::sync::Arc::new(Ty::Nil),
                 effects: EffectSet::pure(),
-            }),
+            }))),
             effects: EffectSet::pure(),
             enclosing_class: Some(Symbol::from("Holder")),
             kind: AccessorKind::Method,

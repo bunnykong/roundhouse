@@ -7,7 +7,7 @@ use roundhouse::dialect::MethodDef;
 use roundhouse::expr::{Expr, ExprNode};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::runtime_src::parse_methods_with_rbs_in_ctx;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 #[path = "support/runtime_block_signature.rs"]
 mod runtime_block_signature;
@@ -286,10 +286,10 @@ end
     let mut batch = ClassInfo::default();
     batch.instance_methods.insert(
         Symbol::from("rows"),
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: vec![].into(),
             ret: std::sync::Arc::new(Ty::Nil),
-            block: Some(std::sync::Arc::new(Ty::Fn {
+            block: Some(std::sync::Arc::new(Ty::Fn(Box::new(FnTy {
                 params: vec![roundhouse::ty::Param {
                     name: Symbol::from("s"),
                     ty: Ty::Str.into(),
@@ -299,9 +299,9 @@ end
                 ret: std::sync::Arc::new(Ty::Nil),
                 block: None,
                 effects: roundhouse::effect::EffectSet::default(),
-            })),
+            })))),
             effects: roundhouse::effect::EffectSet::default(),
-        },
+        })),
     );
     let classes = HashMap::from_iter([(batch_id, batch)]);
     let methods = parse_methods_with_rbs_in_ctx(ruby, rbs, &classes).expect("runtime parses");

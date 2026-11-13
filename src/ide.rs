@@ -26,7 +26,7 @@ use crate::dialect::{AccessorKind, ControllerBodyItem, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::{FileId, SourceFile, Span};
-use crate::ty::{Row, Ty};
+use crate::ty::{FnTy, Row, Ty};
 
 /// A zero-based LSP-style position: `line` plus a UTF-16 `character`
 /// offset into that line. (LSP's default `positionEncoding`.)
@@ -241,7 +241,8 @@ pub fn def_of<'a>(app: &'a App, owner: &ClassId, name: &Symbol, class_side: bool
 /// type, so nilability reads the way it does on a call.
 fn describe_def(def: &DefSite<'_>) -> TypeAt {
     let (display, ret): (String, Option<Ty>) = match def.signature {
-        Some(Ty::Fn { params, ret, .. }) => {
+        Some(Ty::Fn(fn_ty)) => {
+            let FnTy { params, ret, .. } = &**fn_ty;
             let ps: Vec<String> = params
                 .iter()
                 .map(|p| format!("{}: {}", p.name.as_str(), render_ty(&p.ty)))
@@ -1123,7 +1124,8 @@ pub fn render_ty(ty: &Ty) -> String {
                 format!("{}[{}]", id, render_list(args))
             }
         }
-        Ty::Fn { params, ret, .. } => {
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, ret, .. } = &**fn_ty;
             let ps = params.iter().map(|p| render_ty(&p.ty)).collect::<Vec<_>>().join(", ");
             format!("^({}) -> {}", ps, render_ty(ret))
         }
@@ -3055,12 +3057,12 @@ pub fn candidate_signature(
             kind: crate::ty::ParamKind::Required,
         })
         .collect();
-    let fn_ty = Ty::Fn {
+    let fn_ty = Ty::Fn(Box::new(FnTy {
         params: params.into(),
         block: None,
         ret: std::sync::Arc::new(known.clone()),
         effects: crate::effect::EffectSet::pure(),
-    };
+    }));
     crate::rbs::print_method_signature(method.as_str(), &fn_ty)
 }
 

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use roundhouse::analyze::Analyzer;
 use roundhouse::ident::ClassId;
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 #[test]
 fn an_in_batches_scope_types_as_the_relation() {
@@ -21,6 +21,7 @@ fn an_in_batches_scope_types_as_the_relation() {
     Analyzer::new(&app).analyze(&mut app);
     let probe = app.library_classes.iter().find(|c| c.name.0.as_str() == "Probe").expect("class");
     let def = probe.methods.iter().find(|m| m.name.as_str() == "run").expect("method");
-    let Some(Ty::Fn { ret, .. }) = &def.signature else { panic!("typed: {:?}", def.signature) };
+    let Some(Ty::Fn(fn_ty)) = &def.signature else { panic!("typed: {:?}", def.signature) };
+    let FnTy { ret, .. } = &**fn_ty;
     assert_eq!(**ret, Ty::Relation { of: ClassId(roundhouse::ident::Symbol::from("Post")) });
 }

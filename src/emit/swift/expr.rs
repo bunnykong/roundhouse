@@ -1181,8 +1181,8 @@ fn children(e: &Expr) -> Vec<&Expr> {
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
             v.push(body);
             v.extend(rescues.iter().map(|r| &r.body));
-            v.extend(else_branch.iter());
-            v.extend(ensure.iter());
+            v.extend(else_branch.as_deref());
+            v.extend(ensure.as_deref());
         }
         _ => {}
     }
@@ -1502,7 +1502,7 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure, .. }
             if !rescues.is_empty() && rescues.iter().all(rescue_catches_throw) =>
         {
-            emit_do_catch(&emit_expr(body), rescues, ensure.as_ref(), false)
+            emit_do_catch(&emit_expr(body), rescues, ensure.as_deref(), false)
         }
         other => {
             let stub = crate::emit::diagnostics::report_unsupported(e.span, "swift", other.kind_str(), "no Swift form for this construct here");
@@ -2393,7 +2393,7 @@ pub(super) fn wrap_return(e: &Expr) -> String {
         ExprNode::BeginRescue { body, rescues, else_branch: None, ensure, .. }
             if !rescues.is_empty() && rescues.iter().all(rescue_catches_throw) =>
         {
-            emit_do_catch(&wrap_return(body), rescues, ensure.as_ref(), true)
+            emit_do_catch(&wrap_return(body), rescues, ensure.as_deref(), true)
         }
         ExprNode::Let { name, value, body, .. } => format!("{}\n{}", bind_let(name.as_str(), value), wrap_return(body)),
         ExprNode::Seq { exprs } if !exprs.is_empty() => emit_stmts(exprs, true),

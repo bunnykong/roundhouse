@@ -46,7 +46,7 @@ use crate::ingest::controller::VERIFY_AUTHENTICITY_TOKEN;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 use crate::lower::controller::body::{
     has_toplevel_terminal, synthesize_deferred_implicit_render,
     unwrap_respond_to_with_format_dispatch, FormatBreadth,
@@ -2905,7 +2905,7 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     // doesn't matter for typing — we don't check per-key types of
     // controller render options today.
     let kw_rest_opts = || -> Ty {
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: vec![crate::ty::Param {
                 name: Symbol::from("opts"),
                 ty: any_hash.clone().into(),
@@ -2914,10 +2914,10 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
             block: None,
             ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
-        }
+        }))
     };
     let positional_with_kwargs = |first_name: &str, first_ty: Ty| -> Ty {
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: vec![
                 crate::ty::Param {
                     name: Symbol::from(first_name),
@@ -2933,7 +2933,7 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
             block: None,
             ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::pure(),
-        }
+        }))
     };
     info.instance_methods
         .entry(Symbol::from("render"))
@@ -3511,11 +3511,11 @@ fn union_with(a: Ty, b: Ty) -> Ty {
 /// beside it and spinel binds the call's kwargs Hash to the first slot.
 fn mark_param_kinds(sig: Ty, params: &[Param]) -> Ty {
     match sig {
-        Ty::Fn { params: mut tps, block, ret, effects } => {
-            for (tp, p) in tps.iter_mut().zip(params) {
+        Ty::Fn(mut fn_ty) => {
+            for (tp, p) in fn_ty.params.iter_mut().zip(params) {
                 tp.kind = p.ty_kind();
             }
-            Ty::Fn { params: tps, block, ret, effects }
+            Ty::Fn(fn_ty)
         }
         other => other,
     }

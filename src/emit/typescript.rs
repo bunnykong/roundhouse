@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use super::EmittedFile;
 use crate::App;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 const JUNTOS_SQLITE_SOURCE: &str = include_str!("../../runtime/typescript/juntos.ts");
 const JUNTOS_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/juntos-libsql.ts");
@@ -1869,7 +1869,7 @@ pub(super) fn js_library_class(
                 continue;
             }
             let ty = match m.signature.as_ref() {
-                Some(Ty::Fn { ret, .. }) => ts_ty(ret),
+                Some(Ty::Fn(fn_ty)) => ts_ty(&fn_ty.ret),
                 _ => m.body.ty.as_ref().map(ts_ty).unwrap_or_else(|| "any".to_string()),
             };
             let is_static = matches!(m.receiver, MethodReceiver::Class);
@@ -2273,7 +2273,7 @@ pub(crate) fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
             _ => false,
         }
     }
-    matches!(sig, Some(Ty::Fn { ret, .. }) if is_time(ret))
+    matches!(sig, Some(Ty::Fn(fn_ty)) if is_time(&fn_ty.ret))
 }
 
 /// Emit the body of a `constructor` from an `initialize` method's
@@ -2426,8 +2426,8 @@ fn body_contains_yield(body: &crate::expr::Expr) -> bool {
         } => {
             body_contains_yield(inner)
                 || rescues.iter().any(|r| body_contains_yield(&r.body))
-                || else_branch.as_ref().is_some_and(body_contains_yield)
-                || ensure.as_ref().is_some_and(body_contains_yield)
+                || else_branch.as_deref().is_some_and(body_contains_yield)
+                || ensure.as_deref().is_some_and(body_contains_yield)
         }
         ExprNode::Range { begin, end, .. } => {
             begin.as_ref().is_some_and(body_contains_yield)
@@ -2497,7 +2497,8 @@ fn js_class_member(
         Vec<bool>,
         Ty,
     ) = match m.signature.as_ref() {
-        Some(Ty::Fn { params: sig_params, ret, .. }) => {
+        Some(Ty::Fn(fn_ty)) => {
+            let FnTy { params: sig_params, ret, .. } = &**fn_ty;
             let non_block: Vec<&crate::ty::Param> = sig_params
                 .iter()
                 .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
@@ -2768,7 +2769,8 @@ pub(super) fn js_library_function(
 
     let (sig_param_tys, sig_param_optional, ret_ty): (Vec<Ty>, Vec<bool>, Ty) =
         match func.signature.as_ref() {
-            Some(Ty::Fn { params: sig_params, ret, .. }) => {
+            Some(Ty::Fn(fn_ty)) => {
+                let FnTy { params: sig_params, ret, .. } = &**fn_ty;
                 let non_block: Vec<&crate::ty::Param> = sig_params
                     .iter()
                     .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
@@ -3119,9 +3121,10 @@ pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
         .signature
         .as_ref()
         .expect("emit_method requires a signature");
-    let Ty::Fn { params: sig_params, ret, .. } = sig else {
+    let Ty::Fn(fn_ty) = sig else {
         panic!("signature is not Ty::Fn");
     };
+    let FnTy { params: sig_params, ret, .. } = &**fn_ty;
     assert_eq!(
         sig_params.len(),
         m.params.len(),

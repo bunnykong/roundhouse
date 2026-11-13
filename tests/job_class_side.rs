@@ -115,8 +115,8 @@ fn a_set_chain_folds_and_a_kept_set_is_synthesized() {
         .expect("a kept `set` is synthesized");
     assert!(format!("{:?}", set.body).contains("SelfRef"));
     assert!(
-        matches!(&set.signature, Some(roundhouse::ty::Ty::Fn { ret, .. })
-            if matches!(**ret, roundhouse::ty::Ty::Untyped)),
+        matches!(&set.signature, Some(roundhouse::ty::Ty::Fn(fn_ty))
+            if matches!(*fn_ty.ret, roundhouse::ty::Ty::Untyped)),
         "`set` is typed untyped, not as an instance: {:?}",
         set.signature
     );

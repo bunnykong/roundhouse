@@ -146,7 +146,7 @@ fn expand(span: Span, class: &str, pairs: &[(String, Expr)], body: &Expr) -> Exp
             body: body.clone(),
             rescues: Vec::new(),
             else_branch: None,
-            ensure: Some(seq(span, restore)),
+            ensure: Some(Box::new(seq(span, restore))),
             implicit: false,
         },
     ));

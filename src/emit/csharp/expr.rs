@@ -2170,7 +2170,7 @@ pub(super) fn emit_stmt(e: &Expr) -> String {
             .join("\n"),
         ExprNode::If { cond, then_branch, else_branch } => emit_if_stmt(cond, then_branch, else_branch),
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-            emit_begin_rescue(body, rescues, else_branch.as_ref(), ensure.as_ref(), &emit_stmt)
+            emit_begin_rescue(body, rescues, else_branch.as_deref(), ensure.as_deref(), &emit_stmt)
         }
         ExprNode::While { cond, body, until_form } => {
             let c = emit_expr(cond);

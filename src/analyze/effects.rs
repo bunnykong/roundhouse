@@ -12,7 +12,7 @@ use crate::dialect::ControllerBodyItem;
 use crate::effect::{Effect, EffectSet};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::Ctx;
 
@@ -110,7 +110,8 @@ impl super::Analyzer {
 
     fn stamp_method(&self, class: &ClassId, method: &mut crate::dialect::MethodDef) {
         method.effects = self.stamp_expr(class, &mut method.body);
-        if let Some(Ty::Fn { effects, .. }) = &mut method.signature {
+        if let Some(Ty::Fn(fn_ty)) = &mut method.signature {
+            let FnTy { effects, .. } = &mut **fn_ty;
             *effects = method.effects.clone();
         }
     }

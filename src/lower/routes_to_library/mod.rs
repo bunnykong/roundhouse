@@ -24,7 +24,7 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::lower::routes::{flatten_routes, flatten_routes_for_helpers, FlatRoute};
 use crate::lower::typing::{fn_sig, lit_str, lit_sym, with_ty};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// Build the `Routes` dispatch module — `RouteTable.table -> Array<Route>`
 /// (one `Route` instance per concrete `(verb, pattern, controller,
@@ -617,7 +617,7 @@ fn lower_route_helpers(app: &App, hash_query: bool) -> Vec<LibraryFunction> {
     let helper_params: crate::det::HashMap<String, Vec<Ty>> = funcs
         .iter()
         .filter_map(|f| match &f.signature {
-            Some(Ty::Fn { params, .. }) => Some((f.name.as_str().to_string(), params.iter().map(|p| (*p.ty).clone()).collect())),
+            Some(Ty::Fn(fn_ty)) => Some((f.name.as_str().to_string(), fn_ty.params.iter().map(|p| (*p.ty).clone()).collect())),
             _ => None,
         })
         .collect();
@@ -712,7 +712,7 @@ pub fn guard_required_segments(funcs: &mut [LibraryFunction], app: &App) {
         }
         let Some((controller, action)) = targets.get(f.name.as_str()) else { continue };
         let param_tys: Vec<Ty> = match &f.signature {
-            Some(Ty::Fn { params, .. }) => params.iter().map(|p| (*p.ty).clone()).collect(),
+            Some(Ty::Fn(fn_ty)) => fn_ty.params.iter().map(|p| (*p.ty).clone()).collect(),
             _ => Vec::new(),
         };
         let required: Vec<(Symbol, Ty)> = f
@@ -1745,8 +1745,9 @@ fn build_helper_function(
         .map(|p| p.name.clone())
         .collect();
     let mark_optional = |t: Ty| -> Ty {
-        let Ty::Fn { params, block, ret, effects } = t else { return t };
-        Ty::Fn {
+        let Ty::Fn(fn_ty) = t else { return t };
+        let FnTy { params, block, ret, effects } = *fn_ty;
+        Ty::Fn(Box::new(FnTy {
             params: params
                 .into_iter()
                 .map(|mut tp| {
@@ -1759,16 +1760,16 @@ fn build_helper_function(
             block,
             ret,
             effects,
-        }
+        }))
     };
     // Segment keywords ride with the query keywords: both are keyword
     // params in the `def`, and `fn_sig` types every param Required, so
     // declaring one positionally is a call spinel cannot make.
     query_sig.splice(0..0, segment_keyword_sig);
     let signature = match mark_optional(fn_sig(sig_params, Ty::Str)) {
-        Ty::Fn { mut params, block, ret, effects } if !query_sig.is_empty() => {
-            params.extend(query_sig);
-            Ty::Fn { params, block, ret, effects }
+        Ty::Fn(mut fn_ty) if !query_sig.is_empty() => {
+            fn_ty.params.extend(query_sig);
+            Ty::Fn(fn_ty)
         }
         other => other,
     };

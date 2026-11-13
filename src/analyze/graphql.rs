@@ -20,7 +20,7 @@ use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::dialect::{Association, GraphqlResolution, LibraryClass, MethodDef};
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 use crate::App;
 
 pub(super) fn diagnose(app: &App, walk: fn(&Expr, &mut Vec<Diagnostic>)) -> Vec<Diagnostic> {
@@ -86,9 +86,10 @@ pub(super) fn diagnose(app: &App, walk: fn(&Expr, &mut Vec<Diagnostic>)) -> Vec<
             let Some(def) = instance_method(class, method) else {
                 continue;
             };
-            let Some(Ty::Fn { ret, .. }) = &def.signature else {
+            let Some(Ty::Fn(fn_ty)) = &def.signature else {
                 continue;
             };
+            let FnTy { ret, .. } = &**fn_ty;
             if !may_be_nil(ret) || proven_non_nil(app, &models, class, &def.body, 3) {
                 continue;
             }
@@ -391,11 +392,12 @@ fn reached(gql: &crate::dialect::GraphqlObjectType, class: &LibraryClass) -> boo
     if gql.synthesized.iter().any(|m| m.as_str() == "__gql_root") {
         return true;
     }
-    let Some(Ty::Fn { ret, .. }) =
+    let Some(Ty::Fn(fn_ty)) =
         instance_method(class, &Symbol::from("object")).and_then(|m| m.signature.as_ref())
     else {
         return false;
     };
+    let FnTy { ret, .. } = &**fn_ty;
     let variants: Vec<&Ty> = match &**ret {
         Ty::Union { variants } => variants.iter().collect(),
         other => vec![other],

@@ -48,7 +48,7 @@ pub fn python_ty(ty: &Ty) -> String {
             // flat-module emit imports each class by its bare name.
             other => other.rsplit("::").next().unwrap_or(other).to_string(),
         },
-        Ty::Fn { .. } => "object".to_string(),
+        Ty::Fn(_) => "object".to_string(),
         Ty::Var { .. } => "object".to_string(),
         // RBS-declared `untyped` — Python's gradual escape is
         // `typing.Any`. Importing `Any` is the emitter caller's

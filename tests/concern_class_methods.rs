@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use roundhouse::analyze::{diagnose, Analyzer, DiagnosticKind};
 use roundhouse::emit::ruby;
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
     files
@@ -282,7 +282,8 @@ end
                 assert_eq!(return_type(&app, class, "build"), expected);
                 let lc = app.library_classes.iter().find(|c| c.name.0.as_str() == class).unwrap();
                 let build = lc.methods.iter().find(|m| m.name.as_str() == "build").unwrap();
-                let Some(Ty::Fn { ret, .. }) = &build.signature else { panic!("factory signature") };
+                let Some(Ty::Fn(fn_ty)) = &build.signature else { panic!("factory signature") };
+                let FnTy { ret, .. } = &**fn_ty;
                 assert_eq!(**ret, expected, "signature must be concrete, not SelfInstance");
                 assert_eq!(return_type(&app, class, "fixed"), Ty::Class {
                     id: roundhouse::ClassId(roundhouse::Symbol::new("Reading")), args: vec![].into(),

@@ -20,7 +20,7 @@ use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// One lowered test module: the test class itself plus any classes
 /// that were declared inline inside its body. Inner classes are
@@ -374,7 +374,8 @@ pub fn lower_test_modules_with_inner_opts(
             if matches!(body_ty, Ty::Untyped | Ty::Nil) {
                 continue;
             }
-            if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
+            if let Some(Ty::Fn(fn_ty)) = &mut method.signature {
+                let FnTy { ret, .. } = &mut **fn_ty;
                 *ret = std::sync::Arc::new(body_ty);
             }
             if let Some(sig) = &method.signature {
@@ -529,13 +530,14 @@ fn inherit_parent_surface(
 /// the signature rather than from `MethodDef.params` would otherwise
 /// declare `name` and leave the body reading an unbound `field`.
 fn adopt_param_names(ty: Ty, params: &[crate::dialect::Param]) -> Ty {
-    let Ty::Fn { params: sig_params, block, ret, effects } = ty else { return ty };
+    let Ty::Fn(fn_ty) = ty else { return ty };
+    let FnTy { params: sig_params, block, ret, effects } = *fn_ty;
     let renamed = sig_params
         .into_iter()
         .zip(params)
         .map(|(sp, p)| crate::ty::Param { name: p.name.clone(), ..sp })
         .collect();
-    Ty::Fn { params: renamed, block, ret, effects }
+    Ty::Fn(Box::new(FnTy { params: renamed, block, ret, effects }))
 }
 
 fn type_inner_class(
@@ -594,7 +596,7 @@ fn type_inner_class(
                 .get(&method.name)
                 .filter(|_| method.name.as_str() != "initialize")
                 .filter(|ty| {
-                    matches!(ty, Ty::Fn { params, .. } if params.len() == method.params.len())
+                    matches!(ty, Ty::Fn(fn_ty) if fn_ty.params.len() == method.params.len())
                 })
                 .cloned()
                 .map(|ty| adopt_param_names(ty, &method.params));
@@ -646,13 +648,15 @@ fn type_inner_class(
             .and_then(|a| ivars.get(&Symbol::from(a)))
             .cloned();
         if let Some(ivar_ty) = writer_ivar {
-            if let Some(Ty::Fn { params, ret, .. }) = &mut method.signature {
+            if let Some(Ty::Fn(fn_ty)) = &mut method.signature {
+                let FnTy { params, ret, .. } = &mut **fn_ty;
                 if let Some(first) = params.first_mut() {
                     first.ty = ivar_ty.clone().into();
                 }
                 *ret = std::sync::Arc::new(ivar_ty);
             }
-        } else if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
+        } else if let Some(Ty::Fn(fn_ty)) = &mut method.signature {
+            let FnTy { ret, .. } = &mut **fn_ty;
             *ret = std::sync::Arc::new(if method.name.as_str() == "initialize" {
                 Ty::Nil
             } else {
@@ -705,12 +709,12 @@ fn signature_from_params(
             TyParam { name: p.name.clone(), ty: ty.into(), kind: p.ty_kind() }
         })
         .collect();
-    Ty::Fn {
+    Ty::Fn(Box::new(FnTy {
         params: ty_params.into(),
         block: None,
         ret: std::sync::Arc::new(ret),
         effects: EffectSet::pure(),
-    }
+    }))
 }
 
 /// The literal keyword arguments the test modules' own code passes, by
@@ -898,12 +902,12 @@ fn build_library_class(
                     kind: p.ty_kind(),
                 })
                 .collect();
-            m.signature = Some(Ty::Fn {
+            m.signature = Some(Ty::Fn(Box::new(FnTy {
                 params: ty_params.into(),
                 block: None,
                 ret: std::sync::Arc::new(Ty::Nil),
                 effects: crate::effect::EffectSet::pure(),
-            });
+            })));
         }
         m.enclosing_class = Some(tm.name.0.clone());
         methods.push(m);

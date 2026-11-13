@@ -121,8 +121,8 @@ fn has_local_mutation(body: &Expr) -> bool {
             ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
                 walk(body)
                     || rescues.iter().any(|r| walk(&r.body))
-                    || else_branch.as_ref().is_some_and(walk)
-                    || ensure.as_ref().is_some_and(walk)
+                    || else_branch.as_deref().is_some_and(walk)
+                    || ensure.as_deref().is_some_and(walk)
             }
             _ => false,
         }

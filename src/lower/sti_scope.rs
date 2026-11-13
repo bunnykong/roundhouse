@@ -265,7 +265,7 @@ fn push_base_class(app: &mut App, bases: &HashMap<ClassId, ClassId>) {
             receiver: MethodReceiver::Class,
             params: Vec::new(),
             body,
-            signature: Some(Ty::Fn { params: vec![].into(), block: None, ret: std::sync::Arc::new(ty), effects: crate::effect::EffectSet::default() }),
+            signature: Some(Ty::Fn(Box::new(crate::ty::FnTy { params: vec![].into(), block: None, ret: std::sync::Arc::new(ty), effects: crate::effect::EffectSet::default() }))),
             effects: crate::effect::EffectSet::default(),
             enclosing_class: Some(lc.name.0.clone()),
             kind: crate::dialect::AccessorKind::Method,

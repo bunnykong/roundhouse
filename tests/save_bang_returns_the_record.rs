@@ -48,7 +48,7 @@ fn the_per_model_registry_types_save_bang_as_the_model() {
         .expect("Domain seeded");
 
     let ret = |name: &str| match info.instance_methods.get(&Symbol::from(name)) {
-        Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+        Some(Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
         other => panic!("`{name}` is not a function type: {other:?}"),
     };
 

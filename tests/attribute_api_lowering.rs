@@ -55,8 +55,8 @@ fn boolean_attribute_synthesizes_typed_reader_and_cast_writer() {
 
     let reader = find("mod_note").expect("reader synthesized");
     assert!(
-        matches!(reader.signature, Some(roundhouse::ty::Ty::Fn { ref ret, .. })
-            if matches!(**ret, roundhouse::ty::Ty::Bool)),
+        matches!(reader.signature, Some(roundhouse::ty::Ty::Fn(ref fn_ty))
+            if matches!(*fn_ty.ret, roundhouse::ty::Ty::Bool)),
         "boolean attribute reader must be Bool-typed: {:?}",
         reader.signature
     );

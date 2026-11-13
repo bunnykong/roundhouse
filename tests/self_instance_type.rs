@@ -229,7 +229,8 @@ end
         .cloned()
         .expect("the sig is read — without the arm the whole sig drops");
     match ty {
-        roundhouse::ty::Ty::Fn { ret, .. } => {
+        roundhouse::ty::Ty::Fn(fn_ty) => {
+            let roundhouse::ty::FnTy { ret, .. } = *fn_ty;
             assert_eq!(*ret, roundhouse::ty::Ty::SelfInstance)
         }
         other => panic!("expected a function type, got {other:?}"),
