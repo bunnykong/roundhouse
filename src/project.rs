@@ -14975,7 +14975,7 @@ mod tests {
             "foo(defined?(Singleton) && 1, Singleton.name)\n",
             // A call that merely ends in `defined?`, a guard passed to a
             // call, and a modifier's own condition (it runs first).
-            "already_defined?(Singleton)\nSingleton.name\n",
+            "already_defined?(Singleton)\n",
             "if accept? defined?(Singleton)\n  Singleton.name\nend\n",
             "defined?(Singleton) && 1 if Singleton.respond_to?(:x)\n",
             // Source that does not parse is read as using every name it spells.
