@@ -3403,7 +3403,8 @@ module ActiveRecord
     # an enum, `attribute` or `normalizes` declaration has its own cast,
     # so its column is not there and keeps the path below.
     def integer_query_limit(col)
-      prefix = "#{@model.table_name}."
+      table_name = @model.table_name.to_s
+      prefix = "#{table_name}."
       name = col.start_with?(prefix) ? col[prefix.length, col.length].to_s : col
       return 0 if name.include?(".")
       limit = @model.schema_integer_query_limits[name.to_sym]
