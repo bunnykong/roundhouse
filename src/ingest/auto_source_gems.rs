@@ -238,3 +238,90 @@ fn required_features(items: &[crate::app::ProgramItem], out: &mut Vec<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::io;
+    use std::path::PathBuf;
+
+    /// A gem `lib/` whose `loop` entry is a symlink back to `lib/` itself,
+    /// and whose `ext` entry is a symlink to a directory outside it
+    /// holding `ext/box.rb`. `read_dir` gives up after `LIMIT` calls, as
+    /// the OS does at its symlink depth, so a walk that follows the loop
+    /// ends instead of hanging.
+    struct Linked {
+        read_dirs: Cell<usize>,
+    }
+
+    const LIMIT: usize = 64;
+
+    impl Linked {
+        /// Where `path` really is: every `loop` component resolves to `lib`.
+        fn real(path: &Path) -> PathBuf {
+            let mut real = PathBuf::new();
+            for part in path.components() {
+                if part.as_os_str() == "loop" { real = PathBuf::from("/gem/lib"); } else { real.push(part); }
+            }
+            if let Ok(rest) = real.strip_prefix("/gem/lib/ext") {
+                let mut outside = PathBuf::from("/elsewhere/ext");
+                outside.extend(rest.components());
+                return outside;
+            }
+            real
+        }
+    }
+
+    impl Vfs for Linked {
+        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.read_to_string(path).map(String::into_bytes)
+        }
+        fn read_to_string(&self, path: &Path) -> io::Result<String> {
+            match Self::real(path).to_str() {
+                Some("/gem/lib/shelf.rb") => Ok("module Shelf\nend\n".into()),
+                Some("/elsewhere/ext/box.rb") => Ok("module Shelf\n  class Box\n  end\nend\n".into()),
+                _ => Err(io::ErrorKind::NotFound.into()),
+            }
+        }
+        fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            self.read_dirs.set(self.read_dirs.get() + 1);
+            if self.read_dirs.get() > LIMIT {
+                return Err(io::Error::other("too many levels of symbolic links"));
+            }
+            match Self::real(path).to_str() {
+                Some("/gem/lib") => Ok(vec![path.join("shelf.rb"), path.join("loop"), path.join("ext")]),
+                Some("/elsewhere/ext") => Ok(vec![path.join("box.rb")]),
+                _ => Err(io::ErrorKind::NotFound.into()),
+            }
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.is_dir(path) || self.read_to_string(path).is_ok()
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            matches!(Self::real(path).to_str(), Some("/gem/lib" | "/elsewhere/ext"))
+        }
+        fn is_symlink(&self, path: &Path) -> bool {
+            path.file_name().is_some_and(|name| name == "loop" || name == "ext")
+        }
+        fn canonical(&self, path: &Path) -> Option<PathBuf> {
+            Some(Self::real(path))
+        }
+    }
+
+    /// A symlink back into `lib/` is walked once: `lib/` and the linked
+    /// `ext/` are read, and the loop adds nothing.
+    #[test]
+    fn declares_reads_each_real_directory_once() {
+        let vfs = Linked { read_dirs: Cell::new(0) };
+        assert!(!declares(&vfs, Path::new("/gem/lib"), "Shelf::Crate"));
+        assert_eq!(vfs.read_dirs.get(), 2);
+    }
+
+    /// A symlinked subdirectory outside `lib/` is still searched.
+    #[test]
+    fn declares_finds_a_class_under_a_symlinked_directory() {
+        let vfs = Linked { read_dirs: Cell::new(0) };
+        assert!(declares(&vfs, Path::new("/gem/lib"), "Shelf::Box"));
+    }
+}
