@@ -1946,6 +1946,13 @@ class Results(unittest.TestCase):
         shards = [ci.spinel_toolchain_shard(["long", "x", "y"], k, count=2, timings=lone) for k in range(2)]
         self.assertIn(["long"], shards)
 
+    def test_equal_tests_fill_every_shard(self):
+        tests = [f"t{i:02}" for i in range(12)]
+        timings = {"toolchain": {t: 400 for t in tests}, "toolchain_cpu": {t: 400 for t in tests}}
+        shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(ci.SPINEL_TOOLCHAIN_SHARDS)]
+        self.assertTrue(all(shards), shards)
+        self.assertEqual(sorted(t for s in shards for t in s), tests)
+
     def test_run_tests_records_cpu_seconds_with_the_bundle_share(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "records.jsonl"

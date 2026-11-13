@@ -1167,7 +1167,8 @@ def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=
         return max((loads[i] + cpu(item)) / SPINEL_TOOLCHAIN_THREADS, longest[i], cost(item))
     mine = []
     for item in sorted(items, key=lambda item: (-cpu(item), item[0])):
-        i = min(range(count), key=lambda i: (ends(i, item), i))
+        # Not the lowest index on a tie: equal tests end every shard at the longest one, and the index alone left the last shards empty.
+        i = min(range(count), key=lambda i: (ends(i, item), loads[i], i))
         loads[i] += cpu(item)
         longest[i] = max(longest[i], cost(item))
         if i == shard:
