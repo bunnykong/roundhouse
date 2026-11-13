@@ -1068,8 +1068,11 @@ fn lookup_changing_methods(
         let writer = |attr: &Symbol| Symbol::from(format!("{}=", attr.as_str()).as_str());
         let implicit = match &*expr.node {
             ExprNode::MethodRef { name: referenced, .. } => changes(referenced, &[]),
+            ExprNode::Send { method, args, .. } if matches!(method.as_str(), "method" | "public_method" | "instance_method") => {
+                args.first().map(literal_method_name).is_none_or(|name| name.is_none_or(|name| changes(&Symbol::from(name), &[])))
+            }
             ExprNode::OpAssign { target: crate::expr::LValue::Attr { name: attr, .. }, value, .. } => {
-                changes(&writer(attr), std::slice::from_ref(value))
+                changes(attr, &[]) || changes(&writer(attr), std::slice::from_ref(value))
             }
             ExprNode::MultiAssign { targets, .. } => targets
                 .iter()

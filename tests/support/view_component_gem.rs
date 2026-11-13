@@ -47,7 +47,7 @@ pub const SCRIPT: &str = r#"io = +""
 Views::Articles.index_into(io, Article.all, nil, nil)
 expected = "<p class=\"greeting\">Hello, BLOG! (0 articles)</p>"
 raise "component:\n#{io}" unless io.include?(expected)
-card = "<div class=\"card card-warm\">\n  <h2>Title &lt;b&gt;</h2>\n  <ul><li>one</li><li>two</li><li><b>three</b></li></ul>\n  <div class=\"body\">\n  Body text\n</div>\n  <small>fine <print></small>\n</div>"
+card = "<div class=\"card card-warm\">\n  <h2>Title &lt;b&gt;</h2>\n  <ul><li>one</li><li>two</li><li><b>three</b></li></ul>\n  <div class=\"body\">\n  \n  Body text\n</div>\n  <small>fine <print></small>\n</div>"
 raise "card:\n#{io}" unless io.include?(card)
 puts "view_component passed"
 "#;
