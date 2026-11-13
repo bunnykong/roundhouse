@@ -1,4 +1,8 @@
 module ActiveRecord
+  # `where` casts of an enum column; see `relation.rb`.
+  def self.enum_where_int: (Integer | Float | bool | Symbol | String | nil value, Array[String] labels, Array[Integer] values, String nil_label) -> Integer?
+  def self.enum_where_str: (Integer | Float | bool | Symbol | String | nil value, Array[String] labels, Array[String] values, String nil_label) -> String?
+
   # Lazy chainable query builder. Chain methods answer a new Relation
   # and leave the receiver unchanged; terminals execute and return
   # rows / scalars. Loaded records are `Base` as an interim (same as
@@ -401,6 +405,9 @@ module ActiveRecord
     def bound_text: (untyped value) -> String
     def column_bound_value: (String col, untyped val) -> untyped
     def integer_column?: (String col) -> bool
+    def enum_column?: (String col) -> bool
+    def list_predicate: (String col, String qcol, Array[untyped] val) -> String
+    def enum_list_predicate: (String col, String qcol, Array[Integer | Float | bool | Symbol | String | Base | Range[untyped] | nil] val) -> String
     def named_bind_start?: (String ch) -> bool
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String

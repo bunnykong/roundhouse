@@ -104,3 +104,49 @@ fn a_non_enum_column_keeps_its_symbols() {
         "a non-enum column must not be mapped through the enum table:\n{line}"
     );
 }
+
+/// A String-valued mapping's labels become Strings element-wise on a
+/// target with no runtime relation, and the container's type follows
+/// them, as it does for Integers: an `Array[Sym]` left over String
+/// elements is what a strict target reads as the element type.
+#[test]
+fn a_string_mappings_array_value_is_typed_as_strings() {
+    use roundhouse::expr::{Expr, ExprNode, Literal};
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"tickets\", force: :cascade do |t|\n    t.string \"status\"\n  end\nend\n"),
+        ("app/models/ticket.rb", "class Ticket < ApplicationRecord\n  enum :status, { queued: \"sent\", sent: \"done\" }\n\n  def self.both\n    where(status: [:queued, :sent]).count\n  end\nend\n"),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower_for(&mut app, roundhouse::build_target::BuildTarget::Go);
+    let model = app.models.iter().find(|m| m.name.0.as_str() == "Ticket").expect("Ticket");
+    let body = model
+        .body
+        .iter()
+        .find_map(|item| match item {
+            roundhouse::dialect::ModelBodyItem::Method { method, .. } if method.name.as_str() == "both" => Some(&method.body),
+            _ => None,
+        })
+        .expect("Ticket.both");
+    let mut arrays = Vec::new();
+    let mut pending: Vec<&Expr> = vec![body];
+    while let Some(expr) = pending.pop() {
+        if let ExprNode::Array { elements, .. } = &*expr.node {
+            arrays.push((elements.clone(), expr.ty.clone()));
+        }
+        expr.node.for_each_child(&mut |child| pending.push(child));
+    }
+    let (elements, ty) = arrays.into_iter().next().expect("the array value");
+    let stored: Vec<_> = elements
+        .iter()
+        .map(|e| match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            other => panic!("not a String: {other:?}"),
+        })
+        .collect();
+    assert_eq!(stored, ["sent", "done"]);
+    assert_eq!(
+        ty,
+        Some(roundhouse::ty::Ty::Array { elem: std::sync::Arc::new(roundhouse::ty::Ty::Str) }),
+        "the container's type follows its String elements"
+    );
+}
