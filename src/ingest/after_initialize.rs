@@ -54,7 +54,12 @@
 //!
 //! Applying a reopen statically means code that runs during boot, before
 //! the callbacks fire, already sees the patched method: an initializer's
-//! own statements (`ingest::boot_program`) do.
+//! own statements (`ingest::boot_program`) do, and so does an earlier
+//! callback, which in Rails runs before the patch; after boot the two
+//! agree. A reopen target is read from the top level: inside
+//! `config/application.rb`'s `module Shop; class Application`,
+//! `Worker.module_eval` reopens `::Worker`, where Ruby would take
+//! `Shop::Worker` when it exists.
 
 use crate::det::HashSet;
 use std::path::{Path, PathBuf};
