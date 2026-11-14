@@ -9,6 +9,12 @@ use super::after_initialize_boot_contract::{
     app, server_guarded_app, BOOT_LOG_AFTER_BOOT, NOT_SERVED_AFTER_BOOT, SERVED_AFTER_BOOT, STATUSES_AFTER_BOOT,
 };
 use super::native_http::Server;
+// The shared app below reaches the Overlay builder through this module.
+use super::emit_and_run;
+
+#[path = "../support/after_initialize_app.rs"]
+mod probe_app;
+use probe_app::{app as probe_app_overlay, mkpath_app, ASSERTIONS, MKPATH_ASSERTIONS, SPINEL_RUN};
 
 /// A shipment queued before a restart is resumed by the next boot: the first
 /// server queues it, the second one's callback finds it and enqueues its job,
@@ -78,4 +84,18 @@ puts "the server flag ran the guarded hook in its place"
             not_served = NOT_SERVED_AFTER_BOOT,
         ))
         .assert_passes();
+}
+
+/// The analysis app's callbacks natively, called as the server's `main.rb` calls
+/// the runner (`SPINEL_RUN`): a contract starts no server.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn after_initialize_callbacks_run_at_boot_on_spinel() {
+    probe_app_overlay().run_spinel(&format!("{SPINEL_RUN}{ASSERTIONS}")).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn a_rails_root_mkpath_callback_runs_on_spinel() {
+    mkpath_app().run_spinel(&format!("{SPINEL_RUN}{MKPATH_ASSERTIONS}")).assert_passes();
 }

@@ -947,6 +947,7 @@ class Routing(unittest.TestCase):
         for path in [
             "src/ingest/after_initialize.rs",
             "tests/emit_and_run/after_initialize.rs",
+            "tests/support/after_initialize_app.rs",
             "tests/support/after_initialize_boot.rs",
             "tests/spinel_toolchain/after_initialize_boot.rs",
             "src/project.rs",

@@ -315,12 +315,13 @@ NET_HTTP_INPUTS = {
     "runtime/spinel/tcp_socket_stub.rb",
     "runtime/spinel/tcp_socket_stub.rbs",
 }
-# Inputs of the after_initialize boot order's native server check
+# Inputs of the after_initialize native checks
 # (tests/spinel_toolchain/after_initialize_boot.rs): the pass that carries
-# the callbacks, the app the check boots, and its Ruby family half.
+# the callbacks, the apps the checks build, and their Ruby family half.
 AFTER_INITIALIZE_BOOT_INPUTS = {
     "src/ingest/after_initialize.rs",
     "tests/emit_and_run/after_initialize.rs",
+    "tests/support/after_initialize_app.rs",
     "tests/support/after_initialize_boot.rs",
 }
 # Inputs of the reopen gate (tests/app_reopens_runtime_class.rs): the
