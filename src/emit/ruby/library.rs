@@ -208,16 +208,11 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         (owner != lc.name.0.as_str() && emitted_here.contains(owner.as_str())).then_some(owner)
     };
 
-    let mut children: crate::det::HashMap<String, Vec<&LibraryClass>> =
-        crate::det::HashMap::default();
-    for lc in &lcs {
-        if is_spliced_factory(lc) || matches!(lc.origin, Some(LibraryClassOrigin::DataFactory { .. })) {
-            continue;
-        }
-        if let Some(owner) = owner_in_this_tree(lc) {
-            children.entry(owner).or_default().push(lc);
-        }
-    }
+    let nested: Vec<(String, &LibraryClass)> = lcs
+        .iter()
+        .filter(|lc| !is_spliced_factory(lc) && !matches!(lc.origin, Some(LibraryClassOrigin::DataFactory { .. })))
+        .filter_map(|lc| owner_in_this_tree(lc).map(|owner| (owner, lc)))
+        .collect();
 
     // Each file is rendered on its own: the passes above did the
     // lowering, and what a render reads is the same for every class.
@@ -227,7 +222,18 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         .filter(|lc| !matches!(lc.origin, Some(LibraryClassOrigin::DataFactory { .. })))
         .filter(|lc| owner_in_this_tree(lc).is_none())
         .collect();
-    super::par_render::map(app, classes, &roots, |&lc| {
+    // Each nested class goes in ONE opening of its owner (see
+    // `nested_placement`): handed to every opening of the name, a class
+    // opened in n gem files carried n copies of its nested classes.
+    let mut children: Vec<Vec<&LibraryClass>> = vec![Vec::new(); roots.len()];
+    for ((_, kid), at) in nested.iter().zip(nested_placement(&roots, &nested, app)) {
+        if let Some(at) = at {
+            children[at].push(kid);
+        }
+    }
+    let roots: Vec<(&LibraryClass, Vec<&LibraryClass>)> = roots.into_iter().zip(children).collect();
+    super::par_render::map(app, classes, &roots, |(lc, kids)| {
+        let lc: &LibraryClass = lc;
         // `underscore`, not `snake_case`: a namespaced reopen
         // (lobsters' `ActiveRecord::Base.q`, `Net::HTTP`,
         // `ShortId::CandidateId`) nests as `active_record/base.rb` —
@@ -235,9 +241,10 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         // Makefile's dependency list.
         let file_stem = crate::naming::underscore(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
-        let mut files = match children.get(lc.name.0.as_str()) {
-            Some(kids) => emit_library_class_with_nested(lc, kids, app, classes, &factories, out_path),
-            None => emit_library_class_pair_in(lc, app, classes, &factories, out_path),
+        let mut files = if kids.is_empty() {
+            emit_library_class_pair_in(lc, app, classes, &factories, out_path)
+        } else {
+            emit_library_class_with_nested(lc, kids, app, classes, &factories, out_path)
         };
         for block in &data_blocks {
             splice_data_block(&mut files, block, app, classes, &factories);
@@ -283,16 +290,7 @@ fn order_openings_by_load(lcs: &mut [LibraryClass], app: &App) {
         return;
     }
     let ranks = file_load_ranks(app);
-    let file_of = |lc: &LibraryClass| -> Option<String> {
-        let span = std::iter::once(lc.parent_span)
-            .chain(lc.include_spans.iter().copied())
-            .chain(lc.constants.iter().map(|(_, v)| v.span))
-            .chain(lc.methods.iter().map(|m| m.body.span))
-            .chain(lc.unknown_calls.iter().map(|c| c.span))
-            .find(|s| !s.is_synthetic())?;
-        let source = app.sources.get((span.file.0 as usize).checked_sub(1)?)?;
-        Some(normalize_path(&source.path))
-    };
+    let file_of = |lc: &LibraryClass| opening_file(lc, app);
     for group in groups {
         // `None` (a conditional decides the file's place) leaves the group as is.
         let Some(mut keyed) = group
@@ -315,6 +313,75 @@ fn order_openings_by_load(lcs: &mut [LibraryClass], app: &App) {
             lcs[*slot] = lc;
         }
     }
+}
+
+/// The file an opening was read from: the first of its spans that points
+/// at a source.
+fn opening_file(lc: &LibraryClass, app: &App) -> Option<String> {
+    let span = std::iter::once(lc.parent_span)
+        .chain(lc.include_spans.iter().copied())
+        .chain(lc.constants.iter().map(|(_, v)| v.span))
+        .chain(lc.methods.iter().map(|m| m.body.span))
+        .chain(lc.unknown_calls.iter().map(|c| c.span))
+        .find(|s| !s.is_synthetic())?;
+    let source = app.sources.get((span.file.0 as usize).checked_sub(1)?)?;
+    Some(normalize_path(&source.path))
+}
+
+/// Which opening of its owner each nested class is written in, by index
+/// into `roots` (in load order). A class opened in several gem files is
+/// one emitted file of several blocks, and Ruby defines a nested class
+/// where its file writes it, once: so the opening read from the nested
+/// class's own file. An opening that holds nothing but nested classes has
+/// no span to say its file; when the nested class's file opens the owner
+/// and one opening's file is unknown, that is the one. A nested class
+/// written compactly in a file with no opening of its owner
+/// (`class Shelf::Cap` in `cap.rb`) goes in the last opening whose file
+/// loads before its own, or the first when that order is not known. With
+/// one opening, that one.
+///
+/// An opening before an `X = Data.define(…)` of the owner is a class Ruby
+/// then replaces, so only that opening and the ones after it are
+/// candidates.
+fn nested_placement(roots: &[&LibraryClass], kids: &[(String, &LibraryClass)], app: &App) -> Vec<Option<usize>> {
+    let mut openings: HashMap<&str, Vec<usize>> = HashMap::default();
+    for (at, lc) in roots.iter().enumerate() {
+        openings.entry(lc.name.0.as_str()).or_default().push(at);
+    }
+    let several = openings.values().any(|o| o.len() > 1);
+    let ranks = if several { file_load_ranks(app) } else { HashMap::default() };
+    let rank = |file: &Option<String>| file.as_ref().and_then(|f| ranks.get(f).copied().flatten());
+    kids.iter()
+        .map(|(owner, kid)| {
+            let all = openings.get(owner.as_str())?;
+            let from = all.iter().rposition(|&at| roots[at].data_define().is_some()).unwrap_or(0);
+            let candidates = &all[from..];
+            if candidates.len() == 1 {
+                return Some(candidates[0]);
+            }
+            let file = opening_file(kid, app);
+            if let Some(&same) = candidates.iter().find(|&&at| file.is_some() && opening_file(roots[at], app) == file) {
+                return Some(same);
+            }
+            let opens_owner = file.as_ref().is_some_and(|file| {
+                app.library_class_files
+                    .iter()
+                    .any(|(path, names)| normalize_path(path) == *file && names.iter().any(|n| n.0.as_str() == owner))
+            });
+            let unknown: Vec<usize> = candidates.iter().copied().filter(|&at| opening_file(roots[at], app).is_none()).collect();
+            if let (true, [only]) = (opens_owner, unknown.as_slice()) {
+                return Some(*only);
+            }
+            let before = rank(&file).and_then(|kid_rank| {
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|&at| rank(&opening_file(roots[at], app)).is_some_and(|r| r <= kid_rank))
+                    .last()
+            });
+            Some(before.unwrap_or(candidates[0]))
+        })
+        .collect()
 }
 
 /// Each gem file's place in the order its declarations run: a depth-first
