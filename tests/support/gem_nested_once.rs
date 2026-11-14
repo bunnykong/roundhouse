@@ -41,11 +41,27 @@ pub const KIND: &str = r##"class Shelf
 end
 "##;
 
+/// [`KIND`] with a constant naming a class `errors.rb` nests, read as
+/// `kind.rb` loads, after `errors.rb`.
+pub const DEFAULT_KIND: &str = r##"class Shelf
+  DEFAULT_ERROR = MissingError
+
+  def self.kind
+    "box"
+  end
+end
+"##;
+
 pub const LABEL: &str = r##"class Shelf
   def self.label
     "shelf box"
   end
 end
+"##;
+
+pub const DEFAULT_ASSERTIONS: &str = r##"got = [Shelf.kind, Shelf.label, Shelf.size, Shelf::DEFAULT_ERROR.new("lid").message].join(" / ")
+raise "describe #{got.inspect}" unless got == "box / shelf box / 3 / missing lid"
+puts "default passed"
 "##;
 
 /// [`SHELF`] also requiring `lid.rb` and `cap.rb`.
@@ -156,6 +172,14 @@ pub fn listed(app: emit_and_run::Overlay) -> emit_and_run::Overlay {
 #[allow(dead_code)]
 pub fn split_app() -> emit_and_run::Overlay {
     with_gem(&[("shelf.rb", SHELF), ("shelf/errors.rb", ERRORS), ("shelf/kind.rb", KIND), ("shelf/label.rb", LABEL)])
+        .write("app/models/article_box.rb", ARTICLE_BOX)
+}
+
+/// [`split_app`] with `kind.rb` reading `MissingError` into a constant.
+/// Ruby 4.0.7 answers `"box / shelf box / 3 / missing lid"`.
+#[allow(dead_code)]
+pub fn default_error_app() -> emit_and_run::Overlay {
+    with_gem(&[("shelf.rb", SHELF), ("shelf/errors.rb", ERRORS), ("shelf/kind.rb", DEFAULT_KIND), ("shelf/label.rb", LABEL)])
         .write("app/models/article_box.rb", ARTICLE_BOX)
 }
 

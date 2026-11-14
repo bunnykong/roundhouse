@@ -17,6 +17,13 @@ fn a_nested_class_opened_in_two_gem_files_answers_both_openings() {
     contract::listed(contract::lid_app()).run_ruby(contract::LID_ASSERTIONS).assert_passes();
 }
 
+/// `kind.rb`'s `DEFAULT_ERROR = MissingError` reads a class `errors.rb`
+/// nests, and `errors.rb` loads first.
+#[test]
+fn a_constant_reading_a_nested_class_of_an_earlier_gem_file_answers_it() {
+    contract::listed(contract::default_error_app()).run_ruby(contract::DEFAULT_ASSERTIONS).assert_passes();
+}
+
 /// The emitted `app/models/shelf.rb`, split into its top-level
 /// `class Shelf` blocks, one per opening file.
 fn shelf_blocks(app: super::emit_and_run::Overlay) -> (String, Vec<String>) {
@@ -79,4 +86,15 @@ fn the_spinel_emit_writes_each_opening_of_a_nested_class_in_its_own_files_block(
     assert!(errors.contains("def self.shape") && !errors.contains("def self.diameter"), "{source}");
     let lid = block_with(&blocks, "def self.lid_count", &source);
     assert!(lid.contains("def self.diameter") && !lid.contains("def self.shape"), "{source}");
+}
+
+/// `errors.rb`'s opening holds only nested classes, so no span gives its
+/// file; it is still written where `errors.rb` loads, before `kind.rb`'s
+/// block that reads `MissingError`.
+#[test]
+fn the_spinel_emit_writes_an_opening_of_only_nested_classes_where_its_file_loads() {
+    let (source, blocks) = shelf_blocks(contract::default_error_app());
+    let errors = blocks.iter().position(|b| b.contains("class MissingError")).unwrap_or_else(|| panic!("{source}"));
+    let kind = blocks.iter().position(|b| b.contains("DEFAULT_ERROR")).unwrap_or_else(|| panic!("{source}"));
+    assert!(errors < kind, "errors.rb's block before kind.rb's in\n{source}");
 }
