@@ -312,6 +312,10 @@ mod stdlib_rexml_include;
 mod gem_reopen_source_contract;
 #[path = "spinel_toolchain/gem_reopen_source.rs"]
 mod gem_reopen_source;
+#[path = "support/gem_nested_once.rs"]
+mod gem_nested_once_contract;
+#[path = "spinel_toolchain/gem_nested_once.rs"]
+mod gem_nested_once;
 #[path = "support/stdlib_singleton.rs"]
 mod stdlib_singleton_contract;
 #[path = "spinel_toolchain/stdlib_singleton.rs"]
