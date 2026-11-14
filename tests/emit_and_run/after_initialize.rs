@@ -322,6 +322,56 @@ end
     assert!(run.stdout.contains("shouted"));
 }
 
+/// A class an initializer defines and a callback only reopens is kept: no
+/// source names it but the reopen, and Rails 8.1.4 patches it at boot.
+#[test]
+fn a_class_only_a_callback_reopens_is_kept() {
+    let run = base()
+        .write("config/initializers/chime.rb", r#"class Chime
+  def tone
+    "ding"
+  end
+end
+
+Rails.application.config.after_initialize do
+  Chime.class_eval do
+    def tone
+      "dong"
+    end
+  end
+end
+"#)
+        .run_ruby("raise \"tone: #{Chime.new.tone.inspect}\" unless Chime.new.tone == \"dong\"\nputs \"chimed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("chimed"));
+}
+
+/// A reopen and a first `require` are applied while ingesting, so neither
+/// may follow a statement of its callback that runs: in Rails a `next`
+/// there skips them, and anything there runs before them. Each such
+/// callback is an ingest error, not a patch applied out of order.
+#[test]
+fn a_reopen_or_a_require_after_a_statement_that_runs_is_an_error() {
+    let patch = "class Chime\n  def tone\n    \"ding\"\n  end\nend\n";
+    let reopen = ingest_error(&[
+        ("config/initializers/chime.rb", patch),
+        (
+            "config/initializers/patch.rb",
+            "Rails.application.config.after_initialize do\n  next if ENV[\"SKIP_PATCH\"]\n  Chime.class_eval do\n    def tone\n      \"dong\"\n    end\n  end\nend\n",
+        ),
+    ]);
+    assert!(reopen.contains("`Chime.class_eval` follows a statement of its after_initialize callback that runs"), "{reopen}");
+    let require = ingest_error(&[
+        ("config/initializers/chime.rb", patch),
+        ("lib/boot_action.rb", "Chime.new.tone\n"),
+        (
+            "config/initializers/load.rb",
+            "Rails.application.config.after_initialize do\n  next if ENV[\"SKIP_FIRST\"]\n  require \"boot_action\"\nend\n\nRails.application.config.after_initialize do\n  require \"boot_action\"\nend\n",
+        ),
+    ]);
+    assert!(require.contains("`require` follows a statement of its after_initialize callback that runs"), "{require}");
+}
+
 /// A required path resolves inside the app or not at all: a `..` past the
 /// root, an absolute path and a symlink out of `lib/` each name a file the
 /// compiled program does not carry, so each is refused.

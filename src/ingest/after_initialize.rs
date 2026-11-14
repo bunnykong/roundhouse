@@ -47,6 +47,11 @@
 //!   Any other `require`, or one whose path leaves the app or passes a
 //!   symlink, is an error: the emitted program loads no files at run time.
 //!
+//! Both must come before any statement of their callback that runs (a
+//! required file's included): one there could skip them in Rails (`next
+//! if …`) or run before the patch, so such a callback is an error. A
+//! class an initializer defines and only a reopen targets is kept.
+//!
 //! Applying a reopen statically means code that runs during boot, before
 //! the callbacks fire, already sees the patched method: an initializer's
 //! own statements (`ingest::boot_program`) do.
@@ -271,6 +276,7 @@ fn read_body<V: Vfs + ?Sized>(
 ) -> IngestResult<()> {
     for stmt in stmts {
         if let Some(reopen) = reopen(&stmt, file)? {
+            before_what_runs(callback, file, &format!("`{}.{}`", reopen.target, reopen.via))?;
             callback.reopens.push(reopen);
             continue;
         }
@@ -279,6 +285,10 @@ fn read_body<V: Vfs + ?Sized>(
             if !loaded.insert(required.clone()) {
                 continue;
             }
+            // Its first load is read into this callback only, and a later
+            // `require` of it is dropped: both hold only when nothing
+            // before it can skip it.
+            before_what_runs(callback, file, "`require`")?;
             if depth > 8 {
                 return Err(unsupported(file, "require nesting inside an after_initialize callback is too deep".into()));
             }
@@ -309,6 +319,22 @@ fn read_body<V: Vfs + ?Sized>(
         callback.body.push(expr);
     }
     Ok(())
+}
+
+/// A static part is applied while ingesting, as if it ran first: an
+/// error when a statement of its callback that runs comes before it, which
+/// in Rails could skip it (`next if …`) or run before the patch.
+fn before_what_runs(callback: &Callback, file: &str, what: &str) -> IngestResult<()> {
+    if callback.body.is_empty() {
+        return Ok(());
+    }
+    Err(unsupported(
+        file,
+        format!(
+            "{what} follows a statement of its after_initialize callback that runs; it is applied while compiling, \
+             so it must come before any such statement"
+        ),
+    ))
 }
 
 const REOPENERS: &[&str] = &["module_eval", "class_eval", "module_exec", "class_exec"];
@@ -454,9 +480,9 @@ fn rails_root_path(node: &Node<'_>) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Root constant names the callback bodies and the methods their reopens
-/// define read, so a class an initializer defines and only a callback
-/// names is kept.
+/// Root constant names the callback bodies read, the classes their reopens
+/// target and the methods those define read, so a class an initializer
+/// defines and only a callback names is kept.
 pub(super) fn named_constants(callbacks: &[Callback]) -> std::collections::HashSet<String> {
     fn visit(expr: &Expr, out: &mut std::collections::HashSet<String>) {
         if let ExprNode::Const { path } = &*expr.node {
@@ -472,6 +498,11 @@ pub(super) fn named_constants(callbacks: &[Callback]) -> std::collections::HashS
             visit(expr, &mut out);
         }
         for reopen in &callback.reopens {
+            // The target itself: a class an initializer defines and only a
+            // callback reopens is live at boot.
+            if let Some(root) = reopen.target.split("::").find(|s| !s.is_empty()) {
+                out.insert(root.to_string());
+            }
             for item in &reopen.items {
                 if let ReopenItem::Def(method) = item {
                     visit(&method.body, &mut out);
