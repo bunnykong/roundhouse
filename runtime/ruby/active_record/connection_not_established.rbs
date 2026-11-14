@@ -7,4 +7,8 @@ module ActiveRecord
 
   class ConnectionTimeoutError < ConnectionNotEstablished
   end
+
+  class NoDatabaseError < StatementInvalid
+    def initialize: (?String message) -> void
+  end
 end

@@ -315,6 +315,14 @@ NET_HTTP_INPUTS = {
     "runtime/spinel/tcp_socket_stub.rb",
     "runtime/spinel/tcp_socket_stub.rbs",
 }
+# Inputs of the after_initialize boot order's native server check
+# (tests/spinel_toolchain/after_initialize_boot.rs): the pass that carries
+# the callbacks, the app the check boots, and its Ruby family half.
+AFTER_INITIALIZE_BOOT_INPUTS = {
+    "src/ingest/after_initialize.rs",
+    "tests/emit_and_run/after_initialize.rs",
+    "tests/support/after_initialize_boot.rs",
+}
 # Inputs of the reopen gate (tests/app_reopens_runtime_class.rs): the
 # pass, and the runtime job whose override it builds natively.
 APP_REOPENS_INPUTS = {
@@ -911,6 +919,10 @@ def select(
             spinel_tests.add("data_record_composition")
         if path in {"tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"}:
             reasons.append(f"{path}: unit (emit_and_run), spinel-toolchain (ordinary class-body calls)")
+            spinel = True
+            jobs_selected.update(CORE)
+        if path in AFTER_INITIALIZE_BOOT_INPUTS:
+            reasons.append(f"{path}: unit and spinel-toolchain (after_initialize boot order)")
             spinel = True
             jobs_selected.update(CORE)
         if path.startswith("tests/support/controller_content_type_writer/"):

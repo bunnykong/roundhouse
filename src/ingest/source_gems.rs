@@ -475,7 +475,8 @@ fn built_autoload_dirs(text: &str) -> Vec<String> {
     defs.0
 }
 
-fn normalize(path: &Path) -> PathBuf {
+/// `.` and `..` folded lexically; a `..` with nothing left to pop stays.
+pub(super) fn normalize(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for component in path.components() {

@@ -65,6 +65,11 @@ pub struct ConcernGuardedItem {
     pub at: usize,
 }
 
+/// The generated module whose `run` performs the app's `after_initialize`
+/// callbacks (`ingest::after_initialize`); each entry calls it once the
+/// database and the job drain are set up (`project::apply_app_initializers`).
+pub const AFTER_INITIALIZE_RUNNER: &str = "AppInitializers";
+
 /// The top-level IR: a Rails application as data. This is the serializable
 /// deliverable — the thing ingesters produce and emitters consume.
 
@@ -586,6 +591,11 @@ pub struct App {
     /// seams as `initializer_filters`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_response_headers: Vec<InitializerResponseHeader>,
+    /// Whether ingest generated the after_initialize runner module
+    /// ([`AFTER_INITIALIZE_RUNNER`], `ingest::after_initialize`), so the
+    /// emitted entries call its `run`. Recorded, not inferred from the name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runs_after_initialize: bool,
     /// `ActionView::PartialRenderer.collection_cache = Store.reader` from
     /// a `config/initializers/` file (bare or inside `to_prepare`): the
     /// store cached collection renders read and write. campfire points
@@ -1391,6 +1401,7 @@ impl App {
             gem_package_settings: Vec::new(),
             auto_source_gems: Vec::new(),
             initializer_response_headers: Vec::new(),
+            runs_after_initialize: false,
             collection_cache_store: None,
             app_requires: Vec::new(),
             sql_functions: Vec::new(),

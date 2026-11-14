@@ -943,6 +943,22 @@ class Routing(unittest.TestCase):
         # This is a toolchain test, not a framework-suite binary.
         self.assertNotIn("data_record_siblings", ci.SPINEL_TESTS)
 
+    def test_after_initialize_boot_order_selects_the_native_toolchain_lane(self):
+        for path in [
+            "src/ingest/after_initialize.rs",
+            "tests/emit_and_run/after_initialize.rs",
+            "tests/support/after_initialize_boot.rs",
+            "tests/spinel_toolchain/after_initialize_boot.rs",
+            "src/project.rs",
+            "runtime/spinel/scaffold/main.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("spinel-toolchain", plan["jobs"])
+        # The native server check is a toolchain test, not a framework-suite binary.
+        self.assertNotIn("after_initialize_boot", ci.SPINEL_TESTS)
+
     def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
         for path in [
             "src/lower/arel/visitor.rs",
