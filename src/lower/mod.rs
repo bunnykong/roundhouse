@@ -18,6 +18,7 @@
 //! broadcasts orchestration, schema → DDL, and router dispatch tables.
 
 pub mod arel;
+pub mod renderable;
 pub mod route_guards;
 pub mod array_columns;
 pub mod associations;
@@ -130,7 +131,7 @@ pub mod defined_ivar_read;
 pub mod method_missing_calls;
 pub mod dynamic_try;
 pub mod primary_key_send;
-mod core_instance_methods;
+pub(crate) mod core_instance_methods;
 pub mod route_param_recall;
 pub mod expect_string_key;
 pub mod defined_ivar_memo;

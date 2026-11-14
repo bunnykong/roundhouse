@@ -3382,6 +3382,42 @@ pub fn target_files(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    target_files_lent(Lent::Shared(app), fixture, target)
+}
+
+/// [`target_files`] for a caller that is done with the app's bodies: the
+/// target lowerings that would copy the whole app to rewrite it rewrite
+/// this one instead (`lower::constantize`). The files are the same; the
+/// app is left as the emit lowered it.
+pub fn target_files_lowering_in_place(
+    app: &mut App,
+    fixture: &Path,
+    target: BuildTarget,
+) -> Result<Vec<(String, String)>, String> {
+    target_files_lent(Lent::Own(app), fixture, target)
+}
+
+/// The app an emit reads: borrowed, or the caller's own to lower in place.
+enum Lent<'a> {
+    Shared(&'a App),
+    Own(&'a mut App),
+}
+
+impl Lent<'_> {
+    fn get(&self) -> &App {
+        match self {
+            Lent::Shared(app) => app,
+            Lent::Own(app) => app,
+        }
+    }
+}
+
+fn target_files_lent(
+    lent: Lent<'_>,
+    fixture: &Path,
+    target: BuildTarget,
+) -> Result<Vec<(String, String)>, String> {
+    let app = lent.get();
     // Stage 0 of the specializer: the identity. Nothing is specialized
     // yet, so none of the trimming or refusals below apply — every construct is
     // residue, and the residue runs on Rails.
@@ -3404,10 +3440,10 @@ pub fn target_files(
             (crate::gems::native_extension_gem_namespaces(app), Default::default())
         };
         return crate::emit::ruby::with_external_gem_namespaces(&namespaces, includes, || {
-            crate::emit::ruby::expr::with_body_statements(|| target_files_inner(app, fixture, target))
+            crate::emit::ruby::expr::with_body_statements(|| target_files_inner(lent, fixture, target))
         });
     }
-    target_files_inner(app, fixture, target)
+    target_files_inner(lent, fixture, target)
 }
 
 /// The ruby family runs an automatically sourced gem as the real gem,
@@ -3476,10 +3512,11 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
 pub(crate) use crate::source_gem_shake::{compiled_on_the_ruby_family, shakes_source_gems};
 
 fn target_files_inner(
-    app: &App,
+    mut lent: Lent<'_>,
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    let app = lent.get();
     let without_inherited_replay;
     let app = if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
         let mut trimmed = app.clone();
@@ -3554,12 +3591,20 @@ fn target_files_inner(
         None => app,
     };
     let with_closed_constantize;
-    let app = match crate::lower::constantize::lower_for_target(app, target) {
-        Some(lowered) => {
-            with_closed_constantize = lowered;
-            &with_closed_constantize
+    // No step above replaced the app: the caller's own is lowered where it is.
+    let in_place = matches!(lent, Lent::Own(_)) && std::ptr::eq(app, lent.get());
+    let app = if in_place {
+        let Lent::Own(own) = &mut lent else { unreachable!() };
+        crate::lower::constantize::lower_in_place(own, target);
+        &**own
+    } else {
+        match crate::lower::constantize::lower_for_target(app, target) {
+            Some(lowered) => {
+                with_closed_constantize = lowered;
+                &with_closed_constantize
+            }
+            None => app,
         }
-        None => app,
     };
     let with_nil_operands;
     let app = match crate::lower::nil_operand::lower_for_target(app, target) {
@@ -6195,24 +6240,74 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
 }
 
 /// A class-body load-time conditional (`dialect::ConditionalDefinitions`)
-/// is written as the source has it only by the Ruby family; another
+/// is written as the source has it by the Ruby family and Spinel; another
 /// target would define every branch's methods, the last one winning, so
 /// each such statement is an error there.
 fn refuse_conditional_definitions(app: &App, target: BuildTarget) {
     for lc in &app.library_classes {
         for conditional in &lc.conditional_definitions {
+            // Not Spinel's when no other method answers the names: Spinel compiles the `if` around `def`s as Ruby
+            // loads it, and refuses only a name a builtin, an accessor or another def answers when the branch did not run.
+            if target == BuildTarget::Spinel && !conditional_names_answered_elsewhere(app, lc, conditional) {
+                continue;
+            }
             let diagnostic = crate::diagnostic::Diagnostic::unsupported(
                 conditional.span,
                 Some(crate::ident::Symbol::from(target.as_str())),
                 "conditional_definition",
-                format!(
-                    "`{}` defines methods in a load-time `if`/`unless`, which only the Ruby and JRuby targets carry",
-                    lc.name.0.as_str()
-                ),
+                if target == BuildTarget::Spinel {
+                    format!(
+                        "`{}` defines a method in a load-time `if`/`unless` that a builtin, an accessor or another def also answers, which Spinel does not compile",
+                        lc.name.0.as_str()
+                    )
+                } else {
+                    format!(
+                        "`{}` defines methods in a load-time `if`/`unless`, which only the Ruby, JRuby and Spinel targets carry",
+                        lc.name.0.as_str()
+                    )
+                },
             );
             emit::diagnostics::push(diagnostic);
         }
     }
+}
+
+fn conditional_names_answered_elsewhere(app: &App, lc: &crate::dialect::LibraryClass, conditional: &crate::dialect::ConditionalDefinitions) -> bool {
+    fn members(c: &crate::dialect::ConditionalDefinitions, out: &mut Vec<(crate::ident::Symbol, crate::dialect::MethodReceiver)>) {
+        for arm in &c.arms {
+            out.extend(arm.methods.iter().map(|m| (m.name.clone(), m.receiver)));
+            for nested in &arm.nested {
+                members(nested, out);
+            }
+        }
+    }
+    let mut names = Vec::new();
+    members(conditional, &mut names);
+    let core = crate::lower::core_instance_methods::OBJECT.iter().chain(crate::lower::core_instance_methods::KERNEL_PRIVATE);
+    let builtins: crate::det::HashSet<&str> = core.copied().chain(["method_missing", "initialize"]).collect();
+    names.iter().any(|(name, receiver)| {
+        if *receiver == crate::dialect::MethodReceiver::Instance && builtins.contains(name.as_str()) {
+            return true;
+        }
+        let mut current = Some(lc.name.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { break };
+            let mut parent = None;
+            for class in app.library_classes.iter().filter(|c| c.name == id) {
+                let elsewhere = class.methods.iter().any(|m| {
+                    &m.name == name
+                        && m.receiver == *receiver
+                        && (class.name != lc.name || !class.conditional_definitions.iter().any(|c| c.contains(m)))
+                });
+                if elsewhere {
+                    return true;
+                }
+                parent = parent.or_else(|| class.parent.clone());
+            }
+            current = parent;
+        }
+        false
+    })
 }
 
 /// One line or item of a program as written, branches flattened
@@ -8893,6 +8988,9 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionDispatch::Http::Parameters::ParseError",
     "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
+    // `runtime/ruby/action_view/base.rb`: a component render's buffer and lookup context.
+    "ActionView::OutputBuffer",
+    "ActionView::LookupContext",
     // `runtime/ruby/active_record/arel.rb` — node constructors the ruby
     // family and spinel load with that file. A strict target has no Arel
     // text nodes to construct.
@@ -10411,6 +10509,9 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // request-finder registry; one model lowering serves them all.
     let _registry = crate::lower::model_to_library::share_request_finder_registry(&app.models, &app.schema);
     let _writers = crate::lower::model_to_library::share_module_writers(app);
+    // Whole-App answers several passes ask for (`app_answers::of`), each
+    // computed once for this assembly; `app` is borrowed for the guard's life.
+    let _answers = crate::app_answers::share(app);
     let mut files: Vec<(String, String)> = Vec::new();
 
     crate::runtime_files::walk_into("runtime/spinel/scaffold", "", &mut files)?;
@@ -13198,7 +13299,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
             files.iter().any(|(p, c)| {
                 p.ends_with(".rb")
                     && (requires_feature(c, &require_line)
-                        || c.lines().any(|line| line.trim_start().starts_with(&under_gem)))
+                        || (c.contains(&under_gem) && c.lines().any(|line| line.trim_start().starts_with(&under_gem))))
             })
         })
         .collect();

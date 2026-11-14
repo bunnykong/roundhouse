@@ -18,5 +18,5 @@ pub fn function_receiver<'a>(
         return None;
     }
     let recv = recv?;
-    matches!(recv.ty.as_ref(), Some(Ty::Fn { .. })).then_some(recv)
+    matches!(recv.ty.as_ref(), Some(Ty::Fn(_))).then_some(recv)
 }

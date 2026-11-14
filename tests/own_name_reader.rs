@@ -244,7 +244,7 @@ fn analyze(files: &[(&str, &str)]) -> Analyzed {
 fn ret(analyzed: &Analyzed, class: &str, method: &str, class_side: bool) -> Ty {
     let key = (class.to_string(), method.to_string(), class_side);
     match analyzed.returns.get(&key) {
-        Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+        Some(Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
         Some(ty) => ty.clone(),
         None => panic!("{class}{}{method} not registered", if class_side { "." } else { "#" }),
     }

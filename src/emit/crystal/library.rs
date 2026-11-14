@@ -317,7 +317,7 @@ fn render_class(lc: &LibraryClass) -> String {
                     continue;
                 }
                 let ty = match m.signature.as_ref() {
-                    Some(crate::ty::Ty::Fn { ret, .. }) => super::ty::crystal_ty(ret),
+                    Some(crate::ty::Ty::Fn(fn_ty)) => super::ty::crystal_ty(&fn_ty.ret),
                     _ => {
                         // No signature — `attr_accessor` synth without
                         // RBS annotation. Walk every method body in
@@ -694,7 +694,7 @@ fn signature_ret_is_time(sig: Option<&crate::ty::Ty>) -> bool {
             _ => false,
         }
     }
-    matches!(sig, Some(crate::ty::Ty::Fn { ret, .. }) if is_time(ret))
+    matches!(sig, Some(crate::ty::Ty::Fn(fn_ty)) if is_time(&fn_ty.ret))
 }
 
 fn collect_initialize_assignments(

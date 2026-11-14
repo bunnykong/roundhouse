@@ -384,7 +384,7 @@ pub(in crate::analyze) fn register(
                         && m.name.as_str() == "perform"
                 })
                 .and_then(|m| match &m.signature {
-                    Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+                    Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
                     _ => None,
                 })
                 .unwrap_or(Ty::Untyped);

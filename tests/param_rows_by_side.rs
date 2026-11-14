@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use roundhouse::analyze::Analyzer;
 use roundhouse::dialect::MethodReceiver;
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 fn params_of(files: &[(&str, &str)], class: &str, method: &str, side: MethodReceiver) -> Vec<Ty> {
     let mut tree: HashMap<PathBuf, Vec<u8>> =
@@ -21,7 +21,8 @@ fn params_of(files: &[(&str, &str)], class: &str, method: &str, side: MethodRece
         .iter()
         .find(|m| m.name.as_str() == method && m.receiver == side)
         .expect("method");
-    let Some(Ty::Fn { params, .. }) = &def.signature else { panic!("typed: {:?}", def.signature) };
+    let Some(Ty::Fn(fn_ty)) = &def.signature else { panic!("typed: {:?}", def.signature) };
+    let FnTy { params, .. } = &**fn_ty;
     params.iter().map(|p| (*p.ty).clone()).collect()
 }
 

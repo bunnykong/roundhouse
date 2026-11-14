@@ -1,5 +1,26 @@
 module ActionView
   class Base
+    @lookup_context: LookupContext?
     def form_with: () -> nil
+    def lookup_context: () -> LookupContext
+    def view_renderer: () -> nil
+    def view_flow: () -> nil
+  end
+
+  class OutputBuffer
+    @raw_buffer: String
+    def initialize: (?String buffer) -> void
+    def to_s: () -> String
+    def to_str: () -> String
+    def length: () -> Integer
+    def empty?: () -> bool
+    def html_safe?: () -> bool
+    def <<: (String? value) -> OutputBuffer
+    def safe_concat: (String value) -> OutputBuffer
+  end
+
+  class LookupContext
+    def variants: () -> Array[Symbol]
+    def formats: () -> Array[Symbol]
   end
 end

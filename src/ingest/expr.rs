@@ -2449,14 +2449,14 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             }
             let else_branch = match b.else_clause() {
                 Some(e) => match e.statements() {
-                    Some(s) => Some(ingest_expr(&s.as_node(), file)?),
+                    Some(s) => Some(Box::new(ingest_expr(&s.as_node(), file)?)),
                     None => None,
                 },
                 None => None,
             };
             let ensure = match b.ensure_clause() {
                 Some(e) => match e.statements() {
-                    Some(s) => Some(ingest_expr(&s.as_node(), file)?),
+                    Some(s) => Some(Box::new(ingest_expr(&s.as_node(), file)?)),
                     None => None,
                 },
                 None => None,

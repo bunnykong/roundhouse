@@ -277,7 +277,7 @@ fn settle_representable_writers(
             let ty = registry
                 .get(&lc.name)
                 .and_then(|info| match info.instance_methods.get(&Symbol::from(reader.as_str())) {
-                    Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+                    Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
                     _ => None,
                 })
                 .or_else(|| lc.methods.iter().find(|m| m.name.as_str() == reader).and_then(|m| m.body.ty.clone()));
@@ -464,7 +464,7 @@ fn settle_ams_writers(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) -> 
             let ty = registry
                 .get(&lc.name)
                 .and_then(|info| match info.instance_methods.get(&Symbol::from(reader.as_str())) {
-                    Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+                    Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
                     _ => None,
                 })
                 .or_else(|| body.and_then(|b| b.ty.clone()));
@@ -872,7 +872,7 @@ fn declared_as_json_writer(
                     }
                 }
                 let ty = match info.instance_methods.get(name) {
-                    Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                    Some(Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
                     _ => info
                         .attributes
                         .fields

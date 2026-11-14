@@ -7,7 +7,7 @@ use roundhouse::emit::diagnostics::scope;
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::project::{BuildTarget, target_files};
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 #[test]
 fn sqlite_date_quotes_match_rails_with_and_without_optional_helpers() {
@@ -253,9 +253,10 @@ fn columns_constructors_and_callers_preserve_the_date_domain() {
     let rbs = "class CalendarEntry\n  def identity: (Date date) -> Date\nend\n";
     let signatures = roundhouse::rbs::parse_app_signatures(rbs).unwrap();
     let sig = &signatures[&ClassId(Symbol::from("CalendarEntry"))][&Symbol::from("identity")];
-    let Ty::Fn { params, ret, .. } = sig else {
+    let Ty::Fn(fn_ty) = sig else {
         panic!("expected function: {sig:?}")
     };
+    let FnTy { params, ret, .. } = &**fn_ty;
     assert_eq!(params[0].ty, Ty::Date.into());
     assert_eq!(**ret, Ty::Date);
 }
@@ -510,15 +511,17 @@ fn date_signatures_normalize_builtins_without_erasing_nominal_namespaces() {
             },
         ),
     ] {
-        let Ty::Fn { params, ret, .. } = signature(name) else {
+        let Ty::Fn(fn_ty) = signature(name) else {
             panic!("not a function")
         };
+        let FnTy { params, ret, .. } = *fn_ty;
         assert_eq!(params[0].ty, expected.clone().into());
         assert_eq!(*ret, expected);
     }
-    let Ty::Fn { params, ret, .. } = signature("nested") else {
+    let Ty::Fn(fn_ty) = signature("nested") else {
         panic!("not a function")
     };
+    let FnTy { params, ret, .. } = *fn_ty;
     assert_eq!(
         params[0].ty,
         Ty::Array {
@@ -542,10 +545,11 @@ fn date_signatures_normalize_builtins_without_erasing_nominal_namespaces() {
         "class Probe\n  def value: () -> {text}\nend\n"
     ))
     .unwrap();
-    let Ty::Fn { ret, .. } = &reparsed[&ClassId(Symbol::from("Probe"))][&Symbol::from("value")]
+    let Ty::Fn(fn_ty) = &reparsed[&ClassId(Symbol::from("Probe"))][&Symbol::from("value")]
     else {
         panic!("not a function")
     };
+    let FnTy { ret, .. } = &**fn_ty;
     assert_eq!(**ret, date);
 
     let app = app_with(
@@ -563,9 +567,10 @@ fn date_signatures_normalize_builtins_without_erasing_nominal_namespaces() {
             },
         ),
     ] {
-        let Ty::Fn { params, ret, .. } = &sigs[&Symbol::from(name)] else {
+        let Ty::Fn(fn_ty) = &sigs[&Symbol::from(name)] else {
             panic!("not a function")
         };
+        let FnTy { params, ret, .. } = &**fn_ty;
         assert_eq!(params[0].ty, expected.clone().into());
         assert_eq!(**ret, expected);
     }

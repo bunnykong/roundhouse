@@ -599,7 +599,8 @@ fn type_method_body_solo(method: &mut MethodDef) {
     insert_framework_stubs(&mut classes);
     let typer = crate::analyze::BodyTyper::new(&classes);
     let mut ctx = crate::analyze::Ctx::default();
-    if let Some(crate::ty::Ty::Fn { params, .. }) = &method.signature {
+    if let Some(crate::ty::Ty::Fn(fn_ty)) = &method.signature {
+        let crate::ty::FnTy { params, .. } = &**fn_ty;
         for (param, sig) in method.params.iter().zip(params.iter()) {
             ctx.local_bindings.insert(param.name.clone(), (*sig.ty).clone());
         }
@@ -4753,8 +4754,8 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                         body: rewrite_ivars_to_locals(&r.body),
                     })
                     .collect(),
-                else_branch: else_branch.as_ref().map(rewrite_ivars_to_locals),
-                ensure: ensure.as_ref().map(rewrite_ivars_to_locals),
+                else_branch: else_branch.as_deref().map(rewrite_ivars_to_locals).map(Box::new),
+                ensure: ensure.as_deref().map(rewrite_ivars_to_locals).map(Box::new),
                 implicit: *implicit,
             }
         }

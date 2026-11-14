@@ -141,7 +141,7 @@ fn dispatch_follows_the_resolved_superclass() {
         let def = class(&app, "Probe").methods.iter().find(|m| m.name.as_str() == method)
             .unwrap_or_else(|| panic!("no Probe#{method}"));
         match def.signature.as_ref() {
-            Some(roundhouse::ty::Ty::Fn { ret, .. }) => (**ret).clone(),
+            Some(roundhouse::ty::Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
             other => panic!("Probe#{method} has no signature: {other:?}"),
         }
     };

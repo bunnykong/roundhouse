@@ -182,7 +182,7 @@ pub fn go_ty(ty: &Ty) -> String {
             "Time" => "string".to_string(),
             other => other.to_string(),
         },
-        Ty::Fn { .. } => "func()".to_string(),
+        Ty::Fn(_) => "func()".to_string(),
         Ty::Var { .. } => "interface{}".to_string(),
         // Go has no syntactic distinction between "must narrow" and
         // "gradual" — both collapse to `interface{}`. The Var/Untyped

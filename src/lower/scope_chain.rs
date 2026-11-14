@@ -614,11 +614,14 @@ fn assoc_scope_shape(
     // them when every call site agreed the argument is one, which is
     // what makes `create!(attributes)` mergeable without guessing.
     let hash_params: HashSet<Symbol> = match &method_def.signature {
-        Some(crate::ty::Ty::Fn { params, .. }) => params
-            .iter()
-            .filter(|p| matches!(*p.ty, crate::ty::Ty::Hash { .. }))
-            .map(|p| p.name.clone())
-            .collect(),
+        Some(crate::ty::Ty::Fn(fn_ty)) => {
+            let crate::ty::FnTy { params, .. } = &**fn_ty;
+            params
+                .iter()
+                .filter(|p| matches!(*p.ty, crate::ty::Ty::Hash { .. }))
+                .map(|p| p.name.clone())
+                .collect()
+        },
         _ => HashSet::default(),
     };
     #[allow(clippy::too_many_arguments)]

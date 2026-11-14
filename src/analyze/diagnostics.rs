@@ -253,6 +253,32 @@ pub(crate) fn datetime_local_time_reads(app: &App) -> Vec<crate::span::Span> {
 /// reading (or passed) its dir-convention record local, would see the
 /// body there. Those are refused, as is any other block-form render
 /// (`render partial: "x", locals: … do` raises in Rails).
+/// A view's `render` of an object (`render(Widget.new)`) that is not known to render itself: Rails asks the object to
+/// (`render_in(view_context)`), which only `lower::renderable` models, for an object typed as answering it. Left alone it was emitted as a bare `render(…)` in the
+/// view's module, which has no such method, so it raised when the page rendered.
+fn unmodeled_object_renders(app: &App) -> Vec<Diagnostic> {
+    use crate::lower::view::classify_render_partial;
+    fn visit(app: &App, e: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*e.node
+            && method.as_str() == "render"
+            && crate::lower::renderable::rendered_object(app, e).is_none()
+            && !e.span.is_synthetic()
+            && let Some(first) = args.first()
+            && matches!(&*first.node, ExprNode::Send { .. } | ExprNode::Const { .. })
+            && classify_render_partial(None, method.as_str(), args, None, &|_| true, &|_| false).is_none()
+        {
+            let why = "Rails asks the object to render itself (`render_in(view_context)`), and this object is not known to answer it";
+            out.push(Diagnostic::unsupported(e.span, None, "render of an object", why));
+        }
+        e.node.for_each_child(&mut |c| visit(app, c, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(app, &view.body, &mut out);
+    }
+    out
+}
+
 fn unmodeled_block_renders(app: &App) -> Vec<Diagnostic> {
     use crate::lower::view::{classify_render_partial, RenderPartial};
     // Bare `yield`s, and whether any sits inside a loop: a `while`, or the
@@ -283,7 +309,8 @@ fn unmodeled_block_renders(app: &App) -> Vec<Diagnostic> {
     let carrying = crate::lower::view_to_library::yield_carrying_partials(app);
     let reason = |e: &Expr, caller_dir: &str| -> Option<&'static str> {
         let ExprNode::Send { recv, method, args, block: Some(block), .. } = &*e.node else { return None };
-        if method.as_str() != "render" || recv.is_some() {
+        // Not an object that renders itself: the lowering hands the block to its `render_in` (a component's slots).
+        if method.as_str() != "render" || recv.is_some() || crate::lower::renderable::rendered_object(app, e).is_some() {
             return None;
         }
         let Some(RenderPartial::LayoutBlock { layout, locals, block }) =
@@ -858,6 +885,7 @@ fn diagnose_head(app: &App) -> Vec<Diagnostic> {
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
     out.extend(unmodeled_block_renders(app));
+    out.extend(unmodeled_object_renders(app));
     out.extend(crate::gems::extension_gem_refusals(app, None));
     // graphql-ruby object types: their bodies, and each `null: false`
     // field's resolved value.

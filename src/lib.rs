@@ -7,6 +7,7 @@
 pub mod adapter;
 pub mod analyze;
 pub mod app;
+mod app_answers;
 #[cfg(feature = "memory-census")]
 pub mod memory_census;
 pub mod builder;

@@ -61,7 +61,7 @@ fn file_separator_and_open_flag_constants_execute_after_emission() {
 #[test]
 fn open_flags_type_as_integers_and_survive_class_body_emission() {
     use roundhouse::project::BuildTarget;
-    use roundhouse::ty::Ty;
+    use roundhouse::ty::{FnTy, Ty};
 
     for name in ["NOCTTY", "SYNC", "DSYNC", "BINARY"] {
         let source = format!("class FlagProbe\n  FLAGS = File::{name}\n  def value\n    File::{name}\n  end\nend\n");
@@ -71,7 +71,8 @@ fn open_flags_type_as_integers_and_survive_class_body_emission() {
         assert!(errors.is_empty(), "{name}: {errors:#?}");
         let probe = analyzed.library_classes.iter().find(|c| c.name.0.as_str() == "FlagProbe").unwrap();
         let method = probe.methods.iter().find(|m| m.name.as_str() == "value").unwrap();
-        let Some(Ty::Fn { ret, .. }) = &method.signature else { panic!("{name}: no signature") };
+        let Some(Ty::Fn(fn_ty)) = &method.signature else { panic!("{name}: no signature") };
+        let FnTy { ret, .. } = &**fn_ty;
         assert_eq!(ret.as_ref(), &Ty::Int, "{name}");
         let ruby = std::fs::read_to_string(emitted.join("app/models/flag_probe.rb")).unwrap();
         assert!(ruby.contains(&format!("FLAGS = File::{name}")), "{ruby}");

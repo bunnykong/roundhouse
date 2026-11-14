@@ -30,7 +30,7 @@
 
 use crate::dialect::LibraryClass;
 use crate::expr::{Arm, Expr, ExprNode, InterpPart, LValue, Literal, RescueClause};
-use crate::ty::{ParamKind, Ty};
+use crate::ty::{FnTy, ParamKind, Ty};
 use crate::det::HashMap;
 
 /// (ClassName, method_name) → param_tys. ClassName is the last segment
@@ -86,13 +86,16 @@ fn build_registry_from(lcs: &[&LibraryClass]) -> CalleeRegistry {
         let entry = out.entry(class_name).or_default();
         for m in &lc.methods {
             let param_tys: Vec<Ty> = match m.signature.as_ref() {
-                Some(Ty::Fn { params, .. }) => params
-                    .iter()
-                    .filter(|p| {
-                        !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest)
-                    })
-                    .map(|p| (*p.ty).clone())
-                    .collect(),
+                Some(Ty::Fn(fn_ty)) => {
+                    let FnTy { params, .. } = &**fn_ty;
+                    params
+                        .iter()
+                        .filter(|p| {
+                            !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest)
+                        })
+                        .map(|p| (*p.ty).clone())
+                        .collect()
+                },
                 _ => continue,
             };
             entry.insert(m.name.as_str().to_string(), param_tys);
@@ -143,13 +146,16 @@ fn build_registry(lcs: &[LibraryClass]) -> CalleeRegistry {
         let entry = out.entry(class_name).or_default();
         for m in &lc.methods {
             let param_tys: Vec<Ty> = match m.signature.as_ref() {
-                Some(Ty::Fn { params, .. }) => params
-                    .iter()
-                    .filter(|p| {
-                        !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest)
-                    })
-                    .map(|p| (*p.ty).clone())
-                    .collect(),
+                Some(Ty::Fn(fn_ty)) => {
+                    let FnTy { params, .. } = &**fn_ty;
+                    params
+                        .iter()
+                        .filter(|p| {
+                            !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest)
+                        })
+                        .map(|p| (*p.ty).clone())
+                        .collect()
+                },
                 _ => continue,
             };
             entry.insert(m.name.as_str().to_string(), param_tys);
@@ -380,8 +386,8 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
                     .collect(),
                 else_branch: else_branch
                     .as_ref()
-                    .map(|e| rewrite_expr(e, registry, class_name)),
-                ensure: ensure.as_ref().map(|e| rewrite_expr(e, registry, class_name)),
+                    .map(|e| Box::new(rewrite_expr(e, registry, class_name))),
+                ensure: ensure.as_ref().map(|e| Box::new(rewrite_expr(e, registry, class_name))),
                 implicit: *implicit,
             }
         }

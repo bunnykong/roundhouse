@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use roundhouse::analyze::{diagnose, Analyzer, DiagnosticKind};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 fn dispatch_failures(files: &[(&str, &str)]) -> Vec<String> {
     let tree: HashMap<PathBuf, Vec<u8>> = files
@@ -39,7 +39,8 @@ fn an_alias_in_an_rbs_file_stands_for_the_type_it_names() {
     )
     .expect("parse");
     let walk = &sigs[&ClassId(Symbol::new("Cart"))][&Symbol::new("walk")];
-    let Ty::Fn { params, ret, .. } = walk else { panic!("{walk:?}") };
+    let Ty::Fn(fn_ty) = walk else { panic!("{walk:?}") };
+    let FnTy { params, ret, .. } = &**fn_ty;
     let ints = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
     assert_eq!(params[0].ty, ints.clone().into());
     assert_eq!(
@@ -69,7 +70,8 @@ fn root_qualified_unqualified_and_inherited_aliases_still_resolve() {
     let sigs = roundhouse::rbs::parse_app_signatures(
         "type path = String\nclass Cart\n  type count = Integer\n  class Nested\n    def walk: (path, ::path, count) -> void\n  end\nend\n",
     ).expect("parse");
-    let Ty::Fn { params, .. } = &sigs[&ClassId(Symbol::new("Cart::Nested"))][&Symbol::new("walk")] else { panic!() };
+    let Ty::Fn(fn_ty) = &sigs[&ClassId(Symbol::new("Cart::Nested"))][&Symbol::new("walk")] else { panic!() };
+    let FnTy { params, .. } = &**fn_ty;
     assert_eq!(params.iter().map(|p| (*p.ty).clone()).collect::<Vec<_>>(), vec![Ty::Str, Ty::Str, Ty::Int]);
 }
 
@@ -142,7 +144,8 @@ end
 "#);
         let signatures = roundhouse::ingest::sorbet_sig::ingest_sorbet_signatures(source.as_bytes());
         let consume = &signatures[&ClassId(Symbol::new("Outer::Inner"))][&Symbol::new("consume")];
-        let Ty::Fn { params, .. } = consume else { panic!("{consume:?}") };
+        let Ty::Fn(fn_ty) = consume else { panic!("{consume:?}") };
+        let FnTy { params, .. } = &**fn_ty;
         assert_eq!(params[0].ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) }.into(), "{source}");
         assert_eq!(params[1].ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) }.into(), "{source}");
         assert_eq!(params[2].ty, Ty::Int.into(), "{source}");

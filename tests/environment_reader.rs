@@ -158,7 +158,8 @@ fn direct_env_calls_do_not_gain_hash_only_methods() {
         .iter()
         .find(|method| method.name.as_str() == "invalid")
         .unwrap();
-    if let Some(roundhouse::ty::Ty::Fn { ret, .. }) = &method.signature {
+    if let Some(roundhouse::ty::Ty::Fn(fn_ty)) = &method.signature {
+        let roundhouse::ty::FnTy { ret, .. } = &**fn_ty;
         assert!(
             matches!(
                 ret.as_ref(),
@@ -185,7 +186,8 @@ fn an_env_value_does_not_gain_hash_only_methods() {
         .iter()
         .find(|method| method.name.as_str() == "invalid")
         .unwrap();
-    if let Some(roundhouse::ty::Ty::Fn { ret, .. }) = &method.signature {
+    if let Some(roundhouse::ty::Ty::Fn(fn_ty)) = &method.signature {
+        let roundhouse::ty::FnTy { ret, .. } = &**fn_ty;
         assert!(
             matches!(
                 ret.as_ref(),
@@ -212,9 +214,10 @@ fn a_source_hash_named_env_keeps_its_hash_methods() {
         .iter()
         .find(|method| method.name.as_str() == "augment")
         .unwrap();
-    let Some(roundhouse::ty::Ty::Fn { ret, .. }) = &method.signature else {
+    let Some(roundhouse::ty::Ty::Fn(fn_ty)) = &method.signature else {
         panic!("no signature")
     };
+    let roundhouse::ty::FnTy { ret, .. } = &**fn_ty;
     assert!(
         matches!(ret.as_ref(), roundhouse::ty::Ty::Hash { .. }),
         "{ret:?}"
@@ -235,9 +238,10 @@ fn a_source_class_named_env_keeps_its_own_methods() {
         .iter()
         .find(|method| method.name.as_str() == "augment")
         .unwrap();
-    let Some(roundhouse::ty::Ty::Fn { ret, .. }) = &method.signature else {
+    let Some(roundhouse::ty::Ty::Fn(fn_ty)) = &method.signature else {
         panic!("no signature")
     };
+    let roundhouse::ty::FnTy { ret, .. } = &**fn_ty;
     assert_eq!(ret.as_ref(), &roundhouse::ty::Ty::Str);
 }
 

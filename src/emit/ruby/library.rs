@@ -19,7 +19,7 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
 use crate::lower::view_to_library::hoist_constants::{hoist_pure_helper_constants, is_view_helpers_const};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// Base's shared methods return Base in the runtime sidecar. A concrete
 /// forwarder discards that ABI result and returns its own `self`, so the
@@ -58,12 +58,12 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
                 },
                 kind: crate::ty::ParamKind::Optional,
             }).collect::<Vec<_>>().into();
-            method.signature = Some(Ty::Fn {
+            method.signature = Some(Ty::Fn(Box::new(FnTy {
                 params,
                 ret: std::sync::Arc::new(self_ty.clone()),
                 block: None,
                 effects: crate::effect::EffectSet::default(),
-            });
+            })));
             lc.methods.push(method);
         }
     }
@@ -1234,11 +1234,7 @@ pub(super) fn restore_extras_facades(files: &mut [(String, String)], app: &App) 
 /// that reads one raises there; ours renders with the caller's
 /// same-named value.
 pub(crate) fn apply_library_partial_render_lowering(lcs: &mut [LibraryClass], app: &App) {
-    let contracts = crate::lower::view_to_library::partial_call_contracts(
-        &app.views,
-        &app.controllers,
-        &app.library_classes,
-    );
+    let contracts = app_partial_call_contracts(app);
     if contracts.is_empty() {
         return;
     }
@@ -2006,7 +2002,8 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol, owner
                 Some(crate::lower::model_to_library::relation_new_self()),
             ),
         );
-        if let Some(Ty::Fn { params, .. }) = &mut m.signature {
+        if let Some(Ty::Fn(fn_ty)) = &mut m.signature {
+            let FnTy { params, .. } = &mut **fn_ty;
             let at = params
                 .iter()
                 .position(|p| {
@@ -2029,7 +2026,8 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol, owner
             crate::lower::model_to_library::relation_new_self(),
         ),
     );
-    if let Some(Ty::Fn { params, .. }) = &mut m.signature {
+    if let Some(Ty::Fn(fn_ty)) = &mut m.signature {
+        let FnTy { params, .. } = &mut **fn_ty;
         let at = params
             .iter()
             .position(|p| matches!(p.kind, crate::ty::ParamKind::Keyword { .. }))
@@ -2681,9 +2679,9 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
                 name: Symbol::from("_sti_hydrates_subclasses"), receiver: crate::dialect::MethodReceiver::Class,
                 params: vec![], body: Expr::new(Span::synthetic(), ExprNode::Lit {
                     value: Literal::Bool { value: !plain.contains_key(&lc.name) },
-                }), signature: Some(Ty::Fn {
+                }), signature: Some(Ty::Fn(Box::new(FnTy {
                     params: vec![].into(), block: None, ret: std::sync::Arc::new(Ty::Bool), effects: Default::default(),
-                }),
+                }))),
                 effects: Default::default(), enclosing_class: Some(lc.name.0.clone()),
                 kind: crate::dialect::AccessorKind::Method, is_async: false, mutates_self: false, block_param: None,
             });
@@ -2711,9 +2709,9 @@ pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
                 visibility: crate::dialect::MethodVisibility::Public, unsupported_formals: None,
                 has_anonymous_block: false, name_span: Span::synthetic(),
                 name: Symbol::from("_sti_type_names"), receiver: crate::dialect::MethodReceiver::Class,
-                params: vec![], body, signature: Some(Ty::Fn {
+                params: vec![], body, signature: Some(Ty::Fn(Box::new(FnTy {
                     params: vec![].into(), block: None, ret: std::sync::Arc::new(ret), effects: Default::default(),
-                }),
+                }))),
                 effects: Default::default(), enclosing_class: Some(lc.name.0.clone()),
                 kind: crate::dialect::AccessorKind::Method, is_async: false, mutates_self: false, block_param: None,
             });
@@ -3901,7 +3899,12 @@ fn is_base_controller(lc: &LibraryClass) -> bool {
 /// A name any controller already DEFINES as a method is excluded: the
 /// reader this pass synthesizes would collide with it, and the app's
 /// own method is the one that should win.
-fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
+/// Walked once per shared App (`app_answers`): each helper lowering asks.
+fn helper_read_ivars(app: &App) -> std::rc::Rc<std::collections::BTreeSet<Symbol>> {
+    crate::app_answers::of(app, "helper read ivars", || helper_read_ivars_walk(app))
+}
+
+fn helper_read_ivars_walk(app: &App) -> std::collections::BTreeSet<Symbol> {
     let helper_modules = helper_module_ids(app);
     let mut out = std::collections::BTreeSet::new();
     let mut rendered: Vec<(String, String)> = Vec::new();
@@ -3918,11 +3921,7 @@ fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
         }
     }
     if !rendered.is_empty() {
-        let contracts = crate::lower::view_to_library::partial_call_contracts(
-            &app.views,
-            &app.controllers,
-            &app.library_classes,
-        );
+        let contracts = app_partial_call_contracts(app);
         for key in &rendered {
             if let Some(contract) = contracts.get(key) {
                 out.extend(contract.closure.iter().chain(&contract.record_ivar).map(|n| Symbol::from(n.as_str())));
@@ -6335,9 +6334,10 @@ fn route_helper_param_types(
         if f.module_path.last().map(|s| s.as_str()) != Some("RouteHelpers") {
             continue;
         }
-        let Some(crate::ty::Ty::Fn { params, .. }) = &f.signature else {
+        let Some(crate::ty::Ty::Fn(fn_ty)) = &f.signature else {
             continue;
         };
+        let crate::ty::FnTy { params, .. } = &**fn_ty;
         out.insert(
             f.name.as_str().to_string(),
             params.iter().map(|p| (*p.ty).clone()).collect(),
@@ -8250,7 +8250,7 @@ fn read_statement_cleanup(lc: &LibraryClass) -> std::borrow::Cow<'_, LibraryClas
                         body,
                         rescues: vec![],
                         else_branch: None,
-                        ensure: Some(cleanup),
+                        ensure: Some(Box::new(cleanup)),
                         implicit: false,
                     }));
                 }
@@ -10543,6 +10543,17 @@ fn file_constant_owner(name: &str, app: &App, classes: &[LibraryClass]) -> Optio
 
 /// Every constant path the app declares (models, controllers, library
 /// classes and modules, test modules) and each namespace enclosing one.
+/// The partial contracts of the app's own views, controllers and library
+/// classes, built once per shared App (`app_answers`): each helper and
+/// library partial-render lowering asks for them.
+fn app_partial_call_contracts(
+    app: &App,
+) -> std::rc::Rc<crate::det::HashMap<(String, String), crate::lower::view_to_library::PartialCallContract>> {
+    crate::app_answers::of(app, "partial call contracts", || {
+        crate::lower::view_to_library::partial_call_contracts(&app.views, &app.controllers, &app.library_classes)
+    })
+}
+
 fn app_constant_paths(app: &App, classes: &[LibraryClass]) -> std::rc::Rc<crate::det::HashSet<String>> {
     let build = || {
         #[cfg(test)]
@@ -12907,7 +12918,7 @@ mod insert_rel_param_tests {
     fn rest_param_method_gets_rel_as_a_typed_keyword_in_params_and_signature() {
         let owner = ClassId(Symbol::from("Widget"));
         let params = vec![Param::rest(Symbol::from("tags"))];
-        let sig = Ty::Fn {
+        let sig = Ty::Fn(Box::new(FnTy {
             params: vec![crate::ty::Param {
                 name: Symbol::from("tags"),
                 ty: Ty::Untyped.into(),
@@ -12916,7 +12927,7 @@ mod insert_rel_param_tests {
             block: None,
             ret: std::sync::Arc::new(Ty::Untyped),
             effects: crate::effect::EffectSet::pure(),
-        };
+        }));
         let mut m = bare_method(params, Some(sig));
         let rel_param = Symbol::from("__rel");
         assert!(insert_rel_param(&mut m, &rel_param, &owner));
@@ -12926,9 +12937,10 @@ mod insert_rel_param_tests {
         assert!(!rel.rest);
         assert!(rel.default.is_some(), "optional: carries a default");
 
-        let Some(Ty::Fn { params, .. }) = &m.signature else {
+        let Some(Ty::Fn(fn_ty)) = &m.signature else {
             panic!("the signature must not be dropped");
         };
+        let FnTy { params, .. } = &**fn_ty;
         let rel_ty_param = params.iter().find(|p| p.name == rel_param).expect("__rel in signature");
         assert_eq!(rel_ty_param.kind, ParamKind::Keyword { required: false });
         assert_eq!(*rel_ty_param.ty, Ty::Relation { of: owner });
@@ -12942,7 +12954,7 @@ mod insert_rel_param_tests {
     fn non_rest_method_keeps_the_untyped_positional_default() {
         let owner = ClassId(Symbol::from("Widget"));
         let params = vec![Param::positional(Symbol::from("user"))];
-        let sig = Ty::Fn {
+        let sig = Ty::Fn(Box::new(FnTy {
             params: vec![crate::ty::Param {
                 name: Symbol::from("user"),
                 ty: Ty::Untyped.into(),
@@ -12951,7 +12963,7 @@ mod insert_rel_param_tests {
             block: None,
             ret: std::sync::Arc::new(Ty::Untyped),
             effects: crate::effect::EffectSet::pure(),
-        };
+        }));
         let mut m = bare_method(params, Some(sig));
         let rel_param = Symbol::from("__rel");
         assert!(insert_rel_param(&mut m, &rel_param, &owner));
@@ -12960,9 +12972,10 @@ mod insert_rel_param_tests {
         assert!(!rel.keyword, "unchanged: still a positional-with-default: {rel:?}");
         assert!(rel.default.is_some());
 
-        let Some(Ty::Fn { params, .. }) = &m.signature else {
+        let Some(Ty::Fn(fn_ty)) = &m.signature else {
             panic!("the signature must not be dropped");
         };
+        let FnTy { params, .. } = &**fn_ty;
         let rel_ty_param = params.iter().find(|p| p.name == rel_param).expect("__rel in signature");
         assert_eq!(rel_ty_param.kind, ParamKind::Optional);
         assert_eq!(*rel_ty_param.ty, Ty::Untyped, "unchanged: still Untyped, not Relation");
@@ -12975,7 +12988,7 @@ mod insert_rel_param_tests {
         let owner = ClassId(Symbol::from("Widget"));
         let kwrest = Param { keyword: true, ..Param::rest(Symbol::from("opts")) };
         let params = vec![Param::rest(Symbol::from("tags")), kwrest];
-        let sig = Ty::Fn {
+        let sig = Ty::Fn(Box::new(FnTy {
             params: vec![
                 crate::ty::Param { name: Symbol::from("tags"), ty: Ty::Untyped.into(), kind: ParamKind::Rest },
                 crate::ty::Param { name: Symbol::from("opts"), ty: Ty::Untyped.into(), kind: ParamKind::KeywordRest },
@@ -12983,17 +12996,17 @@ mod insert_rel_param_tests {
             block: None,
             ret: std::sync::Arc::new(Ty::Untyped),
             effects: crate::effect::EffectSet::pure(),
-        };
+        }));
         let mut m = bare_method(params, Some(sig));
         let rel_param = Symbol::from("__rel");
         assert!(insert_rel_param(&mut m, &rel_param, &owner));
 
         let names: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["tags", "__rel", "opts"]);
-        let Some(Ty::Fn { params, .. }) = &m.signature else {
+        let Some(Ty::Fn(fn_ty)) = &m.signature else {
             panic!("the signature must not be dropped");
         };
-        let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        let names: Vec<&str> = fn_ty.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["tags", "__rel", "opts"]);
     }
 }

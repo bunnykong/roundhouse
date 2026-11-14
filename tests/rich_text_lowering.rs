@@ -117,7 +117,7 @@ fn rich_text_body_reads_back_as_content() {
     let lc = lower(&app, "ActionText::RichText");
     let reader = instance_method(&lc, "body").expect("body reader");
     let ret = match &reader.signature {
-        Some(roundhouse::ty::Ty::Fn { ret, .. }) => (**ret).clone(),
+        Some(roundhouse::ty::Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
         other => panic!("body reader has no Fn signature: {other:?}"),
     };
     assert!(
@@ -157,7 +157,7 @@ fn the_declaring_model_gets_the_macro_expansion() {
     // `body` is never nil — it builds when there is no row — so the
     // reader is typed as the record rather than as a nullable one.
     let ret = match &instance_method(&lc, "body").unwrap().signature {
-        Some(roundhouse::ty::Ty::Fn { ret, .. }) => (**ret).clone(),
+        Some(roundhouse::ty::Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
         other => panic!("body reader has no Fn signature: {other:?}"),
     };
     assert!(

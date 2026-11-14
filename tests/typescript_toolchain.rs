@@ -309,6 +309,40 @@ fn real_blog_namespaced_serializer_render_tsc_passes() {
     assert_tsc_passes("real-blog with a namespaced serializer render", &emitted);
 }
 
+/// #2066: the namespaced controller's three routes, requested through the
+/// emitted router as the emitted integration tests request theirs, answer
+/// what active_model_serializers answers on Rails: `serializer:
+/// ::ArticleSerializer` and `each_serializer: ::ArticleSerializer` render
+/// the top-level class (`id` and `title`), `serializer:
+/// Api::ArticleSerializer` the namespaced one (`id` only).
+#[test]
+#[ignore]
+fn real_blog_namespaced_serializer_render_answers_the_rooted_class() {
+    let (emitted, errors) = namespaced_serializer::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        r#"import "./test/_runtime/setup.js";
+import { Test } from "./test/_runtime/minitest.js";
+import { ArticlesFixtures } from "./test/fixtures/articles.js";
+const id = ArticlesFixtures.one().id;
+const t: any = new Test();
+const out: string[] = [];
+for (const path of [`/api/articles/${id}`, "/api/articles", `/api/articles/${id}/nested`]) {
+  t.get(path);
+  out.push(`${t.status} ${t.body}`);
+}
+console.log(out.join("\n"));
+"#,
+    );
+    assert_eq!(
+        out,
+        "200 {\"id\":1,\"title\":\"Getting Started with Rails\"}\n\
+         200 [{\"id\":1,\"title\":\"Getting Started with Rails\"},{\"id\":2,\"title\":\"Understanding MVC Architecture\"}]\n\
+         200 {\"id\":1}"
+    );
+}
+
 /// A namespaced controller whose joined name a top-level controller
 /// already has (`Mod::MailsController`, `ModMailsController`): the entry
 /// files bound both as `ModMailsController` (TS2300).

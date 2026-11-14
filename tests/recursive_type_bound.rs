@@ -26,7 +26,7 @@ mod emit_and_run;
 use roundhouse::analyze::{diagnose, Analyzer, FixpointRounds, LoopEnd, Restamp, Severity};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -148,10 +148,13 @@ fn measure(ty: &Ty) -> (usize, usize) {
         Ty::Record { row } => (row.fields.values().collect(), !row.fields.is_empty()),
         Ty::Union { variants } => (variants.iter().collect(), false),
         Ty::Class { args, .. } => (args.iter().collect(), !args.is_empty()),
-        Ty::Fn { params, block, ret, .. } => (
-            params.iter().map(|p| &*p.ty).chain(block.as_deref()).chain(std::iter::once(&**ret)).collect(),
-            true,
-        ),
+        Ty::Fn(fn_ty) => {
+            let FnTy { params, block, ret, .. } = &**fn_ty;
+            (
+                params.iter().map(|p| &*p.ty).chain(block.as_deref()).chain(std::iter::once(&**ret)).collect(),
+                true,
+            )
+        },
         _ => (Vec::new(), false),
     };
     let (mut depth, mut nodes) = (0, 1);

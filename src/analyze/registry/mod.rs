@@ -14,17 +14,17 @@ pub(super) mod stdlib;
 pub(super) mod view;
 
 use crate::effect::EffectSet;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// A block-yielding `Fn` type — `() { (block_ty) -> ret } -> ret` — used to
 /// register `form_with` / `fields_for` / `respond_to` and friends so the
 /// yielded block param types. Shared by the view and controller
 /// registrations (both once defined this inline).
 pub(in crate::analyze) fn block_fn(block_ty: &Ty, ret: Ty) -> Ty {
-    Ty::Fn {
+    Ty::Fn(Box::new(FnTy {
         params: vec![].into(),
         block: Some(std::sync::Arc::new(block_ty.clone())),
         ret: std::sync::Arc::new(ret),
         effects: EffectSet::default(),
-    }
+    }))
 }

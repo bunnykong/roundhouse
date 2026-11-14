@@ -1074,8 +1074,8 @@ fn js_body_with_state(
                 body.span,
                 inner,
                 rescues,
-                else_branch.as_ref(),
-                ensure.as_ref(),
+                else_branch.as_deref(),
+                ensure.as_deref(),
                 return_ty,
             )
         }

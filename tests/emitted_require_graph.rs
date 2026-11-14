@@ -295,7 +295,8 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
      ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingMethod,
      ActiveStorage::Transformers::ImageProcessingTransformer::UnsupportedImageProcessingArgument,
      ActiveJob::EnqueueError, ActiveJob::Continuable,
-     ActionDispatch::Http::Parameters::ParseError]
+     ActionDispatch::Http::Parameters::ParseError,
+     ActionView::OutputBuffer, ActionView::LookupContext]
   end
 end
 "#),

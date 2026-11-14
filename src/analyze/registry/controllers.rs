@@ -14,7 +14,7 @@ use crate::App;
 use crate::dialect::ModelBodyItem;
 use crate::expr::ExprNode;
 use crate::ident::{ClassId, Symbol};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 pub(in crate::analyze) fn register(
     classes: &mut HashMap<ClassId, ClassInfo>,
@@ -446,9 +446,9 @@ pub(in crate::analyze) fn register(
     // with BOTH block parameters, because a block yielding two values
     // that names one leaves the second bound to nothing and everything
     // compared against it untyped.
-    let yields_two = |first: (&str, Ty), second: (&str, Ty), verdict: Ty| Ty::Fn {
+    let yields_two = |first: (&str, Ty), second: (&str, Ty), verdict: Ty| Ty::Fn(Box::new(FnTy {
         params: Vec::new().into(),
-        block: Some(std::sync::Arc::new(Ty::Fn {
+        block: Some(std::sync::Arc::new(Ty::Fn(Box::new(FnTy {
             params: [first, second]
                 .into_iter()
                 .map(|(name, ty)| crate::ty::Param {
@@ -460,11 +460,11 @@ pub(in crate::analyze) fn register(
             block: None,
             ret: std::sync::Arc::new(verdict),
             effects: crate::effect::EffectSet::default(),
-        })),
+        })))),
         // The block's verdict, or nil once the challenge is rendered.
         ret: std::sync::Arc::new(Ty::Untyped),
         effects: crate::effect::EffectSet::default(),
-    };
+    }));
     let str_hash = || Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     for m in ["authenticate_or_request_with_http_basic", "authenticate_with_http_basic"] {
         app_ctrl.class_methods.insert(
@@ -676,7 +676,7 @@ fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut Cl
     for name in ["prop", "lazy_prop"] {
         page.instance_methods.insert(
             Symbol::from(name),
-            Ty::Fn {
+            Ty::Fn(Box::new(FnTy {
                 params: vec![
                     crate::ty::Param {
                         name: Symbol::from("key"),
@@ -692,7 +692,7 @@ fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut Cl
                 block: None,
                 ret: std::sync::Arc::new(Ty::Nil),
                 effects: crate::effect::EffectSet::default(),
-            },
+            })),
         );
     }
     if let Some(methods) = parsed.get(&ClassId(Symbol::from("ActionController::Base"))) {
@@ -702,7 +702,7 @@ fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut Cl
     }
     app_ctrl.class_methods.insert(
         Symbol::from("inertia_errors"),
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: vec![crate::ty::Param {
                 name: Symbol::from("errors"),
                 ty: Ty::Untyped.into(),
@@ -711,7 +711,7 @@ fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut Cl
             block: None,
             ret: std::sync::Arc::new(Ty::Nil),
             effects: crate::effect::EffectSet::default(),
-        },
+        })),
     );
     // A literal props hash never leaves `InertiaRails.optional` / `.defer`
     // in the tree: ingest unwraps them. A helper that returns those

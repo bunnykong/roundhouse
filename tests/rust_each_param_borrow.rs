@@ -15,7 +15,7 @@ use roundhouse::effect::EffectSet;
 use roundhouse::emit::rust;
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::ty::{Param, ParamKind, Ty};
+use roundhouse::ty::{FnTy, Param, ParamKind, Ty};
 
 fn emitted_posts_views() -> String {
     let files: Vec<(&str, &str)> = vec![
@@ -144,12 +144,12 @@ end
             "stamp" => Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
             _ => Ty::Int,
         };
-        m.signature = Some(Ty::Fn {
+        m.signature = Some(Ty::Fn(Box::new(FnTy {
             params: vec![Param { name: "items".into(), ty: items.clone().into(), kind: ParamKind::Required }].into(),
             block: None,
             ret: Arc::new(ret),
             effects: EffectSet::pure(),
-        });
+        })));
     }
     roundhouse::session::analyze_and_lower(&mut app);
     rust::emit(&app)

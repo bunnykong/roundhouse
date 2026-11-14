@@ -107,8 +107,8 @@ fn rewrite(expr: &mut Expr, secure: &HashMap<ClassId, Vec<Symbol>>) {
     if let ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } = &mut *expr.node {
         let slots = std::iter::once(body)
             .chain(rescues.iter_mut().map(|clause| &mut clause.body))
-            .chain(else_branch.iter_mut())
-            .chain(ensure.iter_mut());
+            .chain(else_branch.as_deref_mut())
+            .chain(ensure.as_deref_mut());
         for slot in slots {
             if !matches!(&*slot.node, ExprNode::Seq { .. }) {
                 if let Some(prelude) = take_claim(slot, secure) {

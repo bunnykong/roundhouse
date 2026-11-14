@@ -72,7 +72,7 @@ use crate::dialect::{MethodDef, Model};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::controller_to_library::params::{
     collect_specs, helper_spec_map, model_from_params_name, params_source_class, ParamsSpec,
@@ -1047,12 +1047,7 @@ fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
         value: std::sync::Arc::new(Ty::Untyped),
     };
     let (mut params, block, ret, effects) = match method.signature.clone() {
-        Some(Ty::Fn {
-            params,
-            block,
-            ret,
-            effects,
-        }) => (params, block, ret, effects),
+        Some(Ty::Fn(fn_ty)) => { let FnTy { params, block, ret, effects } = *fn_ty; (params, block, ret, effects) }
         _ => (
             method
                 .params
@@ -1073,12 +1068,12 @@ fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
             p.ty = hash_ty.clone().into();
         }
     }
-    method.signature = Some(Ty::Fn {
+    method.signature = Some(Ty::Fn(Box::new(FnTy {
         params,
         block,
         ret,
         effects,
-    });
+    })));
 }
 
 fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpec)]) {
@@ -1087,12 +1082,7 @@ fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpe
     // rather than declining — the whole point is that this parameter's
     // type is now known.
     let (mut params, block, ret, effects) = match method.signature.clone() {
-        Some(Ty::Fn {
-            params,
-            block,
-            ret,
-            effects,
-        }) => (params, block, ret, effects),
+        Some(Ty::Fn(fn_ty)) => { let FnTy { params, block, ret, effects } = *fn_ty; (params, block, ret, effects) }
         _ => (
             method
                 .params
@@ -1116,12 +1106,12 @@ fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpe
             }.into();
         }
     }
-    method.signature = Some(Ty::Fn {
+    method.signature = Some(Ty::Fn(Box::new(FnTy {
         params,
         block,
         ret,
         effects,
-    });
+    })));
 }
 
 /// Offer each STATEMENT in `body` to `f`, which may rewrite it and push

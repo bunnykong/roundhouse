@@ -106,7 +106,7 @@ use crate::dialect::{
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::{ParamKind, Row, Ty};
+use crate::ty::{FnTy, ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
@@ -2295,7 +2295,8 @@ impl Analyzer {
     fn stamp_inferred_method_signatures(&self, app: &mut App) {
         let declared_sigs = app.rbs_signatures.clone();
         let declared = |owner: &ClassId, method: &crate::dialect::MethodDef| -> Option<Ty> {
-            let sig @ Ty::Fn { params, .. } = declared_sigs.get(owner)?.get(&method.name)? else { return None };
+            let sig @ Ty::Fn(fn_ty) = declared_sigs.get(owner)?.get(&method.name)? else { return None };
+            let FnTy { params, .. } = &**fn_ty;
             (params.len() == method.params.len() && params.iter().zip(&method.params).all(|(d, p)| d.kind == p.ty_kind()))
                 .then(|| sig.clone())
         };
@@ -2342,7 +2343,7 @@ impl Analyzer {
                 // there).
                 let ret = table
                     .and_then(|t| t.get(&method.name))
-                    .filter(|t| !matches!(t, Ty::Fn { .. }))
+                    .filter(|t| !matches!(t, Ty::Fn(_)))
                     .cloned()
                     .or_else(|| effective_return_ty(&method.body))
                     .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped));
@@ -2404,12 +2405,12 @@ impl Analyzer {
                         ret = if kept.len() == 1 { kept.into_iter().next().unwrap() } else { Ty::Union { variants: kept.into() } };
                     }
                 }
-                method.signature = Some(Ty::Fn {
+                method.signature = Some(Ty::Fn(Box::new(FnTy {
                     params: params.into(),
                     block: None,
                     ret: std::sync::Arc::new(ret),
                     effects: method.effects.clone(),
-                });
+                })));
             }
         }
     }
@@ -4359,6 +4360,7 @@ impl Analyzer {
         // are this pass's frontier, which models and controllers above
         // have already retyped, and the classes earlier passes retyped
         // after the last survey.
+        let library_setup = crate::timings::begin("typing: library setup");
         let stale: Option<crate::det::HashSet<ClassId>> = match (self.retyped_since_survey.take(), dirty) {
             (Some(mut pending), Some(d)) => {
                 pending.extend(d.iter().cloned());
@@ -4458,19 +4460,17 @@ impl Analyzer {
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::default();
         // A mailer whose `mail` looks its template up renders one named after its action under another directory too
         // (Devise's scoped `users/mailer/confirmation_instructions`).
-        let looking_up = crate::lower::mailer_templates::lookup_dirs(app);
+        // Both read every library class's trees, so they are read from the kept
+        // per-class reads, refreshed for the classes `stale` names (the surveys' rule).
+        self.surveys.library_reads(app, stale.as_ref());
+        let looking = crate::lower::mailer_templates::looking_up_mailers_with(app, &self.surveys.template_opts(app));
+        let looking_up = crate::lower::mailer_templates::lookup_dirs_of(app, looking);
 
         // A mailer's modules write its ivars too: Devise's `devise_mail` sets `@resource` and `@email` from
         // `Devise::Mailers::Helpers`, which its templates read. As last typed: the fixpoint reruns this.
         // A module's reopenings are one module: each declaration adds its writes and includes.
-        let mut module_ivars: HashMap<ClassId, (HashMap<Symbol, Ty>, Vec<ClassId>)> = HashMap::default();
-        for c in app.library_classes.iter().filter(|c| c.is_module) {
-            let (found, includes) = module_ivars.entry(c.name.clone()).or_default();
-            for m in c.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
-                extract_ivar_assignments(&m.body, found);
-            }
-            includes.extend(c.includes.iter().filter(|i| !includes.contains(i)).cloned().collect::<Vec<_>>());
-        }
+        let module_ivars = self.surveys.module_ivars(app);
+        drop(library_setup);
         let _typing_library = crate::timings::begin("typing: library");
         // Preserve each mailer's registry write before its original position.
         let mut start = 0;
@@ -5136,7 +5136,8 @@ impl Analyzer {
             .instance_methods
             .get(method)
             .or_else(|| cls.class_methods.get(method))?;
-        let Ty::Fn { params, .. } = ty else { return None };
+        let Ty::Fn(fn_ty) = ty else { return None };
+        let params = &fn_ty.params;
         let found = params.iter().find(|p| p.name == *name).or_else(|| {
             let n = positional?;
             params
@@ -5164,17 +5165,17 @@ impl Analyzer {
             return false;
         }
         let Some(cls) = self.classes.get(class_id) else { return false };
-        let Some(Ty::Fn { params, .. }) =
+        let Some(Ty::Fn(fn_ty)) =
             cls.instance_methods.get(method).or_else(|| cls.class_methods.get(method))
         else {
             return false;
         };
-        params
+        fn_ty.params
             .iter()
             .find(|p| p.name == *name)
             .or_else(|| {
                 let n = positional?;
-                params
+                fn_ty.params
                     .iter()
                     .filter(|p| matches!(p.kind, crate::ty::ParamKind::Required | crate::ty::ParamKind::Optional))
                     .nth(n)
@@ -5659,21 +5660,34 @@ impl Analyzer {
         // context each round so a template's `authenticated?` resolves
         // — the authentication generator's shape, in every Rails 8 app.
         let view_ctx = ClassId(Symbol::from("ActionView::Base"));
-        for name in &app.view_visible_controller_methods {
-            if app.helper_method_index.get(name)
-                .is_some_and(|owner| registry::view::has_instance_helper(app, name, owner))
-            {
-                continue; // The selected helper owner is projected below.
+        let helpers = registry::view::InstanceHelpers::of(app);
+        // The selected helper owner is projected below.
+        let wanted: Vec<&Symbol> = app
+            .view_visible_controller_methods
+            .iter()
+            .filter(|name| !app.helper_method_index.get(*name).is_some_and(|owner| helpers.has(name, owner)))
+            .collect();
+        // Each name takes the answer of the first owner that has one,
+        // controllers first. One walk of the owners answers every name:
+        // the writes below are each to its own name, so none changes
+        // another name's answer.
+        let mut answers: HashMap<&Symbol, Ty> = HashMap::default();
+        let mut pending: crate::det::HashSet<&Symbol> = wanted.iter().copied().collect();
+        let owners = app.controllers.iter().map(|c| &c.name).chain(app.library_classes.iter().map(|lc| &lc.name));
+        for c in owners.filter_map(|cid| self.classes.get(cid)) {
+            if pending.is_empty() {
+                break;
             }
-            let owners = app
-                .controllers
-                .iter()
-                .map(|c| &c.name)
-                .chain(app.library_classes.iter().map(|lc| &lc.name));
-            let ty = owners
-                .filter_map(|cid| self.classes.get(cid))
-                .find_map(|c| c.instance_methods.get(name).cloned());
-            if let Some(ty) = ty {
+            pending.retain(|name| match c.instance_methods.get(*name) {
+                Some(ty) => {
+                    answers.insert(name, ty.clone());
+                    false
+                }
+                None => true,
+            });
+        }
+        for name in wanted {
+            if let Some(ty) = answers.remove(name) {
                 self.classes.entry(view_ctx.clone()).or_default().instance_methods.insert(name.clone(), ty);
             }
         }
@@ -5682,7 +5696,7 @@ impl Analyzer {
         // signatures, rather than preserving a framework or another
         // included module's answer for the same spelling.
         for (name, owner) in &app.helper_method_index {
-            if !registry::view::has_instance_helper(app, name, owner) {
+            if !helpers.has(name, owner) {
                 continue;
             }
             let ty = self.classes.get(owner)
@@ -5772,6 +5786,7 @@ impl Analyzer {
     }
 
     fn harvest_method_returns(&mut self, app: &App, harvest_tests: bool) {
+        let returns_span = crate::timings::begin("harvest: returns");
         for model in &app.models {
             self.harvest_one_model(model);
         }
@@ -5846,7 +5861,11 @@ impl Analyzer {
             }
         }
 
+        drop(returns_span);
+        let block_values = crate::timings::begin("harvest: block values");
         self.harvest_block_value_methods(app);
+        drop(block_values);
+        let _folds = crate::timings::begin("harvest: folds");
         self.fold_concern_surfaces(app);
         self.fold_host_surfaces(app);
         self.fold_extended_modules(app);
@@ -5862,13 +5881,18 @@ impl Analyzer {
         // Verdicts read last round's registry and are written below, so
         // each model, class and controller is read in parallel and
         // collected in source order.
+        // A body with no block parameter and no `yield` answers no block's
+        // value (each arm `returns_block_value` accepts is a `yield`, a
+        // local only a `yield` assigns, or a call handed the block
+        // parameter), so only the others are asked.
         let this = &*self;
         let models = parallel::map_ref(&app.models, |model| {
             model
                 .methods()
                 .filter(|method| {
                     let bp = method.block_param.as_ref().map(|p| &p.name);
-                    this.returns_block_value(&model.name, &method.name, &method.body, bp)
+                    may_return_block_value(&method.body, bp)
+                        && this.returns_block_value(&model.name, &method.name, &method.body, bp)
                 })
                 .map(|method| (model.name.clone(), method.name.clone()))
                 .collect::<Vec<_>>()
@@ -5878,7 +5902,7 @@ impl Analyzer {
                 .iter()
                 .filter(|method| {
                     let bp = method.block_param.as_ref().map(|p| &p.name);
-                    this.returns_block_value(&lc.name, &method.name, &method.body, bp)
+                    may_return_block_value(&method.body, bp) && this.returns_block_value(&lc.name, &method.name, &method.body, bp)
                 })
                 .map(|method| (lc.name.clone(), method.name.clone()))
                 .collect::<Vec<_>>()
@@ -5886,7 +5910,10 @@ impl Analyzer {
         let controllers = parallel::map_ref(&app.controllers, |controller| {
             controller
                 .actions()
-                .filter(|action| this.returns_block_value(&controller.name, &action.name, &action.body, action.block_param.as_ref()))
+                .filter(|action| {
+                    may_return_block_value(&action.body, action.block_param.as_ref())
+                        && this.returns_block_value(&controller.name, &action.name, &action.body, action.block_param.as_ref())
+                })
                 .map(|action| (controller.name.clone(), action.name.clone()))
                 .collect::<Vec<_>>()
         });
@@ -6041,6 +6068,31 @@ impl Analyzer {
 
     fn fold_concern_surfaces(&mut self, app: &App) {
         type Surface = (HashMap<Symbol, Ty>, HashMap<Symbol, Ty>, Vec<ClassId>);
+        // The AR instance names the catalog seeds with a return, and each
+        // class name's declarations (asked only for those names).
+        let ar_instance: crate::det::HashSet<&str> = crate::catalog::AR_CATALOG
+            .iter()
+            .filter(|e| e.receiver == crate::catalog::ReceiverContext::Instance && e.return_kind.is_some())
+            .map(|e| e.name)
+            .collect();
+        let declarations: std::cell::OnceCell<HashMap<&ClassId, Vec<&crate::dialect::LibraryClass>>> =
+            std::cell::OnceCell::new();
+        let declared_instance_method = |class: &ClassId, name: &Symbol| {
+            declarations
+                .get_or_init(|| {
+                    let mut by_name: HashMap<&ClassId, Vec<&crate::dialect::LibraryClass>> = HashMap::default();
+                    for lc in &app.library_classes {
+                        by_name.entry(&lc.name).or_default().push(lc);
+                    }
+                    by_name
+                })
+                .get(class)
+                .is_some_and(|all| {
+                    all.iter().any(|other| {
+                        other.methods.iter().any(|d| &d.name == name && d.receiver == crate::dialect::MethodReceiver::Instance)
+                    })
+                })
+        };
         let module_surfaces: HashMap<ClassId, Surface> = app
             .library_classes
             .iter()
@@ -6058,18 +6110,7 @@ impl Analyzer {
                 // (`registry::library`) types the concern's own bare calls;
                 // it is not a definition, so it must not claim the name on
                 // the includer ahead of a module that defines it.
-                inst.retain(|name, _| {
-                    !crate::catalog::AR_CATALOG.iter().any(|e| {
-                        e.receiver == crate::catalog::ReceiverContext::Instance
-                            && e.return_kind.is_some()
-                            && e.name == name.as_str()
-                    }) || app.library_classes.iter().any(|other| {
-                        other.name == lc.name
-                            && other.methods.iter().any(|d| {
-                                &d.name == name && d.receiver == crate::dialect::MethodReceiver::Instance
-                            })
-                    })
-                });
+                inst.retain(|name, _| !ar_instance.contains(name.as_str()) || declared_instance_method(&lc.name, name));
                 Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone())))
             })
             .collect();
@@ -6259,8 +6300,8 @@ impl Analyzer {
         // body harvest: `delegated_type`'s `def page; leafable if page?;
         // end` body types as the full polymorphic union, but the useful
         // call-site answer is `Page | nil`.
-        if let Some(Ty::Fn { ret, .. }) = &method.signature {
-            return Some((**ret).clone());
+        if let Some(Ty::Fn(fn_ty)) = &method.signature {
+            return Some((*fn_ty.ret).clone());
         }
         tuple_return_ty(&method.body)
             .or_else(|| effective_return_ty_with(&method.body, Self::class_object_return_ty))
@@ -10315,12 +10356,12 @@ struct ParamShape {
 /// answers `untyped`, and passing it on (`I18n.with_locale(locale,
 /// &action)`) is a read of a bound local rather than of nothing.
 fn captured_block_ty() -> Ty {
-    Ty::Fn {
+    Ty::Fn(Box::new(FnTy {
         params: vec![].into(),
         block: None,
         ret: std::sync::Arc::new(Ty::Untyped),
         effects: crate::effect::EffectSet::default(),
-    }
+    }))
 }
 
 /// What a parameter is typed as inside its method, given what its
@@ -10885,9 +10926,108 @@ struct BodySurveys {
     /// typed literal-symbol keyword pairs.
     mailer_withs: Vec<Vec<(ClassId, Option<(Symbol, Ty)>)>>,
     mailers: Vec<ClassId>,
+    /// Per library class: what the library setup reads from its trees
+    /// alone, and the classes they were read for, in order.
+    library: Vec<LibraryReads>,
+    library_names: Vec<ClassId>,
+}
+
+/// What the library setup reads from one library class.
+#[derive(Clone, Default, PartialEq, Debug)]
+struct LibraryReads {
+    /// `mailer_templates::spells_template_opts`: whether a method passes
+    /// `mail` a `template_name:` or `template_path:`.
+    template_opts: bool,
+    /// A module's instance-method ivar writes, read onto an empty map
+    /// (`None`: not a module).
+    ivars: Option<HashMap<Symbol, Ty>>,
+}
+
+impl LibraryReads {
+    fn of(lc: &crate::dialect::LibraryClass) -> Self {
+        LibraryReads {
+            template_opts: crate::lower::mailer_templates::spells_template_opts(lc),
+            ivars: lc.is_module.then(|| module_ivar_writes(lc, HashMap::default())),
+        }
+    }
+}
+
+/// One module declaration's instance-method ivar writes, onto `found`.
+fn module_ivar_writes(c: &crate::dialect::LibraryClass, mut found: HashMap<Symbol, Ty>) -> HashMap<Symbol, Ty> {
+    for m in c.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+        extract_ivar_assignments(&m.body, &mut found);
+    }
+    found
+}
+
+/// What the library setup reads from each module: its instance methods'
+/// ivar writes, a reopened module's joined in declaration order, and its
+/// includes.
+#[cfg(test)]
+fn module_ivars(app: &App) -> HashMap<ClassId, (HashMap<Symbol, Ty>, Vec<ClassId>)> {
+    let mut out: HashMap<ClassId, (HashMap<Symbol, Ty>, Vec<ClassId>)> = HashMap::default();
+    for c in app.library_classes.iter().filter(|c| c.is_module) {
+        let (found, includes) = out.entry(c.name.clone()).or_default();
+        *found = module_ivar_writes(c, std::mem::take(found));
+        includes.extend(c.includes.iter().filter(|i| !includes.contains(i)).cloned().collect::<Vec<_>>());
+    }
+    out
 }
 
 impl BodySurveys {
+    /// Reads each library class a pass has rewritten since the last read
+    /// ([`LibraryReads`]); the rest keep what they gave then.
+    fn library_reads(&mut self, app: &App, stale: Option<&crate::det::HashSet<ClassId>>) {
+        let reuse = stale.is_some()
+            && self.library_names.len() == app.library_classes.len()
+            && self.library_names.iter().zip(&app.library_classes).all(|(name, lc)| *name == lc.name);
+        if !reuse {
+            self.library = vec![LibraryReads::default(); app.library_classes.len()];
+            self.library_names = app.library_classes.iter().map(|lc| lc.name.clone()).collect();
+        }
+        for (i, lc) in app.library_classes.iter().enumerate() {
+            if reuse && !stale.is_some_and(|s| s.contains(&lc.name)) {
+                continue;
+            }
+            self.library[i] = LibraryReads::of(lc);
+        }
+        #[cfg(debug_assertions)]
+        for (i, lc) in app.library_classes.iter().enumerate() {
+            assert_eq!(LibraryReads::of(lc), self.library[i], "kept library setup reads of {:?} are stale", lc.name);
+        }
+    }
+
+    /// The names of the library classes `spells_template_opts` holds for.
+    fn template_opts<'a>(&self, app: &'a App) -> BTreeSet<&'a str> {
+        app.library_classes
+            .iter()
+            .zip(&self.library)
+            .filter(|(_, reads)| reads.template_opts)
+            .map(|(lc, _)| lc.name.0.as_str())
+            .collect()
+    }
+
+    /// Each module's ivar writes and includes, from the kept reads. A
+    /// module declared once takes its kept writes; a reopened one is
+    /// walked again, each declaration onto the writes of the ones before,
+    /// since a join onto earlier writes is not the join of separate reads.
+    fn module_ivars(&self, app: &App) -> HashMap<ClassId, (HashMap<Symbol, Ty>, Vec<ClassId>)> {
+        let mut declarations: HashMap<&ClassId, usize> = HashMap::default();
+        for c in app.library_classes.iter().filter(|c| c.is_module) {
+            *declarations.entry(&c.name).or_default() += 1;
+        }
+        let mut out: HashMap<ClassId, (HashMap<Symbol, Ty>, Vec<ClassId>)> = HashMap::default();
+        for (c, reads) in app.library_classes.iter().zip(&self.library).filter(|(c, _)| c.is_module) {
+            let (found, includes) = out.entry(c.name.clone()).or_default();
+            match &reads.ivars {
+                Some(kept) if declarations[&c.name] == 1 => *found = kept.clone(),
+                _ => *found = module_ivar_writes(c, std::mem::take(found)),
+            }
+            includes.extend(c.includes.iter().filter(|i| !includes.contains(i)).cloned().collect::<Vec<_>>());
+        }
+        out
+    }
+
     fn attr_writes(&mut self, app: &App, targets: &crate::det::HashSet<&ClassId>, stale: Option<&crate::det::HashSet<ClassId>>) {
         let mut keys: Vec<ClassId> = targets.iter().map(|id| (*id).clone()).collect();
         keys.sort();
@@ -12063,12 +12203,12 @@ mod rbs_ingestion_tests {
     use super::*;
 
     fn fn_ty_returning(ret: Ty) -> Ty {
-        Ty::Fn {
+        Ty::Fn(Box::new(FnTy {
             params: vec![].into(),
             block: None,
             ret: std::sync::Arc::new(ret),
             effects: EffectSet::default(),
-        }
+        }))
     }
 
     #[test]
@@ -12093,9 +12233,10 @@ mod rbs_ingestion_tests {
 
         // Returned Ty is the Ty::Fn — the whole method type, since
         // parameterless method dispatch preserves this shape today.
-        let Ty::Fn { ret, .. } = theme else {
+        let Ty::Fn(fn_ty) = theme else {
             panic!("expected Ty::Fn for theme");
         };
+        let FnTy { ret, .. } = &**fn_ty;
         assert_eq!(**ret, Ty::Str);
     }
 
@@ -12123,9 +12264,10 @@ mod rbs_ingestion_tests {
             .expect("find method from RBS is in Article's instance_methods");
 
         // The RBS override is present with the user-declared return.
-        let Ty::Fn { ret, .. } = find else {
+        let Ty::Fn(fn_ty) = find else {
             panic!("expected Ty::Fn for find override");
         };
+        let FnTy { ret, .. } = &**fn_ty;
         assert_eq!(**ret, Ty::Str);
     }
 
@@ -12276,6 +12418,19 @@ fn snapshot_rebuild(e: &Expr) -> bool {
     }
 }
 
+/// Whether [`Analyzer::returns_block_value`] can hold for a body: it has
+/// a block parameter to hand on, or a `yield` somewhere.
+fn may_return_block_value(body: &Expr, block_param: Option<&Symbol>) -> bool {
+    block_param.is_some() || mentions_yield(body)
+}
+
+/// Whether `body` has a `yield` anywhere.
+fn mentions_yield(body: &Expr) -> bool {
+    let mut found = matches!(&*body.node, ExprNode::Yield { .. });
+    body.node.for_each_child(&mut |c| found = found || mentions_yield(c));
+    found
+}
+
 /// Locals every assignment of which in `body` is a bare `yield` — a
 /// method's own copy of its block's value (`records = yield; …; records`).
 fn yield_only_locals(body: &Expr) -> crate::det::HashSet<Symbol> {
@@ -12381,7 +12536,7 @@ fn value_leaves(body: &Expr, include_returns: bool) -> Vec<&Expr> {
             ExprNode::Case { arms, .. } => arms.iter().for_each(|a| tails(&a.body, out)),
             ExprNode::Seq { exprs } if !exprs.is_empty() => tails(exprs.last().unwrap(), out),
             ExprNode::BeginRescue { body, rescues, else_branch, .. } => {
-                tails(else_branch.as_ref().unwrap_or(body), out);
+                tails(else_branch.as_deref().unwrap_or(body), out);
                 rescues.iter().for_each(|r| tails(&r.body, out));
             }
             ExprNode::Return { .. } => {}
@@ -12883,5 +13038,81 @@ mod site_cache_tests {
         let sites = vec![site("A", "own"), site("B", "go"), site("B", "go"), site("C", "go"), (unknown_receiver(), Symbol::from("x"), Vec::new(), SiteKeywords { group: false, keys: Vec::new(), splat: None, anonymous_forward: false }, SiteRecv::Instance)];
         let targets = called_targets(&caller, &sites);
         assert_eq!(targets, [(ClassId(Symbol::from("B")), Symbol::from("go")), (ClassId(Symbol::from("C")), Symbol::from("go"))]);
+    }
+}
+
+
+#[cfg(test)]
+mod library_reads_tests {
+    use super::*;
+    use crate::lower::mailer_templates::{lookup_dirs, lookup_dirs_of, looking_up_mailers_with};
+    use std::path::PathBuf;
+
+    fn analyzed(files: &[(&str, String)]) -> App {
+        let tree = files.iter().map(|(path, src)| (PathBuf::from(path), src.as_bytes().to_vec())).collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        app
+    }
+
+    fn stale(names: &[&str]) -> crate::det::HashSet<ClassId> {
+        names.iter().map(|n| ClassId(Symbol::from(*n))).collect()
+    }
+
+    fn mailer(call: &str) -> String {
+        format!("class ProbeMailer < ActionMailer::Base\n  def ping\n    {call}\n  end\nend\n")
+    }
+
+    // The mailer's `mail` gains a `template_name:` between two reads: the
+    // rewritten class is read again, so it looks up.
+    #[test]
+    fn a_rewritten_mailer_is_read_again_for_its_template_options() {
+        let before = analyzed(&[("app/mailers/probe_mailer.rb", mailer("mail(to: 'x@y')"))]);
+        let after = analyzed(&[("app/mailers/probe_mailer.rb", mailer("mail(to: 'x@y', template_name: 'other')"))]);
+        let mut kept = BodySurveys::default();
+        kept.library_reads(&before, None);
+        assert!(kept.template_opts(&before).is_empty());
+        kept.library_reads(&after, Some(&stale(&["ProbeMailer"])));
+        assert_eq!(kept.template_opts(&after), ["ProbeMailer"].into_iter().collect());
+        let looking = looking_up_mailers_with(&after, &kept.template_opts(&after));
+        assert!(looking.contains("ProbeMailer"), "{looking:?}");
+        assert_eq!(lookup_dirs_of(&after, looking), lookup_dirs(&after));
+    }
+
+    // A class the stale set leaves out keeps what it was read to; in a
+    // debug build the check of every kept read catches a wrong stale set.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "kept library setup reads of")]
+    fn a_rewritten_class_left_out_of_the_stale_set_fails_the_check() {
+        let before = analyzed(&[("app/mailers/probe_mailer.rb", mailer("mail(to: 'x@y')"))]);
+        let after = analyzed(&[("app/mailers/probe_mailer.rb", mailer("mail(to: 'x@y', template_name: 'other')"))]);
+        let mut kept = BodySurveys::default();
+        kept.library_reads(&before, None);
+        kept.library_reads(&after, Some(&stale(&[])));
+    }
+
+    // A module's ivar write is retyped between two reads: the rewritten
+    // module's writes are read again; a reopened module is walked whole.
+    #[test]
+    fn a_rewritten_module_is_read_again_for_its_ivar_writes() {
+        let files = |value: &str| {
+            vec![
+                ("lib/probe_tracking.rb", format!("module ProbeTracking\n  def track\n    @last = {value}\n  end\nend\n")),
+                ("lib/shared_a.rb", "module Shared\n  def a\n    @a = 1\n  end\nend\n".to_string()),
+                ("lib/shared_b.rb", "module Shared\n  def b\n    @b = 'x'\n  end\nend\n".to_string()),
+            ]
+        };
+        let before = analyzed(&files("1"));
+        let after = analyzed(&files("'one'"));
+        assert_ne!(module_ivars(&before), module_ivars(&after));
+        let mut kept = BodySurveys::default();
+        kept.library_reads(&before, None);
+        assert_eq!(kept.module_ivars(&before), module_ivars(&before));
+        kept.library_reads(&after, Some(&stale(&["ProbeTracking"])));
+        assert_eq!(kept.module_ivars(&after), module_ivars(&after));
+        let shared = &module_ivars(&after)[&ClassId(Symbol::from("Shared"))].0;
+        assert_eq!(shared.len(), 2, "{shared:?}");
     }
 }

@@ -1275,7 +1275,7 @@ pub(crate) fn method_return_via_registry(
             // walk started from, as analyze's dispatch substitutes.
             let ty = ty.subst_self(&Ty::Class { id: class.clone(), args: Vec::new().into() });
             let ret = match ty {
-                Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
+                Ty::Fn(fn_ty) => std::sync::Arc::unwrap_or_clone(fn_ty.ret),
                 t => t,
             };
             return match ret {

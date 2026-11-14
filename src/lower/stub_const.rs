@@ -294,7 +294,7 @@ fn rewrite(e: &mut Expr, stubbed: &HashSet<Vec<Symbol>>) {
             body,
             rescues: Vec::new(),
             else_branch: None,
-            ensure: Some(pop),
+            ensure: Some(Box::new(pop)),
             implicit: false,
         });
         *e = Expr::new(e.span, ExprNode::Seq { exprs: vec![push, guarded] });

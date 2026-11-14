@@ -31,7 +31,7 @@ use roundhouse::expr::{Expr, ExprNode, InterpPart};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_library_classes;
 use roundhouse::rbs::{parse_app_ivars, parse_app_signatures};
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 const RUNTIME_DIR: &str = "runtime/ruby/active_record";
 
@@ -445,7 +445,8 @@ fn build_method_ctx(
     ctx.self_ty = Some(Ty::Class { id: class_id.clone(), args: vec![].into() });
     ctx.ivar_bindings = ivars.clone();
     if let Some(class_sigs) = sigs.get(class_id) {
-        if let Some(Ty::Fn { params, .. }) = class_sigs.get(&method.name) {
+        if let Some(Ty::Fn(fn_ty)) = class_sigs.get(&method.name) {
+            let FnTy { params, .. } = &**fn_ty;
             for (param, p) in method.params.iter().zip(params.iter()) {
                 ctx.local_bindings.insert(param.name.clone(), (*p.ty).clone());
             }
@@ -553,7 +554,8 @@ fn qualified_finder_signatures_seed_contexts_and_results() {
             assert_eq!(ctx.local_bindings.get(&Symbol::new(name)), Some(&ty), "{class}.{name}");
         }
     }
-    let Ty::Fn { ret, .. } = &sigs[&key_class][&Symbol::new("parse")] else { panic!("parse signature"); };
+    let Ty::Fn(fn_ty) = &sigs[&key_class][&Symbol::new("parse")] else { panic!("parse signature"); };
+    let FnTy { ret, .. } = &**fn_ty;
     assert_eq!(ret.as_ref(), &Ty::Class { id: key_class.clone(), args: vec![].into() });
     let source = b"class Probe; def valid(cast); cast.valid; end; def value(cast); cast.value; end; end";
     let mut probes = ingest_library_classes(source, "probe.rb").unwrap();

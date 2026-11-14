@@ -56,7 +56,7 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::lower::typing::with_ty;
 use crate::naming::camelize;
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::util::map_expr;
 
@@ -1408,7 +1408,7 @@ fn collect_returned_permits<'a>(
             arms.iter().map(|arm| &arm.body).collect()
         }
         ExprNode::CaseMatch { arms, else_body, .. } => arms.iter().map(|arm| &arm.body).chain(else_body).collect(),
-        ExprNode::BeginRescue { body: begun, rescues, else_branch, .. } => std::iter::once(else_branch.as_ref().unwrap_or(begun))
+        ExprNode::BeginRescue { body: begun, rescues, else_branch, .. } => std::iter::once(else_branch.as_deref().unwrap_or(begun))
             .chain(rescues.iter().map(|rescue| &rescue.body))
             .collect(),
         ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } | ExprNode::Return { value } => vec![value],
@@ -2347,14 +2347,14 @@ fn synth_except(spec: &ParamsSpec) -> MethodDef {
         receiver: MethodReceiver::Instance,
         params: vec![Param::rest(keys.clone())],
         body,
-        signature: Some(Ty::Fn {
+        signature: Some(Ty::Fn(Box::new(FnTy {
             params: vec![crate::ty::Param {
                 name: keys, ty: keys_ty.into(), kind: crate::ty::ParamKind::Rest,
             }].into(),
             block: None,
             ret: owner_ty.into(),
             effects: EffectSet::pure(),
-        }),
+        }))),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -3015,7 +3015,7 @@ fn synth_as_json(owner: &ClassId) -> MethodDef {
 }
 
 fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
-    Ty::Fn {
+    Ty::Fn(Box::new(FnTy {
         params: params
             .into_iter()
             .map(|(name, ty)| crate::ty::Param {
@@ -3027,7 +3027,7 @@ fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
         block: None,
         ret: std::sync::Arc::new(ret),
         effects: crate::effect::EffectSet::pure(),
-    }
+    }))
 }
 
 /// Build the `ClassInfo` registry entry for a synthesized Params class

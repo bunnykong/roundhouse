@@ -255,7 +255,7 @@ fn query_args(helper_name: &str, entries: &[(Expr, Expr)], app: &App) -> Vec<Str
             &funcs
         };
         match funcs.iter().find(|f| f.name.as_str() == helper_name).and_then(|f| f.signature.clone()) {
-            Some(crate::ty::Ty::Fn { params, .. }) => params.to_vec(),
+            Some(crate::ty::Ty::Fn(fn_ty)) => fn_ty.params.to_vec(),
             _ => Vec::new(),
         }
     });

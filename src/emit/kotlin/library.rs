@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::emit::EmittedFile;
 use crate::expr::{Expr, ExprNode, LValue};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::expr::{
     begin_method, emit_expr, emit_if_return_value, hoisted_decls, register_method_param_tys, register_method_params,
@@ -224,7 +224,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             let name = camel(m.name.as_str());
             if temporal_names.insert(name.clone()) {
                 let ret = match m.signature.as_ref() {
-                    Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                    Some(Ty::Fn(fn_ty)) => (*fn_ty.ret).clone(),
                     _ => Ty::Time,
                 };
                 temporal_readers.push((name, ret, m.body.clone()));
@@ -242,14 +242,16 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
                 if temporal_names.contains(&camel(m.name.as_str())) {
                     continue;
                 }
-                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { ret, .. } = &**fn_ty;
                     prop_types
                         .entry(camel(m.name.as_str()))
                         .or_insert_with(|| (**ret).clone());
                 }
             }
             AccessorKind::AttributeWriter => {
-                if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { params, .. } = &**fn_ty;
                     if let Some(p) = params.first() {
                         // writer name is `foo=`; strip the `=`.
                         let base = m.name.as_str().trim_end_matches('=');
@@ -723,9 +725,10 @@ fn register_params_for(receiver: &str, methods: &[MethodDef]) {
 /// Keyword, rest, and block params are not positional arguments.
 fn positional_signature_tys(m: &MethodDef) -> Vec<Ty> {
     use crate::ty::ParamKind;
-    let Some(Ty::Fn { params, .. }) = m.signature.as_ref() else {
+    let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() else {
         return Vec::new();
     };
+    let FnTy { params, .. } = &**fn_ty;
     params
         .iter()
         .filter(|p| matches!(p.kind, ParamKind::Required | ParamKind::Optional))
@@ -843,7 +846,7 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
     // block slot.
     if body_has_yield(&m.body) {
         let bt = match m.signature.as_ref() {
-            Some(Ty::Fn { block: Some(b), .. }) => kotlin_ty(b),
+            Some(Ty::Fn(fn_ty)) if let Some(b) = &fn_ty.block => kotlin_ty(b),
             _ => "(Any?) -> Unit".to_string(),
         };
         params.push(format!("block: {bt}"));
@@ -852,7 +855,7 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
     // Return type.
     // Not Unit for a method without a signature: an app method's answer is its body's type
     let ret_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        Some(Ty::Fn(fn_ty)) => Some((*fn_ty.ret).clone()),
         _ if m.name.as_str() == "initialize" => None,
         _ => m.body.ty.clone().filter(|t| !t.is_open()),
     };
@@ -902,7 +905,7 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
 /// back to `Any?` where the signature is missing.
 fn method_params(m: &MethodDef) -> Vec<String> {
     let sig_params = match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) => Some(params),
+        Some(Ty::Fn(fn_ty)) => Some(&fn_ty.params),
         _ => None,
     };
     m.params
@@ -1110,8 +1113,8 @@ fn expr_children(e: &Expr) -> Vec<&Expr> {
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
             v.push(body);
             v.extend(rescues.iter().map(|r| &r.body));
-            v.extend(else_branch.iter());
-            v.extend(ensure.iter());
+            v.extend(else_branch.as_deref());
+            v.extend(ensure.as_deref());
         }
         _ => {}
     }
@@ -1147,12 +1150,14 @@ fn class_accessor_props(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
         }
         match m.kind {
             AccessorKind::AttributeReader => {
-                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { ret, .. } = &**fn_ty;
                     props.entry(camel(m.name.as_str())).or_insert_with(|| (**ret).clone());
                 }
             }
             AccessorKind::AttributeWriter => {
-                if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+                if let Some(Ty::Fn(fn_ty)) = m.signature.as_ref() {
+                    let FnTy { params, .. } = &**fn_ty;
                     if let Some(p) = params.first() {
                         let base = m.name.as_str().trim_end_matches('=');
                         props.entry(camel(base)).or_insert_with(|| (*p.ty).clone());
@@ -1226,9 +1231,10 @@ fn infer_body_ivar_types(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
 
     // Signal 1: reader methods returning exactly an ivar.
     for m in methods {
-        if let (Some(ivar), Some(Ty::Fn { ret, .. })) =
+        if let (Some(ivar), Some(Ty::Fn(fn_ty))) =
             (body_returns_ivar(&m.body), m.signature.as_ref())
         {
+            let FnTy { ret, .. } = &**fn_ty;
             if !matches!(&**ret, Ty::Nil) {
                 out.entry(ivar).or_insert_with(|| (**ret).clone());
             }
@@ -1379,7 +1385,7 @@ fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
             _ => false,
         }
     }
-    matches!(sig, Some(Ty::Fn { ret, .. }) if is_time(ret))
+    matches!(sig, Some(Ty::Fn(fn_ty)) if is_time(&fn_ty.ret))
 }
 
 /// Default initializer for a property type (Kotlin requires properties

@@ -697,3 +697,34 @@ unless defined?(ActiveSupport::HashWithIndifferentAccess)
     end
   end
 end
+
+# ActiveSupport's Module#module_parent_name / module_parent / module_parents, as Rails 8.1 defines them (a gem's own
+# lookup up its namespaces: view_component's `module_parents` for the config it inherits).
+class Module
+  unless method_defined?(:module_parents)
+    def module_parent_name
+      return @parent_name if defined?(@parent_name)
+      return nil if name.nil?
+      parent_name = name =~ /::[^:]+\z/ ? -$` : nil
+      @parent_name = parent_name unless frozen?
+      parent_name
+    end
+
+    def module_parent
+      module_parent_name ? Object.const_get(module_parent_name) : Object
+    end
+
+    def module_parents
+      parents = []
+      if module_parent_name
+        parts = module_parent_name.split("::")
+        until parts.empty?
+          parents << Object.const_get(parts * "::")
+          parts.pop
+        end
+      end
+      parents << Object unless parents.include?(Object)
+      parents
+    end
+  end
+end

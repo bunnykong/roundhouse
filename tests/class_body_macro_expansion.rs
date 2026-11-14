@@ -582,7 +582,7 @@ fn finite_configuration_is_class_state_not_an_action_or_instance_field() {
         .find(|m| m.name.as_str() == "window_options")
         .unwrap();
     assert!(
-        matches!(&reader.signature, Some(roundhouse::ty::Ty::Fn { ret, .. }) if matches!(&**ret, roundhouse::ty::Ty::Hash { .. }))
+        matches!(&reader.signature, Some(roundhouse::ty::Ty::Fn(fn_ty)) if matches!(&*fn_ty.ret, roundhouse::ty::Ty::Hash { .. }))
     );
     for target in [
         roundhouse::project::BuildTarget::Rust,

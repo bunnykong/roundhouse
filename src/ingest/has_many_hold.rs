@@ -133,7 +133,7 @@ pub(crate) fn expand(app: &mut App) {
     }
     for (model, name, target) in signatures {
         let record = crate::ty::Ty::Class { id: target, args: vec![].into() };
-        let takes = |ret: crate::ty::Ty| crate::ty::Ty::Fn {
+        let takes = |ret: crate::ty::Ty| crate::ty::Ty::Fn(Box::new(crate::ty::FnTy {
             params: vec![crate::ty::Param {
                 name: crate::ident::Symbol::from("record"),
                 ty: record.clone().into(),
@@ -143,7 +143,7 @@ pub(crate) fn expand(app: &mut App) {
             block: None,
             ret: ret.into(),
             effects: Default::default(),
-        };
+        }));
         let table = app.rbs_signatures.entry(model).or_default();
         table.insert(crate::ident::Symbol::from(format!("__hold_{name}")), takes(record.clone()));
         // `<<` answers the association; the record is what callers chain
@@ -155,7 +155,7 @@ pub(crate) fn expand(app: &mut App) {
         // `<<` with an Array adds each element (`concat(records.flatten)`).
         table.insert(
             crate::ident::Symbol::from(format!("__push_all_{name}")),
-            crate::ty::Ty::Fn {
+            crate::ty::Ty::Fn(Box::new(crate::ty::FnTy {
                 params: vec![crate::ty::Param {
                     name: crate::ident::Symbol::from("records"),
                     ty: crate::ty::Ty::Array { elem: record.clone().into() }.into(),
@@ -165,16 +165,16 @@ pub(crate) fn expand(app: &mut App) {
                 block: None,
                 ret: pushed.into(),
                 effects: Default::default(),
-            },
+            })),
         );
         table.insert(
             crate::ident::Symbol::from(format!("__held_{name}_list")),
-            crate::ty::Ty::Fn {
+            crate::ty::Ty::Fn(Box::new(crate::ty::FnTy {
                 params: vec![].into(),
                 block: None,
                 ret: crate::ty::Ty::Array { elem: record.clone().into() }.into(),
                 effects: Default::default(),
-            },
+            })),
         );
     }
 }

@@ -211,8 +211,8 @@ pub(super) fn body_contains_yield(body: &Expr) -> bool {
         ExprNode::BeginRescue { body: inner, rescues, else_branch, ensure, .. } => {
             body_contains_yield(inner)
                 || rescues.iter().any(|r| body_contains_yield(&r.body))
-                || else_branch.as_ref().is_some_and(body_contains_yield)
-                || ensure.as_ref().is_some_and(body_contains_yield)
+                || else_branch.as_deref().is_some_and(body_contains_yield)
+                || ensure.as_deref().is_some_and(body_contains_yield)
         }
         _ => false,
     }

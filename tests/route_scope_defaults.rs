@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::lower::lower_routes_to_library_functions;
-use roundhouse::ty::{ParamKind, Ty};
+use roundhouse::ty::{FnTy, ParamKind, Ty};
 
 const SCHEMA: &str = "ActiveRecord::Schema.define(version: 1) do\n  \
     create_table :users do |t|\n    t.string :name\n  end\nend\n";
@@ -41,9 +41,10 @@ fn helper_params(routes: &str, name: &str) -> Vec<roundhouse::ty::Param> {
                 helpers.iter().map(|f| f.name.as_str().to_string()).collect::<Vec<_>>()
             )
         });
-    let Ty::Fn { params, .. } = f.signature.clone().expect("signature") else {
+    let Ty::Fn(fn_ty) = f.signature.clone().expect("signature") else {
         panic!("not a Ty::Fn")
     };
+    let FnTy { params, .. } = *fn_ty;
     params.to_vec()
 }
 

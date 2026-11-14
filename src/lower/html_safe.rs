@@ -112,7 +112,11 @@ pub fn apply_html_safe_lowering(app: &mut App) {
             }
         }
     }
+    let components = components(app);
     for lc in &mut app.library_classes {
+        if components.contains(lc.name.0.as_str()) {
+            continue;
+        }
         for m in lc.methods.iter_mut().filter(|m| !from_source_gem(&app.sources, m)) {
             rewrite(&mut m.body);
         }
@@ -131,6 +135,16 @@ pub fn apply_html_safe_lowering(app: &mut App) {
             rewrite(&mut m.body);
         }
     }
+}
+
+// Nor a component's (a class whose instances answer `render_in`, a ViewComponent): it renders on the view context too,
+// and its marks reach the page through the gem's code (a slot's `to_s`), past any lowering that reads the mark.
+fn components(app: &App) -> crate::det::HashSet<String> {
+    app.library_classes
+        .iter()
+        .filter(|lc| crate::lower::renderable::renders_itself(app, &lc.name))
+        .map(|lc| lc.name.0.as_str().to_string())
+        .collect()
 }
 
 // A source gem's method runs on the view context at request time (simple_form's `content = "".html_safe`, then
@@ -153,13 +167,20 @@ pub fn lower_for_target(app: &App, target: crate::build_target::BuildTarget) -> 
         e.node.for_each_child(&mut |c| found |= marks(c));
         found
     }
-    if !app.library_classes.iter().flat_map(|lc| lc.methods.iter()).any(|m| from_source_gem(&app.sources, m) && marks(&m.body)) {
+    let components = components(app);
+    let kept = |lc: &crate::dialect::LibraryClass, m: &crate::dialect::MethodDef, sources: &[crate::span::SourceFile]| {
+        from_source_gem(sources, m) || components.contains(lc.name.0.as_str())
+    };
+    if !app.library_classes.iter().any(|lc| lc.methods.iter().any(|m| kept(lc, m, &app.sources) && marks(&m.body))) {
         return None;
     }
     let mut app = app.clone();
     let sources = std::mem::take(&mut app.sources);
-    for m in app.library_classes.iter_mut().flat_map(|lc| lc.methods.iter_mut()).filter(|m| from_source_gem(&sources, m)) {
-        rewrite(&mut m.body);
+    for lc in app.library_classes.iter_mut() {
+        let keep_all = components.contains(lc.name.0.as_str());
+        for m in lc.methods.iter_mut().filter(|m| keep_all || from_source_gem(&sources, m)) {
+            rewrite(&mut m.body);
+        }
     }
     app.sources = sources;
     Some(app)

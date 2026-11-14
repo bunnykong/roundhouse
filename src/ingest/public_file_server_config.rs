@@ -77,7 +77,8 @@ pub(super) struct Setting {
 
 impl Setting {
     fn path(&self) -> String {
-        format!("{}.{}", self.section, self.key)
+        // A top-level setting (`config.eager_load`) has no section.
+        if self.section.is_empty() { self.key.to_string() } else { format!("{}.{}", self.section, self.key) }
     }
 }
 
@@ -125,12 +126,17 @@ pub(super) fn assignment<'pr>(node: &Node<'pr>, setting: &Setting) -> Option<Nod
     if constant_id_str(&call.name()).strip_suffix('=') != Some(setting.key) {
         return None;
     }
-    let section = call.receiver()?;
-    let section = section.as_call_node()?;
-    if constant_id_str(&section.name()) != setting.section || section.arguments().is_some() {
-        return None;
-    }
-    let config_node = section.receiver()?;
+    let receiver = call.receiver()?;
+    // A top-level setting's receiver is `config` itself.
+    let config_node = if setting.section.is_empty() {
+        receiver
+    } else {
+        let section = receiver.as_call_node()?;
+        if constant_id_str(&section.name()) != setting.section || section.arguments().is_some() {
+            return None;
+        }
+        section.receiver()?
+    };
     let config = config_node.as_call_node()?;
     if constant_id_str(&config.name()) != "config" || config.arguments().is_some() {
         return None;
@@ -492,7 +498,24 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting, rails: Op
     } else { src
         .lines()
         .map(|line| line.split('#').next().unwrap_or(""))
-        .map(|code| code.matches(path_text.as_str()).count())
+        // Not a longer name the setting's spells part of (`config.eager_load_paths`, `config.rake_eager_load` beside `eager_load`).
+        .map(|code| {
+            let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+            code.match_indices(path_text.as_str())
+                // Nor a plain read of the setting (`if config.eager_load`, `x == config.eager_load`): it writes nothing, while
+                // any other use (a mutation, an unmodelled write) still counts against the assignments read.
+                .filter(|(at, m)| {
+                    let rest = code[at + m.len()..].trim_start();
+                    let before = code[..*at].trim_end_matches(|c: char| word(c) || c == '.' || c == ':').trim_end();
+                    let read_after = ["==", "!=", ")", ",", "?", "then"].iter().any(|t| rest.starts_with(t))
+                        || (rest.starts_with("||") && !rest.starts_with("||="))
+                        || (rest.starts_with("&&") && !rest.starts_with("&&="));
+                    let read_before = ["if", "unless", "elsif", "&&", "||", "!", "(", "==", "!="].iter().any(|t| before.ends_with(t));
+                    let read = read_after || (rest.is_empty() && read_before);
+                    !code[at + m.len()..].starts_with(word) && !code[..*at].ends_with(word) && !read
+                })
+                .count()
+        })
         .sum() };
     let refused = if mentioned > count(&found) {
         Some(format!(
@@ -627,6 +650,26 @@ mod tests {
             out,
             "def public_file_server_headers\n  env = Rails.env.to_s\n  if env == \"production\"\n    return ({\n    \"Cache-Control\" => \"public, max-age=2592000\"\n  })\n  end\n  return {}\nend\n"
         );
+    }
+
+    #[test]
+    fn a_read_of_the_setting_is_no_unmodelled_assignment() {
+        let out = synth(&[(
+            "config/environments/production.rb",
+            "Rails.application.configure do\n  config.public_file_server.headers = { \"X\" => \"1\" }\n  puts \"set\" if config.public_file_server.headers\nend\n",
+        )])
+        .unwrap()
+        .expect("an override");
+        assert!(out.contains("return ({ \"X\" => \"1\" })"), "{out}");
+    }
+
+    #[test]
+    fn a_compound_assignment_is_still_refused() {
+        let out = synth(&[(
+            "config/environments/production.rb",
+            "Rails.application.configure do\n  config.public_file_server.headers = { \"X\" => \"1\" }\n  config.public_file_server.headers &&= { \"X\" => \"2\" }\nend\n",
+        )]);
+        assert!(out.is_err(), "{out:?}");
     }
 
     #[test]

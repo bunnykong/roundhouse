@@ -86,7 +86,7 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
             let is_temporal_reader = m.kind == AccessorKind::AttributeReader
                 && matches!(
                     m.signature.as_ref(),
-                    Some(crate::ty::Ty::Fn { ret, .. }) if ret.contains_time()
+                    Some(crate::ty::Ty::Fn(fn_ty)) if fn_ty.ret.contains_time()
                 );
             !is_module_singleton
                 && matches!(m.receiver, MethodReceiver::Instance)
@@ -154,7 +154,7 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
         let is_temporal_reader = m.kind == AccessorKind::AttributeReader
             && matches!(
                 m.signature.as_ref(),
-                Some(crate::ty::Ty::Fn { ret, .. }) if ret.contains_time()
+                Some(crate::ty::Ty::Fn(fn_ty)) if fn_ty.ret.contains_time()
             );
         if !is_temporal_reader
             && matches!(
@@ -354,7 +354,7 @@ fn collect_struct_fields(methods: &[MethodDef]) -> Vec<String> {
         if m.kind == AccessorKind::AttributeReader
             && matches!(
                 m.signature.as_ref(),
-                Some(crate::ty::Ty::Fn { ret, .. }) if ret.contains_time()
+                Some(crate::ty::Ty::Fn(fn_ty)) if fn_ty.ret.contains_time()
             )
         {
             continue;
@@ -549,8 +549,8 @@ pub(super) fn references_var(e: &Expr, name: &str) -> bool {
                     r.classes.iter().any(|c| references_var(c, name))
                         || references_var(&r.body, name)
                 })
-                || opt(else_branch, name)
-                || opt(ensure, name)
+                || else_branch.as_deref().is_some_and(|e| references_var(e, name))
+                || ensure.as_deref().is_some_and(|e| references_var(e, name))
         }
     }
 }

@@ -8,7 +8,7 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::lower::column_slot::{self, ColumnSlot};
 use crate::schema::{Column, Table};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 use super::row::row_class_id;
 use super::{
@@ -3787,14 +3787,14 @@ fn synth_initialize(
         ExprNode::Hash { entries: Vec::new(), kwargs: false },
     );
     let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
-    let signature = Ty::Fn {
+    let signature = Ty::Fn(Box::new(FnTy {
         params: vec![crate::ty::Param {
             name: attrs.clone(), ty: attrs_ty.into(), kind: crate::ty::ParamKind::Optional,
         }].into(),
         block: None,
         ret: std::sync::Arc::new(Ty::Nil),
         effects: EffectSet::default(),
-    };
+    }));
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Private,
         unsupported_formals: None,

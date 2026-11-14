@@ -11,7 +11,7 @@ use super::method::{emit_instance_method, emit_module_method};
 use super::ty::rust_ty;
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::{Expr, ExprNode, Literal, LValue};
-use crate::ty::Ty;
+use crate::ty::{FnTy, Ty};
 
 /// Module mode — flat list of `def self.*` helpers (e.g.
 /// `inflector.rb`'s `Inflector.pluralize`). Each method emits as a
@@ -571,11 +571,14 @@ fn collect_class_method_param_tys(
     let mut out = crate::det::HashMap::default();
     for m in methods {
         let tys: Vec<Ty> = match m.signature.as_ref() {
-            Some(Ty::Fn { params, .. }) => params
-                .iter()
-                .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
-                .map(|p| (*p.ty).clone())
-                .collect(),
+            Some(Ty::Fn(fn_ty)) => {
+                let FnTy { params, .. } = &**fn_ty;
+                params
+                    .iter()
+                    .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
+                    .map(|p| (*p.ty).clone())
+                    .collect()
+            },
             _ => continue,
         };
         // Ruby `Class.new(args)` invokes `initialize(args)`; the IR

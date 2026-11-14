@@ -524,6 +524,11 @@ module Rails
       "_session"
     end
 
+    # Rails' default with no `config.eager_load`; the app's environments override it on the reopen.
+    def eager_load
+      false
+    end
+
     def propshaft_asset_path(source)
       "/assets/#{source}"
     end
@@ -900,6 +905,11 @@ module Rails
 
     def relative_url_root
       ENV["RAILS_RELATIVE_URL_ROOT"]
+    end
+
+    # `config.eager_load`, per environment from config/environments (`ingest::action_controller_caching_config`).
+    def eager_load
+      Rails.application.eager_load
     end
 
     def action_controller

@@ -154,6 +154,67 @@ end
 # constantization, transliteration, and parameterization remain unexposed.
 module ActiveSupport
   module Inflector
+    # Rails' `Inflector.pluralize(word)` and `singularize(word)` under the default rules (view_component names a
+    # slot's methods with them); the String forms' own ports answer.
+    def self.pluralize(word)
+      ::Inflector.pluralize_word(word.to_s, 2)
+    end
+
+    # Rails 8.1's default singular rules, latest defined first, after its uncountables and irregulars (the
+    # regular-suffix `ActiveSupport.singularize` the String form uses would give "movy" and "mice").
+    def self.singularize(word)
+      s = word.to_s
+      d = s.downcase
+      n = s.length
+      return s if s.empty? || ::Inflector.pluralize_uncountable?(d)
+      return ::Inflector.pluralize_cased(s, 6, "erson") if d.end_with?("people") || d.end_with?("person")
+      return ::Inflector.pluralize_cased(s, 8, "hild") if d.end_with?("children")
+      return ::Inflector.pluralize_cased(s, 5, "hild") if d.end_with?("child")
+      return ::Inflector.pluralize_cased(s, 3, "an") if d.end_with?("men") || d.end_with?("man")
+      return ::Inflector.pluralize_cased(s, 5, "ex") if d.end_with?("sexes")
+      return ::Inflector.pluralize_cased(s, 5, "ove") if d.end_with?("moves")
+      return ::Inflector.pluralize_cased(s, 7, "ombie") if d.end_with?("zombies")
+      return singular_tail(s, 1, "") if d.end_with?("databases")
+      return singular_tail(s, 3, "") if d.end_with?("quizzes")
+      return singular_tail(s, 4, "ix") if d.end_with?("matrices")
+      return singular_tail(s, 4, "ex") if d.end_with?("vertices") || d.end_with?("indices")
+      return s[0, 2].to_s + s[4, n - 4].to_s if d.start_with?("oxen")
+      return singular_tail(s, 2, "") if d.end_with?("aliases") || d.end_with?("statuses")
+      return s if d.end_with?("alias") || d.end_with?("status")
+      return singular_tail(s, 1, "us") if d.end_with?("octopi") || d.end_with?("viri")
+      return s if d.end_with?("octopus") || d.end_with?("virus")
+      return s[0, 1].to_s + "xis" if d == "axes" || d == "axis"
+      return singular_tail(s, 2, "is") if d.end_with?("crises") || d.end_with?("crisis") || d.end_with?("testes") || d.end_with?("testis")
+      return singular_tail(s, 1, "") if d.end_with?("shoes")
+      return singular_tail(s, 2, "") if d.end_with?("oes")
+      return singular_tail(s, 2, "") if d.end_with?("buses")
+      return s if d.end_with?("bus")
+      return s[0, 1].to_s + "ouse" if d == "mice" || d == "lice"
+      return singular_tail(s, 2, "") if d.end_with?("xes") || d.end_with?("ches") || d.end_with?("sses") || d.end_with?("shes")
+      return singular_tail(s, 1, "") if d.end_with?("movies")
+      return s if d.end_with?("series")
+      return singular_tail(s, 3, "y") if d.end_with?("ies") && n >= 4 && (!"aeiouy".include?(d[n - 4].to_s) || (n >= 5 && d[n - 5, 2] == "qu"))
+      return singular_tail(s, 3, "f") if d.end_with?("lves") || d.end_with?("rves")
+      return singular_tail(s, 1, "") if d.end_with?("tives") || d.end_with?("hives")
+      return singular_tail(s, 3, "fe") if d.end_with?("ves") && n >= 4 && d[n - 4] != "f"
+      return s[0, 5].to_s + "sis" if d == "analyses" || d == "analysis"
+      if d.end_with?("ses") || d.end_with?("sis")
+        stem = d[0, n - 3].to_s
+        if stem.end_with?("analy") || stem.end_with?("ba") || stem.end_with?("diagno") || stem.end_with?("parenthe") ||
+            stem.end_with?("progno") || stem.end_with?("synop") || stem.end_with?("the")
+          return singular_tail(s, 3, "sis")
+        end
+      end
+      return singular_tail(s, 1, "um") if d.end_with?("ta") || d.end_with?("ia")
+      return s if d.end_with?("news") || d.end_with?("ss")
+      return singular_tail(s, 1, "") if d.end_with?("s")
+      s
+    end
+
+    def self.singular_tail(s, drop, rest)
+      s[0, s.length - drop].to_s + rest
+    end
+
     # Rails' camelize with the default (upper camel case) and lower-camel
     # option. A slash separates namespaces; an underscore starts a new word.
     def self.camelize(text, uppercase_first_letter = true)

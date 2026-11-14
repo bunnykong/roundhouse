@@ -8,7 +8,7 @@
 
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::lower::lower_routes_to_library_functions;
-use roundhouse::ty::Ty;
+use roundhouse::ty::{FnTy, Ty};
 
 #[test]
 fn nested_param_under_slug_parent_types_str() {
@@ -45,9 +45,10 @@ fn nested_param_under_slug_parent_types_str() {
             .signature
             .clone()
             .expect("helper signature");
-        let Ty::Fn { params, .. } = sig else {
+        let Ty::Fn(fn_ty) = sig else {
             panic!("helper signature is not Ty::Fn: {sig:?}")
         };
+        let FnTy { params, .. } = *fn_ty;
         params.to_vec()
     };
 
