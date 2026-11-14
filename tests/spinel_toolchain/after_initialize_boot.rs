@@ -6,7 +6,7 @@
 //! spinel-toolchain job installs.
 
 use super::after_initialize_boot_contract::{
-    app, server_guarded_app, BOOT_LOG_AFTER_BOOT, SERVED_AFTER_BOOT, STATUSES_AFTER_BOOT,
+    app, server_guarded_app, BOOT_LOG_AFTER_BOOT, NOT_SERVED_AFTER_BOOT, SERVED_AFTER_BOOT, STATUSES_AFTER_BOOT,
 };
 use super::native_http::Server;
 
@@ -36,8 +36,7 @@ fn a_boot_callback_resumes_a_queued_row_on_the_native_server() {
 /// The server runs a hook registered under `if defined?(Rails::Server)`, in
 /// its place between the two every process runs, as Rails 8.1.4 does under
 /// `rails server`: the second boot resumes the shipment the first queued.
-/// The worker role passes `false` (`project::tests`, and the runner's flag in
-/// `tests/emit_and_run/after_initialize.rs`).
+/// The worker role passes `false` (`project::tests`, and the runner's flag below).
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn a_server_guarded_boot_callback_runs_on_the_native_server() {
@@ -56,4 +55,27 @@ fn a_server_guarded_boot_callback_runs_on_the_native_server() {
         answer = second.get("/shipments").body;
     }
     assert_eq!(answer, SERVED_AFTER_BOOT, "{}", second.log());
+}
+
+/// The runner's flag natively: `run(false)`, as the worker role calls it,
+/// runs the two unguarded hooks and leaves the shipment queued; `run(true)`,
+/// as the server calls it, runs all three in registration order. A contract
+/// starts no server and registers no drain, so the job runs inline.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn a_server_guarded_hook_runs_only_under_the_server_flag_on_spinel() {
+    server_guarded_app()
+        .run_spinel_with_db(&format!(
+            r#"Shipment.create!(status: "queued")
+AppInitializers.run(false)
+answer = Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
+raise "run(false): " + answer unless answer == {not_served:?}
+AppInitializers.run(true)
+answer = Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
+raise "run(true): " + answer unless answer == "sent|first,last,first,resumed 1,last"
+puts "the server flag ran the guarded hook in its place"
+"#,
+            not_served = NOT_SERVED_AFTER_BOOT,
+        ))
+        .assert_passes();
 }

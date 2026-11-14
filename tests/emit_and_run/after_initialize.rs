@@ -603,29 +603,6 @@ fn a_server_guarded_hook_runs_from_config_ru_and_not_the_one_request_script() {
     assert_eq!(served, boot::SERVED_AFTER_BOOT);
 }
 
-/// The runner's flag natively: `run(false)`, as the worker role calls it,
-/// runs the two unguarded hooks and leaves the shipment queued; `run(true)`,
-/// as the server calls it, runs all three in registration order. A contract
-/// starts no server and registers no drain, so the job runs inline.
-#[test]
-#[ignore = "requires the Spinel toolchain"]
-fn a_server_guarded_hook_runs_only_under_the_server_flag_on_spinel() {
-    boot::server_guarded_app()
-        .run_spinel_with_db(&format!(
-            r#"Shipment.create!(status: "queued")
-AppInitializers.run(false)
-answer = Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
-raise "run(false): " + answer unless answer == {not_served:?}
-AppInitializers.run(true)
-answer = Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
-raise "run(true): " + answer unless answer == "sent|first,last,first,resumed 1,last"
-puts "the server flag ran the guarded hook in its place"
-"#,
-            not_served = boot::NOT_SERVED_AFTER_BOOT,
-        ))
-        .assert_passes();
-}
-
 /// Rails 8.1.4 boots the server-guarded app twice, with one shipment queued
 /// each time: `rails/commands/server/server_command` loaded, as
 /// `rails server` loads it before the app, defines `Rails::Server`, so the
