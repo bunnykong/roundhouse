@@ -24,6 +24,36 @@ pub(in crate::analyze) fn has_instance_helper(app: &App, name: &Symbol, owner: &
     })
 }
 
+/// [`has_instance_helper`] for every owner `helper_method_index` names,
+/// from one walk of the app (the harvest asks it for each helper, each
+/// round).
+pub(in crate::analyze) struct InstanceHelpers<'a> {
+    defined: crate::det::HashSet<(&'a ClassId, &'a Symbol)>,
+}
+
+impl<'a> InstanceHelpers<'a> {
+    pub(in crate::analyze) fn of(app: &'a App) -> Self {
+        let owners: crate::det::HashSet<&ClassId> = app.helper_method_index.values().collect();
+        let mut defined = crate::det::HashSet::default();
+        for class in app.library_classes.iter().filter(|class| owners.contains(&class.name)) {
+            for method in class.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+                defined.insert((&class.name, &method.name));
+            }
+        }
+        for controller in app.controllers.iter().filter(|c| owners.contains(&c.name)) {
+            for action in controller.actions() {
+                defined.insert((&controller.name, &action.name));
+            }
+        }
+        Self { defined }
+    }
+
+    /// [`has_instance_helper`] of an owner `helper_method_index` names.
+    pub(in crate::analyze) fn has(&self, name: &Symbol, owner: &ClassId) -> bool {
+        self.defined.contains(&(owner, name))
+    }
+}
+
 pub(in crate::analyze) fn register(
     classes: &mut HashMap<ClassId, ClassInfo>,
     app: &App,
