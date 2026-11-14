@@ -290,13 +290,13 @@ fn order_openings_by_load(lcs: &mut [LibraryClass], app: &App) {
         return;
     }
     let ranks = file_load_ranks(app);
-    let file_of = |lc: &LibraryClass| opening_file(lc, app);
     for group in groups {
+        let files = opening_files(&group.iter().map(|&i| &lcs[i]).collect::<Vec<_>>(), app);
         // `None` (a conditional decides the file's place) leaves the group as is.
-        let Some(mut keyed) = group
+        let Some(mut keyed) = files
             .iter()
             .enumerate()
-            .map(|(at, &i)| match file_of(&lcs[i]).and_then(|f| ranks.get(&f).copied()) {
+            .map(|(at, file)| match file.as_ref().and_then(|f| ranks.get(f).copied()) {
                 Some(rank) => rank.map(|rank| (rank, at)),
                 None => Some((usize::MAX, at)),
             })
@@ -328,6 +328,38 @@ fn opening_file(lc: &LibraryClass, app: &App) -> Option<String> {
     Some(normalize_path(&source.path))
 }
 
+/// The file each of `openings` was read from. An opening holding nothing
+/// but nested classes (`class Shelf` around `class BaseError`) has no span
+/// to say it; when exactly one of a name's openings is such, and exactly
+/// one file that opens the name is not another opening's, that file is
+/// its own.
+fn opening_files(openings: &[&LibraryClass], app: &App) -> Vec<Option<String>> {
+    let mut files: Vec<Option<String>> = openings.iter().map(|lc| opening_file(lc, app)).collect();
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::default();
+    for (at, lc) in openings.iter().enumerate() {
+        by_name.entry(lc.name.0.as_str()).or_default().push(at);
+    }
+    let mut names: Vec<(&str, Vec<usize>)> = by_name.into_iter().collect();
+    names.sort();
+    for (name, group) in names {
+        let [spanless] = group.iter().copied().filter(|&at| files[at].is_none()).collect::<Vec<_>>()[..] else { continue };
+        let claimed: crate::det::HashSet<String> = group.iter().filter_map(|&at| files[at].clone()).collect();
+        let mut unclaimed: Vec<String> = app
+            .library_class_files
+            .iter()
+            .filter(|(_, names)| names.iter().any(|n| n.0.as_str() == name))
+            .map(|(path, _)| normalize_path(path))
+            .filter(|path| !claimed.contains(path))
+            .collect();
+        unclaimed.sort();
+        unclaimed.dedup();
+        if let [only] = &unclaimed[..] {
+            files[spanless] = Some(only.clone());
+        }
+    }
+    files
+}
+
 /// Which opening of its owner each nested class is written in, by index
 /// into `roots` (in load order). A class opened in several gem files is
 /// one emitted file of several blocks, and Ruby defines a nested class
@@ -351,6 +383,7 @@ fn nested_placement(roots: &[&LibraryClass], kids: &[(String, &LibraryClass)], a
     let several = openings.values().any(|o| o.len() > 1);
     let ranks = if several { file_load_ranks(app) } else { HashMap::default() };
     let rank = |file: &Option<String>| file.as_ref().and_then(|f| ranks.get(f).copied().flatten());
+    let root_files = opening_files(roots, app);
     kids.iter()
         .map(|(owner, kid)| {
             let all = openings.get(owner.as_str())?;
@@ -360,7 +393,7 @@ fn nested_placement(roots: &[&LibraryClass], kids: &[(String, &LibraryClass)], a
                 return Some(candidates[0]);
             }
             let file = opening_file(kid, app);
-            if let Some(&same) = candidates.iter().find(|&&at| file.is_some() && opening_file(roots[at], app) == file) {
+            if let Some(&same) = candidates.iter().find(|&&at| file.is_some() && root_files[at] == file) {
                 return Some(same);
             }
             let opens_owner = file.as_ref().is_some_and(|file| {
@@ -368,7 +401,7 @@ fn nested_placement(roots: &[&LibraryClass], kids: &[(String, &LibraryClass)], a
                     .iter()
                     .any(|(path, names)| normalize_path(path) == *file && names.iter().any(|n| n.0.as_str() == owner))
             });
-            let unknown: Vec<usize> = candidates.iter().copied().filter(|&at| opening_file(roots[at], app).is_none()).collect();
+            let unknown: Vec<usize> = candidates.iter().copied().filter(|&at| root_files[at].is_none()).collect();
             if let (true, [only]) = (opens_owner, unknown.as_slice()) {
                 return Some(*only);
             }
@@ -376,7 +409,7 @@ fn nested_placement(roots: &[&LibraryClass], kids: &[(String, &LibraryClass)], a
                 candidates
                     .iter()
                     .copied()
-                    .filter(|&at| rank(&opening_file(roots[at], app)).is_some_and(|r| r <= kid_rank))
+                    .filter(|&at| rank(&root_files[at]).is_some_and(|r| r <= kid_rank))
                     .last()
             });
             Some(before.unwrap_or(candidates[0]))
