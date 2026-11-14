@@ -8,6 +8,10 @@
 //! The Ruby family check and the Rails 8.1.4 control
 //! (`tests/emit_and_run/after_initialize.rs`) and the native server check
 //! (`tests/spinel_toolchain/after_initialize_boot.rs`) share these files.
+//!
+//! [`server_guarded_app`] registers that callback under
+//! `if defined?(Rails::Server)`, between two that every process runs, as an
+//! app keeps a recovery to the process that serves.
 #![allow(dead_code)]
 
 use super::emit_and_run;
@@ -96,6 +100,38 @@ pub fn app() -> emit_and_run::Overlay {
             "Rails.application.routes.draw do\n  get \"/shipments\", to: \"shipments#index\"\n  post \"/shipments\", to: \"shipments#create\"\nend\n",
         );
     for (path, content) in FILES {
+        overlay = overlay.write(path, content);
+    }
+    overlay
+}
+
+/// The resuming hook registered only under `rails server`, between two
+/// hooks every process registers. Rails 8.1.4 runs all three in that order
+/// under `rails server` and the outer two otherwise
+/// (`a_server_guarded_hook_matches_rails`).
+pub const SERVER_GUARDED_FILES: &[(&str, &str)] = &[
+    (
+        "config/initializers/a_first.rb",
+        "Rails.application.config.after_initialize do\n  BootLog.record(\"first\")\nend\n",
+    ),
+    (
+        "config/initializers/resume_shipments.rb",
+        "if defined?(Rails::Server)\n  Rails.application.config.after_initialize do\n    Shipment.resume_queued!\n  end\nend\n",
+    ),
+    (
+        "config/initializers/z_last.rb",
+        "Rails.application.config.after_initialize do\n  BootLog.record(\"last\")\nend\n",
+    ),
+];
+
+/// `statuses|log` once a process boots with one shipment queued: as Rails
+/// 8.1.4 answers under `rails server`, and in any other process.
+pub const SERVED_AFTER_BOOT: &str = "sent|first,resumed 1,last";
+pub const NOT_SERVED_AFTER_BOOT: &str = "queued|first,last";
+
+pub fn server_guarded_app() -> emit_and_run::Overlay {
+    let mut overlay = app();
+    for (path, content) in SERVER_GUARDED_FILES {
         overlay = overlay.write(path, content);
     }
     overlay

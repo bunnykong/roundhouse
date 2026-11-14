@@ -5,7 +5,9 @@
 //! explains, because `spin build` links jemalloc, which only the
 //! spinel-toolchain job installs.
 
-use super::after_initialize_boot_contract::{app, BOOT_LOG_AFTER_BOOT, STATUSES_AFTER_BOOT};
+use super::after_initialize_boot_contract::{
+    app, server_guarded_app, BOOT_LOG_AFTER_BOOT, NOT_SERVED_AFTER_BOOT, SERVED_AFTER_BOOT, STATUSES_AFTER_BOOT,
+};
 use super::native_http::Server;
 
 /// A shipment queued before a restart is resumed by the next boot: the first
@@ -29,4 +31,51 @@ fn a_boot_callback_resumes_a_queued_row_on_the_native_server() {
         answer = second.get("/shipments").body;
     }
     assert_eq!(answer, format!("{STATUSES_AFTER_BOOT}|{BOOT_LOG_AFTER_BOOT}"), "{}", second.log());
+}
+
+/// The server runs a hook registered under `if defined?(Rails::Server)`, in
+/// its place between the two every process runs, as Rails 8.1.4 does under
+/// `rails server`: the second boot resumes the shipment the first queued.
+/// The worker role passes `false` (`project::tests`, and the runner's flag below).
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn a_server_guarded_boot_callback_runs_on_the_native_server() {
+    let tree = server_guarded_app().native_http_tree();
+    let first = Server::start(&tree);
+    assert_eq!(first.get("/shipments").body, "|first,resumed 0,last", "{}", first.log());
+    let queued = first.post_without_session("/shipments", "application/json", "{}");
+    assert_eq!(queued.status, 201, "{}", first.log());
+    drop(first);
+
+    let second = Server::start(&tree);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut answer = second.get("/shipments").body;
+    while answer.starts_with("queued") && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        answer = second.get("/shipments").body;
+    }
+    assert_eq!(answer, SERVED_AFTER_BOOT, "{}", second.log());
+}
+
+/// The runner's flag natively: `run(false)`, as the worker role calls it,
+/// runs the two unguarded hooks and leaves the shipment queued; `run(true)`,
+/// as the server calls it, runs all three in registration order. A contract
+/// starts no server and registers no drain, so the job runs inline.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn a_server_guarded_hook_runs_only_under_the_server_flag_on_spinel() {
+    server_guarded_app()
+        .run_spinel_with_db(&format!(
+            r#"Shipment.create!(status: "queued")
+AppInitializers.run(false)
+answer = Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
+raise "run(false): " + answer unless answer == {not_served:?}
+AppInitializers.run(true)
+answer = Shipment.order(:id).pluck(:status).join(",") + "|" + BootLog.entries.join(",")
+raise "run(true): " + answer unless answer == "sent|first,last,first,resumed 1,last"
+puts "the server flag ran the guarded hook in its place"
+"#,
+            not_served = NOT_SERVED_AFTER_BOOT,
+        ))
+        .assert_passes();
 }

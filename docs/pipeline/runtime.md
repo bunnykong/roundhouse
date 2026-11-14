@@ -3191,8 +3191,12 @@ Three gaps remain, all on spinel's side:
   `Rails.application.configure`. Each entry runs them once it has opened
   the database and set up the job drain, before it serves or works off a
   job. campfire's two (`Room::MessagesCount.ensure!` and starting the WAL
-  checkpointer outside tests) run this way. A block under a guard or in
-  any other spelling is not run, and the initializer ledger reports it.
+  checkpointer outside tests) run this way. Hooks inside an initializer's
+  top-level `if defined?(Rails::Server)`, with no `else` and nothing else
+  in its body, run from the entries that serve (the Spinel server and
+  `config.ru`), as Rails runs them under `rails server` only. A block
+  under any other guard or in any other spelling is not run, and the
+  initializer ledger reports it.
 - **`Rails.application.env_config` holds what is set and is consulted
   for nothing**: a forgery failure always renders the 422 that
   `action_dispatch.show_exceptions = :rescuable` asks for.

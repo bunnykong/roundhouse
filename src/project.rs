@@ -6533,28 +6533,42 @@ end\n";
 /// requires `boot.rb` alone runs none, as requiring Rails' `config/boot.rb`
 /// runs none. One helper for the Spinel tree and the Ruby family, so both
 /// run the same callbacks.
+///
+/// Each call says whether its entry is the server: `run(true)` also runs
+/// the hooks an initializer registers under `if defined?(Rails::Server)`,
+/// which Rails registers only under `rails server`. The Spinel server and
+/// `config.ru` pass `true`; the Spinel worker role, `sidekiq.rb` and the
+/// one-request script pass `false`, as a Rails worker or runner process
+/// leaves `Rails::Server` undefined. `config.ru` is a choice:
+/// it is what the emitted tree serves from (`rake dev` runs Puma on it),
+/// the app's own server command here, so it counts as `rails server`,
+/// which loads it too. Rails under a plain `puma` or `falcon` on the
+/// app's `config.ru` leaves `Rails::Server` undefined and skips them.
 fn apply_app_initializers(files: &mut [(String, String)], app: &App, target: RequireTarget) -> Result<(), String> {
     if !app.runs_after_initialize {
         return Ok(());
     }
-    // (file, the line the step after the setup starts with); the call goes
-    // ahead of that line and the comment above it, at its indentation.
-    let sites: &[(&str, &str)] = match target {
-        RequireTarget::Spinel => &[("main.rb", "  SidekiqWorker.cli(ARGV)"), ("main.rb", "Thread.new do")],
+    // (file, the line the step after the setup starts with, whether the
+    // entry serves); the call goes ahead of that line and the comment
+    // above it, at its indentation.
+    let sites: &[(&str, &str, bool)] = match target {
+        RequireTarget::Spinel => &[("main.rb", "  SidekiqWorker.cli(ARGV)", false), ("main.rb", "Thread.new do", true)],
         RequireTarget::RubyFamily => &[
-            ("main.rb", "  env = {"),
-            ("config.ru", "use ThrusterCache::Middleware"),
-            ("sidekiq.rb", "SidekiqWorker.cli(ARGV)"),
+            ("main.rb", "  env = {", false),
+            ("config.ru", "use ThrusterCache::Middleware", true),
+            ("sidekiq.rb", "SidekiqWorker.cli(ARGV)", false),
         ],
     };
-    let call = format!("Db.with_connection {{ {}.run }}", crate::app::AFTER_INITIALIZE_RUNNER);
+    let runner = crate::app::AFTER_INITIALIZE_RUNNER;
+    let applied = format!("Db.with_connection {{ {runner}.run(");
     for (path, content) in files.iter_mut() {
-        let anchors: Vec<&str> = sites.iter().filter(|(file, _)| file == path).map(|(_, line)| *line).collect();
-        if anchors.is_empty() || content.lines().any(|line| line.trim() == call) {
+        let anchors: Vec<(&str, bool)> =
+            sites.iter().filter(|(file, _, _)| file == path).map(|(_, line, server)| (*line, *server)).collect();
+        if anchors.is_empty() || content.lines().any(|line| line.trim().starts_with(&applied)) {
             continue;
         }
         let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
-        for anchor in anchors {
+        for (anchor, server) in anchors {
             let found: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| line.as_str() == anchor).map(|(i, _)| i).collect();
             let [at] = found.as_slice() else {
                 return Err(format!(
@@ -6567,10 +6581,16 @@ fn apply_app_initializers(files: &mut [(String, String)], app: &App, target: Req
             while start > 0 && lines[start - 1].trim_start().starts_with('#') && lines[start - 1].starts_with(indent) {
                 start -= 1;
             }
+            let call = format!("Db.with_connection {{ {runner}.run({server}) }}");
+            let role = match server {
+                true => "# The server: those registered under `if defined?(Rails::Server)` run too.",
+                false => "# Not the server: those under `if defined?(Rails::Server)` do not run.",
+            };
             let mut block: Vec<String> = [
                 "# The app's after_initialize callbacks (ingest::after_initialize), as",
                 "# Rails runs them last in initialize!: after the database and the job",
                 "# drain are set up, before anything serves or works off a job.",
+                role,
                 call.as_str(),
             ]
             .iter()
@@ -15092,25 +15112,32 @@ mod tests {
 
     /// Each scaffold entry runs the after_initialize callbacks once, after
     /// the line that sets up its job drain and before the line that starts
-    /// its server or worker; a second pass adds nothing.
+    /// its server or worker; a second pass adds nothing. The entries that
+    /// serve (the Spinel server, `config.ru`) say so with `run(true)`, so
+    /// the hooks registered under `if defined?(Rails::Server)` run there
+    /// only; the worker role, `sidekiq.rb` and the one-request script pass
+    /// `false`.
     #[test]
     fn app_initializers_run_between_the_drain_and_the_server_in_each_entry() {
         let mut app = App::new();
         app.runs_after_initialize = true;
-        let call = "Db.with_connection { AppInitializers.run }";
+        let serving = "Db.with_connection { AppInitializers.run(true) }";
+        let not_serving = "Db.with_connection { AppInitializers.run(false) }";
         let read = |path: &str| crate::runtime_files::read_to_string(path).unwrap();
         let mut spinel = vec![("main.rb".to_string(), read("runtime/spinel/scaffold/main.rb"))];
         apply_app_initializers(&mut spinel, &app, RequireTarget::Spinel).unwrap();
         apply_app_initializers(&mut spinel, &app, RequireTarget::Spinel).unwrap();
         let main = &spinel[0].1;
-        assert_eq!(main.matches(call).count(), 2, "{main}");
+        assert_eq!((main.matches(serving).count(), main.matches(not_serving).count()), (1, 1), "{main}");
         let at = |text: &str, needle: &str| text.find(needle).unwrap_or_else(|| panic!("no `{needle}`"));
-        let worker_role = &main[at(main, "if ARGV.length > 0 && ARGV[0] == \"sidekiq\"")..];
-        assert!(at(worker_role, "  ActiveJob.register_drain") < at(worker_role, &format!("  {call}")));
-        assert!(at(worker_role, &format!("  {call}")) < at(worker_role, "  SidekiqWorker.cli(ARGV)"));
+        let worker_role = &main[at(main, "if ARGV.length > 0 && ARGV[0] == \"sidekiq\"")..at(main, "\nport = ")];
+        assert!(!worker_role.contains(serving), "{worker_role}");
+        assert!(at(worker_role, "  ActiveJob.register_drain") < at(worker_role, &format!("  {not_serving}")));
+        assert!(at(worker_role, &format!("  {not_serving}")) < at(worker_role, "  SidekiqWorker.cli(ARGV)"));
         let server = &main[at(main, "\nMain.configure_default_adapter!\n")..];
-        assert!(at(server, "\nActiveJob.register_drain\n") < at(server, &format!("\n{call}\n")));
-        assert!(at(server, &format!("\n{call}\n")) < at(server, "\nThread.new do\n  Main.job_loop\n"));
+        assert!(!server.contains(not_serving), "{server}");
+        assert!(at(server, "\nActiveJob.register_drain\n") < at(server, &format!("\n{serving}\n")));
+        assert!(at(server, &format!("\n{serving}\n")) < at(server, "\nThread.new do\n  Main.job_loop\n"));
 
         let overlay = "runtime/spinel/scaffold/ruby_overlay";
         let mut ruby: Vec<(String, String)> = ["main.rb", "config.ru", "sidekiq.rb"]
@@ -15119,17 +15146,17 @@ mod tests {
             .collect();
         apply_app_initializers(&mut ruby, &app, RequireTarget::RubyFamily).unwrap();
         apply_app_initializers(&mut ruby, &app, RequireTarget::RubyFamily).unwrap();
-        for (path, before, after) in [
-            ("main.rb", "if __FILE__ == $PROGRAM_NAME\n  Main.configure_default_adapter!\n", "\n  env = {\n"),
-            ("config.ru", "\nActiveJob.drain_in_background!\n", "\nuse ThrusterCache::Middleware\n"),
-            ("sidekiq.rb", "\nActiveJob.register_drain\n", "\nSidekiqWorker.cli(ARGV)\n"),
+        for (path, call, other, before, after) in [
+            ("main.rb", not_serving, serving, "if __FILE__ == $PROGRAM_NAME\n  Main.configure_default_adapter!\n", "\n  env = {\n"),
+            ("config.ru", serving, not_serving, "\nActiveJob.drain_in_background!\n", "\nuse ThrusterCache::Middleware\n"),
+            ("sidekiq.rb", not_serving, serving, "\nActiveJob.register_drain\n", "\nSidekiqWorker.cli(ARGV)\n"),
         ] {
             let text = &ruby.iter().find(|(p, _)| p == path).unwrap().1;
-            assert_eq!(text.matches(call).count(), 1, "{path}:\n{text}");
+            assert_eq!((text.matches(call).count(), text.matches(other).count()), (1, 0), "{path}:\n{text}");
             assert!(at(text, before) < at(text, call) && at(text, call) < at(text, after), "{path}:\n{text}");
         }
         let config_ru = &ruby.iter().find(|(p, _)| p == "config.ru").unwrap().1;
-        assert!(at(config_ru, "Broadcasts.set_transport(") < at(config_ru, call), "{config_ru}");
+        assert!(at(config_ru, "Broadcasts.set_transport(") < at(config_ru, serving), "{config_ru}");
     }
 
     /// An app with no callbacks keeps its entries as written, and an entry
