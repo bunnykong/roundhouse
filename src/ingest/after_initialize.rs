@@ -58,8 +58,8 @@
 //! callback, which in Rails runs before the patch; after boot the two
 //! agree. A reopen target is read from the top level: inside
 //! `config/application.rb`'s `module Shop; class Application`,
-//! `Worker.module_eval` reopens `::Worker`, where Ruby would take
-//! `Shop::Worker` when it exists.
+//! `Notifier.module_eval` reopens `::Notifier`, where Ruby would take
+//! `Shop::Notifier` when it exists.
 
 use crate::det::HashSet;
 use std::path::{Path, PathBuf};
@@ -396,6 +396,21 @@ fn reopen(stmt: &Node<'_>, file: &str) -> IngestResult<Option<Reopen>> {
     let mut items = Vec::new();
     for inner in block.body().map(flatten_statements).unwrap_or_default() {
         if let Some(def) = inner.as_def_node() {
+            // `def self.x` or `def Target.x` defines on the target; `def
+            // Other.x` defines on `Other` in Ruby, which a reopen cannot carry.
+            if let Some(recv) = def.receiver() {
+                let named = constant_path_of(&recv).map(|p| p.join("::").trim_start_matches("::").to_string());
+                if recv.as_self_node().is_none() && named.as_deref() != Some(target.as_str()) {
+                    let shown = named.unwrap_or_else(|| "…".to_string());
+                    return Err(unsupported(
+                        file,
+                        format!(
+                            "`def {shown}.{}` in an after_initialize reopen of `{target}` defines on another receiver",
+                            constant_id_str(&def.name())
+                        ),
+                    ));
+                }
+            }
             items.push(ReopenItem::Def(super::library_class::ingest_library_method(&def, &owner, file)?));
             continue;
         }

@@ -372,6 +372,22 @@ fn a_reopen_or_a_require_after_a_statement_that_runs_is_an_error() {
     assert!(require.contains("`require` follows a statement of its after_initialize callback that runs"), "{require}");
 }
 
+/// A `def` in a reopen defines on the reopened class, or on it by name or
+/// `self`; `def Other.refresh` there defines on `Other` in Ruby, so it is
+/// an ingest error, not a method installed on the reopened class.
+#[test]
+fn a_reopen_def_on_another_receiver_is_an_error() {
+    let classes = "class Chime\n  def self.refresh\n    \"chime\"\n  end\nend\n\nclass Bell\nend\n";
+    let foreign = ingest_error(&[
+        ("config/initializers/chime.rb", classes),
+        (
+            "config/initializers/patch.rb",
+            "Rails.application.config.after_initialize do\n  Chime.class_eval do\n    def Bell.refresh\n      \"bell\"\n    end\n  end\nend\n",
+        ),
+    ]);
+    assert!(foreign.contains("`def Bell.refresh` in an after_initialize reopen of `Chime`"), "{foreign}");
+}
+
 /// A required path resolves inside the app or not at all: a `..` past the
 /// root, an absolute path and a symlink out of `lib/` each name a file the
 /// compiled program does not carry, so each is refused.
